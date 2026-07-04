@@ -25,6 +25,7 @@ import { useDialogActions } from "../context/DialogContext";
 import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
 import { usePanel } from "../context/PanelContext";
 import { useCompany } from "../context/CompanyContext";
+import { useApplyCompanyBranding } from "../hooks/useApplyCompanyBranding";
 import { useSidebar } from "../context/SidebarContext";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
 import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
@@ -74,6 +75,9 @@ export function Layout() {
     selectionSource,
     setSelectedCompanyId,
   } = useCompany();
+  // Apply the selected company's brand color as theme overrides (unless the
+  // company is pinned to the default Paperclip skin). Per-company theming (P4).
+  useApplyCompanyBranding(selectedCompany);
   const {
     companyPrefix,
     pluginRoutePath: matchedPluginRoutePath,

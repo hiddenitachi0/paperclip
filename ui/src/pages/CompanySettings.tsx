@@ -13,6 +13,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Settings, CloudUpload, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
   Field,
   ToggleField,
@@ -41,6 +42,7 @@ export function CompanySettings() {
   const [attachmentMaxMiB, setAttachmentMaxMiB] = useState(String(DEFAULT_COMPANY_ATTACHMENT_MAX_MIB));
   const [logoUrl, setLogoUrl] = useState("");
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+  const [defaultSkin, setDefaultSkinState] = useState(false);
 
   // Sync local state from selected company
   useEffect(() => {
@@ -50,6 +52,7 @@ export function CompanySettings() {
     setBrandColor(selectedCompany.brandColor ?? "");
     setAttachmentMaxMiB(String(Math.round((selectedCompany.attachmentMaxBytes ?? DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES) / BYTES_PER_MIB)));
     setLogoUrl(selectedCompany.logoUrl ?? "");
+    setDefaultSkinState(isDefaultSkin(selectedCompany.id));
   }, [selectedCompany]);
 
   const attachmentMaxBytes = Number.parseInt(attachmentMaxMiB, 10) * BYTES_PER_MIB;
@@ -264,7 +267,7 @@ export function CompanySettings() {
               </Field>
               <Field
                 label="Brand color"
-                hint="Sets the hue for the company icon. Leave empty for auto-generated color."
+                hint="Tints the company icon and the workspace theme (buttons, accents, focus rings) for this company. Leave empty for an auto-generated color."
               >
                 <div className="flex items-center gap-2">
                   <input
@@ -297,6 +300,16 @@ export function CompanySettings() {
                   )}
                 </div>
               </Field>
+              <ToggleField
+                label="Use default Paperclip skin"
+                hint="Ignore this company's brand color and show the stock Paperclip theme — handy for matching docs, tutorials, and screenshots. Saved per browser."
+                checked={defaultSkin}
+                onChange={(next) => {
+                  setDefaultSkinState(next);
+                  if (selectedCompanyId) setDefaultSkin(selectedCompanyId, next);
+                }}
+                toggleTestId="company-default-skin-toggle"
+              />
               <Field
                 label="Attachment size limit"
                 hint={`Accepted range: 1-${MAX_COMPANY_ATTACHMENT_MAX_MIB} MiB.`}

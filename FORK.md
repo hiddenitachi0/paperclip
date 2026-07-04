@@ -31,6 +31,24 @@ if upstream reworks `App.tsx` routing or `Sidebar.tsx` nav, re-apply the two ins
 
 ---
 
+### Feature 4 — Per-company theming (brandColor → whole-UI theme + default-skin toggle)
+
+`Company.brandColor` already existed (it tinted only the company icon). Now it also drives the
+app's primary theme tokens per selected company, with a per-company "use default Paperclip skin"
+opt-out (localStorage, no schema change) for matching docs/screenshots.
+
+| File | Change | Type |
+|---|---|---|
+| `ui/src/lib/company-branding.ts` | hex→CSS-var overrides + default-skin preference store | **New file** |
+| `ui/src/hooks/useApplyCompanyBranding.ts` | applies the selected company's brandColor as theme vars | **New file** |
+| `ui/src/components/Layout.tsx` | one import + one hook call | Surgical edit |
+| `ui/src/pages/CompanySettings.tsx` | default-skin `ToggleField` + brand-color hint copy | Surgical edit |
+
+Overrides only the `--primary` family (`--primary`, `--ring`, `--sidebar-primary`, their
+foregrounds) on `<html>`, so a brand color tints buttons/rings/accents without harming
+background/text contrast. Verified live: `--primary` follows the company's brandColor and the
+default-skin toggle reverts it to stock.
+
 ## Out-of-tree work (near-zero conflict risk)
 
 ### Feature 2 — Cowork/Claude Code → Paperclip importer
