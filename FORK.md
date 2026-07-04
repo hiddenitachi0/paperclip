@@ -103,5 +103,22 @@ plugins) — no existing source touched.
 > for work-products/approvals (the worker host-client has no such method today). Kept out to
 > hold core edits at zero; it's a clean future addition if we want agent-side filing.
 
-_Still planned per HANDOFF roadmap:_ per-company theming, credential-request flow, Mission
-Control federation plugin, Telegram bridge plugin, `opencode-local`→Ollama config.
+### Feature 6 — Mission Control v1 (federation)
+
+`packages/plugins/mission-control/` — a plugin (sidebar link + `page` slot) giving a **portfolio
+view across remote Paperclip instances**. Register remotes (URL + board API key); per remote
+company it shows live runs / queued / needs-you / cost / agents / tasks with a deep link into
+the remote's Now view. The worker stores remotes in plugin state and aggregates each remote's
+public REST API (`/api/health`, `/api/companies`, `/api/companies/stats`, `/live-runs`,
+`/approvals`) with the board key as `Authorization: Bearer`. Board keys stay server-side (never
+returned to the browser).
+
+**Zero core edits** (new `packages/plugins/*` package). Verified on one box: builds/installs/
+loads, page+sidebar render, add/remove/refresh registry persists, board-key auth works, and the
+aggregation logic returns correct per-company stats + deep links against the live API. Note:
+`ctx.http.fetch` SSRF-blocks private/loopback IPs, so single-box **localhost self-federation is
+blocked by design** (shown as "unreachable"); Tailscale's `100.64/10` range is NOT blocked, so
+real remotes work — full multi-server verification lands with Phase 2.
+
+_Still planned per HANDOFF roadmap:_ Productize-a-project (item 7), Telegram bridge plugin,
+`opencode-local`→Ollama config.
