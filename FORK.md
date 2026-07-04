@@ -33,6 +33,15 @@ if upstream reworks `App.tsx` routing or `Sidebar.tsx` nav, re-apply the two ins
 
 ## Out-of-tree work (near-zero conflict risk)
 
-_None yet._ Planned per HANDOFF roadmap: Cowork→Paperclip importer (external tool),
-image/video approval-gate plugin, per-company theming, credential-request flow,
-Mission Control federation plugin, Telegram bridge plugin, `opencode-local`→Ollama config.
+### Feature 2 — Cowork/Claude Code → Paperclip importer
+
+`tools/cowork-importer/` — a standalone, dependency-free Node CLI (`convert.mjs`) that turns a
+Claude Code / Cowork project (`CLAUDE.md` + `.claude/agents/*.md` + `.claude/skills/*/SKILL.md`)
+into an `agentcompanies/v1` package and imports it via the official `POST /companies/import`
+API. Single-task project → one agent; broader project → lead + subagents (org hierarchy) +
+skills. **Zero core edits** — lives outside the pnpm workspace (`tools/` is not a workspace
+glob), touches no `packages/`, `server/`, `ui/`, or `cli/` code. See its README for usage.
+
+_Still planned per HANDOFF roadmap:_ image/video approval-gate plugin, per-company theming,
+credential-request flow, Mission Control federation plugin, Telegram bridge plugin,
+`opencode-local`→Ollama config.
