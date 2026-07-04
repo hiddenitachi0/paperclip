@@ -42,6 +42,25 @@ API. Single-task project → one agent; broader project → lead + subagents (or
 skills. **Zero core edits** — lives outside the pnpm workspace (`tools/` is not a workspace
 glob), touches no `packages/`, `server/`, `ui/`, or `cli/` code. See its README for usage.
 
-_Still planned per HANDOFF roadmap:_ image/video approval-gate plugin, per-company theming,
-credential-request flow, Mission Control federation plugin, Telegram bridge plugin,
-`opencode-local`→Ollama config.
+### Feature 3 — Image/video approval gate (Media Studio plugin)
+
+`packages/plugins/media-studio/` — a Paperclip plugin (worker + `detailTab` UI) that generates
+an image, previews it, files a **board approval** + a work-product in `ready_for_review`, and
+only posts once approved (approve / request-changes / regenerate). Generation is behind a
+`GenerationProvider` interface with **mock** (keyless), **fal** (Fal.ai), and **comfyui**
+(swappable GPU endpoint) implementations, chosen in plugin settings. The approval it files is a
+normal `request_board_approval`, so it also surfaces in **Feature 1's Now → Needs-you lane**.
+
+**Zero edits to existing core files.** The plugin uses only existing REST routes from its UI
+(`/issues/:id/work-products`, `/companies/:id/approvals`, `/approvals/:id/approve|request-revision`,
+`/work-products/:id`, `/issues/:id/comments`). It IS a new workspace package under
+`packages/plugins/*`, so `pnpm-lock.yaml` gains its dev deps (same pattern as the repo's example
+plugins) — no existing source touched.
+
+> Deliberately deferred: fully-autonomous filing (the agent itself creating the work-product +
+> approval, not just generating the preview) would need a small additive plugin-SDK RPC surface
+> for work-products/approvals (the worker host-client has no such method today). Kept out to
+> hold core edits at zero; it's a clean future addition if we want agent-side filing.
+
+_Still planned per HANDOFF roadmap:_ per-company theming, credential-request flow, Mission
+Control federation plugin, Telegram bridge plugin, `opencode-local`→Ollama config.
