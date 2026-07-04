@@ -49,6 +49,29 @@ foregrounds) on `<html>`, so a brand color tints buttons/rings/accents without h
 background/text contrast. Verified live: `--primary` follows the company's brandColor and the
 default-skin toggle reverts it to stock.
 
+---
+
+### Feature 5 — Credential-request flow
+
+An agent files a **named + explained credential request**; it surfaces in the user's inbox and
+the Now → Needs-you lane; the user provides the value inline; the secret is created and the
+approval resolved (which wakes the requesting agent). Implemented as a new **approval type**
+`credential_request` (agents already POST approvals; it auto-counts in the inbox badge with no
+plumbing change) plus a fill-secret form on the approval detail.
+
+| File | Change | Type |
+|---|---|---|
+| `packages/shared/src/constants.ts` | add `credential_request` to `APPROVAL_TYPES` (Zod + free-text DB pick it up automatically) | 1-line edit |
+| `ui/src/components/ApprovalPayload.tsx` | label + `KeyRound` icon + payload renderer + `credentialRequestFields` helper | Surgical edit |
+| `ui/src/pages/ApprovalDetail.tsx` | "enter secret value → submit" form; `secretsApi.create` then `approve` (wakes agent) | Surgical edit |
+| `ui/src/pages/Inbox.tsx` | suppress generic Approve/Reject for `credential_request` | 1-line edit |
+| `ui/src/pages/DashboardNow.tsx` | Now-view row shows "Provide credential" (own fork file) | Additive |
+
+No DB migration. Verified live end-to-end: an agent-filed request surfaces in Now/Inbox, the
+fill form creates the encrypted secret (name/description preserved) and resolves the approval.
+Agent-filing path: `POST /companies/:id/approvals` with `type:"credential_request"`,
+`payload:{name, envKey, description}`, `issueIds:[...]` — the same route agents already use.
+
 ## Out-of-tree work (near-zero conflict risk)
 
 ### Feature 2 — Cowork/Claude Code → Paperclip importer

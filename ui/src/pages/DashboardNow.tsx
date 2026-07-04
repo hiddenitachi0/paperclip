@@ -434,6 +434,9 @@ function ApprovalRow({
     },
   });
   const busy = approveMutation.isPending || rejectMutation.isPending;
+  // A credential request is resolved by providing a value on its detail page,
+  // not by a generic Approve/Reject.
+  const isCredentialRequest = approval.type === "credential_request";
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2">
@@ -452,25 +455,34 @@ function ApprovalRow({
           </p>
         </div>
       </Link>
-      <div className="flex items-center gap-1.5">
-        <Button
-          size="sm"
-          className="h-6 flex-1 bg-green-700 px-2 text-[11px] text-white hover:bg-green-600"
-          disabled={busy}
-          onClick={() => approveMutation.mutate()}
+      {isCredentialRequest ? (
+        <Link
+          to={`/approvals/${approval.id}`}
+          className="inline-flex h-6 items-center justify-center rounded-md bg-amber-600 px-2 text-[11px] font-semibold text-white hover:bg-amber-500"
         >
-          {approveMutation.isPending ? "…" : "Approve"}
-        </Button>
-        <Button
-          size="sm"
-          variant="destructive"
-          className="h-6 flex-1 px-2 text-[11px]"
-          disabled={busy}
-          onClick={() => rejectMutation.mutate()}
-        >
-          {rejectMutation.isPending ? "…" : "Reject"}
-        </Button>
-      </div>
+          Provide credential
+        </Link>
+      ) : (
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            className="h-6 flex-1 bg-green-700 px-2 text-[11px] text-white hover:bg-green-600"
+            disabled={busy}
+            onClick={() => approveMutation.mutate()}
+          >
+            {approveMutation.isPending ? "…" : "Approve"}
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            className="h-6 flex-1 px-2 text-[11px]"
+            disabled={busy}
+            onClick={() => rejectMutation.mutate()}
+          >
+            {rejectMutation.isPending ? "…" : "Reject"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

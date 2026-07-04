@@ -428,6 +428,9 @@ function ApprovalInboxRow({
   const label = approvalLabel(approval.type, approval.payload as Record<string, unknown> | null);
   const showResolutionButtons =
     approval.type !== "budget_override_required" &&
+    // A credential request is resolved by providing a value on its detail page,
+    // not by a generic Approve/Reject here.
+    approval.type !== "credential_request" &&
     ACTIONABLE_APPROVAL_STATUSES.has(approval.status);
   const showUnreadSlot = unreadState !== null;
   const showUnreadDot = unreadState === "visible" || unreadState === "fading";

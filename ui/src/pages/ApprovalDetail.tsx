@@ -3,12 +3,13 @@ import { Link, useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { approvalsApi } from "../api/approvals";
 import { agentsApi } from "../api/agents";
+import { secretsApi } from "../api/secrets";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
-import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer } from "../components/ApprovalPayload";
+import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -26,6 +27,7 @@ export function ApprovalDetail() {
   const [commentBody, setCommentBody] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showRawPayload, setShowRawPayload] = useState(false);
+  const [credentialValue, setCredentialValue] = useState("");
 
   const { data: approval, isLoading } = useQuery({
     queryKey: queryKeys.approvals.detail(approvalId!),
@@ -121,6 +123,32 @@ export function ApprovalDetail() {
     onError: (err) => setError(err instanceof Error ? err.message : "Resubmit failed"),
   });
 
+  // Credential request: create the encrypted secret from the value the user
+  // supplies, then resolve the approval so the requesting agent is woken.
+  const fillCredentialMutation = useMutation({
+    mutationFn: async () => {
+      const fields = credentialRequestFields(approval?.payload as Record<string, unknown>);
+      const companyId = approval?.companyId ?? selectedCompanyId;
+      if (!companyId) throw new Error("No company for this request");
+      const rawKey = fields.envKey ?? fields.label;
+      const key = rawKey.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "") || "CREDENTIAL";
+      await secretsApi.create(companyId, {
+        name: fields.envKey ?? fields.label,
+        key,
+        value: credentialValue,
+        description: fields.description ?? null,
+      });
+      await approvalsApi.approve(approvalId!, "Credential provided");
+    },
+    onSuccess: () => {
+      setError(null);
+      setCredentialValue("");
+      refresh();
+      navigate(`/approvals/${approvalId}?resolved=approved`, { replace: true });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not save the credential"),
+  });
+
   const addCommentMutation = useMutation({
     mutationFn: () => approvalsApi.addComment(approvalId!, commentBody.trim()),
     onSuccess: () => {
@@ -148,6 +176,8 @@ export function ApprovalDetail() {
   const linkedAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
   const isActionable = approval.status === "pending" || approval.status === "revision_requested";
   const isBudgetApproval = approval.type === "budget_override_required";
+  const isCredentialRequest = approval.type === "credential_request";
+  const credentialFields = isCredentialRequest ? credentialRequestFields(payload) : null;
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
   const primaryLinkedIssue = linkedIssues?.[0] ?? null;
@@ -260,8 +290,36 @@ export function ApprovalDetail() {
             </p>
           </div>
         )}
+        {isCredentialRequest && isActionable && (
+          <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
+            <label className="text-sm font-medium">
+              {credentialFields?.envKey ? `Value for ${credentialFields.envKey}` : "Credential value"}
+            </label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={credentialValue}
+              onChange={(e) => setCredentialValue(e.target.value)}
+              placeholder="Paste the secret value…"
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-ring"
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                className="bg-green-700 hover:bg-green-600 text-white"
+                onClick={() => fillCredentialMutation.mutate()}
+                disabled={fillCredentialMutation.isPending || !credentialValue.trim()}
+              >
+                {fillCredentialMutation.isPending ? "Saving…" : "Provide credential & continue"}
+              </Button>
+              <span className="text-[11px] text-muted-foreground">
+                Stored encrypted in Company Secrets.
+              </span>
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
-          {isActionable && !isBudgetApproval && (
+          {isActionable && !isBudgetApproval && !isCredentialRequest && (
             <>
               <Button
                 size="sm"

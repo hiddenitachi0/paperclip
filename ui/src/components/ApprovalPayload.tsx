@@ -1,4 +1,4 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, KeyRound } from "lucide-react";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
@@ -6,7 +6,21 @@ export const typeLabel: Record<string, string> = {
   approve_ceo_strategy: "CEO Strategy",
   budget_override_required: "Budget Override",
   request_board_approval: "Board Approval",
+  credential_request: "Credential Request",
 };
+
+/** Read the requested-credential fields an agent puts on a credential_request payload. */
+export function credentialRequestFields(payload?: Record<string, unknown> | null): {
+  label: string;
+  envKey: string | null;
+  description: string | null;
+} {
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const envKey = str(payload?.envKey) ?? str(payload?.key);
+  const label = str(payload?.name) ?? str(payload?.title) ?? envKey ?? "Credential";
+  const description = str(payload?.description) ?? str(payload?.summary) ?? str(payload?.reason);
+  return { label, envKey, description };
+}
 
 function firstNonEmptyString(...values: unknown[]): string | null {
   for (const value of values) {
@@ -41,6 +55,7 @@ export const typeIcon: Record<string, typeof UserPlus> = {
   approve_ceo_strategy: Lightbulb,
   budget_override_required: ShieldAlert,
   request_board_approval: ShieldCheck,
+  credential_request: KeyRound,
 };
 
 export const defaultTypeIcon = ShieldCheck;
@@ -243,5 +258,21 @@ export function ApprovalPayloadRenderer({
   if (type === "request_board_approval") {
     return <BoardApprovalPayload payload={payload} hideTitle={hidePrimaryTitle} />;
   }
+  if (type === "credential_request") return <CredentialRequestPayload payload={payload} />;
   return <CeoStrategyPayload payload={payload} />;
+}
+
+function CredentialRequestPayload({ payload }: { payload: Record<string, unknown> }) {
+  const { label, envKey, description } = credentialRequestFields(payload);
+  return (
+    <div className="space-y-3">
+      <PayloadField label="Credential" value={label} />
+      {envKey ? <PayloadField label="Environment variable" value={envKey} /> : null}
+      {description ? <PayloadField label="Why it's needed" value={description} /> : null}
+      <p className="text-xs text-muted-foreground">
+        Provide the value below — it is stored as an encrypted company secret, and the requesting
+        agent is woken to continue once you submit.
+      </p>
+    </div>
+  );
 }
