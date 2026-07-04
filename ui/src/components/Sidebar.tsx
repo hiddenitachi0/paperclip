@@ -18,6 +18,7 @@ import {
   PanelLeftOpen,
   Pin,
   MessagesSquare,
+  RadioTower,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -158,7 +159,8 @@ export function Sidebar() {
               newTaskButton
             );
           })()}
-          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/dashboard/now" label="Now" icon={RadioTower} liveCount={liveRunCount} />
+          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} end />
           <SidebarNavItem
             to="/inbox"
             label="Inbox"
