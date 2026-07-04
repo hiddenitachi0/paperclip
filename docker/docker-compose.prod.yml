@@ -1,0 +1,27 @@
+# Production override for the paperclip-fork VPS deploy (Hetzner + Tailscale).
+# Use together with the base compose:
+#
+#   docker compose --env-file .env \
+#     -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+#
+# Hardening vs. the base compose:
+#  - published ports bound to loopback only (nothing on the public internet);
+#    the tailnet reaches the app via `tailscale serve` -> https://<host>.ts.net
+#  - Postgres port not published at all (server reaches db over the compose network)
+#  - restart: unless-stopped so the always-on brain survives reboots
+#  - PAPERCLIP_ALLOWED_HOSTNAMES lets the Tailscale hostname through the host guard
+#
+# Required in .env (never committed):
+#   BETTER_AUTH_SECRET=<openssl rand -hex 32>
+#   PAPERCLIP_PUBLIC_URL=https://<host>.<tailnet>.ts.net
+#   PAPERCLIP_ALLOWED_HOSTNAMES=<host>.<tailnet>.ts.net,localhost,127.0.0.1
+services:
+  server:
+    restart: unless-stopped
+    environment:
+      PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
+    ports: !override
+      - "127.0.0.1:3100:3100"
+  db:
+    restart: unless-stopped
+    ports: !override []
