@@ -29,6 +29,11 @@ A top-level, glanceable live page with four lanes: **Needs you** (runs whose
 New files never conflict on rebase. The two edits are additive single-line insertions;
 if upstream reworks `App.tsx` routing or `Sidebar.tsx` nav, re-apply the two inserts.
 
+**Live-activity enhancement (dogfood-driven, `c5c01e97e`):** the Working-now lane shows each
+agent's *real current action* (from the live run transcript) instead of the opaque runtime
+status, with a "Watch live" cue. Adds `ui/src/lib/run-activity.ts` (`describeRunActivity`,
+unit-tested in `run-activity.test.ts`) and edits `DashboardNow.tsx` only.
+
 ---
 
 ### Feature 4 — Per-company theming (brandColor → whole-UI theme + default-skin toggle)
