@@ -49,7 +49,7 @@ describe("classifyTaskWaiting", () => {
     expect(r.waitingOn).toBe("external");
   });
 
-  it("owner=unknown stalled chain → surfaces to you (the ACM-2/DUR-4 shape)", () => {
+  it("owner=unknown stalled chain → parked, not you (unattributed ≠ human action)", () => {
     const r = classifyTaskWaiting(
       issue({
         blockedInboxAttention: attention({
@@ -59,7 +59,7 @@ describe("classifyTaskWaiting", () => {
         }),
       }),
     );
-    expect(r.waitingOn).toBe("you");
+    expect(r.waitingOn).toBe("unknown");
     expect(r.label).toBe("Inspect blocker chain");
   });
 
@@ -80,9 +80,9 @@ describe("classifyTaskWaiting", () => {
     expect(r.waitingOn).toBe("agent");
   });
 
-  it("manual block, no blocker, no attention → needs your input (the DUR-3/DUR-4 case)", () => {
+  it("manual block, no blocker, no attention → parked, not you (the DUR-3/DUR-4 case)", () => {
     const r = classifyTaskWaiting(issue({ blockedInboxAttention: null, blockedBy: [] as Issue["blockedBy"] }));
-    expect(r.waitingOn).toBe("you");
-    expect(r.label).toBe("Needs your input");
+    expect(r.waitingOn).toBe("unknown");
+    expect(r.label).toBe("Parked");
   });
 });

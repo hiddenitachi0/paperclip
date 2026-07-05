@@ -58,12 +58,14 @@ function needsFollowup(run: LiveRunForIssue): boolean {
   return run.livenessState === "needs_followup";
 }
 
-// A run's lane. "Needs you" wins over everything else because it is the only
-// lane that demands a human — an actioned run should surface there even if it is
-// still technically running or already finished.
+// A run's lane. "Needs you" is reserved for a run that is *still live and stuck*
+// — running, but flagged as needing follow-up. A run that has already terminated
+// is never a human action item, even if the liveness monitor tagged it
+// `needs_followup` (e.g. "succeeded but no concrete action evidence" — that's the
+// recovery system's job, not Filip's); it belongs in "Just finished." This keeps
+// the Needs-you lane to genuine asks instead of every monitoring heuristic.
 function laneForRun(run: LiveRunForIssue): LaneKey {
-  if (needsFollowup(run)) return "needs_you";
-  if (isRunning(run)) return "working";
+  if (isRunning(run)) return needsFollowup(run) ? "needs_you" : "working";
   if (isQueued(run)) return "queued";
   return "finished";
 }

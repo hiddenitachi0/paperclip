@@ -3,10 +3,14 @@ import { blockedReasonLabel } from "./blockedInbox";
 
 // Who is a blocked/parked task actually waiting on? Paperclip already computes a
 // rich "blocked inbox attention" (owner + reason + action) for tasks it can
-// classify; when present we trust it. For tasks an agent simply set to
-// `blocked` with a prose reason (no structured blocker), we fall back: a
-// blocked task with a blocker is waiting on that blocker's owner (another
-// agent); otherwise the agent stopped and needs a human decision.
+// classify; when present we trust its owner attribution. The Now view's
+// "Needs you" lane must mean *you are the required next actor* — so we only
+// route a task there when Paperclip explicitly attributes it to the user/board.
+// Anything unattributed (owner "unknown", or a bare `blocked` with a prose
+// reason and no structured blocker) is treated as PARKED, not "needs you": a
+// task that genuinely needs Filip reaches him through an approval or an
+// owner=user attribution, and over-notifying every parked task buried the real
+// asks. Parked tasks still live on the board — they just don't scream here.
 
 export type TaskWaitingOn = "you" | "agent" | "external" | "unknown";
 
@@ -32,11 +36,12 @@ export function classifyTaskWaiting(issue: Issue): TaskWaiting {
       case "external":
         return { waitingOn: "external", label, ownerLabel };
       default:
-        // Unknown owner: a stuck task with no clear next actor surfaces to the
-        // human — better to over-notify than to hide a stalled task — unless it
-        // is specifically parked behind another agent's backlog work.
+        // Unknown owner: Paperclip couldn't attribute the block to anyone. That
+        // is not automatically the human's problem — parked behind another
+        // agent's backlog work is theirs; anything else is parked until it
+        // raises a concrete ask (an approval or a user-owned block).
         return {
-          waitingOn: attention.reason === "blocked_by_assigned_backlog_issue" ? "agent" : "you",
+          waitingOn: attention.reason === "blocked_by_assigned_backlog_issue" ? "agent" : "unknown",
           label,
           ownerLabel,
         };
@@ -47,7 +52,9 @@ export function classifyTaskWaiting(issue: Issue): TaskWaiting {
   if (issue.blockedBy && issue.blockedBy.length > 0) {
     return { waitingOn: "agent", label: "Blocked by another task", ownerLabel: null };
   }
-  return { waitingOn: "you", label: "Needs your input", ownerLabel: null };
+  // Bare block with a prose reason and no structured blocker — ambiguous. It's
+  // the owning agent's / recovery system's to progress, not a human action item.
+  return { waitingOn: "unknown", label: "Parked", ownerLabel: null };
 }
 
 /** A blocked task the user personally needs to act on. */
