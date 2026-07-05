@@ -22,6 +22,7 @@ import { EmptyState } from "../components/EmptyState";
 import { Identity } from "../components/Identity";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { describeRunActivity } from "../lib/run-activity";
+import { classifyTaskWaiting } from "../lib/task-waiting";
 import { Button } from "@/components/ui/button";
 import {
   approvalLabel,
@@ -141,6 +142,21 @@ export function DashboardNow() {
     staleTime: 30_000,
   });
 
+  // Blocked tasks that stopped waiting on someone. We surface the ones waiting
+  // on the user in the Needs-you lane — a blocked task an agent can't move past
+  // without a human is exactly "needs you", even without a run or approval.
+  const { data: blockedTasks } = useQuery({
+    queryKey: [...queryKeys.issues.list(selectedCompanyId!), "now-blocked"],
+    queryFn: () =>
+      issuesApi.list(selectedCompanyId!, {
+        status: "blocked",
+        includeBlockedInboxAttention: true,
+        includeBlockedBy: true,
+      }),
+    enabled: !!selectedCompanyId,
+    refetchInterval: NOW_POLL_INTERVAL_MS,
+  });
+
   const runs = useMemo(() => liveRuns ?? [], [liveRuns]);
 
   // Fetch issue titles for every run that references one, so rows can show the
@@ -222,6 +238,15 @@ export function DashboardNow() {
     return map;
   }, [agents]);
 
+  // Blocked tasks that are waiting on the user (not on another agent/external).
+  const needsYouTasks = useMemo(
+    () =>
+      (blockedTasks ?? [])
+        .map((issue) => ({ issue, waiting: classifyTaskWaiting(issue) }))
+        .filter((t) => t.waiting.waitingOn === "you"),
+    [blockedTasks],
+  );
+
   if (!selectedCompanyId) {
     return (
       <EmptyState
@@ -235,7 +260,8 @@ export function DashboardNow() {
     );
   }
 
-  const needsYouCount = runsByLane.needs_you.length + actionableApprovals.length;
+  const needsYouCount =
+    runsByLane.needs_you.length + actionableApprovals.length + needsYouTasks.length;
 
   return (
     <div className="space-y-5">
@@ -286,6 +312,9 @@ export function DashboardNow() {
                       issue={run.issueId ? issueById.get(run.issueId) : undefined}
                       activity={activityByRun.get(run.id)}
                     />
+                  ))}
+                  {needsYouTasks.slice(0, LANE_ROW_LIMIT).map(({ issue, waiting }) => (
+                    <BlockedTaskRow key={`task-${issue.id}`} issue={issue} label={waiting.label} />
                   ))}
                   {needsYouCount === 0 ? <LaneEmpty label="Nothing needs you right now." /> : null}
                 </>
@@ -470,6 +499,28 @@ function RunRow({
             Watch live <ArrowRight className="h-2.5 w-2.5" />
           </span>
         ) : null}
+      </div>
+    </Link>
+  );
+}
+
+function BlockedTaskRow({ issue, label }: { issue: Issue; label: string }) {
+  return (
+    <Link
+      to={`/issues/${issue.identifier ?? issue.id}`}
+      className="group flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2"
+      title="Open the task"
+    >
+      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
+          {issue.identifier ? `${issue.identifier} · ` : ""}
+          {issue.title}
+        </p>
+        <p className="text-[10px] text-muted-foreground">
+          <span className="font-medium text-amber-600 dark:text-amber-400">Waiting on you</span>
+          {label ? ` · ${label}` : ""}
+        </p>
       </div>
     </Link>
   );
