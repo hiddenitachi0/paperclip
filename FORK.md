@@ -34,6 +34,12 @@ agent's *real current action* (from the live run transcript) instead of the opaq
 status, with a "Watch live" cue. Adds `ui/src/lib/run-activity.ts` (`describeRunActivity`,
 unit-tested in `run-activity.test.ts`) and edits `DashboardNow.tsx` only.
 
+**Needs-you tasks enhancement (dogfood-driven, `94538e07e`):** the Needs-you lane also surfaces
+blocked tasks that are waiting on the *user* (not just run followups + approvals) — e.g. a task
+an agent set to `blocked` pending a human decision. Adds `ui/src/lib/task-waiting.ts`
+(`classifyTaskWaiting`, unit-tested) which uses Paperclip's blocked-inbox owner/reason where
+available and defaults ambiguous/stalled tasks to "waiting on you"; edits `DashboardNow.tsx`.
+
 ---
 
 ### Feature 4 — Per-company theming (brandColor → whole-UI theme + default-skin toggle)
