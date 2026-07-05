@@ -44,7 +44,10 @@ $COMPOSE ps                 # status
 $COMPOSE logs -f server     # app logs
 $COMPOSE restart server     # restart app
 
-# Take an upstream/fork update:
+# Deploy the latest custom (the gated deploy path — pull + rebuild + swap + health-check):
+./scripts/deploy-prod.sh            # logs to deploy.log; no-op if custom hasn't moved
+
+# (manual equivalent) take an upstream/fork update:
 git pull && $COMPOSE up -d --build
 
 # Back up data (volumes):
