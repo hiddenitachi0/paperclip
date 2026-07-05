@@ -70,6 +70,14 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# uv: Python package/venv manager for agent workspaces that build Python apps
+# (e.g. the Nordstrand Django dashboard). The base image ships python3 but no
+# pip/ensurepip, so `uv venv` / `uv pip install -r requirements.txt` / `uv sync`
+# are how agents bootstrap a runnable Python checkout in their worktree. Copied
+# from the official static uv image (no pip needed). Pin a version tag here if
+# reproducible builds become a requirement.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
 ENV NODE_ENV=production \
   HOME=/paperclip \
   HOST=0.0.0.0 \

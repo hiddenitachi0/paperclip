@@ -83,6 +83,18 @@ fill form creates the encrypted secret (name/description preserved) and resolves
 Agent-filing path: `POST /companies/:id/approvals` with `type:"credential_request"`,
 `payload:{name, envKey, description}`, `issueIds:[...]` — the same route agents already use.
 
+### Infra — `uv` in the runtime image (Python-app workspaces)
+
+The base image ships `python3` but no `pip`/`ensurepip`, so agent worktrees can't bootstrap a
+Python project (needed for the Nordstrand Django dashboard). Added `uv` to the production stage
+so `uv venv` / `uv pip install -r requirements.txt` / `uv sync` work in agent worktrees.
+
+| File | Change | Type |
+|---|---|---|
+| `Dockerfile` | `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/` in the `production` stage | Additive 1-line (+comment) |
+
+Additive; low rebase-conflict risk. Pin the uv image tag if reproducible builds become required.
+
 ## Out-of-tree work (near-zero conflict risk)
 
 ### Feature 2 — Cowork/Claude Code → Paperclip importer
