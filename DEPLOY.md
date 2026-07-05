@@ -49,8 +49,26 @@ $COMPOSE restart server     # restart app
 
 # (manual equivalent) take an upstream/fork update:
 git pull && $COMPOSE up -d --build
+```
 
-# Back up data (volumes):
+## Deploy on approval (agent asks → you approve → it deploys)
+
+`scripts/deploy-poller.sh` (run by the `paperclip-deploy-poller` systemd timer, ~1/min) watches
+for **approved deploy requests** and runs `deploy-prod.sh` for each, commenting the result back.
+
+- A **deploy request** is a board approval with `payload.kind == "deploy"` — it appears in the
+  operator's **Needs-you** lane / Inbox with an **Approve** button. Approve = one click; the
+  deploy then runs itself and comments "Deployed — commit X is live."
+- An agent files one via `POST /companies/:id/approvals` with
+  `{ type: "request_board_approval", payload: { kind: "deploy", title: "Deploy … to production", note: "…" } }`.
+- Poller state: processed approval ids in `.deployed-approvals`; logs in `deploy-poller.log`.
+- Timer control: `systemctl status paperclip-deploy-poller.timer`; disable with
+  `systemctl disable --now paperclip-deploy-poller.timer` to require manual `deploy-prod.sh` again.
+
+## Back up data
+
+```bash
+cd /root/paperclip
 docker run --rm -v paperclip-data:/d -v "$PWD":/b alpine tar czf /b/paperclip-data.tgz -C /d .
 ```
 
