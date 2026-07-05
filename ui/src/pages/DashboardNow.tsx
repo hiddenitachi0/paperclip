@@ -20,6 +20,8 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { EmptyState } from "../components/EmptyState";
 import { Identity } from "../components/Identity";
+import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
+import { describeRunActivity } from "../lib/run-activity";
 import { Button } from "@/components/ui/button";
 import {
   approvalLabel,
@@ -36,6 +38,10 @@ const NOW_POLL_INTERVAL_MS = 5_000;
 const NOW_RUN_FETCH_LIMIT = 60;
 const NOW_RUN_MIN_COUNT = 40;
 const LANE_ROW_LIMIT = 12;
+// Live-transcript polling for the "what's it doing now" glimpse on active runs.
+const NOW_LOG_POLL_INTERVAL_MS = 5_000;
+const NOW_LOG_READ_LIMIT_BYTES = 48_000;
+const NOW_MAX_CHUNKS_PER_RUN = 24;
 
 type LaneKey = "needs_you" | "working" | "queued" | "finished";
 
@@ -172,6 +178,36 @@ export function DashboardNow() {
     return grouped;
   }, [runs]);
 
+  // Pull the live transcript for actively-running agents so each row can show
+  // the real current action ("Editing worker.ts", "Running `pnpm build`") rather
+  // than the opaque runtime status. Only running/followup runs produce output.
+  const activeRuns = useMemo(
+    () => runs.filter((r) => r.status === "running" || r.livenessState === "needs_followup"),
+    [runs],
+  );
+  const { transcriptByRun } = useLiveRunTranscripts({
+    runs: activeRuns.map((r) => ({
+      id: r.id,
+      status: r.status,
+      adapterType: r.adapterType,
+      logBytes: r.logBytes,
+      lastOutputBytes: r.lastOutputBytes,
+    })),
+    companyId: selectedCompanyId,
+    maxChunksPerRun: NOW_MAX_CHUNKS_PER_RUN,
+    logPollIntervalMs: NOW_LOG_POLL_INTERVAL_MS,
+    logReadLimitBytes: NOW_LOG_READ_LIMIT_BYTES,
+    enableRealtimeUpdates: false,
+  });
+  const activityByRun = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const run of activeRuns) {
+      const activity = describeRunActivity(transcriptByRun.get(run.id));
+      if (activity) map.set(run.id, activity);
+    }
+    return map;
+  }, [activeRuns, transcriptByRun]);
+
   const actionableApprovals = useMemo(
     () =>
       (approvals ?? [])
@@ -248,6 +284,7 @@ export function DashboardNow() {
                       run={run}
                       lane="needs_you"
                       issue={run.issueId ? issueById.get(run.issueId) : undefined}
+                      activity={activityByRun.get(run.id)}
                     />
                   ))}
                   {needsYouCount === 0 ? <LaneEmpty label="Nothing needs you right now." /> : null}
@@ -260,6 +297,7 @@ export function DashboardNow() {
                       run={run}
                       lane={lane.key}
                       issue={run.issueId ? issueById.get(run.issueId) : undefined}
+                      activity={activityByRun.get(run.id)}
                     />
                   ))}
                   {runsByLane[lane.key].length === 0 ? (
@@ -348,18 +386,29 @@ function RunRow({
   run,
   lane,
   issue,
+  activity,
 }: {
   run: LiveRunForIssue;
   lane: LaneKey;
   issue?: Issue;
+  /** Live "what it's doing now" line derived from the run transcript. */
+  activity?: string;
 }) {
-  // Prefer the ephemeral current-status message for live lanes; fall back to the
-  // follow-up reason (needs_you) or the linked task title.
+  const taskTitle = issue?.title ?? (run.issueId ? `Task ${run.issueId.slice(0, 8)}` : null);
+
+  // Lead with the real current action (from the transcript). Fall back through
+  // the follow-up reason, the ephemeral status, and finally the task title.
   const primary =
-    (lane === "needs_you"
-      ? run.livenessReason || run.nextAction || run.currentStatusMessage
-      : run.currentStatusMessage) ||
-    (issue?.title ?? (run.issueId ? `Task ${run.issueId.slice(0, 8)}` : "No linked task"));
+    activity ||
+    (lane === "needs_you" ? run.livenessReason || run.nextAction : null) ||
+    run.currentStatusMessage ||
+    taskTitle ||
+    (lane === "needs_you" ? "Waiting for you" : "Working…");
+
+  // When the primary line is a live action (not the task itself), keep the task
+  // visible as context so you see both what and on-which.
+  const showTaskContext = Boolean(taskTitle) && primary !== taskTitle;
+  const isActive = lane === "working" || lane === "needs_you";
 
   const timeLabel =
     lane === "finished"
@@ -381,6 +430,7 @@ function RunRow({
         "group flex flex-col gap-1 rounded-lg border bg-background/70 px-2.5 py-2 transition-colors",
         LANE_ROW_STATUS[lane],
       )}
+      title={isActive ? "Open the live transcript" : "Open the run"}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -401,9 +451,26 @@ function RunRow({
         </div>
         <span className="shrink-0 text-[10px] text-muted-foreground">{timeLabel}</span>
       </div>
-      <p className="line-clamp-2 pl-4 text-xs text-muted-foreground group-hover:text-foreground">
+      <p
+        className={cn(
+          "line-clamp-2 pl-4 text-xs",
+          lane === "working" ? "text-foreground/90" : "text-muted-foreground group-hover:text-foreground",
+        )}
+      >
         {primary}
       </p>
+      <div className="flex items-center justify-between gap-2 pl-4">
+        {showTaskContext ? (
+          <span className="min-w-0 truncate text-[10px] text-muted-foreground">on {taskTitle}</span>
+        ) : (
+          <span />
+        )}
+        {isActive ? (
+          <span className="hidden shrink-0 items-center gap-0.5 text-[10px] font-medium text-cyan-600 group-hover:inline-flex dark:text-cyan-400">
+            Watch live <ArrowRight className="h-2.5 w-2.5" />
+          </span>
+        ) : null}
+      </div>
     </Link>
   );
 }
