@@ -202,5 +202,19 @@ aggregation logic returns correct per-company stats + deep links against the liv
 blocked by design** (shown as "unreachable"); Tailscale's `100.64/10` range is NOT blocked, so
 real remotes work — full multi-server verification lands with Phase 2.
 
-_Still planned per HANDOFF roadmap:_ Productize-a-project (item 7), Telegram bridge plugin,
-`opencode-local`→Ollama config.
+### `opencode_local` → Ollama adapter config
+
+Documented how to point an agent on the `opencode_local` adapter at a self-hosted Ollama model,
+using the adapter's existing env-driven gateway routing (`PAPERCLIP_OPENCODE_PROVIDERS` /
+`PAPERCLIP_OPENCODE_SMALL_MODEL`, already shipped in `runtime-config.ts` for LiteLLM/OpenRouter/
+corporate-proxy gateways) — **zero core edits**, config + doc only. Full setup steps, the exact
+`PAPERCLIP_OPENCODE_PROVIDERS` JSON shape, and the agent model config live in
+`doc/adapters/opencode-local-ollama.md`.
+
+Verified locally: installed Ollama, pulled `qwen2.5:0.5b`, confirmed its OpenAI-compatible
+`/v1/chat/completions` endpoint responds, then ran the actual `opencode` CLI with the exact
+`opencode.json` shape the adapter's `prepareOpenCodeRuntimeConfig` produces from those env vars
+— got `exitCode: 0` and a real completion back, confirming an agent on this config completes a
+run entirely against a self-hosted model.
+
+_Still planned per HANDOFF roadmap:_ Productize-a-project (item 7), Telegram bridge plugin.
