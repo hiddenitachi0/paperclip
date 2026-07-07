@@ -233,6 +233,10 @@ export const companyPortabilityExportSchema = z.object({
   selectedFiles: z.array(z.string().min(1)).optional(),
   expandReferencedSkills: z.boolean().optional(),
   sidebarOrder: portabilitySidebarOrderSchema.partial().optional(),
+  // Opt-in selective-secret migration: scoped env-input keys to carry values for,
+  // sealed under secretsPassphrase (returned out-of-band, never in the package).
+  secretSelection: z.array(z.string().min(1)).optional(),
+  secretsPassphrase: z.string().min(1).optional(),
 });
 
 export type CompanyPortabilityExport = z.infer<typeof companyPortabilityExportSchema>;

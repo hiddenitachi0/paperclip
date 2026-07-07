@@ -63,7 +63,7 @@ import { agentService } from "./agents.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
-import { openSecretBundle, SecretBundlePassphraseError } from "./portable-secret-bundle.js";
+import { openSecretBundle, sealSecretBundle, SecretBundlePassphraseError } from "./portable-secret-bundle.js";
 import { renderOrgChartPng, type OrgNode } from "../routes/org-chart-svg.js";
 import { companySkillService } from "./company-skills.js";
 import { companyService } from "./companies.js";
@@ -3250,6 +3250,19 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const files: Record<string, CompanyPortabilityFileEntry> = {};
     const warnings: string[] = [];
     const envInputs: CompanyPortabilityManifest["envInputs"] = [];
+    // Index of scoped-env-key -> source secret ref, built from the ORIGINAL
+    // (pre-normalization) agent/project env. Used to resolve values for the
+    // operator's opt-in selective-secret carry (see the seal step below).
+    const secretRefIndex = new Map<string, { secretId: string; version: number | "latest" }>();
+    const indexSecretRefs = (scopePrefix: string, envValue: unknown) => {
+      if (!isPlainRecord(envValue)) return;
+      for (const [key, binding] of Object.entries(envValue as Record<string, unknown>)) {
+        if (isPlainRecord(binding) && binding.type === "secret_ref" && typeof binding.secretId === "string") {
+          const version = typeof binding.version === "number" ? binding.version : "latest";
+          secretRefIndex.set(`${scopePrefix}${key}`, { secretId: binding.secretId, version });
+        }
+      }
+    };
     const requestedSidebarOrder = normalizePortableSidebarOrder(input.sidebarOrder);
     const rootPath = normalizeAgentUrlKey(company.name) ?? "company-package";
     let companyLogoPath: string | null = null;
@@ -3535,6 +3548,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           (agent.adapterConfig as Record<string, unknown>).env,
           warnings,
         );
+        indexSecretRefs(`agent:${slug}:`, (agent.adapterConfig as Record<string, unknown>).env);
         envInputs.push(...exportedEnvInputs);
         const adapterDefaultRules = ADAPTER_DEFAULT_RULES_BY_TYPE[agent.adapterType] ?? [];
         const portableAdapterConfig = pruneDefaultLikeValue(
@@ -3611,6 +3625,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       const projectPath = `projects/${slug}/PROJECT.md`;
       const envInputsStart = envInputs.length;
       const exportedEnvInputs = extractPortableProjectEnvInputs(slug, project.env, warnings);
+      indexSecretRefs(`project:${slug}:`, project.env);
       envInputs.push(...exportedEnvInputs);
       const projectEnvInputs = dedupeEnvInputs(
         envInputs
@@ -3833,12 +3848,57 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     resolved.manifest.envInputs = dedupeEnvInputs(envInputs);
     resolved.warnings.unshift(...warnings);
 
+    // Selective-secret carry (opt-in): resolve the operator's SELECTED secret
+    // values from source and seal them under a passphrase, OUT-OF-BAND from the
+    // shareable package (never written into files). Re-encrypted on import.
+    let encryptedSecretsBundle: string | undefined;
+    let carriedSecretKeys: string[] | undefined;
+    const secretSelection = (input.secretSelection ?? []).filter((key) => key && key.trim().length > 0);
+    if (secretSelection.length > 0) {
+      if (!input.secretsPassphrase) {
+        throw unprocessable("A passphrase (secretsPassphrase) is required to carry secret values.");
+      }
+      const carried: Record<string, string> = {};
+      const missing: string[] = [];
+      for (const scopedKey of secretSelection) {
+        const ref = secretRefIndex.get(scopedKey);
+        if (!ref) {
+          missing.push(scopedKey);
+          continue;
+        }
+        try {
+          const envKey = scopedKey.split(":").pop() ?? scopedKey;
+          carried[scopedKey] = await secrets.resolveSecretValueForExport(companyId, ref.secretId, ref.version, {
+            consumerType: "system",
+            consumerId: "company-export",
+            configPath: `env.${envKey}`,
+          });
+        } catch {
+          missing.push(scopedKey);
+        }
+      }
+      carriedSecretKeys = Object.keys(carried);
+      if (carriedSecretKeys.length > 0) {
+        encryptedSecretsBundle = sealSecretBundle(carried, input.secretsPassphrase);
+        resolved.warnings.unshift(
+          `Carrying ${carriedSecretKeys.length} secret value(s) in a passphrase-sealed bundle (opt-in). Keep the bundle + passphrase secure; supply both at import.`,
+        );
+      }
+      if (missing.length > 0) {
+        resolved.warnings.unshift(
+          `Could not resolve ${missing.length} selected secret(s) to carry: ${missing.join(", ")}. They must be re-entered on the destination.`,
+        );
+      }
+    }
+
     return {
       rootPath,
       manifest: resolved.manifest,
       files: finalFiles,
       warnings: resolved.warnings,
       paperclipExtensionPath,
+      encryptedSecretsBundle,
+      carriedSecretKeys,
     };
   }
 

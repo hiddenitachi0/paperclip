@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { openSecretBundle } from "../services/portable-secret-bundle.js";
 import type { CompanyPortabilityFileEntry } from "@paperclipai/shared";
 
 const companySvc = {
@@ -69,6 +70,7 @@ const secretSvc = {
   normalizeEnvBindingsForPersistence: vi.fn(async (_companyId: string, env: Record<string, unknown>) => env),
   syncEnvBindingsForTarget: vi.fn(async () => []),
   resolveAdapterConfigForRuntime: vi.fn(async (_companyId: string, config: Record<string, unknown>) => ({ config, secretKeys: new Set<string>() })),
+  resolveSecretValueForExport: vi.fn(async () => "resolved-value"),
 };
 
 const agentInstructionsSvc = {
@@ -568,6 +570,66 @@ describe("company portability", () => {
       defaultValue: "development",
       portability: "portable",
     });
+  });
+
+  it("carries selected secret values in a passphrase-sealed bundle, out-of-band from the package", async () => {
+    const portability = companyPortabilityService({} as any);
+    secretSvc.resolveSecretValueForExport.mockResolvedValue("ghp_write_secret_value");
+    agentSvc.list.mockResolvedValue([
+      {
+        id: "agent-carrier",
+        name: "Carrier",
+        status: "idle",
+        role: "engineer",
+        title: null,
+        icon: null,
+        reportsTo: null,
+        capabilities: null,
+        adapterType: "claude_local",
+        adapterConfig: {
+          env: {
+            GITHUB_TOKEN: { type: "secret_ref", secretId: "sec-gh", version: "latest" },
+          },
+        },
+        runtimeConfig: {},
+        budgetMonthlyCents: 0,
+        permissions: { canCreateAgents: false },
+        metadata: null,
+      },
+    ]);
+
+    const exported = await portability.exportBundle("company-1", {
+      include: { company: true, agents: true, projects: false, issues: false },
+      secretSelection: ["agent:carrier:GITHUB_TOKEN"],
+      secretsPassphrase: "correct horse battery",
+    });
+
+    // Carried, and resolved from the right source secret.
+    expect(exported.carriedSecretKeys).toEqual(["agent:carrier:GITHUB_TOKEN"]);
+    expect(secretSvc.resolveSecretValueForExport).toHaveBeenCalledWith(
+      "company-1",
+      "sec-gh",
+      "latest",
+      expect.objectContaining({ configPath: "env.GITHUB_TOKEN" }),
+    );
+    // Out-of-band: neither the plaintext value nor the sealed blob is in the package files.
+    const filesJson = JSON.stringify(exported.files);
+    expect(filesJson).not.toContain("ghp_write_secret_value");
+    expect(filesJson).not.toContain(exported.encryptedSecretsBundle);
+    // The sealed bundle opens to the value with the passphrase.
+    expect(openSecretBundle(exported.encryptedSecretsBundle!, "correct horse battery")).toEqual({
+      "agent:carrier:GITHUB_TOKEN": "ghp_write_secret_value",
+    });
+  });
+
+  it("requires a passphrase when secretSelection is provided", async () => {
+    const portability = companyPortabilityService({} as any);
+    await expect(
+      portability.exportBundle("company-1", {
+        include: { company: true, agents: true },
+        secretSelection: ["agent:carrier:GITHUB_TOKEN"],
+      }),
+    ).rejects.toThrow();
   });
 
   it("exports default sidebar order into the Paperclip extension and manifest", async () => {
