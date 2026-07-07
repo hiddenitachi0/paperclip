@@ -83,6 +83,33 @@ fill form creates the encrypted secret (name/description preserved) and resolves
 Agent-filing path: `POST /companies/:id/approvals` with `type:"credential_request"`,
 `payload:{name, envKey, description}`, `issueIds:[...]` — the same route agents already use.
 
+### Feature 7 — Private-repo managed workspace clones (GITHUB_TOKEN auth)
+
+Managed project-workspace checkouts (`ensureManagedProjectWorkspace` in
+`heartbeat.ts`) did a bare `git clone <repoUrl>` with a sanitized env and **no
+credentials**, so a project workspace pointed at a **private** GitHub repo could
+never materialize — the clone hung on the username prompt, the workspace stayed
+un-cloned, and every project-scoped run got blocked with `workspace_validation_failed`
+(Paperclip refuses to launch git-sensitive adapters from the agent fallback cwd).
+This surfaced standing up the Nordstrand dashboard (private repo).
+
+Now, when the repo is a `github.com` https URL, the clone authenticates with the
+company's `GITHUB_TOKEN` / `GH_TOKEN` / `PAPERCLIP_GITHUB_TOKEN` secret (same
+names + resolver semantics as the GitHub external-object provider). The token is
+passed via the environment and read by an inline `credential.helper`, so it never
+appears in the process argv, the cloned repo's `.git/config`, or any error message
+(the `repoUrl` in errors stays clean). No token bound → clone proceeds
+unauthenticated exactly as before (public repos unaffected).
+
+| File | Change | Type |
+|---|---|---|
+| `server/src/services/heartbeat.ts` | `resolveManagedCloneGitHubToken` + `isGitHubHttpsRepoUrl` helpers; `ensureManagedProjectWorkspace` takes an optional `resolveGitHubToken` and injects a credential helper into the clone; primary-workspace call site wires the resolver | Surgical edit (hot path) |
+
+Rebase note: `heartbeat.ts` is large and churns upstream — re-apply the three edits
+(two new helpers before `ensureManagedProjectWorkspace`, the clone-block auth
+injection, and the `resolveGitHubToken` arg at the primary call site) if they
+conflict. Behaviour is additive/opt-in, so a clean re-apply is low-risk.
+
 ### Infra — `uv` in the runtime image (Python-app workspaces)
 
 The base image ships `python3` but no `pip`/`ensurepip`, so agent worktrees can't bootstrap a

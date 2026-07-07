@@ -1120,10 +1120,42 @@ function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   }
 }
 
+// Secret names checked, in order, when authenticating a managed workspace clone
+// of a private repo. Matches the GitHub external-object provider so a single
+// GITHUB_TOKEN secret covers both PR resolution and workspace checkout.
+const MANAGED_CLONE_GITHUB_TOKEN_SECRET_NAMES = ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP_GITHUB_TOKEN"] as const;
+
+function isGitHubHttpsRepoUrl(repoUrl: string): boolean {
+  try {
+    const parsed = new URL(repoUrl);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.host.toLowerCase();
+    return host === "github.com" || host === "www.github.com";
+  } catch {
+    return false;
+  }
+}
+
+// Resolve a GitHub token from the company's secrets (if any) so managed
+// workspace clones can reach PRIVATE repos. Returns null when no token secret
+// is bound, in which case the clone proceeds unauthenticated (public repos).
+async function resolveManagedCloneGitHubToken(db: Db, companyId: string): Promise<string | null> {
+  const secrets = secretService(db);
+  for (const secretName of MANAGED_CLONE_GITHUB_TOKEN_SECRET_NAMES) {
+    const secret = await secrets.getByName(companyId, secretName).catch(() => null);
+    if (!secret) continue;
+    const value = await secrets.resolveSecretValue(companyId, secret.id, "latest").catch(() => null);
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
 async function ensureManagedProjectWorkspace(input: {
   companyId: string;
   projectId: string;
   repoUrl: string | null;
+  resolveGitHubToken?: (() => Promise<string | null>) | null;
 }): Promise<{ cwd: string; warning: string | null }> {
   const cwd = resolveManagedProjectWorkspaceDir({
     companyId: input.companyId,
@@ -1159,9 +1191,31 @@ async function ensureManagedProjectWorkspace(input: {
     await fs.rm(cwd, { recursive: true, force: true });
   }
 
+  const cloneEnv: NodeJS.ProcessEnv = {
+    ...sanitizeRuntimeServiceBaseEnv(process.env),
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const cloneArgs: string[] = [];
+  // For private GitHub repos, authenticate the clone with the company's
+  // GITHUB_TOKEN secret. The token is passed through the environment and read
+  // by an inline credential helper, so it never lands in the process argv, the
+  // cloned repo's .git/config, or any error message (the repoUrl stays clean).
+  if (input.resolveGitHubToken && isGitHubHttpsRepoUrl(input.repoUrl)) {
+    const token = await input.resolveGitHubToken().catch(() => null);
+    if (token) {
+      cloneEnv.PAPERCLIP_MANAGED_CLONE_GH_TOKEN = token;
+      cloneArgs.push(
+        "-c",
+        "credential.useHttpPath=false",
+        "-c",
+        'credential.helper=!f() { echo username=x-access-token; echo "password=$PAPERCLIP_MANAGED_CLONE_GH_TOKEN"; }; f',
+      );
+    }
+  }
+  cloneArgs.push("clone", input.repoUrl, cwd);
   try {
-    await execFile("git", ["clone", input.repoUrl, cwd], {
-      env: sanitizeRuntimeServiceBaseEnv(process.env),
+    await execFile("git", cloneArgs, {
+      env: cloneEnv,
       timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
     });
     return { cwd, warning: null };
@@ -6019,6 +6073,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               companyId: agent.companyId,
               projectId: workspaceProjectId ?? resolvedProjectId ?? workspace.projectId,
               repoUrl: readNonEmptyString(workspace.repoUrl),
+              resolveGitHubToken: () => resolveManagedCloneGitHubToken(db, agent.companyId),
             });
             projectCwd = managedWorkspace.cwd;
             managedWorkspaceWarning = managedWorkspace.warning;
