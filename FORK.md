@@ -246,4 +246,21 @@ Verified locally: installed Ollama, pulled `qwen2.5:0.5b`, confirmed its OpenAI-
 — got `exitCode: 0` and a real completion back, confirming an agent on this config completes a
 run entirely against a self-hosted model.
 
-_Still planned per HANDOFF roadmap:_ Productize-a-project (item 7), Telegram bridge plugin.
+### Telegram bridge (host companion service)
+
+`scripts/telegram-bridge.py` — a multi-bot, multi-company companion service run alongside
+the deployed container (not an in-repo plugin). Each Telegram-enabled agent gets its own bot
+identity, scoped to one company; bot-less agents escalate up `reportsTo` within their company,
+tagged "(on behalf of X)". Outbound: pending approvals route to the requesting agent's bot (or
+nearest boss's) with Approve/Reject buttons; credential requests link to the dashboard form
+instead. Inbound: Approve/Reject taps resolve the approval, a text message creates a task for
+that bot's agent. Purely additive — approvals/tasks still live in Paperclip and the web UI.
+
+**Zero core edits** (host-side script driving the CLI, config at
+`/root/paperclip/.telegram-agents.json`, root-only). Iterated since first ship: multi-bot +
+org-aware routing/escalation, multi-company support, only-mark-notified-after-successful-send,
+and surfacing parked/blocked/stopped tasks (not just `in_review`) so stalls don't go silent.
+
+_Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
+external dependency (a productizable deliverable from another company's project) and was
+cancelled 2026-07-07 rather than left waiting; revisit if that dependency ever ships.
