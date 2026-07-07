@@ -209,6 +209,61 @@ def notify_approvals(state, bots):
         save_state(state)
 
 
+# Statuses that mean "work has parked and a human probably needs to look" — the
+# safety net so a stalled task surfaces even when the agent never filed a card.
+WAITING_STATUSES = "in_review"
+
+
+def notify_waiting(state, bots):
+    """Ping the owning bot when a task parks in a waiting state, so stalls surface."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        seen = set(state.get("notified_waiting", []))
+    for company_id, cbots in by_company.items():
+        data = cli("issue", "list", "-C", company_id, "--status", WAITING_STATUSES)
+        if data is None:
+            continue
+        items = data if isinstance(data, list) else data.get("issues", [])
+        reports_to, names = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        for it in items:
+            iid = it.get("id")
+            status = it.get("status")
+            key = f"{iid}:{status}"
+            if not iid or key in seen:
+                continue
+            owner = it.get("assigneeAgentId")
+            bot, escalated = (
+                resolve_bot(owner, bots_by_agent, reports_to, default_bot)
+                if owner
+                else (default_bot, True)
+            )
+            ident = it.get("identifier") or iid[:8]
+            title = (it.get("title") or "")[:200]
+            text = f"*🔎 Parked for review: {ident}*\n{title}"
+            if escalated and owner:
+                text += f"\n_(owned by {names.get(owner, 'a teammate')})_"
+            text += "\nThis task is waiting and may need your input or go-ahead."
+            text += f"\n\n[Open in Paperclip]({bot['uiBase']}/issues/{iid})"
+            sent = False
+            for chat in bots_state(state, bot["token"])["chats"]:
+                res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
+                         parse_mode="Markdown", disable_web_page_preview=True)
+                if res is None:
+                    res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
+                             disable_web_page_preview=True)
+                if res is not None:
+                    sent = True
+            if sent:
+                seen.add(key)
+    with LOCK:
+        state["notified_waiting"] = list(seen)[-800:]
+        save_state(state)
+
+
 def bots_state(state, token):
     with LOCK:
         return state["bots"].setdefault(token, {"offset": 0, "chats": []})
@@ -317,6 +372,10 @@ def main():
             notify_approvals(state, bots)
         except Exception as e:
             print(f"notify error: {e}", flush=True)
+        try:
+            notify_waiting(state, bots)
+        except Exception as e:
+            print(f"waiting-notify error: {e}", flush=True)
         time.sleep(12)
 
 
