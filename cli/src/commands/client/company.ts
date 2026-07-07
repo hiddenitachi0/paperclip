@@ -58,6 +58,8 @@ interface CompanyExportOptions extends BaseClientOptions {
   issues?: string;
   projectIssues?: string;
   expandReferencedSkills?: boolean;
+  withSecrets?: string;
+  secretsPassphrase?: string;
 }
 
 interface CompanyFeedbackOptions extends BaseClientOptions {
@@ -85,6 +87,8 @@ interface CompanyImportOptions extends BaseClientOptions {
   paperclipUrl?: string;
   yes?: boolean;
   dryRun?: boolean;
+  secretsFile?: string;
+  secretsPassphrase?: string;
 }
 
 const DEFAULT_EXPORT_INCLUDE: CompanyPortabilityInclude = {
@@ -1338,6 +1342,8 @@ export function registerCompanyCommands(program: Command): void {
       .option("--issues <values>", "Comma-separated issue identifiers/ids to export")
       .option("--project-issues <values>", "Comma-separated project shortnames/ids whose issues should be exported")
       .option("--expand-referenced-skills", "Vendor skill contents instead of exporting upstream references", false)
+      .option("--with-secrets <keys>", "Comma-separated scoped env keys to CARRY secret values for (agent:<slug>:<KEY> / project:<slug>:<KEY> / <KEY>); requires --secrets-passphrase")
+      .option("--secrets-passphrase <pass>", "Passphrase to seal carried secret values into a .secrets.enc sidecar")
       .action(async (companyId: string, opts: CompanyExportOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
@@ -1351,6 +1357,8 @@ export function registerCompanyCommands(program: Command): void {
               issues: parseCsvValues(opts.issues),
               projectIssues: parseCsvValues(opts.projectIssues),
               expandReferencedSkills: Boolean(opts.expandReferencedSkills),
+              secretSelection: parseCsvValues(opts.withSecrets),
+              secretsPassphrase: opts.secretsPassphrase,
             },
           );
           if (!exported) {
@@ -1358,6 +1366,19 @@ export function registerCompanyCommands(program: Command): void {
           }
           await confirmOverwriteExportDirectory(opts.out!);
           await writeExportToFolder(opts.out!, exported);
+          // Carried secret values (if any) go in a separate 0600 sidecar, NOT in
+          // the shareable package. Move it securely and supply it at import.
+          if (exported.encryptedSecretsBundle) {
+            const sidecar = path.join(path.resolve(opts.out!), ".secrets.enc");
+            await writeFile(sidecar, exported.encryptedSecretsBundle, { mode: 0o600 });
+            printOutput(
+              {
+                secretsCarried: exported.carriedSecretKeys ?? [],
+                secretsSidecar: sidecar,
+              },
+              { json: ctx.json },
+            );
+          }
           printOutput(
             {
               ok: true,
@@ -1395,6 +1416,8 @@ export function registerCompanyCommands(program: Command): void {
       .option("--paperclip-url <url>", "Alias for --api-base on this command")
       .option("--yes", "Accept default selection and skip the pre-import confirmation prompt", false)
       .option("--dry-run", "Run preview only without applying", false)
+      .option("--secrets-file <path>", "Path to a .secrets.enc bundle from an export with --with-secrets (defaults to <package>/.secrets.enc if present)")
+      .option("--secrets-passphrase <pass>", "Passphrase to open --secrets-file")
       .action(async (fromPathOrUrl: string, opts: CompanyImportOptions) => {
         try {
           if (!opts.apiBase?.trim() && opts.paperclipUrl?.trim()) {
@@ -1551,9 +1574,29 @@ export function registerCompanyCommands(program: Command): void {
             targetMode: targetPayload.mode,
             companyId: targetPayload.mode === "existing_company" ? targetPayload.companyId : null,
           });
+          // Selective-secret migration: read the sealed sidecar (explicit
+          // --secrets-file, or <package>/.secrets.enc for a local-path import)
+          // so the server unseals + re-creates the carried secrets.
+          let encryptedSecretsBundle: string | undefined;
+          const secretsFilePath =
+            opts.secretsFile ??
+            (sourcePayload.type !== "github" ? path.join(path.resolve(from), ".secrets.enc") : undefined);
+          if (secretsFilePath) {
+            try {
+              encryptedSecretsBundle = (await readFile(secretsFilePath, "utf8")).trim() || undefined;
+            } catch {
+              if (opts.secretsFile) throw new Error(`Could not read secrets file: ${secretsFilePath}`);
+              // Auto-detect miss is fine — the package simply carries no secrets.
+            }
+          }
+          if (encryptedSecretsBundle && !opts.secretsPassphrase) {
+            throw new Error("--secrets-passphrase is required to open the carried secrets bundle.");
+          }
           const imported = await ctx.api.post<CompanyPortabilityImportResult>(importApiPath, {
             ...previewPayload,
             adapterOverrides,
+            encryptedSecretsBundle,
+            secretsPassphrase: encryptedSecretsBundle ? opts.secretsPassphrase : undefined,
           });
           if (!imported) {
             throw new Error("Import request returned no data.");
