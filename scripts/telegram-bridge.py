@@ -211,7 +211,8 @@ def notify_approvals(state, bots):
 
 # Statuses that mean "work has parked and a human probably needs to look" — the
 # safety net so a stalled task surfaces even when the agent never filed a card.
-WAITING_STATUSES = "in_review"
+# Covers both review-parked and blocked/stopped work.
+WAITING_STATUSES = "in_review,blocked"
 
 
 def notify_waiting(state, bots):
@@ -243,7 +244,8 @@ def notify_waiting(state, bots):
             )
             ident = it.get("identifier") or iid[:8]
             title = (it.get("title") or "")[:200]
-            text = f"*🔎 Parked for review: {ident}*\n{title}"
+            label = "🚧 Blocked / stopped" if status == "blocked" else "🔎 Parked for review"
+            text = f"*{label}: {ident}*\n{title}"
             if escalated and owner:
                 text += f"\n_(owned by {names.get(owner, 'a teammate')})_"
             text += "\nThis task is waiting and may need your input or go-ahead."
