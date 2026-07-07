@@ -775,6 +775,24 @@ export function secretService(db: Db) {
     })).value;
   }
 
+  /**
+   * Resolve a secret VALUE for a company-migration export ("selective secrets").
+   * Authorization is enforced by the export route (board access to the company);
+   * unlike runtime resolution this does NOT assert a per-consumer binding — the
+   * secret may be bound to any agent/project the export is carrying — but it
+   * still records an access event for audit via resolveSecretValueInternal.
+   */
+  async function resolveSecretValueForExport(
+    companyId: string,
+    secretId: string,
+    version: number | "latest",
+    context?: SecretConsumerContext,
+  ): Promise<string> {
+    return (await resolveSecretValueInternal(companyId, secretId, version, {
+      accessContext: context ?? { consumerType: "system", consumerId: "company-export" },
+    })).value;
+  }
+
   async function normalizeEnvConfig(
     companyId: string,
     envValue: unknown,
@@ -1897,6 +1915,7 @@ export function secretService(db: Db) {
     getByName,
     resolveSecretValue,
     resolveSecretValueForEphemeralAccess,
+    resolveSecretValueForExport,
 
     create: async (
       companyId: string,
