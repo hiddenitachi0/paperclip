@@ -110,6 +110,38 @@ Rebase note: `heartbeat.ts` is large and churns upstream — re-apply the three 
 injection, and the `resolveGitHubToken` arg at the primary call site) if they
 conflict. Behaviour is additive/opt-in, so a clean re-apply is low-risk.
 
+### Feature 8 — Self-serve integration tokens (canonical-key dropdown + auto-bind)
+
+Adding a tool token used to be two fiddly manual steps for a non-expert: create a
+company secret, then separately open an agent's config editor and hand-type the
+exact env-var name to bind it. Now the Secrets page has an **"Add integration
+token"** dialog: pick a **known env key from a dropdown** (or custom), paste the
+value, choose **who gets it** (a specific agent, or all agents) → it creates the
+secret *and* writes the env binding on each target agent in one action. Different
+agents can hold different values for the **same** key (e.g. a write `GITHUB_TOKEN`
+for a lead, read-only for the rest) — because binding is per-agent.
+
+Built entirely on existing, proven plumbing (no schema change, no run hot-path
+change): the dialog composes `secretsApi.create` + a **read-modify-write** of each
+agent's `adapterConfig.env` (never a bare overwrite — existing bindings like
+`CLAUDE_CODE_OAUTH_TOKEN` are preserved), and the server's existing
+`syncEnvBindingsForTarget` derives the binding rows on save.
+
+| File | Change | Type |
+|---|---|---|
+| `packages/shared/src/integration-keys.ts` | Canonical catalog `KNOWN_INTEGRATION_ENV_KEYS` + `GITHUB_TOKEN_SECRET_NAMES` + `PUSH_CAPABILITY_ENV_KEYS` (single source of truth) | **New file** |
+| `packages/shared/src/index.ts` | Re-export the catalog | Surgical edit |
+| `server/src/services/github-external-object-provider.ts` | `DEFAULT_GITHUB_TOKEN_SECRET_NAMES` now = shared `GITHUB_TOKEN_SECRET_NAMES` | 1-line dedupe |
+| `server/src/services/heartbeat.ts` | `PUSH_CAPABILITY_ENV_KEYS` + managed-clone token names now sourced from shared catalog | 2-line dedupe |
+| `ui/src/components/AddIntegrationTokenDialog.tsx` | The dialog (dropdown + value + agent target → create secret + bind) | **New file** |
+| `ui/src/pages/Secrets.tsx` | "Add integration token" button + dialog wiring | Surgical edit |
+
+Deliberately deferred (Phase 2): a true **company-default env layer** so brand-new
+agents auto-inherit a token without re-applying. That one genuinely needs a schema
+migration (`companies.env` + a `"company"` binding target type) and a new merge
+layer in `resolveExecutionRunAdapterConfig` — out of scope here since per-agent
+binding (incl. an "all agents" one-click) already covers the stated need.
+
 ### Infra — `uv` in the runtime image (Python-app workspaces)
 
 The base image ships `python3` but no `pip`/`ensurepip`, so agent worktrees can't bootstrap a

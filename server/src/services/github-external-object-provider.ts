@@ -1,5 +1,5 @@
 import type { Db } from "@paperclipai/db";
-import type { ExternalObjectCanonicalUrl } from "@paperclipai/shared";
+import { type ExternalObjectCanonicalUrl, GITHUB_TOKEN_SECRET_NAMES } from "@paperclipai/shared";
 import { ghFetch, gitHubApiBase } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import type {
@@ -27,7 +27,7 @@ interface GitHubObjectIdentity {
   pathKind: "pull" | "issues";
 }
 
-const DEFAULT_GITHUB_TOKEN_SECRET_NAMES = ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP_GITHUB_TOKEN"] as const;
+const DEFAULT_GITHUB_TOKEN_SECRET_NAMES = GITHUB_TOKEN_SECRET_NAMES;
 const GITHUB_OBJECT_TTL_SECONDS = 300;
 
 function isGitHubHost(host: string) {

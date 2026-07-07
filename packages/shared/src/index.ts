@@ -372,6 +372,14 @@ export {
   type PluginEventType,
   type PluginBridgeErrorCode,
 } from "./constants.js";
+export {
+  KNOWN_INTEGRATION_ENV_KEYS,
+  GITHUB_TOKEN_SECRET_NAMES,
+  PUSH_CAPABILITY_ENV_KEYS,
+  getIntegrationKey,
+  type IntegrationKeyDescriptor,
+  type IntegrationKeyCategory,
+} from "./integration-keys.js";
 
 export {
   ALL_INTERFACES_BIND_HOST,

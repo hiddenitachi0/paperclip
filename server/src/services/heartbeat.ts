@@ -200,6 +200,10 @@ import {
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
+import {
+  GITHUB_TOKEN_SECRET_NAMES,
+  PUSH_CAPABILITY_ENV_KEYS as SHARED_PUSH_CAPABILITY_ENV_KEYS,
+} from "@paperclipai/shared";
 import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
@@ -294,7 +298,7 @@ const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON = "execution_review_part
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE = "execution_review_participant_recovery";
 const GITHUB_PR_WORKFLOW_SKILL_KEY = "paperclipai/bundled/software-development/github-pr-workflow";
 const GITHUB_PR_WORKFLOW_SKILL_SLUG = "github-pr-workflow";
-const PUSH_CAPABILITY_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN"] as const;
+const PUSH_CAPABILITY_ENV_KEYS = SHARED_PUSH_CAPABILITY_ENV_KEYS;
 // Keep this in sync with local adapters that require a git workspace before launch.
 const GIT_SENSITIVE_LOCAL_ADAPTER_TYPES = new Set([
   "acpx_local",
@@ -1123,7 +1127,7 @@ function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
 // Secret names checked, in order, when authenticating a managed workspace clone
 // of a private repo. Matches the GitHub external-object provider so a single
 // GITHUB_TOKEN secret covers both PR resolution and workspace checkout.
-const MANAGED_CLONE_GITHUB_TOKEN_SECRET_NAMES = ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP_GITHUB_TOKEN"] as const;
+const MANAGED_CLONE_GITHUB_TOKEN_SECRET_NAMES = GITHUB_TOKEN_SECRET_NAMES;
 
 function isGitHubHttpsRepoUrl(repoUrl: string): boolean {
   try {

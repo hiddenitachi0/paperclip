@@ -76,6 +76,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { ImportFromVaultDialog } from "./secrets/ImportFromVaultDialog";
+import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
 
 type CreateMode = "managed" | "external";
 type SecretsTab = "secrets" | "vaults";
@@ -405,6 +406,7 @@ export function Secrets() {
   const [selectedSecretId, setSelectedSecretId] = useState<string | null>(null);
   const [usageDialogSecretId, setUsageDialogSecretId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [addTokenOpen, setAddTokenOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importInitialVaultId, setImportInitialVaultId] = useState<string | null>(null);
   const [createMode, setCreateMode] = useState<CreateMode>("managed");
@@ -921,6 +923,14 @@ export function Secrets() {
               onManageVaults={() => setActiveTab("vaults")}
               className="ml-auto"
             />
+            <Button
+              variant="outline"
+              onClick={() => setAddTokenOpen(true)}
+              size="sm"
+              disabled={!selectedCompanyId}
+            >
+              <KeyRound className="h-3.5 w-3.5 mr-1" /> Add integration token
+            </Button>
             <Button onClick={() => setCreateOpen(true)} size="sm">
               <Plus className="h-3.5 w-3.5 mr-1" /> New secret
             </Button>
@@ -1191,6 +1201,13 @@ export function Secrets() {
         </DialogContent>
       </Dialog>
 
+      {selectedCompanyId && (
+        <AddIntegrationTokenDialog
+          open={addTokenOpen}
+          onOpenChange={setAddTokenOpen}
+          companyId={selectedCompanyId}
+        />
+      )}
       {selectedCompanyId && (
         <ImportFromVaultDialog
           open={importOpen}
