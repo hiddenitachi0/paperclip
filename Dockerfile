@@ -70,6 +70,16 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Global git credential helper: lets any agent (and managed clones) authenticate
+# github.com clone/fetch/push from a GITHUB_TOKEN/GH_TOKEN in the environment,
+# with zero per-agent or per-company git wiring. Scoped to github.com so the
+# token is never offered to other hosts. Adding a GitHub token in the dashboard
+# is all that's needed for a new company's agents to push and open PRs.
+COPY scripts/paperclip-git-credential.sh /usr/local/bin/paperclip-git-credential
+RUN chmod +x /usr/local/bin/paperclip-git-credential \
+  && git config --system 'credential.https://github.com.helper' /usr/local/bin/paperclip-git-credential \
+  && git config --system 'credential.https://github.com.useHttpPath' false
+
 # uv: Python package/venv manager for agent workspaces that build Python apps
 # (e.g. the Nordstrand Django dashboard). The base image ships python3 but no
 # pip/ensurepip, so `uv venv` / `uv pip install -r requirements.txt` / `uv sync`

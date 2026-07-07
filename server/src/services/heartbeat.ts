@@ -1199,26 +1199,18 @@ async function ensureManagedProjectWorkspace(input: {
     ...sanitizeRuntimeServiceBaseEnv(process.env),
     GIT_TERMINAL_PROMPT: "0",
   };
-  const cloneArgs: string[] = [];
-  // For private GitHub repos, authenticate the clone with the company's
-  // GITHUB_TOKEN secret. The token is passed through the environment and read
-  // by an inline credential helper, so it never lands in the process argv, the
-  // cloned repo's .git/config, or any error message (the repoUrl stays clean).
+  // For private GitHub repos, resolve the company's GITHUB_TOKEN secret and put
+  // it in the clone environment. The image's global git credential helper
+  // (/etc/gitconfig, github.com-scoped — see Dockerfile) reads GITHUB_TOKEN and
+  // authenticates the clone: the SAME single credential path agents use for
+  // fetch/push, so the token never lands in argv, the cloned .git/config, or any
+  // error message (the repoUrl stays clean).
   if (input.resolveGitHubToken && isGitHubHttpsRepoUrl(input.repoUrl)) {
     const token = await input.resolveGitHubToken().catch(() => null);
-    if (token) {
-      cloneEnv.PAPERCLIP_MANAGED_CLONE_GH_TOKEN = token;
-      cloneArgs.push(
-        "-c",
-        "credential.useHttpPath=false",
-        "-c",
-        'credential.helper=!f() { echo username=x-access-token; echo "password=$PAPERCLIP_MANAGED_CLONE_GH_TOKEN"; }; f',
-      );
-    }
+    if (token) cloneEnv.GITHUB_TOKEN = token;
   }
-  cloneArgs.push("clone", input.repoUrl, cwd);
   try {
-    await execFile("git", cloneArgs, {
+    await execFile("git", ["clone", input.repoUrl, cwd], {
       env: cloneEnv,
       timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
     });

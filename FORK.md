@@ -95,11 +95,13 @@ This surfaced standing up the Nordstrand dashboard (private repo).
 
 Now, when the repo is a `github.com` https URL, the clone authenticates with the
 company's `GITHUB_TOKEN` / `GH_TOKEN` / `PAPERCLIP_GITHUB_TOKEN` secret (same
-names + resolver semantics as the GitHub external-object provider). The token is
-passed via the environment and read by an inline `credential.helper`, so it never
-appears in the process argv, the cloned repo's `.git/config`, or any error message
-(the `repoUrl` in errors stays clean). No token bound → clone proceeds
-unauthenticated exactly as before (public repos unaffected).
+names + resolver semantics as the GitHub external-object provider). The resolved
+token is placed in the clone environment as `GITHUB_TOKEN` and consumed by the
+image's **global git credential helper** (see the Infra entry below) — the same
+single credential path agents use for fetch/push — so it never appears in the
+process argv, the cloned repo's `.git/config`, or any error message (the `repoUrl`
+in errors stays clean). No token bound → clone proceeds unauthenticated exactly as
+before (public repos unaffected).
 
 | File | Change | Type |
 |---|---|---|
@@ -141,6 +143,33 @@ agents auto-inherit a token without re-applying. That one genuinely needs a sche
 migration (`companies.env` + a `"company"` binding target type) and a new merge
 layer in `resolveExecutionRunAdapterConfig` — out of scope here since per-agent
 binding (incl. an "all agents" one-click) already covers the stated need.
+
+### Infra — global git credential helper (zero-wiring GitHub auth)
+
+Agents run `git` inside their workspace, but the base image wired **no
+credentials**, so `git push` / `git fetch` failed with `could not read Username for
+'https://github.com'` even when a `GITHUB_TOKEN` was bound to the agent — the agent
+had to hand-embed the token in the remote URL to push. That's fragile and defeats
+the "auto-open PRs" workflow.
+
+Fix: a **global, github.com-scoped credential helper baked into the image** that
+supplies `username=x-access-token` + `password=$GITHUB_TOKEN` (falling back to
+`$GH_TOKEN`) for any git operation. Because each agent run already injects its own
+token into the environment, every clone/fetch/push authenticates with **that
+agent's** access level automatically — a write token pushes; a read-only token gets
+a clean `403` on push instead of leaking write. A brand-new company needs only a
+`GITHUB_TOKEN` secret bound to its agents (done in the dashboard via Feature 8) —
+**no per-company or per-repo git wiring, and no username to configure**.
+
+| File | Change | Type |
+|---|---|---|
+| `scripts/paperclip-git-credential.sh` | The helper: answers git's `get` with the env token; ignores store/erase (nothing on disk) | **New file** |
+| `Dockerfile` | Install the helper + `git config --system credential.https://github.com.helper` (production stage) | Additive |
+
+Scoped to `github.com` so the token is never offered to other hosts; supplies
+nothing when no token is in the environment (public repos and non-agent git are
+unaffected). This is the one credential path — Feature 7's managed clone feeds the
+same helper by putting the resolved secret in `GITHUB_TOKEN`.
 
 ### Infra — `uv` in the runtime image (Python-app workspaces)
 
