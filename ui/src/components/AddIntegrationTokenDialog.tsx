@@ -6,6 +6,7 @@ import { agentsApi } from "../api/agents";
 import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
+import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -41,6 +42,31 @@ function secretKeyFor(envKey: string, targetSlug: string): string {
     .slice(0, 64);
 }
 
+/**
+ * Drop env entries that reference a secret that no longer exists — the server
+ * re-validates every secret_ref on save, so a single dangling binding (left by
+ * a deleted secret) would otherwise block adding an unrelated new one. Returns
+ * the cleaned env plus the keys that were pruned (for transparency).
+ */
+function pruneDanglingRefs(
+  env: Record<string, unknown>,
+  validSecretIds: Set<string>,
+): { env: Record<string, unknown>; pruned: string[] } {
+  const out: Record<string, unknown> = {};
+  const pruned: string[] = [];
+  for (const [key, binding] of Object.entries(env)) {
+    if (binding && typeof binding === "object" && (binding as { type?: unknown }).type === "secret_ref") {
+      const secretId = (binding as { secretId?: unknown }).secretId;
+      if (typeof secretId === "string" && !validSecretIds.has(secretId)) {
+        pruned.push(key);
+        continue;
+      }
+    }
+    out[key] = binding;
+  }
+  return { env: out, pruned };
+}
+
 interface AddIntegrationTokenDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -61,6 +87,7 @@ export function AddIntegrationTokenDialog({
   companyId,
 }: AddIntegrationTokenDialogProps) {
   const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
   const [keyChoice, setKeyChoice] = useState<string>(KNOWN_INTEGRATION_ENV_KEYS[0]?.key ?? CUSTOM_KEY);
   const [customKey, setCustomKey] = useState("");
   const [value, setValue] = useState("");
@@ -101,24 +128,43 @@ export function AddIntegrationTokenDialog({
         targetAgentId === ALL_AGENTS ? agents.map((a) => a.id) : [targetAgentId];
       if (targets.length === 0) throw new Error("No agents to bind this token to.");
 
-      // 1. Create the secret (value never leaves this request).
-      const secret = await secretsApi.create(companyId, {
-        name: previewSecretName,
-        key: secretKeyFor(envKey, targetLabel),
-        provider: "local_encrypted",
-        value,
-        description: description.trim() || descriptor?.description || null,
-      });
+      const secretKey = secretKeyFor(envKey, targetLabel);
+      const existingSecrets = await secretsApi.list(companyId);
+
+      // 1. Create the secret — or, if one for this key+target already exists
+      //    (e.g. a retry after a partial failure), rotate its value so the flow
+      //    is idempotent instead of colliding on the unique key.
+      const priorSecret = existingSecrets.find((s) => s.key === secretKey);
+      const secret = priorSecret
+        ? await secretsApi.rotate(priorSecret.id, { value })
+        : await secretsApi.create(companyId, {
+            name: previewSecretName,
+            key: secretKey,
+            provider: "local_encrypted",
+            value,
+            description: description.trim() || descriptor?.description || null,
+          });
+
+      // Set of secret ids that still exist, used to prune bindings left
+      // dangling by deleted secrets (else the server rejects the whole save).
+      const validSecretIds = new Set(existingSecrets.map((s) => s.id));
+      validSecretIds.add(secret.id);
 
       // 2. Bind it into each target agent's env via read-modify-write so we
-      //    never clobber existing bindings (e.g. CLAUDE_CODE_OAUTH_TOKEN).
+      //    never clobber existing valid bindings (e.g. CLAUDE_CODE_OAUTH_TOKEN),
+      //    while dropping any already-broken ones.
       const ref = { type: "secret_ref" as const, secretId: secret.id, version: "latest" as const };
       const failures: string[] = [];
+      const prunedKeys = new Set<string>();
       for (const agentId of targets) {
         try {
           const detail = await agentsApi.get(agentId, companyId);
           const cfg = { ...((detail.adapterConfig ?? {}) as Record<string, unknown>) };
-          const env = { ...((cfg.env as Record<string, unknown>) ?? {}) };
+          const { env, pruned } = pruneDanglingRefs(
+            { ...((cfg.env as Record<string, unknown>) ?? {}) },
+            validSecretIds,
+          );
+          pruned.forEach((k) => prunedKeys.add(k));
           env[envKey] = ref;
           cfg.env = env;
           await agentsApi.update(agentId, { adapterConfig: cfg }, companyId);
@@ -129,14 +175,22 @@ export function AddIntegrationTokenDialog({
       }
       if (failures.length > 0) {
         throw new Error(
-          `Secret created, but binding failed for ${failures.length} agent(s): ${failures.join("; ")}`,
+          `Secret saved, but binding failed for ${failures.length} agent(s): ${failures.join("; ")}`,
         );
       }
-      return { boundCount: targets.length };
+      return { boundCount: targets.length, pruned: [...prunedKeys] };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.list(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
+      pushToast({
+        tone: result.pruned.length > 0 ? "warn" : "success",
+        title: `${envKey} bound to ${result.boundCount} agent${result.boundCount === 1 ? "" : "s"}`,
+        body:
+          result.pruned.length > 0
+            ? `Also removed stale bindings that pointed to deleted secrets: ${result.pruned.join(", ")}. Re-add those to restore them.`
+            : undefined,
+      });
       reset();
       onOpenChange(false);
     },
