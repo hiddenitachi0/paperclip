@@ -186,12 +186,24 @@ def notify_approvals(state, bots):
                 {"text": "✅ Approve", "callback_data": f"approve:{aid}"},
                 {"text": "❌ Reject", "callback_data": f"reject:{aid}"},
             ]]}
+            sent = False
             for chat in bots_state(state, bot["token"])["chats"]:
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
                 if kb:
                     params["reply_markup"] = kb
-                tg(bot["token"], "sendMessage", **params)
-            notified.add(aid)
+                res = tg(bot["token"], "sendMessage", **params)
+                if res is None:
+                    # Legacy Markdown 400s on unbalanced entities in agent-authored
+                    # text — retry once as plain text so the alert still lands.
+                    params.pop("parse_mode", None)
+                    res = tg(bot["token"], "sendMessage", **params)
+                if res is not None:
+                    sent = True
+            # Only suppress future re-notification once it has actually been
+            # delivered. If no chat is registered yet (user hasn't /start-ed this
+            # bot), leave it un-notified so a later poll delivers it once they do.
+            if sent:
+                notified.add(aid)
     with LOCK:
         state["notified"] = list(notified)[-800:]
         save_state(state)
