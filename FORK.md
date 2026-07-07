@@ -144,6 +144,23 @@ migration (`companies.env` + a `"company"` binding target type) and a new merge
 layer in `resolveExecutionRunAdapterConfig` — out of scope here since per-agent
 binding (incl. an "all agents" one-click) already covers the stated need.
 
+### Feature 9 — Self-serve change-password UI
+
+The Profile settings page only edited name + avatar — there was **no way to change
+your password in the GUI** (a real gap; a locked-out/weak-password operator had no
+self-serve path). better-auth already exposes `POST /api/auth/change-password`
+(current + new password) via the mounted auth handler, so this is a **UI-only**
+addition: a "Change password" card on `ProfileSettings` with current/new/confirm
+fields + client-side validation, calling a new `authApi.changePassword`.
+
+| File | Change | Type |
+|---|---|---|
+| `ui/src/api/auth.ts` | `changePassword({currentPassword, newPassword})` → POST `/change-password` | Surgical edit |
+| `ui/src/pages/ProfileSettings.tsx` | "Change password" card (form + mutation + validation) | Surgical edit |
+
+No server change (better-auth handles it). Verified the endpoint exists (POST
+returns 400 on empty body, not 404) and the UI typechecks + builds.
+
 ### Infra — global git credential helper (zero-wiring GitHub auth)
 
 Agents run `git` inside their workspace, but the base image wired **no

@@ -128,6 +128,17 @@ export const authApi = {
   updateProfile: async (input: UpdateCurrentUserProfile): Promise<CurrentUserProfile> =>
     authPatch("/profile", input, (payload) => currentUserProfileSchema.parse(payload)),
 
+  // Change the signed-in user's password (email/password accounts). Backed by
+  // better-auth's built-in /api/auth/change-password endpoint; requires the
+  // current password. Optionally revokes other sessions.
+  changePassword: async (input: {
+    currentPassword: string;
+    newPassword: string;
+    revokeOtherSessions?: boolean;
+  }) => {
+    await authPost("/change-password", input);
+  },
+
   signOut: async () => {
     await authPost("/sign-out", {});
   },

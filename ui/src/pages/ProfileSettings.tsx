@@ -27,6 +27,24 @@ export function ProfileSettings() {
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwMessage, setPwMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const changePasswordMutation = useMutation({
+    mutationFn: () => authApi.changePassword({ currentPassword: pwCurrent, newPassword: pwNew }),
+    onSuccess: () => {
+      setPwCurrent("");
+      setPwNew("");
+      setPwConfirm("");
+      setPwMessage({ tone: "success", text: "Password updated." });
+    },
+    onError: (err) =>
+      setPwMessage({
+        tone: "error",
+        text: err instanceof Error ? err.message : "Could not change password.",
+      }),
+  });
   const sessionQuery = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
@@ -268,6 +286,87 @@ export function ProfileSettings() {
             </Button>
           </div>
         </form>
+
+        <div className="rounded-[28px] border border-border/70 bg-card p-6 shadow-sm">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold">Change password</h2>
+            <p className="text-sm text-muted-foreground">
+              Update the password you use to sign in with email.
+            </p>
+          </div>
+          {pwMessage ? (
+            <div
+              className={
+                pwMessage.tone === "success"
+                  ? "mt-4 text-sm text-emerald-600 dark:text-emerald-400"
+                  : "mt-4 text-sm text-destructive"
+              }
+            >
+              {pwMessage.text}
+            </div>
+          ) : null}
+          <form
+            className="mt-4 grid gap-4 md:grid-cols-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setPwMessage(null);
+              if (pwNew.length < 8) {
+                setPwMessage({ tone: "error", text: "New password must be at least 8 characters." });
+                return;
+              }
+              if (pwNew !== pwConfirm) {
+                setPwMessage({ tone: "error", text: "New passwords do not match." });
+                return;
+              }
+              changePasswordMutation.mutate();
+            }}
+          >
+            <div className="space-y-2">
+              <Label htmlFor="pw-current">Current password</Label>
+              <Input
+                id="pw-current"
+                type="password"
+                autoComplete="current-password"
+                value={pwCurrent}
+                onChange={(event) => setPwCurrent(event.target.value)}
+              />
+            </div>
+            <div className="hidden md:block" />
+            <div className="space-y-2">
+              <Label htmlFor="pw-new">New password</Label>
+              <Input
+                id="pw-new"
+                type="password"
+                autoComplete="new-password"
+                value={pwNew}
+                onChange={(event) => setPwNew(event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pw-confirm">Confirm new password</Label>
+              <Input
+                id="pw-confirm"
+                type="password"
+                autoComplete="new-password"
+                value={pwConfirm}
+                onChange={(event) => setPwConfirm(event.target.value)}
+              />
+            </div>
+            <div className="md:col-span-2 flex justify-end">
+              <Button
+                type="submit"
+                disabled={changePasswordMutation.isPending || !pwCurrent || !pwNew || !pwConfirm}
+              >
+                {changePasswordMutation.isPending ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <Save className="size-4" />
+                )}
+                {changePasswordMutation.isPending ? "Updating..." : "Update password"}
+              </Button>
+            </div>
+          </form>
+        </div>
       </section>
     </div>
   );
