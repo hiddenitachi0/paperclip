@@ -63,6 +63,7 @@ import { agentService } from "./agents.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
+import { openSecretBundle, SecretBundlePassphraseError } from "./portable-secret-bundle.js";
 import { renderOrgChartPng, type OrgNode } from "../routes/org-chart-svg.js";
 import { companySkillService } from "./company-skills.js";
 import { companyService } from "./companies.js";
@@ -4401,13 +4402,31 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
       return true;
     });
+    // Selective-secret migration: if the operator carried secret values in a
+    // passphrase-sealed bundle, open it here (server-side) and merge into the
+    // values map. Explicit `secretValues` win over carried ones. Plaintext never
+    // transited the wire or touched disk in the clear.
+    let effectiveSecretValues = input.secretValues;
+    if (input.encryptedSecretsBundle) {
+      if (!input.secretsPassphrase) {
+        throw unprocessable("A passphrase is required to open the carried secret bundle.");
+      }
+      let carried: Record<string, string>;
+      try {
+        carried = openSecretBundle(input.encryptedSecretsBundle, input.secretsPassphrase);
+      } catch (err) {
+        if (err instanceof SecretBundlePassphraseError) throw unprocessable(err.message);
+        throw err;
+      }
+      effectiveSecretValues = { ...carried, ...(input.secretValues ?? {}) };
+    }
     const createdImportSecretIds: string[] = [];
     try {
       await materializeImportEnvInputValues(
         targetCompany.id,
         sourceManifest,
         importEnvInputs,
-        input.secretValues,
+        effectiveSecretValues,
         actorUserId,
         createdImportSecretIds,
       );

@@ -257,6 +257,11 @@ export const portabilityAdapterOverrideSchema = z.object({
 export const companyPortabilityImportSchema = companyPortabilityPreviewSchema.extend({
   adapterOverrides: z.record(z.string().min(1), portabilityAdapterOverrideSchema).optional(),
   secretValues: z.record(z.string().min(1), z.string()).optional(),
+  // Opt-in selective-secret migration: a passphrase-sealed bundle of carried
+  // secret values (from an export with secretSelection). The server opens it and
+  // merges the values into secretValues before creating destination secrets.
+  encryptedSecretsBundle: z.string().min(1).optional(),
+  secretsPassphrase: z.string().min(1).optional(),
 });
 
 export type CompanyPortabilityImport = z.infer<typeof companyPortabilityImportSchema>;

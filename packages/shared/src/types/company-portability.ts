@@ -190,6 +190,15 @@ export interface CompanyPortabilityExportResult {
   files: Record<string, CompanyPortabilityFileEntry>;
   warnings: string[];
   paperclipExtensionPath: string;
+  /**
+   * Present only when `secretSelection` was requested: an opaque, passphrase-
+   * sealed blob of the carried secret values. Deliberately OUTSIDE `files` so it
+   * never lands in the shareable markdown package — the operator saves it to a
+   * separate sidecar and supplies it (with the passphrase) at import time.
+   */
+  encryptedSecretsBundle?: string;
+  /** Scoped keys whose values were actually resolved and carried (for transparency). */
+  carriedSecretKeys?: string[];
 }
 
 export interface CompanyPortabilityExportPreviewFile {
@@ -298,6 +307,16 @@ export interface CompanyPortabilityAdapterOverride {
 export interface CompanyPortabilityImportRequest extends CompanyPortabilityPreviewRequest {
   adapterOverrides?: Record<string, CompanyPortabilityAdapterOverride>;
   secretValues?: Record<string, string>;
+  /**
+   * A passphrase-sealed secret bundle produced by an export with
+   * `secretSelection` (the `encryptedSecretsBundle` result field). The server
+   * opens it with `secretsPassphrase` and merges the values into `secretValues`
+   * before creating destination secrets — plaintext values never transit the
+   * wire or touch disk in the clear.
+   */
+  encryptedSecretsBundle?: string;
+  /** Passphrase to open `encryptedSecretsBundle`. */
+  secretsPassphrase?: string;
 }
 
 export interface CompanyPortabilityImportResult {
@@ -334,4 +353,16 @@ export interface CompanyPortabilityExportRequest {
   selectedFiles?: string[];
   expandReferencedSkills?: boolean;
   sidebarOrder?: Partial<CompanyPortabilitySidebarOrder>;
+  /**
+   * Opt-in: carry the VALUES of selected secrets with the migration, sealed
+   * under `secretsPassphrase`. Entries are scoped env-input keys
+   * (`agent:<slug>:<KEY>` / `project:<slug>:<KEY>` / `<KEY>`). Omit or leave
+   * empty to migrate structure only (secrets re-entered on the destination).
+   * Values are decrypted from the source instance and re-sealed — never copied
+   * as raw ciphertext (see portable-secret-bundle) — and are returned
+   * out-of-band on the result, never written into the shareable package.
+   */
+  secretSelection?: string[];
+  /** Passphrase used to seal the carried secret values. Required if secretSelection is non-empty. */
+  secretsPassphrase?: string;
 }
