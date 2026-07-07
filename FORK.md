@@ -161,6 +161,31 @@ fields + client-side validation, calling a new `authApi.changePassword`.
 No server change (better-auth handles it). Verified the endpoint exists (POST
 returns 400 on empty body, not 404) and the UI typechecks + builds.
 
+### Feature 10 — Company migration with selective secrets (Phase A)
+
+Roadmap #18, phase A: migrate a company to its own server AND choose which
+secrets travel. Paperclip's export/import already carries structure but strips
+all secret values (per-instance `master.key` means ciphertext can't be copied);
+the operator re-enters everything on the destination. This adds an **opt-in**
+value carry: the source resolves the *selected* secrets, seals them under a
+passphrase, and the destination unseals + re-creates them — decrypt-on-export /
+re-encrypt-on-import, so plaintext never hits the package, the wire, or disk.
+
+| File | Change | Type |
+|---|---|---|
+| `server/src/services/portable-secret-bundle.ts` | passphrase-sealed transport (scrypt + AES-256-GCM), `seal`/`open` + unit tests | **New file** |
+| `server/src/services/secrets.ts` | `resolveSecretValueForExport` (audited, binding-agnostic resolver) | Surgical edit |
+| `server/src/services/company-portability.ts` | export: index source `secret_ref`s, resolve+seal `secretSelection` into an out-of-band `encryptedSecretsBundle`; import: `openSecretBundle` → merge into `secretValues` | Surgical edit |
+| `packages/shared/src/types/company-portability.ts` + `validators/company-portability.ts` | `secretSelection`/`secretsPassphrase` (export), `encryptedSecretsBundle`/`secretsPassphrase` (import), result fields | Surgical edit |
+| `server/src/__tests__/{company-portability,portable-secret-bundle}.test.ts` | round-trip carry→seal→open + passphrase-required tests | Test |
+
+Usable via the export/import API today (secretSelection in the request →
+encryptedSecretsBundle in the response → supply it + passphrase at import). Still
+to add: CLI sidecar wiring (`export --with-secrets`/`import --secrets-file`), and
+Phase B (maintainer agent + two-phase cutover) / Phase C (signed update packets)
+per the franchise roadmap. Behaviour is fully opt-in/additive — no secrets travel
+unless `secretSelection` is passed.
+
 ### Infra — global git credential helper (zero-wiring GitHub auth)
 
 Agents run `git` inside their workspace, but the base image wired **no
