@@ -235,6 +235,9 @@ export type {
   ExecutionWorkspaceStrategy,
   ProjectExecutionWorkspacePolicy,
   ProjectExecutionWorkspaceDefaultMode,
+  ProjectDeployPolicy,
+  ProjectDeployKind,
+  ProjectDeployRollbackStrategy,
   IssueExecutionWorkspaceSettings,
 } from "./workspace-runtime.js";
 export type {

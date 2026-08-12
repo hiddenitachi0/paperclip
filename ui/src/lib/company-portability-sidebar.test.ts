@@ -51,6 +51,7 @@ function makeProject(id: string, name: string): Project {
     pauseReason: null,
     pausedAt: null,
     executionWorkspacePolicy: null,
+    deployPolicy: null,
     archivedAt: null,
     goalIds: [],
     goals: [],

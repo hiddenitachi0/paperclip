@@ -1,5 +1,6 @@
 import type { BudgetWindowKind, PauseReason, ProjectStatus } from "../constants.js";
 import type {
+  ProjectDeployPolicy,
   ProjectExecutionWorkspacePolicy,
   ProjectWorkspaceRuntimeConfig,
   WorkspaceRuntimeService,
@@ -94,6 +95,7 @@ export interface Project {
   pauseReason: PauseReason | null;
   pausedAt: Date | null;
   executionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
+  deployPolicy: ProjectDeployPolicy | null;
   codebase: ProjectCodebase;
   workspaces: ProjectWorkspace[];
   primaryWorkspace: ProjectWorkspace | null;

@@ -160,6 +160,21 @@ export interface ProjectExecutionWorkspacePolicy {
   authorizationPolicy?: TrustAuthorizationPolicy | null;
 }
 
+export type ProjectDeployKind = "compose_recreate" | "compose_build_swap" | "custom";
+export type ProjectDeployRollbackStrategy = "git_previous" | "none";
+
+export interface ProjectDeployPolicy {
+  enabled: boolean;
+  requestingAgentId: string | null;
+  workspaceId: string;
+  deployTargetPath: string;
+  deployKind: ProjectDeployKind;
+  deployServices?: string[];
+  deployCommand?: string;
+  healthCheckUrl: string;
+  rollback: ProjectDeployRollbackStrategy;
+}
+
 export interface IssueExecutionWorkspaceSettings {
   mode?: ExecutionWorkspaceMode;
   environmentId?: string | null;

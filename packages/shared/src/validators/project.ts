@@ -31,6 +31,20 @@ export const projectExecutionWorkspacePolicySchema = z
   })
   .strict();
 
+export const deployPolicySchema = z
+  .object({
+    enabled: z.boolean(),
+    requestingAgentId: z.string().uuid().nullable(),
+    workspaceId: z.string().uuid(),
+    deployTargetPath: z.string().min(1),
+    deployKind: z.enum(["compose_recreate", "compose_build_swap", "custom"]),
+    deployServices: z.array(z.string()).optional(),
+    deployCommand: z.string().optional(),
+    healthCheckUrl: z.string().min(1),
+    rollback: z.enum(["git_previous", "none"]),
+  })
+  .strict();
+
 export const projectWorkspaceRuntimeConfigSchema = z.object({
   workspaceRuntime: z.record(z.string(), z.unknown()).optional().nullable(),
   desiredState: z.enum(["running", "stopped", "manual"]).optional().nullable(),
@@ -110,6 +124,7 @@ const projectFields = {
   icon: z.enum(PROJECT_ICON_NAMES).optional().nullable(),
   env: envConfigSchema.optional().nullable(),
   executionWorkspacePolicy: projectExecutionWorkspacePolicySchema.optional().nullable(),
+  deployPolicy: deployPolicySchema.optional().nullable(),
   archivedAt: z.string().datetime().optional().nullable(),
 };
 
@@ -125,3 +140,4 @@ export const updateProjectSchema = z.object(projectFields).partial();
 export type UpdateProject = z.infer<typeof updateProjectSchema>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;
+export type ProjectDeployPolicy = z.infer<typeof deployPolicySchema>;

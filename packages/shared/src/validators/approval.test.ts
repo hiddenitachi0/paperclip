@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addApprovalCommentSchema,
+  deployRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
 } from "./approval.js";
@@ -27,5 +28,22 @@ describe("approval validators", () => {
       .toBe("Decision\n\nApproved.");
     expect(requestApprovalRevisionSchema.parse({ decisionNote: "Decision\\r\\nRevise." }).decisionNote)
       .toBe("Decision\nRevise.");
+  });
+
+  it("validates the deploy request approval payload convention", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: "abc1234",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+    };
+    expect(deployRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(deployRequestPayloadSchema.parse({ ...payload, commit: undefined }).commit).toBeUndefined();
+    expect(() => deployRequestPayloadSchema.parse({ ...payload, kind: "other" })).toThrow();
+    expect(() => deployRequestPayloadSchema.parse({ ...payload, extra: "nope" })).toThrow();
+    const { title: _title, ...missingTitle } = payload;
+    expect(() => deployRequestPayloadSchema.parse(missingTitle)).toThrow();
   });
 });

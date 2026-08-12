@@ -613,6 +613,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
       runtimePolicy: null,
       cleanupPolicy: null,
     },
+    deployPolicy: null,
     codebase: {
       workspaceId: "workspace-board-ui",
       repoUrl: "https://github.com/paperclipai/paperclip",
