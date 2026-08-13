@@ -263,11 +263,13 @@ export {
   updateProjectWorkspaceSchema,
   projectExecutionWorkspacePolicySchema,
   projectWorkspaceRuntimeConfigSchema,
+  deployPolicySchema,
   type CreateProject,
   type UpdateProject,
   type CreateProjectWorkspace,
   type UpdateProjectWorkspace,
   type ProjectExecutionWorkspacePolicy,
+  type ProjectDeployPolicy,
 } from "./project.js";
 
 export {
@@ -457,11 +459,13 @@ export {
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
   addApprovalCommentSchema,
+  deployRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
   type ResubmitApproval,
   type AddApprovalComment,
+  type DeployRequestPayload,
 } from "./approval.js";
 
 export {

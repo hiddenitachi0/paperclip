@@ -34,3 +34,21 @@ export const addApprovalCommentSchema = z.object({
 });
 
 export type AddApprovalComment = z.infer<typeof addApprovalCommentSchema>;
+
+/**
+ * `request_board_approval` payload convention for deploy requests filed against
+ * a project's `deployPolicy`. Formalizes the `{kind:"deploy", ...}` shape the
+ * on-box deploy runner already expects informally.
+ */
+export const deployRequestPayloadSchema = z
+  .object({
+    kind: z.literal("deploy"),
+    projectId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    commit: z.string().optional(),
+    title: z.string().min(1),
+    note: multilineTextSchema,
+  })
+  .strict();
+
+export type DeployRequestPayload = z.infer<typeof deployRequestPayloadSchema>;

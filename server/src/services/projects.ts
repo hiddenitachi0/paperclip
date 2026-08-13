@@ -19,6 +19,7 @@ import {
   type BudgetWindowKind,
   type ProjectBudgetSummary,
   type ProjectCodebase,
+  type ProjectDeployPolicy,
   type ProjectExecutionWorkspacePolicy,
   type ProjectGoalRef,
   type ProjectManagedByPlugin,
@@ -30,6 +31,7 @@ import {
 } from "@paperclipai/shared";
 import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runtime-read-model.js";
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
+import { parseProjectDeployPolicy } from "./deploy-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 
@@ -56,11 +58,12 @@ type CreateWorkspaceInput = {
 };
 type UpdateWorkspaceInput = Partial<CreateWorkspaceInput>;
 
-interface ProjectWithGoals extends Omit<ProjectRow, "executionWorkspacePolicy"> {
+interface ProjectWithGoals extends Omit<ProjectRow, "executionWorkspacePolicy" | "deployPolicy"> {
   urlKey: string;
   goalIds: string[];
   goals: ProjectGoalRef[];
   executionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
+  deployPolicy: ProjectDeployPolicy | null;
   codebase: ProjectCodebase;
   workspaces: ProjectWorkspace[];
   primaryWorkspace: ProjectWorkspace | null;
@@ -113,6 +116,7 @@ async function attachGoals(db: Db, rows: ProjectRow[]): Promise<ProjectWithGoals
       goalIds: g.map((x) => x.id),
       goals: g,
       executionWorkspacePolicy: parseProjectExecutionWorkspacePolicy(r.executionWorkspacePolicy),
+      deployPolicy: parseProjectDeployPolicy(r.deployPolicy),
     } as ProjectWithGoals;
   });
 }

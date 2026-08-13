@@ -121,6 +121,7 @@ function project(overrides: Partial<Project> = {}): Project {
     pauseReason: null,
     pausedAt: null,
     executionWorkspacePolicy: null,
+    deployPolicy: null,
     codebase: {
       workspaceId: null,
       repoUrl: null,
