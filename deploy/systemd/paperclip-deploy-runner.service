@@ -1,0 +1,18 @@
+[Unit]
+Description=Paperclip universal on-box deploy runner (DUR-9)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Path to the checkout of THIS repo (paperclip-fork) on the box — the runner
+# itself always lives here, regardless of which project/company it is
+# deploying on any given run. Override in an instance drop-in if the checkout
+# lives somewhere other than /root/paperclip:
+#   systemctl edit paperclip-deploy-runner.service
+ExecStart=/root/paperclip/scripts/deploy-runner.sh
+User=root
+# The runner shells out to `docker exec` (talks to the Paperclip server
+# container) and to `git`/`docker compose` directly against each project's
+# deployTargetPath on the host — both require root today, same as the
+# existing deploy-poller.sh/deploy-prod.sh it is replacing.

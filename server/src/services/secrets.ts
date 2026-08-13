@@ -33,6 +33,7 @@ import {
   createSecretProviderConfigSchema,
   deriveProjectUrlKey,
   envBindingSchema,
+  GITHUB_TOKEN_SECRET_NAMES,
   isUuidLike,
   normalizeAgentUrlKey,
   secretProviderConfigPayloadSchema,
@@ -791,6 +792,26 @@ export function secretService(db: Db) {
     return (await resolveSecretValueInternal(companyId, secretId, version, {
       accessContext: context ?? { consumerType: "system", consumerId: "company-export" },
     })).value;
+  }
+
+  /**
+   * Resolve the company's GitHub token by the same secret-name convention as
+   * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
+   * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
+   * wins. Used by the on-box deploy runner to authenticate `git fetch` against
+   * private repos without ever exposing arbitrary secret values by id.
+   */
+  async function resolveGitHubToken(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
+    for (const secretName of GITHUB_TOKEN_SECRET_NAMES) {
+      const secret = await getByName(companyId, secretName).catch(() => null);
+      if (!secret) continue;
+      const value = await resolveSecretValueInternal(companyId, secret.id, "latest", {
+        accessContext: context ?? { consumerType: "system", consumerId: "deploy-runner" },
+      }).catch(() => null);
+      const trimmed = value?.value?.trim();
+      if (trimmed) return trimmed;
+    }
+    return null;
   }
 
   async function normalizeEnvConfig(
@@ -1916,6 +1937,7 @@ export function secretService(db: Db) {
     resolveSecretValue,
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForExport,
+    resolveGitHubToken,
 
     create: async (
       companyId: string,

@@ -11,7 +11,7 @@ import {
   updateSecretSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertInstanceAdmin } from "./authz.js";
 import { logActivity, secretService } from "../services/index.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 
@@ -19,6 +19,21 @@ export function secretRoutes(db: Db) {
   const router = Router();
   const svc = secretService(db);
   const defaultProvider = getConfiguredSecretProvider();
+
+  // Instance-admin-only: resolves the company's GITHUB_TOKEN/GH_TOKEN secret
+  // value by name convention (see resolveGitHubToken), never by arbitrary
+  // secret id. Used exclusively by the on-box deploy runner (DUR-9) to
+  // authenticate `git fetch` against private deploy targets; deliberately not
+  // a general secret-value-reveal endpoint.
+  router.get("/companies/:companyId/deploy-github-token", async (req, res) => {
+    assertInstanceAdmin(req);
+    const companyId = req.params.companyId as string;
+    const token = await svc.resolveGitHubToken(companyId, {
+      consumerType: "system",
+      consumerId: "deploy-runner",
+    });
+    res.json({ token });
+  });
 
   router.get("/companies/:companyId/secret-providers", (req, res) => {
     assertBoard(req);

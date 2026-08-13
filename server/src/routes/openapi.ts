@@ -686,6 +686,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
+  "GET /api/companies/{companyId}/deploy-github-token",
   "POST /api/companies",
   "POST /api/plugins/install",
   "POST /api/instance/database-backups",
@@ -2192,6 +2193,15 @@ registry.registerPath({
 });
 
 // ─── Secrets ─────────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/deploy-github-token",
+  tags: ["secrets"],
+  summary: "Resolve the company's GITHUB_TOKEN for the on-box deploy runner (instance admin only)",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
 
 registry.registerPath({
   method: "get",
