@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Project } from "@paperclipai/shared";
+import type { Project, ProjectDeployPolicy } from "@paperclipai/shared";
 import { StatusBadge } from "./StatusBadge";
 import { cn, formatDate } from "../lib/utils";
+import { agentsApi } from "../api/agents";
 import { environmentsApi } from "../api/environments";
 import { goalsApi } from "../api/goals";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -22,6 +23,7 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { DraftInput } from "./agent-config-primitives";
 import { InlineEditor } from "./InlineEditor";
 import { EnvironmentVariablesEditor } from "./environment-variables-editor";
+import { ReportsToPicker } from "./ReportsToPicker";
 
 const PROJECT_STATUSES = [
   { value: "backlog", label: "Backlog" },
@@ -30,6 +32,20 @@ const PROJECT_STATUSES = [
   { value: "completed", label: "Completed" },
   { value: "cancelled", label: "Cancelled" },
 ];
+
+function toDeployDraft(deployPolicy: ProjectDeployPolicy | null | undefined) {
+  return {
+    enabled: deployPolicy?.enabled === true,
+    requestingAgentId: deployPolicy?.requestingAgentId ?? null,
+    workspaceId: deployPolicy?.workspaceId ?? "",
+    deployTargetPath: deployPolicy?.deployTargetPath ?? "",
+    deployKind: deployPolicy?.deployKind ?? "custom",
+    deployServices: deployPolicy?.deployServices ?? [],
+    deployCommand: deployPolicy?.deployCommand ?? "",
+    healthCheckUrl: deployPolicy?.healthCheckUrl ?? "",
+    rollback: deployPolicy?.rollback ?? "none",
+  };
+}
 
 interface ProjectPropertiesProps {
   project: Project;
@@ -54,7 +70,16 @@ export type ProjectConfigFieldKey =
   | "execution_workspace_branch_template"
   | "execution_workspace_worktree_parent_dir"
   | "execution_workspace_provision_command"
-  | "execution_workspace_teardown_command";
+  | "execution_workspace_teardown_command"
+  | "deploy_enabled"
+  | "deploy_requesting_agent"
+  | "deploy_workspace"
+  | "deploy_kind"
+  | "deploy_target_path"
+  | "deploy_services"
+  | "deploy_command"
+  | "deploy_health_check_url"
+  | "deploy_rollback";
 
 function SaveIndicator({ state }: { state: ProjectFieldSaveState }) {
   if (state === "saving") {
@@ -271,6 +296,11 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
     queryFn: () => environmentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId && environmentsEnabled,
   });
+  const { data: companyAgents = [] } = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId!),
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
 
   const linkedGoalIds = project.goalIds.length > 0
     ? project.goalIds
@@ -375,6 +405,22 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
         ...patch,
       },
     };
+  };
+
+  // deployPolicySchema requires workspaceId/deployTargetPath/healthCheckUrl together
+  // (not optional), unlike executionWorkspacePolicy's fields which each save independently.
+  // A local draft lets edits across fields accumulate before all required fields are
+  // filled, since no single field's commit can satisfy the schema on its own otherwise.
+  const [deployDraft, setDeployDraft] = useState(() => toDeployDraft(project.deployPolicy));
+  useEffect(() => {
+    setDeployDraft(toDeployDraft(project.deployPolicy));
+  }, [project.id]);
+
+  const updateDeployPolicy = (patch: Record<string, unknown>) => {
+    if (!onUpdate && !onFieldUpdate) return;
+    const next = { ...deployDraft, ...patch };
+    setDeployDraft(next);
+    return { deployPolicy: next };
   };
 
   const isAbsolutePath = (value: string) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
@@ -1161,6 +1207,210 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
             </div>
           </>
         ) : null}
+
+        <Separator className="my-4" />
+
+        <div className="py-1.5 space-y-2">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span>Self-serve deploy</span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[10px] text-muted-foreground hover:text-foreground"
+                  aria-label="Self-serve deploy help"
+                >
+                  ?
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Let a designated agent request deploys of this project's configured recipe, subject to board approval.
+              </TooltipContent>
+            </Tooltip>
+          </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <span>Enable self-serve deploy</span>
+                  <SaveIndicator state={fieldState("deploy_enabled")} />
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Allow the requesting agent to file deploy requests for this project.
+                </div>
+              </div>
+              {onUpdate || onFieldUpdate ? (
+                <ToggleSwitch
+                  checked={deployDraft.enabled}
+                  onCheckedChange={() =>
+                    commitField("deploy_enabled", updateDeployPolicy({ enabled: !deployDraft.enabled })!)}
+                />
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  {deployDraft.enabled ? "Enabled" : "Disabled"}
+                </span>
+              )}
+            </div>
+
+            {deployDraft.enabled ? (
+              <div className="space-y-3">
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Requesting agent</span>
+                      <SaveIndicator state={fieldState("deploy_requesting_agent")} />
+                    </label>
+                  </div>
+                  <ReportsToPicker
+                    agents={companyAgents}
+                    value={deployDraft.requestingAgentId}
+                    onChange={(id) =>
+                      commitField("deploy_requesting_agent", updateDeployPolicy({ requestingAgentId: id })!)}
+                    chooseLabel="Choose requesting agent..."
+                    disabledEmptyLabel="No requesting agent"
+                  />
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Workspace</span>
+                      <SaveIndicator state={fieldState("deploy_workspace")} />
+                    </label>
+                  </div>
+                  <select
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                    value={deployDraft.workspaceId}
+                    onChange={(e) =>
+                      commitField("deploy_workspace", updateDeployPolicy({ workspaceId: e.target.value })!)}
+                  >
+                    <option value="">Select a workspace</option>
+                    {workspaces.map((workspace) => (
+                      <option key={workspace.id} value={workspace.id}>
+                        {workspace.name}
+                        {workspace.id === primaryCodebaseWorkspace?.id ? " (primary)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Deploy kind</span>
+                      <SaveIndicator state={fieldState("deploy_kind")} />
+                    </label>
+                  </div>
+                  <select
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                    value={deployDraft.deployKind}
+                    onChange={(e) =>
+                      commitField("deploy_kind", updateDeployPolicy({ deployKind: e.target.value })!)}
+                  >
+                    <option value="compose_recreate">Compose recreate</option>
+                    <option value="compose_build_swap">Compose build + swap</option>
+                    <option value="custom">Custom command</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Deploy target path</span>
+                      <SaveIndicator state={fieldState("deploy_target_path")} />
+                    </label>
+                  </div>
+                  <DraftInput
+                    value={deployDraft.deployTargetPath}
+                    onCommit={(value) =>
+                      commitField("deploy_target_path", updateDeployPolicy({ deployTargetPath: value })!)}
+                    immediate
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                    placeholder="/root/my-project"
+                  />
+                </div>
+
+                {deployDraft.deployKind === "custom" ? (
+                  <div>
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>Deploy command</span>
+                        <SaveIndicator state={fieldState("deploy_command")} />
+                      </label>
+                    </div>
+                    <DraftInput
+                      value={deployDraft.deployCommand}
+                      onCommit={(value) =>
+                        commitField("deploy_command", updateDeployPolicy({ deployCommand: value || undefined })!)}
+                      immediate
+                      className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                      placeholder="bash ./scripts/deploy.sh"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>Services (comma-separated)</span>
+                        <SaveIndicator state={fieldState("deploy_services")} />
+                      </label>
+                    </div>
+                    <DraftInput
+                      value={deployDraft.deployServices.join(", ")}
+                      onCommit={(value) =>
+                        commitField(
+                          "deploy_services",
+                          updateDeployPolicy({
+                            deployServices: value
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })!,
+                        )}
+                      className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                      placeholder="web, worker"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Health check URL</span>
+                      <SaveIndicator state={fieldState("deploy_health_check_url")} />
+                    </label>
+                  </div>
+                  <DraftInput
+                    value={deployDraft.healthCheckUrl}
+                    onCommit={(value) =>
+                      commitField("deploy_health_check_url", updateDeployPolicy({ healthCheckUrl: value })!)}
+                    immediate
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                    placeholder="https://example.com/api/health"
+                  />
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Rollback</span>
+                      <SaveIndicator state={fieldState("deploy_rollback")} />
+                    </label>
+                  </div>
+                  <select
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                    value={deployDraft.rollback}
+                    onChange={(e) =>
+                      commitField("deploy_rollback", updateDeployPolicy({ rollback: e.target.value })!)}
+                  >
+                    <option value="git_previous">Roll back to previous commit</option>
+                    <option value="none">No automatic rollback</option>
+                  </select>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
 
       </div>
 
