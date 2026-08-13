@@ -4,6 +4,7 @@ import { heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
+  deployRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -27,6 +28,15 @@ function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(a
     ...approval,
     payload: redactEventPayload(approval.payload) ?? {},
   };
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"deploy"` follow
+ * the deploy-request convention (see deploy-poller.sh) and must validate against
+ * deployRequestPayloadSchema before an operator ever sees them.
+ */
+function isDeployRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "deploy";
 }
 
 function isStatusOnlyCheapRecoveryContext(contextSnapshot: unknown) {
@@ -136,6 +146,9 @@ export function approvalRoutes(
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
+    if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
+      deployRequestPayloadSchema.parse(approvalInput.payload);
+    }
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -356,6 +369,9 @@ export function approvalRoutes(
       return;
     }
 
+    if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
+      deployRequestPayloadSchema.parse(req.body.payload);
+    }
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
