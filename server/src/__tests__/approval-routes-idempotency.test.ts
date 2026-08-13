@@ -369,6 +369,74 @@ describe("approval routes idempotent retries", () => {
     );
   });
 
+  it("rejects deploy-request approvals whose payload does not match deployRequestPayloadSchema", async () => {
+    const res = await request(await createAgentApp())
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: {
+          kind: "deploy",
+          projectId: "not-a-uuid",
+          title: "Deploy dashboard",
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toBe("Validation error");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts a well-formed deploy-request approval payload", async () => {
+    const payload = {
+      kind: "deploy",
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: "abc1234",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+    };
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-9",
+      companyId: "company-1",
+      type: "request_board_approval",
+      requestedByAgentId: "agent-1",
+      requestedByUserId: null,
+      status: "pending",
+      payload,
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-04-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-06T00:00:00.000Z"),
+    });
+
+    const res = await request(await createAgentApp())
+      .post("/api/companies/company-1/approvals")
+      .send({ type: "request_board_approval", payload });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalled();
+  });
+
+  it("rejects deploy-request payloads injected via resubmit", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-10",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "revision_requested",
+      payload: { kind: "deploy" },
+      requestedByAgentId: "agent-1",
+    });
+
+    const res = await request(await createAgentApp())
+      .post("/api/approvals/approval-10/resubmit")
+      .send({ payload: { kind: "deploy", title: "missing required fields" } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toBe("Validation error");
+    expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
+  });
+
   it("blocks status-only recovery runs from creating approvals", async () => {
     const res = await request(await createAgentApp({
       contextSnapshot: {
