@@ -2103,6 +2103,44 @@ describeEmbeddedPostgres("secretService", () => {
     expect(JSON.stringify(events)).not.toContain("runtime-secret");
   });
 
+  it("resolves the GitHub token for the deploy runner by secret-name convention (DUR-9)", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    await svc.create(companyId, {
+      name: "GITHUB_TOKEN",
+      provider: "local_encrypted",
+      value: "ghp_readonlytoken",
+    });
+
+    const resolved = await svc.resolveGitHubToken(companyId);
+
+    expect(resolved).toBe("ghp_readonlytoken");
+    const events = await svc.listAccessEvents(
+      companyId,
+      (await svc.getByName(companyId, "GITHUB_TOKEN"))!.id,
+    );
+    expect(events.at(-1)).toMatchObject({
+      companyId,
+      consumerType: "system",
+      consumerId: "deploy-runner",
+      outcome: "success",
+    });
+  });
+
+  it("falls back through GH_TOKEN/PAPERCLIP_GITHUB_TOKEN and returns null when no token secret is bound", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    await expect(svc.resolveGitHubToken(companyId)).resolves.toBeNull();
+
+    await svc.create(companyId, {
+      name: "GH_TOKEN",
+      provider: "local_encrypted",
+      value: "ghp_fallbacktoken",
+    });
+    await expect(svc.resolveGitHubToken(companyId)).resolves.toBe("ghp_fallbacktoken");
+  });
+
   it("preserves local implicit board authorization for ephemeral secret access", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

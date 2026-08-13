@@ -23,6 +23,7 @@ const mockSecretService = vi.hoisted(() => ({
   remove: vi.fn(),
   previewRemoteImport: vi.fn(),
   importRemoteSecrets: vi.fn(),
+  resolveGitHubToken: vi.fn(),
 }));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
@@ -646,5 +647,58 @@ describe("secret routes", () => {
         entityId: secret.id,
       }),
     );
+  });
+
+  describe("deploy-github-token (DUR-9)", () => {
+    const instanceAdmin = {
+      type: "board",
+      userId: "admin-1",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+      memberships: [{ companyId: "company-1", status: "active", membershipRole: "admin" }],
+    };
+
+    it("resolves the company's GitHub token for an instance admin", async () => {
+      mockSecretService.resolveGitHubToken.mockResolvedValue("ghp_readonlytoken");
+
+      const res = await request(createApp(instanceAdmin)).get(
+        "/api/companies/company-1/deploy-github-token",
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ token: "ghp_readonlytoken" });
+      expect(mockSecretService.resolveGitHubToken).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({ consumerType: "system", consumerId: "deploy-runner" }),
+      );
+    });
+
+    it("returns a null token when no GITHUB_TOKEN-shaped secret is bound", async () => {
+      mockSecretService.resolveGitHubToken.mockResolvedValue(null);
+
+      const res = await request(createApp(instanceAdmin)).get(
+        "/api/companies/company-1/deploy-github-token",
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ token: null });
+    });
+
+    it("rejects a non-instance-admin board caller even with company access", async () => {
+      const res = await request(createApp()).get("/api/companies/company-1/deploy-github-token");
+
+      expect(res.status).toBe(403);
+      expect(mockSecretService.resolveGitHubToken).not.toHaveBeenCalled();
+    });
+
+    it("rejects agent callers", async () => {
+      const res = await request(
+        createApp({ type: "agent", agentId: "agent-1", companyId: "company-1" }),
+      ).get("/api/companies/company-1/deploy-github-token");
+
+      expect(res.status).toBe(403);
+      expect(mockSecretService.resolveGitHubToken).not.toHaveBeenCalled();
+    });
   });
 });

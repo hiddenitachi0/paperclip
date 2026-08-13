@@ -620,6 +620,24 @@ export function registerSecretCommands(program: Command): void {
 
   addCommonClientOptions(
     secrets
+      .command("deploy-github-token")
+      .description("Resolve the company's GITHUB_TOKEN for the on-box deploy runner (instance-admin only)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (opts: SecretListOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const result = await ctx.api.get<{ token: string | null }>(
+            apiPath`/api/companies/${ctx.companyId}/deploy-github-token`,
+          );
+          printOutput(result, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    secrets
       .command("migrate-inline-env")
       .description("Migrate inline sensitive agent env values into secret references")
       .requiredOption("-C, --company-id <id>", "Company ID")
