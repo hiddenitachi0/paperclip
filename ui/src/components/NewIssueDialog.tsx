@@ -128,6 +128,8 @@ const ISSUE_THINKING_EFFORT_OPTIONS = {
     { value: "low", label: "Low" },
     { value: "medium", label: "Medium" },
     { value: "high", label: "High" },
+    { value: "xhigh", label: "X-High" },
+    { value: "max", label: "Max" },
   ],
   codex_local: [
     { value: "", label: "Default" },
@@ -415,6 +417,13 @@ export function NewIssueDialog() {
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const executionWorkspaceDefaultProjectId = useRef<string | null>(null);
   const initializationKeyRef = useRef<string | null>(null);
+  // The assignee's saved adapter config, seeded into the displayed model/effort/chrome
+  // controls. Displayed-only: matching these values keeps the "primary" lane (no override).
+  const seededAssigneeDefaultsRef = useRef<{ model: string; effort: string; chrome: boolean }>({
+    model: "",
+    effort: "",
+    chrome: false,
+  });
 
   const effectiveCompanyId = dialogCompanyId ?? selectedCompanyId;
   const dialogCompany = companies.find((c) => c.id === effectiveCompanyId) ?? selectedCompany;
@@ -846,9 +855,18 @@ export function NewIssueDialog() {
     }
   }, [newIssueOpen, newIssueDefaults, orderedProjects, selectedCompanyId, setIssueText]);
 
+  const currentAssignee = selectedAssigneeAgentId
+    ? (agents ?? []).find((a) => a.id === selectedAssigneeAgentId)
+    : null;
+
+  // Seed the displayed model/effort/chrome from the selected assignee's saved adapter
+  // config. Re-fills automatically when the operator changes the assignee. Seeded values
+  // are display-only: they do NOT emit an override (the lane stays "primary") until the
+  // operator edits a control away from the seeded default (see laneAfterEdit).
   useEffect(() => {
     if (!supportsAssigneeOverrides) {
       setAssigneeOptionsOpen(false);
+      seededAssigneeDefaultsRef.current = { model: "", effort: "", chrome: false };
       setAssigneeModelLane("primary");
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
@@ -865,15 +883,42 @@ export function NewIssueDialog() {
         : assigneeAdapterType === "opencode_local"
           ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
           : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
-    if (!validThinkingValues.some((option) => option.value === assigneeThinkingEffort)) {
-      setAssigneeThinkingEffort("");
+    const effortField =
+      assigneeAdapterType === "codex_local"
+        ? "modelReasoningEffort"
+        : assigneeAdapterType === "opencode_local"
+          ? "variant"
+          : "effort";
+
+    const config = currentAssignee?.adapterConfig ?? {};
+    const seededModel = typeof config.model === "string" ? config.model : "";
+    const rawEffort = config[effortField];
+    const seededEffort =
+      typeof rawEffort === "string" && validThinkingValues.some((option) => option.value === rawEffort)
+        ? rawEffort
+        : "";
+    const seededChrome = assigneeAdapterType === "claude_local" && config.chrome === true;
+    seededAssigneeDefaultsRef.current = { model: seededModel, effort: seededEffort, chrome: seededChrome };
+
+    if (assigneeModelLane === "custom") {
+      // An explicit override is active (e.g. restored from a draft) — keep the operator's
+      // values, only dropping an effort that is not valid for this adapter.
+      if (!validThinkingValues.some((option) => option.value === assigneeThinkingEffort)) {
+        setAssigneeThinkingEffort("");
+      }
+      return;
     }
+    // Display-only: reflect the assignee's saved defaults in the controls.
+    setAssigneeModelOverride(seededModel);
+    setAssigneeThinkingEffort(seededEffort);
+    setAssigneeChrome(seededChrome);
   }, [
     supportsAssigneeOverrides,
     assigneeAdapterType,
     assigneeThinkingEffort,
     assigneeSupportsCheapLane,
     assigneeModelLane,
+    currentAssignee,
   ]);
 
   // Cleanup timer on unmount
@@ -1083,9 +1128,6 @@ export function NewIssueDialog() {
   const hasDraft = draftHasText || stagedFiles.length > 0;
   const currentStatus = statuses.find((s) => s.value === status) ?? statuses[1]!;
   const currentPriority = priorities.find((p) => p.value === priority);
-  const currentAssignee = selectedAssigneeAgentId
-    ? (agents ?? []).find((a) => a.id === selectedAssigneeAgentId)
-    : null;
   const currentAssigneeLowTrust = getTrustPreset(currentAssignee?.permissions) === "low_trust_review";
   const currentProject = orderedProjects.find((project) => project.id === projectId);
   const currentProjectExecutionWorkspacePolicy =
@@ -1214,6 +1256,29 @@ export function NewIssueDialog() {
     },
     [assigneeAdapterModels],
   );
+  // Editing a seeded control promotes to the "custom" lane (which emits an override) only
+  // when the resulting values differ from the seeded default. Setting everything back to the
+  // seed demotes a custom lane to "primary"; the "cheap" preset is left untouched.
+  const laneAfterAssigneeEdit = (model: string, effort: string, chrome: boolean): IssueModelLane => {
+    const seed = seededAssigneeDefaultsRef.current;
+    const matchesSeed = model === seed.model && effort === seed.effort && chrome === seed.chrome;
+    if (matchesSeed) {
+      return assigneeModelLane === "custom" ? "primary" : assigneeModelLane;
+    }
+    return "custom";
+  };
+  const handleAssigneeModelOverrideChange = (next: string) => {
+    setAssigneeModelOverride(next);
+    setAssigneeModelLane(laneAfterAssigneeEdit(next, assigneeThinkingEffort, assigneeChrome));
+  };
+  const handleAssigneeThinkingEffortChange = (next: string) => {
+    setAssigneeThinkingEffort(next);
+    setAssigneeModelLane(laneAfterAssigneeEdit(assigneeModelOverride, next, assigneeChrome));
+  };
+  const handleAssigneeChromeChange = (next: boolean) => {
+    setAssigneeChrome(next);
+    setAssigneeModelLane(laneAfterAssigneeEdit(assigneeModelOverride, assigneeThinkingEffort, next));
+  };
   const currentWorkMode = workModeMetaFor(workMode);
   const CurrentWorkModeIcon = currentWorkMode.icon;
 
@@ -1827,46 +1892,42 @@ export function NewIssueDialog() {
                     <p className="text-[11px] text-muted-foreground">Override the model and effort for this task only.</p>
                   )}
                 </div>
-                {assigneeModelLane === "custom" && (
-                  <div className="space-y-1.5">
-                    <div className="text-xs text-muted-foreground">Model</div>
-                    <InlineEntitySelector
-                      value={assigneeModelOverride}
-                      options={modelOverrideOptions}
-                      placeholder="Default model"
-                      disablePortal
-                      noneLabel="Default model"
-                      searchPlaceholder="Search models..."
-                      emptyMessage="No models found."
-                      onChange={setAssigneeModelOverride}
-                    />
+                <div className="space-y-1.5">
+                  <div className="text-xs text-muted-foreground">Model</div>
+                  <InlineEntitySelector
+                    value={assigneeModelOverride}
+                    options={modelOverrideOptions}
+                    placeholder="Default model"
+                    disablePortal
+                    noneLabel="Default model"
+                    searchPlaceholder="Search models..."
+                    emptyMessage="No models found."
+                    onChange={handleAssigneeModelOverrideChange}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <div className="text-xs text-muted-foreground">Thinking effort</div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {thinkingEffortOptions.map((option) => (
+                      <button
+                        key={option.value || "default"}
+                        className={cn(
+                          "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
+                          assigneeThinkingEffort === option.value && "bg-accent"
+                        )}
+                        onClick={() => handleAssigneeThinkingEffortChange(option.value)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
                   </div>
-                )}
-                {assigneeModelLane === "custom" && (
-                  <div className="space-y-1.5">
-                    <div className="text-xs text-muted-foreground">Thinking effort</div>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {thinkingEffortOptions.map((option) => (
-                        <button
-                          key={option.value || "default"}
-                          className={cn(
-                            "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
-                            assigneeThinkingEffort === option.value && "bg-accent"
-                          )}
-                          onClick={() => setAssigneeThinkingEffort(option.value)}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {assigneeAdapterType === "claude_local" && assigneeModelLane === "custom" && (
+                </div>
+                {assigneeAdapterType === "claude_local" && (
                   <div className="flex items-center justify-between rounded-md border border-border px-2 py-1.5">
                     <div className="text-xs text-muted-foreground">Enable Chrome (--chrome)</div>
                     <ToggleSwitch
                       checked={assigneeChrome}
-                      onCheckedChange={() => setAssigneeChrome((value) => !value)}
+                      onCheckedChange={() => handleAssigneeChromeChange(!assigneeChrome)}
                     />
                   </div>
                 )}
