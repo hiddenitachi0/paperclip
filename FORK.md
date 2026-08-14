@@ -273,6 +273,41 @@ aggregation logic returns correct per-company stats + deep links against the liv
 blocked by design** (shown as "unreachable"); Tailscale's `100.64/10` range is NOT blocked, so
 real remotes work — full multi-server verification lands with Phase 2.
 
+### Feature 11 — Universal self-serve deploy runner (`projects.deploy_policy`)
+
+Generalizes this fork's own bespoke `scripts/deploy-poller.sh` + `deploy-prod.sh` pattern into
+one config-driven, versioned runner usable by any project on the instance (originally motivated
+by also wanting to cut the Nordstrand Dashboard project over from its own hand-installed,
+untracked poller — that cutover was later re-homed to Nordstrand's own team for company-isolation
+reasons; see DUR-12 in issue history). A project opts in via `deployPolicy` (workspace, target
+path, deploy recipe, services, health-check URL, rollback mode); an agent then files a
+`kind:"deploy"` board approval carrying `projectId`/`workspaceId`/optional pinned `commit`, and
+`scripts/deploy-runner.sh` (installed on-box as `paperclip-deploy-runner.{service,timer}`,
+polling every minute) picks up approved+unprocessed requests across **all** companies, but only
+acts on projects with `deployPolicy.enabled === true`.
+
+| File | Change | Type |
+|---|---|---|
+| `packages/db/src/migrations/0128_project_deploy_policy.sql` | Adds `projects.deploy_policy jsonb` | **New migration** |
+| `packages/db/src/schema/projects.ts` | Column added to schema | Surgical edit |
+| `packages/shared/src/validators/project.ts` | `deployPolicySchema` | Surgical edit |
+| `packages/shared/src/validators/approval.ts` | `deployRequestPayloadSchema` (`kind:"deploy"` payload shape) | Surgical edit |
+| `server/src/services/deploy-policy.ts` | `parseProjectDeployPolicy` | **New file** |
+| `server/src/services/projects.ts` | Wires deploy policy into project read/update | Surgical edit |
+| `server/src/routes/approvals.ts` | Server-side validation of deploy-request payloads | Surgical edit |
+| `server/src/routes/secrets.ts`, `services/secrets.ts` | Instance-admin-only `deploy-github-token` endpoint (read-only token, never a general secret-value read) | Surgical edit |
+| `ui/src/components/ProjectProperties.tsx` | Self-serve deploy config section + approval card rendering | Surgical edit |
+| `scripts/deploy-runner.sh` | The runner itself — resolves policy, fetches/resets to pinned commit, runs the operator-configured recipe (`compose_recreate` / `compose_build_swap` / `custom`), health-checks, auto-rolls-back on failure, comments the result back on the approval | **New file** (host-side, outside any container) |
+| `deploy/systemd/paperclip-deploy-runner.{service,timer}` | First version-controlled copy of the systemd units (previously hand-installed/untracked for the original poller) | **New files** |
+
+Runs **alongside** the existing `paperclip-deploy-poller.timer` (not a replacement yet) —
+`deploy-poller.sh` still matches any approved `kind:"deploy"` approval regardless of project, so
+both currently race harmlessly on this fork's own deploys (same repo/target, idempotent). Retiring
+the old poller is a deliberate later step, only after the new runner is proven end-to-end on this
+project (tracked in DUR-13), so the fork is never left without a working deploy path mid-migration.
+Installed on the VPS 2026-08-14 (approval `2bdcfe84`); this FORK.md entry itself is the low-risk
+proving commit for that end-to-end verification.
+
 ### `opencode_local` → Ollama adapter config
 
 Documented how to point an agent on the `opencode_local` adapter at a self-hosted Ollama model,
