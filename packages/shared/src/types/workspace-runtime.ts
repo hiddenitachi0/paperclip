@@ -171,6 +171,8 @@ export interface ProjectDeployPolicy {
   deployKind: ProjectDeployKind;
   deployServices?: string[];
   deployCommand?: string;
+  composeFiles?: string[];
+  envFile?: string;
   healthCheckUrl: string;
   rollback: ProjectDeployRollbackStrategy;
 }

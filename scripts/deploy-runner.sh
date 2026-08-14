@@ -30,9 +30,13 @@
 #   4. Run the OPERATOR-configured recipe: deployKind is set by the operator
 #      in project settings only — the requesting agent can only ask for a
 #      deploy of the pre-configured recipe, never inject a command (SECURITY,
-#      ties to admin-auth-hardening):
-#       - compose_recreate:    docker compose up -d --force-recreate [deployServices...]
-#       - compose_build_swap:  docker compose build [deployServices...]; docker compose up -d --no-build [deployServices...]
+#      ties to admin-auth-hardening). compose_recreate/compose_build_swap build
+#      their `docker compose` invocation from optional deployPolicy.composeFiles
+#      (-f per entry) and deployPolicy.envFile (--env-file), defaulting to a
+#      plain `docker compose` (root docker-compose.yml in deployTargetPath)
+#      when neither is set:
+#       - compose_recreate:    docker compose [--env-file ...] [-f ...] up -d --force-recreate [deployServices...]
+#       - compose_build_swap:  docker compose [--env-file ...] [-f ...] build [deployServices...]; docker compose [--env-file ...] [-f ...] up -d --no-build [deployServices...]
 #       - custom:               bash -c "$deployCommand"
 #   5. Health-check healthCheckUrl for HTTP 200 (retries below); auto-rollback
 #      (git reset --hard to the pre-deploy commit + re-run the recipe) when
@@ -131,6 +135,8 @@ if not deploy_target_path:
     sys.exit(1)
 deploy_services = " ".join(str(s) for s in (policy.get("deployServices") or []))
 deploy_command = policy.get("deployCommand") or ""
+compose_files = " ".join(str(f) for f in (policy.get("composeFiles") or []))
+env_file = policy.get("envFile") or ""
 health_check_url = policy.get("healthCheckUrl") or ""
 if not health_check_url:
     print("deploy_policy.healthCheckUrl is empty", file=sys.stderr)
@@ -148,6 +154,8 @@ fields = {
     "DV_DEPLOY_TARGET_PATH": deploy_target_path,
     "DV_DEPLOY_SERVICES": deploy_services,
     "DV_DEPLOY_COMMAND": deploy_command,
+    "DV_COMPOSE_FILES": compose_files,
+    "DV_ENV_FILE": env_file,
     "DV_HEALTH_CHECK_URL": health_check_url,
     "DV_ROLLBACK": rollback,
 }
@@ -189,19 +197,35 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
   )
 }
 
-run_recipe() { # target_dir, kind, services, command
-  local target_dir="$1" kind="$2" services="$3" command="$4"
+run_recipe() { # target_dir, kind, services, command, compose_files, env_file
+  # Exit status: 0 = ok; 3 = compose_build_swap's `build` step failed before
+  # anything was swapped (the `&&` short-circuits `up --no-build`), so the
+  # previously running container was never touched; 1 = the recipe failed
+  # after touching the running container (compose_recreate, the swap half of
+  # compose_build_swap, or a custom command we can't reason about).
+  local target_dir="$1" kind="$2" services="$3" command="$4" compose_files="$5" env_file="$6"
   (
     cd "$target_dir" || exit 1
+    local compose_args=()
+    [ -n "$env_file" ] && compose_args+=(--env-file "$env_file")
+    if [ -n "$compose_files" ]; then
+      local f
+      for f in $compose_files; do
+        compose_args+=(-f "$f")
+      done
+    fi
     case "$kind" in
       compose_recreate)
         # shellcheck disable=SC2086
-        docker compose up -d --force-recreate $services >>"$LOG" 2>&1
+        docker compose "${compose_args[@]}" up -d --force-recreate $services >>"$LOG" 2>&1
         ;;
       compose_build_swap)
         # shellcheck disable=SC2086
-        docker compose build $services >>"$LOG" 2>&1 && \
-        docker compose up -d --no-build $services >>"$LOG" 2>&1
+        if ! docker compose "${compose_args[@]}" build $services >>"$LOG" 2>&1; then
+          exit 3
+        fi
+        # shellcheck disable=SC2086
+        docker compose "${compose_args[@]}" up -d --no-build $services >>"$LOG" 2>&1
         ;;
       custom)
         bash -c "$command" >>"$LOG" 2>&1
@@ -270,10 +294,14 @@ process_approval() { # approval_id, company_id
   local after_commit
   after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-  if ! run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND"; then
-    log "runner: $aid recipe ($DV_DEPLOY_KIND) failed"
+  run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
+  local recipe_status=$?
+  if [ "$recipe_status" -ne 0 ]; then
+    log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     maybe_rollback "$aid" "$before_commit"
-    comment "$aid" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; the running version may be broken." ) Check deploy-runner.log."
+    local broken_note="the running version may be broken."
+    [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
+    comment "$aid" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" ) Check deploy-runner.log."
     return
   fi
 
@@ -294,8 +322,13 @@ maybe_rollback() { # approval_id, before_commit
   [ "$before" = "unknown" ] && return 0
   log "runner: $aid rolling back $DV_DEPLOY_TARGET_PATH to $before"
   git -C "$DV_DEPLOY_TARGET_PATH" reset --hard --quiet "$before" 2>>"$LOG"
-  run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" || \
+  run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
+  local rollback_status=$?
+  if [ "$rollback_status" -eq 3 ]; then
+    log "runner: $aid rollback build also failed, but nothing was swapped — the running container is untouched, no manual intervention needed"
+  elif [ "$rollback_status" -ne 0 ]; then
     log "runner: $aid rollback recipe also failed — manual intervention needed"
+  fi
 }
 
 main() {
