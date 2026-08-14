@@ -1892,37 +1892,41 @@ export function NewIssueDialog() {
                     <p className="text-[11px] text-muted-foreground">Override the model and effort for this task only.</p>
                   )}
                 </div>
-                <div className="space-y-1.5">
-                  <div className="text-xs text-muted-foreground">Model</div>
-                  <InlineEntitySelector
-                    value={assigneeModelOverride}
-                    options={modelOverrideOptions}
-                    placeholder="Default model"
-                    disablePortal
-                    noneLabel="Default model"
-                    searchPlaceholder="Search models..."
-                    emptyMessage="No models found."
-                    onChange={handleAssigneeModelOverrideChange}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <div className="text-xs text-muted-foreground">Thinking effort</div>
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {thinkingEffortOptions.map((option) => (
-                      <button
-                        key={option.value || "default"}
-                        className={cn(
-                          "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
-                          assigneeThinkingEffort === option.value && "bg-accent"
-                        )}
-                        onClick={() => handleAssigneeThinkingEffortChange(option.value)}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
+                {assigneeModelLane !== "cheap" && (
+                  <div className="space-y-1.5">
+                    <div className="text-xs text-muted-foreground">Model</div>
+                    <InlineEntitySelector
+                      value={assigneeModelOverride}
+                      options={modelOverrideOptions}
+                      placeholder="Default model"
+                      disablePortal
+                      noneLabel="Default model"
+                      searchPlaceholder="Search models..."
+                      emptyMessage="No models found."
+                      onChange={handleAssigneeModelOverrideChange}
+                    />
                   </div>
-                </div>
-                {assigneeAdapterType === "claude_local" && (
+                )}
+                {assigneeModelLane !== "cheap" && (
+                  <div className="space-y-1.5">
+                    <div className="text-xs text-muted-foreground">Thinking effort</div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {thinkingEffortOptions.map((option) => (
+                        <button
+                          key={option.value || "default"}
+                          className={cn(
+                            "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
+                            assigneeThinkingEffort === option.value && "bg-accent"
+                          )}
+                          onClick={() => handleAssigneeThinkingEffortChange(option.value)}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {assigneeAdapterType === "claude_local" && assigneeModelLane === "custom" && (
                   <div className="flex items-center justify-between rounded-md border border-border px-2 py-1.5">
                     <div className="text-xs text-muted-foreground">Enable Chrome (--chrome)</div>
                     <ToggleSwitch
