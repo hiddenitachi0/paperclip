@@ -366,3 +366,5 @@ and surfacing parked/blocked/stopped tasks (not just `in_review`) so stalls don'
 _Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
 external dependency (a productizable deliverable from another company's project) and was
 cancelled 2026-07-07 rather than left waiting; revisit if that dependency ever ships.
+
+<!-- DUR-15 CI verification test 2026-08-14T13:48:52Z -->
