@@ -65,6 +65,11 @@ for **approved deploy requests** and runs `deploy-prod.sh` for each, commenting 
 - Timer control: `systemctl status paperclip-deploy-poller.timer`; disable with
   `systemctl disable --now paperclip-deploy-poller.timer` to require manual `deploy-prod.sh` again.
 
+This project is also mid-cutover (DUR-13) to the universal `scripts/deploy-runner.sh` +
+`paperclip-deploy-runner.timer` (see `scripts/deploy-runner.sh` header for the generalized
+version of this same flow, config-driven via project `deployPolicy`). Both timers run side by
+side until the new runner is proven end-to-end here, after which this poller is retired.
+
 ## Back up data
 
 ```bash
