@@ -308,6 +308,19 @@ project (tracked in DUR-13), so the fork is never left without a working deploy 
 Installed on the VPS 2026-08-14 (approval `2bdcfe84`); this FORK.md entry itself is the low-risk
 proving commit for that end-to-end verification.
 
+**Update (DUR-16):** `compose_build_swap`/`compose_recreate` originally assumed a root
+`docker-compose.yml` in `deployTargetPath`, which didn't fit this fork's own `docker/` layout and
+forced a `deployKind: custom` workaround with a hardcoded `deployCommand`. `deployPolicy` now takes
+optional `composeFiles: string[]` and `envFile: string`; `deploy-runner.sh` builds
+`docker compose [--env-file envFile] [-f composeFiles[i]]...` from them, falling back to plain
+`docker compose` (root file) when neither is set. Also fixed `run_recipe`'s rollback wording: a
+`compose_build_swap` build failure (nothing ever swapped, since `build && up` short-circuits) now
+reports "the previously running version was left untouched" instead of the old blanket "manual
+intervention needed", which only fires when the running container was actually touched and left
+broken. Once this lands and deploys, the fork's own `deployPolicy` moves off the `custom` escape
+onto `compose_build_swap` + `composeFiles: [docker/docker-compose.yml, docker/docker-compose.prod.yml]`
++ `envFile: .env`, for consistency with any future non-root-compose project.
+
 ### `opencode_local` → Ollama adapter config
 
 Documented how to point an agent on the `opencode_local` adapter at a self-hosted Ollama model,

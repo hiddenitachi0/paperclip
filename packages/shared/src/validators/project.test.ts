@@ -40,4 +40,14 @@ describe("deployPolicySchema", () => {
     const { workspaceId: _workspaceId, ...missingWorkspaceId } = valid;
     expect(() => deployPolicySchema.parse(missingWorkspaceId)).toThrow();
   });
+
+  it("accepts composeFiles and envFile for non-root compose layouts", () => {
+    const withCompose = {
+      ...valid,
+      deployKind: "compose_build_swap" as const,
+      composeFiles: ["docker/docker-compose.yml", "docker/docker-compose.prod.yml"],
+      envFile: ".env",
+    };
+    expect(deployPolicySchema.parse(withCompose)).toEqual(withCompose);
+  });
 });

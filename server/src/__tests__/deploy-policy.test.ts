@@ -35,6 +35,44 @@ describe("deploy policy helpers", () => {
     });
   });
 
+  it("parses composeFiles and envFile for non-root compose layouts", () => {
+    expect(
+      parseProjectDeployPolicy({
+        enabled: true,
+        requestingAgentId: null,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        deployTargetPath: "/root/paperclip",
+        deployKind: "compose_build_swap",
+        deployServices: ["server"],
+        composeFiles: ["docker/docker-compose.yml", "docker/docker-compose.prod.yml"],
+        envFile: ".env",
+        healthCheckUrl: "/api/health",
+        rollback: "git_previous",
+      }),
+    ).toEqual({
+      enabled: true,
+      requestingAgentId: null,
+      workspaceId: "44444444-4444-4444-8444-444444444444",
+      deployTargetPath: "/root/paperclip",
+      deployKind: "compose_build_swap",
+      deployServices: ["server"],
+      composeFiles: ["docker/docker-compose.yml", "docker/docker-compose.prod.yml"],
+      envFile: ".env",
+      healthCheckUrl: "/api/health",
+      rollback: "git_previous",
+    });
+  });
+
+  it("drops a non-array composeFiles and non-string envFile", () => {
+    const result = parseProjectDeployPolicy({
+      workspaceId: "44444444-4444-4444-8444-444444444444",
+      composeFiles: "not-an-array",
+      envFile: 42,
+    });
+    expect(result?.composeFiles).toBeUndefined();
+    expect(result?.envFile).toBeUndefined();
+  });
+
   it("defaults invalid/missing enum fields and drops invalid optional fields", () => {
     const result = parseProjectDeployPolicy({
       enabled: false,

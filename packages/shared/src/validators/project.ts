@@ -40,6 +40,8 @@ export const deployPolicySchema = z
     deployKind: z.enum(["compose_recreate", "compose_build_swap", "custom"]),
     deployServices: z.array(z.string()).optional(),
     deployCommand: z.string().optional(),
+    composeFiles: z.array(z.string()).optional(),
+    envFile: z.string().optional(),
     healthCheckUrl: z.string().min(1),
     rollback: z.enum(["git_previous", "none"]),
   })
