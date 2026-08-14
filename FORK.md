@@ -321,6 +321,18 @@ broken. Once this lands and deploys, the fork's own `deployPolicy` moves off the
 onto `compose_build_swap` + `composeFiles: [docker/docker-compose.yml, docker/docker-compose.prod.yml]`
 + `envFile: .env`, for consistency with any future non-root-compose project.
 
+**Update (DUR-17):** That cutover landed. Sequence: (1) shipped `db21409a` (DUR-16) via the
+still-unchanged `custom` recipe so the on-box `deploy-runner.sh` checkout picked up the new
+composeFiles/envFile-aware code first — the runner only updates as a side effect of processing an
+approved deploy, so switching recipes before this would have reproduced the original DUR-13
+failure; (2) switched `deployPolicy.deployKind` to `compose_build_swap` +
+`composeFiles`/`envFile`, keeping `deployCommand` in place as an instant-revert fallback; (3) filed
+a second deploy approval re-shipping the same commit through the new recipe as a live verification
+— confirmed via the deploy-runner's own comment ("commit db21409a is live and healthy") that
+build + swap + health-check behaved identically to the old hardcoded command; (4) removed
+`deployCommand` from `deployPolicy` entirely, so the fork's deploy config now matches the generic
+`compose_build_swap` shape with no project-specific escape hatch.
+
 ### `opencode_local` → Ollama adapter config
 
 Documented how to point an agent on the `opencode_local` adapter at a self-hosted Ollama model,
