@@ -421,7 +421,7 @@ export type IssueExecutionStageType = (typeof ISSUE_EXECUTION_STAGE_TYPES)[numbe
 export const ISSUE_MONITOR_SCHEDULED_BY = ["assignee", "board"] as const;
 export type IssueMonitorScheduledBy = (typeof ISSUE_MONITOR_SCHEDULED_BY)[number];
 
-export const ISSUE_EXECUTION_MONITOR_KINDS = ["external_service"] as const;
+export const ISSUE_EXECUTION_MONITOR_KINDS = ["external_service", "goal_condition"] as const;
 export type IssueExecutionMonitorKind = (typeof ISSUE_EXECUTION_MONITOR_KINDS)[number];
 
 export const ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES = [
@@ -448,8 +448,14 @@ export const ISSUE_EXECUTION_MONITOR_CLEAR_REASONS = [
   "dispatch_skipped",
   "timeout_exceeded",
   "max_attempts_exhausted",
+  "spend_cap_exceeded",
+  "goal_condition_met",
 ] as const;
 export type IssueExecutionMonitorClearReason = (typeof ISSUE_EXECUTION_MONITOR_CLEAR_REASONS)[number];
+
+/** Verdicts an independent goal-condition judge can return. See DUR-32. */
+export const GOAL_CONDITION_VERDICTS = ["met", "not_met"] as const;
+export type GoalConditionVerdict = (typeof GOAL_CONDITION_VERDICTS)[number];
 
 export const ISSUE_EXECUTION_DECISION_OUTCOMES = ["approved", "changes_requested"] as const;
 export type IssueExecutionDecisionOutcome = (typeof ISSUE_EXECUTION_DECISION_OUTCOMES)[number];

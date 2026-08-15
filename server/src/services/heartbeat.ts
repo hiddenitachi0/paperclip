@@ -110,6 +110,8 @@ import {
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
 import { escalationGrantService } from "./escalation-grants.js";
+import { approvalService } from "./approvals.js";
+import { issueApprovalService } from "./issue-approvals.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeIdempotencyKey,
@@ -175,6 +177,27 @@ import {
   SELF_REVIEW_PASS_REASON,
 } from "./self-review-gate.js";
 import {
+  buildGoalConditionEscalationSummary,
+  buildGoalConditionJudgeIdempotencyKey,
+  buildGoalConditionJudgeInstruction,
+  buildGoalConditionVerdictMonitorPatch,
+  computeGoalConditionSpendCents,
+  evaluateGoalConditionBounds,
+  findExistingGoalConditionJudgeNoticeCommentForRun,
+  findExistingGoalConditionJudgeWake,
+  findGoalConditionVerdictCommentForRun,
+  goalConditionAlreadyMetForRound,
+  GOAL_CONDITION_JUDGE_CONTEXT_KEY,
+  GOAL_CONDITION_JUDGE_REASON,
+  GOAL_CONDITION_WORKER_RETRY_REASON,
+  isGoalConditionJudgeRun,
+  nextGoalConditionRound,
+  parseGoalConditionVerdict,
+  postGoalConditionJudgeNoticeComment,
+  readGoalConditionMonitorPolicy,
+  resolveEvaluatorModelProfile,
+} from "./goal-condition-judge.js";
+import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
@@ -209,7 +232,7 @@ import {
   readPaperclipSkillSyncPreference,
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
-import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
+import { extractSkillMentionIds, isUuidLike, formatApprovalTitle } from "@paperclipai/shared";
 import {
   GITHUB_TOKEN_SECRET_NAMES,
   PUSH_CAPABILITY_ENV_KEYS as SHARED_PUSH_CAPABILITY_ENV_KEYS,
@@ -4801,6 +4824,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
   const escalationGrants = escalationGrantService(db);
+  const approvalsSvc = approvalService(db);
+  const issueApprovalsSvc = issueApprovalService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const environmentsSvc = environmentService(db);
@@ -5729,6 +5754,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             isNull(issues.monitorWakeRequestedAt),
             lt(issues.monitorWakeRequestedAt, staleClaimThreshold),
           ),
+          // DUR-32: goal_condition monitors are driven by the run-finish hook
+          // (goal-condition-judge.ts), never this generic external_service-style sweep.
+          sql`(${issues.executionPolicy} -> 'monitor' ->> 'kind') is distinct from 'goal_condition'`,
         ),
       )
       .orderBy(asc(issues.monitorNextCheckAt), asc(issues.updatedAt))
@@ -6682,6 +6710,210 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     );
   }
 
+  /** DUR-32: resolves an independent judge run's verdict on a goal_condition monitor and drives the loop. */
+  async function handleGoalConditionJudgeRunFinished(
+    run: typeof heartbeatRuns.$inferSelect,
+    issue: {
+      id: string;
+      companyId: string;
+      identifier: string | null;
+      title: string;
+      assigneeAgentId: string | null;
+      executionState: unknown;
+      executionPolicy: unknown;
+      projectId: string | null;
+    },
+  ) {
+    const policy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+    const monitorPolicy = readGoalConditionMonitorPolicy(policy);
+    if (!monitorPolicy) return;
+
+    const context = parseObject(run.contextSnapshot);
+    const originalWorkerRunId = readNonEmptyString(context.originalWorkerRunId);
+    const existingState = parseIssueExecutionState(issue.executionState);
+    const defaultRound = nextGoalConditionRound(existingState?.monitor ?? null);
+    const round = asNumber(context.goalConditionRound, defaultRound);
+
+    if (run.status !== "succeeded") {
+      // The judge's own run failed to complete. Leave monitor state untouched — the next
+      // attempt to hand off will re-trigger the gate and schedule a fresh judge pass.
+      return;
+    }
+
+    const verdictComment = await findGoalConditionVerdictCommentForRun(db, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      runId: run.id,
+    });
+    const parsed = parseGoalConditionVerdict(verdictComment?.body ?? null);
+    const verdict = parsed?.verdict ?? "not_met";
+    const verdictReason = parsed
+      ? parsed.reason
+      : "The independent check finished without returning a clear verdict, so this is treated as not met.";
+
+    const spentCents = await computeGoalConditionSpendCents(db, issue.id);
+    const bounds =
+      verdict === "met"
+        ? ({ exceeded: false } as const)
+        : evaluateGoalConditionBounds({ policy: monitorPolicy, round, now: new Date(), spentCents });
+
+    const clearReason = verdict === "met" ? "goal_condition_met" : bounds.exceeded ? bounds.reason : null;
+    const patch = buildGoalConditionVerdictMonitorPatch({
+      existingExecutionState: existingState,
+      monitorPolicy,
+      round,
+      verdict,
+      verdictReason,
+      judgeRunId: run.id,
+      spentCents,
+      clearReason,
+    });
+
+    await db
+      .update(issues)
+      .set({
+        executionState: patch.executionState,
+        monitorNextCheckAt: patch.monitorNextCheckAt,
+        monitorWakeRequestedAt: patch.monitorWakeRequestedAt,
+        monitorLastTriggeredAt: patch.monitorLastTriggeredAt,
+        monitorAttemptCount: patch.monitorAttemptCount,
+        monitorNotes: patch.monitorNotes,
+        monitorScheduledBy: patch.monitorScheduledBy,
+      })
+      .where(eq(issues.id, issue.id));
+
+    if (verdict === "met") {
+      await postGoalConditionJudgeNoticeComment(db, {
+        companyId: issue.companyId,
+        issueId: issue.id,
+        sourceRunId: run.id,
+        body: `Independent check passed — the finish line has been met: "${monitorPolicy.condition}"`,
+      });
+      if (issue.assigneeAgentId) {
+        try {
+          await enqueueWakeup(issue.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: GOAL_CONDITION_JUDGE_REASON,
+            payload: {
+              issueId: issue.id,
+              taskId: issue.id,
+              resumeIntent: true,
+              resumeFromRunId: originalWorkerRunId ?? undefined,
+              instruction:
+                "An independent check just confirmed the finish line is met. Go ahead and continue your normal handoff to review/done now.",
+            },
+            contextSnapshot: {
+              issueId: issue.id,
+              wakeReason: GOAL_CONDITION_JUDGE_REASON,
+              resumeFromRunId: originalWorkerRunId ?? undefined,
+            },
+            idempotencyKey: `${GOAL_CONDITION_JUDGE_REASON}:met:${issue.id}:${run.id}`,
+            requestedByActorType: "system",
+            requestedByActorId: "issue_goal_condition_judge",
+          });
+        } catch {
+          // Best-effort — the assignee will also see the passing verdict as a comment and
+          // can resume the handoff on its own next wake.
+        }
+      }
+      return;
+    }
+
+    if (bounds.exceeded) {
+      const summary = buildGoalConditionEscalationSummary({
+        condition: monitorPolicy.condition as string,
+        round,
+        maxAttempts: monitorPolicy.maxAttempts ?? null,
+        lastVerdictReason: verdictReason,
+        spentCents,
+        spendCapCents: monitorPolicy.spendCapCents ?? null,
+        boundReason: bounds.reason,
+      });
+      await postGoalConditionJudgeNoticeComment(db, {
+        companyId: issue.companyId,
+        issueId: issue.id,
+        sourceRunId: run.id,
+        body: `Stopping this loop and escalating to the operator.\n\n${summary.plainSummary}`,
+      });
+      await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issue.id));
+      try {
+        const projectLabel = issue.projectId
+          ? await db
+              .select({ name: projects.name })
+              .from(projects)
+              .where(eq(projects.id, issue.projectId))
+              .then((rows) => rows[0]?.name ?? null)
+          : null;
+        const companyLabel = projectLabel
+          ? null
+          : await db
+              .select({ name: companies.name })
+              .from(companies)
+              .where(eq(companies.id, issue.companyId))
+              .then((rows) => rows[0]?.name ?? "Paperclip");
+        const approval = await approvalsSvc.create(issue.companyId, {
+          type: "request_board_approval",
+          payload: {
+            kind: "goal_condition_exhausted",
+            title: formatApprovalTitle(projectLabel ?? companyLabel ?? "Paperclip", summary.title),
+            plainSummary: summary.plainSummary,
+            recommendedAction:
+              "Review the gap the judge described, then either extend the round/spend cap or take over the task directly.",
+            issueId: issue.id,
+          },
+          requestedByAgentId: null,
+          requestedByUserId: null,
+          status: "pending",
+          decisionNote: null,
+          decidedByUserId: null,
+          decidedAt: null,
+          updatedAt: new Date(),
+        });
+        await issueApprovalsSvc.linkManyForApproval(approval.id, [issue.id], {});
+      } catch {
+        // Best-effort — the blocked status + issue comment already surface this to the
+        // operator even if filing the approval card fails.
+      }
+      return;
+    }
+
+    // Not met, but within bounds: re-wake the worker with the judge's reason attached so the
+    // next round is aimed at the actual gap, resuming their own session where it left off.
+    await postGoalConditionJudgeNoticeComment(db, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      sourceRunId: run.id,
+      body: `Independent check: not met yet — ${verdictReason}`,
+    });
+    if (!issue.assigneeAgentId) return;
+    try {
+      await enqueueWakeup(issue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: GOAL_CONDITION_WORKER_RETRY_REASON,
+        payload: {
+          issueId: issue.id,
+          taskId: issue.id,
+          resumeIntent: true,
+          resumeFromRunId: originalWorkerRunId ?? undefined,
+          instruction: `An independent check found this isn't done yet: ${verdictReason}\n\nAddress this specific gap, then continue.`,
+        },
+        contextSnapshot: {
+          issueId: issue.id,
+          wakeReason: GOAL_CONDITION_WORKER_RETRY_REASON,
+          resumeFromRunId: originalWorkerRunId ?? undefined,
+        },
+        idempotencyKey: `${GOAL_CONDITION_WORKER_RETRY_REASON}:${issue.id}:${run.id}`,
+        requestedByActorType: "system",
+        requestedByActorId: "issue_goal_condition_judge",
+      });
+    } catch {
+      // Best-effort — the gap is already visible as a comment for the next time the
+      // assignee is woken for this issue.
+    }
+  }
+
   async function handleSuccessfulRunHandoff(run: typeof heartbeatRuns.$inferSelect, agent: typeof agents.$inferSelect) {
     if (run.status !== "succeeded") return;
     const context = parseObject(run.contextSnapshot);
@@ -6704,6 +6936,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
       .then((rows) => rows[0] ?? null);
+
+    // DUR-32: a run that WAS the independent judge never itself hands the issue off — its
+    // entire disposition is "record the verdict and drive the loop." Handle it here and
+    // exit before any of the generic self-review/handoff logic below runs.
+    if (issue && isGoalConditionJudgeRun(run)) {
+      await handleGoalConditionJudgeRunFinished(run, issue);
+      return;
+    }
 
     if (
       issue &&
@@ -6743,6 +6983,75 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // enforces the self-review pass.
           }
           return;
+        }
+      }
+    }
+
+    // DUR-32 backstop: covers a transition to in_review/done that bypassed the synchronous
+    // PATCH gate (goal-condition-judge.ts evaluateGoalConditionDoneGate), e.g. because the
+    // status change came from a path other than that guarded route. Composes with self-review
+    // above — this only runs once self-review has already resolved for this run.
+    if (
+      issue &&
+      (issue.status === "in_review" || issue.status === "done") &&
+      !isGoalConditionJudgeRun(run)
+    ) {
+      const policy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+      const monitorPolicy = readGoalConditionMonitorPolicy(policy);
+      if (monitorPolicy) {
+        const executionState = parseIssueExecutionState(issue.executionState);
+        const round = nextGoalConditionRound(executionState?.monitor ?? null);
+        if (!goalConditionAlreadyMetForRound(executionState?.monitor ?? null, round)) {
+          const idempotencyKey = buildGoalConditionJudgeIdempotencyKey({ issueId: issue.id, sourceRunId: run.id, round });
+          const existingWake = await findExistingGoalConditionJudgeWake(db, { companyId: issue.companyId, idempotencyKey });
+          if (!existingWake) {
+            const instruction = buildGoalConditionJudgeInstruction({
+              issueIdentifier: issue.identifier,
+              condition: monitorPolicy.condition as string,
+              round,
+              maxAttempts: monitorPolicy.maxAttempts ?? null,
+              priorVerdictReason: executionState?.monitor?.lastVerdictReason ?? null,
+            });
+            try {
+              await enqueueWakeup(agent.id, {
+                source: "automation",
+                triggerDetail: "system",
+                reason: GOAL_CONDITION_JUDGE_REASON,
+                payload: { issueId: issue.id, taskId: issue.id, instruction },
+                contextSnapshot: {
+                  issueId: issue.id,
+                  wakeReason: GOAL_CONDITION_JUDGE_REASON,
+                  [GOAL_CONDITION_JUDGE_CONTEXT_KEY]: true,
+                  forceFreshSession: true,
+                  modelProfile: resolveEvaluatorModelProfile(monitorPolicy),
+                  originalWorkerRunId: run.id,
+                  goalConditionRound: round,
+                },
+                idempotencyKey,
+                requestedByActorType: "system",
+                requestedByActorId: "issue_goal_condition_gate",
+              });
+              const noticeBody = `Before this moves on, an independent judge is checking the finish line: "${monitorPolicy.condition}"`;
+              const existingNotice = await findExistingGoalConditionJudgeNoticeCommentForRun(db, {
+                companyId: issue.companyId,
+                issueId: issue.id,
+                sourceRunId: run.id,
+                body: noticeBody,
+              });
+              if (!existingNotice) {
+                await postGoalConditionJudgeNoticeComment(db, {
+                  companyId: issue.companyId,
+                  issueId: issue.id,
+                  sourceRunId: run.id,
+                  body: noticeBody,
+                });
+              }
+            } catch {
+              // Best-effort — if scheduling the judge fails here, the next PATCH attempt on
+              // this issue will retry via the synchronous gate.
+            }
+            return;
+          }
         }
       }
     }
