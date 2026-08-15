@@ -7,7 +7,7 @@ import { projectsApi } from "../api/projects";
 import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
-import { collectLiveIssueIds } from "../lib/liveIssueIds";
+import { collectLiveIssueIds, collectLiveIssueActivity } from "../lib/liveIssueIds";
 import { queryKeys } from "../lib/queryKeys";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { EmptyState } from "../components/EmptyState";
@@ -104,6 +104,7 @@ export function Issues() {
   });
 
   const liveIssueIds = useMemo(() => collectLiveIssueIds(liveRuns), [liveRuns]);
+  const liveIssueActivity = useMemo(() => collectLiveIssueActivity(liveRuns), [liveRuns]);
 
   const issueLinkState = useMemo(
     () =>
@@ -187,6 +188,7 @@ export function Issues() {
       agents={agents}
       projects={projects}
       liveIssueIds={liveIssueIds}
+      liveIssueActivity={liveIssueActivity}
       viewStateKey="paperclip:issues-view"
       issueLinkState={issueLinkState}
       initialAssignees={searchParams.get("assignee") ? [searchParams.get("assignee")!] : undefined}

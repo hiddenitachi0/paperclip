@@ -44,6 +44,7 @@ import {
 } from "../lib/inbox";
 import { cn, formatDurationMs, formatTokens } from "../lib/utils";
 import { collectSubtreeLiveCounts } from "../lib/liveIssueIds";
+import type { RunActivityTimestamps } from "../lib/runLiveness";
 import {
   InboxIssueMetaLeading,
   InboxIssueTrailingColumns,
@@ -391,6 +392,7 @@ interface IssuesListProps {
   agents?: Agent[];
   projects?: ProjectOption[];
   liveIssueIds?: Set<string>;
+  liveIssueActivity?: ReadonlyMap<string, RunActivityTimestamps>;
   projectId?: string;
   viewStateKey: string;
   issueLinkState?: unknown;
@@ -603,6 +605,7 @@ export function IssuesList({
   agents,
   projects,
   liveIssueIds,
+  liveIssueActivity,
   projectId,
   viewStateKey,
   issueLinkState,
@@ -1630,6 +1633,7 @@ export function IssuesList({
           issues={filtered}
           agents={agents}
           liveIssueIds={liveIssueIds}
+          liveIssueActivity={liveIssueActivity}
           compactCards={boardCompactCards}
           collapsedStatuses={boardCollapsedStatuses}
           initialVisibleCount={viewState.boardColumnPageSize}

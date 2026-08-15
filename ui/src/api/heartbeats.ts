@@ -34,6 +34,7 @@ export interface ActiveRunForIssue {
   livenessReason?: string | null;
   continuationAttempt?: number;
   lastUsefulActionAt?: string | Date | null;
+  lastOutputAt?: string | Date | null;
   nextAction?: string | null;
   outputSilence?: HeartbeatRun["outputSilence"];
   currentStatusMessage?: string | null;
@@ -63,6 +64,7 @@ export interface LiveRunForIssue {
   livenessReason?: string | null;
   continuationAttempt?: number;
   lastUsefulActionAt?: string | null;
+  lastOutputAt?: string | null;
   nextAction?: string | null;
   outputSilence?: HeartbeatRun["outputSilence"];
   currentStatusMessage?: string | null;

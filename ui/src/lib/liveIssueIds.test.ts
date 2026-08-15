@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LiveRunForIssue } from "../api/heartbeats";
-import { collectLiveIssueIds, collectSubtreeLiveCounts } from "./liveIssueIds";
+import { collectLiveIssueActivity, collectLiveIssueIds, collectSubtreeLiveCounts } from "./liveIssueIds";
 
 describe("collectLiveIssueIds", () => {
   it("keeps only runs linked to issues", () => {
@@ -73,6 +73,77 @@ describe("collectLiveIssueIds", () => {
     ];
 
     expect([...collectLiveIssueIds(liveRuns)]).toEqual(["issue-1", "issue-2"]);
+  });
+});
+
+describe("collectLiveIssueActivity", () => {
+  it("keeps the run with the most recent activity when an issue has more than one live run", () => {
+    const liveRuns: LiveRunForIssue[] = [
+      {
+        id: "run-stale",
+        status: "running",
+        invocationSource: "scheduler",
+        triggerDetail: null,
+        startedAt: "2026-04-20T09:00:00.000Z",
+        finishedAt: null,
+        createdAt: "2026-04-20T09:00:00.000Z",
+        agentId: "agent-1",
+        agentName: "Coder",
+        adapterType: "codex_local",
+        issueId: "issue-1",
+        lastOutputAt: "2026-04-20T09:05:00.000Z",
+      },
+      {
+        id: "run-fresh",
+        status: "running",
+        invocationSource: "scheduler",
+        triggerDetail: null,
+        startedAt: "2026-04-20T10:00:00.000Z",
+        finishedAt: null,
+        createdAt: "2026-04-20T10:00:00.000Z",
+        agentId: "agent-2",
+        agentName: "Builder",
+        adapterType: "codex_local",
+        issueId: "issue-1",
+        lastOutputAt: "2026-04-20T10:02:00.000Z",
+      },
+    ];
+
+    const activity = collectLiveIssueActivity(liveRuns);
+    expect(activity.get("issue-1")?.lastOutputAt).toBe("2026-04-20T10:02:00.000Z");
+  });
+
+  it("ignores runs without an issue id or that are not live", () => {
+    const liveRuns: LiveRunForIssue[] = [
+      {
+        id: "run-done",
+        status: "succeeded",
+        invocationSource: "scheduler",
+        triggerDetail: null,
+        startedAt: null,
+        finishedAt: "2026-04-20T09:05:00.000Z",
+        createdAt: "2026-04-20T09:00:00.000Z",
+        agentId: "agent-1",
+        agentName: "Coder",
+        adapterType: "codex_local",
+        issueId: "issue-1",
+      },
+      {
+        id: "run-orphan",
+        status: "running",
+        invocationSource: "scheduler",
+        triggerDetail: null,
+        startedAt: "2026-04-20T09:00:00.000Z",
+        finishedAt: null,
+        createdAt: "2026-04-20T09:00:00.000Z",
+        agentId: "agent-2",
+        agentName: "Builder",
+        adapterType: "codex_local",
+        issueId: null,
+      },
+    ];
+
+    expect(collectLiveIssueActivity(liveRuns).size).toBe(0);
   });
 });
 

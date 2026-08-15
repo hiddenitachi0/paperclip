@@ -24,6 +24,8 @@ import type { Issue, IssueStatus } from "@paperclipai/shared";
 import { AlertTriangle } from "lucide-react";
 import { isSuccessfulRunHandoffRequired } from "../lib/successful-run-handoff";
 import { collectSubtreeLiveCounts } from "../lib/liveIssueIds";
+import { describeRunLiveness, type RunActivityTimestamps } from "../lib/runLiveness";
+import { LivenessBadge } from "./LivenessBadge";
 import { cn } from "../lib/utils";
 
 export const KANBAN_BOARD_HIGH_VOLUME_THRESHOLD = 100;
@@ -108,6 +110,7 @@ interface KanbanBoardProps {
   issues: Issue[];
   agents?: Agent[];
   liveIssueIds?: Set<string>;
+  liveIssueActivity?: ReadonlyMap<string, RunActivityTimestamps>;
   compactCards?: boolean;
   collapsedStatuses?: string[];
   initialVisibleCount?: number;
@@ -122,6 +125,7 @@ function KanbanColumn({
   issues,
   agents,
   liveIssueIds,
+  liveIssueActivity,
   subtreeLiveCounts,
   compactCards = false,
   collapsed = false,
@@ -133,6 +137,7 @@ function KanbanColumn({
   issues: Issue[];
   agents?: Agent[];
   liveIssueIds?: Set<string>;
+  liveIssueActivity?: ReadonlyMap<string, RunActivityTimestamps>;
   subtreeLiveCounts?: ReadonlyMap<string, number>;
   compactCards?: boolean;
   collapsed?: boolean;
@@ -203,6 +208,7 @@ function KanbanColumn({
               issue={issue}
               agents={agents}
               isLive={liveIssueIds?.has(issue.id)}
+              liveActivity={liveIssueActivity?.get(issue.id)}
               subtreeLiveCount={subtreeLiveCounts?.get(issue.id) ?? 0}
               compact={compactCards}
               className={tone.card}
@@ -234,6 +240,7 @@ function KanbanCard({
   issue,
   agents,
   isLive,
+  liveActivity,
   subtreeLiveCount = 0,
   isOverlay,
   compact = false,
@@ -242,6 +249,7 @@ function KanbanCard({
   issue: Issue;
   agents?: Agent[];
   isLive?: boolean;
+  liveActivity?: RunActivityTimestamps;
   subtreeLiveCount?: number;
   isOverlay?: boolean;
   compact?: boolean;
@@ -304,7 +312,10 @@ function KanbanCard({
             </span>
           ) : null}
           {isLive && (
-            <span className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+            <span
+              className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-blue-600 dark:text-blue-400"
+              title={compact ? describeRunLiveness(liveActivity)?.text : undefined}
+            >
               <span className="relative flex h-2 w-2">
                 <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
@@ -312,6 +323,7 @@ function KanbanCard({
               {compact ? "Live" : null}
             </span>
           )}
+          {isLive && !compact && <LivenessBadge activity={liveActivity} className="shrink-0" />}
           {!isLive && subtreeLiveCount > 0 && (
             <span
               className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
@@ -347,6 +359,7 @@ export function KanbanBoard({
   issues,
   agents,
   liveIssueIds,
+  liveIssueActivity,
   compactCards = false,
   collapsedStatuses = [],
   initialVisibleCount = KANBAN_COLUMN_INITIAL_VISIBLE_LIMIT,
@@ -430,6 +443,7 @@ export function KanbanBoard({
             issues={columnIssues[status] ?? []}
             agents={agents}
             liveIssueIds={liveIssueIds}
+            liveIssueActivity={liveIssueActivity}
             subtreeLiveCounts={subtreeLiveCounts}
             compactCards={compactCards}
             collapsed={collapsedStatusSet.has(status)}
