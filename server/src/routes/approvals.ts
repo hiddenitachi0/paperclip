@@ -7,6 +7,7 @@ import {
   deployRequestPayloadSchema,
   formatApprovalTechnicalReference,
   formatApprovalTitle,
+  modelBoostRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -16,6 +17,7 @@ import { logger } from "../middleware/logger.js";
 import {
   approvalService,
   accessService,
+  escalationGrantService,
   heartbeatService,
   issueApprovalService,
   issueThreadInteractionService,
@@ -40,6 +42,15 @@ function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(a
  */
 function isDeployRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "deploy";
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"model_boost"`
+ * follow the temporary model/effort escalation convention (DUR-31) and must
+ * validate against modelBoostRequestPayloadSchema before an operator sees them.
+ */
+function isModelBoostRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "model_boost";
 }
 
 /**
@@ -125,6 +136,7 @@ export function approvalRoutes(
   const issueApprovalsSvc = issueApprovalService(db);
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db);
+  const escalationGrantsSvc = escalationGrantService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   async function requireApprovalAccess(req: Request, id: string) {
@@ -210,8 +222,28 @@ export function approvalRoutes(
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
+    const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       deployRequestPayloadSchema.parse(approvalInput.payload);
+    }
+    if (isModelBoostRequestApproval(approvalInput.type, approvalInput.payload)) {
+      const boostPayload = modelBoostRequestPayloadSchema.parse(approvalInput.payload);
+      const requestingAgentId =
+        approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null);
+      if (actor.actorType === "agent" && actor.actorId !== boostPayload.agentId) {
+        res.status(403).json({ error: "An agent can only request a boost for itself" });
+        return;
+      }
+      if (!requestingAgentId) {
+        res.status(422).json({ error: "A boost request must be filed by the requesting agent" });
+        return;
+      }
+      await escalationGrantsSvc.assertRequestAllowed({
+        companyId,
+        issueId: boostPayload.issueId,
+        agentId: boostPayload.agentId,
+        reason: boostPayload.reason,
+      });
     }
     let normalizedPayload =
       approvalInput.type === "hire_agent"
@@ -230,7 +262,6 @@ export function approvalRoutes(
       );
     }
 
-    const actor = getActorInfo(req);
     const approval = await svc.create(companyId, {
       ...approvalInput,
       payload: normalizedPayload,

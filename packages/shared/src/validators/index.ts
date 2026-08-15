@@ -460,12 +460,14 @@ export {
   resubmitApprovalSchema,
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
+  modelBoostRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
   type ResubmitApproval,
   type AddApprovalComment,
   type DeployRequestPayload,
+  type ModelBoostRequestPayload,
 } from "./approval.js";
 
 export {

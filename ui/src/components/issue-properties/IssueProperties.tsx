@@ -35,7 +35,7 @@ import { StatusIcon } from "../StatusIcon";
 import { PriorityIcon } from "../PriorityIcon";
 import { Identity } from "../Identity";
 import { IssueReferencePill } from "../IssueReferencePill";
-import { formatDate, formatDateTime, cn, projectUrl } from "../../lib/utils";
+import { formatDate, formatDateTime, formatCents, cn, projectUrl } from "../../lib/utils";
 import type { IssueExternalObjectGroup } from "../../hooks/useIssueExternalObjects";
 import { timeAgo } from "../../lib/timeAgo";
 import { Button } from "@/components/ui/button";
@@ -1925,6 +1925,21 @@ export function IssueProperties({
           >
             {assigneeOptionsContent}
           </PropertyPicker>
+        ) : null}
+
+        {issue.activeEscalationGrant ? (
+          <PropertyRow label="Boost" wrap>
+            <PropertyChip className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400">
+              {[issue.activeEscalationGrant.grantedModel, issue.activeEscalationGrant.grantedEffort]
+                .filter(Boolean)
+                .join(" · ") || "Active"}
+            </PropertyChip>
+            <span className="text-xs text-muted-foreground">
+              {formatCents(issue.activeEscalationGrant.spentCents)} of{" "}
+              {formatCents(issue.activeEscalationGrant.maxSpendCents)} used · expires{" "}
+              {formatDateTime(issue.activeEscalationGrant.expiresAt)}
+            </span>
+          </PropertyRow>
         ) : null}
 
         <PropertyPicker

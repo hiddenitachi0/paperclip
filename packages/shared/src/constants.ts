@@ -590,6 +590,17 @@ export const APPROVAL_STATUSES = [
 ] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
+export const ESCALATION_GRANT_STATUSES = ["active", "expired"] as const;
+export type EscalationGrantStatus = (typeof ESCALATION_GRANT_STATUSES)[number];
+
+export const ESCALATION_GRANT_EXPIRED_REASONS = ["time_expired", "budget_exhausted"] as const;
+export type EscalationGrantExpiredReason = (typeof ESCALATION_GRANT_EXPIRED_REASONS)[number];
+
+// Default/maximum lifetime of a model/effort boost grant (DUR-31) when the
+// requesting agent doesn't specify `durationMinutes`.
+export const ESCALATION_GRANT_DEFAULT_DURATION_MINUTES = 240;
+export const ESCALATION_GRANT_MAX_DURATION_MINUTES = 1440;
+
 export const SECRET_PROVIDERS = [
   "local_encrypted",
   "aws_secrets_manager",

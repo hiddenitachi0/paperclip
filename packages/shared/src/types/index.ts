@@ -397,6 +397,7 @@ export type {
 } from "./issue-tree-control.js";
 export type { Goal } from "./goal.js";
 export type { Approval, ApprovalComment } from "./approval.js";
+export type { EscalationGrant, EscalationGrantWithSpend } from "./escalation-grant.js";
 export type {
   BudgetPolicy,
   BudgetPolicySummary,
