@@ -1935,7 +1935,7 @@ export function IssueProperties({
                 .join(" · ") || "Active"}
             </PropertyChip>
             <span className="text-xs text-muted-foreground">
-              {formatCents(issue.activeEscalationGrant.spentCents)} of{" "}
+              approved by the operator · {formatCents(issue.activeEscalationGrant.spentCents)} of{" "}
               {formatCents(issue.activeEscalationGrant.maxSpendCents)} used · expires{" "}
               {formatDateTime(issue.activeEscalationGrant.expiresAt)}
             </span>
