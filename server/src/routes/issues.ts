@@ -125,6 +125,7 @@ import {
   findExistingIssueBlockersResolvedWake,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
+import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -5840,6 +5841,24 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
+    const selfReviewGateResult = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup: heartbeat.wakeup,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        projectId: existing.projectId,
+        executionPolicy: existing.executionPolicy,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (selfReviewGateResult) {
+      res.status(409).json({ error: selfReviewGateResult.message });
+      return;
+    }
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {

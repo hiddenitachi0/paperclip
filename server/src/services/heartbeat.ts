@@ -165,6 +165,15 @@ import {
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import {
+  findExistingSelfReviewPassNoticeCommentForRun,
+  issueExecutionPolicyOptsOutOfSelfReview,
+  issueProjectHasGitWorkspace,
+  isSelfReviewPassRun,
+  postSelfReviewPassNoticeComment,
+  SELF_REVIEW_PASS_NOTICE_COMMENT,
+  SELF_REVIEW_PASS_REASON,
+} from "./self-review-gate.js";
+import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
@@ -6660,11 +6669,55 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         assigneeAgentId: issues.assigneeAgentId,
         assigneeUserId: issues.assigneeUserId,
         executionState: issues.executionState,
+        executionPolicy: issues.executionPolicy,
         projectId: issues.projectId,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
       .then((rows) => rows[0] ?? null);
+
+    if (
+      issue &&
+      (issue.status === "in_review" || issue.status === "done") &&
+      !isSelfReviewPassRun(run) &&
+      !issueExecutionPolicyOptsOutOfSelfReview(issue.executionPolicy)
+    ) {
+      const hasGitWorkspace = await issueProjectHasGitWorkspace(db, issue.companyId, issue.projectId);
+      if (hasGitWorkspace) {
+        const scheduled = await scheduleBoundedRetryForRun(run, agent, {
+          retryReason: SELF_REVIEW_PASS_REASON,
+          wakeReason: SELF_REVIEW_PASS_REASON,
+          maxAttempts: 1,
+          delayMs: 0,
+        });
+        if (scheduled.outcome === "scheduled") {
+          try {
+            // Best-effort, deduped-by-run notice so the agent actually sees plain-language
+            // instructions on wake (the generic wake payload doesn't surface an arbitrary
+            // instruction field — see self-review-gate.ts for details).
+            const existingNotice = await findExistingSelfReviewPassNoticeCommentForRun(db, {
+              companyId: issue.companyId,
+              issueId: issue.id,
+              sourceRunId: run.id,
+              body: SELF_REVIEW_PASS_NOTICE_COMMENT,
+            });
+            if (!existingNotice) {
+              await postSelfReviewPassNoticeComment(db, {
+                companyId: issue.companyId,
+                issueId: issue.id,
+                sourceRunId: run.id,
+                body: SELF_REVIEW_PASS_NOTICE_COMMENT,
+              });
+            }
+          } catch {
+            // Ignore — the bounded retry itself is already scheduled and is what actually
+            // enforces the self-review pass.
+          }
+          return;
+        }
+      }
+    }
+
     const idempotencyKey = issue
       ? buildFinishSuccessfulRunHandoffIdempotencyKey({
         issueId: issue.id,

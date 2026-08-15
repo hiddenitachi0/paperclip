@@ -449,6 +449,8 @@ export interface IssueExecutionPolicy {
   monitor?: IssueExecutionMonitorPolicy | null;
   reviewPreset?: LowTrustReviewPresetPolicy;
   authorizationPolicy?: TrustAuthorizationPolicy;
+  /** Opt-out for the automatic self-review pass gate (default on for code issues). */
+  selfReview?: boolean;
 }
 
 export interface IssueExecutionMonitorState {
