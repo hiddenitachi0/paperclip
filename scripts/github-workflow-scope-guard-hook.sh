@@ -21,9 +21,20 @@ command -v jq >/dev/null 2>&1 || exit 0
 TOOL_NAME="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null)"
 [[ "$TOOL_NAME" == "Bash" ]] || exit 0
 
-# Match on the whole hook payload rather than a specific tool_response field
-# path, so this keeps working even if the harness reshapes that structure.
-printf '%s' "$HOOK_INPUT" | grep -Fq 'without `workflow` scope' || exit 0
+# Only consider commands that could plausibly be a git/gh push or PR
+# operation. Without this guard, matching the rejection text anywhere in the
+# whole hook payload false-triggers on any unrelated command whose output
+# happens to echo that phrase back — e.g. `curl` fetching this very issue's
+# comment history once a past comment has quoted GitHub's error message.
+COMMAND="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+printf '%s' "$COMMAND" | grep -Eq '(^|[|&;[:space:]])git[[:space:]]+.*push|(^|[|&;[:space:]])gh[[:space:]]' || exit 0
+
+# Match on the tool_response portion (falling back to the whole payload if
+# that field is missing/reshaped) rather than including tool_input, so the
+# command string itself can't self-match.
+RESPONSE_TEXT="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_response // empty' 2>/dev/null)"
+[[ -n "$RESPONSE_TEXT" ]] || RESPONSE_TEXT="$HOOK_INPUT"
+printf '%s' "$RESPONSE_TEXT" | grep -Fq 'without `workflow` scope' || exit 0
 
 log "detected a GitHub push rejected for missing 'workflow' token scope"
 
