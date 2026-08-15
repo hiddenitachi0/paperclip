@@ -41,6 +41,7 @@ function registerRouteMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     accessService: () => ({
       canUser: vi.fn(),
       hasPermission: vi.fn(),

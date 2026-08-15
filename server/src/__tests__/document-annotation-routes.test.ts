@@ -109,6 +109,7 @@ const annotationComment = {
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
+    escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     accessService: () => ({
       canUser: vi.fn(),
       decide: vi.fn(async (input: { action?: string }) => ({

@@ -20,6 +20,7 @@ const mockIssueService = vi.hoisted(() => ({
 }));
 
 vi.mock("../services/index.js", () => ({
+  escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   accessService: () => ({
     canUser: vi.fn(async () => true),
     decide: vi.fn(async (input: { action?: string }) => ({
