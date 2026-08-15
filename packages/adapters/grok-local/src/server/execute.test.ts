@@ -138,6 +138,142 @@ describe("grok_local execute", () => {
     expect(logs.map((entry) => entry.chunk)).not.toEqual([]);
   });
 
+  it("DUR-33: prepends the company's COMPANY.md ahead of the agent's own instructions", async () => {
+    const root = await makeTempRoot();
+    const instructionsPath = path.join(root, "managed", "AGENTS.md");
+    await fs.mkdir(path.dirname(instructionsPath), { recursive: true });
+    await fs.writeFile(instructionsPath, "You are Grok.\n", "utf8");
+
+    const companyId = "co-with-standing-rules";
+    const companyInstructionsDir = path.join(root, "paperclip-home", "instances", "default", "companies", companyId, "instructions");
+    await fs.mkdir(companyInstructionsDir, { recursive: true });
+    await fs.writeFile(path.join(companyInstructionsDir, "COMPANY.md"), "1. Never guess.", "utf8");
+
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+
+    let stagedInstructionsContents = "";
+    runProcessMock.mockImplementation(async (_runId, _target, _command, _args, options) => {
+      stagedInstructionsContents = await fs.readFile(path.join(root, "Agents.md"), "utf8");
+      await options.onLog?.("stdout", '{"type":"text","data":"done"}\n');
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: [
+          JSON.stringify({ type: "text", data: "done" }),
+          JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "sess-1", requestId: "req-1" }),
+        ].join("\n"),
+        stderr: "",
+      };
+    });
+
+    const ctx: AdapterExecutionContext = {
+      runId: "run-company-instructions",
+      agent: {
+        id: "agent-1",
+        companyId,
+        name: "Grok Agent",
+        adapterType: "grok_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        cwd: root,
+        instructionsFilePath: instructionsPath,
+      },
+      context: {},
+      authToken: "run-token",
+      onLog: async () => {},
+    };
+
+    try {
+      const result = await execute(ctx);
+
+      expect(result.exitCode).toBe(0);
+      expect(stagedInstructionsContents).toBeTruthy();
+      expect(stagedInstructionsContents.indexOf("1. Never guess.")).toBeLessThan(
+        stagedInstructionsContents.indexOf("You are Grok."),
+      );
+    } finally {
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+    }
+  });
+
+  it("DUR-33: a company without COMPANY.md behaves exactly as today (no header, no error)", async () => {
+    const root = await makeTempRoot();
+    const instructionsPath = path.join(root, "managed", "AGENTS.md");
+    await fs.mkdir(path.dirname(instructionsPath), { recursive: true });
+    await fs.writeFile(instructionsPath, "You are Grok.\n", "utf8");
+
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home-empty");
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+
+    let stagedInstructionsContents = "";
+    runProcessMock.mockImplementation(async (_runId, _target, _command, _args, options) => {
+      stagedInstructionsContents = await fs.readFile(path.join(root, "Agents.md"), "utf8");
+      await options.onLog?.("stdout", '{"type":"text","data":"done"}\n');
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: [
+          JSON.stringify({ type: "text", data: "done" }),
+          JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "sess-1", requestId: "req-1" }),
+        ].join("\n"),
+        stderr: "",
+      };
+    });
+
+    const ctx: AdapterExecutionContext = {
+      runId: "run-no-company-instructions",
+      agent: {
+        id: "agent-1",
+        companyId: "co-without-file",
+        name: "Grok Agent",
+        adapterType: "grok_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        cwd: root,
+        instructionsFilePath: instructionsPath,
+      },
+      context: {},
+      authToken: "run-token",
+      onLog: async () => {},
+    };
+
+    try {
+      const result = await execute(ctx);
+
+      expect(result.exitCode).toBe(0);
+      expect(stagedInstructionsContents).toBe("You are Grok.\n");
+    } finally {
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+    }
+  });
+
   it("cleans up staged assets when setup fails before the Grok process starts", async () => {
     const root = await makeTempRoot();
     const instructionsPath = path.join(root, "managed", "AGENTS.md");

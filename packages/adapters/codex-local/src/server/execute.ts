@@ -37,6 +37,7 @@ import {
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
+  resolveCombinedAgentInstructionsContent,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseCodexJsonl,
@@ -668,7 +669,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let instructionsChars = 0;
     if (instructionsFilePath) {
       try {
-        const instructionsContents = await fs.readFile(instructionsFilePath, "utf8");
+        const rawInstructionsContents = await fs.readFile(instructionsFilePath, "utf8");
+        const instructionsContents = await resolveCombinedAgentInstructionsContent({
+          companyId: agent.companyId,
+          agentInstructionsContent: rawInstructionsContents,
+        });
         instructionsPrefix =
           `${instructionsContents}\n\n` +
           `The above agent instructions were loaded from ${instructionsFilePath}. ` +

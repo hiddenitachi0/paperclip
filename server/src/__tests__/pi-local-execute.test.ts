@@ -27,6 +27,23 @@ process.exit(0);
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writeSucceedingPiCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+if (process.argv.includes("--list-models")) {
+  console.log("provider  model");
+  console.log("google    gemini-3-flash-preview");
+  process.exit(0);
+}
+console.log(JSON.stringify({ type: "agent_start" }));
+console.log(JSON.stringify({ type: "turn_start" }));
+console.log(JSON.stringify({ type: "turn_end", message: { role: "assistant", content: "" }, toolResults: [] }));
+console.log(JSON.stringify({ type: "agent_end", messages: [] }));
+process.exit(0);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
 async function writeEnvDumpPiCommand(commandPath: string, envDumpPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -148,6 +165,141 @@ describe("pi_local execute", () => {
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("DUR-33: prepends the company's COMPANY.md ahead of the agent's own instructions", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-execute-company-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "pi");
+    const instructionsPath = path.join(root, "AGENTS.md");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(instructionsPath, "# Agent instructions", "utf8");
+    await writeSucceedingPiCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.HOME = root;
+    const companyId = "co-with-standing-rules";
+    const companyInstructionsDir = path.join(root, "paperclip-home", "instances", "default", "companies", companyId, "instructions");
+    await fs.mkdir(companyInstructionsDir, { recursive: true });
+    await fs.writeFile(path.join(companyInstructionsDir, "COMPANY.md"), "1. Never guess.", "utf8");
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+
+    let capturedArgs: string[] = [];
+    try {
+      const result = await execute({
+        runId: "run-company-instructions",
+        agent: {
+          id: "agent-1",
+          companyId,
+          name: "Pi Agent",
+          adapterType: "pi_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "google/gemini-3-flash-preview",
+          instructionsFilePath: instructionsPath,
+          promptTemplate: "Keep working.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+        onMeta: async (meta) => {
+          capturedArgs = meta.commandArgs ?? [];
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      const flagIndex = capturedArgs.indexOf("--append-system-prompt");
+      expect(flagIndex).toBeGreaterThanOrEqual(0);
+      const systemPrompt = capturedArgs[flagIndex + 1] ?? "";
+      expect(systemPrompt).toBeTruthy();
+      expect(systemPrompt.indexOf("1. Never guess.")).toBeLessThan(
+        systemPrompt.indexOf("# Agent instructions"),
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("DUR-33: a company without COMPANY.md behaves exactly as today (no header, no error)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-execute-no-company-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "pi");
+    const instructionsPath = path.join(root, "AGENTS.md");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(instructionsPath, "# Agent instructions", "utf8");
+    await writeSucceedingPiCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home-empty");
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+
+    let capturedArgs: string[] = [];
+    try {
+      const result = await execute({
+        runId: "run-no-company-instructions",
+        agent: {
+          id: "agent-1",
+          companyId: "co-without-file",
+          name: "Pi Agent",
+          adapterType: "pi_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "google/gemini-3-flash-preview",
+          instructionsFilePath: instructionsPath,
+          promptTemplate: "Keep working.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+        onMeta: async (meta) => {
+          capturedArgs = meta.commandArgs ?? [];
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      const flagIndex = capturedArgs.indexOf("--append-system-prompt");
+      expect(flagIndex).toBeGreaterThanOrEqual(0);
+      const systemPrompt = capturedArgs[flagIndex + 1] ?? "";
+      expect(systemPrompt.startsWith("# Agent instructions")).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
       await fs.rm(root, { recursive: true, force: true });
     }
   });

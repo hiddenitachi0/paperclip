@@ -110,6 +110,64 @@ export function resolvePaperclipInstanceRootForAdapter(input: {
   return path.resolve(homeDir, "instances", instanceId);
 }
 
+/**
+ * Path to a company's single editable COMPANY.md instructions file, mirroring the
+ * per-agent instructions bundle layout at `<instanceRoot>/companies/<companyId>/agents/<agentId>/instructions/`.
+ */
+export function resolveCompanyInstructionsPath(input: {
+  companyId: string;
+  homeDir?: string;
+  instanceId?: string;
+  env?: NodeJS.ProcessEnv;
+}): string {
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter(input);
+  return path.resolve(instanceRoot, "companies", input.companyId, "instructions", "COMPANY.md");
+}
+
+/** Returns null (not an error) when the company has no COMPANY.md, or it's empty/whitespace-only. */
+export async function readCompanyInstructionsContent(input: {
+  companyId: string;
+  homeDir?: string;
+  instanceId?: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string | null> {
+  const filePath = resolveCompanyInstructionsPath(input);
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    return content.trim().length > 0 ? content : null;
+  } catch {
+    return null;
+  }
+}
+
+const COMPANY_INSTRUCTIONS_SEPARATOR = "\n\n---\n\n";
+
+/** Prepends company instructions ahead of an agent's own instructions. No-op when companyInstructions is null/blank. */
+export function combineCompanyAndAgentInstructions(
+  companyInstructions: string | null,
+  agentInstructions: string,
+): string {
+  if (!companyInstructions || companyInstructions.trim().length === 0) return agentInstructions;
+  return `${companyInstructions.trimEnd()}${COMPANY_INSTRUCTIONS_SEPARATOR}${agentInstructions}`;
+}
+
+/**
+ * The single shared seam every local adapter (claude-local, codex-local, pi-local, grok-local, ...)
+ * calls to resolve an agent's final instructions content. Resolving this here — once, in
+ * adapter-utils — rather than in each adapter's execute.ts keeps company-level instructions
+ * resolution from being reimplemented (and drifting) four times.
+ */
+export async function resolveCombinedAgentInstructionsContent(input: {
+  companyId: string;
+  agentInstructionsContent: string;
+  homeDir?: string;
+  instanceId?: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string> {
+  const companyInstructions = await readCompanyInstructionsContent(input);
+  return combineCompanyAndAgentInstructions(companyInstructions, input.agentInstructionsContent);
+}
+
 export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [
   "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
   "",

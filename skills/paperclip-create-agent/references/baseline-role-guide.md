@@ -4,6 +4,8 @@ Use this guide when no template under `references/agents/` is a close fit for th
 
 The guide is not itself a template — copy the section outline below into your draft and fill each section with role-specific content. Aim for roughly 60–150 lines of `AGENTS.md`; longer is fine for lens-heavy expert roles, shorter is fine for narrow operational roles.
 
+Do not paste company-wide standing rules into a new `AGENTS.md`. If the company has a `COMPANY.md`, it is automatically prepended ahead of every agent's own `AGENTS.md` on every run — pasting the same rules here would only create a second copy that can drift out of sync.
+
 ---
 
 ## Section outline

@@ -44,6 +44,7 @@ import {
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   runChildProcess,
+  resolveCombinedAgentInstructionsContent,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
@@ -569,7 +570,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let instructionsReadFailed = false;
     if (resolvedInstructionsFilePath) {
       try {
-        const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
+        const rawInstructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
+        const instructionsContents = await resolveCombinedAgentInstructionsContent({
+          companyId: agent.companyId,
+          agentInstructionsContent: rawInstructionsContents,
+        });
         systemPromptExtension =
           `${instructionsContents}\n\n` +
           `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +

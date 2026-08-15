@@ -413,6 +413,85 @@ describe("claude execute", () => {
     }
   });
 
+  it("DUR-33: prepends the company's COMPANY.md ahead of the agent's own instructions", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-company-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root);
+    const instructionsFile = path.join(root, "instructions.md");
+    await fs.writeFile(instructionsFile, "# Agent instructions", "utf-8");
+    const companyId = "co-with-standing-rules";
+    const companyInstructionsDir = path.join(root, "paperclip-home", "instances", "default", "companies", companyId, "instructions");
+    await fs.mkdir(companyInstructionsDir, { recursive: true });
+    await fs.writeFile(path.join(companyInstructionsDir, "COMPANY.md"), "1. Never guess.", "utf-8");
+    const previousHome = process.env.PAPERCLIP_HOME;
+    const previousInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home");
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+    try {
+      await execute({
+        runId: "run-company-instructions",
+        agent: { id: "agent-1", companyId, name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Do work.",
+          instructionsFilePath: instructionsFile,
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+        onMeta: async () => {},
+      });
+      const captured = JSON.parse(await fs.readFile(capturePath, "utf-8"));
+      expect(captured.instructionsContents).toBeTruthy();
+      expect(captured.instructionsContents.indexOf("1. Never guess.")).toBeLessThan(
+        captured.instructionsContents.indexOf("# Agent instructions"),
+      );
+    } finally {
+      process.env.PAPERCLIP_HOME = previousHome;
+      process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("DUR-33: a company without COMPANY.md behaves exactly as today (no header, no error)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-no-company-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root);
+    const instructionsFile = path.join(root, "instructions.md");
+    await fs.writeFile(instructionsFile, "# Agent instructions", "utf-8");
+    const previousHome = process.env.PAPERCLIP_HOME;
+    const previousInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-home-empty");
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+    try {
+      await execute({
+        runId: "run-no-company-instructions",
+        agent: { id: "agent-1", companyId: "co-without-file", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Do work.",
+          instructionsFilePath: instructionsFile,
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+        onMeta: async () => {},
+      });
+      const captured = JSON.parse(await fs.readFile(capturePath, "utf-8"));
+      expect(captured.instructionsContents.startsWith("# Agent instructions")).toBe(true);
+    } finally {
+      process.env.PAPERCLIP_HOME = previousHome;
+      process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   /**
    * Regression tests for commandNotes accuracy (Greptile P2).
    *

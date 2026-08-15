@@ -23,6 +23,9 @@ import type {
 } from "@paperclipai/shared";
 import { companySkillsApi } from "../api/companySkills";
 import { agentsApi } from "../api/agents";
+import { accessApi } from "../api/access";
+import { authApi } from "../api/auth";
+import { companyInstructionsApi } from "../api/companyInstructions";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -31,6 +34,7 @@ import { EmptyState } from "../components/EmptyState";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { Skeleton } from "@/components/ui/skeleton";
 import { CopyText } from "../components/CopyText";
 import { Identity } from "../components/Identity";
 import { AgentIcon } from "../components/AgentIconPicker";
@@ -3674,6 +3678,165 @@ function SkillPane({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Company rules (COMPANY.md) — DUR-33
+// ---------------------------------------------------------------------------
+
+/**
+ * Board-only editable box for COMPANY.md: the standing rules every agent in
+ * this company gets prepended ahead of its own AGENTS.md on every run.
+ *
+ * Board-vs-agent gating mirrors the pattern used for board-only actions in
+ * IssueDetail.tsx (`canManageTreeControl`): resolve the current human session,
+ * then check whether `/cli-auth/me` lists this company under `companyIds`.
+ * The server enforces the real check (assertBoard + agents:create decision);
+ * this only controls whether the edit affordance is shown.
+ */
+export function CompanyInstructionsCard({ companyId }: { companyId: string | null }) {
+  const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const { data: session } = useQuery({
+    queryKey: queryKeys.auth.session,
+    queryFn: () => authApi.getSession(),
+  });
+  const currentUserId = session?.user?.id ?? null;
+
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    enabled: Boolean(currentUserId),
+    retry: false,
+  });
+  const canEdit = Boolean(companyId && boardAccess?.companyIds?.includes(companyId));
+
+  const instructionsQuery = useQuery({
+    queryKey: queryKeys.companies.instructions(companyId ?? ""),
+    queryFn: () => companyInstructionsApi.get(companyId!),
+    enabled: Boolean(companyId),
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: (content: string) => companyInstructionsApi.update(companyId!, content),
+    onSuccess: (file) => {
+      queryClient.setQueryData(queryKeys.companies.instructions(companyId ?? ""), file);
+      setEditing(false);
+      pushToast({ tone: "success", title: "Company rules saved" });
+    },
+    onError: (error) => {
+      pushToast({
+        tone: "error",
+        title: "Failed to save company rules",
+        body: error instanceof Error ? error.message : "Failed to save company rules.",
+      });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => companyInstructionsApi.remove(companyId!),
+    onSuccess: () => {
+      queryClient.setQueryData(queryKeys.companies.instructions(companyId ?? ""), {
+        path: "COMPANY.md",
+        content: "",
+        exists: false,
+        size: 0,
+      });
+      setEditing(false);
+      pushToast({ tone: "success", title: "Company rules cleared" });
+    },
+    onError: (error) => {
+      pushToast({
+        tone: "error",
+        title: "Failed to clear company rules",
+        body: error instanceof Error ? error.message : "Failed to clear company rules.",
+      });
+    },
+  });
+
+  if (!companyId) return null;
+
+  const file = instructionsQuery.data;
+  const loading = instructionsQuery.isLoading;
+
+  function startEditing() {
+    setDraft(file?.content ?? "");
+    setEditing(true);
+  }
+
+  function cancelEditing() {
+    setEditing(false);
+    setDraft("");
+  }
+
+  return (
+    <div className="mb-4 space-y-3 rounded-md border border-border p-4" data-testid="company-instructions-card">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">Company rules</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            The rules every agent in this company follows on every run, on top of its own role instructions.
+          </p>
+        </div>
+        {canEdit && !editing && !loading ? (
+          <Button size="sm" variant="outline" onClick={startEditing}>
+            <Pencil className="mr-1.5 h-3.5 w-3.5" />
+            {file?.exists ? "Edit" : "Add rules"}
+          </Button>
+        ) : null}
+      </div>
+
+      {loading ? (
+        <Skeleton className="h-20 w-full" />
+      ) : editing ? (
+        <div className="space-y-2">
+          <MarkdownEditor
+            value={draft}
+            onChange={(value) => setDraft(value ?? "")}
+            placeholder="# Company rules"
+            className="min-w-0 overflow-hidden"
+            contentClassName="min-h-[200px] max-w-full break-words text-sm font-mono"
+          />
+          <p className="text-xs text-muted-foreground">
+            Changes apply the next time each agent starts a new session — not to sessions already in progress.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => saveMutation.mutate(draft)}
+              disabled={saveMutation.isPending}
+            >
+              {saveMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={cancelEditing} disabled={saveMutation.isPending}>
+              Cancel
+            </Button>
+            {file?.exists ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="ml-auto text-destructive hover:text-destructive"
+                onClick={() => deleteMutation.mutate()}
+                disabled={deleteMutation.isPending}
+              >
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                {deleteMutation.isPending ? "Clearing..." : "Clear rules"}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : file?.exists ? (
+        <MarkdownBody className="text-sm [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+          {file.content}
+        </MarkdownBody>
+      ) : (
+        <p className="text-sm text-muted-foreground">No company rules set yet.</p>
+      )}
+    </div>
+  );
+}
+
 export function CompanySkills() {
   const { "*": routePath } = useParams<{ "*": string }>();
   const navigate = useNavigate();
@@ -4620,6 +4783,8 @@ export function CompanySkills() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {isDiscovery ? <CompanyInstructionsCard companyId={selectedCompanyId} /> : null}
 
       {isDiscovery ? (
         <DiscoveryGrid
