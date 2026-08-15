@@ -27,6 +27,7 @@ import {
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
   MODEL_PROFILE_KEYS,
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
+  GOAL_CONDITION_VERDICTS,
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
@@ -193,6 +194,9 @@ export const issueExecutionMonitorPolicySchema = z.object({
   timeoutAt: z.string().datetime().optional().nullable().default(null),
   maxAttempts: z.number().int().positive().max(100).optional().nullable().default(null),
   recoveryPolicy: z.enum(ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES).optional().nullable().default(null),
+  condition: z.string().trim().min(1).max(2000).optional().nullable().default(null),
+  evaluatorModelProfile: z.enum(MODEL_PROFILE_KEYS).optional().nullable().default(null),
+  spendCapCents: z.number().int().positive().max(10_000_000).optional().nullable().default(null),
 });
 
 export const issueExecutionPolicySchema = z.object({
@@ -221,6 +225,13 @@ export const issueExecutionMonitorStateSchema = z.object({
   recoveryPolicy: z.enum(ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES).nullable().optional().default(null),
   clearedAt: z.string().datetime().nullable(),
   clearReason: z.enum(ISSUE_EXECUTION_MONITOR_CLEAR_REASONS).nullable(),
+  condition: z.string().trim().min(1).max(2000).nullable().optional().default(null),
+  evaluatorModelProfile: z.enum(MODEL_PROFILE_KEYS).nullable().optional().default(null),
+  spendCapCents: z.number().int().positive().max(10_000_000).nullable().optional().default(null),
+  lastVerdict: z.enum(GOAL_CONDITION_VERDICTS).nullable().optional().default(null),
+  lastVerdictReason: z.string().max(2000).nullable().optional().default(null),
+  lastJudgeRunId: z.string().uuid().nullable().optional().default(null),
+  spentCentsAtLastVerdict: z.number().int().nonnegative().nullable().optional().default(null),
 });
 
 export const issueReviewRequestSchema = z.object({

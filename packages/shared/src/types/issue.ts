@@ -25,6 +25,7 @@ import type {
   IssueThreadInteractionKind,
   IssueThreadInteractionStatus,
   IssueStatus,
+  GoalConditionVerdict,
 } from "../constants.js";
 import type { Goal } from "./goal.js";
 import type { EscalationGrantWithSpend } from "./escalation-grant.js";
@@ -441,6 +442,15 @@ export interface IssueExecutionMonitorPolicy {
   timeoutAt?: string | null;
   maxAttempts?: number | null;
   recoveryPolicy?: IssueExecutionMonitorRecoveryPolicy | null;
+  /**
+   * DUR-32: plain-English finish line for kind "goal_condition" — written by whoever
+   * creates the task, re-checked by an independent judge after each round.
+   */
+  condition?: string | null;
+  /** Model profile the independent judge runs on (deliberately cheap/fast; defaults to "cheap"). */
+  evaluatorModelProfile?: ModelProfileKey | null;
+  /** Hard spend cap in cents across all cost_events for this issue before the loop must stop. */
+  spendCapCents?: number | null;
 }
 
 export interface IssueExecutionPolicy {
@@ -458,6 +468,7 @@ export interface IssueExecutionMonitorState {
   status: IssueExecutionMonitorStateStatus;
   nextCheckAt: string | null;
   lastTriggeredAt: string | null;
+  /** For kind "goal_condition", doubles as the judged round number (one judge pass per round). */
   attemptCount: number;
   notes: string | null;
   scheduledBy: IssueMonitorScheduledBy | null;
@@ -469,6 +480,14 @@ export interface IssueExecutionMonitorState {
   recoveryPolicy?: IssueExecutionMonitorRecoveryPolicy | null;
   clearedAt: string | null;
   clearReason: IssueExecutionMonitorClearReason | null;
+  /** DUR-32 goal_condition fields. */
+  condition?: string | null;
+  evaluatorModelProfile?: ModelProfileKey | null;
+  spendCapCents?: number | null;
+  lastVerdict?: GoalConditionVerdict | null;
+  lastVerdictReason?: string | null;
+  lastJudgeRunId?: string | null;
+  spentCentsAtLastVerdict?: number | null;
 }
 
 export interface IssueReviewRequest {

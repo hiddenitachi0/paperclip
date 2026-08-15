@@ -89,6 +89,10 @@ function monitorMetadataFromPolicy(monitor: IssueExecutionMonitorPolicy) {
     timeoutAt: monitor.timeoutAt ?? null,
     maxAttempts: monitor.maxAttempts ?? null,
     recoveryPolicy: monitor.recoveryPolicy ?? null,
+    // DUR-32: carried through so the UI can show the finish line before round 1 has run.
+    condition: monitor.condition ?? null,
+    evaluatorModelProfile: monitor.evaluatorModelProfile ?? null,
+    spendCapCents: monitor.spendCapCents ?? null,
   };
 }
 
@@ -100,6 +104,9 @@ function monitorMetadataFromState(state: IssueExecutionMonitorState | null | und
     timeoutAt: state?.timeoutAt ?? null,
     maxAttempts: state?.maxAttempts ?? null,
     recoveryPolicy: state?.recoveryPolicy ?? null,
+    condition: state?.condition ?? null,
+    evaluatorModelProfile: state?.evaluatorModelProfile ?? null,
+    spendCapCents: state?.spendCapCents ?? null,
   };
 }
 
@@ -988,12 +995,19 @@ export function buildInitialIssueMonitorFields(input: {
   }
 
   const monitorState = buildScheduledMonitorState(null, input.policy.monitor);
+  // DUR-32: goal_condition is driven by the run-finish hook (goal-condition-judge.ts), not
+  // the periodic monitor sweep (tickDueIssueMonitors) — monitorNextCheckAt must stay null so
+  // that generic external_service-style sweep never claims and mis-dispatches it.
+  const isGoalCondition = input.policy.monitor.kind === "goal_condition";
   return {
-    monitorNextCheckAt: new Date(input.policy.monitor.nextCheckAt),
+    monitorNextCheckAt: isGoalCondition ? null : new Date(input.policy.monitor.nextCheckAt),
     monitorWakeRequestedAt: null,
     monitorNotes: input.policy.monitor.notes ?? null,
     monitorScheduledBy: input.policy.monitor.scheduledBy,
-    executionState: executionStateWithMonitor(null, monitorState) as Record<string, unknown> | null,
+    executionState: executionStateWithMonitor(
+      null,
+      isGoalCondition ? { ...monitorState, nextCheckAt: null } : monitorState,
+    ) as Record<string, unknown> | null,
   };
 }
 

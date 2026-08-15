@@ -127,6 +127,7 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
+import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -5862,6 +5863,27 @@ export function issueRoutes(
     });
     if (selfReviewGateResult) {
       res.status(409).json({ error: selfReviewGateResult.message });
+      return;
+    }
+    // DUR-32: composes with self-review above — self-review runs first, then (if the issue
+    // has a plain-English goal condition set) an independent judge decides whether another
+    // round is needed before the transition to in_review/done is allowed through.
+    const goalConditionGateResult = await evaluateGoalConditionDoneGate({
+      db,
+      wakeup: heartbeat.wakeup,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        executionPolicy: existing.executionPolicy,
+        executionState: existing.executionState,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (goalConditionGateResult) {
+      res.status(409).json({ error: goalConditionGateResult.message });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =
