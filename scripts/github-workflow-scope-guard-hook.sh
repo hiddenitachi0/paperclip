@@ -30,17 +30,27 @@ log "detected a GitHub push rejected for missing 'workflow' token scope"
 FEEDBACK="That push was rejected by GitHub because this project's GitHub token doesn't have the 'workflow' permission, so it can't touch files under .github/workflows/. Do NOT work around this by reverting or dropping the CI/workflow change — leave it as-is; that would silently degrade CI. A plain-language notification has been filed on this issue explaining how the operator can fix the token. If you can't make progress without this push landing, say so and name the missing GitHub token 'workflow' scope as the blocker."
 
 file_operator_comment() {
-  [[ -n "${PAPERCLIP_API_URL:-}" && -n "${PAPERCLIP_API_KEY:-}" ]] || return 0
+  [[ -n "${PAPERCLIP_API_KEY:-}" ]] || return 0
   local issue_id="${PAPERCLIP_TASK_ID:-}"
   [[ -n "$issue_id" ]] || return 0
   command -v curl >/dev/null 2>&1 || return 0
+
+  # Direct curls to $PAPERCLIP_API_URL hang from inside the agent sandbox on
+  # this fork (that hostname isn't reachable directly). When the sandbox's
+  # local plain-HTTP proxy is available, use it instead; otherwise fall back
+  # to the real API URL for environments without that proxy.
+  local api_base="${PAPERCLIP_API_URL:-}"
+  if [[ -n "${PAPERCLIP_LISTEN_PORT:-}" ]]; then
+    api_base="http://127.0.0.1:$PAPERCLIP_LISTEN_PORT"
+  fi
+  [[ -n "$api_base" ]] || return 0
 
   # De-dupe: only file the operator comment once per issue, even though this
   # hook may see the same rejection repeated across retried pushes.
   local marker="<!-- github-workflow-scope-guard -->"
   local existing already_filed
-  existing="$(curl -sS -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-    "$PAPERCLIP_API_URL/api/issues/$issue_id/comments" 2>/dev/null)" || existing=""
+  existing="$(curl -sS --max-time 10 -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+    "$api_base/api/issues/$issue_id/comments" 2>/dev/null)" || existing=""
   already_filed="false"
   if [[ -n "$existing" ]]; then
     already_filed="$(printf '%s' "$existing" | jq -r --arg marker "$marker" '
@@ -64,8 +74,8 @@ The agent has been told not to work around this by reverting the change."
 
   local payload response
   payload="$(jq -nc --arg comment "$comment_body" '{comment: $comment}')"
-  response="$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH \
-    "$PAPERCLIP_API_URL/api/issues/$issue_id" \
+  response="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X PATCH \
+    "$api_base/api/issues/$issue_id" \
     -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
     ${PAPERCLIP_RUN_ID:+-H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"} \
     -H 'Content-Type: application/json' \
