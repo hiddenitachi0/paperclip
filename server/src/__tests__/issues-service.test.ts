@@ -3032,6 +3032,132 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(child.requestDepth).toBe(MAX_ISSUE_REQUEST_DEPTH);
   });
+
+  describe("createChild assigneeAdapterOverrides inheritance", () => {
+    async function seedParent(assigneeAdapterOverrides: Record<string, unknown> | null) {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const projectId = randomUUID();
+      const agentId = randomUUID();
+      const parentIssueId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(goals).values({
+        id: goalId,
+        companyId,
+        title: "Ship child helpers",
+        level: "task",
+        status: "active",
+      });
+      await db.insert(projects).values({
+        id: projectId,
+        companyId,
+        goalId,
+        name: "Workspace project",
+        status: "in_progress",
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Boss",
+        role: "manager",
+        status: "active",
+        adapterType: "claude_local",
+        adapterConfig: { model: "saved-agent-model", effort: "medium" },
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: parentIssueId,
+        companyId,
+        projectId,
+        goalId,
+        title: "Parent issue",
+        status: "in_progress",
+        priority: "medium",
+        requestDepth: 0,
+        assigneeAgentId: agentId,
+        assigneeAdapterOverrides,
+      });
+
+      return { companyId, projectId, goalId, agentId, parentIssueId };
+    }
+
+    it("defaults the child override from the parent's model/effort override when the child leaves it unset", async () => {
+      const { parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+      });
+
+      expect(child.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+    });
+
+    it("keeps the creator's explicit child override instead of the parent's", async () => {
+      const { parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-haiku-4-5" } },
+      });
+
+      expect(child.assigneeAdapterOverrides).toEqual({
+        adapterConfig: { model: "claude-haiku-4-5" },
+      });
+    });
+
+    it("explicit null child override wins over the parent's override", async () => {
+      const { parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+        assigneeAdapterOverrides: null,
+      });
+
+      expect(child.assigneeAdapterOverrides).toBeNull();
+    });
+
+    it("leaves the child override unset when the parent has no model/effort override", async () => {
+      const { parentIssueId } = await seedParent(null);
+
+      const { issue: child } = await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+      });
+
+      expect(child.assigneeAdapterOverrides).toBeNull();
+    });
+
+    it("never writes the inherited override back to the agent's saved adapterConfig", async () => {
+      const { agentId, parentIssueId } = await seedParent({
+        adapterConfig: { model: "claude-opus-5", effort: "high" },
+      });
+
+      await svc.createChild(parentIssueId, {
+        title: "Child helper",
+        status: "todo",
+      });
+
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, agentId));
+      expect(agentRow?.adapterConfig).toEqual({ model: "saved-agent-model", effort: "medium" });
+    });
+  });
 });
 
 describeEmbeddedPostgres("issueService blockers and dependency wake readiness", () => {

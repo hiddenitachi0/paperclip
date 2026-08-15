@@ -505,6 +505,39 @@ function appendAcceptanceCriteriaToDescription(description: string | null | unde
   return base ? `${base}\n\n${criteriaMarkdown}` : criteriaMarkdown;
 }
 
+const CHILD_INHERITABLE_ADAPTER_CONFIG_KEYS = ["model", "effort", "modelReasoningEffort", "variant"] as const;
+
+/**
+ * Derives the assigneeAdapterOverrides a child issue should default to when its
+ * creator didn't set its own. Only carries forward the parent's model/effort
+ * override (adapterConfig.model|effort|modelReasoningEffort|variant) -- never
+ * `useProjectWorkspace`, and never resolves a `modelProfile` preset (e.g.
+ * "cheap") into concrete values, since that resolution is agent/adapter
+ * dependent and happens at run time, not at issue-creation time.
+ */
+function deriveChildAssigneeAdapterOverridesFromParent(
+  parentAssigneeAdapterOverrides: unknown,
+): Record<string, unknown> | null {
+  if (
+    !parentAssigneeAdapterOverrides ||
+    typeof parentAssigneeAdapterOverrides !== "object" ||
+    Array.isArray(parentAssigneeAdapterOverrides)
+  ) {
+    return null;
+  }
+  const parentAdapterConfig = (parentAssigneeAdapterOverrides as Record<string, unknown>).adapterConfig;
+  if (!parentAdapterConfig || typeof parentAdapterConfig !== "object" || Array.isArray(parentAdapterConfig)) {
+    return null;
+  }
+  const config = parentAdapterConfig as Record<string, unknown>;
+  const hasModelOrEffort = CHILD_INHERITABLE_ADAPTER_CONFIG_KEYS.some((key) => {
+    const value = config[key];
+    return typeof value === "string" && value.length > 0;
+  });
+  if (!hasModelOrEffort) return null;
+  return { adapterConfig: { ...config } };
+}
+
 function normalizeAcceptedPlanDecompositionFingerprintValue(value: unknown): unknown {
   if (value === undefined) return null;
   if (
@@ -4977,8 +5010,19 @@ export function issueService(db: Db) {
         actorUserId,
         ...issueData
       } = data;
+      // Task-scoped inheritance only: this never touches agents.adapterConfig,
+      // it only defaults the child issue's own override when the creator left
+      // assigneeAdapterOverrides unset entirely (explicit values, including
+      // explicit null, always win).
+      const inheritedAssigneeAdapterOverrides =
+        "assigneeAdapterOverrides" in issueData
+          ? undefined
+          : deriveChildAssigneeAdapterOverridesFromParent(parent.assigneeAdapterOverrides);
       let child = await issueService(db).create(parent.companyId, {
         ...issueData,
+        ...(inheritedAssigneeAdapterOverrides !== undefined
+          ? { assigneeAdapterOverrides: inheritedAssigneeAdapterOverrides }
+          : {}),
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
         goalId: issueData.goalId ?? parent.goalId,
