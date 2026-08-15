@@ -32,9 +32,18 @@ printf '%s' "$COMMAND" | grep -Eq '(^|[|&;[:space:]])git[[:space:]]+.*push|(^|[|
 # Match on the tool_response portion (falling back to the whole payload if
 # that field is missing/reshaped) rather than including tool_input, so the
 # command string itself can't self-match.
+#
+# The needle is built from two halves concatenated at runtime, rather than
+# written as one literal, so the contiguous rejection string never appears
+# verbatim anywhere in this file. Any single literal here would otherwise
+# make a git/gh command whose output includes a diff/cat of this very
+# script (e.g. someone reviewing this hook) self-trigger the guard.
+REJECTION_NEEDLE_PART1='refusing to allow a Personal Access Token to'
+REJECTION_NEEDLE_PART2=' create or update workflow'
+REJECTION_NEEDLE="$REJECTION_NEEDLE_PART1$REJECTION_NEEDLE_PART2"
 RESPONSE_TEXT="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_response // empty' 2>/dev/null)"
 [[ -n "$RESPONSE_TEXT" ]] || RESPONSE_TEXT="$HOOK_INPUT"
-printf '%s' "$RESPONSE_TEXT" | grep -Fq 'without `workflow` scope' || exit 0
+printf '%s' "$RESPONSE_TEXT" | grep -Fq "$REJECTION_NEEDLE" || exit 0
 
 log "detected a GitHub push rejected for missing 'workflow' token scope"
 
