@@ -202,6 +202,8 @@ export const issueExecutionPolicySchema = z.object({
   monitor: issueExecutionMonitorPolicySchema.optional().nullable(),
   reviewPreset: lowTrustReviewPresetPolicySchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
+  // Opt-out for the automatic self-review pass gate (default on for code issues). See DUR-22.
+  selfReview: z.boolean().optional(),
 });
 
 export const issueExecutionMonitorStateSchema = z.object({

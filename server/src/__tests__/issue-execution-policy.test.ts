@@ -43,6 +43,22 @@ describe("normalizeIssueExecutionPolicy", () => {
     expect(normalizeIssueExecutionPolicy({ stages: [] })).toBeNull();
   });
 
+  it("returns a policy carrying only selfReview:false even with no stages/monitor/preset", () => {
+    const result = normalizeIssueExecutionPolicy({ stages: [], selfReview: false });
+    expect(result).not.toBeNull();
+    expect(result!.selfReview).toBe(false);
+    expect(result!.stages).toHaveLength(0);
+  });
+
+  it("omits selfReview from the normalized policy when not provided", () => {
+    const result = normalizeIssueExecutionPolicy({
+      stages: [
+        { type: "review", participants: [{ type: "agent", agentId: qaAgentId }] },
+      ],
+    });
+    expect(result!.selfReview).toBeUndefined();
+  });
+
   it("throws when all participants are invalid (missing agentId)", () => {
     expect(() =>
       normalizeIssueExecutionPolicy({
