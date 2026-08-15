@@ -325,9 +325,15 @@ def notify_interactions(state, bots):
             text += "\nYour OK is needed before this continues."
             text += f"\n\n[Open in Paperclip]({bot['uiBase']}/issues/{issue_ref}#interaction-{iid})"
             # Only a plain confirmation resolves with a single tap; checkbox
-            # selections, question forms, and task drafts need the full form
-            # in the issue thread, same split as the Needs-you lane in the UI.
-            kb = None if it.get("kind") != "request_confirmation" else {"inline_keyboard": [[
+            # selections, question forms, and task drafts need the full form in
+            # the issue thread, same split as the Needs-you lane in the UI. A
+            # confirmation that requires a decline reason also needs the full
+            # form — a Decline tap with no reason would just fail server-side.
+            supports_inline_decision = (
+                it.get("kind") == "request_confirmation"
+                and (it.get("payload") or {}).get("rejectRequiresReason") is not True
+            )
+            kb = None if not supports_inline_decision else {"inline_keyboard": [[
                 {"text": "✅ Approve", "callback_data": f"iaccept:{issue_id}:{iid}"},
                 {"text": "❌ Decline", "callback_data": f"ireject:{issue_id}:{iid}"},
             ]]}

@@ -662,7 +662,10 @@ function InteractionRow({
   const threadHref = `/issues/${issueRef}#interaction-${interaction.id}`;
   // Only a plain confirmation resolves with a single tap; checkbox selections,
   // question forms, and task drafts need the full form in the issue thread.
-  const supportsInlineDecision = interaction.kind === "request_confirmation";
+  // A confirmation that requires a decline reason also needs the full form —
+  // an inline Decline tap with no reason would just fail silently.
+  const supportsInlineDecision =
+    interaction.kind === "request_confirmation" && interaction.payload.rejectRequiresReason !== true;
 
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: queryKeys.interactions.pendingForCompany(companyId) });
