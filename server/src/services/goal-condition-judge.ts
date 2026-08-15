@@ -79,13 +79,29 @@ export function nextGoalConditionRound(state: IssueExecutionMonitorState | null 
   return (state?.attemptCount ?? 0) + 1;
 }
 
-/** True once a judge has already confirmed the condition met for the CURRENT round's work. */
+/**
+ * How long a "met" verdict is trusted to wave a transition through without re-judging.
+ *
+ * A verdict is only meant to cover the SAME work session's retry of the handoff it
+ * unblocked (the worker gets 409'd, the judge says met, the worker's resumed wake retries
+ * the same PATCH) — not an indefinitely-reusable pass. Round numbers alone can't tell those
+ * apart: they only increment when a judge runs, not when new work happens, so a reopened
+ * issue that gets new work and is closed again would otherwise reuse a stale "met" from
+ * hours or days earlier without ever being re-checked. Bounding by recency closes that gap
+ * without needing to track heartbeat run lineage.
+ */
+const GOAL_CONDITION_VERDICT_TRUST_WINDOW_MS = 30 * 60 * 1000;
+
+/** True once a judge has already confirmed the condition met for the CURRENT round's work, recently enough to still trust it. */
 export function goalConditionAlreadyMetForRound(
   state: IssueExecutionMonitorState | null | undefined,
   round: number,
+  now: Date = new Date(),
 ): boolean {
   if (!state) return false;
-  return state.lastVerdict === "met" && state.attemptCount >= round - 1;
+  if (state.lastVerdict !== "met" || state.attemptCount < round - 1) return false;
+  if (!state.lastTriggeredAt) return false;
+  return now.getTime() - new Date(state.lastTriggeredAt).getTime() <= GOAL_CONDITION_VERDICT_TRUST_WINDOW_MS;
 }
 
 export function buildGoalConditionJudgeIdempotencyKey(input: { issueId: string; sourceRunId: string; round: number }) {

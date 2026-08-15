@@ -82,9 +82,21 @@ describe("nextGoalConditionRound / goalConditionAlreadyMetForRound", () => {
   });
 
   it("is not met until a judge verdict says so for that round", () => {
-    expect(goalConditionAlreadyMetForRound(null, 1)).toBe(false);
-    expect(goalConditionAlreadyMetForRound({ lastVerdict: "not_met", attemptCount: 1 } as any, 2)).toBe(false);
-    expect(goalConditionAlreadyMetForRound({ lastVerdict: "met", attemptCount: 1 } as any, 2)).toBe(true);
+    const now = new Date("2026-08-15T12:00:00Z");
+    const recent = { lastVerdict: "met", attemptCount: 1, lastTriggeredAt: "2026-08-15T11:59:00Z" } as any;
+    expect(goalConditionAlreadyMetForRound(null, 1, now)).toBe(false);
+    expect(goalConditionAlreadyMetForRound({ lastVerdict: "not_met", attemptCount: 1 } as any, 2, now)).toBe(false);
+    expect(goalConditionAlreadyMetForRound(recent, 2, now)).toBe(true);
+  });
+
+  it("stops trusting a met verdict once it's stale (e.g. the issue was reopened long after)", () => {
+    const now = new Date("2026-08-15T12:00:00Z");
+    const stale = { lastVerdict: "met", attemptCount: 1, lastTriggeredAt: "2026-08-15T11:00:00Z" } as any;
+    expect(goalConditionAlreadyMetForRound(stale, 2, now)).toBe(false);
+  });
+
+  it("never trusts a met verdict with no lastTriggeredAt recorded", () => {
+    expect(goalConditionAlreadyMetForRound({ lastVerdict: "met", attemptCount: 1 } as any, 2)).toBe(false);
   });
 });
 
