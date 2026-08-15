@@ -33,7 +33,27 @@ export interface IntegrationKeyDescriptor {
    * looked up by name (used by server-side by-name resolution fallbacks).
    */
   secretNameHints?: readonly string[];
+  /**
+   * Plain-language, non-technical explanation of which GitHub permissions this
+   * token needs and how to add them, for operators who don't already know what
+   * an OAuth "scope" is. Shown as setup guidance next to the token field
+   * (DUR-21) so operators grant the right access up front instead of
+   * discovering a missing permission only after an agent's push is rejected.
+   */
+  scopeGuidance?: string;
 }
+
+/**
+ * Written for an operator who has never heard the word "scope" — explains
+ * which boxes to check on GitHub and why, in plain language. See DUR-21.
+ */
+const GITHUB_TOKEN_SCOPE_GUIDANCE =
+  "This project always needs a token that can read and write the repo's files: on GitHub, under " +
+  "Settings → Developer settings → Personal access tokens, that's the \"repo\" checkbox (classic token) " +
+  "or \"Contents: Read and write\" (fine-grained token). If this repo has automated checks that run on " +
+  "GitHub (files under .github/workflows/) and you want agents to be able to fix those too, also check " +
+  "\"workflow\" (classic) or \"Actions: Read and write\" (fine-grained) — without it, GitHub silently " +
+  "blocks any push that touches those files.";
 
 export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
   {
@@ -44,6 +64,7 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
     category: "vcs",
     gitPush: true,
     secretNameHints: ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP_GITHUB_TOKEN"],
+    scopeGuidance: GITHUB_TOKEN_SCOPE_GUIDANCE,
   },
   {
     key: "GH_TOKEN",
@@ -52,6 +73,7 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
     category: "vcs",
     gitPush: true,
     secretNameHints: ["GH_TOKEN", "GITHUB_TOKEN"],
+    scopeGuidance: GITHUB_TOKEN_SCOPE_GUIDANCE,
   },
   {
     key: "CLAUDE_CODE_OAUTH_TOKEN",

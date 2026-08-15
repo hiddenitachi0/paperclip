@@ -779,6 +779,15 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                   </Button>
                 </div>
               )}
+              {codebase.repoUrl && (
+                <p className="text-[11px] text-muted-foreground">
+                  Agents push through a GitHub token set below under <span className="font-medium">Env</span>{" "}
+                  (<span className="font-mono">GITHUB_TOKEN</span>). It needs write access to this repo's
+                  files, plus GitHub's "workflow" permission if you want agents to be able to fix files under{" "}
+                  <span className="font-mono">.github/workflows/</span> — without it, GitHub silently blocks
+                  those pushes.
+                </p>
+              )}
             </div>
 
             <div className="space-y-1">
