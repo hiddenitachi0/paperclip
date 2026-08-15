@@ -11,6 +11,7 @@ const mockIssueService = vi.hoisted(() => ({
 
 const mockInteractionService = vi.hoisted(() => ({
   listForIssue: vi.fn(),
+  listPendingForCompany: vi.fn(),
   create: vi.fn(),
   acceptInteraction: vi.fn(),
   acceptSuggestedTasks: vi.fn(),
@@ -181,6 +182,7 @@ describe.sequential("issue thread interaction routes", () => {
     vi.clearAllMocks();
     mockIssueService.getById.mockResolvedValue(createIssue());
     mockInteractionService.listForIssue.mockResolvedValue([]);
+    mockInteractionService.listPendingForCompany.mockResolvedValue([]);
     mockInteractionService.expireRequestConfirmationsSupersededByHistoricalComments.mockResolvedValue([]);
     mockInteractionService.create.mockResolvedValue({
       id: "interaction-1",
@@ -388,6 +390,42 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+  });
+
+  it("lists pending operator-directed interactions across a company", async () => {
+    mockInteractionService.listPendingForCompany.mockResolvedValue([
+      {
+        id: "interaction-1",
+        companyId: "company-1",
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "request_confirmation",
+        status: "pending",
+        issueIdentifier: "PAP-1714",
+        issueTitle: "Persist interactions",
+        issueStatus: "in_review",
+        createdByAgentName: "Dashboard Boss",
+      },
+    ]);
+    const app = await createApp();
+
+    const res = await request(app).get("/api/companies/company-1/interactions?status=pending");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        id: "interaction-1",
+        issueIdentifier: "PAP-1714",
+        createdByAgentName: "Dashboard Boss",
+      }),
+    ]);
+    expect(mockInteractionService.listPendingForCompany).toHaveBeenCalledWith("company-1");
+  });
+
+  it("rejects an unsupported status filter on the company interactions list", async () => {
+    const app = await createApp();
+
+    const res = await request(app).get("/api/companies/company-1/interactions?status=accepted");
+    expect(res.status).toBe(400);
+    expect(mockInteractionService.listPendingForCompany).not.toHaveBeenCalled();
   });
 
   it("accepts suggested tasks and wakes created assignees plus the current assignee", async () => {

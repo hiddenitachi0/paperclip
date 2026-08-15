@@ -154,6 +154,7 @@ describe("issue subresource commands", () => {
 
     try {
       await run(["issue", "interactions", ISSUE_ID]);
+      await run(["issue", "interactions:pending", "--company-id", COMPANY_ID]);
       await run([
         "issue", "interaction:create", ISSUE_ID,
         "--payload-json", JSON.stringify({
@@ -194,6 +195,7 @@ describe("issue subresource commands", () => {
 
     expect(fetchMock.mock.calls.map((call) => [call[1]?.method ?? "GET", call[0]])).toEqual([
       ["GET", `http://localhost:3100/api/issues/${ISSUE_ID}/interactions`],
+      ["GET", `http://localhost:3100/api/companies/${COMPANY_ID}/interactions?status=pending`],
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/interactions`],
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/interactions/${INTERACTION_ID}/accept`],
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/interactions/${INTERACTION_ID}/accept`],
@@ -217,7 +219,7 @@ describe("issue subresource commands", () => {
       ["GET", `http://localhost:3100/api/issues/${ISSUE_ID}/feedback-votes`],
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/feedback-votes`],
     ]);
-    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body))).toEqual({
       selectedOptionIds: ["file-a", "file-b"],
     });
   });

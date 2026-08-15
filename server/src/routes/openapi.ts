@@ -3129,6 +3129,18 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/interactions",
+  tags: ["issues"],
+  summary: "List pending operator-directed interactions across a company",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({ status: z.literal("pending").optional() }),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/issues/{id}/interactions",
   tags: ["issues"],

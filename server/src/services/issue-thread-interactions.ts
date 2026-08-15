@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -67,6 +67,13 @@ type ResolvedInteractionResult = {
 
 type IssueThreadInteractionRow = typeof issueThreadInteractions.$inferSelect;
 type IssueTouchDb = Pick<Db, "update">;
+
+export type PendingCompanyInteraction = IssueThreadInteraction & {
+  issueIdentifier: string | null;
+  issueTitle: string;
+  issueStatus: string;
+  createdByAgentName: string | null;
+};
 
 type IssueResolutionContext = {
   id: string;
@@ -940,6 +947,38 @@ export function issueThreadInteractionService(db: Db) {
         .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id));
 
       return rows.map((row) => hydrateInteraction(row));
+    },
+
+    // Every interaction kind can only be accepted/rejected by a board actor
+    // (see rejectAgentIssueThreadInteractionResolution in routes/issues.ts) — a
+    // row with status "pending" is by construction an unresolved ask directed at
+    // the operator, never an agent-to-agent handoff. This powers the Needs-you
+    // lane (DUR-30), so it intentionally does not take a broader status filter.
+    listPendingForCompany: async (companyId: string): Promise<PendingCompanyInteraction[]> => {
+      const rows = await db
+        .select({
+          interaction: issueThreadInteractions,
+          issueIdentifier: issues.identifier,
+          issueTitle: issues.title,
+          issueStatus: issues.status,
+          createdByAgentName: agents.name,
+        })
+        .from(issueThreadInteractions)
+        .innerJoin(issues, eq(issueThreadInteractions.issueId, issues.id))
+        .leftJoin(agents, eq(issueThreadInteractions.createdByAgentId, agents.id))
+        .where(and(
+          eq(issueThreadInteractions.companyId, companyId),
+          eq(issueThreadInteractions.status, "pending"),
+        ))
+        .orderBy(desc(issueThreadInteractions.createdAt));
+
+      return rows.map((row) => ({
+        ...hydrateInteraction(row.interaction),
+        issueIdentifier: row.issueIdentifier,
+        issueTitle: row.issueTitle,
+        issueStatus: row.issueStatus,
+        createdByAgentName: row.createdByAgentName,
+      }));
     },
 
     getById: async (interactionId: string) => {

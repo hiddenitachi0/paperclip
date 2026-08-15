@@ -147,6 +147,10 @@ interface IssueRecoveryResolveOptions extends BaseClientOptions {
   resolutionNote?: string;
 }
 
+interface InteractionPendingListOptions extends BaseClientOptions {
+  companyId?: string;
+}
+
 interface InteractionAcceptOptions extends BaseClientOptions {
   selectedClientKeys?: string;
   selectedOptionIds?: string;
@@ -719,6 +723,25 @@ export function registerIssueCommands(program: Command): void {
           handleCommandError(err);
         }
       }),
+  );
+
+  addCommonClientOptions(
+    issue
+      .command("interactions:pending")
+      .description("List operator-directed interactions still pending across a company")
+      .option("-C, --company-id <id>", "Company ID")
+      .action(async (opts: InteractionPendingListOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const interactions = await ctx.api.get(
+            `${apiPath`/api/companies/${ctx.companyId}/interactions`}?status=pending`,
+          );
+          printOutput(interactions, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
   );
 
   addCommonClientOptions(
