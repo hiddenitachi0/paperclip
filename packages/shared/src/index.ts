@@ -1,5 +1,11 @@
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
+  formatApprovalTechnicalReference,
+  formatApprovalTitle,
+  stripLegacyTitlePrefix,
+  type ApprovalTechnicalReference,
+} from "./approval-title.js";
+export {
   getAgentOrgChainHealth,
   getAgentWorkEligibility,
   isAgentAssignableToWork,

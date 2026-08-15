@@ -109,6 +109,62 @@ async function createAgentApp(options: { runId?: string; contextSnapshot?: Recor
   return app;
 }
 
+// Distinguishes issues/projects/companies lookups by the actual table object
+// passed to `.from(...)`, mirroring how routes/approvals.ts resolves the
+// project label an approval title should lead with. Imports `@paperclipai/db`
+// dynamically so it resolves the same fresh module instance `vi.resetModules()`
+// forces on the (also dynamically imported) route module under test.
+async function createTitleResolutionDb(opts: {
+  issueProjectId?: string | null;
+  projectName?: string | null;
+  companyName?: string | null;
+}) {
+  const { companies, issues, projects } = await import("@paperclipai/db");
+  return {
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          then: async (resolve: (rows: unknown[]) => unknown) => {
+            if (table === issues) {
+              return resolve(opts.issueProjectId ? [{ projectId: opts.issueProjectId }] : []);
+            }
+            if (table === projects) {
+              return resolve(opts.projectName ? [{ name: opts.projectName }] : []);
+            }
+            if (table === companies) {
+              return resolve(opts.companyName ? [{ name: opts.companyName }] : []);
+            }
+            return resolve([]);
+          },
+        })),
+      })),
+    })),
+  } as any;
+}
+
+async function createAgentAppWithDb(db: any) {
+  const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
+    import("../middleware/index.js"),
+    import("../routes/approvals.js"),
+  ]);
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor = {
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      runId: "run-1",
+      source: "api_key",
+      isInstanceAdmin: false,
+    };
+    next();
+  });
+  app.use("/api", approvalRoutes(db));
+  app.use(errorHandler);
+  return app;
+}
+
 describe("approval routes idempotent retries", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -367,6 +423,62 @@ describe("approval routes idempotent retries", () => {
         action: "approval.created",
       }),
     );
+  });
+
+  it("rewrites payload.title to '<project> — <what this does>' from the linked issue's project (DUR-24)", async () => {
+    mockApprovalService.create.mockResolvedValue({ id: "approval-title-1" });
+
+    const db = await createTitleResolutionDb({
+      issueProjectId: "project-1",
+      projectName: "Nordstrand dashboard",
+    });
+    const res = await request(await createAgentAppWithDb(db))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        issueIds: ["00000000-0000-0000-0000-000000000001"],
+        payload: { title: "put the 2026 look, translations and Finance fixes live" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          title: "Nordstrand dashboard — put the 2026 look, translations and Finance fixes live",
+        }),
+      }),
+    );
+  });
+
+  it("strips a legacy PR-number title prefix and lifts prNumber/repo into a technicalReference line, never the title (DUR-24)", async () => {
+    mockApprovalService.create.mockResolvedValue({ id: "approval-title-2" });
+
+    const db = await createTitleResolutionDb({ companyName: "Paperclip Fork Co" });
+    const res = await request(await createAgentAppWithDb(db))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: {
+          kind: "merge_pr",
+          title: "Merge PR #12 — sub-tasks inherit the model and effort you set on a task",
+          repo: "fork",
+          prNumber: 12,
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          title: "Paperclip Fork Co — sub-tasks inherit the model and effort you set on a task",
+          technicalReference: "Technical reference: fork repo, pull request #12",
+        }),
+      }),
+    );
+    const [, createArg] = mockApprovalService.create.mock.calls[0];
+    expect(createArg.payload.title).not.toMatch(/#12/);
   });
 
   it("rejects deploy-request approvals whose payload does not match deployRequestPayloadSchema", async () => {

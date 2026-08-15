@@ -40,6 +40,15 @@ export function approvalSubject(payload?: Record<string, unknown> | null): strin
   );
 }
 
+/**
+ * Small secondary line for the approval detail view — PR number, repo, branch,
+ * commit. The title itself never carries these (see DUR-24); this is where an
+ * agent/operator who needs the technical trail finds it.
+ */
+export function approvalTechnicalReference(payload?: Record<string, unknown> | null): string | null {
+  return firstNonEmptyString(payload?.technicalReference);
+}
+
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
 export function approvalLabel(type: string, payload?: Record<string, unknown> | null): string {
   const base = typeLabel[type] ?? type;

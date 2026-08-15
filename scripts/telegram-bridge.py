@@ -175,6 +175,11 @@ def notify_approvals(state, bots):
             text = f"*{approval_title(a)}*"
             if detail:
                 text += f"\n{detail[:300]}"
+            # PR/branch/commit trail, if any, stays a small secondary line —
+            # never the headline. See DUR-24.
+            technical_reference = p.get("technicalReference")
+            if technical_reference:
+                text += f"\n_{technical_reference}_"
             if escalated and requester:
                 text += f"\n_(on behalf of {names.get(requester, 'a teammate')})_"
             if is_cred:

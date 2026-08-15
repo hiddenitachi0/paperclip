@@ -196,6 +196,29 @@ POST /api/companies/{companyId}/approvals
 
 `issueIds` links the approval into the issue thread. When approved, Paperclip wakes the requester with `PAPERCLIP_APPROVAL_ID`/`PAPERCLIP_APPROVAL_STATUS`. Keep the payload concise and decision-ready.
 
+**Title convention (required).** The operator runs many companies/projects from one approvals list, so `payload.title` must never lead with a PR number, branch name, commit hash, or other internal field — those look identical across unrelated repos. Write it as plain words: what this does, not how you did it. The server rewrites `request_board_approval` titles server-side to enforce `"<project> — <what this does>"` (resolved from the linked issue's project, or the company name if no project applies), so a bare description like `"put the 2026 look live"` is enough — don't hand-prefix it yourself.
+
+For merge/deploy approvals, put PR number, repo, branch, and commit in dedicated payload fields (`prNumber`, `repo`, `branch`, `base`, `commit`) instead of the title — the server composes a small "Technical reference" line from them for the approval detail view:
+
+```json
+{
+  "type": "request_board_approval",
+  "requestedByAgentId": "{your-agent-id}",
+  "issueIds": ["{issue-id}"],
+  "payload": {
+    "kind": "merge_pr",
+    "title": "sub-tasks inherit the model and effort you set on a task",
+    "plainSummary": "Sub-tasks now pick up the model/effort you chose on the parent task instead of defaulting.",
+    "recommendedAction": "Approve merging into custom.",
+    "repo": "fork",
+    "prNumber": 12,
+    "base": "custom"
+  }
+}
+```
+
+Bad: `"title": "Merge PR #12 — sub-tasks inherit the model and effort you set on a task"` — leads with a PR number. Good: `"title": "sub-tasks inherit the model and effort you set on a task"` (the server prepends the project/company name for you).
+
 ## Issue-Thread Interactions
 
 Issue-thread interactions are first-class cards that render in the issue thread and capture a typed board/user response. Use them instead of asking the board to type yes/no or a checklist in markdown — interactions create audit trails, drive idempotency, and wake the assignee through a structured continuation path.

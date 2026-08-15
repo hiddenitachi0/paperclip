@@ -1,10 +1,12 @@
 import { Router, type Request } from "express";
 import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { companies, heartbeatRuns, issues, projects, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
   deployRequestPayloadSchema,
+  formatApprovalTechnicalReference,
+  formatApprovalTitle,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -37,6 +39,66 @@ function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(a
  */
 function isDeployRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "deploy";
+}
+
+/**
+ * Resolve the plain-words label an operator-facing approval title should lead
+ * with: the linked issue's project name, falling back to the company name.
+ * Never the repository slug — see DUR-24.
+ */
+async function resolveApprovalProjectLabel(db: Db, companyId: string, issueIds: string[]) {
+  for (const issueId of issueIds) {
+    const issueRow = await db
+      .select({ projectId: issues.projectId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    if (!issueRow?.projectId) continue;
+    const projectRow = await db
+      .select({ name: projects.name })
+      .from(projects)
+      .where(eq(projects.id, issueRow.projectId))
+      .then((rows) => rows[0] ?? null);
+    if (projectRow?.name) return projectRow.name;
+  }
+  const companyRow = await db
+    .select({ name: companies.name })
+    .from(companies)
+    .where(eq(companies.id, companyId))
+    .then((rows) => rows[0] ?? null);
+  return companyRow?.name ?? "Paperclip";
+}
+
+/**
+ * `request_board_approval` is the type agents use to file merge/deploy/etc.
+ * approvals by hand. Rewrite the title through the shared formatter so the
+ * "<project> — <what this does>" convention can't drift per agent, and lift
+ * any technical PR/branch/commit fields into a separate secondary field
+ * instead of leaving them in the headline.
+ */
+async function normalizeRequestBoardApprovalPayload(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  payload: Record<string, unknown>,
+) {
+  if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
+  const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
+  payload.title = formatApprovalTitle(projectLabel, payload.title);
+  if (!payload.technicalReference) {
+    const technicalReference = formatApprovalTechnicalReference({
+      repo: typeof payload.repo === "string" ? payload.repo : null,
+      prNumber:
+        typeof payload.prNumber === "number" || typeof payload.prNumber === "string"
+          ? payload.prNumber
+          : null,
+      branch: typeof payload.branch === "string" ? payload.branch : null,
+      base: typeof payload.base === "string" ? payload.base : null,
+      commit: typeof payload.commit === "string" ? payload.commit : null,
+    });
+    if (technicalReference) payload.technicalReference = technicalReference;
+  }
+  return payload;
 }
 
 function isStatusOnlyCheapRecoveryContext(contextSnapshot: unknown) {
@@ -149,7 +211,7 @@ export function approvalRoutes(
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       deployRequestPayloadSchema.parse(approvalInput.payload);
     }
-    const normalizedPayload =
+    let normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
             companyId,
@@ -157,6 +219,14 @@ export function approvalRoutes(
             { strictMode: strictSecretsMode },
           )
         : approvalInput.payload;
+    if (approvalInput.type === "request_board_approval") {
+      normalizedPayload = await normalizeRequestBoardApprovalPayload(
+        db,
+        companyId,
+        uniqueIssueIds,
+        normalizedPayload,
+      );
+    }
 
     const actor = getActorInfo(req);
     const approval = await svc.create(companyId, {
