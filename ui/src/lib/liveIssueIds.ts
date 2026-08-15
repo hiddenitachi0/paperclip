@@ -1,4 +1,5 @@
 import type { LiveRunForIssue } from "../api/heartbeats";
+import type { RunActivityTimestamps } from "./runLiveness";
 
 function isLiveRunStatus(status: string): boolean {
   return status === "queued" || status === "running";
@@ -10,6 +11,50 @@ export function collectLiveIssueIds(liveRuns: readonly LiveRunForIssue[] | null 
     if (run.issueId && isLiveRunStatus(run.status)) ids.add(run.issueId);
   }
   return ids;
+}
+
+/**
+ * Per-issue activity timestamps for its own live run, keyed by issue id.
+ * Feeds the plain-language "last activity" liveness badge. When an issue
+ * somehow has more than one live run, the one with the most recent activity
+ * wins.
+ */
+export function collectLiveIssueActivity(
+  liveRuns: readonly LiveRunForIssue[] | null | undefined,
+): Map<string, RunActivityTimestamps> {
+  const activity = new Map<string, RunActivityTimestamps>();
+  for (const run of liveRuns ?? []) {
+    if (!run.issueId || !isLiveRunStatus(run.status)) continue;
+    const candidate: RunActivityTimestamps = {
+      lastOutputAt: run.lastOutputAt,
+      lastUsefulActionAt: run.lastUsefulActionAt,
+      startedAt: run.startedAt,
+      createdAt: run.createdAt,
+    };
+    const existing = activity.get(run.issueId);
+    if (!existing) {
+      activity.set(run.issueId, candidate);
+      continue;
+    }
+    const candidateLatest = latestOf(candidate);
+    const existingLatest = latestOf(existing);
+    if (candidateLatest && (!existingLatest || candidateLatest > existingLatest)) {
+      activity.set(run.issueId, candidate);
+    }
+  }
+  return activity;
+}
+
+function latestOf(activity: RunActivityTimestamps): number | null {
+  const values = [activity.lastOutputAt, activity.lastUsefulActionAt, activity.startedAt, activity.createdAt];
+  let latest: number | null = null;
+  for (const value of values) {
+    if (!value) continue;
+    const t = new Date(value).getTime();
+    if (Number.isNaN(t)) continue;
+    if (latest === null || t > latest) latest = t;
+  }
+  return latest;
 }
 
 /**

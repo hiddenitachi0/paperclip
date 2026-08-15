@@ -71,6 +71,7 @@ import {
 import { workModeMetaFor } from "../lib/work-mode-meta";
 import { IssueContinuationHandoff } from "../components/IssueContinuationHandoff";
 import { IssueAttachmentsSection } from "../components/IssueAttachmentsSection";
+import { LivenessBadge } from "../components/LivenessBadge";
 import { IssueDocumentsSection } from "../components/IssueDocumentsSection";
 import { IssuePlanDecompositionsSection } from "../components/IssuePlanDecompositionsSection";
 import { IssueOutputSection } from "../components/issue-output/IssueOutputSection";
@@ -1463,6 +1464,27 @@ export function IssueDetail() {
   });
   const resolvedHasActiveRun = issue ? shouldTrackIssueActiveRun(issue) && hasActiveRun : hasActiveRun;
   const hasLiveRuns = liveRunCount > 0 || resolvedHasActiveRun;
+  // Shares the cache/queryKey of liveRunCount/hasActiveRun above (react-query
+  // dedupes by key) — this just reads the full run objects instead of the
+  // boolean/count projection, for the "last activity" liveness badge.
+  const { data: liveRunsForActivity } = useQuery<LiveRunForIssue[]>({
+    queryKey: queryKeys.issues.liveRuns(issueId!),
+    queryFn: () => heartbeatsApi.liveRunsForIssue(issueId!),
+    enabled: !!issueId,
+    refetchInterval: 3000,
+  });
+  const { data: activeRunForActivity } = useQuery<ActiveRunForIssue | null>({
+    queryKey: queryKeys.issues.activeRun(issueId!),
+    queryFn: () => heartbeatsApi.activeRunForIssue(issueId!),
+    enabled: !!issueId && (!!issue?.executionRunId || issue?.status === "in_progress"),
+    refetchInterval: liveRunCount > 0 ? false : 3000,
+  });
+  const headerLivenessRun = hasLiveRuns
+    ? (liveRunsForActivity?.find((run) => run.status === "running")
+      ?? liveRunsForActivity?.[0]
+      ?? activeRunForActivity
+      ?? null)
+    : null;
   useEffect(() => {
     if (!hasLiveRuns && locallyQueuedCommentRunIds.size > 0) {
       setLocallyQueuedCommentRunIds(new Map());
@@ -3740,6 +3762,8 @@ export function IssueDetail() {
               Live
             </span>
           )}
+
+          {hasLiveRuns && <LivenessBadge activity={headerLivenessRun} className="shrink-0" />}
 
           {issue.originKind === "routine_execution" && issue.originId && (
             <Link

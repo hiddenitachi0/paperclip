@@ -17,8 +17,10 @@ import { formatAssigneeUserLabel } from "../lib/assignees";
 import type { InboxIssueColumn } from "../lib/inbox";
 import { cn } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
+import type { RunActivityTimestamps } from "../lib/runLiveness";
 import { Identity } from "./Identity";
 import { StatusIcon } from "./StatusIcon";
+import { LivenessBadge } from "./LivenessBadge";
 
 export const issueTrailingColumns: InboxIssueColumn[] = ["assignee", "project", "workspace", "parent", "labels", "updated"];
 
@@ -136,6 +138,7 @@ export function IssueColumnPicker({
 export function InboxIssueMetaLeading({
   issue,
   isLive,
+  liveActivity,
   subtreeLiveCount = 0,
   showSubtreeLiveChip = true,
   showStatus = true,
@@ -145,6 +148,7 @@ export function InboxIssueMetaLeading({
 }: {
   issue: Issue;
   isLive: boolean;
+  liveActivity?: RunActivityTimestamps;
   subtreeLiveCount?: number;
   showSubtreeLiveChip?: boolean;
   showStatus?: boolean;
@@ -195,6 +199,7 @@ export function InboxIssueMetaLeading({
           </span>
         </span>
       )}
+      {isLive && <LivenessBadge activity={liveActivity} className="hidden sm:inline-flex" />}
       {showSubtreeLiveChip && !isLive && subtreeLiveCount > 0 && (
         <span
           className={cn(
