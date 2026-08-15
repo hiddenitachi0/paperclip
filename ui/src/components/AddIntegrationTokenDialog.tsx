@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KNOWN_INTEGRATION_ENV_KEYS, getIntegrationKey } from "@paperclipai/shared";
-import { KeyRound, Loader2 } from "lucide-react";
+import { Info, KeyRound, Loader2 } from "lucide-react";
 import { agentsApi } from "../api/agents";
 import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
@@ -257,6 +257,12 @@ export function AddIntegrationTokenDialog({
               <p className="text-xs text-destructive">
                 Must start with a letter or underscore and contain only A–Z, 0–9, _.
               </p>
+            )}
+            {descriptor?.scopeGuidance && (
+              <div className="flex gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
+                <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <p>{descriptor.scopeGuidance}</p>
+              </div>
             )}
           </div>
 
