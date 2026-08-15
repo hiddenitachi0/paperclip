@@ -289,7 +289,9 @@ export function NewProjectDialog() {
                   <HelpCircle className="h-3 w-3 text-muted-foreground/50 cursor-help" />
                 </TooltipTrigger>
                 <TooltipContent side="top" className="max-w-[240px] text-xs">
-                  Link a GitHub repository so agents can clone, read, and push code for this project.
+                  Link a GitHub repository so agents can clone, read, and push code for this project. After
+                  creating the project, add a GitHub token with write access to this repo (and "workflow"
+                  permission too, if you want agents to be able to fix files under .github/workflows/).
                 </TooltipContent>
               </Tooltip>
             </div>
