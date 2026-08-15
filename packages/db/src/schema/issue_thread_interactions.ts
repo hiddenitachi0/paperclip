@@ -5,6 +5,7 @@ import type {
 import { sql } from "drizzle-orm";
 import { pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
+import { approvals } from "./approvals.js";
 import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { issueComments } from "./issue_comments.js";
@@ -22,6 +23,10 @@ export const issueThreadInteractions = pgTable(
     idempotencyKey: text("idempotency_key"),
     sourceCommentId: uuid("source_comment_id").references(() => issueComments.id, { onDelete: "set null" }),
     sourceRunId: uuid("source_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
+    // Set when an agent files a request_confirmation/request_checkbox_confirmation for the
+    // same decision as a request_board_approval (DUR-29): deciding either one resolves both,
+    // so the operator only ever has to answer once.
+    linkedApprovalId: uuid("linked_approval_id").references(() => approvals.id, { onDelete: "set null" }),
     title: text("title"),
     summary: text("summary"),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id),
@@ -50,5 +55,6 @@ export const issueThreadInteractions = pgTable(
       .on(table.companyId, table.issueId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
     sourceCommentIdx: index("issue_thread_interactions_source_comment_idx").on(table.sourceCommentId),
+    linkedApprovalIdx: index("issue_thread_interactions_linked_approval_idx").on(table.linkedApprovalId),
   }),
 );

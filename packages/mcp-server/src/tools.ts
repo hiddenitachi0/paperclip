@@ -143,6 +143,10 @@ const createRequestConfirmationToolSchema = z.object({
   title: z.string().trim().max(240).nullable().optional(),
   summary: z.string().trim().max(1000).nullable().optional(),
   continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("none"),
+  // Only set this when a request_board_approval already covers the same decision — deciding
+  // either one then resolves both. Do not raise both a request_confirmation and a
+  // request_board_approval for the same decision unless you link them this way (DUR-29).
+  linkedApprovalId: z.string().uuid().nullable().optional(),
   payload: requestConfirmationPayloadSchema,
 });
 
@@ -154,6 +158,7 @@ const createRequestCheckboxConfirmationToolSchema = z.object({
   title: z.string().trim().max(240).nullable().optional(),
   summary: z.string().trim().max(1000).nullable().optional(),
   continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+  linkedApprovalId: z.string().uuid().nullable().optional(),
   payload: requestCheckboxConfirmationPayloadSchema,
 });
 

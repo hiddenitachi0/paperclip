@@ -1145,15 +1145,18 @@ function RequestConfirmationResolution({
   if (interaction.status === "expired") {
     const expiredByComment = outcome === "superseded_by_comment";
     const expiredByTargetChange = outcome === "stale_target";
+    const autoResolved = outcome === "auto_resolved";
     return (
       <div className="space-y-3 rounded-sm border border-amber-500/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
-          {expiredByComment ? "Expired by comment" : "Expired by target change"}
+          {autoResolved ? "Closed automatically" : expiredByComment ? "Expired by comment" : "Expired by target change"}
         </div>
         <p className="leading-6">
-          {expiredByComment
-            ? "A board comment superseded this confirmation before it was resolved."
-            : "The requested target changed before this confirmation was resolved."}
+          {autoResolved
+            ? (interaction.result?.reason ?? "This request was closed automatically before it was resolved.")
+            : expiredByComment
+              ? "A board comment superseded this confirmation before it was resolved."
+              : "The requested target changed before this confirmation was resolved."}
         </p>
         {expiredByComment && interaction.result?.commentId ? (
           <Button asChild size="sm" variant="ghost" className="h-7 px-2 text-amber-950 hover:bg-amber-500/15 dark:text-amber-50">

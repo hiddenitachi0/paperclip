@@ -89,6 +89,7 @@ import {
   issueTreeControlService,
   type ActiveIssueTreePauseHoldGate,
 } from "./issue-tree-control.js";
+import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import {
   parseIssueGraphLivenessIncidentKey,
   RECOVERY_ORIGIN_KINDS,
@@ -5764,6 +5765,19 @@ export function issueService(db: Db) {
           }
         }
         const [enriched] = await withIssueLabels(tx, [updated]);
+        if (
+          (issueData.status === "done" || issueData.status === "cancelled") &&
+          existing.status !== issueData.status
+        ) {
+          // DUR-29: closing the issue settles any decision it was waiting on — resolve
+          // still-pending issue-thread interactions so they don't linger in the operator's
+          // "needs you" list for work that already shipped.
+          await issueThreadInteractionService(db).resolveAllPendingForIssueClosed(
+            { id: updated.id, companyId: existing.companyId, status: updated.status },
+            { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+            tx,
+          );
+        }
         if (
           (issueData.status === "done" || issueData.status === "cancelled") &&
           existing.status !== issueData.status &&

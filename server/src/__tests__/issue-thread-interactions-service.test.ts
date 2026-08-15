@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
+  approvals,
   companies,
   createDb,
   documentRevisions,
@@ -24,6 +25,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { approvalService } from "../services/approvals.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { issueService } from "../services/issues.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
@@ -46,6 +48,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   afterEach(async () => {
     await db.delete(issueThreadInteractions);
+    await db.delete(approvals);
     await db.delete(issueComments);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
@@ -2029,6 +2032,244 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         id: created.id,
         status: "accepted",
       });
+    });
+  });
+
+  // DUR-29: agents were filing a request_board_approval AND a request_confirmation for the
+  // same merge/deploy decision. The operator answers the approval, the work ships, and the
+  // interaction is left pending forever. These tests cover the fix: closing the issue
+  // auto-resolves any interaction still pending, and linking an interaction to an approval
+  // means deciding either one resolves both.
+  describe("DUR-29 orphaned interaction resolution", () => {
+    it("auto-resolves a pending request_confirmation when its issue is closed", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Issue closed while pending");
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+      }, {
+        kind: "request_confirmation",
+        payload: { version: 1, prompt: "Merge approval: ship the thing" },
+      }, {
+        userId: "local-board",
+      });
+      expect(created.status).toBe("pending");
+
+      await issuesSvc.update(issueId, { status: "done" });
+
+      const resolved = await interactionsSvc.getById(created.id);
+      expect(resolved).toMatchObject({
+        status: "expired",
+        result: {
+          version: 1,
+          outcome: "auto_resolved",
+        },
+      });
+      expect(resolved?.result?.reason).toContain("done");
+    });
+
+    it("auto-resolves pending suggest_tasks and ask_user_questions interactions when the issue is cancelled", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Cancel with mixed pending interactions");
+
+      const suggestTasks = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "suggest_tasks",
+        payload: {
+          version: 1,
+          tasks: [{ clientKey: "root", title: "Follow-up" }],
+        },
+      }, { userId: "local-board" });
+
+      const askQuestions = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "ask_user_questions",
+        payload: {
+          version: 1,
+          questions: [{
+            id: "q1",
+            prompt: "Which environment?",
+            selectionMode: "single",
+            required: false,
+            options: [{ id: "prod", label: "Production" }],
+          }],
+        },
+      }, { userId: "local-board" });
+
+      await issuesSvc.update(issueId, { status: "cancelled" });
+
+      const resolvedSuggestTasks = await interactionsSvc.getById(suggestTasks.id);
+      expect(resolvedSuggestTasks?.status).toBe("rejected");
+      expect(resolvedSuggestTasks?.result).toMatchObject({
+        version: 1,
+        rejectionReason: expect.stringContaining("cancelled"),
+      });
+
+      const resolvedAskQuestions = await interactionsSvc.getById(askQuestions.id);
+      expect(resolvedAskQuestions?.status).toBe("cancelled");
+      expect(resolvedAskQuestions?.result).toMatchObject({
+        version: 1,
+        cancelled: true,
+        cancellationReason: expect.stringContaining("cancelled"),
+      });
+    });
+
+    it("does not touch already-resolved interactions when the issue closes", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Already resolved stays put");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        payload: { version: 1, prompt: "Already handled" },
+      }, { userId: "local-board" });
+
+      await interactionsSvc.acceptInteraction(
+        { id: issueId, companyId, goalId: null, projectId: null },
+        created.id,
+        {},
+        { userId: "local-board" },
+      );
+
+      await issuesSvc.update(issueId, { status: "done" });
+
+      const resolved = await interactionsSvc.getById(created.id);
+      expect(resolved?.status).toBe("accepted");
+      expect(resolved?.result).toMatchObject({ outcome: "accepted" });
+    });
+
+    it("resolves a linked request_confirmation when its paired board approval is approved", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Approval decides the linked interaction");
+
+      const [approval] = await db.insert(approvals).values({
+        companyId,
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "ship it" },
+        status: "pending",
+      }).returning();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        linkedApprovalId: approval!.id,
+        payload: { version: 1, prompt: "Merge approval: ship it" },
+      }, { userId: "local-board" });
+      expect(created.linkedApprovalId).toBe(approval!.id);
+
+      await approvalService(db).approve(approval!.id, "board", "approved");
+      const resolvedByApproval = await interactionsSvc.resolveInteractionsLinkedToApproval(
+        { id: approval!.id, companyId, status: "approved" },
+        { userId: "board" },
+      );
+
+      expect(resolvedByApproval).toHaveLength(1);
+      const resolved = await interactionsSvc.getById(created.id);
+      expect(resolved).toMatchObject({
+        status: "accepted",
+        result: { version: 1, outcome: "accepted" },
+      });
+    });
+
+    it("resolves a linked request_confirmation when its paired board approval is rejected", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Rejected approval rejects the linked interaction");
+
+      const [approval] = await db.insert(approvals).values({
+        companyId,
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "ship it" },
+        status: "pending",
+      }).returning();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        linkedApprovalId: approval!.id,
+        payload: { version: 1, prompt: "Merge approval: ship it" },
+      }, { userId: "local-board" });
+
+      await approvalService(db).reject(approval!.id, "board", "not now");
+      await interactionsSvc.resolveInteractionsLinkedToApproval(
+        { id: approval!.id, companyId, status: "rejected" },
+        { userId: "board" },
+      );
+
+      const resolved = await interactionsSvc.getById(created.id);
+      expect(resolved).toMatchObject({
+        status: "rejected",
+        result: { version: 1, outcome: "rejected" },
+      });
+    });
+
+    it("decides the linked board approval when the interaction is accepted directly", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Accepting the interaction decides the approval");
+
+      const [approval] = await db.insert(approvals).values({
+        companyId,
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "ship it" },
+        status: "pending",
+      }).returning();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        linkedApprovalId: approval!.id,
+        payload: { version: 1, prompt: "Merge approval: ship it" },
+      }, { userId: "local-board" });
+
+      await interactionsSvc.acceptInteraction(
+        { id: issueId, companyId, goalId: null, projectId: null },
+        created.id,
+        {},
+        { userId: "local-board" },
+      );
+
+      const [approvalRow] = await db.select().from(approvals).where(eq(approvals.id, approval!.id));
+      expect(approvalRow?.status).toBe("approved");
+    });
+
+    it("decides the linked board approval when the interaction is rejected directly", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Rejecting the interaction decides the approval");
+
+      const [approval] = await db.insert(approvals).values({
+        companyId,
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "ship it" },
+        status: "pending",
+      }).returning();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        linkedApprovalId: approval!.id,
+        payload: { version: 1, prompt: "Merge approval: ship it" },
+      }, { userId: "local-board" });
+
+      await interactionsSvc.rejectInteraction(
+        { id: issueId, companyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      );
+
+      const [approvalRow] = await db.select().from(approvals).where(eq(approvals.id, approval!.id));
+      expect(approvalRow?.status).toBe("rejected");
+    });
+
+    it("rejects linkedApprovalId that references an approval in a different company", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Cross-company approval link rejected");
+      const otherCompanyId = randomUUID();
+      await db.insert(companies).values({
+        id: otherCompanyId,
+        name: "Other Co",
+        issuePrefix: `T${otherCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      const [foreignApproval] = await db.insert(approvals).values({
+        companyId: otherCompanyId,
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "ship it" },
+        status: "pending",
+      }).returning();
+
+      await expect(interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        linkedApprovalId: foreignApproval!.id,
+        payload: { version: 1, prompt: "Merge approval: ship it" },
+      }, { userId: "local-board" })).rejects.toThrow(
+        "linkedApprovalId must reference an approval in the same company",
+      );
     });
   });
 });

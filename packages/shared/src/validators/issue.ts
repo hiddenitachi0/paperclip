@@ -851,7 +851,16 @@ export const requestCheckboxConfirmationPayloadSchema = z.object({
 
 export const requestConfirmationResultSchema = z.object({
   version: z.literal(1),
-  outcome: z.enum(["accepted", "rejected", "superseded_by_comment", "stale_target"]),
+  outcome: z.enum([
+    "accepted",
+    "rejected",
+    "superseded_by_comment",
+    "stale_target",
+    // Set when Paperclip closes this pending request on its own — either the
+    // issue it lives on reached done/cancelled, or a linked request_board_approval
+    // for the same decision was decided first. See DUR-29.
+    "auto_resolved",
+  ]),
   reason: z.string().trim().max(4000).nullable().optional(),
   commentId: z.string().uuid().nullable().optional(),
   staleTarget: requestConfirmationTargetSchema.nullable().optional(),
@@ -905,6 +914,10 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("none"),
+    // Only set this when a request_board_approval already covers the same decision and the
+    // agent genuinely needs both surfaces (DUR-29) — deciding either one then resolves both.
+    // The common case is to raise only one request; do not set this "just in case".
+    linkedApprovalId: z.string().uuid().nullable().optional(),
     payload: requestConfirmationPayloadSchema,
   }),
   z.object({
@@ -915,6 +928,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    linkedApprovalId: z.string().uuid().nullable().optional(),
     payload: requestCheckboxConfirmationPayloadSchema,
   }),
 ]);
