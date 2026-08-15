@@ -7,12 +7,14 @@ import {
   CheckCircle2,
   CircleDot,
   Loader2,
+  MessageCircleQuestion,
   RadioTower,
 } from "lucide-react";
 import { Link } from "@/lib/router";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
 import { issuesApi } from "../api/issues";
+import { interactionsApi, type PendingCompanyInteraction } from "../api/interactions";
 import { agentsApi } from "../api/agents";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, relativeTime } from "../lib/utils";
@@ -159,6 +161,18 @@ export function DashboardNow() {
     refetchInterval: NOW_POLL_INTERVAL_MS,
   });
 
+  // An agent that halted an issue thread to ask the operator a direct
+  // question — independent of the issue's own status (in_review, blocked,
+  // in_progress all halt this way). This is a precise fourth source: only
+  // interactions still pending a human answer, never a looser "parked task"
+  // heuristic (see task-waiting.ts's own warning against over-notifying).
+  const { data: pendingInteractions } = useQuery({
+    queryKey: queryKeys.interactions.pendingForCompany(selectedCompanyId!),
+    queryFn: () => interactionsApi.listPendingForCompany(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    refetchInterval: NOW_POLL_INTERVAL_MS,
+  });
+
   const runs = useMemo(() => liveRuns ?? [], [liveRuns]);
 
   // Fetch issue titles for every run that references one, so rows can show the
@@ -263,7 +277,10 @@ export function DashboardNow() {
   }
 
   const needsYouCount =
-    runsByLane.needs_you.length + actionableApprovals.length + needsYouTasks.length;
+    runsByLane.needs_you.length
+    + actionableApprovals.length
+    + needsYouTasks.length
+    + (pendingInteractions ?? []).length;
 
   return (
     <div className="space-y-5">
@@ -304,6 +321,13 @@ export function DashboardNow() {
                           ? agentById.get(approval.requestedByAgentId) ?? null
                           : null
                       }
+                    />
+                  ))}
+                  {(pendingInteractions ?? []).map((interaction) => (
+                    <InteractionRow
+                      key={`interaction-${interaction.id}`}
+                      interaction={interaction}
+                      companyId={selectedCompanyId}
                     />
                   ))}
                   {runsByLane.needs_you.slice(0, LANE_ROW_LIMIT).map((run) => (
@@ -602,6 +626,108 @@ function ApprovalRow({
             {rejectMutation.isPending ? "…" : "Reject"}
           </Button>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** Plain-language question text for a pending interaction row — the prompt an
+ * operator halted on, not a generic "Requested confirmation" status label. */
+function interactionQuestionText(interaction: PendingCompanyInteraction): string {
+  if (interaction.title?.trim()) return interaction.title.trim();
+  switch (interaction.kind) {
+    case "request_confirmation":
+    case "request_checkbox_confirmation":
+      return interaction.payload.prompt;
+    case "ask_user_questions":
+      return interaction.payload.title?.trim() || interaction.payload.questions[0]?.prompt || "Answer needed";
+    case "suggest_tasks": {
+      const count = interaction.payload.tasks.length;
+      return interaction.summary?.trim() || `${count} suggested ${count === 1 ? "task" : "tasks"}`;
+    }
+    default:
+      return "Waiting for your answer";
+  }
+}
+
+function InteractionRow({
+  interaction,
+  companyId,
+}: {
+  interaction: PendingCompanyInteraction;
+  companyId: string;
+}) {
+  const queryClient = useQueryClient();
+  const issueRef = interaction.issueIdentifier ?? interaction.issueId;
+  const threadHref = `/issues/${issueRef}#interaction-${interaction.id}`;
+  // Only a plain confirmation resolves with a single tap; checkbox selections,
+  // question forms, and task drafts need the full form in the issue thread.
+  // A confirmation that requires a decline reason also needs the full form —
+  // an inline Decline tap with no reason would just fail silently.
+  const supportsInlineDecision =
+    interaction.kind === "request_confirmation" && interaction.payload.rejectRequiresReason !== true;
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.interactions.pendingForCompany(companyId) });
+
+  const acceptMutation = useMutation({
+    mutationFn: () => issuesApi.acceptInteraction(interaction.issueId, interaction.id),
+    onSuccess: invalidate,
+  });
+  const rejectMutation = useMutation({
+    mutationFn: () => issuesApi.rejectInteraction(interaction.issueId, interaction.id),
+    onSuccess: invalidate,
+  });
+  const busy = acceptMutation.isPending || rejectMutation.isPending;
+  const acceptLabel =
+    interaction.kind === "request_confirmation" ? interaction.payload.acceptLabel ?? "Approve" : "Approve";
+  const rejectLabel =
+    interaction.kind === "request_confirmation" ? interaction.payload.rejectLabel ?? "Decline" : "Decline";
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2">
+      <Link to={threadHref} className="group flex items-start gap-1.5">
+        <MessageCircleQuestion className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+        <div className="min-w-0">
+          <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
+            {interactionQuestionText(interaction)}
+          </p>
+          <p className="line-clamp-1 text-[10px] text-muted-foreground">
+            {interaction.issueIdentifier ? `${interaction.issueIdentifier} · ` : ""}
+            {interaction.issueTitle}
+            {interaction.createdByAgentName ? ` · from ${interaction.createdByAgentName}` : ""}
+            {" · "}
+            {relativeTime(interaction.createdAt)}
+          </p>
+        </div>
+      </Link>
+      {supportsInlineDecision ? (
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            className="h-6 flex-1 bg-green-700 px-2 text-[11px] text-white hover:bg-green-600"
+            disabled={busy}
+            onClick={() => acceptMutation.mutate()}
+          >
+            {acceptMutation.isPending ? "…" : acceptLabel}
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            className="h-6 flex-1 px-2 text-[11px]"
+            disabled={busy}
+            onClick={() => rejectMutation.mutate()}
+          >
+            {rejectMutation.isPending ? "…" : rejectLabel}
+          </Button>
+        </div>
+      ) : (
+        <Link
+          to={threadHref}
+          className="inline-flex h-6 items-center justify-center rounded-md border border-amber-600/50 px-2 text-[11px] font-semibold text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
+        >
+          Answer in thread
+        </Link>
       )}
     </div>
   );

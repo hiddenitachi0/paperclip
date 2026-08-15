@@ -40,6 +40,28 @@ an agent set to `blocked` pending a human decision. Adds `ui/src/lib/task-waitin
 (`classifyTaskWaiting`, unit-tested) which uses Paperclip's blocked-inbox owner/reason where
 available and defaults ambiguous/stalled tasks to "waiting on you"; edits `DashboardNow.tsx`.
 
+**Pending operator questions enhancement (DUR-30):** an agent that halts an issue thread with an
+`issue_thread_interactions` question (`request_confirmation`, `request_checkbox_confirmation`,
+`ask_user_questions`, `suggest_tasks`) previously never appeared in Needs-you unless it also
+happened to be a `blocked` task attributed to the user — the most common halt shape (a
+`request_confirmation` on an `in_review`/`in_progress` task) was invisible. Every interaction kind
+can only be accepted/rejected by a board actor, so a `status:"pending"` row already means
+"directed at the operator, not agent-to-agent" — no new schema/audience field needed. Adds a
+fourth Needs-you source, independent of the issue's own status:
+
+| File | Change | Type |
+|---|---|---|
+| `server/src/services/issue-thread-interactions.ts` | `listPendingForCompany(companyId)` — joins pending interactions to their issue (identifier/title/status) + creating agent | Surgical edit |
+| `server/src/routes/issues.ts` | `GET /companies/:companyId/interactions?status=pending` | Surgical edit |
+| `server/src/routes/openapi.ts` | spec entry for the new route | Surgical edit |
+| `ui/src/api/interactions.ts` | `interactionsApi.listPendingForCompany` | **New file** |
+| `ui/src/pages/DashboardNow.tsx` | fourth `needsYouCount` source + `InteractionRow` (inline Accept/Reject for `request_confirmation`, "Answer in thread" deep link for the rest) | Surgical edit |
+| `cli/src/commands/client/issue.ts` | `issue interactions:pending -C <companyId>` | Surgical edit |
+| `scripts/telegram-bridge.py` | `notify_interactions` — same question, plain language, on the bot; inline Approve/Decline only for `request_confirmation` | Surgical edit |
+
+Does not touch `task-waiting.ts`'s parked-task classification — this is a precise, independent
+fourth source, not a loosening of the existing "don't over-notify" rule.
+
 ---
 
 ### Feature 4 — Per-company theming (brandColor → whole-UI theme + default-skin toggle)
@@ -362,6 +384,19 @@ that bot's agent. Purely additive — approvals/tasks still live in Paperclip an
 `/root/paperclip/.telegram-agents.json`, root-only). Iterated since first ship: multi-bot +
 org-aware routing/escalation, multi-company support, only-mark-notified-after-successful-send,
 and surfacing parked/blocked/stopped tasks (not just `in_review`) so stalls don't go silent.
+
+**Update (DUR-30):** before this, the bridge only relayed board *approvals* and a generic
+"parked for review/blocked" ping — an agent halting an issue thread with a structured
+`request_confirmation`/question (e.g. "Approve Phase 4: merge standard KPIs into Custom KPIs?")
+sent nothing at all. Added `notify_interactions`, polling the new
+`issue interactions:pending -C <companyId>` CLI command (`GET
+/companies/:id/interactions?status=pending` under the hood) once per loop alongside
+`notify_approvals`/`notify_waiting`. Sends the actual question in plain language with an
+"Open in Paperclip" deep link to `#interaction-{id}` in the thread; `request_confirmation`
+additionally gets inline Approve/Decline buttons (`iaccept:`/`ireject:` callback data, wired
+through `handle_callback` to `issue interaction:accept`/`interaction:reject`) — checkbox
+selections, question forms, and suggested-task drafts need the full form in the thread, so
+those get the deep link only, no buttons.
 
 _Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
 external dependency (a productizable deliverable from another company's project) and was

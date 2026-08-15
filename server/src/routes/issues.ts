@@ -7199,6 +7199,23 @@ export function issueRoutes(
     res.json(interactions);
   });
 
+  // Company-wide view of interactions awaiting a human answer — the source the
+  // Needs-you lane uses to surface a halted agent's question without having to
+  // open every issue one by one (DUR-30). Only ever returns "pending" rows: every
+  // interaction kind can only be resolved by a board actor, so "pending" already
+  // means "directed at the operator, not agent-to-agent".
+  router.get("/companies/:companyId/interactions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const status = req.query.status;
+    if (status !== undefined && status !== "pending") {
+      res.status(400).json({ error: "Only status=pending is supported" });
+      return;
+    }
+    const interactions = await issueThreadInteractionService(db).listPendingForCompany(companyId);
+    res.json(interactions);
+  });
+
   router.post("/issues/:id/interactions", validate(createIssueThreadInteractionSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);

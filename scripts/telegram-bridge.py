@@ -271,6 +271,90 @@ def notify_waiting(state, bots):
         save_state(state)
 
 
+def interaction_question(it):
+    """Plain-language question text — the prompt an agent halted on, not a
+    generic status label. Mirrors ui/src/pages/DashboardNow.tsx's
+    interactionQuestionText (DUR-30)."""
+    title = (it.get("title") or "").strip()
+    if title:
+        return title
+    kind = it.get("kind")
+    payload = it.get("payload") or {}
+    if kind in ("request_confirmation", "request_checkbox_confirmation"):
+        return payload.get("prompt") or "Confirmation needed"
+    if kind == "ask_user_questions":
+        questions = payload.get("questions") or []
+        return payload.get("title") or (questions[0].get("prompt") if questions else None) or "Question"
+    if kind == "suggest_tasks":
+        count = len(payload.get("tasks") or [])
+        return (it.get("summary") or "").strip() or f"{count} suggested task{'s' if count != 1 else ''}"
+    return "Needs your answer"
+
+
+def notify_interactions(state, bots):
+    """Ping the owning bot when an agent halts an issue thread with a direct
+    question — independent of the issue's status, unlike notify_waiting below.
+    Only ever polls status=pending, i.e. asks still awaiting a human (DUR-30)."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        seen = set(state.get("notified_interactions", []))
+    for company_id, cbots in by_company.items():
+        data = cli("issue", "interactions:pending", "-C", company_id)
+        if data is None:
+            continue
+        items = data if isinstance(data, list) else data.get("interactions", [])
+        reports_to, names = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        for it in items:
+            iid = it.get("id")
+            issue_id = it.get("issueId")
+            if not iid or not issue_id or iid in seen:
+                continue
+            requester = it.get("createdByAgentId")
+            bot, escalated = resolve_bot(requester, bots_by_agent, reports_to, default_bot)
+            issue_ref = it.get("issueIdentifier") or issue_id
+            issue_title = (it.get("issueTitle") or "")[:200]
+            question = interaction_question(it)[:300]
+            text = f"*❓ {question}*"
+            text += f"\n{issue_ref} · {issue_title}"
+            if escalated and requester:
+                text += f"\n_(from {names.get(requester, 'a teammate')})_"
+            text += "\nYour OK is needed before this continues."
+            text += f"\n\n[Open in Paperclip]({bot['uiBase']}/issues/{issue_ref}#interaction-{iid})"
+            # Only a plain confirmation resolves with a single tap; checkbox
+            # selections, question forms, and task drafts need the full form in
+            # the issue thread, same split as the Needs-you lane in the UI. A
+            # confirmation that requires a decline reason also needs the full
+            # form — a Decline tap with no reason would just fail server-side.
+            supports_inline_decision = (
+                it.get("kind") == "request_confirmation"
+                and (it.get("payload") or {}).get("rejectRequiresReason") is not True
+            )
+            kb = None if not supports_inline_decision else {"inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"iaccept:{issue_id}:{iid}"},
+                {"text": "❌ Decline", "callback_data": f"ireject:{issue_id}:{iid}"},
+            ]]}
+            sent = False
+            for chat in bots_state(state, bot["token"])["chats"]:
+                params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
+                if kb:
+                    params["reply_markup"] = kb
+                res = tg(bot["token"], "sendMessage", **params)
+                if res is None:
+                    params.pop("parse_mode", None)
+                    res = tg(bot["token"], "sendMessage", **params)
+                if res is not None:
+                    sent = True
+            if sent:
+                seen.add(iid)
+    with LOCK:
+        state["notified_interactions"] = list(seen)[-800:]
+        save_state(state)
+
+
 def bots_state(state, token):
     with LOCK:
         return state["bots"].setdefault(token, {"offset": 0, "chats": []})
@@ -285,13 +369,22 @@ def register_chat(state, token, chat_id):
 
 
 def handle_callback(cq):
-    action, _, aid = cq.get("data", "").partition(":")
+    data = cq.get("data", "")
+    action, _, rest = data.partition(":")
     tgtoken = cq["_token"]
-    if action not in ("approve", "reject") or not aid:
+    if action in ("approve", "reject") and rest:
+        ok = cli("approval", "approve" if action == "approve" else "reject", rest) is not None
+        label = "Approved ✅" if action == "approve" else "Rejected ❌"
+    elif action in ("iaccept", "ireject") and rest.count(":") == 1:
+        issue_id, _, interaction_id = rest.partition(":")
+        ok = cli(
+            "issue", "interaction:accept" if action == "iaccept" else "interaction:reject",
+            issue_id, interaction_id,
+        ) is not None
+        label = "Approved ✅" if action == "iaccept" else "Declined ❌"
+    else:
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"))
         return
-    ok = cli("approval", "approve" if action == "approve" else "reject", aid) is not None
-    label = "Approved ✅" if action == "approve" else "Rejected ❌"
     tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"),
        text=label if ok else "Failed — use the dashboard")
     msg = cq.get("message") or {}
@@ -379,6 +472,10 @@ def main():
             notify_approvals(state, bots)
         except Exception as e:
             print(f"notify error: {e}", flush=True)
+        try:
+            notify_interactions(state, bots)
+        except Exception as e:
+            print(f"interaction-notify error: {e}", flush=True)
         try:
             notify_waiting(state, bots)
         except Exception as e:
