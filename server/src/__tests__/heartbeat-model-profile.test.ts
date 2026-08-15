@@ -4,6 +4,7 @@ import {
   type AdapterModelProfileDefinition,
 } from "../adapters/index.js";
 import {
+  buildEscalationGrantAdapterConfig,
   mergeModelProfileAdapterConfig,
   normalizeModelProfileWakeContext,
   resolveModelProfileApplication,
@@ -143,5 +144,81 @@ describe("heartbeat model profile application", () => {
     });
 
     expect(contextSnapshot).toMatchObject({ modelProfile: "cheap" });
+  });
+});
+
+describe("DUR-31 escalation grant dispatch precedence", () => {
+  const noProfile = resolveModelProfileApplication({
+    adapterModelProfiles: [],
+    agentRuntimeConfig: {},
+    issueModelProfile: null,
+    contextSnapshot: {},
+  });
+
+  it("maps a granted model/effort into the claude_local adapterConfig shape", () => {
+    expect(
+      buildEscalationGrantAdapterConfig("claude_local", {
+        grantedModel: "opus", grantedEffort: "high",
+      }),
+    ).toEqual({ model: "opus", effort: "high" });
+  });
+
+  it("maps effort onto modelReasoningEffort for codex_local and variant for opencode_local", () => {
+    expect(
+      buildEscalationGrantAdapterConfig("codex_local", { grantedModel: null, grantedEffort: "high" }),
+    ).toEqual({ modelReasoningEffort: "high" });
+    expect(
+      buildEscalationGrantAdapterConfig("opencode_local", { grantedModel: null, grantedEffort: "high" }),
+    ).toEqual({ variant: "high" });
+  });
+
+  it("lets an active grant beat the agent base config and the model profile", () => {
+    const merged = mergeModelProfileAdapterConfig({
+      baseConfig: { model: "base-model", effort: "low" },
+      modelProfile: noProfile,
+      grantAdapterConfig: buildEscalationGrantAdapterConfig("claude_local", {
+        grantedModel: "opus", grantedEffort: "high",
+      }),
+      issueAdapterConfig: null,
+    });
+
+    expect(merged).toEqual({ model: "opus", effort: "high" });
+  });
+
+  it("lets an explicit operator issue override beat an active grant field-by-field", () => {
+    const merged = mergeModelProfileAdapterConfig({
+      baseConfig: { model: "base-model", effort: "low" },
+      modelProfile: noProfile,
+      grantAdapterConfig: buildEscalationGrantAdapterConfig("claude_local", {
+        grantedModel: "opus", grantedEffort: "high",
+      }),
+      // Operator pinned the model but left effort unset -- the grant's effort
+      // still applies since the operator override never touched it.
+      issueAdapterConfig: { model: "operator-pinned-model" },
+    });
+
+    expect(merged).toEqual({ model: "operator-pinned-model", effort: "high" });
+  });
+
+  it("orders base < model profile < grant < issue override end to end", () => {
+    const cheapProfileApplication = resolveModelProfileApplication({
+      adapterModelProfiles: [cheapProfile],
+      agentRuntimeConfig: {},
+      issueModelProfile: "cheap",
+      contextSnapshot: {},
+    });
+
+    const merged = mergeModelProfileAdapterConfig({
+      baseConfig: { model: "base-model", modelReasoningEffort: "medium", approvalPolicy: "strict" },
+      modelProfile: cheapProfileApplication,
+      grantAdapterConfig: { model: "grant-model" },
+      issueAdapterConfig: { modelReasoningEffort: "explicit-override" },
+    });
+
+    expect(merged).toEqual({
+      model: "grant-model",
+      modelReasoningEffort: "explicit-override",
+      approvalPolicy: "strict",
+    });
   });
 });

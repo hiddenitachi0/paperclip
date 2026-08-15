@@ -54,6 +54,7 @@ export type {
   WorkTimelineSpan,
 } from "./work-timeline.js";
 export { approvalService } from "./approvals.js";
+export { escalationGrantService } from "./escalation-grants.js";
 export { budgetService } from "./budgets.js";
 export { secretService } from "./secrets.js";
 export { routineService } from "./routines.js";

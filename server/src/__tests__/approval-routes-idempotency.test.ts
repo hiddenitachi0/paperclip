@@ -31,6 +31,14 @@ const mockSecretService = vi.hoisted(() => ({
   normalizeHireApprovalPayloadForPersistence: vi.fn(),
 }));
 
+const mockEscalationGrantService = vi.hoisted(() => ({
+  assertRequestAllowed: vi.fn(),
+  createFromApproval: vi.fn(),
+  resolveActiveGrantForDispatch: vi.fn(),
+  evaluateCostEvent: vi.fn(),
+  getForIssue: vi.fn(),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
@@ -40,6 +48,7 @@ function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
     approvalService: () => mockApprovalService,
+    escalationGrantService: () => mockEscalationGrantService,
     heartbeatService: () => mockHeartbeatService,
     issueApprovalService: () => mockIssueApprovalService,
     issueThreadInteractionService: () => mockIssueThreadInteractionService,

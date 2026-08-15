@@ -1,16 +1,23 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvalComments, approvals } from "@paperclipai/db";
+import { modelBoostRequestPayloadSchema } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
+import { escalationGrantService } from "./escalation-grants.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+
+function isModelBoostApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "model_boost";
+}
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
   const budgets = budgetService(db);
+  const escalationGrants = escalationGrantService(db);
   const instanceSettings = instanceSettingsService(db);
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
@@ -178,6 +185,15 @@ export function approvalService(db: Db) {
             approvedAt: now,
           }).catch(() => {});
         }
+      }
+
+      if (applied && isModelBoostApproval(updated)) {
+        const payload = modelBoostRequestPayloadSchema.parse(updated.payload);
+        await escalationGrants.createFromApproval({
+          companyId: updated.companyId,
+          approvalId: updated.id,
+          payload,
+        });
       }
 
       return { approval: updated, applied };

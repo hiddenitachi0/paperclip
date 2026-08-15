@@ -109,6 +109,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { escalationGrantService } from "./escalation-grants.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeIdempotencyKey,
@@ -1989,14 +1990,41 @@ export function resolveModelProfileApplication(input: {
   };
 }
 
+const ESCALATION_GRANT_EFFORT_ADAPTER_CONFIG_KEY: Record<string, string> = {
+  claude_local: "effort",
+  codex_local: "modelReasoningEffort",
+  opencode_local: "variant",
+};
+
+/**
+ * Turns an active DUR-31 boost grant into the adapterConfig shape the given
+ * adapter type expects -- same field mapping as buildAssigneeAdapterOverrides
+ * on the UI side (ui/src/lib/issue-assignee-overrides.ts), since a grant is
+ * requested/stored adapter-agnostically (`grantedModel`/`grantedEffort`).
+ */
+export function buildEscalationGrantAdapterConfig(
+  adapterType: string,
+  grant: { grantedModel: string | null; grantedEffort: string | null },
+): Record<string, unknown> {
+  const adapterConfig: Record<string, unknown> = {};
+  if (grant.grantedModel) adapterConfig.model = grant.grantedModel;
+  if (grant.grantedEffort) {
+    const effortKey = ESCALATION_GRANT_EFFORT_ADAPTER_CONFIG_KEY[adapterType];
+    if (effortKey) adapterConfig[effortKey] = grant.grantedEffort;
+  }
+  return adapterConfig;
+}
+
 export function mergeModelProfileAdapterConfig(input: {
   baseConfig: Record<string, unknown>;
   modelProfile: ModelProfileApplication;
+  grantAdapterConfig?: Record<string, unknown> | null;
   issueAdapterConfig: Record<string, unknown> | null | undefined;
 }): Record<string, unknown> {
   return {
     ...input.baseConfig,
     ...(input.modelProfile.adapterConfig ?? {}),
+    ...(input.grantAdapterConfig ?? {}),
     ...(input.issueAdapterConfig ?? {}),
   };
 }
@@ -4772,6 +4800,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const escalationGrants = escalationGrantService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const environmentsSvc = environmentService(db);
@@ -10198,9 +10227,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipModelProfile;
     }
+    const activeEscalationGrant =
+      issueId && issueContext && issueContext.assigneeAgentId === agent.id
+        ? await escalationGrants.resolveActiveGrantForDispatch({
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId,
+          })
+        : null;
+    const escalationGrantAdapterConfig = activeEscalationGrant
+      ? buildEscalationGrantAdapterConfig(agent.adapterType, activeEscalationGrant)
+      : null;
+    if (activeEscalationGrant) {
+      context.paperclipEscalationGrant = {
+        id: activeEscalationGrant.id,
+        approvalId: activeEscalationGrant.approvalId,
+        grantedModel: activeEscalationGrant.grantedModel,
+        grantedEffort: activeEscalationGrant.grantedEffort,
+        maxSpendCents: activeEscalationGrant.maxSpendCents,
+        expiresAt: activeEscalationGrant.expiresAt.toISOString(),
+      };
+    } else {
+      delete context.paperclipEscalationGrant;
+    }
     const mergedConfig = mergeModelProfileAdapterConfig({
       baseConfig: workspaceManagedConfig,
       modelProfile: modelProfileApplication,
+      grantAdapterConfig: escalationGrantAdapterConfig,
       issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);

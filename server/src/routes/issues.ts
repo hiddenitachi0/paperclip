@@ -79,6 +79,7 @@ import {
   agentService,
   companyService,
   companySearchService,
+  escalationGrantService,
   executionWorkspaceService,
   goalService,
   heartbeatService,
@@ -1207,6 +1208,7 @@ export function issueRoutes(
 ) {
   const router = Router();
   const svc = issueService(db);
+  const escalationGrantsSvc = escalationGrantService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
@@ -3559,6 +3561,7 @@ export function issueRoutes(
       scheduledRetry,
       activeRecoveryAction,
       linkedCases,
+      activeEscalationGrant,
     ] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
@@ -3572,6 +3575,7 @@ export function issueRoutes(
       svc.getCurrentScheduledRetry(issue.id),
       recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
       listIssueLinkedCases(db, issue.companyId, issue.id),
+      escalationGrantsSvc.getForIssue(issue.companyId, issue.id),
     ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -3604,6 +3608,7 @@ export function issueRoutes(
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
+      activeEscalationGrant,
       blockedBy: relationsWithRecoveryActions.blockedBy,
       blocks: relationsWithRecoveryActions.blocks,
       relatedWork: referenceSummary,

@@ -4,6 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
+import { escalationGrantService } from "./escalation-grants.js";
 
 export interface CostDateRange {
   from?: Date;
@@ -50,6 +51,7 @@ async function getMonthlySpendTotal(
 
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
+  const escalationGrants = escalationGrantService(db);
   return {
     createEvent: async (companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId">) => {
       const agent = await db
@@ -97,6 +99,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .where(eq(companies.id, companyId));
 
       await budgets.evaluateCostEvent(event);
+      await escalationGrants.evaluateCostEvent(event);
 
       return event;
     },

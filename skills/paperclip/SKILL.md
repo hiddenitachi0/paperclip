@@ -221,6 +221,30 @@ Bad: `"title": "Merge PR #12 — sub-tasks inherit the model and effort you set 
 
 **One request per decision (required).** Every decision that needs the operator gets exactly one ask. Merge/deploy decisions always go through `request_board_approval` — including the `merge_pr` approval a hook files automatically after `gh pr create` — never *also* raise a `request_confirmation` for the same merge/deploy on top of it. The board approvals list and the in-task interaction list are two different surfaces; the operator answering one does not close the other unless you explicitly link them (see below), so filing both leaves a stale card behind forever once the approval is answered. `request_confirmation`/`ask_user_questions` are for decisions that live in the task thread and have no board-approval equivalent (accepting a plan revision, answering a clarifying question). If you genuinely need both surfaces for one decision — rare — set `linkedApprovalId` on the `request_confirmation`/`request_checkbox_confirmation` to the approval's id; Paperclip then resolves both together no matter which one the operator answers (DUR-29).
 
+**Requesting a temporary model/effort boost (DUR-31).** If you're stuck on your current task because the base model/effort isn't enough — losing track of a wide refactor, needing deeper reasoning — you can ask for a temporary, task-scoped boost instead of grinding on or silently switching models yourself. File `kind:"model_boost"`:
+
+```json
+{
+  "type": "request_board_approval",
+  "requestedByAgentId": "{your-agent-id}",
+  "issueIds": ["{issue-id}"],
+  "payload": {
+    "kind": "model_boost",
+    "issueId": "{issue-id}",
+    "agentId": "{your-agent-id}",
+    "requestedModel": "opus",
+    "reason": "This refactor spans 40 files and I keep losing track of what's already changed.",
+    "estimatedExtraCostCents": 500,
+    "maxSpendCents": 1500,
+    "durationMinutes": 240,
+    "title": "temporary model boost for the auth refactor",
+    "summary": "Bumping to Opus for this task only, capped at $15 extra spend, for up to 4 hours. Denied means I keep working on the base model."
+  }
+}
+```
+
+At least one of `requestedModel`/`requestedEffort` is required. `maxSpendCents` is the hard money cap on the boost — once cumulative spend on this task reaches it, or `durationMinutes` elapses (default 4h, max 24h), the boost ends automatically and a plain-language note is posted on the task; nothing else changes silently. Approving this never hires or creates an agent — it's a time-boxed, money-capped grant for *your current task only*, applied automatically at your next dispatch. An explicit model/effort the operator set directly on the task (the `assigneeAdapterOverrides` from the per-task selector) always wins over an active grant. You can't re-ask while a request is pending or a grant is already active, and re-asking with the same reason right after a denial is rejected — if you're denied, keep working on your base config and only ask again once something material has changed.
+
 ## Issue-Thread Interactions
 
 Issue-thread interactions are first-class cards that render in the issue thread and capture a typed board/user response. Use them instead of asking the board to type yes/no or a checklist in markdown — interactions create audit trails, drive idempotency, and wake the assignee through a structured continuation path.
