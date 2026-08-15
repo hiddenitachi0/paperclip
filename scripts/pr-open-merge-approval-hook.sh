@@ -39,6 +39,15 @@ fi
 HOOK_CWD="$(printf '%s' "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null)"
 [[ -n "$HOOK_CWD" && -d "$HOOK_CWD" ]] && cd "$HOOK_CWD"
 
+# Direct curls to $PAPERCLIP_API_URL hang from inside the agent sandbox on
+# this fork (that hostname isn't reachable directly). When the sandbox's
+# local plain-HTTP proxy is available, use it instead; otherwise fall back
+# to the real API URL for environments without that proxy.
+API_BASE="$PAPERCLIP_API_URL"
+if [[ -n "${PAPERCLIP_LISTEN_PORT:-}" ]]; then
+  API_BASE="http://127.0.0.1:$PAPERCLIP_LISTEN_PORT"
+fi
+
 # `gh pr create` only just ran; ask GitHub what's actually true for the
 # current branch instead of trying to scrape a PR number out of tool output.
 # If this fails, either the create failed or there's no PR — nothing to do.
@@ -76,8 +85,8 @@ fi
 APPROVAL_SUMMARY="$PLAIN_SUMMARY. Approving merges this into $PR_BASE — nothing else happens automatically."
 
 # --- De-duplicate: skip if a merge_pr approval already exists for this PR ---
-EXISTING="$(curl -sS -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-  "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/approvals" 2>/dev/null)" || EXISTING=""
+EXISTING="$(curl -sS --max-time 10 -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+  "$API_BASE/api/companies/$PAPERCLIP_COMPANY_ID/approvals" 2>/dev/null)" || EXISTING=""
 if [[ -n "$EXISTING" ]]; then
   ALREADY_FILED="$(printf '%s' "$EXISTING" | jq -r --arg repo "$REPO" --argjson pr "$PR_NUMBER" '
     [ .[] | select(
@@ -129,8 +138,8 @@ if [[ -n "${PAPERCLIP_RUN_ID:-}" ]]; then
   RUN_ID_HEADER=(-H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID")
 fi
 
-RESPONSE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
-  "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/approvals" \
+RESPONSE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST \
+  "$API_BASE/api/companies/$PAPERCLIP_COMPANY_ID/approvals" \
   -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
   "${RUN_ID_HEADER[@]}" \
   -H 'Content-Type: application/json' \
