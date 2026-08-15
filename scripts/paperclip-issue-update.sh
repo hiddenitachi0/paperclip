@@ -102,8 +102,17 @@ if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" || -z "${PAPERC
   exit 1
 fi
 
-curl -sS -X PATCH \
-  "$PAPERCLIP_API_URL/api/issues/$issue_id" \
+# Direct curls to $PAPERCLIP_API_URL hang from inside the agent sandbox on
+# this fork (that hostname isn't reachable directly). When the sandbox's
+# local plain-HTTP proxy is available, use it instead; otherwise fall back
+# to the real API URL for environments without that proxy.
+API_BASE="$PAPERCLIP_API_URL"
+if [[ -n "${PAPERCLIP_LISTEN_PORT:-}" ]]; then
+  API_BASE="http://127.0.0.1:$PAPERCLIP_LISTEN_PORT"
+fi
+
+curl -sS --max-time 10 -X PATCH \
+  "$API_BASE/api/issues/$issue_id" \
   -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
   -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
   -H 'Content-Type: application/json' \
