@@ -18,6 +18,7 @@ import {
   accessService,
   heartbeatService,
   issueApprovalService,
+  issueThreadInteractionService,
   logActivity,
   secretService,
 } from "../services/index.js";
@@ -122,6 +123,7 @@ export function approvalRoutes(
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
+  const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -287,6 +289,13 @@ export function approvalRoutes(
     const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
 
     if (applied) {
+      // DUR-29: an agent may have raised a request_confirmation for the same decision as
+      // this approval — resolve it now so the operator doesn't have to answer it separately.
+      await interactionsSvc.resolveInteractionsLinkedToApproval(approval, {
+        agentId: null,
+        userId: req.actor.userId ?? "board",
+      });
+
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
@@ -383,6 +392,12 @@ export function approvalRoutes(
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
 
     if (applied) {
+      // DUR-29: resolve any request_confirmation linked to this approval too.
+      await interactionsSvc.resolveInteractionsLinkedToApproval(approval, {
+        agentId: null,
+        userId: req.actor.userId ?? "board",
+      });
+
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",

@@ -219,6 +219,8 @@ For merge/deploy approvals, put PR number, repo, branch, and commit in dedicated
 
 Bad: `"title": "Merge PR #12 — sub-tasks inherit the model and effort you set on a task"` — leads with a PR number. Good: `"title": "sub-tasks inherit the model and effort you set on a task"` (the server prepends the project/company name for you).
 
+**One request per decision (required).** Every decision that needs the operator gets exactly one ask. Merge/deploy decisions always go through `request_board_approval` — including the `merge_pr` approval a hook files automatically after `gh pr create` — never *also* raise a `request_confirmation` for the same merge/deploy on top of it. The board approvals list and the in-task interaction list are two different surfaces; the operator answering one does not close the other unless you explicitly link them (see below), so filing both leaves a stale card behind forever once the approval is answered. `request_confirmation`/`ask_user_questions` are for decisions that live in the task thread and have no board-approval equivalent (accepting a plan revision, answering a clarifying question). If you genuinely need both surfaces for one decision — rare — set `linkedApprovalId` on the `request_confirmation`/`request_checkbox_confirmation` to the approval's id; Paperclip then resolves both together no matter which one the operator answers (DUR-29).
+
 ## Issue-Thread Interactions
 
 Issue-thread interactions are first-class cards that render in the issue thread and capture a typed board/user response. Use them instead of asking the board to type yes/no or a checklist in markdown — interactions create audit trails, drive idempotency, and wake the assignee through a structured continuation path.
@@ -238,6 +240,7 @@ Key shared semantics:
 - **Target binding and staleness.** `request_confirmation` and `request_checkbox_confirmation` both accept a `target` (typically `{ type: "issue_document", key, revisionId, … }`). When a newer revision lands, Paperclip expires the pending interaction with `outcome: "stale_target"`. Rebuild against the latest revision and create a fresh interaction.
 - **Supersede on user comment.** Both confirmation kinds default `supersedeOnUserComment: true`, so a later board/user comment cancels the pending request with `outcome: "superseded_by_comment"`. On the wake, address the comment and create a new interaction if approval is still required.
 - **Idempotency.** Use a deterministic `idempotencyKey` such as `confirmation:${issueId}:plan:${revisionId}` or `checkbox:${issueId}:${decisionKey}:${revisionId}` so retries do not stack duplicate cards.
+- **Never double-ask.** Don't raise a `request_confirmation`/`request_checkbox_confirmation` for a decision that already has (or will get) a `request_board_approval` — see "One request per decision" above. If you closed the issue while a `request_confirmation` was still pending, Paperclip resolves it automatically with `outcome: "auto_resolved"`; you don't need to clean it up by hand.
 - **Source issue posture.** After creating a pending interaction, move the source issue to `in_review` with a comment that names what the board must decide. The pending interaction is the explicit waiting path.
 
 Create a `request_checkbox_confirmation` (board selects any subset, then confirms):

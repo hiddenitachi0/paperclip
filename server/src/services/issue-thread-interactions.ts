@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  approvals,
   documents,
   heartbeatRuns,
   issueComments,
@@ -42,6 +43,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
+import { approvalService } from "./approvals.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
 
 type InteractionActor = {
@@ -120,6 +122,7 @@ function isEquivalentCreateRequest(
     && (row.idempotencyKey ?? null) === (input.idempotencyKey ?? null)
     && (row.sourceCommentId ?? null) === (input.sourceCommentId ?? null)
     && (row.sourceRunId ?? null) === (input.sourceRunId ?? null)
+    && (row.linkedApprovalId ?? null) === (("linkedApprovalId" in input ? input.linkedApprovalId : null) ?? null)
     && (row.title ?? null) === (input.title ?? null)
     && (row.summary ?? null) === (input.summary ?? null)
     && (row.createdByAgentId ?? null) === (actor.agentId ?? null)
@@ -649,6 +652,34 @@ async function assertRequestConfirmationTargetIsCurrent(db: Db | any, args: {
   }
 }
 
+// Part 2 of DUR-29: when an agent links a request_confirmation/request_checkbox_confirmation
+// to a request_board_approval for the same decision (via linkedApprovalId), deciding the
+// interaction must also decide the approval so the operator's other surface clears too. Best
+// effort — a stale/already-resolved linked approval must not block resolving the interaction
+// itself, so failures here are logged and swallowed.
+async function decideLinkedApprovalForInteractionDecision(dbOrTx: Db | any, args: {
+  linkedApprovalId: string | null;
+  targetStatus: "approved" | "rejected";
+  actor: InteractionActor;
+  reason: string;
+}) {
+  if (!args.linkedApprovalId) return;
+  try {
+    const svc = approvalService(dbOrTx as Db);
+    const decidedByUserId = args.actor.userId ?? "system";
+    if (args.targetStatus === "approved") {
+      await svc.approve(args.linkedApprovalId, decidedByUserId, args.reason);
+    } else {
+      await svc.reject(args.linkedApprovalId, decidedByUserId, args.reason);
+    }
+  } catch (error) {
+    console.error(
+      "[paperclip] Failed to auto-resolve linked approval for decided interaction",
+      { linkedApprovalId: args.linkedApprovalId, targetStatus: args.targetStatus, error },
+    );
+  }
+}
+
 async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
   row: IssueThreadInteractionRow;
   actor: InteractionActor;
@@ -872,6 +903,13 @@ export function issueThreadInteractionService(db: Db) {
         await touchIssue(tx, args.issue.id);
       }
 
+      await decideLinkedApprovalForInteractionDecision(tx, {
+        linkedApprovalId: args.current.linkedApprovalId,
+        targetStatus: "approved",
+        actor: args.actor,
+        reason: "Closed automatically: the linked issue-thread confirmation was accepted.",
+      });
+
       return {
         interaction: hydrateInteraction(updated),
         continuationIssue,
@@ -926,6 +964,12 @@ export function issueThreadInteractionService(db: Db) {
       throw conflict("Interaction has already been resolved");
     }
     await touchIssue(db, args.issue.id);
+    await decideLinkedApprovalForInteractionDecision(db, {
+      linkedApprovalId: args.current.linkedApprovalId,
+      targetStatus: "rejected",
+      actor: args.actor,
+      reason: "Closed automatically: the linked issue-thread confirmation was rejected.",
+    });
     const rejected = hydrateInteraction(updated);
     await emitInteractionResolvedTelemetry(db, rejected);
     return rejected;
@@ -1008,6 +1052,17 @@ export function issueThreadInteractionService(db: Db) {
           issueId: issue.id,
           target: data.payload.target ?? null,
         });
+
+        if (data.linkedApprovalId) {
+          const linkedApproval = await db
+            .select({ companyId: approvals.companyId })
+            .from(approvals)
+            .where(eq(approvals.id, data.linkedApprovalId))
+            .then((rows) => rows[0] ?? null);
+          if (!linkedApproval || linkedApproval.companyId !== issue.companyId) {
+            throw unprocessable("linkedApprovalId must reference an approval in the same company");
+          }
+        }
       }
 
       let created: IssueThreadInteractionRow;
@@ -1023,6 +1078,7 @@ export function issueThreadInteractionService(db: Db) {
             idempotencyKey: data.idempotencyKey ?? null,
             sourceCommentId: data.sourceCommentId ?? null,
             sourceRunId: data.sourceRunId ?? null,
+            linkedApprovalId: "linkedApprovalId" in data ? data.linkedApprovalId ?? null : null,
             title: data.title ?? null,
             summary: data.summary ?? null,
             createdByAgentId: actor.agentId ?? null,
@@ -1688,6 +1744,123 @@ export function issueThreadInteractionService(db: Db) {
       const cancelled = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, cancelled);
       return cancelled;
+    },
+
+    // Part 2 of DUR-29: a request_board_approval was approved/rejected and it has one or more
+    // request_confirmation/request_checkbox_confirmation interactions linked to it via
+    // linkedApprovalId — resolve those too so the operator never has to answer the same
+    // decision twice. Called from the approvals routes after an approve/reject is applied.
+    resolveInteractionsLinkedToApproval: async (
+      approval: { id: string; companyId: string; status: string },
+      actor: InteractionActor,
+    ): Promise<IssueThreadInteraction[]> => {
+      if (approval.status !== "approved" && approval.status !== "rejected") return [];
+
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, approval.companyId),
+          eq(issueThreadInteractions.linkedApprovalId, approval.id),
+          eq(issueThreadInteractions.status, "pending"),
+        ));
+      if (rows.length === 0) return [];
+
+      const targetStatus = approval.status === "approved" ? "accepted" : "rejected";
+      const reason = `Closed automatically: the linked board approval was ${approval.status}.`;
+      const now = new Date();
+      const resolved: IssueThreadInteraction[] = [];
+      for (const row of rows) {
+        const [updated] = await db
+          .update(issueThreadInteractions)
+          .set({
+            status: targetStatus,
+            result: {
+              version: 1,
+              outcome: targetStatus,
+              reason,
+            },
+            resolvedByAgentId: actor.agentId ?? null,
+            resolvedByUserId: actor.userId ?? null,
+            resolvedAt: now,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(issueThreadInteractions.id, row.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ))
+          .returning();
+        if (updated) resolved.push(hydrateInteraction(updated));
+      }
+
+      if (resolved.length > 0) {
+        const issueIds = [...new Set(resolved.map((interaction) => interaction.issueId))];
+        await Promise.all(issueIds.map((issueId) => touchIssue(db, issueId)));
+        await emitResolvedInteractionsTelemetry(db, resolved);
+      }
+      return resolved;
+    },
+
+    // Part 1 of DUR-29: an issue reached done/cancelled while it still had pending
+    // issue-thread interactions (most commonly a request_confirmation the agent duplicated
+    // with a request_board_approval that the operator already answered). Resolve every kind
+    // with a clear system reason so the operator's "needs you" list never carries a ghost for
+    // a decision that no longer matters. Called from issueService(db).update() whenever a
+    // status update lands on done/cancelled — accepts an explicit dbOrTx so it can run inside
+    // that same transaction.
+    resolveAllPendingForIssueClosed: async (
+      issue: { id: string; companyId: string; status: string },
+      actor: InteractionActor,
+      dbOrTx: Db | any = db,
+    ): Promise<IssueThreadInteraction[]> => {
+      const rows: IssueThreadInteractionRow[] = await dbOrTx
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, issue.companyId),
+          eq(issueThreadInteractions.issueId, issue.id),
+          eq(issueThreadInteractions.status, "pending"),
+        ));
+      if (rows.length === 0) return [];
+
+      const reason = `Closed automatically: this issue reached ${issue.status} before this request was resolved.`;
+      const now = new Date();
+      const resolved: IssueThreadInteraction[] = [];
+      for (const row of rows) {
+        let patch: { status: string; result: unknown } | null = null;
+        if (row.kind === "suggest_tasks") {
+          patch = { status: "rejected", result: { version: 1, rejectionReason: reason } };
+        } else if (row.kind === "ask_user_questions") {
+          patch = {
+            status: "cancelled",
+            result: { version: 1, answers: [], cancelled: true, cancellationReason: reason, summaryMarkdown: null },
+          };
+        } else if (isRequestConfirmationLikeKind(row.kind)) {
+          patch = { status: "expired", result: { version: 1, outcome: "auto_resolved", reason } };
+        }
+        if (!patch) continue;
+
+        const [updated] = await dbOrTx
+          .update(issueThreadInteractions)
+          .set({
+            ...patch,
+            resolvedByAgentId: actor.agentId ?? null,
+            resolvedByUserId: actor.userId ?? null,
+            resolvedAt: now,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(issueThreadInteractions.id, row.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ))
+          .returning();
+        if (updated) resolved.push(hydrateInteraction(updated));
+      }
+
+      if (resolved.length > 0) {
+        await emitResolvedInteractionsTelemetry(dbOrTx, resolved);
+      }
+      return resolved;
     },
   };
 }

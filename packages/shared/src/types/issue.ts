@@ -863,7 +863,7 @@ export interface RequestCheckboxConfirmationPayload {
 
 export interface RequestConfirmationResult {
   version: 1;
-  outcome: "accepted" | "rejected" | "superseded_by_comment" | "stale_target";
+  outcome: "accepted" | "rejected" | "superseded_by_comment" | "stale_target" | "auto_resolved";
   reason?: string | null;
   commentId?: string | null;
   staleTarget?: RequestConfirmationTarget | null;
@@ -881,6 +881,7 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   idempotencyKey?: string | null;
   sourceCommentId?: string | null;
   sourceRunId?: string | null;
+  linkedApprovalId?: string | null;
   title?: string | null;
   summary?: string | null;
   status: IssueThreadInteractionStatus;
