@@ -1,4 +1,5 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, KeyRound } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, KeyRound, Rocket } from "lucide-react";
+import { Link } from "@/lib/router";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
@@ -42,7 +43,7 @@ export function approvalSubject(payload?: Record<string, unknown> | null): strin
 
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
 export function approvalLabel(type: string, payload?: Record<string, unknown> | null): string {
-  const base = typeLabel[type] ?? type;
+  const base = payload?.kind === "deploy" ? "Deploy" : typeLabel[type] ?? type;
   const subject = approvalSubject(payload);
   if (subject) {
     return `${base}: ${subject}`;
@@ -59,6 +60,12 @@ export const typeIcon: Record<string, typeof UserPlus> = {
 };
 
 export const defaultTypeIcon = ShieldCheck;
+
+/** Icon for an approval, distinguishing deploy requests from other board approvals. */
+export function approvalIcon(type: string, payload?: Record<string, unknown> | null): typeof UserPlus {
+  if (payload?.kind === "deploy") return Rocket;
+  return typeIcon[type] ?? defaultTypeIcon;
+}
 
 function PayloadField({ label, value }: { label: string; value: unknown }) {
   if (!value) return null;
@@ -177,13 +184,63 @@ export function BoardApprovalPayload({
 }
 
 function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+
+  if (payload.kind === "deploy") {
+    const projectId = firstNonEmptyString(payload.projectId);
+    const workspaceId = firstNonEmptyString(payload.workspaceId);
+    const commit = firstNonEmptyString(payload.commit);
+    const note = firstNonEmptyString(payload.note);
+
+    return (
+      <div className="mt-4 space-y-3.5 text-sm">
+        {title && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Title</p>
+            <p className="font-medium leading-6 text-foreground">{title}</p>
+          </div>
+        )}
+        {projectId && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Target project</p>
+            <Link
+              to={`/projects/${projectId}`}
+              className="font-mono text-xs text-foreground underline decoration-dotted underline-offset-2 hover:text-primary"
+            >
+              {projectId}
+            </Link>
+          </div>
+        )}
+        {workspaceId && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Workspace</p>
+            <p className="font-mono text-xs text-foreground/90">{workspaceId}</p>
+          </div>
+        )}
+        {commit && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Commit</p>
+            <p className="font-mono text-xs text-foreground/90">{commit}</p>
+          </div>
+        )}
+        {note && (
+          <div className="space-y-1.5">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Note</p>
+            <pre className="max-h-48 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-muted-foreground whitespace-pre-wrap">
+              {note}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const risks = Array.isArray(payload.risks)
     ? payload.risks
         .filter((value): value is string => typeof value === "string")
         .map((value) => value.trim())
         .filter(Boolean)
     : [];
-  const title = firstNonEmptyString(payload.title);
   const summary = firstNonEmptyString(payload.summary);
   const recommendedAction = firstNonEmptyString(payload.recommendedAction);
   const nextActionOnApproval = firstNonEmptyString(payload.nextActionOnApproval);

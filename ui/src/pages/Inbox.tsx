@@ -71,7 +71,7 @@ import { SwipeToArchive } from "../components/SwipeToArchive";
 import { StatusIcon } from "../components/StatusIcon";
 import { cn } from "../lib/utils";
 import { StatusBadge } from "../components/StatusBadge";
-import { approvalLabel, defaultTypeIcon, typeIcon } from "../components/ApprovalPayload";
+import { approvalIcon, approvalLabel } from "../components/ApprovalPayload";
 import { timeAgo } from "../lib/timeAgo";
 import { Button } from "@/components/ui/button";
 import {
@@ -424,7 +424,7 @@ function ApprovalInboxRow({
   selected?: boolean;
   className?: string;
 }) {
-  const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
+  const Icon = approvalIcon(approval.type, approval.payload as Record<string, unknown> | null);
   const label = approvalLabel(approval.type, approval.payload as Record<string, unknown> | null);
   const showResolutionButtons =
     approval.type !== "budget_override_required" &&
