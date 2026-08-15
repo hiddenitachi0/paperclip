@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ApprovalPayloadRenderer, approvalLabel } from "./ApprovalPayload";
+import { ApprovalPayloadRenderer, approvalLabel, approvalTechnicalReference } from "./ApprovalPayload";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -15,6 +15,21 @@ describe("approvalLabel", () => {
         title: "Reply with an ASCII frog",
       }),
     ).toBe("Board Approval: Reply with an ASCII frog");
+  });
+});
+
+describe("approvalTechnicalReference", () => {
+  it("surfaces payload.technicalReference for the detail view's secondary line", () => {
+    expect(
+      approvalTechnicalReference({
+        title: "Paperclip — sub-tasks inherit the model and effort you set on a task",
+        technicalReference: "Technical reference: fork repo, pull request #12",
+      }),
+    ).toBe("Technical reference: fork repo, pull request #12");
+  });
+
+  it("returns null when the payload carries no technical reference", () => {
+    expect(approvalTechnicalReference({ title: "Approve hosting spend" })).toBeNull();
   });
 });
 

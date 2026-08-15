@@ -9,7 +9,7 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
-import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
+import { approvalLabel, approvalTechnicalReference, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -235,6 +235,11 @@ export function ApprovalDetail() {
             <div>
               <h2 className="text-lg font-semibold">{approvalLabel(approval.type, approval.payload as Record<string, unknown> | null)}</h2>
               <p className="text-xs text-muted-foreground font-mono">{approval.id}</p>
+              {approvalTechnicalReference(approval.payload as Record<string, unknown> | null) && (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {approvalTechnicalReference(approval.payload as Record<string, unknown> | null)}
+                </p>
+              )}
             </div>
           </div>
           <StatusBadge status={approval.status} />
