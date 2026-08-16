@@ -43,6 +43,7 @@ import {
   shapePaperclipWorkspaceEnvForExecution,
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  resolveCombinedAgentInstructionsContent,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseClaudeStreamJson,
@@ -446,7 +447,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let combinedInstructionsContents: string | null = null;
   if (instructionsFilePath) {
     try {
-      const instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
+      const rawInstructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
+      const instructionsContent = await resolveCombinedAgentInstructionsContent({
+        companyId: agent.companyId,
+        agentInstructionsContent: rawInstructionsContent,
+      });
       const pathDirective =
         `\nThe above agent instructions were loaded from ${instructionsFilePath}. ` +
         `Resolve any relative file references from ${instructionsFileDir}. ` +

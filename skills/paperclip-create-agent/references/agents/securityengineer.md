@@ -23,6 +23,9 @@ Do not add broad admin or write-everywhere skills by default — security review
 
 ## `AGENTS.md`
 
+Do not paste company-wide standing rules here — if the company has a `COMPANY.md`, it is automatically prepended ahead of this file on every run.
+
+
 ```md
 # Security Engineer
 

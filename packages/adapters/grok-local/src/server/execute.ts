@@ -37,6 +37,7 @@ import {
   stringifyPaperclipWakePayload,
   refreshPaperclipWorkspaceEnvForExecution,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  resolveCombinedAgentInstructionsContent,
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
 import { isGrokUnknownSessionError, parseGrokJsonl } from "./parse.js";
@@ -100,6 +101,7 @@ async function pathExists(candidate: string): Promise<boolean> {
 
 async function stageGrokProjectAssets(input: {
   cwd: string;
+  companyId: string;
   instructionsFilePath: string;
   skillEntries: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames: string[];
@@ -120,20 +122,38 @@ async function stageGrokProjectAssets(input: {
   const instructionsTarget = path.join(input.cwd, "Agents.md");
   if (input.instructionsFilePath) {
     if (!await pathExists(instructionsTarget)) {
-      await fs.copyFile(input.instructionsFilePath, instructionsTarget);
+      const rawInstructions = await fs.readFile(input.instructionsFilePath, "utf8");
+      const combinedInstructions = await resolveCombinedAgentInstructionsContent({
+        companyId: input.companyId,
+        agentInstructionsContent: rawInstructions,
+      });
+      await fs.writeFile(instructionsTarget, combinedInstructions, "utf8");
       ensureCleanupFile(instructionsTarget);
       stagedInstructionsPath = instructionsTarget;
     } else if (path.resolve(instructionsTarget) !== path.resolve(input.instructionsFilePath)) {
-      rulesFilePath = input.instructionsFilePath;
+      const rawInstructions = await fs.readFile(input.instructionsFilePath, "utf8");
+      const combinedInstructions = await resolveCombinedAgentInstructionsContent({
+        companyId: input.companyId,
+        agentInstructionsContent: rawInstructions,
+      });
+      const combinedRulesPath = path.join(input.cwd, ".paperclip-combined-instructions.md");
+      await fs.writeFile(combinedRulesPath, combinedInstructions, "utf8");
+      ensureCleanupFile(combinedRulesPath);
+      rulesFilePath = combinedRulesPath;
       await input.onLog(
         "stdout",
-        `[paperclip] Grok workspace already contains ${instructionsTarget}; using --rules @${input.instructionsFilePath} instead of overwriting it.\n`,
+        `[paperclip] Grok workspace already contains ${instructionsTarget}; using --rules @${combinedRulesPath} instead of overwriting it.\n`,
       );
     }
   } else {
     const canonicalAgents = path.join(input.cwd, "AGENTS.md");
     if (!await pathExists(instructionsTarget) && await pathExists(canonicalAgents)) {
-      await fs.copyFile(canonicalAgents, instructionsTarget);
+      const rawInstructions = await fs.readFile(canonicalAgents, "utf8");
+      const combinedInstructions = await resolveCombinedAgentInstructionsContent({
+        companyId: input.companyId,
+        agentInstructionsContent: rawInstructions,
+      });
+      await fs.writeFile(instructionsTarget, combinedInstructions, "utf8");
       ensureCleanupFile(instructionsTarget);
       stagedInstructionsPath = instructionsTarget;
     }
@@ -232,6 +252,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
+    companyId: agent.companyId,
     instructionsFilePath,
     skillEntries: grokSkillEntries,
     desiredSkillNames: desiredGrokSkillNames,

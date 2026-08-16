@@ -78,6 +78,23 @@ const agentInstructionsSvc = {
   materializeManagedBundle: vi.fn(),
 };
 
+const companyInstructionsFiles = new Map<string, string>();
+const companyInstructionsSvc = {
+  getFile: vi.fn(async (companyId: string) => {
+    const content = companyInstructionsFiles.get(companyId);
+    return content === undefined
+      ? { path: "COMPANY.md", content: "", exists: false, size: 0 }
+      : { path: "COMPANY.md", content, exists: true, size: content.length };
+  }),
+  writeFile: vi.fn(async (companyId: string, content: string) => {
+    companyInstructionsFiles.set(companyId, content);
+    return { path: "COMPANY.md", content, exists: true, size: content.length };
+  }),
+  deleteFile: vi.fn(async (companyId: string) => {
+    companyInstructionsFiles.delete(companyId);
+  }),
+};
+
 vi.mock("../services/companies.js", () => ({
   companyService: () => companySvc,
 }));
@@ -118,6 +135,10 @@ vi.mock("../services/agent-instructions.js", () => ({
   agentInstructionsService: () => agentInstructionsSvc,
 }));
 
+vi.mock("../services/company-instructions.js", () => ({
+  companyInstructionsService: () => companyInstructionsSvc,
+}));
+
 vi.mock("../routes/org-chart-svg.js", () => ({
   renderOrgChartPng: vi.fn(async () => Buffer.from("png")),
 }));
@@ -135,6 +156,7 @@ describe("company portability", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    companyInstructionsFiles.clear();
     secretSvc.create.mockResolvedValue({ id: "secret-created" });
     secretSvc.remove.mockResolvedValue(true);
     secretSvc.normalizeAdapterConfigForPersistence.mockImplementation(async (_companyId, config) => config);
@@ -3779,5 +3801,69 @@ describe("company portability", () => {
     expect(preview.plan.agentPlans).toHaveLength(0);
     expect(preview.plan.projectPlans).toHaveLength(0);
     expect(preview.plan.issuePlans).toHaveLength(0);
+  });
+
+  it("DUR-33: exports COMPANY.md and restores it at the right path on import into a fresh company", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    companyInstructionsFiles.set("company-1", "1. One integration per external system.\n2. Companies are data, not code.");
+
+    const exported = await portability.exportBundle("company-1", {
+      include: { company: true, agents: false, projects: false, issues: false },
+    });
+
+    expect(asTextFile(exported.files["instructions/COMPANY.md"])).toBe(
+      "1. One integration per external system.\n2. Companies are data, not code.",
+    );
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+      requireBoardApprovalForNewAgents: false,
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: exported.rootPath, files: exported.files },
+      include: { company: true, agents: false, projects: false, issues: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip" },
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    expect(companyInstructionsSvc.writeFile).toHaveBeenCalledWith(
+      "company-imported",
+      "1. One integration per external system.\n2. Companies are data, not code.",
+    );
+    expect(companyInstructionsFiles.get("company-imported")).toBe(
+      "1. One integration per external system.\n2. Companies are data, not code.",
+    );
+  });
+
+  it("DUR-33: a company without COMPANY.md exports and imports cleanly (no file, no error)", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    const exported = await portability.exportBundle("company-1", {
+      include: { company: true, agents: false, projects: false, issues: false },
+    });
+
+    expect(exported.files["instructions/COMPANY.md"]).toBeUndefined();
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported-2",
+      name: "Imported Paperclip 2",
+      requireBoardApprovalForNewAgents: false,
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.list.mockResolvedValue([]);
+
+    await portability.importBundle({
+      source: { type: "inline", rootPath: exported.rootPath, files: exported.files },
+      include: { company: true, agents: false, projects: false, issues: false },
+      target: { mode: "new_company", newCompanyName: "Imported Paperclip 2" },
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    expect(companyInstructionsSvc.writeFile).not.toHaveBeenCalled();
   });
 });

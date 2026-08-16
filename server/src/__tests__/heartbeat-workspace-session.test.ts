@@ -1547,6 +1547,7 @@ async function buildSessionConfigMetadata(
 ) {
   return buildEffectiveRunSessionConfigMetadata({
     adapterType: "codex_local",
+    companyId: "company-1",
     effectiveAdapterConfig: {
       command: "codex",
       model: "gpt-5.4-mini",
@@ -1851,6 +1852,67 @@ describe("effective run session config freshness", () => {
     expect(canonical).toContain("missing_absolute_root");
     expect(canonical).not.toContain("Legacy direct-path instructions");
     expect(canonical).not.toContain("contentHash");
+  });
+
+  it("DUR-33: editing a company's COMPANY.md changes the session config fingerprint", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-company-instructions-fingerprint-"));
+    const previousHome = process.env.PAPERCLIP_HOME;
+    const previousInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = homeDir;
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+    try {
+      const companyId = "company-with-instructions";
+      const companyInstructionsDir = path.join(homeDir, "instances", "default", "companies", companyId, "instructions");
+      await fs.mkdir(companyInstructionsDir, { recursive: true });
+      const companyInstructionsPath = path.join(companyInstructionsDir, "COMPANY.md");
+      await fs.writeFile(companyInstructionsPath, "1. Rule one.\n", "utf8");
+
+      const before = await buildSessionConfigMetadata({
+        companyId,
+        effectiveAdapterConfig: { command: "codex", model: "gpt-5.4-mini" },
+      });
+
+      await fs.writeFile(companyInstructionsPath, "1. Rule one, revised.\n", "utf8");
+
+      const after = await buildSessionConfigMetadata({
+        companyId,
+        effectiveAdapterConfig: { command: "codex", model: "gpt-5.4-mini" },
+      });
+
+      expect(before.fingerprints.sessionFingerprint.fingerprint).not.toBe(
+        after.fingerprints.sessionFingerprint.fingerprint,
+      );
+      const decision = resolveTaskSessionConfigFreshness({
+        hasTaskSession: true,
+        configuredModel: "gpt-5.4-mini",
+        taskSessionParams: sessionParamsWithConfigMetadata(before),
+        configMetadata: after,
+      });
+      expect(decision.reset).toBe(true);
+      expect(decision.changedCategories).toContain("instructions");
+      expect(after.fingerprints.sessionFingerprint.canonicalJson).not.toContain("Rule one, revised");
+    } finally {
+      process.env.PAPERCLIP_HOME = previousHome;
+      process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
+    }
+  });
+
+  it("DUR-33: a company without COMPANY.md behaves exactly as today (no error, no extra category noise)", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-company-instructions-absent-"));
+    const previousHome = process.env.PAPERCLIP_HOME;
+    const previousInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_HOME = homeDir;
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+    try {
+      const metadata = await buildSessionConfigMetadata({
+        companyId: "company-without-instructions",
+        effectiveAdapterConfig: { command: "codex", model: "gpt-5.4-mini" },
+      });
+      expect(metadata.fingerprints.sessionFingerprint.fingerprint).toEqual(expect.any(String));
+    } finally {
+      process.env.PAPERCLIP_HOME = previousHome;
+      process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
+    }
   });
 
   it("does not include raw secret or plain env values in canonical session metadata", async () => {

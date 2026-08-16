@@ -231,6 +231,7 @@ import {
 import {
   readPaperclipSkillSyncPreference,
   writePaperclipSkillSyncPreference,
+  resolveCompanyInstructionsPath,
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds, isUuidLike, formatApprovalTitle } from "@paperclipai/shared";
 import {
@@ -3159,6 +3160,10 @@ async function hashFileContentsForConfigFingerprint(filePath: string) {
   return `sha256:${createHash("sha256").update(contents).digest("hex")}`;
 }
 
+async function statIfExists(targetPath: string) {
+  return fs.stat(targetPath).catch(() => null);
+}
+
 function isPathInsideRoot(input: { rootPath: string; filePath: string }) {
   const relative = path.relative(input.rootPath, input.filePath);
   return relative === "" || (
@@ -3195,7 +3200,22 @@ function resolveRootBoundInstructionsFingerprintPath(input: {
   return { filePath: resolvedPath, skippedReason: null };
 }
 
-async function resolveInstructionsConfigFingerprintMetadata(config: Record<string, unknown>) {
+async function resolveCompanyInstructionsConfigFingerprintMetadata(companyId: string) {
+  const filePath = resolveCompanyInstructionsPath({ companyId });
+  const stat = await statIfExists(filePath);
+  if (!stat?.isFile()) return { configured: false };
+  try {
+    return {
+      configured: true,
+      contentHash: await hashFileContentsForConfigFingerprint(filePath),
+      readable: true,
+    };
+  } catch {
+    return { configured: true, readable: false };
+  }
+}
+
+async function resolveInstructionsConfigFingerprintMetadata(config: Record<string, unknown>, companyId: string) {
   const instructionsFilePath = readNonEmptyString(config.instructionsFilePath);
   const instructionsRootPath = readNonEmptyString(config.instructionsRootPath);
   const instructionsEntryFile = readNonEmptyString(config.instructionsEntryFile);
@@ -3209,7 +3229,10 @@ async function resolveInstructionsConfigFingerprintMetadata(config: Record<strin
       ? path.resolve(instructionsRootPath, instructionsEntryFile)
       : null
   );
-  if (!configuredPath && !instructionsRootPath && !instructionsEntryFile) return null;
+  const companyInstructions = await resolveCompanyInstructionsConfigFingerprintMetadata(companyId);
+  if (!configuredPath && !instructionsRootPath && !instructionsEntryFile) {
+    return companyInstructions.configured ? { configured: true, companyInstructions } : null;
+  }
 
   const metadata: Record<string, unknown> = {
     configured: true,
@@ -3217,6 +3240,7 @@ async function resolveInstructionsConfigFingerprintMetadata(config: Record<strin
     entryFile: instructionsEntryFile,
     pathKind: configuredPath ? (path.isAbsolute(configuredPath) ? "absolute" : "relative") : null,
     readPolicy: "root_bound",
+    companyInstructions,
   };
   if (resolved.skippedReason) metadata.readSkippedReason = resolved.skippedReason;
   if (resolved.filePath) {
@@ -3271,6 +3295,7 @@ function buildSessionConfigCategoryValues(input: {
 
 export async function buildEffectiveRunSessionConfigMetadata(input: {
   adapterType: string;
+  companyId: string;
   effectiveAdapterConfig: Record<string, unknown>;
   agentRuntimeConfig: unknown;
   modelProfile: unknown;
@@ -3285,7 +3310,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
   agentConfigRevision?: unknown;
 }): Promise<EffectiveRunSessionConfigMetadata> {
   const secretManifest = input.secretManifest ?? [];
-  const instructions = await resolveInstructionsConfigFingerprintMetadata(input.effectiveAdapterConfig);
+  const instructions = await resolveInstructionsConfigFingerprintMetadata(input.effectiveAdapterConfig, input.companyId);
   const categoryValues = buildSessionConfigCategoryValues({
     adapterType: input.adapterType,
     effectiveAdapterConfig: input.effectiveAdapterConfig,
@@ -10629,6 +10654,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const latestAgentConfigRevision = await getLatestAgentConfigRevision(agent.companyId, agent.id);
     const sessionConfigMetadata = await buildEffectiveRunSessionConfigMetadata({
       adapterType: agent.adapterType,
+      companyId: agent.companyId,
       effectiveAdapterConfig: runtimeConfig,
       agentRuntimeConfig: agent.runtimeConfig,
       modelProfile: modelProfileMetadata,

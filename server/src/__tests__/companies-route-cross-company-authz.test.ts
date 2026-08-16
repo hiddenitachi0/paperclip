@@ -44,6 +44,12 @@ const mockFeedbackService = vi.hoisted(() => ({
   listFeedbackTraces: vi.fn(),
 }));
 
+const mockCompanyInstructionsService = vi.hoisted(() => ({
+  getFile: vi.fn(),
+  writeFile: vi.fn(),
+  deleteFile: vi.fn(),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 function registerCompanyRouteMocks() {
@@ -52,6 +58,7 @@ function registerCompanyRouteMocks() {
     agentService: () => mockAgentService,
     budgetService: () => mockBudgetService,
     companyArtifactsService: () => mockCompanyArtifactsService,
+    companyInstructionsService: () => mockCompanyInstructionsService,
     companyPortabilityService: () => mockCompanyPortabilityService,
     companyService: () => mockCompanyService,
     feedbackService: () => mockFeedbackService,

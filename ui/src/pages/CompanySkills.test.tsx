@@ -3,9 +3,44 @@
 import type { ComponentProps, ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { CompanySkillDetail, CompanySkillVersion } from "@paperclipai/shared";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { SkillDetailPage, getSkillVersionDiffSelection } from "./CompanySkills";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CompanyInstructionsCard, SkillDetailPage, getSkillVersionDiffSelection } from "./CompanySkills";
+
+const mockCompanyInstructionsApi = vi.hoisted(() => ({
+  get: vi.fn(),
+  update: vi.fn(),
+  remove: vi.fn(),
+}));
+
+const mockAccessApi = vi.hoisted(() => ({
+  getCurrentBoardAccess: vi.fn(),
+}));
+
+const mockAuthApi = vi.hoisted(() => ({
+  getSession: vi.fn(),
+}));
+
+const mockPushToast = vi.hoisted(() => vi.fn());
+
+vi.mock("../api/companyInstructions", () => ({
+  companyInstructionsApi: mockCompanyInstructionsApi,
+}));
+
+vi.mock("../api/access", () => ({
+  accessApi: mockAccessApi,
+}));
+
+vi.mock("../api/auth", () => ({
+  authApi: mockAuthApi,
+}));
+
+vi.mock("../context/ToastContext", () => ({
+  useToast: () => ({ pushToast: mockPushToast }),
+  useToastActions: () => ({ pushToast: mockPushToast }),
+  useOptionalToastActions: () => ({ pushToast: mockPushToast }),
+}));
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => (
@@ -80,7 +115,13 @@ vi.mock("../components/MarkdownBody", () => ({
 }));
 
 vi.mock("../components/MarkdownEditor", () => ({
-  MarkdownEditor: ({ value }: { value: string }) => <textarea readOnly value={value} />,
+  MarkdownEditor: ({ value, onChange }: { value: string; onChange?: (value: string) => void }) => (
+    <textarea
+      data-testid="markdown-editor"
+      value={value}
+      onChange={(event) => onChange?.(event.target.value)}
+    />
+  ),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -432,5 +473,157 @@ describe("SkillDetailPage settings", () => {
     });
 
     expect((node.querySelector('[role="dialog"] input') as HTMLInputElement).value).toBe("memory");
+  });
+});
+
+describe("CompanyInstructionsCard", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let queryClient: QueryClient;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+
+    // Default fixture: a board-authenticated actor with access to company-1.
+    mockAuthApi.getSession.mockResolvedValue({
+      session: { id: "sess-1", userId: "user-1" },
+      user: { id: "user-1", email: "board@example.test", name: "Board User", image: null },
+    });
+    mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
+      companyIds: ["company-1"],
+      isInstanceAdmin: false,
+      source: "session",
+      keyId: null,
+      user: null,
+      userId: "user-1",
+    });
+    mockCompanyInstructionsApi.get.mockResolvedValue({
+      path: "COMPANY.md",
+      content: "# Ship it",
+      exists: true,
+      size: 10,
+    });
+    mockCompanyInstructionsApi.update.mockResolvedValue({
+      path: "COMPANY.md",
+      content: "# Updated rules",
+      exists: true,
+      size: 20,
+    });
+  });
+
+  afterEach(() => {
+    root.unmount();
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function flushReact() {
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+  }
+
+  async function renderCard(companyId = "company-1") {
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <CompanyInstructionsCard companyId={companyId} />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+    return container;
+  }
+
+  function buttonNamed(node: ParentNode, name: string) {
+    return Array.from(node.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === name,
+    ) as HTMLButtonElement | undefined;
+  }
+
+  it("renders the box and fetches company instructions on load", async () => {
+    const node = await renderCard();
+
+    expect(mockCompanyInstructionsApi.get).toHaveBeenCalledWith("company-1");
+    expect(node.querySelector('[data-testid="company-instructions-card"]')).toBeTruthy();
+    expect(node.textContent).toContain("Company rules");
+    expect(node.textContent).toContain(
+      "The rules every agent in this company follows on every run, on top of its own role instructions.",
+    );
+    expect(node.textContent).toContain("# Ship it");
+  });
+
+  it("shows a distinct empty state when no company rules have been set yet", async () => {
+    mockCompanyInstructionsApi.get.mockResolvedValue({
+      path: "COMPANY.md",
+      content: "",
+      exists: false,
+      size: 0,
+    });
+
+    const node = await renderCard();
+
+    expect(node.textContent).toContain("No company rules set yet.");
+    expect(node.textContent).not.toContain("# Ship it");
+  });
+
+  it("lets a board actor edit and save new content, with the session-boundary disclosure shown", async () => {
+    const node = await renderCard();
+
+    const editButton = buttonNamed(node, "Edit");
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    const editor = node.querySelector('[data-testid="markdown-editor"]') as HTMLTextAreaElement;
+    expect(editor).toBeTruthy();
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(editor, "# Updated rules");
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await flushReact();
+
+    // Verbatim disclosure required by the ticket: edits never touch an
+    // already-running session, only the next brand-new one.
+    expect(node.textContent).toContain(
+      "Changes apply the next time each agent starts a new session — not to sessions already in progress.",
+    );
+
+    const saveButton = buttonNamed(node, "Save");
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(mockCompanyInstructionsApi.update).toHaveBeenCalledWith("company-1", "# Updated rules");
+  });
+
+  it("hides the edit control for a non-board (agent) viewer context", async () => {
+    // No human session — the closest in-UI analogue to an agent-authenticated
+    // caller, which the server rejects for PUT/DELETE regardless of role.
+    mockAuthApi.getSession.mockResolvedValue({ session: null, user: null });
+
+    const node = await renderCard();
+
+    expect(mockCompanyInstructionsApi.get).toHaveBeenCalledWith("company-1");
+    expect(node.textContent).toContain("Company rules");
+    expect(node.textContent).toContain("# Ship it");
+    expect(buttonNamed(node, "Edit")).toBeUndefined();
+    expect(buttonNamed(node, "Add rules")).toBeUndefined();
   });
 });

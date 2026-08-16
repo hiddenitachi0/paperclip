@@ -1006,6 +1006,36 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/instructions",
+  tags: ["companies"],
+  summary: "Get the company's shared COMPANY.md instructions file",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/companies/{companyId}/instructions",
+  tags: ["companies"],
+  summary: "Replace the company's shared COMPANY.md instructions file (board only)",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(z.object({ content: z.string().max(200_000) })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/companies/{companyId}/instructions",
+  tags: ["companies"],
+  summary: "Delete the company's shared COMPANY.md instructions file (board only)",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/companies/{companyId}/archive",
   tags: ["companies"],

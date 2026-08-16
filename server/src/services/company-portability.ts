@@ -61,6 +61,7 @@ import type { StorageService } from "../storage/types.js";
 import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
 import { agentInstructionsService } from "./agent-instructions.js";
+import { companyInstructionsService } from "./company-instructions.js";
 import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
 import { openSecretBundle, sealSecretBundle, SecretBundlePassphraseError } from "./portable-secret-bundle.js";
@@ -2995,6 +2996,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const agents = agentService(db);
   const assetRecords = assetService(db);
   const instructions = agentInstructionsService();
+  const companyInstructionsSvc = companyInstructionsService();
   const access = accessService(db);
   const projects = projectService(db);
   const issues = issueService(db);
@@ -3464,6 +3466,13 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       },
       "",
     );
+
+    if (include.company) {
+      const companyInstructionsFile = await companyInstructionsSvc.getFile(company.id);
+      if (companyInstructionsFile.exists) {
+        files["instructions/COMPANY.md"] = companyInstructionsFile.content;
+      }
+    }
 
     if (include.company && company.logoAssetId) {
       if (!storage) {
@@ -4442,6 +4451,13 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     }
 
     if (!targetCompany) throw notFound("Target company not found");
+
+    if (include.company) {
+      const importedCompanyInstructions = plan.source.files["instructions/COMPANY.md"];
+      if (typeof importedCompanyInstructions === "string") {
+        await companyInstructionsSvc.writeFile(targetCompany.id, importedCompanyInstructions);
+      }
+    }
 
     const importedAgentEnvSlugs = new Set(
       plan.preview.plan.agentPlans

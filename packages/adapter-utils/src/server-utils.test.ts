@@ -9,10 +9,14 @@ import {
   buildPersistentSkillSnapshot,
   buildRuntimeMountedSkillSnapshot,
   buildInvocationEnvForLogs,
+  combineCompanyAndAgentInstructions,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   materializePaperclipSkillCopy,
+  readCompanyInstructionsContent,
   refreshPaperclipWorkspaceEnvForExecution,
   renderPaperclipWakePrompt,
+  resolveCombinedAgentInstructionsContent,
+  resolveCompanyInstructionsPath,
   runningProcesses,
   runChildProcess,
   sanitizeSshRemoteEnv,
@@ -1769,5 +1773,71 @@ describe("appendWithByteCap", () => {
     expect(output).not.toContain("\uFFFD");
     expect(Buffer.from(output, "utf8").toString("utf8")).toBe(output);
     expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(7);
+  });
+});
+
+describe("company instructions (DUR-33)", () => {
+  async function makeTempInstanceRoot() {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-company-instructions-"));
+    return { homeDir, instanceId: "default" };
+  }
+
+  describe("combineCompanyAndAgentInstructions", () => {
+    it("prepends company instructions ahead of the agent's own instructions", () => {
+      const result = combineCompanyAndAgentInstructions("COMPANY RULES", "AGENT INSTRUCTIONS");
+      expect(result.startsWith("COMPANY RULES")).toBe(true);
+      expect(result.indexOf("COMPANY RULES")).toBeLessThan(result.indexOf("AGENT INSTRUCTIONS"));
+    });
+
+    it("is a no-op (no error, no empty header) when there is no company instructions", () => {
+      expect(combineCompanyAndAgentInstructions(null, "AGENT INSTRUCTIONS")).toBe("AGENT INSTRUCTIONS");
+      expect(combineCompanyAndAgentInstructions("   ", "AGENT INSTRUCTIONS")).toBe("AGENT INSTRUCTIONS");
+    });
+  });
+
+  describe("readCompanyInstructionsContent / resolveCombinedAgentInstructionsContent", () => {
+    it("returns null (not an error) when the company has no COMPANY.md", async () => {
+      const { homeDir, instanceId } = await makeTempInstanceRoot();
+      const content = await readCompanyInstructionsContent({ companyId: "company-without-file", homeDir, instanceId });
+      expect(content).toBeNull();
+
+      const combined = await resolveCombinedAgentInstructionsContent({
+        companyId: "company-without-file",
+        agentInstructionsContent: "AGENT INSTRUCTIONS",
+        homeDir,
+        instanceId,
+      });
+      expect(combined).toBe("AGENT INSTRUCTIONS");
+    });
+
+    it("prepends the same company's COMPANY.md content for every agent in that company (fixture: 12 agents, 1 file)", async () => {
+      const { homeDir, instanceId } = await makeTempInstanceRoot();
+      const companyId = "nordstrand-fixture-company";
+      const filePath = resolveCompanyInstructionsPath({ companyId, homeDir, instanceId });
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      const companyRules = "1. Rule one.\n2. Rule two.";
+      await fs.writeFile(filePath, companyRules, "utf8");
+
+      const twelveAgentIds = Array.from({ length: 12 }, (_unused, index) => `agent-${index + 1}`);
+      const results = await Promise.all(
+        twelveAgentIds.map((agentId) =>
+          resolveCombinedAgentInstructionsContent({
+            companyId,
+            agentInstructionsContent: `You are ${agentId}. Own your module.`,
+            homeDir,
+            instanceId,
+          }),
+        ),
+      );
+
+      for (const [index, combined] of results.entries()) {
+        const agentId = twelveAgentIds[index]!;
+        expect(combined).toBe(`${companyRules}\n\n---\n\nYou are ${agentId}. Own your module.`);
+        expect(combined.startsWith(companyRules)).toBe(true);
+      }
+      // Every agent resolved the exact same company-rules prefix from the one file.
+      const prefixes = new Set(results.map((combined) => combined.split("\n\n---\n\n")[0]));
+      expect(prefixes.size).toBe(1);
+    });
   });
 });

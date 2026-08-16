@@ -24,6 +24,7 @@ import {
   agentService,
   budgetService,
   companyArtifactsService,
+  companyInstructionsService,
   companyPortabilityService,
   companyService,
   feedbackService,
@@ -43,6 +44,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const budgets = budgetService(db);
   const artifacts = companyArtifactsService(db, storage);
   const feedback = feedbackService(db);
+  const instructions = companyInstructionsService();
   const importJobs = new Map<string, ImportJobRecord>();
   const importJobTerminalRetentionMs = 5 * 60 * 1000;
 
@@ -67,6 +69,10 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     }
     return Math.floor(parsed);
   }
+
+  const companyInstructionsBodySchema = z.object({
+    content: z.string().max(200_000),
+  });
 
   const timelineQuerySchema = z.object({
     from: z.string().optional(),
@@ -104,6 +110,22 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (actorAgent.role !== "ceo") {
       throw forbidden(`Only CEO agents can manage ${capability}`);
     }
+  }
+
+  // Mirrors assertCanManageInstructionsPath (server/src/routes/agents.ts) for the
+  // company-level COMPANY.md file: board-authenticated only, never agent-authenticated,
+  // even for CEO agents. There is no per-agent record to check company membership
+  // against here, so this checks companyId directly.
+  async function assertBoardCanManageCompanyInstructions(req: Request, companyId: string) {
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+    const decision = await access.decide({
+      actor: req.actor,
+      action: "agents:create",
+      resource: { type: "company", companyId },
+    });
+    if (decision.allowed) return;
+    throw forbidden(decision.explanation);
   }
 
   router.get("/", async (req, res) => {
@@ -240,6 +262,55 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       includePayload: parseBooleanQuery(req.query.includePayload),
     });
     res.json(traces);
+  });
+
+  // COMPANY.md: the standing-rules box every agent in this company gets prepended
+  // ahead of its own AGENTS.md on every run (see resolveCombinedAgentInstructionsContent).
+  router.get("/:companyId/instructions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await instructions.getFile(companyId));
+  });
+
+  router.put(
+    "/:companyId/instructions",
+    validate(companyInstructionsBodySchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await assertBoardCanManageCompanyInstructions(req, companyId);
+      const { content } = req.body as { content: string };
+      const file = await instructions.writeFile(companyId, content);
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "company.instructions.updated",
+        entityType: "company",
+        entityId: companyId,
+      });
+      res.json(file);
+    },
+  );
+
+  router.delete("/:companyId/instructions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await assertBoardCanManageCompanyInstructions(req, companyId);
+    await instructions.deleteFile(companyId);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "company.instructions.deleted",
+      entityType: "company",
+      entityId: companyId,
+    });
+    res.status(204).end();
   });
 
   router.post("/:companyId/export", async (req, res) => {

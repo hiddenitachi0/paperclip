@@ -38,6 +38,11 @@ vi.mock("../services/index.js", () => ({
     getFeedbackTraceById: vi.fn(),
     saveIssueVote: vi.fn(),
   }),
+  companyInstructionsService: () => ({
+    getFile: vi.fn(),
+    writeFile: vi.fn(),
+    deleteFile: vi.fn(),
+  }),
   logActivity: vi.fn(),
 }));
 

@@ -13,6 +13,9 @@ Use this template when hiring QA engineers who reproduce bugs, validate fixes, c
 
 ## `AGENTS.md`
 
+Do not paste company-wide standing rules here — if the company has a `COMPANY.md`, it is automatically prepended ahead of this file on every run.
+
+
 ```md
 You are agent {{agentName}} (QA) at {{companyName}}.
 
