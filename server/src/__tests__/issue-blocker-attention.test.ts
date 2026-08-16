@@ -620,6 +620,55 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     await expect(svc.count(companyId, { attention: "blocked", q: "Public context" })).resolves.toBe(1);
   });
 
+  it("attributes a blocked issue with a 'Human action:' marker to a board/human owner (DUR-35)", async () => {
+    const { companyId } = await createCompany("BIH");
+    const issueId = await insertIssue({
+      companyId,
+      identifier: "BIH-1",
+      title: "Blocked on GitHub org admin",
+      status: "blocked",
+      description: [
+        "CI is failing because of a stale ruleset requirement.",
+        "Human owner: GitHub org admin",
+        "Human action: open the ruleset settings page and remove pytest from the required checks",
+      ].join("\n"),
+    });
+
+    const rows = await svc.list(companyId, { attention: "blocked" });
+    const issue = rows.find((row) => row.id === issueId);
+
+    expect(issue?.blockedInboxAttention).toMatchObject({
+      state: "human_action_wait",
+      reason: "human_action_required",
+      severity: "high",
+      owner: { type: "board", agentId: null, userId: null, label: "GitHub org admin" },
+      action: {
+        label: "Human action required",
+        detail: "open the ruleset settings page and remove pytest from the required checks",
+      },
+    });
+  });
+
+  it("without a marker, a blocked issue with no structured blocker still falls to blocked_chain_stalled/unknown", async () => {
+    const { companyId } = await createCompany("BIU");
+    const issueId = await insertIssue({
+      companyId,
+      identifier: "BIU-1",
+      title: "Blocked with only a prose comment",
+      status: "blocked",
+      description: "Waiting on someone, no marker here.",
+    });
+
+    const rows = await svc.list(companyId, { attention: "blocked" });
+    const issue = rows.find((row) => row.id === issueId);
+
+    expect(issue?.blockedInboxAttention).toMatchObject({
+      state: "needs_attention",
+      reason: "blocked_chain_stalled",
+      owner: { type: "unknown", agentId: null, userId: null },
+    });
+  });
+
   it("excludes healthy active blockers from blocked inbox attention", async () => {
     const { companyId, agentId } = await createCompany("BIB");
     const parentId = await insertIssue({ companyId, identifier: "BIB-1", title: "Blocked source", status: "blocked" });

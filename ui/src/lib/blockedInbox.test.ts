@@ -105,6 +105,7 @@ describe("blockedInbox", () => {
       "invalid_review_participant",
       "open_recovery_issue",
       "external_owner_action",
+      "human_action_required",
     ];
     for (const reason of reasons) {
       const variant = blockedReasonVariant(reason);

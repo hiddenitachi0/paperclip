@@ -36,6 +36,7 @@ export const issueBlockedInboxStateSchema = z.enum([
   "needs_attention",
   "awaiting_decision",
   "external_wait",
+  "human_action_wait",
   "recovery_open",
   "missing_disposition",
 ]);
@@ -54,6 +55,7 @@ export const issueBlockedInboxReasonSchema = z.enum([
   "pending_board_decision",
   "pending_user_decision",
   "external_owner_action",
+  "human_action_required",
   "open_recovery_issue",
 ]);
 

@@ -436,6 +436,8 @@ A healthy `blocked` issue has an explicit waiting path:
 - the issue has an explicit recovery action that itself has a live or waiting path
 - the issue is waiting on a pending interaction, linked approval, human owner, or clearly named external owner/action
 
+A human owner is named with `Human owner: <who>` / `Human action: <what>` as lines in `description`; an external owner is named the same way with `External owner:` / `External action:`. Either marker gives the issue a structured `owner` attribution (human owner routes to the operator's Needs-you lane) instead of falling through to an unattributed, parked `blocked_chain_stalled` state. A prose-only blocker description with no marker, no `blockedByIssueIds`, no pending approval, and no issue-thread interaction is indistinguishable from a stalled chain and will not reach the operator.
+
 A blocker chain is covered only when its unresolved leaf is live or explicitly waiting. An intermediate `blocked` issue does not make the chain healthy by itself.
 
 A `blocked` issue is stalled when the unresolved blocker leaf has no active run, queued wake, typed participant, pending interaction or approval, user owner, external owner/action, or recovery action. In that case the parent should show the first stalled leaf instead of presenting the dependency as calmly covered.
