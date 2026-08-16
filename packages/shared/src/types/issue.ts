@@ -240,6 +240,7 @@ export type IssueBlockedInboxState =
   | "needs_attention"
   | "awaiting_decision"
   | "external_wait"
+  | "human_action_wait"
   | "recovery_open"
   | "missing_disposition";
 
@@ -257,6 +258,7 @@ export type IssueBlockedInboxReason =
   | "pending_board_decision"
   | "pending_user_decision"
   | "external_owner_action"
+  | "human_action_required"
   | "open_recovery_issue";
 
 export type IssueBlockedInboxOwnerType = "agent" | "user" | "board" | "external" | "unknown";

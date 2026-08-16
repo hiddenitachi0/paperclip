@@ -2661,6 +2661,17 @@ async function listSuccessfulRunHandoffMapForIssues(
   return states;
 }
 
+function humanActionFromDescription(description: string | null): { owner: string | null; action: string } | null {
+  if (!description) return null;
+  const owner = description.match(/^\s*human owner\s*:\s*(.+)$/im)?.[1]?.trim();
+  const action = description.match(/^\s*human action\s*:\s*(.+)$/im)?.[1]?.trim();
+  if (!action) return null;
+  return {
+    owner: owner ? owner.slice(0, 120) : null,
+    action: action.slice(0, 240),
+  };
+}
+
 function externalWaitFromDescription(description: string | null): { owner: string; action: string } | null {
   if (!description) return null;
   const owner = description.match(/^\s*external owner\s*:\s*(.+)$/im)?.[1]?.trim();
@@ -3138,6 +3149,23 @@ async function listIssueBlockedInboxAttentionMap(
     }
 
     const hasMonitor = Boolean(row.monitorNextCheckAt && row.monitorNextCheckAt.getTime() > Date.now());
+    const humanAction = row.status === "blocked" && !hasMonitor ? humanActionFromDescription(row.description) : null;
+    if (humanAction) {
+      result.set(row.id, attentionBase({
+        state: "human_action_wait",
+        reason: "human_action_required",
+        severity: "high",
+        stoppedSinceAt: row.updatedAt,
+        owner: { type: "board", agentId: null, userId: null, label: humanAction.owner },
+        action: {
+          label: "Human action required",
+          detail: humanAction.action,
+        },
+        sourceIssue: source,
+      }));
+      continue;
+    }
+
     const external = row.status === "blocked" && !hasMonitor ? externalWaitFromDescription(row.description) : null;
     if (external) {
       result.set(row.id, attentionBase({

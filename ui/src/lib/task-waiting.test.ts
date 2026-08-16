@@ -42,6 +42,20 @@ describe("classifyTaskWaiting", () => {
     expect(r.ownerLabel).toBe("Copywriter");
   });
 
+  it("owner=board via human_action_required → waiting on you (DUR-35: prose-only human next-step)", () => {
+    const r = classifyTaskWaiting(
+      issue({
+        blockedInboxAttention: attention({
+          reason: "human_action_required",
+          owner: { type: "board", agentId: null, userId: null, label: "GitHub org admin" },
+          action: { label: "Human action required", detail: "Remove pytest from the ruleset" },
+        }),
+      }),
+    );
+    expect(r.waitingOn).toBe("you");
+    expect(r.ownerLabel).toBe("GitHub org admin");
+  });
+
   it("owner=external → external", () => {
     const r = classifyTaskWaiting(
       issue({ blockedInboxAttention: attention({ owner: { type: "external", agentId: null, userId: null, label: null } }) }),

@@ -175,6 +175,22 @@ The array **replaces** the current set on each update — send `[]` to clear. Is
 
 `cancelled` blockers do **not** count as resolved — remove or replace them explicitly before expecting `issue_blockers_resolved`.
 
+**Blocked on a human or external party, with no other issue/agent to link:** when you set `status: "blocked"` and the blocker isn't another issue, name the owner and action as the first lines of the `description` so Paperclip can attribute it structurally (not just in prose an operator has to go find):
+
+```
+Human owner: GitHub org admin
+Human action: open the ruleset settings page and remove pytest from the required checks
+```
+
+or, for a party outside the org:
+
+```
+External owner: Acme Vendor Security Team
+External action: confirm receipt of the access request
+```
+
+Without one of these markers (or a `blockedByIssueIds` link, a pending approval, or an issue-thread interaction), a `blocked` issue with no other structured signal is classified `owner: unknown` and treated as parked — it will **not** surface in the operator's Needs-you lane even after sitting for hours. Prefer the marker for a lightweight named blocker; file an `ask_user_questions` interaction instead when you actually need the human to answer something before you can continue.
+
 ## Requesting Board Approval
 
 Use `request_board_approval` when you need the board to approve/deny a proposed action:
