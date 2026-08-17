@@ -4,13 +4,14 @@ import { useQuery } from "@tanstack/react-query";
 import { agentsApi, type OrgNode } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useSidebar } from "../context/SidebarContext";
 import { queryKeys } from "../lib/queryKeys";
-import { agentUrl } from "../lib/utils";
+import { agentUrl, cn } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { AgentIcon } from "../components/AgentIconPicker";
-import { Download, Maximize2, Minus, Network, Plus, Upload } from "lucide-react";
+import { ChevronRight, Download, Maximize2, Minus, Network, Plus, Upload } from "lucide-react";
 import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
 
 // Layout constants
@@ -168,11 +169,108 @@ const statusDotColor: Record<string, string> = {
 };
 const defaultDotColor = "#a3a3a3";
 
+// ── Mobile tree view ─────────────────────────────────────────────────────
+//
+// The pan/zoom canvas below is unusable on small touch screens once a
+// hierarchy has more than a handful of nodes: there's no way to see overall
+// structure without constant pinch/pan. Below the sidebar's mobile
+// breakpoint we instead render a plain, page-scrolling, collapsible tree
+// list — indentation conveys hierarchy, depth is user-controllable via
+// expand/collapse, and it degrades gracefully to any width.
+
+function OrgTreeMobileNode({
+  node,
+  agentMap,
+  navigate,
+}: {
+  node: OrgNode;
+  agentMap: Map<string, Agent>;
+  navigate: (path: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const hasChildren = node.reports.length > 0;
+  const agent = agentMap.get(node.id);
+  const dotColor = statusDotColor[node.status] ?? defaultDotColor;
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2.5 py-2.5 pl-2 pr-3 cursor-pointer select-none transition-colors hover:bg-accent/30 active:bg-accent/40"
+        onClick={() => navigate(agent ? agentUrl(agent) : `/agents/${node.id}`)}
+      >
+        {hasChildren ? (
+          <button
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-accent"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            aria-label={expanded ? `Collapse ${node.name}'s reports` : `Expand ${node.name}'s reports`}
+          >
+            <ChevronRight
+              className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform", expanded && "rotate-90")}
+            />
+          </button>
+        ) : (
+          <span className="w-6 shrink-0" />
+        )}
+        <div className="relative shrink-0">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted">
+            <AgentIcon icon={agent?.icon} className="h-4 w-4 text-foreground/70" />
+          </div>
+          <span
+            className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card"
+            style={{ backgroundColor: dotColor }}
+          />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-sm font-medium leading-tight text-foreground">{node.name}</span>
+          <span className="truncate text-xs leading-tight text-muted-foreground">
+            {agent?.title ?? roleLabel(node.role)}
+          </span>
+        </div>
+        {hasChildren && (
+          <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground/70">
+            {node.reports.length}
+          </span>
+        )}
+      </div>
+      {hasChildren && expanded && (
+        <div className="ml-[27px] border-l border-border/50 pl-2">
+          {node.reports.map((child) => (
+            <OrgTreeMobileNode key={child.id} node={child} agentMap={agentMap} navigate={navigate} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OrgChartMobile({
+  nodes,
+  agentMap,
+  navigate,
+}: {
+  nodes: OrgNode[];
+  agentMap: Map<string, Agent>;
+  navigate: (path: string) => void;
+}) {
+  return (
+    <div className="divide-y divide-border/40 rounded-lg border border-border bg-card">
+      {nodes.map((node) => (
+        <OrgTreeMobileNode key={node.id} node={node} agentMap={agentMap} navigate={navigate} />
+      ))}
+    </div>
+  );
+}
+
 // ── Main component ──────────────────────────────────────────────────────
 
 export function OrgChart() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const { isMobile } = useSidebar();
   const navigate = useNavigate();
 
   const { data: orgTree, isLoading } = useQuery({
@@ -440,22 +538,35 @@ export function OrgChart() {
     return <EmptyState icon={Network} message="No organizational hierarchy defined." />;
   }
 
+  const companyActions = (
+    <>
+      <Link to="/company/import">
+        <Button variant="outline" size="sm">
+          <Upload className="mr-1.5 h-3.5 w-3.5" />
+          Import company
+        </Button>
+      </Link>
+      <Link to="/company/export">
+        <Button variant="outline" size="sm">
+          <Download className="mr-1.5 h-3.5 w-3.5" />
+          Export company
+        </Button>
+      </Link>
+    </>
+  );
+
+  if (isMobile) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-start gap-2">{companyActions}</div>
+        <OrgChartMobile nodes={orgTree ?? []} agentMap={agentMap} navigate={navigate} />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-[calc(100dvh-9rem)] min-h-[420px] flex-col md:h-full md:min-h-0">
-      <div className="mb-2 flex shrink-0 flex-wrap items-center justify-start gap-2">
-        <Link to="/company/import">
-          <Button variant="outline" size="sm">
-            <Upload className="mr-1.5 h-3.5 w-3.5" />
-            Import company
-          </Button>
-        </Link>
-        <Link to="/company/export">
-          <Button variant="outline" size="sm">
-            <Download className="mr-1.5 h-3.5 w-3.5" />
-            Export company
-          </Button>
-        </Link>
-      </div>
+      <div className="mb-2 flex shrink-0 flex-wrap items-center justify-start gap-2">{companyActions}</div>
       <div
         ref={containerRef}
         data-testid="org-chart-viewport"
