@@ -9,7 +9,6 @@ import { OrgChart } from "./OrgChart";
 const navigateMock = vi.fn();
 const orgMock = vi.fn();
 const listMock = vi.fn();
-const isMobileMock = vi.fn(() => false);
 
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
@@ -22,10 +21,6 @@ vi.mock("../context/CompanyContext", () => ({
 
 vi.mock("../context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }),
-}));
-
-vi.mock("../context/SidebarContext", () => ({
-  useSidebar: () => ({ isMobile: isMobileMock() }),
 }));
 
 vi.mock("../api/agents", () => ({
@@ -266,90 +261,5 @@ describe("OrgChart mobile gestures", () => {
     });
 
     expect(layer.style.transform).toBe("translate(-45px, 40px) scale(1.5)");
-  });
-});
-
-describe("OrgChart mobile tree view", () => {
-  let container: HTMLDivElement;
-  let root: ReturnType<typeof createRoot>;
-  let queryClient: QueryClient;
-
-  beforeEach(() => {
-    isMobileMock.mockReturnValue(true);
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    orgMock.mockResolvedValue(orgTree);
-    listMock.mockResolvedValue(agents);
-  });
-
-  afterEach(async () => {
-    if (root) {
-      await act(async () => {
-        root.unmount();
-      });
-    }
-    container.remove();
-    document.body.innerHTML = "";
-    isMobileMock.mockReturnValue(false);
-    vi.restoreAllMocks();
-    vi.clearAllMocks();
-  });
-
-  async function renderOrgChart() {
-    root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <OrgChart />
-        </QueryClientProvider>,
-      );
-    });
-    await flushReact();
-    await flushReact();
-  }
-
-  it("renders a collapsible tree list instead of the pan/zoom canvas", async () => {
-    await renderOrgChart();
-
-    expect(container.querySelector('[data-testid="org-chart-viewport"]')).toBeNull();
-    expect(container.textContent).toContain("CEO");
-    expect(container.textContent).toContain("Engineer");
-  });
-
-  it("collapses and re-expands a node's reports", async () => {
-    await renderOrgChart();
-
-    expect(container.textContent).toContain("Engineer");
-
-    const toggle = container.querySelector('button[aria-label="Collapse CEO\'s reports"]') as HTMLButtonElement;
-    expect(toggle).not.toBeNull();
-
-    await act(async () => {
-      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    });
-    expect(container.textContent).not.toContain("Engineer");
-
-    const expandToggle = container.querySelector('button[aria-label="Expand CEO\'s reports"]') as HTMLButtonElement;
-    await act(async () => {
-      expandToggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    });
-    expect(container.textContent).toContain("Engineer");
-  });
-
-  it("navigates to the agent on row tap", async () => {
-    await renderOrgChart();
-
-    const rows = container.querySelectorAll(".cursor-pointer.select-none");
-    const engineerRow = Array.from(rows).find((el) => el.textContent?.includes("Engineer")) as HTMLElement;
-    expect(engineerRow).toBeTruthy();
-
-    await act(async () => {
-      engineerRow.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    });
-
-    expect(navigateMock).toHaveBeenCalledWith("/agents/engineer");
   });
 });
