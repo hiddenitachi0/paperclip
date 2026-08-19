@@ -44,6 +44,19 @@ export const deployPolicySchema = z
     envFile: z.string().optional(),
     healthCheckUrl: z.string().min(1),
     rollback: z.enum(["git_previous", "none"]),
+    /**
+     * The branch a merge must land on to ever reach this deploy (DUR-40).
+     * Declared here so the merge-approval branch guard has something to
+     * read instead of a convention recorded only in a doc like FORK.md.
+     */
+    deployBranch: z.string().min(1).optional(),
+    /**
+     * A read-only mirror of an upstream project that looks like a normal
+     * branch but is never deployed (e.g. this fork's `master`). Filing a
+     * merge_pr approval targeting this branch is refused at the API layer
+     * — see isMergePrRequestApproval in routes/approvals.ts (DUR-40).
+     */
+    mirrorBranch: z.string().min(1).optional(),
   })
   .strict();
 
