@@ -73,6 +73,7 @@ const mockIssueThreadInteractionService = vi.hoisted(() => ({
   listForIssue: vi.fn(async () => []),
 }));
 const mockIssueApprovalService = vi.hoisted(() => ({
+  getApproval: vi.fn(),
   link: vi.fn(),
   unlink: vi.fn(),
   listApprovalsForIssue: vi.fn(async () => []),
@@ -486,6 +487,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockReset();
     mockHeartbeatService.cancelRun.mockResolvedValue(null);
+    mockIssueApprovalService.getApproval.mockReset();
     mockIssueApprovalService.link.mockReset();
     mockIssueApprovalService.unlink.mockReset();
     mockIssueApprovalService.listApprovalsForIssue.mockReset();
@@ -1850,5 +1852,111 @@ describe("agent issue mutation checkout ownership", () => {
       expect(res.body.error).toBe("Task-watchdog run context is not backed by an active persisted watchdog.");
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("issue approval link permissions (DUR-43)", () => {
+  const approvalId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("@paperclipai/shared/telemetry");
+    vi.doUnmock("../telemetry.js");
+    vi.doUnmock("../services/access.js");
+    vi.doUnmock("../services/activity-log.js");
+    vi.doUnmock("../services/agents.js");
+    vi.doUnmock("../services/documents.js");
+    vi.doUnmock("../services/external-objects.js");
+    vi.doUnmock("../services/index.js");
+    vi.doUnmock("../services/issues.js");
+    vi.doUnmock("../services/work-products.js");
+    vi.doUnmock("../routes/issues.js");
+    vi.doUnmock("../routes/authz.js");
+    vi.doUnmock("../middleware/index.js");
+    registerRouteMocks();
+    vi.clearAllMocks();
+    mockAccessService.canUser.mockResolvedValue(true);
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      action: "issue:mutate",
+      reason: "allow_explicit_grant",
+      explanation: "Allowed by test default.",
+    });
+    mockAccessService.hasPermission.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) return makeAgent(ownerAgentId);
+      if (id === peerAgentId) return makeAgent(peerAgentId);
+      return null;
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
+    mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+    mockIssueApprovalService.getApproval.mockReset();
+    mockIssueApprovalService.link.mockReset();
+    mockIssueApprovalService.unlink.mockReset();
+    mockIssueApprovalService.listApprovalsForIssue.mockReset();
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
+  });
+
+  it("lets the agent that requested the approval link it to the issue, even without canCreateAgents", async () => {
+    mockIssueApprovalService.getApproval.mockResolvedValue({
+      id: approvalId,
+      companyId,
+      requestedByAgentId: ownerAgentId,
+    });
+    mockIssueApprovalService.link.mockResolvedValue({ issueId, approvalId });
+
+    const app = await createApp(ownerActor());
+    const res = await request(app).post(`/api/issues/${issueId}/approvals`).send({ approvalId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueApprovalService.link).toHaveBeenCalledWith(
+      issueId,
+      approvalId,
+      expect.objectContaining({ agentId: ownerAgentId }),
+    );
+  });
+
+  it("lets the agent that requested the approval unlink it from the issue", async () => {
+    mockIssueApprovalService.getApproval.mockResolvedValue({
+      id: approvalId,
+      companyId,
+      requestedByAgentId: ownerAgentId,
+    });
+
+    const app = await createApp(ownerActor());
+    const res = await request(app).delete(`/api/issues/${issueId}/approvals/${approvalId}`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueApprovalService.unlink).toHaveBeenCalledWith(issueId, approvalId);
+  });
+
+  it("still denies an agent linking an approval it did not request and lacks canCreateAgents for", async () => {
+    mockIssueApprovalService.getApproval.mockResolvedValue({
+      id: approvalId,
+      companyId,
+      requestedByAgentId: peerAgentId,
+    });
+
+    const app = await createApp(ownerActor());
+    const res = await request(app).post(`/api/issues/${issueId}/approvals`).send({ approvalId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Missing permission to link approvals");
+    expect(mockIssueApprovalService.link).not.toHaveBeenCalled();
+  });
+
+  it("denies linking an approval from a different company even if requestedByAgentId matches", async () => {
+    mockIssueApprovalService.getApproval.mockResolvedValue({
+      id: approvalId,
+      companyId: "99999999-9999-4999-8999-999999999999",
+      requestedByAgentId: ownerAgentId,
+    });
+
+    const app = await createApp(ownerActor());
+    const res = await request(app).post(`/api/issues/${issueId}/approvals`).send({ approvalId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Missing permission to link approvals");
+    expect(mockIssueApprovalService.link).not.toHaveBeenCalled();
   });
 });

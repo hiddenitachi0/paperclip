@@ -1913,7 +1913,12 @@ export function issueRoutes(
     });
   }
 
-  async function assertCanManageIssueApprovalLinks(req: Request, res: Response, companyId: string) {
+  async function assertCanManageIssueApprovalLinks(
+    req: Request,
+    res: Response,
+    companyId: string,
+    approvalId?: string | null,
+  ) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "board") return true;
     if (!req.actor.agentId) {
@@ -1926,6 +1931,15 @@ export function issueRoutes(
       return false;
     }
     if (actorAgent.role === "ceo" || Boolean(actorAgent.permissions?.canCreateAgents)) return true;
+    // An agent that requested an approval is always allowed to link/unlink it to
+    // an issue in its own company, even without canCreateAgents — requesting the
+    // approval is already the stronger permission (DUR-43).
+    if (approvalId) {
+      const approval = await issueApprovalsSvc.getApproval(approvalId);
+      if (approval && approval.companyId === companyId && approval.requestedByAgentId === actorAgent.id) {
+        return true;
+      }
+    }
     res.status(403).json({ error: "Missing permission to link approvals" });
     return false;
   }
@@ -5115,7 +5129,7 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertApprovalMutationAllowedByRunContext(req, res, issue))) return;
-    if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId))) return;
+    if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId, req.body.approvalId))) return;
 
     const actor = getActorInfo(req);
     await issueApprovalsSvc.link(id, req.body.approvalId, {
@@ -5150,7 +5164,7 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertApprovalMutationAllowedByRunContext(req, res, issue))) return;
-    if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId))) return;
+    if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId, approvalId))) return;
 
     await issueApprovalsSvc.unlink(id, approvalId);
 
