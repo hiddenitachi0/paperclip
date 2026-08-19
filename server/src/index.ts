@@ -41,6 +41,7 @@ import {
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
   heartbeatService,
+  mergeDeployVisibilityService,
   instanceSettingsService,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
@@ -782,6 +783,7 @@ export async function startServer(): Promise<StartedServer> {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
+    const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery.
@@ -891,6 +893,19 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "routine scheduler tick failed");
+        });
+
+      // DUR-40: flag any merge_pr approval that landed on a project's deploy
+      // branch without a follow-up deploy approval (see merge-deploy-visibility.ts).
+      void mergeDeployVisibility
+        .tick(new Date())
+        .then((result) => {
+          if (result.flagged > 0) {
+            logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "merge-deploy visibility tick failed");
         });
 
       void environmentCustomImages
