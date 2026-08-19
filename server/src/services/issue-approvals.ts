@@ -41,6 +41,8 @@ export function issueApprovalService(db: Db) {
   }
 
   return {
+    getApproval,
+
     listApprovalsForIssue: async (issueId: string) => {
       const issue = await getIssue(issueId);
       if (!issue) throw notFound("Issue not found");
