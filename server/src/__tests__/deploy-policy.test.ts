@@ -63,6 +63,42 @@ describe("deploy policy helpers", () => {
     });
   });
 
+  it("parses deployBranch and mirrorBranch (DUR-40)", () => {
+    expect(
+      parseProjectDeployPolicy({
+        enabled: true,
+        requestingAgentId: null,
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        deployTargetPath: "/root/paperclip",
+        deployKind: "compose_build_swap",
+        healthCheckUrl: "/api/health",
+        rollback: "git_previous",
+        deployBranch: "custom",
+        mirrorBranch: "master",
+      }),
+    ).toEqual({
+      enabled: true,
+      requestingAgentId: null,
+      workspaceId: "44444444-4444-4444-8444-444444444444",
+      deployTargetPath: "/root/paperclip",
+      deployKind: "compose_build_swap",
+      healthCheckUrl: "/api/health",
+      rollback: "git_previous",
+      deployBranch: "custom",
+      mirrorBranch: "master",
+    });
+  });
+
+  it("drops a non-string deployBranch and mirrorBranch", () => {
+    const result = parseProjectDeployPolicy({
+      workspaceId: "44444444-4444-4444-8444-444444444444",
+      deployBranch: 42,
+      mirrorBranch: ["not-a-string"],
+    });
+    expect(result?.deployBranch).toBeUndefined();
+    expect(result?.mirrorBranch).toBeUndefined();
+  });
+
   it("drops a non-array composeFiles and non-string envFile", () => {
     const result = parseProjectDeployPolicy({
       workspaceId: "44444444-4444-4444-8444-444444444444",

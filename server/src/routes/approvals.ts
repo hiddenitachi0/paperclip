@@ -24,8 +24,10 @@ import {
   logActivity,
   secretService,
 } from "../services/index.js";
+import { resolveProjectDeployBranches, type ProjectDeployBranches } from "../services/deploy-branches.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
+import { unprocessable } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
@@ -51,6 +53,18 @@ function isDeployRequestApproval(type: unknown, payload: Record<string, unknown>
  */
 function isModelBoostRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "model_boost";
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"merge_pr"`
+ * ask an operator to merge a pull request. DUR-40: a merge approval targeting
+ * a project's declared upstream-mirror branch (read-only, never deployed)
+ * must be refused before it ever reaches the operator — see DUR-38/DUR-39,
+ * where an approval worded "merges this into master" was approved exactly as
+ * filed and the feature it shipped never went live.
+ */
+function isMergePrRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "merge_pr";
 }
 
 /**
@@ -88,12 +102,45 @@ async function resolveApprovalProjectLabel(db: Db, companyId: string, issueIds: 
  * any technical PR/branch/commit fields into a separate secondary field
  * instead of leaving them in the headline.
  */
+/**
+ * DUR-40 item 2: state the branch's consequence in plain words, in the text
+ * an operator actually reads — not a bare branch name (that's the DUR-38/39
+ * defect: "merges this into master" was true and still misleading, because
+ * nothing said what "master" meant). Always computed and applied by the
+ * system regardless of what the filing agent wrote or omitted — an operator
+ * can't be the last line of defence against wording an agent happened to
+ * choose (or forgot to include: unlike the earlier draft of this function,
+ * this always sets `plainSummary` when we know something worth saying, even
+ * if the agent never supplied one at all).
+ */
+function appendMergeConsequenceSentence(
+  payload: Record<string, unknown>,
+  deployBranches: ProjectDeployBranches | null,
+) {
+  if (payload.kind !== "merge_pr") return;
+  const base = typeof payload.base === "string" ? payload.base.trim() : "";
+  if (!base || !deployBranches?.deployBranch) return;
+
+  const consequence =
+    base === deployBranches.deployBranch
+      ? `This goes to "${deployBranches.deployBranch}", the branch we deploy from. Approving the ` +
+        "merge does not deploy it by itself — a separate deploy approval is still required before it goes live."
+      : `This will land on "${base}", not "${deployBranches.deployBranch}" (the branch we deploy ` +
+        "from) — confirm that is where you intend it before approving.";
+
+  const existing = typeof payload.plainSummary === "string" ? payload.plainSummary.trim() : "";
+  if (existing.includes(consequence)) return;
+  payload.plainSummary = existing ? `${existing}\n\n${consequence}` : consequence;
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
   issueIds: string[],
   payload: Record<string, unknown>,
+  mergePrDeployBranches: ProjectDeployBranches | null = null,
 ) {
+  appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
   payload.title = formatApprovalTitle(projectLabel, payload.title);
@@ -245,6 +292,21 @@ export function approvalRoutes(
         reason: boostPayload.reason,
       });
     }
+    let mergePrDeployBranches: ProjectDeployBranches | null = null;
+    if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
+      const base =
+        typeof approvalInput.payload.base === "string" ? approvalInput.payload.base.trim() : "";
+      if (base) {
+        mergePrDeployBranches = await resolveProjectDeployBranches(db, uniqueIssueIds);
+        if (mergePrDeployBranches?.mirrorBranch && base === mergePrDeployBranches.mirrorBranch) {
+          const correctBranch = mergePrDeployBranches.deployBranch ?? "the branch we deploy from";
+          throw unprocessable(
+            `"${base}" is a read-only mirror of the upstream project and is never deployed — merging there will not ship this change. File the merge approval with base "${correctBranch}" instead.`,
+            { base, mirrorBranch: mergePrDeployBranches.mirrorBranch, deployBranch: mergePrDeployBranches.deployBranch },
+          );
+        }
+      }
+    }
     let normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -259,6 +321,7 @@ export function approvalRoutes(
         companyId,
         uniqueIssueIds,
         normalizedPayload,
+        mergePrDeployBranches,
       );
     }
 
@@ -330,6 +393,14 @@ export function approvalRoutes(
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
+
+      // DUR-40 item 4: whether this merge_pr approval eventually needs a
+      // "no deploy approval followed" note on its issue is checked later by
+      // mergeDeployVisibilityService's scheduled tick (server/src/index.ts),
+      // not here. Checking synchronously at approval time would be wrong: a
+      // deploy approval can only be filed AFTER a merge is approved, so an
+      // immediate check would flag every single normal merge, not just the
+      // ones that were actually forgotten.
 
       await logActivity(db, {
         companyId: approval.companyId,
