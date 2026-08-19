@@ -11901,7 +11901,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         outcome = latestRun.status;
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
-      } else if ((adapterResult.exitCode ?? 0) === 0 && !adapterResult.errorMessage) {
+      } else if (
+        // A run whose adapter result is a genuine success must never be
+        // recorded failed. Exit code alone is not a reliable failure signal:
+        // `killedAfterSuccess` is the adapter's explicit, opt-in flag for
+        // "the process was killed after it already produced a successful
+        // result" (e.g. a post-completion SIGTERM surfacing as exitCode
+        // 143) — trust it over the raw exit code. See DUR-41.
+        ((adapterResult.exitCode ?? 0) === 0 || adapterResult.killedAfterSuccess === true) &&
+        !adapterResult.errorMessage &&
+        !adapterResult.errorCode
+      ) {
         outcome = "succeeded";
       } else {
         outcome = "failed";

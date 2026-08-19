@@ -92,6 +92,15 @@ export interface AdapterExecutionResult {
   runtimeServices?: AdapterRuntimeServiceReport[];
   summary?: string | null;
   clearSession?: boolean;
+  /**
+   * True when the underlying process exited abnormally (nonzero exit code /
+   * signal, e.g. a harness-level SIGTERM) *after* it had already produced a
+   * genuine successful terminal result. The run must still be recorded as a
+   * success; this flag preserves the anomaly for observability without
+   * overloading `errorCode`/`errorMessage` with a fabricated failure. See
+   * DUR-41.
+   */
+  killedAfterSuccess?: boolean;
   question?: {
     prompt: string;
     choices: Array<{

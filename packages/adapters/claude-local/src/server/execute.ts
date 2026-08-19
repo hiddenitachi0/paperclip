@@ -366,6 +366,274 @@ export async function runClaudeLogin(input: {
   });
 }
 
+function parseFallbackErrorMessage(proc: RunProcessResult) {
+  const stderrLine =
+    proc.stderr
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "";
+
+  if ((proc.exitCode ?? 0) === 0) {
+    return "Failed to parse claude JSON output";
+  }
+
+  return stderrLine
+    ? `Claude exited with code ${proc.exitCode ?? -1}: ${stderrLine}`
+    : `Claude exited with code ${proc.exitCode ?? -1}`;
+}
+
+/**
+ * Turns a completed Claude CLI process attempt into the adapter-neutral
+ * `AdapterExecutionResult` the heartbeat service persists. Extracted as a
+ * standalone, dependency-injected function (rather than a closure inside
+ * `execute`) specifically so its success/failure classification can be unit
+ * tested directly — see execute.test.ts for the DUR-41 regression coverage.
+ */
+export function resolveClaudeAdapterResult(
+  attempt: {
+    proc: RunProcessResult;
+    parsedStream: ReturnType<typeof parseClaudeStreamJson>;
+    parsed: Record<string, unknown> | null;
+  },
+  opts: { fallbackSessionId: string | null; clearSessionOnMissingSession?: boolean },
+  env: {
+    timeoutSec: number;
+    cwd: string;
+    promptBundleKey: string;
+    executionTargetIsRemote: boolean;
+    remoteExecutionSessionIdentity?: Record<string, unknown> | null;
+    workspaceId?: string | null;
+    workspaceRepoUrl?: string | null;
+    workspaceRepoRef?: string | null;
+    effectiveEnv: Record<string, string>;
+    model: string;
+    billingType: AdapterExecutionResult["billingType"];
+  },
+): AdapterExecutionResult {
+  const { proc, parsedStream, parsed } = attempt;
+  const loginMeta = detectClaudeLoginRequired({
+    parsed,
+    stdout: proc.stdout,
+    stderr: proc.stderr,
+  });
+  const errorMeta =
+    loginMeta.loginUrl != null
+      ? {
+          loginUrl: loginMeta.loginUrl,
+        }
+      : undefined;
+
+  if (proc.timedOut) {
+    return {
+      exitCode: proc.exitCode,
+      signal: proc.signal,
+      timedOut: true,
+      errorMessage: `Timed out after ${env.timeoutSec}s`,
+      errorCode: "timeout",
+      errorMeta,
+      clearSession: Boolean(opts.clearSessionOnMissingSession),
+    };
+  }
+
+  if (!parsed) {
+    const fallbackErrorMessage = parseFallbackErrorMessage(proc);
+    const transientUpstream =
+      !loginMeta.requiresLogin &&
+      (proc.exitCode ?? 0) !== 0 &&
+      isClaudeTransientUpstreamError({
+        parsed: null,
+        stdout: proc.stdout,
+        stderr: proc.stderr,
+        errorMessage: fallbackErrorMessage,
+      });
+    const transientRetryNotBefore = transientUpstream
+      ? extractClaudeRetryNotBefore({
+          parsed: null,
+          stdout: proc.stdout,
+          stderr: proc.stderr,
+          errorMessage: fallbackErrorMessage,
+        })
+      : null;
+    const errorCode = loginMeta.requiresLogin
+      ? "claude_auth_required"
+      : transientUpstream
+      ? "claude_transient_upstream"
+      : null;
+    return {
+      exitCode: proc.exitCode,
+      signal: proc.signal,
+      timedOut: false,
+      errorMessage: fallbackErrorMessage,
+      errorCode,
+      errorFamily: transientUpstream ? "transient_upstream" : null,
+      retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
+      errorMeta,
+      resultJson: {
+        stdout: proc.stdout,
+        stderr: proc.stderr,
+        ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
+        ...(transientRetryNotBefore
+          ? { retryNotBefore: transientRetryNotBefore.toISOString() }
+          : {}),
+        ...(transientRetryNotBefore
+          ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() }
+          : {}),
+      },
+      clearSession: Boolean(opts.clearSessionOnMissingSession),
+    };
+  }
+
+  const usage =
+    parsedStream.usage ??
+    (() => {
+      const usageObj = parseObject(parsed.usage);
+      return {
+        inputTokens: asNumber(usageObj.input_tokens, 0),
+        cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
+        outputTokens: asNumber(usageObj.output_tokens, 0),
+      };
+    })();
+
+  const rawResolvedSessionId =
+    parsedStream.sessionId ??
+    (asString(parsed.session_id, opts.fallbackSessionId ?? "") || opts.fallbackSessionId);
+  const clearSessionForMaxTurns = isClaudeMaxTurnsResult(parsed);
+  const poisonedPreviousMessageId = isClaudePoisonedPreviousMessageIdError(parsed);
+  // Fable 5 policy refusals exit cleanly (exitCode=0, is_error=false), so this
+  // is intentionally independent of `failed` — otherwise a refusal looks like a
+  // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
+  const claudeRefusal = isClaudeRefusalResult(parsed);
+  // `is_error` on the parsed terminal "result" event is Claude's own
+  // authoritative success/failure verdict. When it's present, trust it
+  // exclusively: a harness-level kill delivered *after* a genuine success
+  // (commonly surfaced as exitCode 143 from a post-completion SIGTERM) must
+  // never flip an already-successful run to failed. See DUR-41 — eight
+  // runs in one window were recorded failed (with the agent's own closing
+  // summary stored as the "error") purely because of this exit-code
+  // override on top of a successful parsed result.
+  //
+  // Only fall back to the exit code when the terminal result genuinely
+  // lacks a structured `is_error` field — i.e. we have no success verdict
+  // to trust at all.
+  const hasStructuredOutcome = typeof parsed.is_error === "boolean";
+  const parsedIsError = asBoolean(parsed.is_error, false);
+  const failed = hasStructuredOutcome ? parsedIsError : (proc.exitCode ?? 0) !== 0 || parsedIsError;
+  // Preserve the anomaly (killed after a real success) for observability
+  // without corrupting errorCode/errorMessage. See AdapterExecutionResult.
+  const killedAfterSuccess = !failed && (proc.exitCode ?? 0) !== 0;
+  // Validate-before-persist guard: never persist a sessionId whose transcript
+  // is known-poisoned. The Claude CLI keeps an on-disk JSONL keyed by the
+  // session id; if the last entry contains a non-`msg_`-prefixed
+  // `previous_message_id`, every subsequent `--resume` hits a 400 from
+  // /v1/messages and the issue is permanently unrecoverable until the
+  // sessionId is dropped server-side. Drop here so resolveNextSessionState
+  // calls clearTaskSessions on the next heartbeat. See RED-978 / RED-976.
+  const shouldDropSessionForPoison = poisonedPreviousMessageId;
+  const resolvedSessionId = shouldDropSessionForPoison ? null : rawResolvedSessionId;
+  const resolvedSessionParams = resolvedSessionId
+    ? ({
+      sessionId: resolvedSessionId,
+      cwd: env.cwd,
+      promptBundleKey: env.promptBundleKey,
+      ...(env.executionTargetIsRemote
+        ? {
+            remoteExecution: env.remoteExecutionSessionIdentity ?? null,
+          }
+        : {}),
+      ...(env.workspaceId ? { workspaceId: env.workspaceId } : {}),
+      ...(env.workspaceRepoUrl ? { repoUrl: env.workspaceRepoUrl } : {}),
+      ...(env.workspaceRepoRef ? { repoRef: env.workspaceRepoRef } : {}),
+    } as Record<string, unknown>)
+    : null;
+  const errorMessage = failed
+    ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
+    : null;
+  const transientUpstream =
+    failed &&
+    !loginMeta.requiresLogin &&
+    !clearSessionForMaxTurns &&
+    !poisonedPreviousMessageId &&
+    isClaudeTransientUpstreamError({
+      parsed,
+      stdout: proc.stdout,
+      stderr: proc.stderr,
+      errorMessage,
+    });
+  const transientRetryNotBefore = transientUpstream
+    ? extractClaudeRetryNotBefore({
+        parsed,
+        stdout: proc.stdout,
+        stderr: proc.stderr,
+        errorMessage,
+      })
+    : null;
+  // `loginMeta.requiresLogin` used to be checked first *unconditionally*,
+  // even when `failed` was false — so `detectClaudeLoginRequired`'s scan of
+  // the full raw stdout/stderr (which can incidentally contain a word like
+  // "unauthorized" from ordinary tool output, e.g. testing an API) could
+  // slap "claude_auth_required" onto a completely successful run. Gate it
+  // (and the other failure-only codes) on `failed` so a genuinely
+  // successful parsed result can never be labelled with an error code. See
+  // DUR-41. `claudeRefusal` is the one intentional exception — it's a
+  // clean-exit outcome by design (see the comment on `claudeRefusal`
+  // above), so it stays evaluated independently of `failed`.
+  const resolvedErrorCode = failed && loginMeta.requiresLogin
+    ? "claude_auth_required"
+    : failed && clearSessionForMaxTurns
+    ? "max_turns_exhausted"
+    : failed && poisonedPreviousMessageId
+    ? "claude_poisoned_previous_message_id"
+    : transientUpstream
+    ? "claude_transient_upstream"
+    : claudeRefusal
+    ? "claude_refusal"
+    : null;
+  const mergedResultJson: Record<string, unknown> = {
+    ...parsed,
+    ...(failed && clearSessionForMaxTurns ? { stopReason: "max_turns_exhausted" } : {}),
+    ...(failed && poisonedPreviousMessageId ? { stopReason: "claude_poisoned_previous_message_id" } : {}),
+    ...(claudeRefusal ? { stopReason: "refusal", errorFamily: "model_refusal" } : {}),
+    ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
+    ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
+    ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
+    ...(killedAfterSuccess ? { killedAfterSuccess: true } : {}),
+  };
+
+  return {
+    exitCode: proc.exitCode,
+    signal: proc.signal,
+    timedOut: false,
+    errorMessage,
+    errorCode: resolvedErrorCode,
+    errorFamily: transientUpstream
+      ? "transient_upstream"
+      : claudeRefusal
+      ? "model_refusal"
+      : null,
+    retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
+    errorMeta,
+    killedAfterSuccess,
+    usage,
+    sessionId: resolvedSessionId,
+    sessionParams: resolvedSessionParams,
+    sessionDisplayId: resolvedSessionId,
+    provider: "anthropic",
+    biller: isBedrockAuth(env.effectiveEnv) ? "aws_bedrock" : "anthropic",
+    model: parsedStream.model || asString(parsed.model, env.model),
+    billingType: env.billingType,
+    costUsd: parsedStream.costUsd ?? asNumber(parsed.total_cost_usd, 0),
+    resultJson: mergedResultJson,
+    summary: parsedStream.summary || asString(parsed.result, ""),
+    clearSession:
+      clearSessionForMaxTurns ||
+      // Clear-on-error: a poisoned previous_message_id is a deterministic
+      // state error. Force the server to drop persisted session state for
+      // this issue so the next continuation starts from a clean slate.
+      poisonedPreviousMessageId ||
+      Boolean(opts.clearSessionOnMissingSession && !resolvedSessionId),
+  };
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
   const executionTarget = readAdapterExecutionTarget({
@@ -742,22 +1010,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return args;
   };
 
-  const parseFallbackErrorMessage = (proc: RunProcessResult) => {
-    const stderrLine =
-      proc.stderr
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .find(Boolean) ?? "";
-
-    if ((proc.exitCode ?? 0) === 0) {
-      return "Failed to parse claude JSON output";
-    }
-
-    return stderrLine
-      ? `Claude exited with code ${proc.exitCode ?? -1}: ${stderrLine}`
-      : `Claude exited with code ${proc.exitCode ?? -1}`;
-  };
-
   const runAttempt = async (resumeSessionId: string | null) => {
     const attemptInstructionsFilePath = resumeSessionId ? undefined : effectiveInstructionsFilePath;
     const args = buildClaudeArgs(resumeSessionId, attemptInstructionsFilePath);
@@ -817,202 +1069,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       parsed: Record<string, unknown> | null;
     },
     opts: { fallbackSessionId: string | null; clearSessionOnMissingSession?: boolean },
-  ): AdapterExecutionResult => {
-    const { proc, parsedStream, parsed } = attempt;
-    const loginMeta = detectClaudeLoginRequired({
-      parsed,
-      stdout: proc.stdout,
-      stderr: proc.stderr,
-    });
-    const errorMeta =
-      loginMeta.loginUrl != null
-        ? {
-            loginUrl: loginMeta.loginUrl,
-          }
-        : undefined;
-
-    if (proc.timedOut) {
-      return {
-        exitCode: proc.exitCode,
-        signal: proc.signal,
-        timedOut: true,
-        errorMessage: `Timed out after ${timeoutSec}s`,
-        errorCode: "timeout",
-        errorMeta,
-        clearSession: Boolean(opts.clearSessionOnMissingSession),
-      };
-    }
-
-    if (!parsed) {
-      const fallbackErrorMessage = parseFallbackErrorMessage(proc);
-      const transientUpstream =
-        !loginMeta.requiresLogin &&
-        (proc.exitCode ?? 0) !== 0 &&
-        isClaudeTransientUpstreamError({
-          parsed: null,
-          stdout: proc.stdout,
-          stderr: proc.stderr,
-          errorMessage: fallbackErrorMessage,
-        });
-      const transientRetryNotBefore = transientUpstream
-        ? extractClaudeRetryNotBefore({
-            parsed: null,
-            stdout: proc.stdout,
-            stderr: proc.stderr,
-            errorMessage: fallbackErrorMessage,
-          })
-        : null;
-      const errorCode = loginMeta.requiresLogin
-        ? "claude_auth_required"
-        : transientUpstream
-        ? "claude_transient_upstream"
-        : null;
-      return {
-        exitCode: proc.exitCode,
-        signal: proc.signal,
-        timedOut: false,
-        errorMessage: fallbackErrorMessage,
-        errorCode,
-        errorFamily: transientUpstream ? "transient_upstream" : null,
-        retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
-        errorMeta,
-        resultJson: {
-          stdout: proc.stdout,
-          stderr: proc.stderr,
-          ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
-          ...(transientRetryNotBefore
-            ? { retryNotBefore: transientRetryNotBefore.toISOString() }
-            : {}),
-          ...(transientRetryNotBefore
-            ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() }
-            : {}),
-        },
-        clearSession: Boolean(opts.clearSessionOnMissingSession),
-      };
-    }
-
-    const usage =
-      parsedStream.usage ??
-      (() => {
-        const usageObj = parseObject(parsed.usage);
-        return {
-          inputTokens: asNumber(usageObj.input_tokens, 0),
-          cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
-          outputTokens: asNumber(usageObj.output_tokens, 0),
-        };
-      })();
-
-    const rawResolvedSessionId =
-      parsedStream.sessionId ??
-      (asString(parsed.session_id, opts.fallbackSessionId ?? "") || opts.fallbackSessionId);
-    const clearSessionForMaxTurns = isClaudeMaxTurnsResult(parsed);
-    const poisonedPreviousMessageId = isClaudePoisonedPreviousMessageIdError(parsed);
-    // Fable 5 policy refusals exit cleanly (exitCode=0, is_error=false), so this
-    // is intentionally independent of `failed` — otherwise a refusal looks like a
-    // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
-    const claudeRefusal = isClaudeRefusalResult(parsed);
-    const parsedIsError = asBoolean(parsed.is_error, false);
-    const failed = (proc.exitCode ?? 0) !== 0 || parsedIsError;
-    // Validate-before-persist guard: never persist a sessionId whose transcript
-    // is known-poisoned. The Claude CLI keeps an on-disk JSONL keyed by the
-    // session id; if the last entry contains a non-`msg_`-prefixed
-    // `previous_message_id`, every subsequent `--resume` hits a 400 from
-    // /v1/messages and the issue is permanently unrecoverable until the
-    // sessionId is dropped server-side. Drop here so resolveNextSessionState
-    // calls clearTaskSessions on the next heartbeat. See RED-978 / RED-976.
-    const shouldDropSessionForPoison = poisonedPreviousMessageId;
-    const resolvedSessionId = shouldDropSessionForPoison ? null : rawResolvedSessionId;
-    const resolvedSessionParams = resolvedSessionId
-      ? ({
-        sessionId: resolvedSessionId,
-        cwd,
-        promptBundleKey: promptBundle.bundleKey,
-        ...(executionTargetIsRemote
-          ? {
-              remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget),
-            }
-          : {}),
-        ...(workspaceId ? { workspaceId } : {}),
-        ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
-        ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
-      } as Record<string, unknown>)
-      : null;
-    const errorMessage = failed
-      ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
-      : null;
-    const transientUpstream =
-      failed &&
-      !loginMeta.requiresLogin &&
-      !clearSessionForMaxTurns &&
-      !poisonedPreviousMessageId &&
-      isClaudeTransientUpstreamError({
-        parsed,
-        stdout: proc.stdout,
-        stderr: proc.stderr,
-        errorMessage,
-      });
-    const transientRetryNotBefore = transientUpstream
-      ? extractClaudeRetryNotBefore({
-          parsed,
-          stdout: proc.stdout,
-          stderr: proc.stderr,
-          errorMessage,
-        })
-      : null;
-    const resolvedErrorCode = loginMeta.requiresLogin
-      ? "claude_auth_required"
-      : failed && clearSessionForMaxTurns
-      ? "max_turns_exhausted"
-      : failed && poisonedPreviousMessageId
-      ? "claude_poisoned_previous_message_id"
-      : transientUpstream
-      ? "claude_transient_upstream"
-      : claudeRefusal
-      ? "claude_refusal"
-      : null;
-    const mergedResultJson: Record<string, unknown> = {
-      ...parsed,
-      ...(failed && clearSessionForMaxTurns ? { stopReason: "max_turns_exhausted" } : {}),
-      ...(failed && poisonedPreviousMessageId ? { stopReason: "claude_poisoned_previous_message_id" } : {}),
-      ...(claudeRefusal ? { stopReason: "refusal", errorFamily: "model_refusal" } : {}),
-      ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
-      ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
-      ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
-    };
-
-    return {
-      exitCode: proc.exitCode,
-      signal: proc.signal,
-      timedOut: false,
-      errorMessage,
-      errorCode: resolvedErrorCode,
-      errorFamily: transientUpstream
-        ? "transient_upstream"
-        : claudeRefusal
-        ? "model_refusal"
+  ): AdapterExecutionResult =>
+    resolveClaudeAdapterResult(attempt, opts, {
+      timeoutSec,
+      cwd,
+      promptBundleKey: promptBundle.bundleKey,
+      executionTargetIsRemote,
+      remoteExecutionSessionIdentity: executionTargetIsRemote
+        ? adapterExecutionTargetSessionIdentity(runtimeExecutionTarget)
         : null,
-      retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
-      errorMeta,
-      usage,
-      sessionId: resolvedSessionId,
-      sessionParams: resolvedSessionParams,
-      sessionDisplayId: resolvedSessionId,
-      provider: "anthropic",
-      biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
-      model: parsedStream.model || asString(parsed.model, model),
+      workspaceId,
+      workspaceRepoUrl,
+      workspaceRepoRef,
+      effectiveEnv,
+      model,
       billingType,
-      costUsd: parsedStream.costUsd ?? asNumber(parsed.total_cost_usd, 0),
-      resultJson: mergedResultJson,
-      summary: parsedStream.summary || asString(parsed.result, ""),
-      clearSession:
-        clearSessionForMaxTurns ||
-        // Clear-on-error: a poisoned previous_message_id is a deterministic
-        // state error. Force the server to drop persisted session state for
-        // this issue so the next continuation starts from a clean slate.
-        poisonedPreviousMessageId ||
-        Boolean(opts.clearSessionOnMissingSession && !resolvedSessionId),
-    };
-  };
+    });
 
   try {
     const initial = await runAttempt(sessionId ?? null);
