@@ -2511,6 +2511,115 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  // DUR-41: a harness-level SIGTERM delivered *after* the adapter already
+  // produced a genuine successful result used to be recorded as a failed run
+  // with the agent's own closing summary stored as the "error" and
+  // claude_auth_required attached — even though there was no failure at all.
+  // This proves the fix holds at the point where AdapterExecutionResult is
+  // turned into a persisted heartbeatRuns row: a `killedAfterSuccess` result
+  // with no errorMessage/errorCode must be recorded `succeeded`, never
+  // `failed`, and the error column must stay empty.
+  it("records a run succeeded, not failed, when the adapter reports killedAfterSuccess with no error", async () => {
+    const { agentId, issueId } = await seedAssignedTodoNoRunFixture();
+    const summary = "This heartbeat work is done and durable; no further action needed.";
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 143,
+      signal: "SIGTERM",
+      timedOut: false,
+      errorMessage: null,
+      errorCode: null,
+      killedAfterSuccess: true,
+      summary,
+      provider: "test",
+      model: "test-model",
+    }));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.assignmentDispatched).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    const settled = await waitForRunToSettle(heartbeat, runs[0]!.id);
+
+    expect(settled?.status).toBe("succeeded");
+    expect(settled?.error).toBeNull();
+    expect(settled?.errorCode).toBeNull();
+    // The error column must never hold the agent-written summary.
+    expect(settled?.error).not.toBe(summary);
+  });
+
+  // DUR-41 Part B: agents have repeatedly ended a turn by arming their own
+  // background watcher (e.g. a detached shell process) and assuming it would
+  // report back later. That watcher does not survive the end of a headless
+  // run, so from Paperclip's point of view it is indistinguishable from no
+  // continuation plan at all: no queued wake, no pending interaction, no
+  // blocker, no routine. Before the DUR-41 fix, a post-completion SIGTERM
+  // (exitCode 143) on top of a genuine success also used to get recorded
+  // `failed`, which would have routed the issue into failure-escalation
+  // instead of the existing successful-run "missing disposition" handoff
+  // path below. This test proves the two halves connect end-to-end: a run
+  // that is killed right after succeeding, and leaves its issue in_progress
+  // with no live continuation path, produces a visible follow-up (a queued
+  // `finish_successful_run_handoff` wake plus an issue comment) rather than
+  // silently stranding the issue forever.
+  it("queues a visible follow-up, not silence, when a run is killed right after succeeding and leaves the issue with no live continuation path", async () => {
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 143,
+      signal: "SIGTERM",
+      timedOut: false,
+      errorMessage: null,
+      errorCode: null,
+      killedAfterSuccess: true,
+      summary: "Set up a background watcher to report back once the deploy finishes.",
+      provider: "test",
+      model: "test-model",
+    }));
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId, 5_000);
+    expect(settled?.status).toBe("succeeded");
+
+    // The dead background watcher never reports back — nothing else queues a
+    // continuation. Paperclip's own successful-run handoff detection must be
+    // the thing that notices and surfaces it.
+    const handoffWakeups = await waitForValue(async () => {
+      const rows = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, agentId));
+      const matches = rows.filter((wakeup) => wakeup.reason === "finish_successful_run_handoff");
+      return matches.length > 0 ? matches : null;
+    }, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(handoffWakeups).toHaveLength(1);
+    expect(handoffWakeups[0]?.payload).toMatchObject({
+      issueId,
+      sourceRunId: runId,
+      handoffRequired: true,
+      handoffReason: "successful_run_missing_state",
+    });
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    const handoffComment = comments.find((comment) => comment.body === SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY);
+    expect(handoffComment).toBeTruthy();
+
+    const activity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, issueId));
+    expect(activity.some((event) => event.action === "issue.successful_run_handoff_required")).toBe(true);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    // Still in_progress — the visible follow-up is a queued wake + comment,
+    // not a silent, unexplained status change.
+    expect(issue?.status).toBe("in_progress");
+  });
+
   it("does not duplicate initial assigned todo dispatch when a queued wake already exists", async () => {
     const { companyId, agentId, issueId } = await seedAssignedTodoNoRunFixture();
     await db.insert(agentWakeupRequests).values({
