@@ -47,6 +47,24 @@
 # deploy-poller.sh today, generalized across companies/projects and
 # file-tracked (this script) instead of hand-installed on the box.
 #
+# DUR-44: an approval is only ever added to the processed-set AFTER a comment
+# (success, failure, or "superseded") has actually been delivered for it —
+# never before. comment() retries with backoff (a deploy recreating the very
+# container this script talks to via `docker exec` can make it unreachable
+# for a stretch, which is exactly what silently dropped 5bd025d5 during
+# DUR-42's own deploy). Each approval is also processed inside its own
+# subshell with an EXIT trap fallback, so an unexpected script error while
+# handling one approval can't abort the whole poll cycle (and orphan
+# already-marked-processed approvals queued behind it) without at least
+# trying to say so. If two approved deploy requests target the same
+# project+workspace in one poll cycle, only the most recently *approved* one
+# actually deploys (they converge on the same git ref reset anyway) — the
+# older one gets a "superseded" comment instead of silently vanishing.
+# Every comment attempt (delivered or not) is also mirrored, best-effort, as
+# a JSON line into $STATUS_PATH inside the server container's own volume, so
+# an agent without host/docker access can see recent runner activity via the
+# API instead of needing a human to read deploy-runner.log by hand.
+#
 # Auth: uses the CLI's stored board credential inside the server container,
 # same as deploy-poller.sh — must be an instance admin (required for the
 # cross-company approval list and the GitHub-token endpoint).
@@ -62,23 +80,62 @@ CLI='cd /app && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts'
 ARGS='--api-base http://127.0.0.1:3100 --data-dir /paperclip/cli-state --json'
 HEALTH_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES:-30}"
 HEALTH_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP:-3}"
+# How hard to try to actually deliver the outcome comment before giving up
+# and leaving the approval unprocessed for the next poll cycle. Sized to
+# outlast a `docker exec` blip while the server container itself is being
+# recreated by a deploy earlier in the same loop.
+COMMENT_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_COMMENT_RETRIES:-12}"
+COMMENT_RETRY_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_COMMENT_RETRY_SLEEP:-5}"
+# Machine-readable activity feed (DUR-44), written into the same shared
+# volume the server container mounts at /paperclip — read it back with
+# GET /api/companies/:companyId/deploy-runner/status.
+STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/status.jsonl}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
-
-# Only one run at a time (a deploy can take minutes; the timer fires every minute).
-exec 9>"/tmp/paperclip-deploy-runner.lock"
-flock -n 9 || exit 0
-
-touch "$PROCESSED"
 
 cli_json() { # subcommand args... -> JSON on stdout (runs inside the server container)
   docker exec "$DOCKER_SERVER_CONTAINER" sh -lc "$CLI $* $ARGS" 2>>"$LOG"
 }
 
-comment() { # approval_id, body
-  docker exec -e BODY="$2" "$DOCKER_SERVER_CONTAINER" sh -lc \
-    "$CLI approval comment $1 --body \"\$BODY\" $ARGS" >/dev/null 2>&1 || true
+# Mirrors every comment attempt (delivered or not) into $STATUS_PATH inside
+# the server container's volume. Best-effort only — never affects whether
+# the approval is considered processed.
+record_status() { # approval_id, company_id, body, delivered(0/1)
+  local aid="$1" company_id="$2" body="$3" delivered="$4" line
+  line="$(AID="$aid" COMPANY_ID="$company_id" BODY="$body" DELIVERED="$delivered" TS="$(ts)" python3 -c '
+import json, os
+print(json.dumps({
+    "ts": os.environ["TS"],
+    "approvalId": os.environ["AID"],
+    "companyId": os.environ["COMPANY_ID"],
+    "commentDelivered": os.environ["DELIVERED"] == "0",
+    "body": os.environ["BODY"],
+}))
+' 2>>"$LOG")"
+  [ -z "$line" ] && return 0
+  docker exec -e STATUS_LINE="$line" -e STATUS_PATH="$STATUS_PATH" "$DOCKER_SERVER_CONTAINER" sh -lc \
+    'mkdir -p "$(dirname "$STATUS_PATH")" && printf "%s\n" "$STATUS_LINE" >> "$STATUS_PATH" && tail -n 500 "$STATUS_PATH" > "$STATUS_PATH.tmp" 2>/dev/null && mv "$STATUS_PATH.tmp" "$STATUS_PATH"' \
+    >/dev/null 2>>"$LOG" || log "runner: $aid failed to record status line (non-fatal)"
+}
+
+comment() { # approval_id, company_id, body -> 0 if delivered, 1 if not (after retries)
+  local aid="$1" company_id="$2" body="$3" attempt=1 delivered=1
+  while [ "$attempt" -le "$COMMENT_RETRIES" ]; do
+    if docker exec -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -lc \
+         "$CLI approval comment $aid --body \"\$BODY\" $ARGS" >/dev/null 2>>"$LOG"; then
+      delivered=0
+      break
+    fi
+    log "runner: $aid comment attempt $attempt/$COMMENT_RETRIES failed"
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$COMMENT_RETRIES" ] && sleep "$COMMENT_RETRY_SLEEP_SECONDS"
+  done
+  if [ "$delivered" -ne 0 ]; then
+    log "runner: $aid could not deliver a comment after $COMMENT_RETRIES attempts — will retry next poll cycle"
+  fi
+  record_status "$aid" "$company_id" "$body" "$delivered"
+  return "$delivered"
 }
 
 already_processed() { grep -qxF "$1" "$PROCESSED" 2>/dev/null; }
@@ -237,13 +294,13 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   )
 }
 
-process_approval() { # approval_id, company_id
+process_approval() { # approval_id, company_id -> exit status is comment()'s delivery status
   local aid="$1" company_id="$2"
 
   local approval_json project_json
   approval_json="$(cli_json approval get "$aid")" || {
     log "runner: $aid could not re-fetch approval"
-    comment "$aid" "Deploy failed — could not re-fetch the approval. Check deploy-runner.log on the server."
+    comment "$aid" "$company_id" "Deploy failed — could not re-fetch the approval. Check deploy-runner.log on the server."
     return
   }
 
@@ -251,13 +308,13 @@ process_approval() { # approval_id, company_id
   project_id="$(printf '%s' "$approval_json" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("payload") or {}).get("projectId") or "")')"
   if [ -z "$project_id" ]; then
     log "runner: $aid payload has no projectId"
-    comment "$aid" "Deploy failed — approval payload has no projectId."
+    comment "$aid" "$company_id" "Deploy failed — approval payload has no projectId."
     return
   fi
 
   project_json="$(cli_json project get "$project_id" -C "$company_id")" || {
     log "runner: $aid could not fetch project $project_id"
-    comment "$aid" "Deploy failed — could not fetch project $project_id."
+    comment "$aid" "$company_id" "Deploy failed — could not fetch project $project_id."
     return
   }
 
@@ -266,7 +323,7 @@ process_approval() { # approval_id, company_id
     reason="$(cat "/tmp/paperclip-deploy-runner-reason.$$" 2>/dev/null)"
     rm -f "/tmp/paperclip-deploy-runner-reason.$$"
     log "runner: $aid rejected — $reason"
-    comment "$aid" "Deploy failed — $reason"
+    comment "$aid" "$company_id" "Deploy failed — $reason"
     return
   fi
   rm -f "/tmp/paperclip-deploy-runner-reason.$$"
@@ -274,7 +331,7 @@ process_approval() { # approval_id, company_id
 
   if [ ! -d "$DV_DEPLOY_TARGET_PATH/.git" ]; then
     log "runner: $aid deployTargetPath $DV_DEPLOY_TARGET_PATH is not a git checkout"
-    comment "$aid" "Deploy failed — deployTargetPath ($DV_DEPLOY_TARGET_PATH) is not set up as a git checkout on the box yet. An operator needs to \`git clone\` it there first."
+    comment "$aid" "$company_id" "Deploy failed — deployTargetPath ($DV_DEPLOY_TARGET_PATH) is not set up as a git checkout on the box yet. An operator needs to \`git clone\` it there first."
     return
   fi
 
@@ -288,7 +345,7 @@ process_approval() { # approval_id, company_id
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
   if ! git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token"; then
     log "runner: $aid git fetch/reset failed"
-    comment "$aid" "Deploy failed — git fetch/reset of $DV_DEPLOY_TARGET_PATH to $target_ref failed. Check deploy-runner.log."
+    comment "$aid" "$company_id" "Deploy failed — git fetch/reset of $DV_DEPLOY_TARGET_PATH to $target_ref failed. Check deploy-runner.log."
     return
   fi
   local after_commit
@@ -301,19 +358,19 @@ process_approval() { # approval_id, company_id
     maybe_rollback "$aid" "$before_commit"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
-    comment "$aid" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" ) Check deploy-runner.log."
+    comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" ) Check deploy-runner.log."
     return
   fi
 
   if ! health_check "$DV_HEALTH_CHECK_URL"; then
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
     maybe_rollback "$aid" "$before_commit"
-    comment "$aid" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." ) Check deploy-runner.log."
+    comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." ) Check deploy-runner.log."
     return
   fi
 
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
-  comment "$aid" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)."
+  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)."
 }
 
 maybe_rollback() { # approval_id, before_commit
@@ -329,6 +386,54 @@ maybe_rollback() { # approval_id, before_commit
   elif [ "$rollback_status" -ne 0 ]; then
     log "runner: $aid rollback recipe also failed — manual intervention needed"
   fi
+}
+
+# EXIT trap safety net for run_one_approval/run_superseded_approval's
+# subshells (DUR-44). If the subshell dies for a reason that never reached
+# one of the explicit comment() calls above — an unbound-variable typo, a
+# future bug, anything — this still tries to tell the operator, and the
+# subshell boundary means that failure can't also take down the rest of the
+# poll cycle's approvals the way a top-level crash would.
+crash_fallback_comment() { # approval_id, company_id, result_file
+  local aid="$1" company_id="$2" result_file="$3"
+  [ -s "$result_file" ] && return 0
+  if comment "$aid" "$company_id" "Deploy failed — the deploy runner exited unexpectedly while processing this approval (internal script error). Check deploy-runner.log."; then
+    echo ok > "$result_file"
+  fi
+}
+
+run_one_approval() { # approval_id, company_id
+  local aid="$1" company_id="$2" result_file
+  result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
+  (
+    trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
+    if process_approval "$aid" "$company_id"; then
+      echo ok > "$result_file"
+    fi
+  )
+  if [ -s "$result_file" ]; then
+    mark_processed "$aid"
+  else
+    log "runner: $aid — no comment could be delivered after retries; leaving unprocessed so it is retried next poll cycle"
+  fi
+  rm -f "$result_file"
+}
+
+run_superseded_approval() { # approval_id, company_id, keep_approval_id
+  local aid="$1" company_id="$2" keep_id="$3" result_file
+  result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
+  (
+    trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
+    if comment "$aid" "$company_id" "Skipped — a newer deploy approval ($keep_id) for the same project was approved in this poll cycle and will be deployed instead; both target the same git ref, so running this one too would be redundant."; then
+      echo ok > "$result_file"
+    fi
+  )
+  if [ -s "$result_file" ]; then
+    mark_processed "$aid"
+  else
+    log "runner: $aid (superseded by $keep_id) — no comment could be delivered after retries; leaving unprocessed so it is retried next poll cycle"
+  fi
+  rm -f "$result_file"
 }
 
 main() {
@@ -350,29 +455,71 @@ for c in items:
 ')"
   [ -z "${company_ids//[[:space:]]/}" ] && exit 0
 
-  local company_id list ids aid
+  local company_id list selection kind aid extra
   for company_id in $company_ids; do
     list="$(cli_json approval list -C "$company_id" --status approved)" || continue
-    ids="$(printf '%s' "$list" | python3 -c '
+    # Group approved deploy requests by (projectId, workspaceId): they
+    # converge on the same git ref reset, so only the most recently
+    # *approved* one in the group needs to actually run this cycle (DUR-44).
+    # Approvals missing a projectId are never grouped together, so a
+    # malformed row can't accidentally swallow an unrelated one.
+    selection="$(printf '%s' "$list" | python3 -c '
 import json, sys
+
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 items = d if isinstance(d, list) else d.get("approvals", [])
-for a in items:
-    payload = a.get("payload") or {}
-    if a.get("type") == "request_board_approval" and str(payload.get("kind")) == "deploy" and a.get("status") == "approved":
-        print(a["id"])
-')"
-    [ -z "${ids//[[:space:]]/}" ] && continue
+candidates = [
+    a for a in items
+    if a.get("type") == "request_board_approval"
+    and str((a.get("payload") or {}).get("kind")) == "deploy"
+    and a.get("status") == "approved"
+]
 
-    for aid in $ids; do
+groups = {}
+for a in candidates:
+    payload = a.get("payload") or {}
+    project_id = payload.get("projectId")
+    workspace_id = payload.get("workspaceId")
+    key = (project_id, workspace_id) if project_id else a.get("id")
+    groups.setdefault(key, []).append(a)
+
+def decided_key(a):
+    return str(a.get("decidedAt") or a.get("updatedAt") or a.get("createdAt") or "")
+
+for group in groups.values():
+    group.sort(key=decided_key)
+    keep = group[-1]
+    keep_id = keep.get("id")
+    for superseded in group[:-1]:
+        superseded_id = superseded.get("id")
+        print(f"SUPERSEDED\t{superseded_id}\t{keep_id}")
+    print(f"KEEP\t{keep_id}")
+')"
+    [ -z "${selection//[[:space:]]/}" ] && continue
+
+    while IFS=$'\t' read -r kind aid extra; do
+      [ -z "$aid" ] && continue
       already_processed "$aid" && continue
-      mark_processed "$aid"   # record before deploying so a failure never loops
-      process_approval "$aid" "$company_id"
-    done
+      case "$kind" in
+        KEEP) run_one_approval "$aid" "$company_id" ;;
+        SUPERSEDED) run_superseded_approval "$aid" "$company_id" "$extra" ;;
+      esac
+    done <<< "$selection"
   done
 }
 
-main
+# Guarded so tests can `source` this file (to exercise its real functions
+# directly, instead of hand-extracting them) without acquiring the single-
+# flight lock, touching the real processed-set file, or running a poll cycle.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  # Only one run at a time (a deploy can take minutes; the timer fires every minute).
+  exec 9>"/tmp/paperclip-deploy-runner.lock"
+  flock -n 9 || exit 0
+
+  touch "$PROCESSED"
+
+  main
+fi

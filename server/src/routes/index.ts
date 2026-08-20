@@ -10,6 +10,7 @@ export { fileResourceRoutes, createFileResourceLimiter } from "./file-resources.
 export { routineRoutes } from "./routines.js";
 export { goalRoutes } from "./goals.js";
 export { approvalRoutes } from "./approvals.js";
+export { deployRunnerRoutes } from "./deploy-runner.js";
 export { secretRoutes } from "./secrets.js";
 export { costRoutes } from "./costs.js";
 export { activityRoutes } from "./activity.js";

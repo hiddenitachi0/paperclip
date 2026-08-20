@@ -51,6 +51,10 @@ diagnostics/
 # Doc maintenance cursor
 .doc-review-cursor
 
+# deploy-runner.sh local runtime state (default paths, see scripts/deploy-runner.sh)
+/.deploy-runner-processed
+/deploy-runner.log
+
 # Playwright
 tests/e2e/test-results/
 tests/e2e/playwright-report/

@@ -2564,6 +2564,20 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+// ─── Deploy runner ───────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/deploy-runner/status",
+  tags: ["deploy-runner"],
+  summary: "Read the deploy runner's activity feed for a company",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({ limit: z.coerce.number().int().positive().optional() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
 // ─── Dashboard ───────────────────────────────────────────────────────────────
 
 registry.registerPath({
