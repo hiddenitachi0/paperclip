@@ -63,6 +63,14 @@ ARGS='--api-base http://127.0.0.1:3100 --data-dir /paperclip/cli-state --json'
 HEALTH_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES:-30}"
 HEALTH_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP:-3}"
 
+# DUR-44: one file per in-flight approval id, touched by comment() whenever it's
+# called for that id. process_one() checks for this marker after process_approval
+# returns (or crashes) so an approval can never be marked processed without a
+# comment (success or failure) actually having been attempted for it.
+COMMENT_MARKER_DIR="${PAPERCLIP_DEPLOY_RUNNER_COMMENT_MARKER_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/paperclip-deploy-runner-markers.XXXXXX")}"
+mkdir -p "$COMMENT_MARKER_DIR"
+trap 'rm -rf "$COMMENT_MARKER_DIR"' EXIT
+
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
@@ -77,6 +85,7 @@ cli_json() { # subcommand args... -> JSON on stdout (runs inside the server cont
 }
 
 comment() { # approval_id, body
+  : > "$COMMENT_MARKER_DIR/$1" 2>/dev/null || true
   docker exec -e BODY="$2" "$DOCKER_SERVER_CONTAINER" sh -lc \
     "$CLI approval comment $1 --body \"\$BODY\" $ARGS" >/dev/null 2>&1 || true
 }
@@ -331,6 +340,26 @@ maybe_rollback() { # approval_id, before_commit
   fi
 }
 
+process_one() { # approval_id, company_id
+  # DUR-44: process_approval runs in a subshell so an unexpected crash inside it
+  # (an unbound variable under `set -u`, a stray non-zero exit, anything) can
+  # never take the whole runner down mid-loop — it just ends that one subshell.
+  # Either way, once we get here we check whether a comment was ever posted for
+  # this approval; if not, we post a generic failure comment ourselves. That
+  # guarantees mark_processed (below) is never the last word on an approval —
+  # a comment (success or failure) always exists for it, so an agent/operator
+  # can tell "processed and reported" apart from "silently lost" via
+  # GET /api/approvals/:id/comments, without needing host/docker access.
+  local aid="$1" company_id="$2"
+  already_processed "$aid" && return 0
+  mark_processed "$aid"   # record before deploying so a failure never loops
+  ( process_approval "$aid" "$company_id" )
+  if [ ! -e "$COMMENT_MARKER_DIR/$aid" ]; then
+    log "runner: $aid process_approval exited without posting any comment (unexpected internal error) — posting fallback failure comment"
+    comment "$aid" "Deploy failed — the deploy runner hit an unexpected internal error and stopped before it could report a result. Check deploy-runner.log."
+  fi
+}
+
 main() {
   local companies company_ids
   companies="$(cli_json company list)" || {
@@ -368,11 +397,12 @@ for a in items:
     [ -z "${ids//[[:space:]]/}" ] && continue
 
     for aid in $ids; do
-      already_processed "$aid" && continue
-      mark_processed "$aid"   # record before deploying so a failure never loops
-      process_approval "$aid" "$company_id"
+      process_one "$aid" "$company_id"
     done
   done
 }
 
-main
+# Allow this file to be sourced (e.g. by tests) without auto-running main.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
