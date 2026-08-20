@@ -305,7 +305,11 @@ const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_r
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
-const TIMER_ACTIONABLE_ISSUE_STATUSES = ["todo", "in_progress"] as const;
+// DUR-42: an issue only stops being "actionable" for a timer wake-up once
+// it's done or cancelled — anything else (including in_review/blocked) may
+// still need this agent's attention, so treat only these two as terminal
+// rather than allow-listing a narrower set of "actionable" statuses.
+const TIMER_ACTIONABLE_ISSUE_TERMINAL_STATUSES = ["done", "cancelled"] as const;
 export {
   ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS,
   ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS,
@@ -8883,11 +8887,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
+      // DUR-42: default this on. It shipped upstream (#8347) as an opt-in
+      // fast-exit for empty timer wakes, but opt-in meant nobody's timer
+      // ticks actually benefited from it — 872 idle wake-ups over 7 days
+      // cost $215.84 with this still defaulted off. An agent can still set
+      // heartbeat.skipTimerWhenNoActionableWork: false explicitly to restore
+      // the old always-wake behavior if it ever needs to.
       skipTimerWhenNoActionableWork: asBoolean(
         heartbeat.skipTimerWhenNoActionableWork ??
           heartbeat.requireActionableTimerWork ??
           heartbeat.issueOnlyTimer,
-        false,
+        true,
       ),
       maxDailyRuns: normalizeOptionalNonNegativeInteger(
         heartbeat.maxDailyRuns ?? heartbeat.dailyRunLimit ?? heartbeat.dailyRunCap ?? heartbeat.maxRunsPerDay,
@@ -9017,22 +9027,101 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return cancelled;
   }
 
+  /**
+   * Cheap (indexed DB reads only, no model call) check for whether a
+   * timer-driven heartbeat wake-up would find anything to act on for this
+   * agent (DUR-42). Every branch here is intentionally broad — an assigned
+   * issue counts regardless of which non-terminal status it's in, a pending
+   * approval/interaction counts regardless of which direction it's
+   * awaiting — because missing real work by being too clever here is far
+   * worse than an occasional unnecessary wake. Only gates the plain
+   * "nothing else going on" timer tick (see the genericTimerWake guard at
+   * this function's only call site) — assignment-driven and other
+   * context-carrying wake-ups never reach this check at all.
+   */
   async function hasActionableTimerWork(agent: typeof agents.$inferSelect) {
-    const row = await db
+    // (a) Any non-terminal issue assigned to this agent. Broadest and most
+    // common case; also transitively covers most due-monitor and
+    // pending-interaction cases below, since an issue with either of those
+    // is essentially always still open.
+    const assignedIssue = await db
       .select({ id: issues.id })
       .from(issues)
       .where(
         and(
           eq(issues.companyId, agent.companyId),
           eq(issues.assigneeAgentId, agent.id),
-          isNull(issues.assigneeUserId),
           isNull(issues.hiddenAt),
-          inArray(issues.status, [...TIMER_ACTIONABLE_ISSUE_STATUSES]),
+          notInArray(issues.status, [...TIMER_ACTIONABLE_ISSUE_TERMINAL_STATUSES]),
         ),
       )
       .limit(1)
       .then((rows) => rows[0] ?? null);
-    return Boolean(row);
+    if (assignedIssue) return true;
+
+    // (b) A pending approval this agent filed and is waiting on a decision
+    // for. Approval decisions already directly wake the requesting agent
+    // (see routes/approvals.ts), so this is a safety net rather than the
+    // primary notification path, but DUR-42 calls it out explicitly.
+    const pendingApproval = await db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.companyId, agent.companyId),
+          eq(approvals.requestedByAgentId, agent.id),
+          eq(approvals.status, "pending"),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (pendingApproval) return true;
+
+    // (c) An unresolved issue-thread interaction (request_confirmation,
+    // suggest_tasks, ask_user_questions, ...) tied to this agent: either it
+    // created the interaction and is waiting on an answer, or the
+    // interaction lives on an issue assigned to it (resolving it wakes the
+    // assignee — continuationPolicy "wake_assignee"/"wake_assignee_on_accept").
+    // Interaction resolution already directly wakes the relevant agent too
+    // (see routes/issues.ts), so again this is belt-and-suspenders.
+    const pendingInteraction = await db
+      .select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .leftJoin(issues, eq(issueThreadInteractions.issueId, issues.id))
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, agent.companyId),
+          eq(issueThreadInteractions.status, "pending"),
+          or(
+            eq(issueThreadInteractions.createdByAgentId, agent.id),
+            eq(issues.assigneeAgentId, agent.id),
+          ),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (pendingInteraction) return true;
+
+    // (d) A scheduled retry that is due (or overdue) for a run belonging to
+    // this agent. promoteDueScheduledRetries already promotes these on its
+    // own periodic sweep independent of tickTimers, so this too is a safety
+    // net for a tick that lands between sweeps.
+    const dueRetry = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, agent.companyId),
+          eq(heartbeatRuns.agentId, agent.id),
+          eq(heartbeatRuns.status, "scheduled_retry"),
+          lte(heartbeatRuns.scheduledRetryAt, new Date()),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (dueRetry) return true;
+
+    return false;
   }
 
   async function markTimerHeartbeatChecked(agentId: string, source: WakeupOptions["source"]) {

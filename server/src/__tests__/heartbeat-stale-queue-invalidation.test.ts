@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentWakeupRequests,
+  approvals,
   companies,
   costEvents,
   createDb,
@@ -13,6 +14,7 @@ import {
   issueComments,
   issueDocuments,
   issues,
+  issueThreadInteractions,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
 import {
@@ -89,6 +91,8 @@ async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createD
       await db.execute(sql.raw(`
         TRUNCATE TABLE
           "company_skills",
+          "issue_thread_interactions",
+          "approvals",
           "issue_comments",
           "issue_documents",
           "document_revisions",
@@ -393,10 +397,187 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(run!.id)).toBe(1);
   });
 
-  it("runs generic timer wakes by default for proactive agents without assigned issue work", async () => {
+  it("allows generic timer wakes when the agent has an in_review issue (not just todo/in_progress)", async () => {
+    // DUR-42: only done/cancelled should count as terminal for this purpose —
+    // an issue sitting in_review or blocked still needs this agent, and must
+    // not be silently skipped just because it isn't strictly todo/in_progress.
+    const { companyId, agentId } = await seedCompanyAndAgent({
+      heartbeatConfig: {
+        enabled: true,
+        skipTimerWhenNoActionableWork: true,
+      },
+    });
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId,
+      title: "Issue awaiting review",
+      status: "in_review",
+      priority: "high",
+      assigneeAgentId: agentId,
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "timer",
+      triggerDetail: "schedule",
+    });
+
+    expect(run).not.toBeNull();
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
+
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
+
+  it("allows generic timer wakes when the agent has a pending approval it requested", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({
+      heartbeatConfig: {
+        enabled: true,
+        skipTimerWhenNoActionableWork: true,
+      },
+    });
+    await db.insert(approvals).values({
+      id: randomUUID(),
+      companyId,
+      type: "request_board_approval",
+      requestedByAgentId: agentId,
+      status: "pending",
+      payload: { kind: "merge_pr" },
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "timer",
+      triggerDetail: "schedule",
+    });
+
+    expect(run).not.toBeNull();
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
+
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
+
+  it("allows generic timer wakes when the agent has an unanswered interaction it created", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({
+      heartbeatConfig: {
+        enabled: true,
+        skipTimerWhenNoActionableWork: true,
+      },
+    });
+    // The issue itself is terminal (done) so this test isolates the
+    // interaction check from the assigned-non-terminal-issue check above.
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Issue whose work already finished",
+      status: "done",
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: randomUUID(),
+      companyId,
+      issueId,
+      kind: "ask_user_questions",
+      status: "pending",
+      createdByAgentId: agentId,
+      payload: { questions: [{ id: "q1", question: "Which environment?" }] },
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "timer",
+      triggerDetail: "schedule",
+    });
+
+    expect(run).not.toBeNull();
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
+
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
+
+  it("allows generic timer wakes when the agent has a due scheduled retry", async () => {
+    // The due scheduled_retry run has the same (empty) task scope as the
+    // generic timer wake, so wakeup() coalesces onto it rather than
+    // queueing a redundant second run for the same agent — that's
+    // correct de-duplication, not a skip. What DUR-42 cares about here is
+    // that the tick is NOT recorded as `heartbeat.timer.no_actionable_work`
+    // and that the pre-existing retry still gets carried to execution by
+    // the normal promote-due-retries + resume-queued-runs path (the same
+    // pair the production scheduler loop runs on every tick alongside
+    // tickTimers — see index.ts), i.e. this isn't silently dropped.
+    const { companyId, agentId } = await seedCompanyAndAgent({
+      heartbeatConfig: {
+        enabled: true,
+        skipTimerWhenNoActionableWork: true,
+      },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      status: "scheduled_retry",
+      scheduledRetryAt: new Date(Date.now() - 60_000),
+      scheduledRetryReason: "transient_failure",
+      scheduledRetryAttempt: 1,
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "timer",
+      triggerDetail: "schedule",
+    });
+
+    expect(run).not.toBeNull();
+
+    const [skipRecord] = await db
+      .select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.reason, "heartbeat.timer.no_actionable_work"),
+        ),
+      );
+    expect(skipRecord).toBeUndefined();
+
+    await heartbeat.promoteDueScheduledRetries();
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
+
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
+
+  it("skips generic timer wakes by default when there is no actionable work (DUR-42)", async () => {
+    // skipTimerWhenNoActionableWork now defaults to true: an agent's timer
+    // tick with nothing pending (no assigned non-terminal issue, no pending
+    // approval/interaction it filed, no due scheduled retry) is a no-op by
+    // default, without needing to opt in via runtimeConfig.
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
+      },
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "timer",
+      triggerDetail: "schedule",
+    });
+
+    expect(run).toBeNull();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+
+    const [wakeup] = await db
+      .select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeup).toMatchObject({
+      status: "skipped",
+      reason: "heartbeat.timer.no_actionable_work",
+    });
+  });
+
+  it("still runs generic timer wakes when an agent explicitly opts out of the no-actionable-work skip", async () => {
+    const { agentId } = await seedCompanyAndAgent({
+      heartbeatConfig: {
+        enabled: true,
+        skipTimerWhenNoActionableWork: false,
       },
     });
 
