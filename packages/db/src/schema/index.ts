@@ -82,6 +82,12 @@ export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";
 export { escalationGrants } from "./escalation_grants.js";
+export {
+  customerInboxDeliveries,
+  customerInboxConversations,
+  CUSTOMER_INBOX_CHANNELS,
+  CUSTOMER_INBOX_DELIVERY_OUTCOMES,
+} from "./customer_inbox_deliveries.js";
 export { approvalComments } from "./approval_comments.js";
 export { activityLog } from "./activity_log.js";
 export { companySecretProviderConfigs } from "./company_secret_provider_configs.js";
