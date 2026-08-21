@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { FolderOpen, Heart, ChevronDown, X } from "lucide-react";
 import { asBoolean, asFiniteNumber, asObject, cn } from "../lib/utils";
 import { extractModelName, extractProviderId } from "../lib/model-utils";
+import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "../lib/agent-model-effort";
 import { queryKeys } from "../lib/queryKeys";
 import { useCompany } from "../context/CompanyContext";
 import {
@@ -149,40 +150,6 @@ function formatArgList(value: unknown): string {
   }
   return typeof value === "string" ? value : "";
 }
-
-const codexThinkingEffortOptions = [
-  { id: "", label: "Auto" },
-  { id: "minimal", label: "Minimal" },
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
-  { id: "xhigh", label: "X-High" },
-] as const;
-
-const openCodeThinkingEffortOptions = [
-  { id: "", label: "Auto" },
-  { id: "minimal", label: "Minimal" },
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
-  { id: "xhigh", label: "X-High" },
-  { id: "max", label: "Max" },
-] as const;
-
-const cursorModeOptions = [
-  { id: "", label: "Auto" },
-  { id: "plan", label: "Plan" },
-  { id: "ask", label: "Ask" },
-] as const;
-
-const claudeThinkingEffortOptions = [
-  { id: "", label: "Auto" },
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
-  { id: "xhigh", label: "X-High" },
-  { id: "max", label: "Max" },
-] as const;
 
 const MAX_TURN_CONTINUATION_DEFAULT_MAX_ATTEMPTS = 2;
 const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
@@ -769,26 +736,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     }
   }
 
-  const thinkingEffortKey =
-    adapterType === "codex_local"
-      ? "modelReasoningEffort"
-      : adapterType === "acpx_local" && acpxAgent === "codex"
-        ? "modelReasoningEffort"
-        : adapterType === "cursor"
-          ? "mode"
-          : adapterType === "opencode_local"
-            ? "variant"
-            : "effort";
-  const thinkingEffortOptions =
-    adapterType === "codex_local"
-      ? codexThinkingEffortOptions
-      : adapterType === "acpx_local" && acpxAgent === "codex"
-        ? codexThinkingEffortOptions
-        : adapterType === "cursor"
-          ? cursorModeOptions
-          : adapterType === "opencode_local"
-            ? openCodeThinkingEffortOptions
-            : claudeThinkingEffortOptions;
+  const thinkingEffortKey = getThinkingEffortKey(adapterType, { agent: acpxAgent });
+  const thinkingEffortOptions = getThinkingEffortOptions(adapterType, { agent: acpxAgent });
   const currentThinkingEffort = isCreate
     ? val!.thinkingEffort
     : adapterType === "codex_local"
@@ -808,7 +757,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           : adapterType === "opencode_local"
             ? eff("adapterConfig", "variant", String(config.variant ?? ""))
             : eff("adapterConfig", "effort", String(config.effort ?? ""));
-  const showThinkingEffort = adapterType !== "gemini_local" && adapterType !== "cursor_cloud";
+  const showThinkingEffort = supportsThinkingEffort(adapterType);
   const codexSearchEnabled = adapterType === "codex_local"
     ? (isCreate ? Boolean(val!.search) : eff("adapterConfig", "search", Boolean(config.search)))
     : false;

@@ -20,7 +20,9 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Bot, Plus, List, GitBranch } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { AlertTriangle, Bot, Plus, List, GitBranch, Pencil, X } from "lucide-react";
+import { BulkAgentEditDialog } from "../components/BulkAgentEditDialog";
 import { AGENT_ROLE_LABELS, type Agent, type Environment, type EnvironmentCapabilities } from "@paperclipai/shared";
 import {
   resourceMembershipState,
@@ -163,6 +165,8 @@ export function Agents() {
   const [view, setView] = useState<"list" | "org">("org");
   const forceListView = isMobile;
   const effectiveView: "list" | "org" = forceListView ? "list" : view;
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkEditOpen, setBulkEditOpen] = useState(false);
 
   const { data: agents, isLoading, error } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -269,6 +273,17 @@ export function Agents() {
       : environmentByAgentId.get(agentId) ?? localEnvironmentDescriptor
   );
 
+  const toggleSelected = (agentId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) next.delete(agentId);
+      else next.add(agentId);
+      return next;
+    });
+  };
+  const selectedAgents = (agents ?? []).filter((a) => selectedIds.has(a.id));
+  const clearSelection = () => setSelectedIds(new Set());
+
   const renderAgentRow = (agent: Agent) => {
     const hasInvalidOrgChain = agent.orgChainHealth?.status === "invalid_org_chain";
     return (
@@ -287,11 +302,28 @@ export function Agents() {
           agent.pausedAt && tab !== "paused" ? "opacity-50" : "",
           resourceMembershipState(membershipsQuery.data, "agent", agent.id) === "left" ? "text-foreground/55" : "",
         )}
-        leading={hasInvalidOrgChain ? (
-          <AlertTriangle className="h-3.5 w-3.5 text-amber-500" aria-label="Invalid reporting chain" />
-        ) : (
-          <AgentStatusCapsule status={agent.status} />
-        )}
+        leading={
+          <div className="flex items-center gap-2">
+            {/* Stop propagation so checking the box doesn't also navigate via the row's Link. */}
+            <div
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+            >
+              <Checkbox
+                checked={selectedIds.has(agent.id)}
+                onCheckedChange={() => toggleSelected(agent.id)}
+                aria-label={`Select ${agent.name}`}
+              />
+            </div>
+            {hasInvalidOrgChain ? (
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-500" aria-label="Invalid reporting chain" />
+            ) : (
+              <AgentStatusCapsule status={agent.status} />
+            )}
+          </div>
+        }
         meta={
           <div className="hidden xl:flex items-center gap-3">
             <AgentMetaColumns
@@ -421,6 +453,24 @@ export function Agents() {
         </div>
       </div>
 
+      {effectiveView === "list" && selectedAgents.length > 0 && (
+        <div className="flex items-center justify-between gap-3 border border-border bg-accent/30 px-3 py-2">
+          <span className="text-xs text-muted-foreground">
+            {selectedAgents.length} agent{selectedAgents.length === 1 ? "" : "s"} selected
+          </span>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setBulkEditOpen(true)}>
+              <Pencil className="h-3.5 w-3.5 mr-1.5" />
+              Bulk edit
+            </Button>
+            <Button size="sm" variant="ghost" onClick={clearSelection}>
+              <X className="h-3.5 w-3.5 mr-1.5" />
+              Clear
+            </Button>
+          </div>
+        </div>
+      )}
+
       {filtered.length > 0 && (
         <p className="text-xs text-muted-foreground">{filtered.length} agent{filtered.length !== 1 ? "s" : ""}</p>
       )}
@@ -481,6 +531,16 @@ export function Agents() {
           No organizational hierarchy defined.
         </p>
       )}
+
+      <BulkAgentEditDialog
+        open={bulkEditOpen}
+        onOpenChange={(next) => {
+          setBulkEditOpen(next);
+          if (!next) clearSelection();
+        }}
+        companyId={selectedCompanyId}
+        agentIds={selectedAgents.map((a) => a.id)}
+      />
     </div>
   );
 }
