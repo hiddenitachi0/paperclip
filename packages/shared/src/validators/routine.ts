@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  CUSTOMER_INBOX_CHANNELS,
   ISSUE_PRIORITIES,
   ROUTINE_CATCH_UP_POLICIES,
   ROUTINE_CONCURRENCY_POLICIES,
@@ -108,6 +109,7 @@ export const routineRevisionSnapshotTriggerV1Schema = z.object({
   publicId: z.string().nullable(),
   signingMode: z.enum(ROUTINE_TRIGGER_SIGNING_MODES).nullable(),
   replayWindowSec: z.number().int().min(30).max(86_400).nullable(),
+  customerInboxChannel: z.enum(CUSTOMER_INBOX_CHANNELS).nullable(),
 }).strict();
 
 export const routineRevisionSnapshotV1Schema = z.object({
@@ -135,6 +137,11 @@ export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
     kind: z.literal("webhook"),
     signingMode: z.enum(ROUTINE_TRIGGER_SIGNING_MODES).optional().default("bearer"),
     replayWindowSec: z.number().int().min(30).max(86_400).optional().default(300),
+    // DUR-68: non-null marks this trigger as the customer-inbox door for the
+    // routine (POST /api/customer-inbox/:publicId) rather than a generic
+    // webhook. Not company- or provider-specific: any source that can push a
+    // message may be pointed at the resulting address.
+    customerInboxChannel: z.enum(CUSTOMER_INBOX_CHANNELS).optional().nullable(),
   }),
   baseTriggerSchema.extend({
     kind: z.literal("api"),

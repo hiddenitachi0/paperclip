@@ -12,18 +12,6 @@ import { issues } from "./issues.js";
  * `companyId` / `routineTriggerId` are nullable because an `unknown_target`
  * delivery (publicId does not resolve to any trigger) belongs to no company.
  */
-export const CUSTOMER_INBOX_CHANNELS = ["email", "contact_form"] as const;
-export type CustomerInboxChannel = (typeof CUSTOMER_INBOX_CHANNELS)[number];
-
-export const CUSTOMER_INBOX_DELIVERY_OUTCOMES = [
-  "accepted",
-  "duplicate",
-  "rejected_signature",
-  "rejected_shape",
-  "failed",
-  "unknown_target",
-] as const;
-export type CustomerInboxDeliveryOutcome = (typeof CUSTOMER_INBOX_DELIVERY_OUTCOMES)[number];
 
 export const customerInboxDeliveries = pgTable(
   "customer_inbox_deliveries",
@@ -65,32 +53,5 @@ export const customerInboxDeliveries = pgTable(
     acceptedMessageUq: uniqueIndex("customer_inbox_deliveries_accepted_message_uq")
       .on(table.companyId, table.routineTriggerId, table.externalMessageId)
       .where(sql`${table.outcome} = 'accepted' and ${table.externalMessageId} is not null`),
-  }),
-);
-
-/**
- * Maps a source-supplied conversation id (e.g. a Gmail thread id) to the
- * Paperclip issue that is handling it, so a reply lands as a comment on the
- * existing task instead of opening a second one (DUR-68 operator decision,
- * item 9). New/absent conversationId -> normal new-issue flow, handled
- * without a row here.
- */
-export const customerInboxConversations = pgTable(
-  "customer_inbox_conversations",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    routineTriggerId: uuid("routine_trigger_id").notNull().references(() => routineTriggers.id, { onDelete: "cascade" }),
-    conversationId: text("conversation_id").notNull(),
-    linkedIssueId: uuid("linked_issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    triggerConversationUq: uniqueIndex("customer_inbox_conversations_trigger_conversation_uq").on(
-      table.routineTriggerId,
-      table.conversationId,
-    ),
-    linkedIssueIdx: index("customer_inbox_conversations_linked_issue_idx").on(table.linkedIssueId),
   }),
 );

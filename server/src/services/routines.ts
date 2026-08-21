@@ -466,6 +466,7 @@ function routineRevisionSnapshotTrigger(trigger: RoutineTriggerRow): RoutineRevi
     publicId: trigger.publicId,
     signingMode: trigger.signingMode as RoutineRevisionSnapshotV1["triggers"][number]["signingMode"],
     replayWindowSec: trigger.replayWindowSec,
+    customerInboxChannel: trigger.customerInboxChannel,
   };
 }
 
@@ -1347,6 +1348,95 @@ export function routineService(
     return value;
   }
 
+  type WebhookTriggerAuthInput = {
+    authorizationHeader?: string | null;
+    signatureHeader?: string | null;
+    hubSignatureHeader?: string | null;
+    timestampHeader?: string | null;
+    rawBody?: Buffer | null;
+    payload?: Record<string, unknown> | null;
+  };
+
+  // Shared by the generic `POST /api/routine-triggers/public/:publicId/fire`
+  // route and the customer-inbox door (`POST /api/customer-inbox/:publicId`).
+  // Both doors authenticate the same way; only what happens after a verified
+  // delivery differs.
+  async function verifyWebhookTriggerAuth(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: WebhookTriggerAuthInput,
+  ) {
+    if (trigger.signingMode === "none") {
+      // No authentication — the publicId in the URL acts as a shared secret.
+    } else if (trigger.signingMode === "github_hmac") {
+      const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+      const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
+      // Accept X-Hub-Signature-256 (GitHub/Sentry) or fall back to the
+      // generic X-Paperclip-Signature header so operators can use github_hmac
+      // mode with either header convention.
+      const providedSignature = (input.hubSignatureHeader ?? input.signatureHeader)?.trim() ?? "";
+      if (!providedSignature) throw unauthorized();
+      const expectedHmac = crypto
+        .createHmac("sha256", secretValue)
+        .update(rawBody)
+        .digest("hex");
+      const normalizedSignature = providedSignature.replace(/^sha256=/, "");
+      const normalizedBuf = Buffer.from(normalizedSignature);
+      const expectedBuf = Buffer.from(expectedHmac);
+      const valid =
+        normalizedBuf.length === expectedBuf.length &&
+        crypto.timingSafeEqual(normalizedBuf, expectedBuf);
+      if (!valid) throw unauthorized();
+    } else if (trigger.signingMode === "bearer") {
+      const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+      const expected = `Bearer ${secretValue}`;
+      const provided = input.authorizationHeader?.trim() ?? "";
+      const expectedBuf = Buffer.from(expected);
+      const providedBuf = Buffer.alloc(expectedBuf.length);
+      providedBuf.write(provided.slice(0, expectedBuf.length));
+      const valid =
+        provided.length === expected.length &&
+        crypto.timingSafeEqual(providedBuf, expectedBuf);
+      if (!valid) {
+        throw unauthorized();
+      }
+    } else {
+      const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+      const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
+      const providedSignature = input.signatureHeader?.trim() ?? "";
+      const providedTimestamp = input.timestampHeader?.trim() ?? "";
+      if (!providedSignature || !providedTimestamp) throw unauthorized();
+      const tsMillis = normalizeWebhookTimestampMs(providedTimestamp);
+      if (tsMillis == null) throw unauthorized();
+      const replayWindowSec = trigger.replayWindowSec ?? 300;
+      if (Math.abs(Date.now() - tsMillis) > replayWindowSec * 1000) {
+        throw unauthorized();
+      }
+      const expectedHmac = crypto
+        .createHmac("sha256", secretValue)
+        .update(`${providedTimestamp}.`)
+        .update(rawBody)
+        .digest("hex");
+      const normalizedSignature = providedSignature.replace(/^sha256=/, "");
+      const valid =
+        normalizedSignature.length === expectedHmac.length &&
+        crypto.timingSafeEqual(Buffer.from(normalizedSignature), Buffer.from(expectedHmac));
+      if (!valid) throw unauthorized();
+    }
+  }
+
+  async function loadWebhookTriggerByPublicId(publicId: string) {
+    const trigger = await db
+      .select()
+      .from(routineTriggers)
+      .where(and(eq(routineTriggers.publicId, publicId), eq(routineTriggers.kind, "webhook")))
+      .then((rows) => rows[0] ?? null);
+    if (!trigger) return null;
+    const routine = await getRoutineById(trigger.routineId);
+    if (!routine) return null;
+    return { trigger, routine };
+  }
+
   async function touchIssueForUserInbox(
     executor: Db,
     input: {
@@ -2058,8 +2148,13 @@ export function routineService(
         publicId = crypto.randomBytes(12).toString("hex");
         const created = await createWebhookSecret(routine.companyId, routine.id, actor);
         secretId = created.secret.id;
+        // A customer-inbox-owned trigger only ever shows the customer-inbox
+        // address (DUR-68): a second door on the same publicId would stay
+        // permanently open, so the generic fire URL is never shown for it.
         secretMaterial = {
-          webhookUrl: `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
+          webhookUrl: input.customerInboxChannel
+            ? `${process.env.PAPERCLIP_API_URL}/api/customer-inbox/${publicId}`
+            : `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
           webhookSecret: created.secretValue,
         };
       }
@@ -2082,6 +2177,7 @@ export function routineService(
             secretId,
             signingMode: input.kind === "webhook" ? input.signingMode : null,
             replayWindowSec: input.kind === "webhook" ? input.replayWindowSec : null,
+            customerInboxChannel: input.kind === "webhook" ? input.customerInboxChannel ?? null : null,
             lastRotatedAt: input.kind === "webhook" ? new Date() : null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
@@ -2242,7 +2338,9 @@ export function routineService(
       return {
         trigger: trigger as RoutineTrigger,
         secretMaterial: {
-          webhookUrl: `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${existing.publicId}/fire`,
+          webhookUrl: existing.customerInboxChannel
+            ? `${process.env.PAPERCLIP_API_URL}/api/customer-inbox/${existing.publicId}`
+            : `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${existing.publicId}/fire`,
           webhookSecret: secretValue,
         },
         revision,
@@ -2322,7 +2420,9 @@ export function routineService(
             secretId: created.secret.id,
             secretMaterial: {
               triggerId: trigger.id,
-              webhookUrl: `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
+              webhookUrl: trigger.customerInboxChannel
+                ? `${process.env.PAPERCLIP_API_URL}/api/customer-inbox/${publicId}`
+                : `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
               webhookSecret: created.secretValue,
             },
           });
@@ -2391,6 +2491,7 @@ export function routineService(
             secretId: triggerSnapshot.kind === "webhook" ? (current?.secretId ?? webhookSecret?.secretId ?? null) : null,
             signingMode: triggerSnapshot.kind === "webhook" ? triggerSnapshot.signingMode : null,
             replayWindowSec: triggerSnapshot.kind === "webhook" ? triggerSnapshot.replayWindowSec : null,
+            customerInboxChannel: triggerSnapshot.kind === "webhook" ? triggerSnapshot.customerInboxChannel : null,
             nextRunAt: restoredNextRunAt,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
@@ -2493,73 +2594,18 @@ export function routineService(
       rawBody?: Buffer | null;
       payload?: Record<string, unknown> | null;
     }) => {
-      const trigger = await db
-        .select()
-        .from(routineTriggers)
-        .where(and(eq(routineTriggers.publicId, publicId), eq(routineTriggers.kind, "webhook")))
-        .then((rows) => rows[0] ?? null);
-      if (!trigger) throw notFound("Routine trigger not found");
-      const routine = await getRoutineById(trigger.routineId);
-      if (!routine) throw notFound("Routine not found");
+      const loaded = await loadWebhookTriggerByPublicId(publicId);
+      if (!loaded) throw notFound("Routine trigger not found");
+      const { trigger, routine } = loaded;
       if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
-
-      if (trigger.signingMode === "none") {
-        // No authentication — the publicId in the URL acts as a shared secret.
-      } else if (trigger.signingMode === "github_hmac") {
-        const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
-        const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
-        // Accept X-Hub-Signature-256 (GitHub/Sentry) or fall back to the
-        // generic X-Paperclip-Signature header so operators can use github_hmac
-        // mode with either header convention.
-        const providedSignature = (input.hubSignatureHeader ?? input.signatureHeader)?.trim() ?? "";
-        if (!providedSignature) throw unauthorized();
-        const expectedHmac = crypto
-          .createHmac("sha256", secretValue)
-          .update(rawBody)
-          .digest("hex");
-        const normalizedSignature = providedSignature.replace(/^sha256=/, "");
-        const normalizedBuf = Buffer.from(normalizedSignature);
-        const expectedBuf = Buffer.from(expectedHmac);
-        const valid =
-          normalizedBuf.length === expectedBuf.length &&
-          crypto.timingSafeEqual(normalizedBuf, expectedBuf);
-        if (!valid) throw unauthorized();
-      } else if (trigger.signingMode === "bearer") {
-        const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
-        const expected = `Bearer ${secretValue}`;
-        const provided = input.authorizationHeader?.trim() ?? "";
-        const expectedBuf = Buffer.from(expected);
-        const providedBuf = Buffer.alloc(expectedBuf.length);
-        providedBuf.write(provided.slice(0, expectedBuf.length));
-        const valid =
-          provided.length === expected.length &&
-          crypto.timingSafeEqual(providedBuf, expectedBuf);
-        if (!valid) {
-          throw unauthorized();
-        }
-      } else {
-        const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
-        const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
-        const providedSignature = input.signatureHeader?.trim() ?? "";
-        const providedTimestamp = input.timestampHeader?.trim() ?? "";
-        if (!providedSignature || !providedTimestamp) throw unauthorized();
-        const tsMillis = normalizeWebhookTimestampMs(providedTimestamp);
-        if (tsMillis == null) throw unauthorized();
-        const replayWindowSec = trigger.replayWindowSec ?? 300;
-        if (Math.abs(Date.now() - tsMillis) > replayWindowSec * 1000) {
-          throw unauthorized();
-        }
-        const expectedHmac = crypto
-          .createHmac("sha256", secretValue)
-          .update(`${providedTimestamp}.`)
-          .update(rawBody)
-          .digest("hex");
-        const normalizedSignature = providedSignature.replace(/^sha256=/, "");
-        const valid =
-          normalizedSignature.length === expectedHmac.length &&
-          crypto.timingSafeEqual(Buffer.from(normalizedSignature), Buffer.from(expectedHmac));
-        if (!valid) throw unauthorized();
+      // One door: a trigger owned by the customer-inbox address (DUR-68) is
+      // not reachable through the generic fire route, so the old door stays
+      // shut on the same publicId.
+      if (trigger.customerInboxChannel) {
+        throw conflict("This routine only accepts messages at its customer-inbox address.");
       }
+
+      await verifyWebhookTriggerAuth(trigger, routine, input);
 
       return dispatchRoutineRun({
         routine,
