@@ -63,3 +63,20 @@ export function withRecoveryModelProfileHint<T extends Record<string, unknown>>(
 export function recoveryAssigneeAdapterOverrides(_workClass: Extract<RecoveryModelProfileWorkClass, "status_only">) {
   return { modelProfile: RECOVERY_MODEL_PROFILE_KEY };
 }
+
+/**
+ * True when a run's contextSnapshot carries the full status-only cheap-recovery
+ * guard shape (DUR-42). Shared by every route-level guard that refuses a mutation
+ * from this run tier, so the shape only needs to change in one place -- see
+ * DUR-45, where three independent copies of this check had drifted into being
+ * the only place a cheap run's "I can't do this" dead end was recognized.
+ */
+export function isStatusOnlyCheapRecoveryContext(contextSnapshot: unknown): boolean {
+  if (!contextSnapshot || typeof contextSnapshot !== "object" || Array.isArray(contextSnapshot)) return false;
+  const context = contextSnapshot as Record<string, unknown>;
+  return context.modelProfile === RECOVERY_MODEL_PROFILE_KEY &&
+    context.recoveryIntent === STATUS_ONLY_RECOVERY_GUARD_CONTEXT.recoveryIntent &&
+    context.allowDeliverableWork === STATUS_ONLY_RECOVERY_GUARD_CONTEXT.allowDeliverableWork &&
+    context.allowDocumentUpdates === STATUS_ONLY_RECOVERY_GUARD_CONTEXT.allowDocumentUpdates &&
+    context.resumeRequiresNormalModel === STATUS_ONLY_RECOVERY_GUARD_CONTEXT.resumeRequiresNormalModel;
+}

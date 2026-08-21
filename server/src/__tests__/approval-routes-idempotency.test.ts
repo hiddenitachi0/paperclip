@@ -90,13 +90,21 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
   return {
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => resolve(
-            Object.keys(selection).includes("contextSnapshot") ? runRows : [],
-          ),
-        })),
+        where: vi.fn(() => {
+          const rows = Object.keys(selection).includes("contextSnapshot") ? runRows : [];
+          const resolvable = {
+            then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+            limit: vi.fn(() => resolvable),
+          };
+          return resolvable;
+        }),
       })),
     })),
+    // DUR-45: cheap-run escalation leaves a plain-language comment on the
+    // issue when it hands a blocked action off to a normal-model run --
+    // a no-op insert is enough for these route-level tests, which only
+    // assert on the 403 response and its escalation details.
+    insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
   } as any;
 }
 
@@ -211,7 +219,7 @@ describe("approval routes idempotent retries", () => {
       explanation: "Allowed by test mock.",
     });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
-    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "11111111-1111-4111-8111-111111111111" }]);
     mockIssueThreadInteractionService.resolveInteractionsLinkedToApproval.mockResolvedValue([]);
     mockLogActivity.mockResolvedValue(undefined);
   });
@@ -585,6 +593,82 @@ describe("approval routes idempotent retries", () => {
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.create).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
+  });
+
+  // DUR-45: a cheap/status-only run that cannot file an approval must hand the
+  // action off to a normal-model run on the same issue instead of just failing.
+  it("escalates to a normal-model run instead of leaving a blocked approval unfiled", async () => {
+    const res = await request(await createAgentApp({
+      contextSnapshot: {
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        allowDeliverableWork: false,
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      },
+    }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "Merge the finished PR" },
+        issueIds: ["11111111-1111-4111-8111-111111111111"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.details.escalation).toMatchObject({
+      escalated: true,
+      alreadyPending: false,
+      capped: false,
+      count: 1,
+    });
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    const [wokenAgentId, wakeOpts] = mockHeartbeatService.wakeup.mock.calls[0];
+    expect(wokenAgentId).toBe("agent-1");
+    expect(wakeOpts.contextSnapshot.modelProfile).toBeUndefined();
+    expect(wakeOpts.contextSnapshot.resumeRequiresNormalModel).toBeUndefined();
+    expect(wakeOpts.payload.issueId).toBe("11111111-1111-4111-8111-111111111111");
+  });
+
+  it("does not enqueue a second escalation wake for a repeat attempt from the same run", async () => {
+    const cheapContextSnapshot = {
+      modelProfile: "cheap",
+      recoveryIntent: "status_only",
+      allowDeliverableWork: false,
+      allowDocumentUpdates: false,
+      resumeRequiresNormalModel: true,
+    };
+    // Simulate an escalation wake already in flight for this (issue, run) pair.
+    const idempotentDb = {
+      select: vi.fn((selection: Record<string, unknown> = {}) => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => {
+            const rows = Object.keys(selection).includes("contextSnapshot")
+              ? [{ id: "run-1", companyId: "company-1", agentId: "agent-1", contextSnapshot: cheapContextSnapshot }]
+              : Object.keys(selection).includes("status")
+                ? [{ id: "existing-wake-run", status: "queued" }]
+                : [];
+            const resolvable = {
+              then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+              limit: vi.fn(() => resolvable),
+            };
+            return resolvable;
+          }),
+        })),
+      })),
+      insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
+    } as any;
+
+    const res = await request(await createAgentAppWithDb(idempotentDb))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: { kind: "merge_pr", title: "Merge the finished PR" },
+        issueIds: ["11111111-1111-4111-8111-111111111111"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.details.escalation).toMatchObject({ escalated: true, alreadyPending: true });
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("blocks status-only recovery runs from resubmitting approvals", async () => {

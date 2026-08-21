@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isStatusOnlyCheapRecoveryContext,
   recoveryAssigneeAdapterOverrides,
   scrubRecoveryModelProfileHints,
   withRecoveryModelProfileHint,
@@ -40,5 +41,34 @@ describe("recovery model profile policy", () => {
       paperclipModelProfile: { requested: "cheap" },
       allowDocumentUpdates: false,
     })).toEqual({ taskId: "source-task" });
+  });
+
+  describe("isStatusOnlyCheapRecoveryContext", () => {
+    it("recognizes the full status-only cheap guard shape produced by withRecoveryModelProfileHint", () => {
+      const context = withRecoveryModelProfileHint({ issueId: "issue-1" }, "status_only");
+      expect(isStatusOnlyCheapRecoveryContext(context)).toBe(true);
+    });
+
+    it("rejects a normal-model context, even one that shares some keys", () => {
+      const context = withRecoveryModelProfileHint({ issueId: "issue-1" }, "normal_model");
+      expect(isStatusOnlyCheapRecoveryContext(context)).toBe(false);
+    });
+
+    it("rejects a partial/tampered guard shape", () => {
+      expect(isStatusOnlyCheapRecoveryContext({
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        // allowDeliverableWork missing -- not the full guard shape.
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      })).toBe(false);
+    });
+
+    it("rejects non-object and null contexts", () => {
+      expect(isStatusOnlyCheapRecoveryContext(null)).toBe(false);
+      expect(isStatusOnlyCheapRecoveryContext(undefined)).toBe(false);
+      expect(isStatusOnlyCheapRecoveryContext("cheap")).toBe(false);
+      expect(isStatusOnlyCheapRecoveryContext([])).toBe(false);
+    });
   });
 });
