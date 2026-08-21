@@ -836,6 +836,19 @@ export function agentRoutes(
     throw forbidden(decision.explanation);
   }
 
+  // DUR-56: a job title (role) is not a label here — `role === "ceo"` is a
+  // blanket permission grant. An agent-authenticated caller must never be
+  // able to change a role, whether the target is itself or another agent it
+  // otherwise has update rights on. Only a board-authenticated (human) actor
+  // may set it.
+  function assertNoAgentRoleMutation(req: Request, patch: Record<string, unknown>) {
+    if (req.actor.type !== "agent") return;
+    if (!hasOwn(patch, "role")) return;
+    throw forbidden(
+      "Agent-authenticated callers cannot change an agent's job title (role). Only board-authenticated callers can.",
+    );
+  }
+
   async function assertCanReadAgent(req: Request, targetAgent: { companyId: string }) {
     assertCompanyAccess(req, targetAgent.companyId);
     if (req.actor.type === "board") {
@@ -1350,12 +1363,30 @@ export function agentRoutes(
     return KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) => adapterConfig[key] !== undefined);
   }
 
+  // DUR-55: an agent-authenticated caller must never be able to add, change, or
+  // remove a tool connection (MCP server) on any agent's adapterConfig,
+  // including its own — that is a command run on the host or a URL data gets
+  // sent to, and today nothing else gates it. Only board-authenticated callers
+  // may set this.
+  function assertNoAgentToolConnectionMutation(
+    req: Request,
+    adapterConfig: Record<string, unknown>,
+    path = "adapterConfig",
+  ) {
+    if (req.actor.type !== "agent") return;
+    if (adapterConfig.mcpServers === undefined) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot modify tool connections (${path}.mcpServers). Only board-authenticated callers can.`,
+    );
+  }
+
   function assertNoAgentAdapterConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown>,
     path = "adapterConfig",
   ) {
     assertNoAgentInstructionsConfigMutation(req, adapterConfig, path);
+    assertNoAgentToolConnectionMutation(req, adapterConfig, path);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectAgentAdapterWorkspaceCommandPaths(adapterConfig, path),
@@ -2814,6 +2845,7 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    assertNoAgentRoleMutation(req, patchData);
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
     if (hasOwn(patchData, "adapterConfig")) {
