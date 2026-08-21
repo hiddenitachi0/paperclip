@@ -161,6 +161,8 @@ import {
   type TrustPresetResolution,
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
+import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
+import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -2556,16 +2558,6 @@ export function issueRoutes(
     return { scope, discovery, sourceIssue, watchdogIssue };
   }
 
-  function isStatusOnlyCheapRecoveryContext(contextSnapshot: unknown) {
-    if (!contextSnapshot || typeof contextSnapshot !== "object" || Array.isArray(contextSnapshot)) return false;
-    const context = contextSnapshot as Record<string, unknown>;
-    return context.modelProfile === "cheap" &&
-      context.recoveryIntent === "status_only" &&
-      context.allowDeliverableWork === false &&
-      context.allowDocumentUpdates === false &&
-      context.resumeRequiresNormalModel === true;
-  }
-
   function requestsCheapIssueAssigneeModelProfile(input: { assigneeAdapterOverrides?: unknown }) {
     const overrides = input.assigneeAdapterOverrides;
     return !!overrides &&
@@ -2641,10 +2633,21 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: { id: string; companyId: string },
+    describeBlockedAction: () => string = () => "create or modify an approval",
   ) {
     const run = await loadActorRunContext(req, issue.companyId);
     if (!run) return true;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
+
+    // DUR-45: hand the blocked action to a normal-model run on the same issue
+    // instead of leaving the issue stuck on a wall only this run's size caused.
+    const escalation = await recordCheapRunEscalation(db, heartbeat.wakeup, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      agentId: run.agentId,
+      sourceRunId: run.id,
+      blockedAction: describeBlockedAction(),
+    });
 
     res.status(403).json({
       error: "Cheap status-only recovery runs cannot create or modify approvals",
@@ -2654,9 +2657,51 @@ export function issueRoutes(
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         resumeRequiresNormalModel: true,
+        escalation,
       },
     });
     return false;
+  }
+
+  /**
+   * DUR-45: a cheap/status-only recovery run is barred from every kind of
+   * mutation this tier can't safely perform (deliverable work, document
+   * updates, approvals -- see the guards above), so the only reason it would
+   * ever try to set an issue to `blocked` is because it hit one of those
+   * walls and has no other way to signal it needs help. Intercepting every
+   * blocked-transition from this run tier is therefore not overreach: it is
+   * the same wall, just reached through the status field instead of a
+   * dedicated mutation route. Redirect to escalation instead of ever
+   * persisting `status: "blocked"` for that reason -- unless escalation
+   * itself is capped, in which case blocking really is the right call, with
+   * a reason an operator can tell apart from "needs a bigger model".
+   */
+  async function interceptCheapRunBlockedStatusTransition(
+    req: Request,
+    issue: { id: string; companyId: string },
+  ): Promise<{ intercepted: boolean; escalation?: Awaited<ReturnType<typeof recordCheapRunEscalation>> }> {
+    if (!req.body || typeof req.body !== "object" || req.body.status !== "blocked") {
+      return { intercepted: false };
+    }
+    const run = await loadActorRunContext(req, issue.companyId);
+    if (!run || !isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) {
+      return { intercepted: false };
+    }
+
+    const escalation = await recordCheapRunEscalation(db, heartbeat.wakeup, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      agentId: run.agentId,
+      sourceRunId: run.id,
+      blockedAction: "mark this issue blocked",
+    });
+    if (escalation.capped) {
+      // Escalation is exhausted for this issue -- let the blocked transition
+      // through as-is; it now has a distinguishable reason for the operator.
+      return { intercepted: false, escalation };
+    }
+    delete (req.body as Record<string, unknown>).status;
+    return { intercepted: true, escalation };
   }
 
   async function loadWorkProductRunAttribution(runId: string) {
@@ -5128,7 +5173,9 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
-    if (!(await assertApprovalMutationAllowedByRunContext(req, res, issue))) return;
+    if (
+      !(await assertApprovalMutationAllowedByRunContext(req, res, issue, () => "link an approval to this issue"))
+    ) return;
     if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId, req.body.approvalId))) return;
 
     const actor = getActorInfo(req);
@@ -5163,7 +5210,9 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
-    if (!(await assertApprovalMutationAllowedByRunContext(req, res, issue))) return;
+    if (
+      !(await assertApprovalMutationAllowedByRunContext(req, res, issue, () => "unlink an approval from this issue"))
+    ) return;
     if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId, approvalId))) return;
 
     await issueApprovalsSvc.unlink(id, approvalId);
@@ -5839,6 +5888,9 @@ export function issueRoutes(
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
+    // DUR-45: never persist status:"blocked" for a cheap/status-only run's own
+    // size limits -- escalate to a normal-model run on this issue instead.
+    await interceptCheapRunBlockedStatusTransition(req, existing);
 
     const actor = getActorInfo(req);
     const isClosed = isClosedIssueStatus(existing.status);

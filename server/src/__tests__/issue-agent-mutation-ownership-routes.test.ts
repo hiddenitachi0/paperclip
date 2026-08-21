@@ -281,13 +281,18 @@ function createRunContextDb(
     if (keys.includes("entityId")) return [];
     if (keys.includes("contextSnapshot")) return runRows;
     if (keys.includes("agentCompanyId")) return runRows;
+    // DUR-45: cheap-run escalation's agent_wakeup_requests lookups -- no
+    // existing/prior escalation wake in these fixtures.
+    if (keys.includes("status")) return [];
+    if (keys.length === 1 && keys[0] === "id") return [];
     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
   };
   const buildQuery = (selection: Record<string, unknown>) => {
-    const whereResult = {
+    const whereResult: Record<string, unknown> = {
       orderBy: vi.fn(async () => []),
       then: async (resolve: (rows: unknown[]) => unknown) => resolve(rowsForSelection(selection)),
     };
+    whereResult.limit = vi.fn(() => whereResult);
     const query = {
       innerJoin: vi.fn(() => query),
       where: vi.fn(() => whereResult),
@@ -299,6 +304,9 @@ function createRunContextDb(
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => buildQuery(selection)),
     })),
+    // DUR-45: cheap-run escalation leaves a plain-language comment when it
+    // hands a blocked action off to a normal-model run -- a no-op insert.
+    insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
   };
 }
 
