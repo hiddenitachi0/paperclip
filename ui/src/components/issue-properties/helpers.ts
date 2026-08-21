@@ -52,6 +52,27 @@ export function toDateTimeLocalValue(value: string | null | undefined) {
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
 }
 
+export function centsToDollarsInputValue(cents: number | null | undefined) {
+  if (cents == null) return "";
+  return (cents / 100).toString();
+}
+
+export function parseDollarsToCents(input: string): number | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const dollars = Number(trimmed);
+  if (!Number.isFinite(dollars) || dollars <= 0) return null;
+  return Math.round(dollars * 100);
+}
+
+export function parsePositiveInt(input: string): number | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value <= 0) return null;
+  return value;
+}
+
 export const ISSUE_THINKING_EFFORT_OPTIONS = {
   claude_local: [
     { value: "", label: "Default" },
