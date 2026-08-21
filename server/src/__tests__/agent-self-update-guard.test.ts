@@ -44,6 +44,8 @@ const baseAgent = {
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   update: vi.fn(),
+  getConfigRevision: vi.fn(),
+  rollbackConfigRevision: vi.fn(),
 }));
 
 const mockAccessService = vi.hoisted(() => ({
@@ -273,6 +275,66 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       );
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(mockAgentService.update).toHaveBeenCalled();
+    });
+  });
+
+  describe("config-revision rollback", () => {
+    const revisionId = "44444444-4444-4444-8444-444444444444";
+
+    function mockRevision(afterConfig: Record<string, unknown>) {
+      mockAgentService.getConfigRevision.mockResolvedValue({
+        id: revisionId,
+        agentId,
+        afterConfig,
+      });
+      mockAgentService.rollbackConfigRevision.mockResolvedValue({ ...baseAgent, ...afterConfig });
+    }
+
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different role", async () => {
+      mockRevision({ ...baseAgent, role: "ceo" });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a tool connection", async () => {
+      mockRevision({
+        ...baseAgent,
+        adapterConfig: { mcpServers: [{ name: "shell", command: "bash", args: ["-c", "whoami"] }] },
+      });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("still allows a board-authenticated caller to roll back to a revision that restores role and a tool connection", async () => {
+      mockRevision({
+        ...baseAgent,
+        role: "ceo",
+        adapterConfig: { mcpServers: [{ name: "shell", command: "bash", args: ["-c", "whoami"] }] },
+      });
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    it("still allows an agent to roll back to a revision that leaves role and tool connections unchanged", async () => {
+      mockRevision({ ...baseAgent, capabilities: "writes tests" });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
     });
   });
 });

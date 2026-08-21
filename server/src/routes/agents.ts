@@ -1393,6 +1393,34 @@ export function agentRoutes(
     );
   }
 
+  // DUR-55 / DUR-56: rolling back to a config revision restores that
+  // revision's role and adapterConfig wholesale, bypassing the PATCH-path
+  // guards above entirely. If any board-authenticated caller ever set a
+  // role or a tool connection in the past, an agent-authenticated caller
+  // could otherwise self-service-restore it later via rollback with no
+  // guard in the way. Refuse a rollback that would actually change role or
+  // adapterConfig.mcpServers for an agent-authenticated caller; unrelated
+  // rollbacks (e.g. reverting capabilities/instructions) are unaffected.
+  function assertNoAgentPrivilegedRollback(
+    req: Request,
+    existing: { role: string; adapterConfig: unknown },
+    snapshot: Record<string, unknown>,
+  ) {
+    if (req.actor.type !== "agent") return;
+    if (typeof snapshot.role === "string" && snapshot.role !== existing.role) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back to a revision that changes an agent's job title (role). Only board-authenticated callers can.",
+      );
+    }
+    const snapshotAdapterConfig = asRecord(snapshot.adapterConfig) ?? {};
+    const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
+    if (JSON.stringify(snapshotAdapterConfig.mcpServers) !== JSON.stringify(existingAdapterConfig.mcpServers)) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back a change to tool connections (adapterConfig.mcpServers). Only board-authenticated callers can.",
+      );
+    }
+  }
+
   function summarizeAgentUpdateDetails(patch: Record<string, unknown>) {
     const changedTopLevelKeys = Object.keys(patch).sort();
     const details: Record<string, unknown> = { changedTopLevelKeys };
@@ -2136,6 +2164,14 @@ export function agentRoutes(
       return;
     }
     await assertCanUpdateAgent(req, existing);
+
+    const targetRevision = await svc.getConfigRevision(id, revisionId);
+    if (!targetRevision) {
+      res.status(404).json({ error: "Revision not found" });
+      return;
+    }
+    const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
+    assertNoAgentPrivilegedRollback(req, existing, targetSnapshot);
 
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
