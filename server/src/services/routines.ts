@@ -1830,6 +1830,131 @@ export function routineService(
     return run;
   }
 
+  // The customer-inbox door (DUR-68): a company points any message source
+  // (email, contact form, ...) at this address. A ledger row is written
+  // for every delivery before any signature/shape validation, so nothing
+  // that knocks on the door goes unrecorded, then the message is delegated
+  // to the same auth+dispatch path as the generic webhook door.
+  async function receiveCustomerInboxMessage(publicId: string, input: {
+    authorizationHeader?: string | null;
+    signatureHeader?: string | null;
+    hubSignatureHeader?: string | null;
+    timestampHeader?: string | null;
+    idempotencyKeyHeader?: string | null;
+    rawBody?: Buffer | null;
+    payload?: Record<string, unknown> | null;
+  }) {
+    const payload = isPlainRecord(input.payload) ? input.payload : {};
+    const readString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
+    const externalMessageId = readString(payload.messageId);
+    const channel = readString(payload.channel);
+    const fromAddress = readString(payload.fromAddress);
+    const fromName = readString(payload.fromName);
+    const subject = readString(payload.subject);
+    const receivedAt = parseCustomerInboxReceivedAt(payload.receivedAt);
+    const payloadDigest = crypto
+      .createHash("sha256")
+      .update(input.rawBody ?? Buffer.from(JSON.stringify(payload)))
+      .digest("hex");
+
+    const loaded = await loadWebhookTriggerByPublicId(publicId);
+    if (!loaded || !loaded.trigger.customerInboxChannel) {
+      await db.insert(customerInboxDeliveries).values({
+        companyId: null,
+        routineTriggerId: null,
+        externalMessageId,
+        channel,
+        fromAddress,
+        fromName,
+        subject,
+        receivedAt,
+        outcome: "unknown_target",
+        payloadDigest,
+      });
+      throw notFound("Routine trigger not found");
+    }
+    const { trigger, routine } = loaded;
+
+    const [ledgerRow] = await db
+      .insert(customerInboxDeliveries)
+      .values({
+        companyId: trigger.companyId,
+        routineTriggerId: trigger.id,
+        externalMessageId,
+        channel: channel ?? trigger.customerInboxChannel,
+        fromAddress,
+        fromName,
+        subject,
+        receivedAt,
+        outcome: "failed",
+        payloadDigest,
+      })
+      .returning();
+
+    const updateLedger = (fields: Partial<typeof customerInboxDeliveries.$inferInsert>) =>
+      db.update(customerInboxDeliveries).set(fields).where(eq(customerInboxDeliveries.id, ledgerRow.id));
+
+    // messageId is the fallback idempotency key and what makes the dispatch
+    // fingerprint unique per message — not the auth mechanism itself, but a
+    // message we cannot tell apart from any other is unreadable all the same.
+    if (!externalMessageId) {
+      await updateLedger({
+        outcome: "rejected_shape",
+        outcomeDetail: "messageId missing",
+        rawPayloadExcerpt: truncateCustomerInboxExcerpt(input.rawBody, payload),
+      });
+      throw unprocessable("messageId is required");
+    }
+
+    const idempotencyKey = input.idempotencyKeyHeader?.trim() || externalMessageId;
+    const subjectShort = subject ? subject.slice(0, 120) : undefined;
+    const dispatchPayload = subjectShort !== undefined ? { ...payload, subjectShort } : payload;
+
+    try {
+      const run = await dispatchWebhookTrigger(trigger, routine, {
+        authorizationHeader: input.authorizationHeader,
+        signatureHeader: input.signatureHeader,
+        hubSignatureHeader: input.hubSignatureHeader,
+        timestampHeader: input.timestampHeader,
+        rawBody: input.rawBody,
+        payload: dispatchPayload,
+        idempotencyKey,
+        allowCustomerInboxTrigger: true,
+      });
+
+      // Duplicate is derived, not reported: a replayed idempotency key
+      // returns the existing run unmarked, so the outcome is `duplicate`
+      // when another `accepted` row already links that run.
+      const alreadyAccepted = await db
+        .select({ id: customerInboxDeliveries.id })
+        .from(customerInboxDeliveries)
+        .where(
+          and(
+            eq(customerInboxDeliveries.linkedRoutineRunId, run.id),
+            eq(customerInboxDeliveries.outcome, "accepted"),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows.length > 0);
+      const outcome: CustomerInboxDeliveryOutcome = alreadyAccepted ? "duplicate" : "accepted";
+
+      await updateLedger({
+        outcome,
+        linkedRoutineRunId: run.id,
+        linkedIssueId: run.linkedIssueId ?? null,
+      });
+      return { outcome, routineRunId: run.id, issueId: run.linkedIssueId ?? null };
+    } catch (error) {
+      const outcome: CustomerInboxDeliveryOutcome =
+        error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
+      await updateLedger({
+        outcome,
+        outcomeDetail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      });
+      throw error;
+    }
+  }
+
   return {
     get: getRoutineById,
     getTrigger: getTriggerById,
@@ -2659,129 +2784,40 @@ export function routineService(
       return dispatchWebhookTrigger(loaded.trigger, loaded.routine, input);
     },
 
-    // The customer-inbox door (DUR-68): a company points any message source
-    // (email, contact form, ...) at this address. A ledger row is written
-    // for every delivery before any signature/shape validation, so nothing
-    // that knocks on the door goes unrecorded, then the message is delegated
-    // to the same auth+dispatch path as the generic webhook door.
-    receiveCustomerInboxMessage: async (publicId: string, input: {
-      authorizationHeader?: string | null;
-      signatureHeader?: string | null;
-      hubSignatureHeader?: string | null;
-      timestampHeader?: string | null;
-      idempotencyKeyHeader?: string | null;
-      rawBody?: Buffer | null;
-      payload?: Record<string, unknown> | null;
-    }) => {
-      const payload = isPlainRecord(input.payload) ? input.payload : {};
-      const readString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
-      const externalMessageId = readString(payload.messageId);
-      const channel = readString(payload.channel);
-      const fromAddress = readString(payload.fromAddress);
-      const fromName = readString(payload.fromName);
-      const subject = readString(payload.subject);
-      const receivedAt = parseCustomerInboxReceivedAt(payload.receivedAt);
-      const payloadDigest = crypto
-        .createHash("sha256")
-        .update(input.rawBody ?? Buffer.from(JSON.stringify(payload)))
-        .digest("hex");
+    receiveCustomerInboxMessage,
 
-      const loaded = await loadWebhookTriggerByPublicId(publicId);
-      if (!loaded || !loaded.trigger.customerInboxChannel) {
-        await db.insert(customerInboxDeliveries).values({
-          companyId: null,
-          routineTriggerId: null,
-          externalMessageId,
-          channel,
-          fromAddress,
-          fromName,
-          subject,
-          receivedAt,
-          outcome: "unknown_target",
-          payloadDigest,
-        });
-        throw notFound("Routine trigger not found");
-      }
-      const { trigger, routine } = loaded;
+    // Used by the "Send test message" button on the routine page: a
+    // board-authenticated call that still goes through the exact same
+    // ledger+auth+dispatch path as an external sender (DUR-68 item 30), so a
+    // test produces a real ledger row instead of the silent bypass the old
+    // manual "Run now" action would produce for an inbox routine.
+    sendCustomerInboxTestMessage: async (routineId: string, triggerId: string) => {
+      const trigger = await db
+        .select()
+        .from(routineTriggers)
+        .where(and(eq(routineTriggers.id, triggerId), eq(routineTriggers.routineId, routineId)))
+        .then((rows) => rows[0] ?? null);
+      if (!trigger) throw notFound("Trigger not found");
+      if (!trigger.customerInboxChannel) throw conflict("This trigger is not a customer-inbox trigger");
+      const routine = await getRoutineById(routineId);
+      if (!routine) throw notFound("Routine not found");
 
-      const [ledgerRow] = await db
-        .insert(customerInboxDeliveries)
-        .values({
-          companyId: trigger.companyId,
-          routineTriggerId: trigger.id,
-          externalMessageId,
-          channel: channel ?? trigger.customerInboxChannel,
-          fromAddress,
-          fromName,
-          subject,
-          receivedAt,
-          outcome: "failed",
-          payloadDigest,
-        })
-        .returning();
-
-      const updateLedger = (fields: Partial<typeof customerInboxDeliveries.$inferInsert>) =>
-        db.update(customerInboxDeliveries).set(fields).where(eq(customerInboxDeliveries.id, ledgerRow.id));
-
-      // messageId is the fallback idempotency key and what makes the dispatch
-      // fingerprint unique per message — not the auth mechanism itself, but a
-      // message we cannot tell apart from any other is unreadable all the same.
-      if (!externalMessageId) {
-        await updateLedger({
-          outcome: "rejected_shape",
-          outcomeDetail: "messageId missing",
-          rawPayloadExcerpt: truncateCustomerInboxExcerpt(input.rawBody, payload),
-        });
-        throw unprocessable("messageId is required");
-      }
-
-      const idempotencyKey = input.idempotencyKeyHeader?.trim() || externalMessageId;
-      const subjectShort = subject ? subject.slice(0, 120) : undefined;
-      const dispatchPayload = subjectShort !== undefined ? { ...payload, subjectShort } : payload;
-
-      try {
-        const run = await dispatchWebhookTrigger(trigger, routine, {
-          authorizationHeader: input.authorizationHeader,
-          signatureHeader: input.signatureHeader,
-          hubSignatureHeader: input.hubSignatureHeader,
-          timestampHeader: input.timestampHeader,
-          rawBody: input.rawBody,
-          payload: dispatchPayload,
-          idempotencyKey,
-          allowCustomerInboxTrigger: true,
-        });
-
-        // Duplicate is derived, not reported: a replayed idempotency key
-        // returns the existing run unmarked, so the outcome is `duplicate`
-        // when another `accepted` row already links that run.
-        const alreadyAccepted = await db
-          .select({ id: customerInboxDeliveries.id })
-          .from(customerInboxDeliveries)
-          .where(
-            and(
-              eq(customerInboxDeliveries.linkedRoutineRunId, run.id),
-              eq(customerInboxDeliveries.outcome, "accepted"),
-            ),
-          )
-          .limit(1)
-          .then((rows) => rows.length > 0);
-        const outcome: CustomerInboxDeliveryOutcome = alreadyAccepted ? "duplicate" : "accepted";
-
-        await updateLedger({
-          outcome,
-          linkedRoutineRunId: run.id,
-          linkedIssueId: run.linkedIssueId ?? null,
-        });
-        return { outcome, routineRunId: run.id, issueId: run.linkedIssueId ?? null };
-      } catch (error) {
-        const outcome: CustomerInboxDeliveryOutcome =
-          error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
-        await updateLedger({
-          outcome,
-          outcomeDetail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
-        });
-        throw error;
-      }
+      const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+      const messageId = `test-${crypto.randomUUID()}`;
+      const payload = {
+        channel: trigger.customerInboxChannel,
+        messageId,
+        fromAddress: "test@paperclip.local",
+        fromName: "Testmelding",
+        subject: "Dette er en testmelding",
+        body: "Sendt fra Paperclip for å bekrefte at inboksen fungerer.",
+        receivedAt: new Date().toISOString(),
+      };
+      return receiveCustomerInboxMessage(trigger.publicId as string, {
+        authorizationHeader: `Bearer ${secretValue}`,
+        idempotencyKeyHeader: messageId,
+        payload,
+      });
     },
 
     // DUR-68: the "Leveranser" section on the inbox routine's detail page.

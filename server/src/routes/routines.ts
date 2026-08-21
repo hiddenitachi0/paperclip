@@ -473,6 +473,16 @@ export function routineRoutes(
     res.json(result);
   });
 
+  router.post("/routines/:id/triggers/:triggerId/customer-inbox-test-message", async (req, res) => {
+    const routine = await assertCanManageExistingRoutine(req, req.params.id as string);
+    if (!routine) {
+      res.status(404).json({ error: "Routine not found" });
+      return;
+    }
+    const result = await svc.sendCustomerInboxTestMessage(routine.id, req.params.triggerId as string);
+    res.status(202).json(result);
+  });
+
   router.post("/routines/:id/triggers", validate(createRoutineTriggerSchema), async (req, res) => {
     const routine = await assertCanManageExistingRoutine(req, req.params.id as string);
     if (!routine) {
