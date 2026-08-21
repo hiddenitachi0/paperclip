@@ -44,7 +44,7 @@ vi.mock("@paperclipai/adapter-utils/server-utils", async () => {
   const actual = await vi.importActual<typeof import("@paperclipai/adapter-utils/server-utils")>(
     "@paperclipai/adapter-utils/server-utils",
   );
-  return { ...actual, runChildProcess };
+  return { ...actual, runChildProcess, ensureCommandResolvable: vi.fn(async () => {}) };
 });
 
 import { execute } from "./execute.js";
