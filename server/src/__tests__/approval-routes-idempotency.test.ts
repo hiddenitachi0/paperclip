@@ -23,6 +23,10 @@ const mockIssueApprovalService = vi.hoisted(() => ({
   linkManyForApproval: vi.fn(),
 }));
 
+const mockIssueService = vi.hoisted(() => ({
+  addComment: vi.fn(),
+}));
+
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   resolveInteractionsLinkedToApproval: vi.fn(),
 }));
@@ -51,6 +55,7 @@ function registerModuleMocks() {
     escalationGrantService: () => mockEscalationGrantService,
     heartbeatService: () => mockHeartbeatService,
     issueApprovalService: () => mockIssueApprovalService,
+    issueService: () => mockIssueService,
     issueThreadInteractionService: () => mockIssueThreadInteractionService,
     logActivity: mockLogActivity,
     secretService: () => mockSecretService,
@@ -80,7 +85,12 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
   return app;
 }
 
-function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "run-1", agentId = "agent-1") {
+function createRouteDb(
+  contextSnapshot: Record<string, unknown> = {},
+  runId = "run-1",
+  agentId = "agent-1",
+  existingEscalationWakeRows: unknown[] = [],
+) {
   const runRows = [{
     id: runId,
     companyId: "company-1",
@@ -90,17 +100,27 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
   return {
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => resolve(
-            Object.keys(selection).includes("contextSnapshot") ? runRows : [],
-          ),
-        })),
+        where: vi.fn(() => {
+          const rows = Object.keys(selection).includes("contextSnapshot")
+            ? runRows
+            : existingEscalationWakeRows;
+          return {
+            then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+            limit: vi.fn(() => ({
+              then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+            })),
+          };
+        }),
       })),
     })),
   } as any;
 }
 
-async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown> } = {}) {
+async function createAgentApp(options: {
+  runId?: string;
+  contextSnapshot?: Record<string, unknown>;
+  existingEscalationWakeRows?: unknown[];
+} = {}) {
   const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
     import("../middleware/index.js"),
     import("../routes/approvals.js"),
@@ -118,7 +138,15 @@ async function createAgentApp(options: { runId?: string; contextSnapshot?: Recor
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb(options.contextSnapshot, options.runId ?? "run-1")));
+  app.use(
+    "/api",
+    approvalRoutes(createRouteDb(
+      options.contextSnapshot,
+      options.runId ?? "run-1",
+      "agent-1",
+      options.existingEscalationWakeRows ?? [],
+    )),
+  );
   app.use(errorHandler);
   return app;
 }
@@ -200,6 +228,7 @@ describe("approval routes idempotent retries", () => {
     mockHeartbeatService.wakeup.mockReset();
     mockIssueApprovalService.listIssuesForApproval.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
+    mockIssueService.addComment.mockReset();
     mockIssueThreadInteractionService.resolveInteractionsLinkedToApproval.mockReset();
     mockSecretService.normalizeHireApprovalPayloadForPersistence.mockReset();
     mockLogActivity.mockReset();
@@ -212,6 +241,7 @@ describe("approval routes idempotent retries", () => {
     });
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
     mockIssueThreadInteractionService.resolveInteractionsLinkedToApproval.mockResolvedValue([]);
     mockLogActivity.mockResolvedValue(undefined);
   });
@@ -585,6 +615,68 @@ describe("approval routes idempotent retries", () => {
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.create).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
+    // No issueIds on the request body -- nothing to scope an escalation wake to.
+    expect(res.body.details.escalation).toEqual({
+      escalated: false,
+      reason: "no issue context available for escalation",
+    });
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("DUR-45: escalates a status-only block on approval creation to a normal-model wake, once per issue", async () => {
+    const res = await request(await createAgentApp({
+      contextSnapshot: {
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        allowDeliverableWork: false,
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      },
+    }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: { title: "Approve hosting spend" },
+        issueIds: ["00000000-0000-4000-8000-000000000040"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.details.escalation).toEqual({ escalated: true, reason: "escalation wake queued" });
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    const [wakeAgentId, wakeOpts] = mockHeartbeatService.wakeup.mock.calls[0];
+    expect(wakeAgentId).toBe("agent-1");
+    expect(wakeOpts.idempotencyKey).toBe("status_only_recovery_escalated_to_normal_model:00000000-0000-4000-8000-000000000040");
+    expect(wakeOpts.contextSnapshot.resumeRequiresNormalModel).toBeUndefined();
+    expect(wakeOpts.contextSnapshot.modelProfile).toBeUndefined();
+    expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+    expect(mockIssueService.addComment.mock.calls[0][0]).toBe("00000000-0000-4000-8000-000000000040");
+  });
+
+  it("DUR-45: does not escalate a second time once a wake for the issue already exists", async () => {
+    const res = await request(await createAgentApp({
+      contextSnapshot: {
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        allowDeliverableWork: false,
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      },
+      existingEscalationWakeRows: [{ id: "wake-existing", status: "queued" }],
+    }))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: { title: "Approve hosting spend" },
+        issueIds: ["00000000-0000-4000-8000-000000000040"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.details.escalation).toEqual({
+      escalated: false,
+      reason: "already escalated once for this issue",
+    });
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
   it("blocks status-only recovery runs from resubmitting approvals", async () => {
@@ -612,6 +704,7 @@ describe("approval routes idempotent retries", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
+    expect(res.body.details.escalation).toEqual({ escalated: true, reason: "escalation wake queued" });
   });
 
   it("blocks status-only recovery runs from commenting on approvals", async () => {
@@ -639,5 +732,6 @@ describe("approval routes idempotent retries", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.addComment).not.toHaveBeenCalled();
+    expect(res.body.details.escalation).toEqual({ escalated: true, reason: "escalation wake queued" });
   });
 });

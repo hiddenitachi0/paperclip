@@ -7,6 +7,7 @@ const companyId = "22222222-2222-4222-8222-222222222222";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  addComment: vi.fn(),
 }));
 
 const mockDocumentsService = vi.hoisted(() => ({
@@ -152,17 +153,27 @@ function registerModuleMocks() {
 
 function createRunContextDb(contextSnapshot: Record<string, unknown>) {
   return {
-    select: vi.fn(() => ({
+    select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) =>
-            resolve([{
+        where: vi.fn(() => {
+          // The DUR-45 status-only escalation check selects {id, status} from
+          // agentWakeupRequests with a trailing .limit(1) -- distinct from the
+          // run-context lookup below, and always "no prior escalation" here.
+          const rows = Object.keys(selection).includes("status")
+            ? []
+            : [{
               id: "run-1",
               companyId,
               agentId: "agent-1",
               contextSnapshot,
-            }]),
-        })),
+            }];
+          return {
+            then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+            limit: vi.fn(() => ({
+              then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
+            })),
+          };
+        }),
       })),
     })),
   };
@@ -267,6 +278,7 @@ describe("issue document revision routes", () => {
     });
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
     mockInstanceSettingsService.get.mockResolvedValue({
       id: "instance-settings-1",
       general: {

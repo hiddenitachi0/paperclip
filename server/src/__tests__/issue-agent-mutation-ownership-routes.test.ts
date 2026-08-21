@@ -279,6 +279,7 @@ function createRunContextDb(
   const rowsForSelection = (selection: Record<string, unknown>) => {
     const keys = Object.keys(selection);
     if (keys.includes("entityId")) return [];
+    if (keys.includes("status") && !keys.includes("permissions")) return [];
     if (keys.includes("contextSnapshot")) return runRows;
     if (keys.includes("agentCompanyId")) return runRows;
     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
@@ -286,6 +287,9 @@ function createRunContextDb(
   const buildQuery = (selection: Record<string, unknown>) => {
     const whereResult = {
       orderBy: vi.fn(async () => []),
+      limit: vi.fn(() => ({
+        then: async (resolve: (rows: unknown[]) => unknown) => resolve(rowsForSelection(selection)),
+      })),
       then: async (resolve: (rows: unknown[]) => unknown) => resolve(rowsForSelection(selection)),
     };
     const query = {

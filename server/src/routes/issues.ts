@@ -161,6 +161,7 @@ import {
   type TrustPresetResolution,
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
+import { attemptStatusOnlyEscalation } from "../services/recovery/status-only-escalation.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -2624,6 +2625,18 @@ export function issueRoutes(
     if (!run) return true;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
+    const escalation = await attemptStatusOnlyEscalation(
+      db,
+      heartbeat.wakeup,
+      (commentIssueId, body) => svc.addComment(commentIssueId, body, {}, { authorType: "system" }),
+      {
+        companyId: issue.companyId,
+        agentId: run.agentId,
+        runId: run.id,
+        issueId: issue.id,
+        blockedAction: "update issue documents, plans, or deliverable artifacts",
+      },
+    );
     res.status(403).json({
       error: "Cheap status-only recovery runs cannot update issue documents, plans, or deliverable artifacts",
       details: {
@@ -2632,6 +2645,7 @@ export function issueRoutes(
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         resumeRequiresNormalModel: true,
+        escalation,
       },
     });
     return false;
@@ -2646,6 +2660,18 @@ export function issueRoutes(
     if (!run) return true;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
+    const escalation = await attemptStatusOnlyEscalation(
+      db,
+      heartbeat.wakeup,
+      (commentIssueId, body) => svc.addComment(commentIssueId, body, {}, { authorType: "system" }),
+      {
+        companyId: issue.companyId,
+        agentId: run.agentId,
+        runId: run.id,
+        issueId: issue.id,
+        blockedAction: "create or modify approvals",
+      },
+    );
     res.status(403).json({
       error: "Cheap status-only recovery runs cannot create or modify approvals",
       details: {
@@ -2654,6 +2680,7 @@ export function issueRoutes(
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         resumeRequiresNormalModel: true,
+        escalation,
       },
     });
     return false;

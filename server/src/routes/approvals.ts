@@ -20,6 +20,7 @@ import {
   escalationGrantService,
   heartbeatService,
   issueApprovalService,
+  issueService,
   issueThreadInteractionService,
   logActivity,
   secretService,
@@ -29,6 +30,7 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { unprocessable } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { attemptStatusOnlyEscalation } from "../services/recovery/status-only-escalation.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -181,6 +183,7 @@ export function approvalRoutes(
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
+  const issuesSvc = issueService(db);
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db);
   const escalationGrantsSvc = escalationGrantService(db);
@@ -206,7 +209,12 @@ export function approvalRoutes(
     return false;
   }
 
-  async function assertApprovalMutationAllowedByRunContext(req: Request, res: any, companyId: string) {
+  async function assertApprovalMutationAllowedByRunContext(
+    req: Request,
+    res: any,
+    companyId: string,
+    issueIds: string[] = [],
+  ) {
     if (req.actor.type !== "agent") return true;
     const runId = req.actor.runId?.trim();
     if (!runId || !req.actor.agentId) return true;
@@ -224,6 +232,22 @@ export function approvalRoutes(
     if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return true;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
+    const escalationIssueId = issueIds[0] ?? null;
+    const escalation = escalationIssueId
+      ? await attemptStatusOnlyEscalation(
+        db,
+        heartbeat.wakeup,
+        (commentIssueId, body) => issuesSvc.addComment(commentIssueId, body, {}, { authorType: "system" }),
+        {
+          companyId,
+          agentId: run.agentId,
+          runId: run.id,
+          issueId: escalationIssueId,
+          blockedAction: "create or modify approvals",
+        },
+      )
+      : { escalated: false, reason: "no issue context available for escalation" };
+
     res.status(403).json({
       error: "Cheap status-only recovery runs cannot create or modify approvals",
       details: {
@@ -232,6 +256,7 @@ export function approvalRoutes(
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         resumeRequiresNormalModel: true,
+        escalation,
       },
     });
     return false;
@@ -262,12 +287,12 @@ export function approvalRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
-    if (!(await assertApprovalMutationAllowedByRunContext(req, res, companyId))) return;
     const rawIssueIds = req.body.issueIds;
     const issueIds = Array.isArray(rawIssueIds)
       ? rawIssueIds.filter((value: unknown): value is string => typeof value === "string")
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
+    if (!(await assertApprovalMutationAllowedByRunContext(req, res, companyId, uniqueIssueIds))) return;
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
@@ -549,7 +574,15 @@ export function approvalRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    if (!(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId))) return;
+    const resubmitLinkedIssues = await issueApprovalsSvc.listIssuesForApproval(id);
+    if (
+      !(await assertApprovalMutationAllowedByRunContext(
+        req,
+        res,
+        existing.companyId,
+        resubmitLinkedIssues.map((linkedIssue) => linkedIssue.id),
+      ))
+    ) return;
 
     if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
@@ -603,7 +636,15 @@ export function approvalRoutes(
       return;
     }
     assertCompanyAccess(req, approval.companyId);
-    if (!(await assertApprovalMutationAllowedByRunContext(req, res, approval.companyId))) return;
+    const commentLinkedIssues = await issueApprovalsSvc.listIssuesForApproval(id);
+    if (
+      !(await assertApprovalMutationAllowedByRunContext(
+        req,
+        res,
+        approval.companyId,
+        commentLinkedIssues.map((linkedIssue) => linkedIssue.id),
+      ))
+    ) return;
     const actor = getActorInfo(req);
     const comment = await svc.addComment(id, req.body.body, {
       agentId: actor.agentId ?? undefined,
