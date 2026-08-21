@@ -531,12 +531,13 @@ function deriveChildAssigneeAdapterOverridesFromParent(
     return null;
   }
   const config = parentAdapterConfig as Record<string, unknown>;
-  const hasModelOrEffort = CHILD_INHERITABLE_ADAPTER_CONFIG_KEYS.some((key) => {
+  const inheritedConfig: Record<string, unknown> = {};
+  for (const key of CHILD_INHERITABLE_ADAPTER_CONFIG_KEYS) {
     const value = config[key];
-    return typeof value === "string" && value.length > 0;
-  });
-  if (!hasModelOrEffort) return null;
-  return { adapterConfig: { ...config } };
+    if (typeof value === "string" && value.length > 0) inheritedConfig[key] = value;
+  }
+  if (Object.keys(inheritedConfig).length === 0) return null;
+  return { adapterConfig: inheritedConfig };
 }
 
 function normalizeAcceptedPlanDecompositionFingerprintValue(value: unknown): unknown {
@@ -1001,6 +1002,7 @@ async function getWorkspaceInheritanceIssue(
       projectWorkspaceId: issues.projectWorkspaceId,
       executionWorkspaceId: issues.executionWorkspaceId,
       executionWorkspaceSettings: issues.executionWorkspaceSettings,
+      assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
     })
     .from(issues)
     .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
@@ -5378,24 +5380,6 @@ export function issueService(db: Db) {
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
-      // Every child-creation path funnels through this insert, so deriving the
-      // inherited model/effort override here (rather than in each caller) is
-      // what makes flow-down real regardless of which route created the child.
-      // An explicit assigneeAdapterOverrides key on the request -- including
-      // explicit null -- always wins over the parent's.
-      if (!("assigneeAdapterOverrides" in issueData) && issueData.parentId) {
-        const parentRow = await db
-          .select({ assigneeAdapterOverrides: issues.assigneeAdapterOverrides })
-          .from(issues)
-          .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, companyId)))
-          .then((rows) => rows[0] ?? null);
-        const inheritedAssigneeAdapterOverrides = deriveChildAssigneeAdapterOverridesFromParent(
-          parentRow?.assigneeAdapterOverrides,
-        );
-        if (inheritedAssigneeAdapterOverrides) {
-          issueData.assigneeAdapterOverrides = inheritedAssigneeAdapterOverrides;
-        }
-      }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
@@ -5408,8 +5392,17 @@ export function issueService(db: Db) {
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
+        // Every child-creation path funnels through this insert, so deriving the
+        // inherited model/effort override here (rather than in each caller) is
+        // what makes flow-down real regardless of which route created the child.
+        // An explicit assigneeAdapterOverrides key on the request -- including
+        // explicit null -- always wins over the parent's.
+        let parentRowForAdapterInheritance: { assigneeAdapterOverrides: Record<string, unknown> | null } | null = null;
         if (workspaceInheritanceIssueId) {
           const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
+          if (workspaceInheritanceIssueId === issueData.parentId) {
+            parentRowForAdapterInheritance = workspaceSource;
+          }
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
           }
@@ -5437,6 +5430,19 @@ export function issueService(db: Db) {
                 mode: issueExecutionWorkspaceModeForPersistedWorkspace(sourceWorkspace.mode),
               };
             }
+          }
+        }
+        if (!("assigneeAdapterOverrides" in issueData) && issueData.parentId) {
+          const parentRow = parentRowForAdapterInheritance ?? await tx
+            .select({ assigneeAdapterOverrides: issues.assigneeAdapterOverrides })
+            .from(issues)
+            .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, companyId)))
+            .then((rows) => rows[0] ?? null);
+          const inheritedAssigneeAdapterOverrides = deriveChildAssigneeAdapterOverridesFromParent(
+            parentRow?.assigneeAdapterOverrides,
+          );
+          if (inheritedAssigneeAdapterOverrides) {
+            issueData.assigneeAdapterOverrides = inheritedAssigneeAdapterOverrides;
           }
         }
         if (issueData.projectId == null && projectWorkspaceId) {

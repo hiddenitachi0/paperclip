@@ -4154,6 +4154,38 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
   });
 
+  it("only inherits the model/effort keys, never other adapterConfig fields the parent happens to carry", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAdapterOverrides: {
+        useProjectWorkspace: true,
+        adapterConfig: { effort: "max", chrome: true, approvalPolicy: "yolo" },
+      },
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Generic child issue",
+    });
+
+    expect(child.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
+  });
+
   it("keeps an explicit child model/effort override instead of inheriting the parent's, including explicit null", async () => {
     const companyId = randomUUID();
     const parentIssueId = randomUUID();
