@@ -11,6 +11,10 @@ type ParsedCodexProvidersConfig = {
   modelProvider: string | null;
 };
 
+type ParsedCodexMcpServersConfig = {
+  servers: Record<string, Record<string, unknown>>;
+};
+
 // Marker comments delimiting the Paperclip-managed regions of config.toml.
 // TOML requires root-level keys (model_provider) to appear before the first
 // table header, while [model_providers.*] tables must not swallow the user's
@@ -20,6 +24,12 @@ const MANAGED_ROOT_BEGIN = "# >>> paperclip codex providers (root) -- managed, d
 const MANAGED_ROOT_END = "# <<< paperclip codex providers (root) <<<";
 const MANAGED_TABLES_BEGIN = "# >>> paperclip codex providers (tables) -- managed, do not edit >>>";
 const MANAGED_TABLES_END = "# <<< paperclip codex providers (tables) <<<";
+// Per-agent MCP servers (adapterConfig.mcpServers) have no root-level
+// selector key (Codex loads every defined [mcp_servers.*] table), so they
+// only need one managed region, mirroring the tables half of the providers
+// pair above.
+const MANAGED_MCP_BEGIN = "# >>> paperclip mcp servers -- managed, do not edit >>>";
+const MANAGED_MCP_END = "# <<< paperclip mcp servers <<<";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -143,6 +153,63 @@ function parseCodexProvidersConfig(
   return { providers, modelProvider };
 }
 
+// Per-agent MCP server config (adapterConfig.mcpServers). Unlike
+// PAPERCLIP_CODEX_PROVIDERS this arrives as already-parsed JS values (an
+// array from the agent's adapterConfig JSONB column), not a JSON string.
+// Codex's config.toml [mcp_servers.*] schema is stdio-only (command/args/env);
+// entries that only carry a `url` (http/sse, which claude_local supports via
+// --mcp-config) are not representable here and are skipped with a note
+// rather than silently dropped or erroring the run.
+function parseCodexMcpServersConfig(raw: unknown, notes: string[]): ParsedCodexMcpServersConfig | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+
+  const servers: Record<string, Record<string, unknown>> = {};
+  const skipped: string[] = [];
+  for (const entry of raw) {
+    if (!isPlainObject(entry)) {
+      skipped.push("(invalid entry)");
+      continue;
+    }
+    const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    const command = typeof entry.command === "string" ? entry.command.trim() : "";
+    if (!name || !command) {
+      const hasUrlOnly = Boolean(name) && !command && typeof entry.url === "string";
+      skipped.push(
+        hasUrlOnly
+          ? `${name} (http/sse MCP servers are not supported by codex_local; stdio "command" only)`
+          : name || "(unnamed)",
+      );
+      continue;
+    }
+    const fields: Record<string, unknown> = { command };
+    if (Array.isArray(entry.args)) {
+      const args = entry.args.filter((item): item is string => typeof item === "string");
+      if (args.length > 0) fields.args = args;
+    }
+    if (isPlainObject(entry.env)) {
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(entry.env)) {
+        if (typeof value === "string") env[key] = value;
+      }
+      if (Object.keys(env).length > 0) fields.env = env;
+    }
+    servers[name] = fields;
+  }
+
+  if (Object.keys(servers).length === 0) {
+    if (skipped.length > 0) {
+      notes.push(
+        `adapterConfig.mcpServers contains no usable stdio entries (skipped: ${skipped.join(", ")}); MCP servers ignored.`,
+      );
+    }
+    return null;
+  }
+  if (skipped.length > 0) {
+    notes.push(`adapterConfig.mcpServers: skipped entries: ${skipped.join(", ")}.`);
+  }
+  return { servers };
+}
+
 function escapeTomlString(value: string): string {
   // TOML 1.0 basic strings require escaping U+0000-U+001F and U+007F (DEL).
   return value.replace(/[\\"\u0000-\u001f\u007f]/g, (char) => {
@@ -193,14 +260,22 @@ function tomlValue(value: unknown): string | null {
   return null;
 }
 
-function emitProviderTable(name: string, fields: Record<string, unknown>): string[] {
-  const lines = [`[model_providers.${tomlKey(name)}]`];
+function emitTomlTable(header: string, fields: Record<string, unknown>): string[] {
+  const lines = [`[${header}]`];
   for (const [key, value] of Object.entries(fields)) {
     const emitted = tomlValue(value);
     if (emitted === null) continue;
     lines.push(`${tomlKey(key)} = ${emitted}`);
   }
   return lines;
+}
+
+function emitProviderTable(name: string, fields: Record<string, unknown>): string[] {
+  return emitTomlTable(`model_providers.${tomlKey(name)}`, fields);
+}
+
+function emitMcpServerTable(name: string, fields: Record<string, unknown>): string[] {
+  return emitTomlTable(`mcp_servers.${tomlKey(name)}`, fields);
 }
 
 function stripManagedBlock(lines: string[], begin: string, end: string): string[] {
@@ -221,10 +296,15 @@ function stripManagedBlock(lines: string[], begin: string, end: string): string[
   return out;
 }
 
+// Despite the name, this strips every Paperclip-managed region: custom model
+// providers AND per-agent MCP servers. Kept as one function/export since both
+// are stripped together at every call site (fresh-merge base and crash
+// self-heal alike).
 export function stripManagedCodexProviderBlocks(content: string): string {
   let lines = content.split("\n");
   lines = stripManagedBlock(lines, MANAGED_ROOT_BEGIN, MANAGED_ROOT_END);
   lines = stripManagedBlock(lines, MANAGED_TABLES_BEGIN, MANAGED_TABLES_END);
+  lines = stripManagedBlock(lines, MANAGED_MCP_BEGIN, MANAGED_MCP_END);
   return lines.join("\n");
 }
 
@@ -243,16 +323,19 @@ function parseTableHeaderPath(line: string): string[] | null {
 }
 
 // Remove pre-existing definitions that would conflict with (or override) the
-// managed content: [model_providers.<name>] tables (and their subtables) for
-// names we are about to define, and the root-level `model_provider` key when
-// we set one. Duplicate TOML tables/keys are parse errors in codex, so the
-// managed definitions must win by excising the originals.
+// managed content: [model_providers.<name>] and [mcp_servers.<name>] tables
+// (and their subtables) for names we are about to define, and the root-level
+// `model_provider` key when we set one. Duplicate TOML tables/keys are parse
+// errors in codex, so the managed definitions must win by excising the
+// originals.
 function stripConflictingDefinitions(
   content: string,
   providerNames: string[],
+  mcpServerNames: string[],
   removeRootModelProvider: boolean,
 ): string {
-  const names = new Set(providerNames);
+  const providerNameSet = new Set(providerNames);
+  const mcpServerNameSet = new Set(mcpServerNames);
   const lines = content.split("\n");
   const out: string[] = [];
   let inRootRegion = true;
@@ -262,9 +345,8 @@ function stripConflictingDefinitions(
     if (headerPath) {
       inRootRegion = false;
       skippingSection =
-        headerPath.length >= 2 &&
-        headerPath[0] === "model_providers" &&
-        names.has(headerPath[1]);
+        (headerPath.length >= 2 && headerPath[0] === "model_providers" && providerNameSet.has(headerPath[1])) ||
+        (headerPath.length >= 2 && headerPath[0] === "mcp_servers" && mcpServerNameSet.has(headerPath[1]));
       if (skippingSection) continue;
     } else if (skippingSection) {
       continue;
@@ -277,9 +359,13 @@ function stripConflictingDefinitions(
   return out.join("\n");
 }
 
-function buildMergedConfigToml(base: string, parsed: ParsedCodexProvidersConfig): string {
+function buildMergedConfigToml(
+  base: string,
+  parsed: ParsedCodexProvidersConfig | null,
+  mcpParsed: ParsedCodexMcpServersConfig | null,
+): string {
   const sections: string[] = [];
-  if (parsed.modelProvider) {
+  if (parsed?.modelProvider) {
     sections.push(
       [
         MANAGED_ROOT_BEGIN,
@@ -290,13 +376,24 @@ function buildMergedConfigToml(base: string, parsed: ParsedCodexProvidersConfig)
   }
   const trimmedBase = base.replace(/^\n+/, "").replace(/\n+$/, "");
   if (trimmedBase.length > 0) sections.push(trimmedBase);
-  const tableLines: string[] = [MANAGED_TABLES_BEGIN];
-  for (const [name, fields] of Object.entries(parsed.providers)) {
-    tableLines.push(...emitProviderTable(name, fields), "");
+  if (parsed) {
+    const tableLines: string[] = [MANAGED_TABLES_BEGIN];
+    for (const [name, fields] of Object.entries(parsed.providers)) {
+      tableLines.push(...emitProviderTable(name, fields), "");
+    }
+    while (tableLines[tableLines.length - 1] === "") tableLines.pop();
+    tableLines.push(MANAGED_TABLES_END);
+    sections.push(tableLines.join("\n"));
   }
-  while (tableLines[tableLines.length - 1] === "") tableLines.pop();
-  tableLines.push(MANAGED_TABLES_END);
-  sections.push(tableLines.join("\n"));
+  if (mcpParsed) {
+    const mcpLines: string[] = [MANAGED_MCP_BEGIN];
+    for (const [name, fields] of Object.entries(mcpParsed.servers)) {
+      mcpLines.push(...emitMcpServerTable(name, fields), "");
+    }
+    while (mcpLines[mcpLines.length - 1] === "") mcpLines.pop();
+    mcpLines.push(MANAGED_MCP_END);
+    sections.push(mcpLines.join("\n"));
+  }
   return `${sections.join("\n\n")}\n`;
 }
 
@@ -336,6 +433,8 @@ function configTomlBackupPath(configTomlPath: string): string {
 export async function prepareCodexRuntimeConfig(input: {
   env: Record<string, string>;
   codexHome: string | null;
+  /** Agent-level adapterConfig.mcpServers, already-parsed JS values (not JSON text). */
+  mcpServers?: unknown;
 }): Promise<PreparedCodexRuntimeConfig> {
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const notes: string[] = [];
@@ -344,12 +443,13 @@ export async function prepareCodexRuntimeConfig(input: {
     resolveEnv,
     notes,
   );
+  const mcpParsed = parseCodexMcpServersConfig(input.mcpServers, notes);
 
-  if (!parsed) {
+  if (!parsed && !mcpParsed) {
     // Self-heal state left behind by a crashed run (cleanup() never ran).
     if (input.codexHome) {
       const configTomlPath = path.join(input.codexHome, "config.toml");
-      const reason = notes.length === 0 ? " (PAPERCLIP_CODEX_PROVIDERS is no longer set)" : "";
+      const reason = notes.length === 0 ? " (no Paperclip-managed provider/MCP config is set for this run)" : "";
       const backupPath = configTomlBackupPath(configTomlPath);
       const backup = await readFileOrNull(backupPath);
       if (backup !== null) {
@@ -360,7 +460,7 @@ export async function prepareCodexRuntimeConfig(input: {
         return {
           notes: [
             ...notes,
-            `Restored "${configTomlPath}" from its pre-run backup, removing stale Paperclip-managed model providers left by an interrupted run${reason}.`,
+            `Restored "${configTomlPath}" from its pre-run backup, removing stale Paperclip-managed model providers/MCP servers left by an interrupted run${reason}.`,
           ],
           cleanup: async () => {},
         };
@@ -374,7 +474,7 @@ export async function prepareCodexRuntimeConfig(input: {
           return {
             notes: [
               ...notes,
-              `Removed stale Paperclip-managed model provider blocks from "${configTomlPath}"${reason}.`,
+              `Removed stale Paperclip-managed model provider/MCP server blocks from "${configTomlPath}"${reason}.`,
             ],
             cleanup: async () => {},
           };
@@ -388,7 +488,7 @@ export async function prepareCodexRuntimeConfig(input: {
     return {
       notes: [
         ...notes,
-        "PAPERCLIP_CODEX_PROVIDERS is set but the adapter config explicitly sets env.CODEX_HOME; leaving the user-managed Codex home untouched (no model provider merge).",
+        "PAPERCLIP_CODEX_PROVIDERS and/or adapterConfig.mcpServers are set but the adapter config explicitly sets env.CODEX_HOME; leaving the user-managed Codex home untouched (no model provider/MCP merge).",
       ],
       cleanup: async () => {},
     };
@@ -399,24 +499,38 @@ export async function prepareCodexRuntimeConfig(input: {
   // A surviving backup from an interrupted run is the true pre-run content;
   // the current config.toml would still carry that run's managed blocks.
   const original = (await readFileOrNull(backupPath)) ?? (await readFileOrNull(configTomlPath));
-  const providerNames = Object.keys(parsed.providers);
+  const providerNames = parsed ? Object.keys(parsed.providers) : [];
+  const mcpServerNames = mcpParsed ? Object.keys(mcpParsed.servers) : [];
   const base = stripConflictingDefinitions(
     stripManagedCodexProviderBlocks(original ?? ""),
     providerNames,
-    parsed.modelProvider !== null,
+    mcpServerNames,
+    parsed?.modelProvider != null,
   );
   await fs.mkdir(input.codexHome, { recursive: true });
   // Persist the original BEFORE writing the merged file so a run that never
   // reaches cleanup() can be restored by the next prepare.
   await fs.writeFile(backupPath, original ?? "", "utf8");
-  await fs.writeFile(configTomlPath, buildMergedConfigToml(base, parsed), "utf8");
+  await fs.writeFile(configTomlPath, buildMergedConfigToml(base, parsed, mcpParsed), "utf8");
+
+  const mergeDescriptions: string[] = [];
+  if (parsed) {
+    mergeDescriptions.push(
+      `${providerNames.length} custom Codex model provider(s) from PAPERCLIP_CODEX_PROVIDERS: ${providerNames.join(", ")}${
+        parsed.modelProvider ? `; selected model_provider "${parsed.modelProvider}"` : ""
+      }`,
+    );
+  }
+  if (mcpParsed) {
+    mergeDescriptions.push(
+      `${mcpServerNames.length} per-agent MCP server(s) from adapterConfig.mcpServers: ${mcpServerNames.join(", ")}`,
+    );
+  }
 
   return {
     notes: [
       ...notes,
-      `Merged ${providerNames.length} custom Codex model provider(s) from PAPERCLIP_CODEX_PROVIDERS into "${configTomlPath}": ${providerNames.join(", ")}${
-        parsed.modelProvider ? `; selected model_provider "${parsed.modelProvider}"` : ""
-      }.`,
+      `Merged ${mergeDescriptions.join("; ")} into "${configTomlPath}".`,
     ],
     cleanup: async () => {
       if (original === null) {

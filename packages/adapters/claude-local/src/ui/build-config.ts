@@ -62,6 +62,17 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   }
 }
 
+function parseJsonArray(text: string): unknown[] | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function buildClaudeLocalConfig(v: CreateConfigValues): Record<string, unknown> {
   const ac: Record<string, unknown> = {};
   if (v.cwd) ac.cwd = v.cwd;
@@ -93,6 +104,8 @@ export function buildClaudeLocalConfig(v: CreateConfigValues): Record<string, un
   if (runtimeServices && Array.isArray(runtimeServices.services)) {
     ac.workspaceRuntime = runtimeServices;
   }
+  const mcpServers = parseJsonArray(v.mcpServersJson ?? "");
+  if (mcpServers && mcpServers.length > 0) ac.mcpServers = mcpServers;
   if (v.command) ac.command = v.command;
   if (v.extraArgs) ac.extraArgs = parseCommaArgs(v.extraArgs);
   return ac;

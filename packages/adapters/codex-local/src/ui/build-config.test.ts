@@ -57,4 +57,21 @@ describe("buildCodexLocalConfig", () => {
 
     expect(config).not.toHaveProperty("model");
   });
+
+  it("parses mcpServersJson into adapterConfig.mcpServers", () => {
+    const config = buildCodexLocalConfig(
+      makeValues({
+        mcpServersJson: JSON.stringify([{ name: "fs", command: "npx", args: ["-y", "server"] }]),
+      }),
+    );
+
+    expect(config.mcpServers).toEqual([{ name: "fs", command: "npx", args: ["-y", "server"] }]);
+  });
+
+  it("omits mcpServers when mcpServersJson is blank, empty, or not an array", () => {
+    expect(buildCodexLocalConfig(makeValues({ mcpServersJson: "" }))).not.toHaveProperty("mcpServers");
+    expect(buildCodexLocalConfig(makeValues({ mcpServersJson: "[]" }))).not.toHaveProperty("mcpServers");
+    expect(buildCodexLocalConfig(makeValues({ mcpServersJson: '{"name":"fs"}' }))).not.toHaveProperty("mcpServers");
+    expect(buildCodexLocalConfig(makeValues({ mcpServersJson: "not json" }))).not.toHaveProperty("mcpServers");
+  });
 });

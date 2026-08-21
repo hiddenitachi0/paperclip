@@ -40,6 +40,7 @@ export const help: Record<string, string> = {
   workspaceBranchTemplate: "Template for naming derived branches. Supports {{issue.identifier}}, {{issue.title}}, {{agent.name}}, {{project.id}}, {{workspace.repoRef}}, and {{slug}}.",
   worktreeParentDir: "Directory where derived worktrees should be created. Absolute, ~-prefixed, and repo-relative paths are supported.",
   runtimeServicesJson: "Optional workspace runtime service definitions. Use this for shared app servers, workers, or other long-lived companion processes attached to the workspace.",
+  mcpServers: "Optional list of MCP (Model Context Protocol) servers this agent can use, e.g. connecting it to Higgsfield or another external tool. Stdio servers need \"name\" and \"command\" (optionally \"args\"/\"env\"); remote servers need \"name\" and \"url\" (optionally \"headers\"). Only this agent's configured servers are used at runtime — not any shared servers configured on the host.",
   maxTurnsPerRun: "Maximum number of agentic turns (tool calls) per heartbeat run.",
   command: "The command to execute (e.g. node, python).",
   localCommand: "Override the path to the CLI command you want the adapter to call (e.g. /usr/local/bin/claude, codex, opencode).",
