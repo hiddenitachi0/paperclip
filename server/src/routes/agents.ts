@@ -869,6 +869,37 @@ export function agentRoutes(
     }
   }
 
+  // DUR-68: Filip's sorting rules live in a fenced block inside the
+  // secretary's AGENTS.md, one line per rule, each ending in the name of the
+  // agent it routes to (after the line's last colon). Saving a rule whose
+  // trailing name doesn't resolve to exactly one live (non-terminated) agent
+  // in the company blocks the write so a typo can't silently misroute
+  // customer messages to nobody.
+  async function assertSorteringsreglerRuleNamesResolve(companyId: string, content: string) {
+    const startMarker = "<!-- SORTERINGSREGLER -->";
+    const endMarker = "<!-- /SORTERINGSREGLER -->";
+    const startIdx = content.indexOf(startMarker);
+    const endIdx = content.indexOf(endMarker);
+    if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return;
+    const block = content.slice(startIdx + startMarker.length, endIdx);
+
+    const liveAgents = await svc.list(companyId);
+    const liveNames = new Set(liveAgents.map((agent) => agent.name));
+
+    const lines = block.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+    let ruleIndex = 0;
+    for (const line of lines) {
+      ruleIndex += 1;
+      const lastColon = line.lastIndexOf(":");
+      if (lastColon === -1) continue;
+      const name = line.slice(lastColon + 1).trim().replace(/[.\s]+$/, "");
+      if (!name || liveNames.has(name)) continue;
+      throw unprocessable(
+        `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
+      );
+    }
+  }
+
   async function assertCanReadAgent(req: Request, targetAgent: { companyId: string }) {
     assertCompanyAccess(req, targetAgent.companyId);
     if (req.actor.type === "board") {
@@ -2841,6 +2872,7 @@ export function agentRoutes(
       return;
     }
     await assertCanManageInstructionsPath(req, existing);
+    await assertSorteringsreglerRuleNamesResolve(existing.companyId, req.body.content as string);
 
     const actor = getActorInfo(req);
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
