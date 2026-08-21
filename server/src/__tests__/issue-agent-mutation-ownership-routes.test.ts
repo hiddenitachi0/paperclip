@@ -1128,6 +1128,30 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueApprovalService.unlink).not.toHaveBeenCalled();
   });
 
+  it("escalates instead of persisting status:\"blocked\" for a cheap status-only run (DUR-45)", async () => {
+    const app = await createApp(
+      ownerActor(),
+      createRunContextDb({
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        allowDeliverableWork: false,
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      }),
+    );
+
+    const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+    const [, persistedPatch] = mockIssueService.update.mock.calls[0];
+    expect(persistedPatch.status).toBeUndefined();
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    const [wokenAgentId, wakeOpts] = mockHeartbeatService.wakeup.mock.calls[0];
+    expect(wokenAgentId).toBe(ownerAgentId);
+    expect(wakeOpts.contextSnapshot.resumeRequiresNormalModel).toBeUndefined();
+  });
+
   it.each([
     [
       "issue create",
