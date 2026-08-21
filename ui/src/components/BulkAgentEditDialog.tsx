@@ -217,7 +217,7 @@ export function BulkAgentEditDialog({ open, onOpenChange, companyId, agentIds }:
                 onCheckedChange={(value) => setApplyDefaultModel(Boolean(value))}
                 id="bulk-apply-default-model"
               />
-              <Label htmlFor="bulk-default-model">Default model</Label>
+              <Label htmlFor="bulk-apply-default-model">Default model</Label>
             </div>
             <Input
               id="bulk-default-model"
@@ -235,7 +235,7 @@ export function BulkAgentEditDialog({ open, onOpenChange, companyId, agentIds }:
                 onCheckedChange={(value) => setApplyBackupModel(Boolean(value))}
                 id="bulk-apply-backup-model"
               />
-              <Label htmlFor="bulk-backup-model">Backup (fast) model</Label>
+              <Label htmlFor="bulk-apply-backup-model">Backup (fast) model</Label>
             </div>
             <Input
               id="bulk-backup-model"
@@ -259,7 +259,7 @@ export function BulkAgentEditDialog({ open, onOpenChange, companyId, agentIds }:
                 onCheckedChange={(value) => setApplyEffort(Boolean(value))}
                 id="bulk-apply-effort"
               />
-              <Label htmlFor="bulk-effort">Effort</Label>
+              <Label htmlFor="bulk-apply-effort">Effort</Label>
             </div>
             {uniformEffortOptions ? (
               <Select
