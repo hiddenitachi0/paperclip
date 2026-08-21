@@ -109,6 +109,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
 import { issueApprovalService } from "./issue-approvals.js";
@@ -14836,11 +14837,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       const issueMonitors = await tickDueIssueMonitors(now);
+      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now);
 
       return {
-        checked: checked + issueMonitors.checked,
-        enqueued: enqueued + issueMonitors.triggered,
-        skipped: skipped + issueMonitors.skipped,
+        checked: checked + issueMonitors.checked + customerInboxHandoffs.checked,
+        enqueued: enqueued + issueMonitors.triggered + customerInboxHandoffs.reassigned,
+        skipped: skipped + issueMonitors.skipped + customerInboxHandoffs.skipped,
       };
     },
 
