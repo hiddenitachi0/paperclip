@@ -200,6 +200,24 @@ function modelProfileTitle(summary: ModelProfileSummary) {
   return lines.join("\n");
 }
 
+interface ResolvedAdapterConfigSummary {
+  model: string | null;
+  effort: string | null;
+}
+
+// What was actually handed to the adapter process for this run -- not what the
+// issue/agent requested, which can be silently dropped anywhere upstream (e.g. a
+// child issue that never inherited its parent's model/effort override).
+function resolvedAdapterConfigForRun(run: RunForIssue): ResolvedAdapterConfigSummary | null {
+  const result = asRecord(run.resultJson);
+  const resolved = asRecord(result?.resolvedAdapterConfig);
+  if (!resolved) return null;
+  const model = readString(resolved.model);
+  const effort = readString(resolved.effort);
+  if (!model && !effort) return null;
+  return { model, effort };
+}
+
 function readNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -773,6 +791,19 @@ export function IssueRunLedgerContent({
                         title={modelProfileTitle(profile)}
                       >
                         {label}
+                      </span>
+                    );
+                  })()}
+                  {(() => {
+                    const resolved = resolvedAdapterConfigForRun(run);
+                    if (!resolved) return null;
+                    const label = [resolved.model, resolved.effort].filter(Boolean).join(" · ");
+                    return (
+                      <span
+                        className="rounded-md border border-border px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground"
+                        title="Model/effort actually used to run this, not just what was requested"
+                      >
+                        Used: {label}
                       </span>
                     );
                   })()}

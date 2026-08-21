@@ -2082,6 +2082,24 @@ function mergeModelProfileRunMetadata(
   };
 }
 
+/**
+ * What was actually handed to adapter.execute() for this run, not what the
+ * issue/agent requested -- the requested model/effort (issue override, model
+ * profile, boost grant) can be silently dropped anywhere in that merge chain,
+ * e.g. a child issue that never inherited its parent's override (DUR-50).
+ * Persisted into resultJson so the operator can see what ran.
+ */
+export function buildResolvedAdapterConfigRunMetadata(input: {
+  adapterType: string;
+  runtimeConfig: Record<string, unknown>;
+}): { model?: string; effort?: string } | null {
+  const effortKey = ESCALATION_GRANT_EFFORT_ADAPTER_CONFIG_KEY[input.adapterType];
+  const model = readNonEmptyString(input.runtimeConfig.model);
+  const effort = effortKey ? readNonEmptyString(input.runtimeConfig[effortKey]) : null;
+  if (!model && !effort) return null;
+  return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+}
+
 export function summarizeHeartbeatRunContextSnapshot(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
@@ -12087,6 +12105,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             } as Record<string, unknown>)
           : null;
 
+      const resolvedAdapterConfigMetadata = buildResolvedAdapterConfigRunMetadata({
+        adapterType: agent.adapterType,
+        runtimeConfig: runtimeConfig as Record<string, unknown>,
+      });
       const persistedResultJson = mergeHeartbeatRunResultJson(
         mergeRunStopMetadataForAgent(agent, outcome, {
           resultJson: mergeModelProfileRunMetadata(
@@ -12094,6 +12116,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               resultJson: {
                 ...parseObject(adapterResult.resultJson),
                 configFreshness: configFreshnessResultMetadata,
+                ...(resolvedAdapterConfigMetadata ? { resolvedAdapterConfig: resolvedAdapterConfigMetadata } : {}),
               },
               errorFamily: adapterResult.errorFamily ?? null,
               retryNotBefore: adapterResult.retryNotBefore ?? null,
