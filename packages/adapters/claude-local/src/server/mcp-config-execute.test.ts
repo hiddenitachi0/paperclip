@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { runChildProcess } = vi.hoisted(() => ({
+const { runChildProcess, ensureCommandResolvable } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
     exitCode: 0,
     signal: null,
@@ -17,13 +17,14 @@ const { runChildProcess } = vi.hoisted(() => ({
     pid: 123,
     startedAt: new Date().toISOString(),
   })),
+  ensureCommandResolvable: vi.fn(async () => undefined),
 }));
 
 vi.mock("@paperclipai/adapter-utils/server-utils", async () => {
   const actual = await vi.importActual<typeof import("@paperclipai/adapter-utils/server-utils")>(
     "@paperclipai/adapter-utils/server-utils",
   );
-  return { ...actual, runChildProcess };
+  return { ...actual, runChildProcess, ensureCommandResolvable };
 });
 
 import { execute } from "./execute.js";
