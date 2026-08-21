@@ -5427,6 +5427,26 @@ export function issueService(db: Db) {
             }
           }
         }
+        // Model/effort inheritance is keyed strictly off parentId (not the more
+        // permissive workspaceInheritanceIssueId, which can point at an unrelated
+        // "current run's issue" for workspace reuse). Every creation path funnels
+        // through this shared create(), so this is the single place the flow-down
+        // has to happen -- callers that already resolved their own override
+        // (createChild, recovery follow-ups) always pass the key explicitly
+        // (including explicit null), so this never runs for them.
+        if (issueData.parentId && !("assigneeAdapterOverrides" in issueData)) {
+          const parentForAdapterInheritance = await tx
+            .select({ assigneeAdapterOverrides: issues.assigneeAdapterOverrides })
+            .from(issues)
+            .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, companyId)))
+            .then((rows) => rows[0] ?? null);
+          const inheritedAssigneeAdapterOverrides = deriveChildAssigneeAdapterOverridesFromParent(
+            parentForAdapterInheritance?.assigneeAdapterOverrides,
+          );
+          if (inheritedAssigneeAdapterOverrides !== null) {
+            issueData.assigneeAdapterOverrides = inheritedAssigneeAdapterOverrides;
+          }
+        }
         if (issueData.projectId == null && projectWorkspaceId) {
           const workspace = await assertValidProjectWorkspace(companyId, null, projectWorkspaceId, tx);
           issueData.projectId = workspace.projectId;

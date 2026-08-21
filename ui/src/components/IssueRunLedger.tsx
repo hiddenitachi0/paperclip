@@ -200,6 +200,22 @@ function modelProfileTitle(summary: ModelProfileSummary) {
   return lines.join("\n");
 }
 
+// DUR-50: shows the model/effort keys actually merged into the adapter
+// config dispatched for this run (server-recorded in resultJson.effectiveModelEffort),
+// not just what the issue/agent requested -- a requested override can be
+// dropped (inheritance bug) or overridden downstream without this ever
+// showing up otherwise.
+function effectiveModelEffortForRun(run: RunForIssue): string | null {
+  const result = asRecord(run.resultJson);
+  const effective = asRecord(result?.effectiveModelEffort);
+  if (!effective) return null;
+  const parts = [
+    readString(effective.model),
+    readString(effective.effort) ?? readString(effective.modelReasoningEffort) ?? readString(effective.variant),
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function readNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -773,6 +789,18 @@ export function IssueRunLedgerContent({
                         title={modelProfileTitle(profile)}
                       >
                         {label}
+                      </span>
+                    );
+                  })()}
+                  {(() => {
+                    const effective = effectiveModelEffortForRun(run);
+                    if (!effective) return null;
+                    return (
+                      <span
+                        className="rounded-md border border-border bg-background px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground"
+                        title="Model/effort actually used for this run"
+                      >
+                        {effective}
                       </span>
                     );
                   })()}

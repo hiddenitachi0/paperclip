@@ -5,6 +5,8 @@ import {
 } from "../adapters/index.js";
 import {
   buildEscalationGrantAdapterConfig,
+  effectiveModelEffortRunMetadata,
+  mergeEffectiveModelEffortRunMetadata,
   mergeModelProfileAdapterConfig,
   normalizeModelProfileWakeContext,
   resolveModelProfileApplication,
@@ -220,5 +222,41 @@ describe("DUR-31 escalation grant dispatch precedence", () => {
       modelReasoningEffort: "explicit-override",
       approvalPolicy: "strict",
     });
+  });
+});
+
+// DUR-50: the run-level record of which model/effort actually got dispatched,
+// independent of the modelProfile ("cheap"/"boost") machinery -- covers the
+// plain assigneeAdapterOverrides case (e.g. effort: "max") that modelProfile
+// metadata never captured, which is what let DUR-47's effort setting go
+// unnoticed once it silently failed to reach its children.
+describe("effective model/effort run metadata", () => {
+  it("extracts only the model/effort-ish keys actually present in the merged config", () => {
+    expect(
+      effectiveModelEffortRunMetadata({
+        model: "claude-opus-5",
+        effort: "max",
+        approvalPolicy: "strict",
+      }),
+    ).toEqual({ model: "claude-opus-5", effort: "max" });
+  });
+
+  it("returns null when the merged config has none of the tracked keys", () => {
+    expect(effectiveModelEffortRunMetadata({ approvalPolicy: "strict" })).toBeNull();
+  });
+
+  it("ignores non-string values for the tracked keys", () => {
+    expect(effectiveModelEffortRunMetadata({ model: 42, effort: null })).toBeNull();
+  });
+
+  it("merges into resultJson without clobbering existing fields", () => {
+    expect(
+      mergeEffectiveModelEffortRunMetadata({ summary: "done" }, { model: "claude-opus-5", effort: "max" }),
+    ).toEqual({ summary: "done", effectiveModelEffort: { model: "claude-opus-5", effort: "max" } });
+  });
+
+  it("leaves resultJson untouched when nothing to record", () => {
+    const resultJson = { summary: "done" };
+    expect(mergeEffectiveModelEffortRunMetadata(resultJson, { approvalPolicy: "strict" })).toBe(resultJson);
   });
 });

@@ -2082,6 +2082,36 @@ function mergeModelProfileRunMetadata(
   };
 }
 
+// DUR-50: the operator has no way to see which model/effort a run actually
+// used vs. what was requested on the issue -- a dropped inheritance (or a
+// silent adapter fallback) was invisible. This records the model/effort-ish
+// keys actually merged into the adapter config dispatched for the run, so
+// IssueRunLedger can show it next to the modelProfile badge.
+const EFFECTIVE_MODEL_EFFORT_ADAPTER_CONFIG_KEYS = ["model", "effort", "modelReasoningEffort", "variant"] as const;
+
+export function effectiveModelEffortRunMetadata(
+  mergedConfig: Record<string, unknown>,
+): Record<string, string> | null {
+  const metadata: Record<string, string> = {};
+  for (const key of EFFECTIVE_MODEL_EFFORT_ADAPTER_CONFIG_KEYS) {
+    const value = mergedConfig[key];
+    if (typeof value === "string" && value.length > 0) metadata[key] = value;
+  }
+  return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
+export function mergeEffectiveModelEffortRunMetadata(
+  resultJson: Record<string, unknown> | null,
+  mergedConfig: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const metadata = effectiveModelEffortRunMetadata(mergedConfig);
+  if (!metadata) return resultJson;
+  return {
+    ...(resultJson ?? {}),
+    effectiveModelEffort: metadata,
+  };
+}
+
 export function summarizeHeartbeatRunContextSnapshot(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
@@ -12089,16 +12119,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const persistedResultJson = mergeHeartbeatRunResultJson(
         mergeRunStopMetadataForAgent(agent, outcome, {
-          resultJson: mergeModelProfileRunMetadata(
-            mergeAdapterRecoveryMetadata({
-              resultJson: {
-                ...parseObject(adapterResult.resultJson),
-                configFreshness: configFreshnessResultMetadata,
-              },
-              errorFamily: adapterResult.errorFamily ?? null,
-              retryNotBefore: adapterResult.retryNotBefore ?? null,
-            }),
-            modelProfileApplication,
+          resultJson: mergeEffectiveModelEffortRunMetadata(
+            mergeModelProfileRunMetadata(
+              mergeAdapterRecoveryMetadata({
+                resultJson: {
+                  ...parseObject(adapterResult.resultJson),
+                  configFreshness: configFreshnessResultMetadata,
+                },
+                errorFamily: adapterResult.errorFamily ?? null,
+                retryNotBefore: adapterResult.retryNotBefore ?? null,
+              }),
+              modelProfileApplication,
+            ),
+            mergedConfig,
           ),
           errorCode: runErrorCode,
           errorMessage: runErrorMessage,
