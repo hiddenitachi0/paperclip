@@ -6,6 +6,7 @@ import {
   companySecretBindings,
   companySecretVersions,
   companySecrets,
+  customerInboxDeliveries,
   documentRevisions,
   documents,
   executionWorkspaces,
@@ -51,8 +52,9 @@ import {
   stringifyRoutineVariableValue,
   syncRoutineVariablesWithTemplate,
 } from "@paperclipai/shared";
+import type { CustomerInboxDeliveryOutcome } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
-import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { HttpError, conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
@@ -202,6 +204,24 @@ function normalizeWebhookTimestampMs(rawTimestamp: string) {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const CUSTOMER_INBOX_EXCERPT_MAX_BYTES = 16 * 1024;
+
+function parseCustomerInboxReceivedAt(value: unknown): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+// Only written for rejected_shape/failed deliveries, truncated to 16 KB, and
+// swept 30 days after receivedAt — accepted/duplicate deliveries keep the
+// message body only in the task they create, not in the ledger.
+function truncateCustomerInboxExcerpt(rawBody: Buffer | null | undefined, payload: Record<string, unknown>): string {
+  const raw = rawBody && rawBody.length > 0 ? rawBody.toString("utf8") : JSON.stringify(payload);
+  return Buffer.byteLength(raw, "utf8") > CUSTOMER_INBOX_EXCERPT_MAX_BYTES
+    ? Buffer.from(raw, "utf8").subarray(0, CUSTOMER_INBOX_EXCERPT_MAX_BYTES).toString("utf8")
+    : raw;
 }
 
 function parseBooleanVariableValue(name: string, raw: unknown) {
@@ -1437,6 +1457,46 @@ export function routineService(
     return { trigger, routine };
   }
 
+  // Shared by `firePublicTrigger` (the generic door) and
+  // `receiveCustomerInboxMessage` (the customer-inbox door, DUR-68). Both
+  // authenticate and dispatch the same way; `allowCustomerInboxTrigger`
+  // is the only thing that differs between the two doors.
+  async function dispatchWebhookTrigger(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: {
+      authorizationHeader?: string | null;
+      signatureHeader?: string | null;
+      hubSignatureHeader?: string | null;
+      timestampHeader?: string | null;
+      idempotencyKey?: string | null;
+      rawBody?: Buffer | null;
+      payload?: Record<string, unknown> | null;
+      allowCustomerInboxTrigger?: boolean;
+    },
+  ) {
+    if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
+    // One door: a trigger owned by the customer-inbox address (DUR-68) is
+    // not reachable through the generic fire route, so the old door stays
+    // shut on the same publicId.
+    if (trigger.customerInboxChannel && !input.allowCustomerInboxTrigger) {
+      throw conflict("This routine only accepts messages at its customer-inbox address.");
+    }
+
+    await verifyWebhookTriggerAuth(trigger, routine, input);
+
+    return dispatchRoutineRun({
+      routine,
+      trigger,
+      source: "webhook",
+      payload: input.payload,
+      variables: isPlainRecord(input.payload) && isPlainRecord(input.payload.variables)
+        ? input.payload.variables
+        : null,
+      idempotencyKey: input.idempotencyKey,
+    });
+  }
+
   async function touchIssueForUserInbox(
     executor: Db,
     input: {
@@ -2596,27 +2656,132 @@ export function routineService(
     }) => {
       const loaded = await loadWebhookTriggerByPublicId(publicId);
       if (!loaded) throw notFound("Routine trigger not found");
+      return dispatchWebhookTrigger(loaded.trigger, loaded.routine, input);
+    },
+
+    // The customer-inbox door (DUR-68): a company points any message source
+    // (email, contact form, ...) at this address. A ledger row is written
+    // for every delivery before any signature/shape validation, so nothing
+    // that knocks on the door goes unrecorded, then the message is delegated
+    // to the same auth+dispatch path as the generic webhook door.
+    receiveCustomerInboxMessage: async (publicId: string, input: {
+      authorizationHeader?: string | null;
+      signatureHeader?: string | null;
+      hubSignatureHeader?: string | null;
+      timestampHeader?: string | null;
+      idempotencyKeyHeader?: string | null;
+      rawBody?: Buffer | null;
+      payload?: Record<string, unknown> | null;
+    }) => {
+      const payload = isPlainRecord(input.payload) ? input.payload : {};
+      const readString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
+      const externalMessageId = readString(payload.messageId);
+      const channel = readString(payload.channel);
+      const fromAddress = readString(payload.fromAddress);
+      const fromName = readString(payload.fromName);
+      const subject = readString(payload.subject);
+      const receivedAt = parseCustomerInboxReceivedAt(payload.receivedAt);
+      const payloadDigest = crypto
+        .createHash("sha256")
+        .update(input.rawBody ?? Buffer.from(JSON.stringify(payload)))
+        .digest("hex");
+
+      const loaded = await loadWebhookTriggerByPublicId(publicId);
+      if (!loaded || !loaded.trigger.customerInboxChannel) {
+        await db.insert(customerInboxDeliveries).values({
+          companyId: null,
+          routineTriggerId: null,
+          externalMessageId,
+          channel,
+          fromAddress,
+          fromName,
+          subject,
+          receivedAt,
+          outcome: "unknown_target",
+          payloadDigest,
+        });
+        throw notFound("Routine trigger not found");
+      }
       const { trigger, routine } = loaded;
-      if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
-      // One door: a trigger owned by the customer-inbox address (DUR-68) is
-      // not reachable through the generic fire route, so the old door stays
-      // shut on the same publicId.
-      if (trigger.customerInboxChannel) {
-        throw conflict("This routine only accepts messages at its customer-inbox address.");
+
+      const [ledgerRow] = await db
+        .insert(customerInboxDeliveries)
+        .values({
+          companyId: trigger.companyId,
+          routineTriggerId: trigger.id,
+          externalMessageId,
+          channel: channel ?? trigger.customerInboxChannel,
+          fromAddress,
+          fromName,
+          subject,
+          receivedAt,
+          outcome: "failed",
+          payloadDigest,
+        })
+        .returning();
+
+      const updateLedger = (fields: Partial<typeof customerInboxDeliveries.$inferInsert>) =>
+        db.update(customerInboxDeliveries).set(fields).where(eq(customerInboxDeliveries.id, ledgerRow.id));
+
+      // messageId is the fallback idempotency key and what makes the dispatch
+      // fingerprint unique per message — not the auth mechanism itself, but a
+      // message we cannot tell apart from any other is unreadable all the same.
+      if (!externalMessageId) {
+        await updateLedger({
+          outcome: "rejected_shape",
+          outcomeDetail: "messageId missing",
+          rawPayloadExcerpt: truncateCustomerInboxExcerpt(input.rawBody, payload),
+        });
+        throw unprocessable("messageId is required");
       }
 
-      await verifyWebhookTriggerAuth(trigger, routine, input);
+      const idempotencyKey = input.idempotencyKeyHeader?.trim() || externalMessageId;
+      const subjectShort = subject ? subject.slice(0, 120) : undefined;
+      const dispatchPayload = subjectShort !== undefined ? { ...payload, subjectShort } : payload;
 
-      return dispatchRoutineRun({
-        routine,
-        trigger,
-        source: "webhook",
-        payload: input.payload,
-        variables: isPlainRecord(input.payload) && isPlainRecord(input.payload.variables)
-          ? input.payload.variables
-          : null,
-        idempotencyKey: input.idempotencyKey,
-      });
+      try {
+        const run = await dispatchWebhookTrigger(trigger, routine, {
+          authorizationHeader: input.authorizationHeader,
+          signatureHeader: input.signatureHeader,
+          hubSignatureHeader: input.hubSignatureHeader,
+          timestampHeader: input.timestampHeader,
+          rawBody: input.rawBody,
+          payload: dispatchPayload,
+          idempotencyKey,
+          allowCustomerInboxTrigger: true,
+        });
+
+        // Duplicate is derived, not reported: a replayed idempotency key
+        // returns the existing run unmarked, so the outcome is `duplicate`
+        // when another `accepted` row already links that run.
+        const alreadyAccepted = await db
+          .select({ id: customerInboxDeliveries.id })
+          .from(customerInboxDeliveries)
+          .where(
+            and(
+              eq(customerInboxDeliveries.linkedRoutineRunId, run.id),
+              eq(customerInboxDeliveries.outcome, "accepted"),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows.length > 0);
+        const outcome: CustomerInboxDeliveryOutcome = alreadyAccepted ? "duplicate" : "accepted";
+
+        await updateLedger({
+          outcome,
+          linkedRoutineRunId: run.id,
+          linkedIssueId: run.linkedIssueId ?? null,
+        });
+        return { outcome, routineRunId: run.id, issueId: run.linkedIssueId ?? null };
+      } catch (error) {
+        const outcome: CustomerInboxDeliveryOutcome =
+          error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
+        await updateLedger({
+          outcome,
+          outcomeDetail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+        });
+        throw error;
+      }
     },
 
     listRuns: async (routineId: string, limit = 50): Promise<RoutineRunSummary[]> => {
