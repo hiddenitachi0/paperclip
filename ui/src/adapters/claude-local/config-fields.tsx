@@ -8,6 +8,7 @@ import {
 } from "../../components/agent-config-primitives";
 import { ChoosePathButton } from "../../components/PathInstructionsModal";
 import { LocalWorkspaceRuntimeFields } from "../local-workspace-runtime-fields";
+import { McpServersJsonField } from "../mcp-servers-field";
 
 const inputClass =
   "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
@@ -66,6 +67,7 @@ export function ClaudeLocalConfigFields({
         adapterType={adapterType}
         models={models}
       />
+      <McpServersJsonField isCreate={isCreate} values={values} set={set} config={config} mark={mark} />
     </>
   );
 }

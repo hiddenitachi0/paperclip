@@ -396,6 +396,119 @@ describe("prepareCodexRuntimeConfig", () => {
     await second.cleanup();
   });
 
+  it("merges per-agent MCP servers into a fresh config.toml and cleans it up", async () => {
+    const home = await makeCodexHome();
+    const prepared = await prepareCodexRuntimeConfig({
+      env: {},
+      codexHome: home,
+      mcpServers: [{ name: "fs", command: "npx", args: ["-y", "server"], env: { FOO: "bar" } }],
+    });
+
+    const content = await readConfigToml(home);
+    expect(content).toContain("[mcp_servers.fs]");
+    expect(content).toContain('command = "npx"');
+    expect(content).toContain('args = ["-y", "server"]');
+    expect(content).toContain('env = { FOO = "bar" }');
+    expect(prepared.notes.some((n) => n.includes("1 per-agent MCP server(s)") && n.includes("fs"))).toBe(true);
+
+    await prepared.cleanup();
+    await expect(fs.access(path.join(home, "config.toml"))).rejects.toThrow();
+  });
+
+  it("merges providers and MCP servers together in one pass with a single backup/restore", async () => {
+    const original = 'model = "gpt-5.1-codex"\n';
+    const home = await makeCodexHome(original);
+    const prepared = await prepareCodexRuntimeConfig({
+      env: { PAPERCLIP_CODEX_PROVIDERS: JSON.stringify(BIFROST_PROVIDERS) },
+      codexHome: home,
+      mcpServers: [{ name: "fs", command: "npx" }],
+    });
+
+    const content = await readConfigToml(home);
+    expect(content).toContain("[model_providers.bifrost]");
+    expect(content).toContain("[mcp_servers.fs]");
+    expect(content).toContain('model = "gpt-5.1-codex"');
+    // Exactly one backup file is written for the combined merge.
+    expect(await fs.readFile(path.join(home, "config.toml.paperclip-backup"), "utf8")).toBe(original);
+
+    await prepared.cleanup();
+    expect(await readConfigToml(home)).toBe(original);
+    await expect(fs.access(path.join(home, "config.toml.paperclip-backup"))).rejects.toThrow();
+  });
+
+  it("wins over a pre-existing same-name [mcp_servers.*] section", async () => {
+    const original = [
+      "[mcp_servers.fs]",
+      'command = "old-command"',
+      "",
+      "[mcp_servers.other]",
+      'command = "keep-me"',
+      "",
+    ].join("\n");
+    const home = await makeCodexHome(original);
+    const prepared = await prepareCodexRuntimeConfig({
+      env: {},
+      codexHome: home,
+      mcpServers: [{ name: "fs", command: "new-command" }],
+    });
+
+    const content = await readConfigToml(home);
+    expect(content).not.toContain("old-command");
+    expect(content).toContain('command = "new-command"');
+    expect(content).toContain("[mcp_servers.other]");
+    expect(content).toContain('command = "keep-me"');
+    expect(content.split("[mcp_servers.fs]").length).toBe(2);
+
+    await prepared.cleanup();
+    expect(await readConfigToml(home)).toBe(original);
+  });
+
+  it("skips url-only (http/sse) MCP entries with a note instead of erroring", async () => {
+    const home = await makeCodexHome("model = \"gpt-5.1-codex\"\n");
+    const prepared = await prepareCodexRuntimeConfig({
+      env: {},
+      codexHome: home,
+      mcpServers: [
+        { name: "remote", url: "https://mcp.example.com" },
+        { name: "fs", command: "npx" },
+      ],
+    });
+
+    const content = await readConfigToml(home);
+    expect(content).toContain("[mcp_servers.fs]");
+    expect(content).not.toContain("mcp_servers.remote");
+    expect(
+      prepared.notes.some((n) => n.includes("remote") && n.includes("http/sse MCP servers are not supported")),
+    ).toBe(true);
+    await prepared.cleanup();
+  });
+
+  it("is a no-op for mcpServers: undefined/empty/malformed-only", async () => {
+    const home = await makeCodexHome("model = \"gpt-5.1-codex\"\n");
+    const cases: Array<unknown> = [undefined, [], [{ command: "npx" }], [{ name: "no-command" }]];
+    for (const mcpServers of cases) {
+      const prepared = await prepareCodexRuntimeConfig({ env: {}, codexHome: home, mcpServers });
+      expect(await readConfigToml(home)).toBe("model = \"gpt-5.1-codex\"\n");
+      await prepared.cleanup();
+    }
+  });
+
+  it("self-heals stale MCP server blocks when adapterConfig.mcpServers is no longer set", async () => {
+    const home = await makeCodexHome();
+    const crashed = await prepareCodexRuntimeConfig({
+      env: {},
+      codexHome: home,
+      mcpServers: [{ name: "fs", command: "npx" }],
+    });
+    void crashed; // simulate crash: no cleanup
+    expect(await readConfigToml(home)).toContain("[mcp_servers.fs]");
+
+    const prepared = await prepareCodexRuntimeConfig({ env: {}, codexHome: home });
+    expect(prepared.notes.some((n) => n.includes("backup"))).toBe(true);
+    expect(await readConfigToml(home)).toBe("");
+    await prepared.cleanup();
+  });
+
   it("rejects the block when model_provider names a filtered or missing provider", async () => {
     const home = await makeCodexHome("model = \"gpt-5.1-codex\"\n");
     const prepared = await prepareCodexRuntimeConfig({

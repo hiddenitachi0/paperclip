@@ -36,16 +36,58 @@ export const upsertAgentInstructionsFileSchema = z.object({
 
 export type UpsertAgentInstructionsFile = z.infer<typeof upsertAgentInstructionsFileSchema>;
 
-const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
-  const envValue = value.env;
-  if (envValue === undefined) return;
-  const parsed = envConfigSchema.safeParse(envValue);
-  if (!parsed.success) {
+// A single MCP (Model Context Protocol) server definition. Cross-adapter
+// shape: stdio servers (`command`, spawned locally) and remote servers
+// (`url`, http/sse) are both representable here, but individual adapters may
+// only support a subset — e.g. codex_local's config.toml only has a stdio
+// `[mcp_servers.*]` table, so url-based entries are accepted by this schema
+// but skipped (with a note) at codex_local run dispatch.
+export const mcpServerConfigSchema = z.object({
+  name: z.string().trim().min(1),
+  transport: z.enum(["stdio", "http", "sse"]).optional(),
+  command: z.string().trim().min(1).optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  url: z.string().trim().min(1).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+}).strict().superRefine((value, ctx) => {
+  const hasCommand = typeof value.command === "string" && value.command.length > 0;
+  const hasUrl = typeof value.url === "string" && value.url.length > 0;
+  if (hasCommand === hasUrl) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "adapterConfig.env must be a map of valid env bindings",
-      path: ["env"],
+      message: "MCP server must set exactly one of `command` (stdio) or `url` (http/sse)",
+      path: ["command"],
     });
+  }
+});
+
+export type McpServerConfig = z.infer<typeof mcpServerConfigSchema>;
+
+export const mcpServersConfigSchema = z.array(mcpServerConfigSchema).max(50);
+
+const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+  const envValue = value.env;
+  if (envValue !== undefined) {
+    const parsed = envConfigSchema.safeParse(envValue);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.env must be a map of valid env bindings",
+        path: ["env"],
+      });
+    }
+  }
+  const mcpServersValue = value.mcpServers;
+  if (mcpServersValue !== undefined) {
+    const parsed = mcpServersConfigSchema.safeParse(mcpServersValue);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.mcpServers must be a list of valid MCP server definitions",
+        path: ["mcpServers"],
+      });
+    }
   }
 });
 

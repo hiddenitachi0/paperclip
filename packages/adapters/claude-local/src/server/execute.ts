@@ -62,6 +62,7 @@ import {
   prepareClaudeConfigSeed,
   resolveSharedClaudeConfigDir,
 } from "./claude-config.js";
+import { parseClaudeMcpServersConfig, prepareClaudeMcpConfigSeed } from "./mcp-config.js";
 import { claudeCommandSupportsEffortFlag } from "./cli-capabilities.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
@@ -747,6 +748,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const claudeConfigSeedDir = useManagedRemoteClaudeConfig
     ? await prepareClaudeConfigSeed(process.env, onLog, agent.companyId)
     : null;
+  const { servers: configuredMcpServers, skippedCount: skippedMcpServerCount } =
+    parseClaudeMcpServersConfig(config.mcpServers);
+  if (skippedMcpServerCount > 0) {
+    await onLog(
+      "stderr",
+      `[paperclip] Warning: ignored ${skippedMcpServerCount} malformed entr${skippedMcpServerCount === 1 ? "y" : "ies"} in adapterConfig.mcpServers (each needs a non-empty "name" and either "command" or "url").\n`,
+    );
+  }
+  const claudeMcpConfigSeed = configuredMcpServers.length > 0
+    ? await prepareClaudeMcpConfigSeed({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        servers: configuredMcpServers,
+        onLog,
+      })
+    : null;
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
         await onLog(
@@ -773,6 +790,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               ? [{
                 key: "config-seed",
                 localDir: claudeConfigSeedDir,
+                followSymlinks: true,
+              }]
+              : []),
+            ...(claudeMcpConfigSeed
+              ? [{
+                key: "mcp-config",
+                localDir: claudeMcpConfigSeed.dir,
                 followSymlinks: true,
               }]
               : []),
@@ -819,6 +843,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const remoteClaudeConfigSeedDir = claudeConfigSeedDir && remoteClaudeRuntimeRoot
     ? preparedExecutionTargetRuntime?.assetDirs["config-seed"] ??
       path.posix.join(remoteClaudeRuntimeRoot, "config-seed")
+    : null;
+  // The agent's per-agent MCP server config, if any: a fresh, content-addressed
+  // JSON file passed via --mcp-config (+ --strict-mcp-config), so a run only
+  // ever sees the servers configured on this Paperclip agent -- never the
+  // host's shared ~/.claude/settings.json mcpServers, and never a stray
+  // project-level .mcp.json in the workspace being worked on.
+  const effectiveClaudeMcpConfigPath = claudeMcpConfigSeed
+    ? remoteClaudeRuntimeRoot
+      ? path.posix.join(
+          preparedExecutionTargetRuntime?.assetDirs["mcp-config"] ??
+            path.posix.join(remoteClaudeRuntimeRoot, "mcp-config"),
+          "mcp-config.json",
+        )
+      : claudeMcpConfigSeed.filePath
     : null;
   const remoteClaudeConfigDir = useManagedRemoteClaudeConfig && remoteClaudeRuntimeRoot
     ? path.posix.join(remoteClaudeRuntimeRoot, "config")
@@ -1006,6 +1044,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
     args.push("--add-dir", effectivePromptBundleAddDir);
+    // --strict-mcp-config makes this agent's configured servers the ONLY MCP
+    // servers active in the run -- not the host's shared ~/.claude/settings.json
+    // mcpServers, and not a project-level .mcp.json in the workspace.
+    if (effectiveClaudeMcpConfigPath) {
+      args.push("--mcp-config", effectiveClaudeMcpConfigPath, "--strict-mcp-config");
+    }
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };

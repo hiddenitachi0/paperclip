@@ -240,6 +240,8 @@ export {
   testAdapterEnvironmentSchema,
   agentPermissionsSchema,
   updateAgentPermissionsSchema,
+  mcpServerConfigSchema,
+  mcpServersConfigSchema,
   type CreateAgent,
   type CreateAgentHire,
   type UpdateAgent,
@@ -254,6 +256,7 @@ export {
   type ResetAgentSession,
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
+  type McpServerConfig,
 } from "./agent.js";
 
 export {
