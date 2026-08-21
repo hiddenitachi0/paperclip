@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { issueStatusText } from "@/lib/status-colors";
 import { Link } from "@/lib/router";
-import type { Issue, IssueLabel } from "@paperclipai/shared";
+import { MODEL_PROFILE_KEYS, type Issue, type IssueExecutionMonitorKind, type IssueLabel, type ModelProfileKey } from "@paperclipai/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accessApi } from "../../api/access";
 import { agentsApi } from "../../api/agents";
@@ -25,7 +25,7 @@ import {
 import { getRecentProjectIds, trackRecentProject } from "../../lib/recent-projects";
 import { orderItemsBySelectedAndRecent } from "../../lib/recent-selections";
 import { formatAssigneeUserLabel } from "../../lib/assignees";
-import { buildExecutionPolicy, stageParticipantValues } from "../../lib/issue-execution-policy";
+import { buildExecutionPolicy, buildGoalConditionMonitor, stageParticipantValues } from "../../lib/issue-execution-policy";
 import { formatMonitorOffset } from "../../lib/issue-monitor";
 import { extractProviderIdWithFallback } from "../../lib/model-utils";
 import { formatRetryReason } from "../../lib/runRetryState";
@@ -60,11 +60,14 @@ import {
 import { ExternalObjectRows } from "./external-object-rows";
 import {
   asRecord,
+  centsToDollarsInputValue,
   compactRecord,
   defaultExecutionWorkspaceModeForProject,
   defaultProjectWorkspaceIdForProject,
   isMainIssueWorkspace,
   overrideLane,
+  parseDollarsToCents,
+  parsePositiveInt,
   sortAdapterModels,
   thinkingEffortKeyFor,
   thinkingEffortOptionsFor,
@@ -182,6 +185,19 @@ export function IssueProperties({
   const [monitorAtInput, setMonitorAtInput] = useState(() => toDateTimeLocalValue(issue.executionPolicy?.monitor?.nextCheckAt));
   const [monitorNotesInput, setMonitorNotesInput] = useState(issue.executionPolicy?.monitor?.notes ?? "");
   const [monitorServiceInput, setMonitorServiceInput] = useState(issue.executionPolicy?.monitor?.serviceName ?? "");
+  const [monitorKindInput, setMonitorKindInput] = useState<IssueExecutionMonitorKind>(
+    issue.executionPolicy?.monitor?.kind === "goal_condition" ? "goal_condition" : "external_service",
+  );
+  const [monitorConditionInput, setMonitorConditionInput] = useState(issue.executionPolicy?.monitor?.condition ?? "");
+  const [monitorEvaluatorProfileInput, setMonitorEvaluatorProfileInput] = useState(
+    issue.executionPolicy?.monitor?.evaluatorModelProfile ?? "",
+  );
+  const [monitorSpendCapInput, setMonitorSpendCapInput] = useState(
+    centsToDollarsInputValue(issue.executionPolicy?.monitor?.spendCapCents),
+  );
+  const [monitorMaxAttemptsInput, setMonitorMaxAttemptsInput] = useState(
+    issue.executionPolicy?.monitor?.maxAttempts != null ? String(issue.executionPolicy.monitor.maxAttempts) : "",
+  );
   const [runtimeActionMessage, setRuntimeActionMessage] = useState<string | null>(null);
   const [runtimeActionErrorMessage, setRuntimeActionErrorMessage] = useState<string | null>(null);
   const [watchdogOpen, setWatchdogOpen] = useState(false);
@@ -734,10 +750,20 @@ export function IssueProperties({
     setMonitorAtInput(toDateTimeLocalValue(issue.executionPolicy?.monitor?.nextCheckAt));
     setMonitorNotesInput(issue.executionPolicy?.monitor?.notes ?? "");
     setMonitorServiceInput(issue.executionPolicy?.monitor?.serviceName ?? "");
+    setMonitorKindInput(issue.executionPolicy?.monitor?.kind === "goal_condition" ? "goal_condition" : "external_service");
+    setMonitorConditionInput(issue.executionPolicy?.monitor?.condition ?? "");
+    setMonitorEvaluatorProfileInput(issue.executionPolicy?.monitor?.evaluatorModelProfile ?? "");
+    setMonitorSpendCapInput(centsToDollarsInputValue(issue.executionPolicy?.monitor?.spendCapCents));
+    setMonitorMaxAttemptsInput(issue.executionPolicy?.monitor?.maxAttempts != null ? String(issue.executionPolicy.monitor.maxAttempts) : "");
   }, [
     issue.executionPolicy?.monitor?.nextCheckAt,
     issue.executionPolicy?.monitor?.notes,
     issue.executionPolicy?.monitor?.serviceName,
+    issue.executionPolicy?.monitor?.kind,
+    issue.executionPolicy?.monitor?.condition,
+    issue.executionPolicy?.monitor?.evaluatorModelProfile,
+    issue.executionPolicy?.monitor?.spendCapCents,
+    issue.executionPolicy?.monitor?.maxAttempts,
   ]);
   // Re-sync watchdog editor inputs when the persisted watchdog changes (and reset on close).
   useEffect(() => {
@@ -926,6 +952,18 @@ export function IssueProperties({
     });
   };
   const saveMonitor = () => {
+    if (monitorKindInput === "goal_condition") {
+      const monitor = buildGoalConditionMonitor({
+        condition: monitorConditionInput,
+        evaluatorModelProfile: (monitorEvaluatorProfileInput || null) as ModelProfileKey | null,
+        spendCapCents: parseDollarsToCents(monitorSpendCapInput),
+        maxAttempts: parsePositiveInt(monitorMaxAttemptsInput),
+      });
+      if (!monitor) return;
+      updateMonitor(monitor);
+      setMonitorOpen(false);
+      return;
+    }
     if (!monitorAtInput) return;
     const nextCheckAt = new Date(monitorAtInput);
     if (Number.isNaN(nextCheckAt.getTime())) return;
@@ -1146,51 +1184,134 @@ export function IssueProperties({
       </div>
     </div>
   ) : null;
+  const monitorKindTabs = (
+    <div className="flex items-center gap-1 text-xs">
+      {(["external_service", "goal_condition"] as const).map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          className={cn(
+            "rounded-full border px-2 py-0.5 transition-colors",
+            monitorKindInput === kind
+              ? "border-foreground/30 bg-accent text-foreground"
+              : "border-border text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+          )}
+          onClick={() => setMonitorKindInput(kind)}
+        >
+          {kind === "external_service" ? "External service" : "Goal condition"}
+        </button>
+      ))}
+    </div>
+  );
   const monitorContent = (
     <div className="flex w-full flex-col gap-2">
-      <div className="flex flex-col gap-2 md:flex-row">
-        <input
-          type="datetime-local"
-          className="rounded-md border border-border bg-transparent px-2 py-1 text-xs"
-          value={monitorAtInput}
-          onChange={(e) => setMonitorAtInput(e.target.value)}
-        />
-        <input
-          type="text"
-          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
-          placeholder="What should the agent re-check?"
-          value={monitorNotesInput}
-          onChange={(e) => setMonitorNotesInput(e.target.value)}
-        />
-      </div>
-      <div className="flex flex-col gap-2 md:flex-row">
-        <input
-          type="text"
-          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
-          placeholder="External service"
-          value={monitorServiceInput}
-          onChange={(e) => setMonitorServiceInput(e.target.value)}
-        />
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground disabled:opacity-50"
-            disabled={!monitorAtInput}
-            onClick={saveMonitor}
-          >
-            Schedule
-          </button>
-          {issue.executionPolicy?.monitor ? (
+      {monitorKindTabs}
+      {monitorKindInput === "goal_condition" ? (
+        <>
+          <Textarea
+            value={monitorConditionInput}
+            onChange={(e) => setMonitorConditionInput(e.target.value)}
+            placeholder="Plain-English finish line, e.g. All tests pass and the PR is merged"
+            rows={3}
+            className="text-xs"
+          />
+          <div className="flex flex-col gap-2 md:flex-row">
+            <select
+              className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+              value={monitorEvaluatorProfileInput}
+              onChange={(e) => setMonitorEvaluatorProfileInput(e.target.value)}
+            >
+              <option value="">Default judge model</option>
+              {MODEL_PROFILE_KEYS.map((profile) => (
+                <option key={profile} value={profile}>{profile}</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+              placeholder="Max attempts"
+              value={monitorMaxAttemptsInput}
+              onChange={(e) => setMonitorMaxAttemptsInput(e.target.value)}
+            />
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+              placeholder="Spend cap ($)"
+              value={monitorSpendCapInput}
+              onChange={(e) => setMonitorSpendCapInput(e.target.value)}
+            />
+          </div>
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
-              onClick={clearMonitor}
+              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground disabled:opacity-50"
+              disabled={!monitorConditionInput.trim()}
+              onClick={saveMonitor}
             >
-              Clear
+              Save
             </button>
-          ) : null}
-        </div>
-      </div>
+            {issue.executionPolicy?.monitor ? (
+              <button
+                type="button"
+                className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+                onClick={clearMonitor}
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex flex-col gap-2 md:flex-row">
+            <input
+              type="datetime-local"
+              className="rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+              value={monitorAtInput}
+              onChange={(e) => setMonitorAtInput(e.target.value)}
+            />
+            <input
+              type="text"
+              className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+              placeholder="What should the agent re-check?"
+              value={monitorNotesInput}
+              onChange={(e) => setMonitorNotesInput(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-2 md:flex-row">
+            <input
+              type="text"
+              className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+              placeholder="External service"
+              value={monitorServiceInput}
+              onChange={(e) => setMonitorServiceInput(e.target.value)}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground disabled:opacity-50"
+                disabled={!monitorAtInput}
+                onClick={saveMonitor}
+              >
+                Schedule
+              </button>
+              {issue.executionPolicy?.monitor ? (
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+                  onClick={clearMonitor}
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 

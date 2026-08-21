@@ -1,4 +1,10 @@
-import type { IssueExecutionPolicy, IssueExecutionStageParticipant, IssueExecutionStagePrincipal } from "@paperclipai/shared";
+import type {
+  IssueExecutionMonitorPolicy,
+  IssueExecutionPolicy,
+  IssueExecutionStageParticipant,
+  IssueExecutionStagePrincipal,
+  ModelProfileKey,
+} from "@paperclipai/shared";
 import { parseAssigneeValue } from "./assignees";
 
 type StageType = "review" | "approval";
@@ -76,14 +82,43 @@ function mergeParticipants(
   return participants;
 }
 
+/** Params for constructing a "keep going until done" goal-condition monitor (DUR-32/DUR-48). */
+export type GoalConditionMonitorInput = {
+  condition: string;
+  evaluatorModelProfile?: ModelProfileKey | null;
+  spendCapCents?: number | null;
+  maxAttempts?: number | null;
+};
+
+export function buildGoalConditionMonitor(input: GoalConditionMonitorInput): IssueExecutionMonitorPolicy | null {
+  const condition = input.condition.trim();
+  if (!condition) return null;
+  return {
+    // Ignored for dispatch (goal_condition monitors are driven by the run-finish hook, not
+    // the periodic nextCheckAt sweep — see heartbeat.ts) but required by the policy schema.
+    nextCheckAt: new Date().toISOString(),
+    notes: null,
+    scheduledBy: "board",
+    kind: "goal_condition",
+    condition,
+    evaluatorModelProfile: input.evaluatorModelProfile ?? null,
+    spendCapCents: input.spendCapCents ?? null,
+    maxAttempts: input.maxAttempts ?? null,
+    serviceName: null,
+    externalRef: null,
+  };
+}
+
 export function buildExecutionPolicy(input: {
   existingPolicy?: IssueExecutionPolicy | null;
   reviewerValues: string[];
   approverValues: string[];
+  /** Explicit monitor override — omit to keep existingPolicy's monitor untouched; pass null to clear it. */
+  monitor?: IssueExecutionMonitorPolicy | null;
 }): IssueExecutionPolicy | null {
   const mode = input.existingPolicy?.mode ?? "normal";
   const stages: IssueExecutionPolicy["stages"] = [];
-  const monitor = input.existingPolicy?.monitor ?? null;
+  const monitor = "monitor" in input ? (input.monitor ?? null) : (input.existingPolicy?.monitor ?? null);
 
   const existingReviewStage = input.existingPolicy?.stages.find((stage) => stage.type === "review");
   const reviewParticipants = mergeParticipants(existingReviewStage?.participants, input.reviewerValues);
