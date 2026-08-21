@@ -4118,6 +4118,113 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
   });
 
+  // DUR-50: a plan-decomposition agent handed a "max effort" parent split the work
+  // into children through this exact generic create route (parentId set directly on
+  // POST /companies/:companyId/issues) rather than the dedicated /issues/:id/children
+  // helper. That route bypassed inheritance entirely, so the operator paid for max
+  // effort and the agents that wrote the code ran at the default with no signal
+  // anywhere that the setting had been dropped.
+  it("inherits the parent's model/effort override on a generic child create when the child sets none of its own", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "max" } },
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Generic child issue",
+    });
+
+    expect(child.parentId).toBe(parentIssueId);
+    expect(child.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
+  });
+
+  it("keeps an explicit child model/effort override instead of inheriting the parent's, including explicit null", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "max" } },
+    });
+
+    const childWithOwnEffort = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Child with its own lower effort",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "low" } },
+    });
+    expect(childWithOwnEffort.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "low" } });
+
+    const childWithExplicitNull = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Child that explicitly opts out",
+      assigneeAdapterOverrides: null,
+    });
+    expect(childWithExplicitNull.assigneeAdapterOverrides).toBeNull();
+  });
+
+  it("keeps an explicit child model/effort override on the createChild helper route too", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "max" } },
+    });
+
+    const { issue: inheritingChild } = await svc.createChild(parentIssueId, {
+      title: "Child helper without its own override",
+      status: "todo",
+    });
+    expect(inheritingChild.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "max" } });
+
+    const { issue: overridingChild } = await svc.createChild(parentIssueId, {
+      title: "Child helper with its own override",
+      status: "todo",
+      assigneeAdapterOverrides: { adapterConfig: { effort: "low" } },
+    });
+    expect(overridingChild.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "low" } });
+  });
+
   it("keeps explicit workspace fields instead of inheriting the parent linkage", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();

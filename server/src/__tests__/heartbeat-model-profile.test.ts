@@ -5,6 +5,7 @@ import {
 } from "../adapters/index.js";
 import {
   buildEscalationGrantAdapterConfig,
+  buildResolvedAdapterConfigRunMetadata,
   mergeModelProfileAdapterConfig,
   normalizeModelProfileWakeContext,
   resolveModelProfileApplication,
@@ -220,5 +221,52 @@ describe("DUR-31 escalation grant dispatch precedence", () => {
       modelReasoningEffort: "explicit-override",
       approvalPolicy: "strict",
     });
+  });
+});
+
+// DUR-50: a requested model/effort override can be silently dropped anywhere
+// in the resolution chain (e.g. a child issue that never inherited it). This
+// records what was actually handed to adapter.execute(), so the operator can
+// see what ran instead of just what was requested.
+describe("DUR-50 resolved adapter config run metadata", () => {
+  it("reads the adapter-specific effort key for the given adapter type", () => {
+    expect(
+      buildResolvedAdapterConfigRunMetadata({
+        adapterType: "claude_local",
+        runtimeConfig: { model: "opus", effort: "max" },
+      }),
+    ).toEqual({ model: "opus", effort: "max" });
+
+    expect(
+      buildResolvedAdapterConfigRunMetadata({
+        adapterType: "codex_local",
+        runtimeConfig: { model: "gpt-5", modelReasoningEffort: "high" },
+      }),
+    ).toEqual({ model: "gpt-5", effort: "high" });
+
+    expect(
+      buildResolvedAdapterConfigRunMetadata({
+        adapterType: "opencode_local",
+        runtimeConfig: { model: "sonnet", variant: "thinking" },
+      }),
+    ).toEqual({ model: "sonnet", effort: "thinking" });
+  });
+
+  it("returns null when the runtime config carries neither a model nor an effort value", () => {
+    expect(
+      buildResolvedAdapterConfigRunMetadata({
+        adapterType: "claude_local",
+        runtimeConfig: { approvalPolicy: "strict" },
+      }),
+    ).toBeNull();
+  });
+
+  it("omits effort for an adapter type with no known effort key", () => {
+    expect(
+      buildResolvedAdapterConfigRunMetadata({
+        adapterType: "unknown_adapter",
+        runtimeConfig: { model: "some-model", effort: "max" },
+      }),
+    ).toEqual({ model: "some-model" });
   });
 });

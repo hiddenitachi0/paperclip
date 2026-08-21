@@ -5039,19 +5039,13 @@ export function issueService(db: Db) {
         actorUserId,
         ...issueData
       } = data;
-      // Task-scoped inheritance only: this never touches agents.adapterConfig,
-      // it only defaults the child issue's own override when the creator left
+      // Model/effort inheritance (task-scoped only, never agents.adapterConfig)
+      // is handled centrally by create() based on the parentId set below --
+      // it defaults the child's override only when this call left
       // assigneeAdapterOverrides unset entirely (explicit values, including
       // explicit null, always win).
-      const inheritedAssigneeAdapterOverrides =
-        "assigneeAdapterOverrides" in issueData
-          ? undefined
-          : deriveChildAssigneeAdapterOverridesFromParent(parent.assigneeAdapterOverrides);
       let child = await issueService(db).create(parent.companyId, {
         ...issueData,
-        ...(inheritedAssigneeAdapterOverrides !== undefined
-          ? { assigneeAdapterOverrides: inheritedAssigneeAdapterOverrides }
-          : {}),
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
         goalId: issueData.goalId ?? parent.goalId,
@@ -5383,6 +5377,24 @@ export function issueService(db: Db) {
       }
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
+      }
+      // Every child-creation path funnels through this insert, so deriving the
+      // inherited model/effort override here (rather than in each caller) is
+      // what makes flow-down real regardless of which route created the child.
+      // An explicit assigneeAdapterOverrides key on the request -- including
+      // explicit null -- always wins over the parent's.
+      if (!("assigneeAdapterOverrides" in issueData) && issueData.parentId) {
+        const parentRow = await db
+          .select({ assigneeAdapterOverrides: issues.assigneeAdapterOverrides })
+          .from(issues)
+          .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, companyId)))
+          .then((rows) => rows[0] ?? null);
+        const inheritedAssigneeAdapterOverrides = deriveChildAssigneeAdapterOverridesFromParent(
+          parentRow?.assigneeAdapterOverrides,
+        );
+        if (inheritedAssigneeAdapterOverrides) {
+          issueData.assigneeAdapterOverrides = inheritedAssigneeAdapterOverrides;
+        }
       }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
