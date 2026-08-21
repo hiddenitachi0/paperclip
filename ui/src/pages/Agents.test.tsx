@@ -713,4 +713,53 @@ describe("Agents", () => {
     expect(container.textContent).toContain("Alpha");
     expect(container.querySelector('[aria-label="Invalid reporting chain"]')).not.toBeNull();
   });
+
+  it("shows a bulk-action bar once an agent is selected in list view, and Clear hides it", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Agents />
+          </ToastProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    // Switch from the default org view to the list view — checkboxes only render there.
+    const listToggle = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.querySelector("svg.lucide-list"),
+    );
+    await act(async () => {
+      listToggle!.click();
+    });
+    await flushReact();
+
+    expect(container.textContent).not.toContain("selected");
+
+    const checkbox = container.querySelector('[aria-label="Select Alpha"]') as HTMLElement | null;
+    expect(checkbox).not.toBeNull();
+    await act(async () => {
+      checkbox!.click();
+    });
+    await flushReact();
+
+    expect(container.textContent).toContain("1 agent selected");
+    const bulkEditButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.includes("Bulk edit"),
+    );
+    expect(bulkEditButton).toBeDefined();
+
+    const clearButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.includes("Clear"),
+    );
+    await act(async () => {
+      clearButton!.click();
+    });
+    await flushReact();
+
+    expect(container.textContent).not.toContain("selected");
+  });
 });
