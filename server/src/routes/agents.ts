@@ -836,6 +836,19 @@ export function agentRoutes(
     throw forbidden(decision.explanation);
   }
 
+  // DUR-56: a job title (role) is not a label here — `role === "ceo"` is a
+  // blanket permission grant. An agent-authenticated caller must never be
+  // able to change a role, whether the target is itself or another agent it
+  // otherwise has update rights on. Only a board-authenticated (human) actor
+  // may set it.
+  function assertNoAgentRoleMutation(req: Request, patch: Record<string, unknown>) {
+    if (req.actor.type !== "agent") return;
+    if (!hasOwn(patch, "role")) return;
+    throw forbidden(
+      "Agent-authenticated callers cannot change an agent's job title (role). Only board-authenticated callers can.",
+    );
+  }
+
   async function assertCanReadAgent(req: Request, targetAgent: { companyId: string }) {
     assertCompanyAccess(req, targetAgent.companyId);
     if (req.actor.type === "board") {
@@ -1350,16 +1363,62 @@ export function agentRoutes(
     return KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) => adapterConfig[key] !== undefined);
   }
 
+  // DUR-55: an agent-authenticated caller must never be able to add, change, or
+  // remove a tool connection (MCP server) on any agent's adapterConfig,
+  // including its own — that is a command run on the host or a URL data gets
+  // sent to, and today nothing else gates it. Only board-authenticated callers
+  // may set this.
+  function assertNoAgentToolConnectionMutation(
+    req: Request,
+    adapterConfig: Record<string, unknown>,
+    path = "adapterConfig",
+  ) {
+    if (req.actor.type !== "agent") return;
+    if (adapterConfig.mcpServers === undefined) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot modify tool connections (${path}.mcpServers). Only board-authenticated callers can.`,
+    );
+  }
+
   function assertNoAgentAdapterConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown>,
     path = "adapterConfig",
   ) {
     assertNoAgentInstructionsConfigMutation(req, adapterConfig, path);
+    assertNoAgentToolConnectionMutation(req, adapterConfig, path);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectAgentAdapterWorkspaceCommandPaths(adapterConfig, path),
     );
+  }
+
+  // DUR-55 / DUR-56: rolling back to a config revision restores that
+  // revision's role and adapterConfig wholesale, bypassing the PATCH-path
+  // guards above entirely. If any board-authenticated caller ever set a
+  // role or a tool connection in the past, an agent-authenticated caller
+  // could otherwise self-service-restore it later via rollback with no
+  // guard in the way. Refuse a rollback that would actually change role or
+  // adapterConfig.mcpServers for an agent-authenticated caller; unrelated
+  // rollbacks (e.g. reverting capabilities/instructions) are unaffected.
+  function assertNoAgentPrivilegedRollback(
+    req: Request,
+    existing: { role: string; adapterConfig: unknown },
+    snapshot: Record<string, unknown>,
+  ) {
+    if (req.actor.type !== "agent") return;
+    if (typeof snapshot.role === "string" && snapshot.role !== existing.role) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back to a revision that changes an agent's job title (role). Only board-authenticated callers can.",
+      );
+    }
+    const snapshotAdapterConfig = asRecord(snapshot.adapterConfig) ?? {};
+    const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
+    if (JSON.stringify(snapshotAdapterConfig.mcpServers) !== JSON.stringify(existingAdapterConfig.mcpServers)) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back a change to tool connections (adapterConfig.mcpServers). Only board-authenticated callers can.",
+      );
+    }
   }
 
   function summarizeAgentUpdateDetails(patch: Record<string, unknown>) {
@@ -2106,6 +2165,14 @@ export function agentRoutes(
     }
     await assertCanUpdateAgent(req, existing);
 
+    const targetRevision = await svc.getConfigRevision(id, revisionId);
+    if (!targetRevision) {
+      res.status(404).json({ error: "Revision not found" });
+      return;
+    }
+    const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
+    assertNoAgentPrivilegedRollback(req, existing, targetSnapshot);
+
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
       agentId: actor.agentId,
@@ -2814,6 +2881,7 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    assertNoAgentRoleMutation(req, patchData);
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
     if (hasOwn(patchData, "adapterConfig")) {
