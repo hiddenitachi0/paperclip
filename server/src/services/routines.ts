@@ -2784,6 +2784,33 @@ export function routineService(
       }
     },
 
+    // DUR-68: the "Leveranser" section on the inbox routine's detail page.
+    // No message bodies -- deliveries only ever expose sender/subject/outcome
+    // and a link to the task, never the body that was sent to the model.
+    listCustomerInboxDeliveries: async (routineId: string, limit = 100) => {
+      const cappedLimit = Math.max(1, Math.min(limit, 100));
+      const rows = await db
+        .select({
+          id: customerInboxDeliveries.id,
+          channel: customerInboxDeliveries.channel,
+          fromAddress: customerInboxDeliveries.fromAddress,
+          fromName: customerInboxDeliveries.fromName,
+          subject: customerInboxDeliveries.subject,
+          receivedAt: customerInboxDeliveries.receivedAt,
+          outcome: customerInboxDeliveries.outcome,
+          createdAt: customerInboxDeliveries.createdAt,
+          linkedIssueId: customerInboxDeliveries.linkedIssueId,
+          issueIdentifier: issues.identifier,
+        })
+        .from(customerInboxDeliveries)
+        .innerJoin(routineTriggers, eq(customerInboxDeliveries.routineTriggerId, routineTriggers.id))
+        .leftJoin(issues, eq(customerInboxDeliveries.linkedIssueId, issues.id))
+        .where(eq(routineTriggers.routineId, routineId))
+        .orderBy(desc(customerInboxDeliveries.createdAt))
+        .limit(cappedLimit);
+      return rows;
+    },
+
     listRuns: async (routineId: string, limit = 50): Promise<RoutineRunSummary[]> => {
       const cappedLimit = Math.max(1, Math.min(limit, 200));
       const rows = await db

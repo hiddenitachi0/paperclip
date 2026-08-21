@@ -461,6 +461,18 @@ export function routineRoutes(
     res.json(result);
   });
 
+  router.get("/routines/:id/customer-inbox-deliveries", async (req, res) => {
+    const routine = await svc.get(req.params.id as string);
+    if (!routine) {
+      res.status(404).json({ error: "Routine not found" });
+      return;
+    }
+    assertCompanyAccess(req, routine.companyId);
+    const limit = Number(req.query.limit ?? 100);
+    const result = await svc.listCustomerInboxDeliveries(routine.id, Number.isFinite(limit) ? limit : 100);
+    res.json(result);
+  });
+
   router.post("/routines/:id/triggers", validate(createRoutineTriggerSchema), async (req, res) => {
     const routine = await assertCanManageExistingRoutine(req, req.params.id as string);
     if (!routine) {
