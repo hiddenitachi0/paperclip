@@ -74,6 +74,7 @@ const mockResolveProjectDeployBranches = vi.hoisted(() => vi.fn());
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
+    agentInstructionsService: () => ({ readFile: vi.fn(), writeFile: vi.fn() }),
     agentService: () => mockAgentService,
     approvalService: () => mockApprovalService,
     escalationGrantService: () => mockEscalationGrantService,

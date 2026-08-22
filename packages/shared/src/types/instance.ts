@@ -19,6 +19,13 @@ export const DEFAULT_BACKUP_RETENTION: BackupRetentionPolicy = {
   monthlyMonths: 1,
 };
 
+// DUR-69/DUR-109: how many days an agent's instructions can go without
+// review before they're flagged stale. One instance-wide number, not
+// per-agent, per Filip's ruling -- changeable later.
+export const DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 60;
+export const MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 1;
+export const MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 3650;
+
 /**
  * Instance-wide execution policy.
  *
@@ -42,6 +49,8 @@ export interface InstanceGeneralSettings {
    * Kubernetes sandbox provider and denies local/ssh execution.
    */
   executionMode?: InstanceExecutionMode;
+  /** Days since `agents.instructionsReviewedAt` before an agent is flagged stale. */
+  instructionsStalenessThresholdDays: number;
 }
 
 export interface InstanceExperimentalSettings {
