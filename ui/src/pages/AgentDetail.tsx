@@ -80,6 +80,9 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/component
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
+import { AgentAvatar } from "../components/AgentAvatar";
+import { agentAvatarUrl } from "../lib/agent-icons";
+import { describeAgentAvatarError } from "../lib/agent-avatar-errors";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
 import {
   isUuidLike,
@@ -869,6 +872,34 @@ export function AgentDetail() {
     },
   });
 
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+
+  const invalidateAvatarQueries = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
+    if (resolvedCompanyId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
+    }
+  }, [queryClient, routeAgentRef, agentLookupRef, resolvedCompanyId]);
+
+  const uploadAvatar = useMutation({
+    mutationFn: (file: File) => assetsApi.uploadAgentAvatar(resolvedCompanyId ?? "", agentLookupRef, file),
+    onSuccess: () => {
+      setAvatarError(null);
+      invalidateAvatarQueries();
+    },
+    onError: (err) => setAvatarError(describeAgentAvatarError(err)),
+  });
+
+  const removeAvatar = useMutation({
+    mutationFn: () => assetsApi.deleteAgentAvatar(resolvedCompanyId ?? "", agentLookupRef),
+    onSuccess: () => {
+      setAvatarError(null);
+      invalidateAvatarQueries();
+    },
+    onError: (err) => setAvatarError(describeAgentAvatarError(err)),
+  });
+
   const updatePermissions = useMutation({
     mutationFn: (permissions: AgentPermissionUpdate) =>
       agentsApi.updatePermissions(agentLookupRef, permissions, resolvedCompanyId ?? undefined),
@@ -1015,9 +1046,15 @@ export function AgentDetail() {
           <AgentIconPicker
             value={agent.icon}
             onChange={(icon) => updateIcon.mutate(icon)}
+            avatarUrl={agentAvatarUrl(agent)}
+            onUploadAvatar={(file) => uploadAvatar.mutate(file)}
+            onRemoveAvatar={() => removeAvatar.mutate()}
+            avatarUploadPending={uploadAvatar.isPending}
+            avatarRemovePending={removeAvatar.isPending}
+            avatarError={avatarError}
           >
             <button className="shrink-0 flex items-center justify-center h-12 w-12 rounded-lg bg-accent hover:bg-accent/80 transition-colors">
-              <AgentIcon icon={agent.icon} className="h-6 w-6" />
+              <AgentAvatar agent={agent} size="lg" iconClassName="h-6 w-6" />
             </button>
           </AgentIconPicker>
           <div className="min-w-0">

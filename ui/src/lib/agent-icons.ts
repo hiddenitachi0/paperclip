@@ -96,3 +96,15 @@ export function getAgentIcon(iconName: string | null | undefined): LucideIcon {
   }
   return AGENT_ICONS[DEFAULT_ICON];
 }
+
+// Structural rather than `Agent`-typed so this compiles ahead of the sibling
+// backend change that adds `avatarAssetId` to the shared `Agent` type. Real
+// `Agent` values satisfy this shape unchanged once that lands.
+interface AgentAvatarSource {
+  id?: string;
+  avatarAssetId?: string | null;
+}
+
+export function agentAvatarUrl(agent: AgentAvatarSource | null | undefined): string | null {
+  return agent?.avatarAssetId ? `/api/assets/${agent.avatarAssetId}/content` : null;
+}
