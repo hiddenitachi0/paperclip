@@ -138,6 +138,7 @@ export interface RoutineRevisionSnapshotTriggerV1 {
   publicId: string | null;
   signingMode: RoutineTriggerSigningMode | null;
   replayWindowSec: number | null;
+  customerInboxChannel: string | null;
 }
 
 export interface RoutineRevisionSnapshotV1 {
@@ -179,6 +180,7 @@ export interface RoutineTrigger {
   secretId: string | null;
   signingMode: string | null;
   replayWindowSec: number | null;
+  customerInboxChannel: string | null;
   lastRotatedAt: Date | null;
   lastResult: string | null;
   createdByAgentId: string | null;

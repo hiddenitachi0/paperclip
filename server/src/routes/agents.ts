@@ -27,6 +27,8 @@ import {
   updateAgentSchema,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
+  extractSorteringsreglerBlock,
+  parseSorteringsreglerRuleTargetNames,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -869,6 +871,27 @@ export function agentRoutes(
         );
       }
       assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
+    }
+  }
+
+  // DUR-68: Filip's sorting rules live in a fenced block inside the
+  // secretary's AGENTS.md, one line per rule, each ending in the name of the
+  // agent it routes to (after the line's last colon). Saving a rule whose
+  // trailing name doesn't resolve to exactly one live (non-terminated) agent
+  // in the company blocks the write so a typo can't silently misroute
+  // customer messages to nobody.
+  async function assertSorteringsreglerRuleNamesResolve(companyId: string, content: string) {
+    const block = extractSorteringsreglerBlock(content);
+    if (block == null) return;
+
+    const liveAgents = await svc.list(companyId);
+    const liveNames = new Set(liveAgents.map((agent) => agent.name));
+
+    for (const { ruleIndex, name } of parseSorteringsreglerRuleTargetNames(block)) {
+      if (liveNames.has(name)) continue;
+      throw unprocessable(
+        `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
+      );
     }
   }
 
@@ -2808,6 +2831,7 @@ export function agentRoutes(
       return;
     }
     await assertCanManageInstructionsPath(req, existing);
+    await assertSorteringsreglerRuleNamesResolve(existing.companyId, req.body.content as string);
 
     const actor = getActorInfo(req);
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
