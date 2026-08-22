@@ -91,6 +91,8 @@ export interface Agent {
   role: AgentRole;
   title: string | null;
   icon: string | null;
+  /** DUR-61: operator-authored tone-of-voice text, board-only, never agent-writable. */
+  personality?: string | null;
   avatarAssetId: string | null;
   status: AgentStatus;
   reportsTo: string | null;

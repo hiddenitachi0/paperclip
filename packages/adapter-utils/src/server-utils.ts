@@ -225,7 +225,7 @@ export async function resolveCombinedAgentInstructionsContent(input: {
   const companyInstructions = await readCompanyInstructionsContent(input);
   const combined = combineCompanyAndAgentInstructions(companyInstructions, input.agentInstructionsContent);
   const personaBlock = composeAgentPersonaBlock(input.personaText);
-  return personaBlock ? `${combined}\n${personaBlock}` : combined;
+  return personaBlock && personaBlock.trim() ? `${combined}\n${personaBlock}` : combined;
 }
 
 export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [

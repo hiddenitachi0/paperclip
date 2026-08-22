@@ -403,6 +403,28 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       expect(res.status, JSON.stringify(res.body)).toBe(403);
       expect(mockAgentService.update).not.toHaveBeenCalled();
     });
+
+    it("rejects an agent-authenticated caller setting its own personality (DUR-61)", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ personality: "Sassy and fun." }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+
+    it("allows a board-authenticated caller to set personality (DUR-61)", async () => {
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ personality: "Sassy and fun." }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalledWith(
+        agentId,
+        expect.objectContaining({ personality: "Sassy and fun." }),
+        expect.anything(),
+      );
+    });
   });
 
   describe("config-revision rollback", () => {
@@ -546,6 +568,26 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
     it("still allows an agent to roll back to a revision that leaves role and tool connections unchanged", async () => {
       mockRevision({ ...baseAgent, capabilities: "writes tests" });
       const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different personality (DUR-61)", async () => {
+      mockRevision({ ...baseAgent, personality: "Sassy and fun." });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("allows a board-authenticated caller to roll back to a revision that restores a personality (DUR-61)", async () => {
+      mockRevision({ ...baseAgent, personality: "Sassy and fun." });
+      const app = await createApp(boardActor);
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
       );

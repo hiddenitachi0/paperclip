@@ -2708,6 +2708,7 @@ function buildManifestFromPackageFiles(
       title,
       icon: asString(extension.icon),
       capabilities: asString(extension.capabilities),
+      personality: asString(extension.personality) ?? null,
       reportsToSlug: asString(frontmatter.reportsTo) ?? asString(extension.reportsTo),
       reportsToExistingAgentId: asString(extension.reportsToExistingAgentId),
       reportsToExistingAgentSlug: asString(extension.reportsToExistingAgentSlug),
@@ -3611,6 +3612,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           role: agent.role !== "agent" ? agent.role : undefined,
           icon: agent.icon ?? null,
           capabilities: agent.capabilities ?? null,
+          personality: agent.personality ?? null,
           adapter: {
             type: agent.adapterType,
             config: portableAdapterConfig,
@@ -4657,6 +4659,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             title: manifestAgent.title,
             icon: manifestAgent.icon,
             capabilities: manifestAgent.capabilities,
+            personality: manifestAgent.personality,
             reportsTo: null,
             adapterType: normalizedAdapter.adapterType,
             adapterConfig: normalizedAdapter.adapterConfig,

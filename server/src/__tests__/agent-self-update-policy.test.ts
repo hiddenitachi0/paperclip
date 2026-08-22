@@ -26,6 +26,7 @@ describe("agentSelfUpdateDisallowedFields", () => {
       name: "Renamed",
       title: "New Title",
       icon: "crown",
+      personality: "Sassy and fun.",
       adapterType: "codex_local",
       defaultEnvironmentId: "env-id",
       metadata: { anything: true },
@@ -44,6 +45,7 @@ describe("agentSelfUpdateDisallowedFields", () => {
       "defaultEnvironmentId",
       "icon",
       "metadata",
+      "personality",
       "name",
       "reportsTo",
       "role",
@@ -96,6 +98,22 @@ describe("computeChangedConfigFields", () => {
   it("reports nothing when the patch matches the existing row", () => {
     const patch = configPatchFromSnapshot({ ...existing });
     expect(computeChangedConfigFields(existing, patch)).toEqual({});
+  });
+
+  it("does not include icon or personality in the patch when the snapshot predates those columns (DUR-61 legacy guard)", () => {
+    // A snapshot row written before icon/personality existed will have neither key.
+    // configPatchFromSnapshot must not emit `icon: undefined` or `personality: undefined`,
+    // which would NULL-wipe those columns on the first rollback of any pre-existing revision.
+    const legacySnapshot = { ...existing };
+    const patch = configPatchFromSnapshot(legacySnapshot as Parameters<typeof configPatchFromSnapshot>[0]);
+    expect(Object.prototype.hasOwnProperty.call(patch, "icon")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(patch, "personality")).toBe(false);
+  });
+
+  it("includes icon and personality in the patch when the snapshot has those keys", () => {
+    const modernSnapshot = { ...existing, icon: "crown" as const, personality: "Warm." };
+    const patch = configPatchFromSnapshot(modernSnapshot as Parameters<typeof configPatchFromSnapshot>[0]);
+    expect(patch).toMatchObject({ icon: "crown", personality: "Warm." });
   });
 
   it("reports reportsTo and budgetMonthlyCents when a rollback snapshot changes them", () => {
