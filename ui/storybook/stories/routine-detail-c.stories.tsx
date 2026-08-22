@@ -61,6 +61,7 @@ const triggers: RoutineTrigger[] = [
     secretId: null,
     signingMode: null,
     replayWindowSec: null,
+    customerInboxChannel: null,
     lastRotatedAt: null,
     lastResult: "succeeded",
     createdByAgentId: null,
