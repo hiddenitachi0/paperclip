@@ -239,6 +239,17 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
     } else if (input.projectPolicy?.workspaceRuntime) {
       nextConfig.workspaceRuntime = cloneRecord(input.projectPolicy.workspaceRuntime) ?? undefined;
     }
+  } else if (input.mode === "shared_workspace") {
+    // No project policy, issue override, or legacy opt-out configures workspace
+    // isolation at all here — this is the project_primary default path that used
+    // to hand every concurrent run the exact same checkout with no isolation
+    // (DUR-75/DUR-82). Default it to git_worktree instead of leaving
+    // workspaceStrategy unset, which used to fall through to the shared
+    // checkout in realizeExecutionWorkspace's own default.
+    nextConfig.workspaceStrategy = { type: "git_worktree" } satisfies ExecutionWorkspaceStrategy as unknown as Record<
+      string,
+      unknown
+    >;
   }
 
   return nextConfig;

@@ -86,6 +86,34 @@ describe("execution workspace policy helpers", () => {
     });
   });
 
+  it("defaults the fully unconfigured shared_workspace path to git_worktree isolation (DUR-82)", () => {
+    const result = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {},
+      projectPolicy: null,
+      issueSettings: null,
+      mode: "shared_workspace",
+      legacyUseProjectWorkspace: null,
+    });
+
+    expect(result.workspaceStrategy).toEqual({ type: "git_worktree" });
+  });
+
+  it("still honors an explicit project_primary policy for shared_workspace (does not force git_worktree)", () => {
+    const result = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {},
+      projectPolicy: {
+        enabled: true,
+        defaultMode: "shared_workspace",
+        workspaceStrategy: { type: "project_primary" },
+      },
+      issueSettings: null,
+      mode: "shared_workspace",
+      legacyUseProjectWorkspace: null,
+    });
+
+    expect(result.workspaceStrategy).toBeUndefined();
+  });
+
   it("preserves project authorization policy for trust-preset resolution", () => {
     expect(parseProjectExecutionWorkspacePolicy({
       enabled: true,
