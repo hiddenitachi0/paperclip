@@ -805,6 +805,77 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("forces agent-authenticated hires to pending_approval even when the company disables required approval (DUR-81)", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-1",
+      companyId,
+      type: "hire_agent",
+      status: "pending",
+      payload: {},
+    });
+
+    const app = await createApp(
+      {
+        type: "agent",
+        agentId,
+        companyId,
+        source: "agent_key",
+        runId: "run-1",
+      },
+      { requireBoardApprovalForNewAgents: false },
+    );
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "New Hire",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockAgentService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({ status: "pending_approval" }),
+    );
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({ type: "hire_agent", status: "pending" }),
+    );
+    expect(res.body.approval).toBeTruthy();
+  });
+
+  it("blocks agent-authenticated direct agent creation even when the company disables required approval (DUR-81)", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+
+    const app = await createApp(
+      {
+        type: "agent",
+        agentId,
+        companyId,
+        source: "agent_key",
+        runId: "run-1",
+      },
+      { requireBoardApprovalForNewAgents: false },
+    );
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agents`)
+      .send({
+        name: "New Hire",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+      }));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("/agent-hires");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
   it("blocks direct agent creation for authenticated company members without agent create permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 

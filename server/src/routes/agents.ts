@@ -2400,7 +2400,11 @@ export function agentRoutes(
       return;
     }
 
-    const requiresApproval = company.requireBoardApprovalForNewAgents;
+    // An agent-authenticated hire must always land as pending_approval: hiring
+    // spends the company's money every month, and that decision belongs to a
+    // human board member, never to another agent, regardless of how this
+    // company has configured requireBoardApprovalForNewAgents (DUR-81).
+    const requiresApproval = req.actor.type === "agent" || company.requireBoardApprovalForNewAgents;
     const status = requiresApproval ? "pending_approval" : "idle";
     const createdAgent = await svc.create(companyId, {
       id: hiredAgentId,
@@ -2547,7 +2551,11 @@ export function agentRoutes(
       res.status(404).json({ error: "Company not found" });
       return;
     }
-    if (company.requireBoardApprovalForNewAgents) {
+    // Agent actors can never use direct (live, unapproved) creation, regardless
+    // of requireBoardApprovalForNewAgents: hiring always requires a human
+    // decision in between, so an agent must go through /agent-hires, which
+    // now forces pending_approval for agent-authenticated requests (DUR-81).
+    if (company.requireBoardApprovalForNewAgents || req.actor.type === "agent") {
       throw conflict(
         "Direct agent creation requires board approval. Use POST /api/companies/:companyId/agent-hires to create a pending hire approval.",
       );
