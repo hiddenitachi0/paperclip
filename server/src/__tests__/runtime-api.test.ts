@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRuntimeApiCandidateUrls,
+  chooseAgentRuntimeApiUrl,
   choosePrimaryRuntimeApiUrl,
   collectReachableInterfaceHosts,
 } from "../runtime-api.js";
@@ -104,6 +105,36 @@ describe("runtime API discovery", () => {
       "http://127.0.0.1:3102",
       "http://host.docker.internal:3102",
     ]);
+  });
+
+  it("chooseAgentRuntimeApiUrl ignores the public base URL and allowed hostnames, even when configured", () => {
+    // Regression for DUR-74: the CEO agent probed the public tailnet address
+    // from inside the container and wrongly concluded the platform was down.
+    // The agent-facing runtime URL must never resolve to that address.
+    expect(
+      chooseAgentRuntimeApiUrl({
+        bindHost: "127.0.0.1",
+        port: 3100,
+      }),
+    ).toBe("http://127.0.0.1:3100");
+  });
+
+  it("chooseAgentRuntimeApiUrl falls back to loopback for a wildcard bind host", () => {
+    expect(
+      chooseAgentRuntimeApiUrl({
+        bindHost: "0.0.0.0",
+        port: 3100,
+      }),
+    ).toBe("http://127.0.0.1:3100");
+  });
+
+  it("chooseAgentRuntimeApiUrl uses an explicit non-loopback bind host as-is", () => {
+    expect(
+      chooseAgentRuntimeApiUrl({
+        bindHost: "10.0.0.5",
+        port: 3100,
+      }),
+    ).toBe("http://10.0.0.5:3100");
   });
 
   it("prefers usable interface hosts and skips link-local addresses", () => {
