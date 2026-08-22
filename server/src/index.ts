@@ -47,6 +47,7 @@ import {
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  logScheduleChainBootstrapVerification,
 } from "./services/index.js";
 import {
   parseAdapterRegistryEnv,
@@ -873,6 +874,13 @@ export async function startServer(): Promise<StartedServer> {
       if (setupCleanup.timedOut > 0 || setupCleanup.failed > 0) {
         logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
       }
+
+      // DUR-100: verify every active routine's declared schedule chains actually
+      // have a live, usable trigger row before logging anything as healthy —
+      // logScheduleChainBootstrapVerification logs its own info/error line.
+      await logScheduleChainBootstrapVerification(db as any).catch((err) => {
+        logger.error({ err }, "startup schedule chain bootstrap verification failed to run");
+      });
     })().catch((err) => {
       logger.error({ err }, "startup heartbeat recovery failed");
     });
