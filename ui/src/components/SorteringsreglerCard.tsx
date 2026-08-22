@@ -47,8 +47,11 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
   });
   const entryFile = bundle?.entryFile ?? "AGENTS.md";
 
+  // Shares AgentDetail's PromptsTab query key for this same file/agent pair,
+  // so a save from either editor invalidates and refetches the other's copy
+  // instead of the two silently overwriting each other's in-flight edits.
   const { data: fileDetail, isLoading } = useQuery({
-    queryKey: ["agents", "instructions-file", agentId, entryFile],
+    queryKey: queryKeys.agents.instructionsFile(agentId, entryFile),
     queryFn: () => agentsApi.instructionsFile(agentId, entryFile, companyId),
     enabled: Boolean(companyId && bundle),
   });
@@ -64,11 +67,6 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
   const rules = draft ?? savedRules ?? "";
   const dirty = draft !== null && draft !== (savedRules ?? "");
 
-  // Only the secretary's AGENTS.md has this block (DUR-68): once loaded,
-  // stay hidden on every other agent's page instead of cluttering it with
-  // an irrelevant "add sorting rules" card.
-  if (blockExists === false) return null;
-
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!fileDetail) throw new Error("Rules not loaded yet");
@@ -78,12 +76,19 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
     onSuccess: () => {
       setDraft(null);
       setError(null);
-      queryClient.invalidateQueries({ queryKey: ["agents", "instructions-file", agentId, entryFile] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsFile(agentId, entryFile) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsBundle(agentId) });
     },
     onError: (err) => {
       setError(err instanceof ApiError ? err.message : "Kunne ikke lagre reglene");
     },
   });
+
+  // Only the secretary's AGENTS.md has this block (DUR-68): once loaded,
+  // stay hidden on every other agent's page instead of cluttering it with
+  // an irrelevant "add sorting rules" card. Hooks above must still run
+  // unconditionally on every render, so this check comes after all of them.
+  if (blockExists === false) return null;
 
   return (
     <Card>
