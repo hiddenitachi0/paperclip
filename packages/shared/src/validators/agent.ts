@@ -118,6 +118,10 @@ export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
     cheap: agentModelProfileConfigSchema.optional(),
   }).strict().optional(),
+  // DUR-68: if this agent stops handling a customer-inbox task, tickTimers'
+  // customer-inbox-handoff sweep reassigns it to reportsTo after this many
+  // minutes. No target field — the target is always reportsTo.
+  handOffUnhandledAfterMinutes: z.number().int().positive().optional().nullable(),
 }).catchall(z.unknown());
 
 export const createAgentSchema = z.object({
