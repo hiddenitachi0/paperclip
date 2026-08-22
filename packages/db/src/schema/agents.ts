@@ -40,6 +40,12 @@ export const agents = pgTable(
     avatarAssetId: uuid("avatar_asset_id"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    // DUR-109: last time a human (direct bundle/file edit) or an approved
+    // boss-proposed instructions_change actually reviewed/applied this
+    // agent's instructions. Defaults to now() on the migration backfill and
+    // on every new agent, so "days since last reviewed" starts counting from
+    // a known point rather than reading as an indefinite null.
+    instructionsReviewedAt: timestamp("instructions_reviewed_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -29,6 +29,7 @@ import {
   LOW_TRUST_REVIEW_PRESET,
   extractSorteringsreglerBlock,
   parseSorteringsreglerRuleTargetNames,
+  DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -570,17 +571,62 @@ export function agentRoutes(
     };
   }
 
+  // DUR-69/DUR-109: "how long since this agent's instructions were last
+  // reviewed", against the one instance-wide threshold an operator can
+  // configure (instance/settings/general, default 60 days). `reviewedAt`
+  // only ever moves via a direct board-authenticated instructions write or
+  // an approved boss proposal (see instructionsReviewedAt updates in this
+  // file and in approvalService.approve) -- never by an agent touching its
+  // own record, so this can't be gamed into looking freshly reviewed.
+  function computeInstructionsStaleness(
+    reviewedAt: Date | string | null | undefined,
+    thresholdDays: number,
+  ) {
+    const reviewedAtDate = reviewedAt instanceof Date ? reviewedAt : new Date(reviewedAt ?? NaN);
+    if (Number.isNaN(reviewedAtDate.getTime())) {
+      // The column is NOT NULL with a defaultNow() backfill, so this should
+      // never happen against a real row -- only against a fixture (test
+      // double, older cached response shape) that predates this field.
+      // Fail open rather than 500ing agent detail/list responses.
+      return { reviewedAt: null, daysSinceReviewed: null, thresholdDays, stale: false };
+    }
+    const daysSinceReviewed = Math.max(
+      0,
+      Math.floor((Date.now() - reviewedAtDate.getTime()) / (24 * 60 * 60 * 1000)),
+    );
+    return {
+      reviewedAt: reviewedAtDate.toISOString(),
+      daysSinceReviewed,
+      thresholdDays,
+      stale: daysSinceReviewed >= thresholdDays,
+    };
+  }
+
+  async function withInstructionsStaleness<T extends { instructionsReviewedAt: Date | string | null | undefined }>(
+    agent: T,
+  ): Promise<T & { instructionsStaleness: ReturnType<typeof computeInstructionsStaleness> }> {
+    const { instructionsStalenessThresholdDays } = await instanceSettings.getGeneral();
+    return {
+      ...agent,
+      instructionsStaleness: computeInstructionsStaleness(
+        agent.instructionsReviewedAt,
+        instructionsStalenessThresholdDays ?? DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+      ),
+    };
+  }
+
   async function buildAgentDetail(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
     options?: { restricted?: boolean },
   ) {
-    const [chainOfCommand, accessState] = await Promise.all([
+    const [chainOfCommand, accessState, agentWithStaleness] = await Promise.all([
       svc.getChainOfCommand(agent.id),
       buildAgentAccessState(agent),
+      withInstructionsStaleness(agent),
     ]);
 
     return {
-      ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
+      ...(options?.restricted ? redactForRestrictedAgentView(agentWithStaleness) : agentWithStaleness),
       chainOfCommand,
       access: accessState,
     };
@@ -1948,7 +1994,13 @@ export function agentRoutes(
       });
       return;
     }
-    const result = await filterAgentsForActor(req, await svc.list(companyId));
+    const filtered = await filterAgentsForActor(req, await svc.list(companyId));
+    const { instructionsStalenessThresholdDays } = await instanceSettings.getGeneral();
+    const threshold = instructionsStalenessThresholdDays ?? DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS;
+    const result = filtered.map((agent) => ({
+      ...agent,
+      instructionsStaleness: computeInstructionsStaleness(agent.instructionsReviewedAt, threshold),
+    }));
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
       res.json(result);
@@ -2922,7 +2974,12 @@ export function agentRoutes(
     );
     await svc.update(
       id,
-      { adapterConfig: normalizedAdapterConfig },
+      // Only a board-authenticated caller can ever reach this route
+      // (assertCanManageInstructionsPath above throws for any other actor),
+      // so a direct content write here is exactly as much "someone reviewed
+      // this agent's instructions" as an approved boss proposal -- reset the
+      // staleness clock (DUR-69/DUR-109) the same way approving one does.
+      { adapterConfig: normalizedAdapterConfig, instructionsReviewedAt: new Date() },
       {
         recordRevision: {
           createdByAgentId: actor.agentId,

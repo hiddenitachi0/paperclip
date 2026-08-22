@@ -1035,6 +1035,9 @@ export {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
 } from "./types/instance.js";
 
 export type {
@@ -1325,6 +1328,7 @@ export {
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
+  instructionsChangeRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -1335,6 +1339,7 @@ export {
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
+  type InstructionsChangeRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,
