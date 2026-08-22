@@ -7238,6 +7238,65 @@ export function issueRoutes(
     res.json(result);
   });
 
+  // DUR-86: narrow self-serve escape hatch. An issue can get permanently
+  // deadlocked when blockedByIssueIds still references a *cancelled* blocker
+  // (checkout() correctly treats "cancelled" as unresolved, since cancelled
+  // work may still need manual re-triage) — but clearing that stale relation
+  // normally requires a PATCH, which for a low-trust agent run requires
+  // trust-boundary access the run only gets by checking the issue out, which
+  // the stale blocker itself prevents. Unlike the general PATCH path, this
+  // only ever unlinks blockers that are already terminal (done/cancelled) —
+  // it can never remove a live blocker — so it's safe to allow directly for
+  // the issue's own current assignee without going through the full
+  // decideIssueAccess boundary check.
+  router.post("/issues/:id/blockers/clear-terminal", async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+
+    if (req.actor.type === "agent") {
+      const actorAgentId = req.actor.agentId;
+      if (!actorAgentId) {
+        res.status(403).json({ error: "Agent authentication required" });
+        return;
+      }
+      if (existing.assigneeAgentId !== actorAgentId) {
+        res.status(403).json({
+          error: "Only the issue's current assignee can clear terminal blockers via this escape hatch",
+        });
+        return;
+      }
+    }
+
+    const result = await svc.clearTerminalBlockers(id);
+    if (!result) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+
+    if (result.clearedBlockerIssueIds.length > 0) {
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: result.issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.blockers.cleared_terminal",
+        entityType: "issue",
+        entityId: result.issue.id,
+        details: { clearedBlockerIssueIds: result.clearedBlockerIssueIds },
+      });
+      await queueTaskWatchdogEvaluation(existing, actor.runId);
+    }
+
+    res.json(result);
+  });
+
   router.get("/issues/:id/comments", async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
