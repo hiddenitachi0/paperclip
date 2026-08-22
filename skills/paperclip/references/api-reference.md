@@ -189,7 +189,9 @@ The response also includes `blockedBy` and `blocks` arrays showing first-class d
 }
 ```
 
-Blocker wake semantics are strict: `issue_blockers_resolved` only fires when every blocker reaches `done`. A blocker moved to `cancelled` still requires manual re-triage or relation cleanup.
+Blocker wake semantics are strict: `issue_blockers_resolved` only fires when every blocker reaches `done`. A blocker moved to `cancelled` still requires manual re-triage or relation cleanup, and `checkout()` itself refuses to check out an issue while such a blocker is still linked.
+
+That manual cleanup can deadlock a low-trust agent run: the normal way to do it is `PATCH /api/issues/:issueId` with a narrowed `blockedByIssueIds`, but that PATCH requires the run's trust boundary to already include the issue, and a low-trust run only gains that boundary by checking the issue out — which the stale cancelled blocker is itself blocking. `POST /api/issues/:issueId/blockers/clear-terminal` breaks that cycle: it lets the issue's own current assignee unlink only the blockers that are already terminal (`done`/`cancelled`), never a still-open one, without needing checkout-derived boundary access. Board/user actors can always call it. It returns `{ issue, clearedBlockerIssueIds }`.
 
 ### Execution Policy Fields On An Issue
 

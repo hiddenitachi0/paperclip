@@ -3876,6 +3876,91 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     ).rejects.toMatchObject({ status: 422 });
   });
 
+  it("clearTerminalBlockers unlinks only cancelled/done blockers so checkout can proceed (DUR-86)", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const cancelledBlockerId = randomUUID();
+    const openBlockerId = randomUUID();
+    const blockedId = randomUUID();
+    await db.insert(issues).values([
+      { id: cancelledBlockerId, companyId, title: "Cancelled blocker", status: "cancelled", priority: "medium" },
+      { id: openBlockerId, companyId, title: "Still-open blocker", status: "todo", priority: "medium" },
+      {
+        id: blockedId,
+        companyId,
+        title: "Blocked",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId,
+      },
+    ]);
+    await svc.update(blockedId, { blockedByIssueIds: [cancelledBlockerId, openBlockerId] });
+
+    // Still deadlocked while the cancelled blocker is linked, even though it will never become "done".
+    await expect(
+      svc.checkout(blockedId, assigneeAgentId, ["todo", "blocked"], null),
+    ).rejects.toMatchObject({ status: 422 });
+
+    const result = await svc.clearTerminalBlockers(blockedId);
+    expect(result?.clearedBlockerIssueIds).toEqual([cancelledBlockerId]);
+
+    // The still-open blocker must remain linked and keep blocking checkout.
+    await expect(svc.getRelationSummaries(blockedId)).resolves.toMatchObject({
+      blockedBy: [expect.objectContaining({ id: openBlockerId })],
+    });
+    await expect(
+      svc.checkout(blockedId, assigneeAgentId, ["todo", "blocked"], null),
+    ).rejects.toMatchObject({ status: 422 });
+
+    // Once the real blocker resolves too, checkout succeeds.
+    await svc.update(openBlockerId, { status: "done" });
+    await expect(
+      svc.checkout(blockedId, assigneeAgentId, ["todo", "blocked"], null),
+    ).resolves.toMatchObject({ id: blockedId, status: "in_progress" });
+  });
+
+  it("clearTerminalBlockers is a no-op when no blockers are terminal", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const openBlockerId = randomUUID();
+    const blockedId = randomUUID();
+    await db.insert(issues).values([
+      { id: openBlockerId, companyId, title: "Still-open blocker", status: "todo", priority: "medium" },
+      { id: blockedId, companyId, title: "Blocked", status: "todo", priority: "medium" },
+    ]);
+    await svc.update(blockedId, { blockedByIssueIds: [openBlockerId] });
+
+    const result = await svc.clearTerminalBlockers(blockedId);
+    expect(result?.clearedBlockerIssueIds).toEqual([]);
+    await expect(svc.getRelationSummaries(blockedId)).resolves.toMatchObject({
+      blockedBy: [expect.objectContaining({ id: openBlockerId })],
+    });
+  });
+
   it("wakes parents only when all direct children are terminal", async () => {
     const companyId = randomUUID();
     const assigneeAgentId = randomUUID();

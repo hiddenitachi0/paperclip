@@ -6351,6 +6351,60 @@ export function issueService(db: Db) {
         };
       }),
 
+    // Narrow self-serve escape hatch for DUR-86: an issue can get permanently
+    // deadlocked when one of its blockedByIssueIds points at a *cancelled*
+    // (or done) blocker — checkout() treats that as still-unresolved (by
+    // design, since cancelled work may need manual re-triage), but the only
+    // way to clear the stale relation is a PATCH that itself requires
+    // checkout-derived trust-boundary access for low-trust agent runs. This
+    // lets the issue's own current assignee unlink specifically the terminal
+    // (done/cancelled) blockers — never a still-open one — without needing
+    // that boundary access, breaking the cycle.
+    clearTerminalBlockers: async (id: string) =>
+      db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
+        );
+        const existing = await tx
+          .select({ id: issues.id, companyId: issues.companyId })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (!existing) return null;
+
+        const blockerRows = await tx
+          .select({ blockerIssueId: issueRelations.issueId, blockerStatus: issues.status })
+          .from(issueRelations)
+          .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+          .where(
+            and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.relatedIssueId, id),
+              eq(issueRelations.type, "blocks"),
+            ),
+          );
+
+        const clearedBlockerIssueIds = blockerRows
+          .filter((row) => row.blockerStatus === "done" || row.blockerStatus === "cancelled")
+          .map((row) => row.blockerIssueId);
+        const remainingBlockerIssueIds = blockerRows
+          .filter((row) => row.blockerStatus !== "done" && row.blockerStatus !== "cancelled")
+          .map((row) => row.blockerIssueId);
+
+        if (clearedBlockerIssueIds.length > 0) {
+          await syncBlockedByIssueIds(id, existing.companyId, remainingBlockerIssueIds, {}, tx);
+        }
+
+        const updated = await tx
+          .select()
+          .from(issues)
+          .where(eq(issues.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (!updated) return null;
+        const [enriched] = await withIssueLabels(tx, [updated]);
+        return { issue: enriched, clearedBlockerIssueIds };
+      }),
+
     listLabels: (companyId: string) =>
       db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
 
