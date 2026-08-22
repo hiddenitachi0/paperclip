@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { environments } from "./environments.js";
+import { companyAgentRoles } from "./company_agent_roles.js";
 
 export const agents = pgTable(
   "agents",
@@ -46,6 +47,19 @@ export const agents = pgTable(
     // on every new agent, so "days since last reviewed" starts counting from
     // a known point rather than reading as an indefinite null.
     instructionsReviewedAt: timestamp("instructions_reviewed_at", { withTimezone: true }).notNull().defaultNow(),
+    // DUR-114: `role` (above) is the legacy free-text label; `roleId` is the
+    // new job/role concept -- a nullable FK so unassigning or deleting a
+    // role never orphans or blocks the agent. Only the dedicated
+    // POST /agents/:id/role route (board-only) may write these four
+    // columns -- see the roleId guard in services/agents.ts.
+    roleId: uuid("role_id").references(() => companyAgentRoles.id, { onDelete: "set null" }),
+    roleAssignedAt: timestamp("role_assigned_at", { withTimezone: true }),
+    // Snapshot of what the role applied at assignment time, so a later diff
+    // against the agent's live adapterConfig.mcpServers / permission grants
+    // can render "added"/"removed" without continuous reconciliation.
+    roleAppliedMcpServerNames: jsonb("role_applied_mcp_server_names").$type<string[]>(),
+    roleAppliedPermissionGrants: jsonb("role_applied_permission_grants")
+      .$type<Array<{ permissionKey: string; scope: Record<string, unknown> | null }>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -53,5 +67,6 @@ export const agents = pgTable(
     companyStatusIdx: index("agents_company_status_idx").on(table.companyId, table.status),
     companyReportsToIdx: index("agents_company_reports_to_idx").on(table.companyId, table.reportsTo),
     companyDefaultEnvironmentIdx: index("agents_company_default_environment_idx").on(table.companyId, table.defaultEnvironmentId),
+    roleIdIdx: index("agents_role_id_idx").on(table.roleId),
   }),
 );

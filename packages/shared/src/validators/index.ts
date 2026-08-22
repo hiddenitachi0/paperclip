@@ -260,6 +260,19 @@ export {
 } from "./agent.js";
 
 export {
+  agentRolePermissionGrantSchema,
+  createAgentRoleSchema,
+  updateAgentRoleSchema,
+  duplicateAgentRoleSchema,
+  assignAgentRoleSchema,
+  type AgentRolePermissionGrant,
+  type CreateAgentRole,
+  type UpdateAgentRole,
+  type DuplicateAgentRole,
+  type AssignAgentRole,
+} from "./agent-roles.js";
+
+export {
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,

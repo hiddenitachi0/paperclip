@@ -3042,19 +3042,36 @@ export function agentRoutes(
     res.json(result.bundle);
   });
 
-  router.patch("/agents/:id", validate(updateAgentSchema), async (req, res) => {
-    const id = req.params.id as string;
-    const existing = await svc.getById(id);
-    if (!existing) {
-      res.status(404).json({ error: "Agent not found" });
-      return;
-    }
-    await assertCanUpdateAgent(req, existing, access);
+  router.patch(
+    "/agents/:id",
+    // DUR-114: checked against the raw body BEFORE validate() runs, since
+    // updateAgentSchema's `roleId: z.never()` throws a generic 400 Zod
+    // validation error that never reaches this route handler at all --
+    // relying on the schema alone would silently swallow the clearer
+    // "use the dedicated route" message. Same reasoning applies to the
+    // (currently dead, unchanged here) `permissions` check below it, which
+    // schema-level `z.never()` already blocks the same way.
+    (req, res, next) => {
+      if (hasOwn(req.body as object, "roleId")) {
+        res.status(422).json({ error: "Use /api/agents/:id/role to change role assignment" });
+        return;
+      }
+      next();
+    },
+    validate(updateAgentSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCanUpdateAgent(req, existing, access);
 
-    if (hasOwn(req.body as object, "permissions")) {
-      res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
-      return;
-    }
+      if (hasOwn(req.body as object, "permissions")) {
+        res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
+        return;
+      }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
@@ -3189,8 +3206,9 @@ export function agentRoutes(
       details: appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
     });
 
-    res.json(agent);
-  });
+      res.json(agent);
+    },
+  );
 
   router.post("/agents/:id/pause", async (req, res) => {
     assertBoard(req);

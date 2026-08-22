@@ -71,6 +71,30 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// DUR-114: role_id and its role_applied_* snapshot columns may only be
+// written by applyRoleAssignment below, which is only ever called from the
+// board-only POST /agents/:id/role route. The general create/update service
+// functions -- including the ones company-portability.ts's import path
+// calls directly, bypassing every route-level guard -- must never accept
+// these fields, so this check runs at the service layer, not just the
+// route.
+const ROLE_ASSIGNMENT_ONLY_FIELDS = [
+  "roleId",
+  "roleAssignedAt",
+  "roleAppliedMcpServerNames",
+  "roleAppliedPermissionGrants",
+] as const;
+
+function assertNoRoleAssignmentFields(data: Record<string, unknown>) {
+  const offending = ROLE_ASSIGNMENT_ONLY_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(data, field));
+  if (offending.length > 0) {
+    throw unprocessable(
+      `Use POST /agents/:id/role to change role assignment (rejected field(s): ${offending.join(", ")})`,
+    );
+  }
+}
+
 function jsonEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -347,6 +371,7 @@ export function agentService(db: Db) {
     data: Partial<typeof agents.$inferInsert>,
     options?: UpdateAgentOptions,
   ) {
+    assertNoRoleAssignmentFields(data);
     const existing = await getById(id);
     if (!existing) return null;
 
@@ -454,6 +479,7 @@ export function agentService(db: Db) {
     getById,
 
     create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+      assertNoRoleAssignmentFields(data);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
@@ -497,6 +523,28 @@ export function agentService(db: Db) {
     },
 
     update: updateAgent,
+
+    // DUR-114: the only write path for role_id/role_applied_* -- deliberately
+    // separate from `update` (which rejects these fields outright) so
+    // callers must go through the dedicated role-assignment service, which
+    // is only reachable from the board-only POST /agents/:id/role route.
+    applyRoleAssignment: async (
+      id: string,
+      patch: {
+        roleId: string | null;
+        roleAssignedAt: Date | null;
+        roleAppliedMcpServerNames: string[] | null;
+        roleAppliedPermissionGrants: Array<{ permissionKey: string; scope: Record<string, unknown> | null }> | null;
+      },
+    ) => {
+      const updated = await db
+        .update(agents)
+        .set({ ...patch, updatedAt: new Date() })
+        .where(eq(agents.id, id))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      return updated ? getById(updated.id) : null;
+    },
 
     pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
       const existing = await getById(id);

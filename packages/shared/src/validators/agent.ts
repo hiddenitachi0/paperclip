@@ -161,6 +161,9 @@ export const updateAgentSchema = createAgentSchema
     // routes (POST/DELETE .../agents/:agentId/avatar) may write this
     // column. This does not, by itself, fix DUR-55.
     avatarAssetId: z.never().optional(),
+    // DUR-114: role assignment is board-only and goes through the dedicated
+    // POST /agents/:id/role route, never this general PATCH route.
+    roleId: z.never().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
