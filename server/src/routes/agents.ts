@@ -519,15 +519,10 @@ export function agentRoutes(
       : [];
     const hasExplicitTaskAssignGrant = grants.some((grant) => grant.permissionKey === "tasks:assign");
 
-    if (agent.role === "ceo") {
-      return {
-        canAssignTasks: true,
-        taskAssignSource: "ceo_role" as const,
-        membership,
-        grants,
-      };
-    }
-
+    // Agents with a "ceo" job title used to get an unconditional bypass here.
+    // `svc.getById` already normalizes `agent.permissions.canCreateAgents` to
+    // `true` by default for the "ceo" role (see normalizeAgentPermissions),
+    // so a CEO agent still lands in this branch without a direct role check.
     if (canCreateAgents(agent)) {
       return {
         canAssignTasks: true,
@@ -2593,8 +2588,8 @@ export function agentRoutes(
         res.status(403).json({ error: "Forbidden" });
         return;
       }
-      if (actorAgent.role !== "ceo") {
-        res.status(403).json({ error: "Only CEO can manage permissions" });
+      if (!actorAgent.permissions?.canManageOtherAgentsPermissions) {
+        res.status(403).json({ error: "Missing permission to manage other agents' permissions" });
         return;
       }
     } else {
@@ -2608,7 +2603,7 @@ export function agentRoutes(
     }
 
     const effectiveCanAssignTasks =
-      agent.role === "ceo" || Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
+      Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
     await access.ensureMembership(agent.companyId, "agent", agent.id, "member", "active");
     await access.setPrincipalPermission(
       agent.companyId,

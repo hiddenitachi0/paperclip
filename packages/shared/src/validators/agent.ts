@@ -13,6 +13,16 @@ import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 export const agentPermissionsSchema = z.object({
   canCreateAgents: z.boolean().optional().default(false),
   canCreateSkills: z.boolean().optional().default(true),
+  // Named capabilities that replace the old `role === "ceo"` blanket
+  // authorization bypass. They default to `false` here and are given their
+  // role-derived default value (true for the "ceo" role) only by
+  // `defaultPermissionsForRole`/`normalizeAgentPermissions` in
+  // server/src/services/agent-permissions.ts, exactly like `canCreateAgents`
+  // above. An explicit value stored on the agent always wins over the
+  // role-derived default.
+  canManageOtherAgentsPermissions: z.boolean().optional().default(false),
+  canManageCompanySettings: z.boolean().optional().default(false),
+  canManageAllWorkspaceRuntimes: z.boolean().optional().default(false),
   trustPreset: trustPresetSchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
 }).catchall(z.unknown());
@@ -243,6 +253,9 @@ export const updateAgentPermissionsSchema = z.object({
   canCreateAgents: z.boolean(),
   canCreateSkills: z.boolean().optional(),
   canAssignTasks: z.boolean(),
+  canManageOtherAgentsPermissions: z.boolean().optional(),
+  canManageCompanySettings: z.boolean().optional(),
+  canManageAllWorkspaceRuntimes: z.boolean().optional(),
   trustPreset: trustPresetSchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
 });

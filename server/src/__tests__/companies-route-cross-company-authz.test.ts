@@ -175,7 +175,13 @@ function resetMockDefaults() {
   }));
   mockCompanyService.remove.mockImplementation(async (id: string) => createCompany(id));
   mockAgentService.getById.mockImplementation(async (id: string) => {
-    if (id === ceoAgentId) return { id, companyId: companyAId, role: "ceo" };
+    // Mirrors the real agent service, which always normalizes permissions
+    // (see services/agents.ts getById) -- a "ceo" row gets
+    // canManageCompanySettings: true by default from normalizeAgentPermissions,
+    // not from a `role === "ceo"` check in the route itself.
+    if (id === ceoAgentId) {
+      return { id, companyId: companyAId, role: "ceo", permissions: { canManageCompanySettings: true } };
+    }
     return null;
   });
   mockCompanyPortabilityService.exportBundle.mockResolvedValue(exportResult());
@@ -295,6 +301,41 @@ describe.sequential("company route cross-company authorization", () => {
     const remove = await request(app).delete(`/api/companies/${companyAId}`);
     expect(remove.status).toBe(403);
     expect(remove.body.error).toContain("Board access required");
+  });
+
+  it("denies a same-company ceo-titled agent once canManageCompanySettings is explicitly revoked", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ceoAgentId) {
+        return { id, companyId: companyAId, role: "ceo", permissions: { canManageCompanySettings: false } };
+      }
+      return null;
+    });
+    const app = await createApp(companyACeoActor());
+
+    const res = await request(app).patch(`/api/companies/${companyAId}`).send({ brandColor: "#abcdef" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Missing permission to manage");
+    assertNoTargetMutationSideEffects();
+  });
+
+  it("allows a non-ceo agent with an explicit canManageCompanySettings grant", async () => {
+    const managerAgentId = "manager-agent-a";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === managerAgentId) {
+        return { id, companyId: companyAId, role: "engineering-manager", permissions: { canManageCompanySettings: true } };
+      }
+      return null;
+    });
+    const app = await createApp({
+      type: "agent",
+      agentId: managerAgentId,
+      companyId: companyAId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    await request(app).patch(`/api/companies/${companyAId}`).send({ brandColor: "#abcdef" }).expect(200);
   });
 
   it("covers board actor access for non-member, viewer, active member, local trusted board, and instance admin without target membership", async () => {
