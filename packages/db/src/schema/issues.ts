@@ -141,6 +141,17 @@ export const issues = pgTable(
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,
       ),
+    // DUR-93: one open task per trigger for messages the customer-inbox door
+    // could not read (rejected_shape/failed) -- further bad deliveries get a
+    // comment on this same task instead of opening a second one.
+    activeCustomerInboxUnreadableIdx: uniqueIndex("issues_active_customer_inbox_unreadable_uq")
+      .on(table.companyId, table.originKind, table.originId)
+      .where(
+        sql`${table.originKind} = 'customer_inbox_unreadable'
+          and ${table.originId} is not null
+          and ${table.hiddenAt} is null
+          and ${table.status} not in ('done', 'cancelled')`,
+      ),
     activeStrandedIssueRecoveryIdx: uniqueIndex("issues_active_stranded_issue_recovery_uq")
       .on(table.companyId, table.originKind, table.originId)
       .where(

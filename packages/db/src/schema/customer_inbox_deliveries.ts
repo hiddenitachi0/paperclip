@@ -32,6 +32,12 @@ export const customerInboxDeliveries = pgTable(
     payloadDigest: text("payload_digest"),
     rawPayloadExcerpt: text("raw_payload_excerpt"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // DUR-93: the pushing source's conversation id (a Gmail thread id, for
+    // example), so a delivery row shows which conversation-continuation
+    // decision it went through. Appended at the end, not inlined next to
+    // externalMessageId, so drizzle-kit's diff can't mistake this add for a
+    // rename of an existing column.
+    conversationId: text("conversation_id"),
   },
   (table) => ({
     companyCreatedIdx: index("customer_inbox_deliveries_company_created_idx").on(
