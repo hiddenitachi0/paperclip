@@ -26,6 +26,11 @@ import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-r
  *   linked `deploy` approval whose id appears in the runner's log with its success sentence is
  *   the strongest same-request signal available without an extra DB column; see the file's
  *   docblock for the known coupling this creates.
+ * - A candidate `deploy` approval must also carry `payload.projectId` matching the issue's own
+ *   project (DUR-116 adversarial review finding #2): `assertCanManageIssueApprovalLinks` lets an
+ *   agent link any same-company approved deploy approval to any issue, so without this check a
+ *   completed deploy for project A could be borrowed to clear the gate on an unrelated merge in
+ *   project B.
  *
  * Explicitly NOT attempted here: verifying the merge_pr's PR actually merged via GitHub (that
  * network round trip belongs in a scheduled tick, not a synchronous PATCH — see
@@ -48,6 +53,12 @@ function approvalPayloadBase(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const base = (payload as Record<string, unknown>).base;
   return typeof base === "string" ? base : null;
+}
+
+function approvalPayloadProjectId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const projectId = (payload as Record<string, unknown>).projectId;
+  return typeof projectId === "string" ? projectId : null;
 }
 
 /**
@@ -103,7 +114,12 @@ export async function evaluateDeployCompletionDoneGate(
     (approval) =>
       approval.type === "request_board_approval" &&
       approval.status === "approved" &&
-      approvalPayloadKind(approval.payload) === "deploy",
+      approvalPayloadKind(approval.payload) === "deploy" &&
+      // DUR-116: an agent with approval-link authority can link ANY same-company approved
+      // deploy approval to this issue, including one filed for a different project. Without
+      // this check a completed deploy for project A would clear the gate for an unrelated
+      // merge in project B.
+      approvalPayloadProjectId(approval.payload) === branches.projectId,
   );
 
   const readStatusLog = input.readStatusLog ?? ((companyId: string) => readDeployRunnerStatus(companyId));

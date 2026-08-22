@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { issues, projects, type Db } from "@paperclipai/db";
 
-export type ProjectDeployBranches = { deployBranch?: string; mirrorBranch?: string };
+export type ProjectDeployBranches = { deployBranch?: string; mirrorBranch?: string; projectId: string };
 
 /**
  * Look up the declared deploy/mirror branch pair (DUR-40) for the project any
@@ -35,7 +35,7 @@ export async function resolveProjectDeployBranches(
     const policy = (projectRow?.deployPolicy ?? null) as Record<string, unknown> | null;
     const mirrorBranch = typeof policy?.mirrorBranch === "string" ? policy.mirrorBranch : undefined;
     const deployBranch = typeof policy?.deployBranch === "string" ? policy.deployBranch : undefined;
-    if (mirrorBranch || deployBranch) return { mirrorBranch, deployBranch };
+    if (mirrorBranch || deployBranch) return { mirrorBranch, deployBranch, projectId: issueRow.projectId };
   }
   return null;
 }

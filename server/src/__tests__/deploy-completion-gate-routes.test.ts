@@ -241,10 +241,10 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
       ...patch,
       updatedAt: new Date(),
     }));
-    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master" });
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
       { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
-      { id: "deploy-1", type: "request_board_approval", status: "approved", payload: { kind: "deploy" } },
+      { id: "deploy-1", type: "request_board_approval", status: "approved", payload: { kind: "deploy", projectId: "project-1" } },
     ]);
     mockReadDeployRunnerStatus.mockReturnValue([
       {
@@ -260,6 +260,31 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
 
     expect(res.status).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "done" }));
+  });
+
+  it("DUR-116: does not let a completed deploy approval filed for a different project clear the gate", async () => {
+    const issue = baseIssue();
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master", projectId: "project-1" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      { id: "deploy-other-project", type: "request_board_approval", status: "approved", payload: { kind: "deploy", projectId: "project-2" } },
+    ]);
+    mockReadDeployRunnerStatus.mockReturnValue([
+      {
+        ts: "t",
+        approvalId: "deploy-other-project",
+        companyId: "company-1",
+        commentDelivered: true,
+        body: "Deployed to /root/paperclip -- commit abc123 is live and healthy (health check: http://x).",
+      },
+    ]);
+
+    const res = await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("no deploy approval has been filed");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
   it("does not block an issue whose project declares no deploy branch, or that never merged into it", async () => {

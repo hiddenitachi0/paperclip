@@ -35,7 +35,7 @@ const deployApproval = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: "deploy-approval-1",
   type: "request_board_approval",
   status: "approved",
-  payload: { kind: "deploy" },
+  payload: { kind: "deploy", projectId: "project-1" },
   ...overrides,
 });
 
@@ -65,7 +65,7 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
 
   it("blocks done when a deploy approval was filed but deploy-runner never recorded completing it", async () => {
     const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
-    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom" });
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval(), deployApproval()]);
     const readStatusLog = vi.fn().mockReturnValue([
       { ts: "t", approvalId: "deploy-approval-1", companyId: "company-1", commentDelivered: true, body: "Deploy failed -- health check timed out." },
@@ -86,7 +86,7 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
 
   it("allows done when deploy-runner's status log confirms the linked deploy approval went live", async () => {
     const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
-    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom" });
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval(), deployApproval()]);
     const readStatusLog = vi.fn().mockReturnValue([
       {
@@ -108,6 +108,36 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  it("DUR-116: does not let a completed deploy approval filed for a DIFFERENT project clear the gate", async () => {
+    const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      mergeApproval(),
+      deployApproval({ id: "deploy-approval-other-project", payload: { kind: "deploy", projectId: "project-2" } }),
+    ]);
+    const readStatusLog = vi.fn().mockReturnValue([
+      {
+        ts: "t",
+        approvalId: "deploy-approval-other-project",
+        companyId: "company-1",
+        commentDelivered: true,
+        body: "Deployed to /root/paperclip -- commit abc123 is live and healthy (health check: http://x).",
+      },
+    ]);
+
+    const result = await evaluateDeployCompletionDoneGate({
+      db: {} as any,
+      issue: ISSUE,
+      actor: AGENT_ACTOR,
+      requestedStatus: "done",
+      currentStatus: "in_review",
+      readStatusLog,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.message).toContain("no deploy approval has been filed");
   });
 
   it("is unaffected when the issue has no deploy branch declared for its project", async () => {
