@@ -18,6 +18,7 @@ import {
   issueComments,
   issueInboxArchives,
   issueReadStates,
+  issueReferenceMentions,
   issues,
   projectWorkspaces,
   projects,
@@ -233,7 +234,7 @@ describeEmbeddedPostgres("customer-inbox door: conversation threading + unreadab
     expect(wakeups.some((w) => w.agentId === secretaryAgentId && w.opts.reason === "customer_inbox.conversation_continued")).toBe(true);
   });
 
-  it("reopens a done task when a new message arrives for the same conversation, and wakes its assignee", async () => {
+  it("opens a new linked task instead of reopening a done task when a new message arrives for the same conversation", async () => {
     const { secretaryAgentId, trigger, secretMaterial, svc, wakeups } = await seedFixture();
     const conversationId = `thread-${randomUUID()}`;
 
@@ -243,14 +244,38 @@ describeEmbeddedPostgres("customer-inbox door: conversation threading + unreadab
     wakeups.length = 0;
     const second = await post(svc, trigger, secretMaterial.webhookSecret, messagePayload({ conversationId }));
     expect(second.outcome).toBe("accepted");
-    expect(second.issueId).toBe(first.issueId);
+    expect(second.issueId).not.toBe(first.issueId);
 
-    const [reopened] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, first.issueId!));
-    expect(reopened.status).toBe("todo");
+    const [closedIssue] = await db.select({ status: issues.status, identifier: issues.identifier }).from(issues).where(eq(issues.id, first.issueId!));
+    expect(closedIssue.status).toBe("done");
 
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, first.issueId!));
-    expect(comments.some((c) => c.body.includes("gjenåpnet"))).toBe(true);
+    const [newIssue] = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId }).from(issues).where(eq(issues.id, second.issueId!));
+    expect(newIssue.status).toBe("todo");
+    expect(newIssue.assigneeAgentId).toBe(secretaryAgentId);
+
+    const mappingRows = await db
+      .select()
+      .from(customerInboxConversations)
+      .where(eq(customerInboxConversations.conversationId, conversationId));
+    expect(mappingRows).toHaveLength(1);
+    expect(mappingRows[0].linkedIssueId).toBe(second.issueId);
+
+    const newIssueComments = await db.select().from(issueComments).where(eq(issueComments.issueId, second.issueId!));
+    expect(newIssueComments.some((c) => c.body.includes(closedIssue.identifier as string))).toBe(true);
+
+    const mentions = await db
+      .select()
+      .from(issueReferenceMentions)
+      .where(eq(issueReferenceMentions.sourceIssueId, second.issueId!));
+    expect(mentions.some((m) => m.targetIssueId === first.issueId)).toBe(true);
+
     expect(wakeups.some((w) => w.agentId === secretaryAgentId)).toBe(true);
+
+    // A further reply in the same conversation now threads onto the new task.
+    wakeups.length = 0;
+    const third = await post(svc, trigger, secretMaterial.webhookSecret, messagePayload({ conversationId }));
+    expect(third.issueId).toBe(second.issueId);
+    expect(wakeups.some((w) => w.agentId === secretaryAgentId && w.opts.reason === "customer_inbox.conversation_continued")).toBe(true);
   });
 
   it("does not double-comment when the same messageId is replayed for an open conversation", async () => {

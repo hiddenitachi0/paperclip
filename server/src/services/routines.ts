@@ -60,6 +60,7 @@ import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
+import { issueReferenceService } from "./issue-references.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
@@ -575,6 +576,7 @@ export function routineService(
   } = {},
 ) {
   const issueSvc = issueService(db);
+  const issueReferencesSvc = issueReferenceService(db);
   const secretsSvc = secretService(db);
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
@@ -1995,6 +1997,7 @@ export function routineService(
   type CustomerInboxConversationMapping = {
     linkedIssueId: string;
     issueStatus: string;
+    issueIdentifier: string | null;
   };
 
   async function findCustomerInboxConversationMapping(
@@ -2005,6 +2008,7 @@ export function routineService(
       .select({
         linkedIssueId: customerInboxConversations.linkedIssueId,
         issueStatus: issues.status,
+        issueIdentifier: issues.identifier,
       })
       .from(customerInboxConversations)
       .innerJoin(issues, eq(issues.id, customerInboxConversations.linkedIssueId))
@@ -2019,12 +2023,11 @@ export function routineService(
   }
 
   // DUR-93: "a reply must not become a second task." A message whose
-  // conversationId already maps to a task attaches to that task instead of
-  // going through the normal create-a-new-issue dispatch. A task that was
-  // already closed is reopened rather than superseded by a second linked
-  // task, so there is always exactly one task per conversation to read;
-  // its assignee is woken either way since a reopened task needs the same
-  // attention as one that was already open.
+  // conversationId already maps to a still-open task attaches to that task
+  // instead of going through the normal create-a-new-issue dispatch. A task
+  // that was already closed is never reopened by this path (DUR-94: a new
+  // task is opened and linked back to it instead) -- callers only reach this
+  // function once they've established the mapped task is still open.
   async function attachCustomerInboxMessageToConversation(
     mapping: CustomerInboxConversationMapping,
     input: { fromAddress: string | null; fromName: string | null; subject: string | null; body: string | null },
@@ -2041,13 +2044,9 @@ export function routineService(
       "```",
     ].join("\n");
 
-    const wasTerminal = mapping.issueStatus === "done" || mapping.issueStatus === "cancelled";
-    if (wasTerminal) {
-      await issueSvc.update(mapping.linkedIssueId, { status: "todo" }, db);
-    }
     await issueSvc.addComment(
       mapping.linkedIssueId,
-      `${wasTerminal ? "Ny melding i samme samtale. Oppgaven er gjenåpnet." : "Ny melding i samme samtale."}\n\n${messageBlock}`,
+      `Ny melding i samme samtale.\n\n${messageBlock}`,
       {},
       undefined,
       db,
@@ -2066,6 +2065,29 @@ export function routineService(
       contextSource: "customer_inbox.conversation",
       requestedByActorType: "system",
     });
+  }
+
+  // DUR-94: the "pick one and state which" decision DUR-93 left open -- a
+  // closed task is never reopened by a later reply. Instead the normal
+  // create-a-new-issue path runs (same as a brand-new conversation) and the
+  // new task gets a system comment naming the closed predecessor, synced
+  // through the same issue-reference-mention mechanism the UI already uses
+  // for "DUR-123"-style mentions, so the two tasks show up as related work.
+  async function linkNewIssueToClosedPredecessor(
+    newIssueId: string,
+    predecessor: { id: string; identifier: string | null },
+  ): Promise<void> {
+    const label = predecessor.identifier ?? predecessor.id;
+    const comment = await issueSvc.addComment(
+      newIssueId,
+      `This conversation continues from ${label}, which was already closed.`,
+      {},
+      undefined,
+      db,
+    );
+    if (predecessor.identifier) {
+      await issueReferencesSvc.syncComment(comment.id, db);
+    }
   }
 
   // The customer-inbox door (DUR-68): a company points any message source
@@ -2158,10 +2180,11 @@ export function routineService(
     const subjectShort = subject ? subject.slice(0, 120) : undefined;
     const dispatchPayload = subjectShort !== undefined ? { ...payload, subjectShort } : payload;
 
-    // DUR-93: a message in a conversation that already maps to a task
-    // attaches to that task instead of creating a second one. Auth still
-    // runs first here -- this is a routing decision AFTER authentication,
-    // never a bypass of it.
+    // DUR-93: a message in a conversation that already maps to a still-open
+    // task attaches to that task instead of creating a second one. Auth
+    // still runs first here -- this is a routing decision AFTER
+    // authentication, never a bypass of it.
+    let closedPredecessor: { id: string; identifier: string | null } | null = null;
     if (conversationId) {
       try {
         await assertWebhookTriggerDispatchable(trigger, routine, {
@@ -2183,7 +2206,12 @@ export function routineService(
       }
 
       const mapping = await findCustomerInboxConversationMapping(trigger.id, conversationId);
-      if (mapping) {
+      if (mapping && TERMINAL_ISSUE_STATUSES.has(mapping.issueStatus)) {
+        // DUR-94: the mapped task is closed -- fall through to the normal
+        // create-a-new-issue path below instead of reopening it, then link
+        // the new task back to this one.
+        closedPredecessor = { id: mapping.linkedIssueId, identifier: mapping.issueIdentifier };
+      } else if (mapping) {
         // Same idempotency guarantee the normal path gets from routineRuns:
         // a message already recorded `accepted` under this messageId is a
         // replay, not a second event, and must not comment twice.
@@ -2216,9 +2244,9 @@ export function routineService(
         await updateLedger({ outcome: "accepted", linkedIssueId: mapping.linkedIssueId });
         return { outcome: "accepted" as CustomerInboxDeliveryOutcome, routineRunId: null, issueId: mapping.linkedIssueId };
       }
-      // No mapping yet -- this is the conversation's first message. Fall
-      // through to the normal create-a-new-issue path below, then remember
-      // the mapping so the NEXT message in this conversation attaches here.
+      // No mapping yet, or the mapped task is closed -- fall through to the
+      // normal create-a-new-issue path below, then remember the mapping so
+      // the NEXT message in this conversation attaches to this new task.
     }
 
     try {
@@ -2250,6 +2278,9 @@ export function routineService(
       const outcome: CustomerInboxDeliveryOutcome = alreadyAccepted ? "duplicate" : "accepted";
 
       if (outcome === "accepted" && conversationId && run.linkedIssueId) {
+        // DUR-94: onConflictDoUpdate, not onConflictDoNothing -- a closed
+        // predecessor's mapping row already exists for this conversation and
+        // must now point at the new task, so the next reply threads here.
         await db
           .insert(customerInboxConversations)
           .values({
@@ -2258,7 +2289,13 @@ export function routineService(
             conversationId,
             linkedIssueId: run.linkedIssueId,
           })
-          .onConflictDoNothing();
+          .onConflictDoUpdate({
+            target: [customerInboxConversations.routineTriggerId, customerInboxConversations.conversationId],
+            set: { linkedIssueId: run.linkedIssueId, updatedAt: new Date() },
+          });
+        if (closedPredecessor) {
+          await linkNewIssueToClosedPredecessor(run.linkedIssueId, closedPredecessor);
+        }
       }
 
       await updateLedger({
