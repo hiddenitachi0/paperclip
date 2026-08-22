@@ -1,5 +1,12 @@
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
+  SORTERINGSREGLER_START_MARKER,
+  SORTERINGSREGLER_END_MARKER,
+  extractSorteringsreglerBlock,
+  withSorteringsreglerBlock,
+  parseSorteringsreglerRuleTargetNames,
+} from "./customer-inbox-rules.js";
+export {
   formatApprovalTechnicalReference,
   formatApprovalTitle,
   stripLegacyTitlePrefix,

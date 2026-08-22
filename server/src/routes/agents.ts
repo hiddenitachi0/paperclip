@@ -27,6 +27,8 @@ import {
   updateAgentSchema,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
+  extractSorteringsreglerBlock,
+  parseSorteringsreglerRuleTargetNames,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -876,24 +878,14 @@ export function agentRoutes(
   // in the company blocks the write so a typo can't silently misroute
   // customer messages to nobody.
   async function assertSorteringsreglerRuleNamesResolve(companyId: string, content: string) {
-    const startMarker = "<!-- SORTERINGSREGLER -->";
-    const endMarker = "<!-- /SORTERINGSREGLER -->";
-    const startIdx = content.indexOf(startMarker);
-    const endIdx = content.indexOf(endMarker);
-    if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return;
-    const block = content.slice(startIdx + startMarker.length, endIdx);
+    const block = extractSorteringsreglerBlock(content);
+    if (block == null) return;
 
     const liveAgents = await svc.list(companyId);
     const liveNames = new Set(liveAgents.map((agent) => agent.name));
 
-    const lines = block.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-    let ruleIndex = 0;
-    for (const line of lines) {
-      ruleIndex += 1;
-      const lastColon = line.lastIndexOf(":");
-      if (lastColon === -1) continue;
-      const name = line.slice(lastColon + 1).trim().replace(/[.\s]+$/, "");
-      if (!name || liveNames.has(name)) continue;
+    for (const { ruleIndex, name } of parseSorteringsreglerRuleTargetNames(block)) {
+      if (liveNames.has(name)) continue;
       throw unprocessable(
         `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
       );

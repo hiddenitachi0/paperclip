@@ -1,32 +1,12 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { extractSorteringsreglerBlock, withSorteringsreglerBlock } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-
-const START_MARKER = "<!-- SORTERINGSREGLER -->";
-const END_MARKER = "<!-- /SORTERINGSREGLER -->";
-
-function extractRulesBlock(content: string): string | null {
-  const startIdx = content.indexOf(START_MARKER);
-  const endIdx = content.indexOf(END_MARKER);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
-  return content.slice(startIdx + START_MARKER.length, endIdx).trim();
-}
-
-function withRulesBlock(content: string, rules: string): string {
-  const block = `${START_MARKER}\n${rules.trim()}\n${END_MARKER}`;
-  const startIdx = content.indexOf(START_MARKER);
-  const endIdx = content.indexOf(END_MARKER);
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    return content.slice(0, startIdx) + block + content.slice(endIdx + END_MARKER.length);
-  }
-  const separator = content.trim().length > 0 ? "\n\n" : "";
-  return `${content}${separator}${block}\n`;
-}
 
 /**
  * DUR-68: Filip never edits the rest of AGENTS.md — this box reads and
@@ -56,8 +36,9 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
     enabled: Boolean(companyId && bundle),
   });
 
-  const blockExists = fileDetail ? extractRulesBlock(fileDetail.content) !== null : null;
-  const savedRules = fileDetail ? (extractRulesBlock(fileDetail.content) ?? "") : null;
+  const extractedBlock = fileDetail ? extractSorteringsreglerBlock(fileDetail.content) : null;
+  const blockExists = fileDetail ? extractedBlock !== null : null;
+  const savedRules = fileDetail ? (extractedBlock ?? "") : null;
 
   useEffect(() => {
     setDraft(null);
@@ -70,7 +51,7 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!fileDetail) throw new Error("Rules not loaded yet");
-      const nextContent = withRulesBlock(fileDetail.content, rules);
+      const nextContent = withSorteringsreglerBlock(fileDetail.content, rules);
       return agentsApi.saveInstructionsFile(agentId, { path: entryFile, content: nextContent }, companyId);
     },
     onSuccess: () => {
