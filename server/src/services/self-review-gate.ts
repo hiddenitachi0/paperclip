@@ -140,16 +140,39 @@ export function detectRiskySurfaceFromDiff(changedFilePaths: readonly string[]):
   return [...found];
 }
 
+/**
+ * DUR-91: content-based counterpart to detectRiskySurfaceFromDiff. The path-based check
+ * alone misses risky content living in a generically-named file (e.g. DUR-67's
+ * codex-home.ts/runtime-config.ts, which strip `mcp_servers` blocks carrying secrets but
+ * match none of the RISKY_SURFACE_PATTERNS filename regexes). This runs the same patterns
+ * against the *added* lines of a unified diff -- lines starting with "+" other than the
+ * "+++ b/path" file header -- so risky literals (mcp_servers, secret, token, ...) trip the
+ * gate regardless of what file they land in. Deliberately only looks at added lines: new
+ * code introducing a risky capability is the case that matters, and limiting to additions
+ * (vs. also scanning removed/context lines) keeps the signal closer to "what did this change
+ * actually introduce" rather than flagging every diff that happens to touch a file
+ * mentioning these words anywhere nearby.
+ */
+export function detectRiskySurfaceFromDiffContent(diffContent: string): RiskySurfaceCategory[] {
+  const found = new Set<RiskySurfaceCategory>();
+  for (const line of diffContent.split(/\r?\n/)) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    for (const { category, pattern } of RISKY_SURFACE_PATTERNS) {
+      if (pattern.test(line)) found.add(category);
+    }
+  }
+  return [...found];
+}
+
 const RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1024 * 1024;
+const RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
 /**
- * Looks up the issue's current execution workspace and, if it's a local, on-disk checkout
- * (local_fs/git_worktree with a base ref recorded), runs `git diff --name-only` against it
- * to get the paths changed since the base ref. Returns null (not an empty array) whenever
- * the diff genuinely can't be read -- cloud/adapter-managed workspaces, a missing path, a
- * missing base ref, or the git command failing -- so callers can tell "no risky surface
- * detected" apart from "couldn't check" and fall back to the ordinary-only prompt rather
- * than guessing.
+ * Resolves the issue's current execution workspace to a local, on-disk git checkout
+ * (local_fs/git_worktree with a base ref recorded) that getChangedFilePathsForIssueWorkspace
+ * and getChangedDiffContentForIssueWorkspace can run `git diff` against. Returns null
+ * whenever there's no such workspace to read -- cloud/adapter-managed workspaces, a missing
+ * path, or a missing base ref -- so callers degrade to "couldn't check" rather than guessing.
  *
  * DUR-83: resolves the workspace by execution_workspaces.sourceIssueId (set only by the
  * server when a workspace is realized, never writable by an issue PATCH) rather than by
@@ -158,10 +181,10 @@ const RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1024 * 1024;
  * a status transition would silently skip risk detection (and any adversarial questions)
  * without ever tripping the self-review gate itself.
  */
-export async function getChangedFilePathsForIssueWorkspace(
+async function resolveIssueGitWorkspace(
   db: Db,
   input: { companyId: string; issueId: string | null | undefined },
-): Promise<string[] | null> {
+): Promise<{ workspacePath: string; baseRef: string } | null> {
   if (!input.issueId) return null;
   const workspace = await db
     .select({
@@ -187,16 +210,58 @@ export async function getChangedFilePathsForIssueWorkspace(
     return null;
   }
 
+  return { workspacePath, baseRef: workspace.baseRef };
+}
+
+/**
+ * Runs `git diff --name-only` against the issue's resolved workspace to get the paths
+ * changed since the base ref. Returns null (not an empty array) whenever the diff genuinely
+ * can't be read -- no resolvable workspace or the git command failing -- so callers can tell
+ * "no risky surface detected" apart from "couldn't check" and fall back to the ordinary-only
+ * prompt rather than guessing.
+ */
+export async function getChangedFilePathsForIssueWorkspace(
+  db: Db,
+  input: { companyId: string; issueId: string | null | undefined },
+): Promise<string[] | null> {
+  const resolved = await resolveIssueGitWorkspace(db, input);
+  if (!resolved) return null;
+
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["-C", workspacePath, "diff", "--name-only", `${workspace.baseRef}...HEAD`],
-      { cwd: workspacePath, maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES },
+      ["-C", resolved.workspacePath, "diff", "--name-only", `${resolved.baseRef}...HEAD`],
+      { cwd: resolved.workspacePath, maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES },
     );
     return stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * DUR-91: sibling to getChangedFilePathsForIssueWorkspace that reads the actual diff hunk
+ * text (`git diff <base>...HEAD`, not `--name-only`) so detectRiskySurfaceFromDiffContent can
+ * catch risky content living in a generically-named file. Same null-vs-empty-string contract:
+ * null means "couldn't check", not "checked, found nothing".
+ */
+export async function getChangedDiffContentForIssueWorkspace(
+  db: Db,
+  input: { companyId: string; issueId: string | null | undefined },
+): Promise<string | null> {
+  const resolved = await resolveIssueGitWorkspace(db, input);
+  if (!resolved) return null;
+
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", resolved.workspacePath, "diff", `${resolved.baseRef}...HEAD`],
+      { cwd: resolved.workspacePath, maxBuffer: RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES },
+    );
+    return stdout;
   } catch {
     return null;
   }
@@ -379,11 +444,21 @@ export async function evaluateSelfReviewDoneGate(input: {
   // couldn't be read (e.g. a non-local workspace) -- that degrades to the ordinary-only
   // prompt rather than guessing at risk. Only computed here (once we know we're actually
   // about to schedule a new pass), not on every duplicate/retry hit of this gate.
-  const changedFilePaths = await getChangedFilePathsForIssueWorkspace(input.db, {
-    companyId: input.issue.companyId,
-    issueId: input.issue.id,
-  });
-  const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
+  //
+  // DUR-91: path-only detection misses risky content in a generically-named file (e.g.
+  // DUR-67's codex-home.ts, which strips `mcp_servers` blocks carrying secrets but matches
+  // no filename pattern). getChangedDiffContentForIssueWorkspace/detectRiskySurfaceFromDiffContent
+  // supplement the path check with the same patterns run against added diff lines.
+  const [changedFilePaths, diffContent] = await Promise.all([
+    getChangedFilePathsForIssueWorkspace(input.db, { companyId: input.issue.companyId, issueId: input.issue.id }),
+    getChangedDiffContentForIssueWorkspace(input.db, { companyId: input.issue.companyId, issueId: input.issue.id }),
+  ]);
+  const riskySurfaceCategories = [
+    ...new Set([
+      ...(changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : []),
+      ...(diffContent ? detectRiskySurfaceFromDiffContent(diffContent) : []),
+    ]),
+  ];
   const riskySurfaceNote =
     riskySurfaceCategories.length > 0
       ? ` This one also touches ${riskySurfaceCategories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ")}, so I've included some adversarial questions on top of the usual check.`
