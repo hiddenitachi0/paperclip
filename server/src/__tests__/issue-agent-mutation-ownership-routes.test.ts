@@ -67,6 +67,7 @@ const mockStorageService = vi.hoisted(() => ({
   deleteObject: vi.fn(),
 }));
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
+  create: vi.fn(),
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   expireRequestConfirmationsSupersededByHistoricalComments: vi.fn(async () => []),
@@ -930,6 +931,33 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(mockAccessService.decide).not.toHaveBeenCalledWith(expect.objectContaining({ action: "issue:comment" }));
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-company agents before interaction authorization is evaluated", async () => {
+    // Regression for DUR-110: a comment on this route was already guarded (see the
+    // "before comment authorization is evaluated" test above), but interactions had no
+    // equivalent coverage proving the company check runs first, ahead of mutation
+    // authorization and payload handling.
+    const res = await request(await createApp(peerActor({ companyId: "99999999-9999-4999-8999-999999999999" })))
+      .post(`/api/issues/${issueId}/interactions`)
+      .send({
+        kind: "ask_user_questions",
+        payload: {
+          version: 1,
+          questions: [
+            {
+              id: "q1",
+              prompt: "Wrong company?",
+              selectionMode: "single",
+              options: [{ id: "o1", label: "Yes" }],
+            },
+          ],
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent key cannot access another company");
+    expect(mockIssueThreadInteractionService.create).not.toHaveBeenCalled();
   });
 
   it("rejects the checked-out owner without a run id on attachment upload (401)", async () => {
