@@ -25,6 +25,9 @@ const mockApprovalService = vi.hoisted(() => ({
   resubmit: vi.fn(),
   listComments: vi.fn(),
   addComment: vi.fn(),
+  findOpenHireApprovalForRole: vi.fn(),
+  findOpenMergePrApproval: vi.fn(),
+  findOpenDeployApproval: vi.fn(),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -161,6 +164,11 @@ describe("DUR-40: merge_pr mirror-branch guard", () => {
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
     mockIssueThreadInteractionService.resolveInteractionsLinkedToApproval.mockResolvedValue([]);
     mockLogActivity.mockResolvedValue(undefined);
+    // DUR-101 dedup guard: default to "no open duplicate" so this
+    // pre-existing DUR-40 branch-guard suite isn't affected by the new check.
+    mockApprovalService.findOpenHireApprovalForRole.mockResolvedValue(null);
+    mockApprovalService.findOpenMergePrApproval.mockResolvedValue(null);
+    mockApprovalService.findOpenDeployApproval.mockResolvedValue(null);
     mockApprovalService.create.mockResolvedValue({
       id: "approval-1",
       type: "request_board_approval",

@@ -12,6 +12,9 @@ const mockApprovalService = vi.hoisted(() => ({
   resubmit: vi.fn(),
   listComments: vi.fn(),
   addComment: vi.fn(),
+  findOpenHireApprovalForRole: vi.fn(),
+  findOpenMergePrApproval: vi.fn(),
+  findOpenDeployApproval: vi.fn(),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -210,6 +213,14 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.resubmit.mockReset();
     mockApprovalService.listComments.mockReset();
     mockApprovalService.addComment.mockReset();
+    mockApprovalService.findOpenHireApprovalForRole.mockReset();
+    mockApprovalService.findOpenMergePrApproval.mockReset();
+    mockApprovalService.findOpenDeployApproval.mockReset();
+    // DUR-101 dedup guard: default to "no open duplicate" so these
+    // pre-existing idempotency cases aren't affected by the new check.
+    mockApprovalService.findOpenHireApprovalForRole.mockResolvedValue(null);
+    mockApprovalService.findOpenMergePrApproval.mockResolvedValue(null);
+    mockApprovalService.findOpenDeployApproval.mockResolvedValue(null);
     mockHeartbeatService.wakeup.mockReset();
     mockIssueApprovalService.listIssuesForApproval.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();

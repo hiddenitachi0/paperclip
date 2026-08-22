@@ -4342,6 +4342,83 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(overridingChild.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "low" } });
   });
 
+  it("DUR-101: refuses a new ticket whose originFingerprint matches an existing open ticket", async () => {
+    const companyId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId,
+      title: "Watchdog: retry the flaky deploy step",
+      status: "todo",
+      priority: "medium",
+      originKind: "product_bug_follow_up",
+      originFingerprint: "flaky-deploy-step-v1",
+    });
+
+    await expect(
+      svc.create(companyId, {
+        title: "Watchdog: retry the flaky deploy step (again)",
+        status: "todo",
+        priority: "medium",
+        originKind: "product_bug_follow_up",
+        originFingerprint: "flaky-deploy-step-v1",
+      } as Parameters<typeof svc.create>[1]),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("DUR-101: allows a same-parent near-duplicate title through but flags it with a system comment pointing at the earlier ticket", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const { issue: firstSibling } = await svc.createChild(parentIssueId, {
+      title: "Add retry logic to the payment webhook handler",
+      status: "todo",
+    });
+
+    const { issue: secondSibling } = await svc.createChild(parentIssueId, {
+      title: "Add retry logic to the payment webhook processor",
+      status: "todo",
+    });
+
+    // Not refused: title similarity alone is too noisy a signal to hard-block
+    // on (see findOpenDuplicateTicket), so the second ticket is created...
+    expect(secondSibling.id).not.toBe(firstSibling.id);
+
+    // ...but flagged with a system comment referencing the earlier ticket,
+    // so the duplicate is visible rather than silent (DUR-101 item 4).
+    const comments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, secondSibling.id));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.authorType).toBe("system");
+    expect(comments[0]?.body).toContain(firstSibling.identifier);
+  });
+
   it("keeps explicit workspace fields instead of inheriting the parent linkage", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();

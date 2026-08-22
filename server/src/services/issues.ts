@@ -3471,6 +3471,65 @@ export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
 
+  // DUR-101: DUR-98 Class D found duplicate implementation tickets filed for
+  // work that was already open (in one case a paid agent was assigned to
+  // build something already live) because nothing checked for an existing
+  // open ticket with the same origin before creating a new one. Match on an
+  // explicit non-default originFingerprint first (the strongest signal, used
+  // by callers like the task-watchdog product-bug follow-up path), then fall
+  // back to "same parent + near-identical title" for hand-filed tickets,
+  // which never populate originFingerprint. Shared by both create() and
+  // createChild() (via create()) so every issue-creation path is covered.
+  //
+  // The two match kinds carry different confidence, so callers should treat
+  // them differently (see create()'s use of `matchType`): an explicit
+  // fingerprint match is an exact, low-false-positive signal worth a hard
+  // refuse, but trigram title similarity alone regularly fires on titles
+  // that are similar in wording but describe different work (e.g. "...on
+  // mobile" vs "...on desktop" scores ~0.53, but "...settings page" vs
+  // "...settings screen" scores ~0.74) -- too blunt to hard-block on, so
+  // it's surfaced as a flag/reference instead.
+  async function findOpenDuplicateTicket(
+    companyId: string,
+    params: { parentId?: string | null; title: string; originFingerprint?: string | null },
+  ): Promise<{ ticket: typeof issues.$inferSelect; matchType: "fingerprint" | "title" } | null> {
+    const normalizedTitle = params.title.trim();
+    if (params.originFingerprint && params.originFingerprint !== "default") {
+      const fingerprintMatch = await db
+        .select()
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, companyId),
+            eq(issues.originFingerprint, params.originFingerprint),
+            isNull(issues.hiddenAt),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        )
+        .orderBy(desc(issues.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (fingerprintMatch) return { ticket: fingerprintMatch, matchType: "fingerprint" };
+    }
+    if (!params.parentId || !normalizedTitle) return null;
+    const titleMatch = await db
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.parentId, params.parentId),
+          isNull(issues.hiddenAt),
+          notInArray(issues.status, ["done", "cancelled"]),
+          sql`similarity(lower(${issues.title}), lower(${normalizedTitle})) >= 0.6`,
+        ),
+      )
+      .orderBy(desc(sql`similarity(lower(${issues.title}), lower(${normalizedTitle}))`))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return titleMatch ? { ticket: titleMatch, matchType: "title" } : null;
+  }
+
   async function getIssueByUuid(id: string) {
     const row = await db
       .select()
@@ -5350,6 +5409,8 @@ export function issueService(db: Db) {
       });
     },
 
+    findOpenDuplicateTicket,
+
     create: async (
       companyId: string,
       data: IssueCreateInput,
@@ -5379,6 +5440,31 @@ export function issueService(db: Db) {
       }
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
+      }
+      // DUR-101: an explicit originFingerprint match is a precise, low-noise
+      // signal (see findOpenDuplicateTicket) and is refused outright. A
+      // title-similarity match under the same parent is a weaker heuristic
+      // that regularly fires on legitimately different sibling tickets (e.g.
+      // "...without its own override" vs "...with its own override"), so
+      // instead of blocking creation it's allowed through with a system
+      // comment linking back to the earlier ticket -- flagged, not silent,
+      // per DUR-101 item 4, without false-positive-blocking real work.
+      let titleSimilarityDuplicate: typeof issues.$inferSelect | null = null;
+      if (issueData.title) {
+        const duplicate = await findOpenDuplicateTicket(companyId, {
+          parentId: issueData.parentId ?? null,
+          title: issueData.title,
+          originFingerprint: issueData.originFingerprint ?? null,
+        });
+        if (duplicate?.matchType === "fingerprint") {
+          throw conflict(
+            `An open ticket with the same origin already exists: "${duplicate.ticket.title}" (${duplicate.ticket.identifier}). Continue that one instead of filing a duplicate.`,
+            { existingIssueId: duplicate.ticket.id, existingIssueIdentifier: duplicate.ticket.identifier },
+          );
+        }
+        if (duplicate?.matchType === "title") {
+          titleSimilarityDuplicate = duplicate.ticket;
+        }
       }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
@@ -5566,6 +5652,14 @@ export function issueService(db: Db) {
         );
 
         const [issue] = await tx.insert(issues).values(values).returning();
+        if (titleSimilarityDuplicate) {
+          await tx.insert(issueComments).values({
+            companyId,
+            issueId: issue.id,
+            authorType: "system",
+            body: `Possible duplicate: this ticket's title is very similar to the open ticket "${titleSimilarityDuplicate.title}" (${titleSimilarityDuplicate.identifier}), which shares the same parent. Check that one before duplicating the work -- not blocked automatically because title similarity alone isn't a reliable enough signal to refuse outright.`,
+          });
+        }
         if (watchdog) {
           await upsertIssueWatchdogForIssue(tx, companyId, issue.id, {
             agentId: watchdog.agentId,
