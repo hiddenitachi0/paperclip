@@ -4,7 +4,7 @@ import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { agents, companyAgentRoles } from "@paperclipai/db";
+import { agents } from "@paperclipai/db";
 import { PERMISSION_KEYS } from "@paperclipai/shared";
 import { mcpServerConfigSchema } from "@paperclipai/shared/validators/agent";
 import { validate } from "../middleware/validate.js";
@@ -18,7 +18,6 @@ import {
   copyRoleToCompany,
   assignRoleToAgent,
 } from "../services/agent-roles.js";
-import { notFound, forbidden } from "../errors.js";
 
 // Schema for the {permissionKey, scope} grant shape
 const grantSchema = z.object({

@@ -9,7 +9,7 @@ import {
 } from "@paperclipai/db";
 import type { PermissionKey } from "@paperclipai/shared";
 import { PERMISSION_KEYS } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { notFound, unprocessable } from "../errors.js";
 
 // Derive a URL-safe slug from a human name. Unique within a company is enforced
 // at the DB level; callers that need to disambiguate should append a suffix.
