@@ -108,6 +108,31 @@ import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/t
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+
+async function alertOwningCompanyOfCrossCompanyWriteAttempt(
+  db: Db,
+  req: Request,
+  issue: { id: string; identifier: string | null; title: string; companyId: string },
+  action: string,
+) {
+  if (req.actor.type !== "agent" || req.actor.companyId === issue.companyId) return;
+  await logActivity(db, {
+    companyId: issue.companyId,
+    actorType: "agent",
+    actorId: req.actor.agentId ?? "unknown",
+    agentId: req.actor.agentId ?? null,
+    runId: null,
+    action: "security.cross_company_write_blocked",
+    entityType: "issue",
+    entityId: issue.id,
+    details: {
+      identifier: issue.identifier,
+      issueTitle: issue.title,
+      attemptedAction: action,
+      actorCompanyId: req.actor.companyId,
+    },
+  });
+}
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectIssueWorkspaceCommandPaths,
@@ -7379,6 +7404,7 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    await alertOwningCompanyOfCrossCompanyWriteAttempt(db, req, issue, "create_interaction");
     assertCompanyAccess(req, issue.companyId);
     if (req.actor.type === "agent") {
       if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
@@ -7939,6 +7965,7 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    await alertOwningCompanyOfCrossCompanyWriteAttempt(db, req, issue, "create_comment");
     assertCompanyAccess(req, issue.companyId);
     const commentAccessDecision = await assertAgentIssueCommentAllowed(req, res, issue);
     if (!commentAccessDecision) return;
