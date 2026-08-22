@@ -111,6 +111,7 @@ import { recoveryService } from "../services/recovery/service.js";
 import { resolveCoreTrustPreset } from "../services/trust-preset-resolver.js";
 import { readObject } from "../lib/objects.js";
 import { listInvalidOrgChainDescendantIds } from "../services/agent-invokability.js";
+import { describeToolCapability, diffMcpServers } from "../services/agent-tool-audit.js";
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
@@ -1478,6 +1479,40 @@ export function agentRoutes(
     return details;
   }
 
+  // Any change to an agent's job title (role), display title, or tool
+  // connections (adapterConfig.mcpServers) must be operator-visible in plain
+  // language regardless of who made it -- an agent-authenticated caller can
+  // no longer touch role or mcpServers at all (see assertNoAgentRoleMutation
+  // / assertNoAgentToolConnectionMutation above), but a board-authenticated
+  // (human) caller still can, and today's `changedTopLevelKeys` /
+  // `changedAdapterConfigKeys` summaries only name the fields that changed,
+  // not what actually changed. This attaches the old -> new values (and, for
+  // tool connections, what each added/removed server can reach) so the
+  // activity feed can render a sentence a non-technical operator can read
+  // without opening the diff. Computed from the persisted before/after agent
+  // records rather than the raw patch, so it is correct even when the patch
+  // only partially overlaps the change (e.g. a merge into adapterConfig).
+  function appendAgentAuditDetails(
+    details: Record<string, unknown>,
+    before: { role: string; title: string | null; adapterConfig: unknown },
+    after: { role: string; title: string | null; adapterConfig: unknown },
+  ) {
+    if (before.role !== after.role) {
+      details.roleChange = { from: before.role, to: after.role };
+    }
+    if (before.title !== after.title) {
+      details.titleChange = { from: before.title, to: after.title };
+    }
+    const { added, removed } = diffMcpServers(before.adapterConfig, after.adapterConfig);
+    if (added.length > 0 || removed.length > 0) {
+      details.toolConnectionChange = {
+        added: added.map((server) => ({ name: server.name, capability: describeToolCapability(server) })),
+        removed: removed.map((server) => ({ name: server.name })),
+      };
+    }
+    return details;
+  }
+
   function buildUnsupportedSkillSnapshot(
     adapterType: string,
     desiredSkillEntries: AgentDesiredSkillEntry[] = [],
@@ -2232,7 +2267,7 @@ export function agentRoutes(
       action: "agent.config_rolled_back",
       entityType: "agent",
       entityId: updated.id,
-      details: { revisionId },
+      details: appendAgentAuditDetails({ revisionId }, existing, updated),
     });
 
     res.json(updated);
@@ -2625,6 +2660,24 @@ export function agentRoutes(
       await assertBoardCanManageAgentsForCompany(req, existing.companyId);
     }
 
+    // Capture the pre-change values before mutating so a change to an
+    // agent's rights (permissions) can be reported old value -> new value,
+    // not just the resulting state.
+    const previousExplicitTaskAssignGrant = await access.hasPermission(
+      existing.companyId,
+      "agent",
+      existing.id,
+      "tasks:assign",
+    );
+    const previousCanAssignTasks =
+      existing.role === "ceo" || Boolean(existing.permissions?.canCreateAgents) || previousExplicitTaskAssignGrant;
+    const previousPermissions = {
+      canCreateAgents: existing.permissions?.canCreateAgents ?? false,
+      canCreateSkills: existing.permissions?.canCreateSkills ?? true,
+      canAssignTasks: previousCanAssignTasks,
+      trustPreset: existing.permissions?.trustPreset ?? "standard",
+    };
+
     const agent = await svc.updatePermissions(id, req.body);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
@@ -2658,6 +2711,7 @@ export function agentRoutes(
         canCreateSkills: agent.permissions?.canCreateSkills ?? true,
         canAssignTasks: effectiveCanAssignTasks,
         trustPreset: agent.permissions?.trustPreset ?? "standard",
+        _previous: previousPermissions,
       },
     });
 
@@ -3051,7 +3105,7 @@ export function agentRoutes(
       action: "agent.updated",
       entityType: "agent",
       entityId: agent.id,
-      details: summarizeAgentUpdateDetails(patchData),
+      details: appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
     });
 
     res.json(agent);

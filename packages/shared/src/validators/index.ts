@@ -464,6 +464,7 @@ export {
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
+  toolGrantRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -471,6 +472,7 @@ export {
   type AddApprovalComment,
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
+  type ToolGrantRequestPayload,
 } from "./approval.js";
 
 export {
