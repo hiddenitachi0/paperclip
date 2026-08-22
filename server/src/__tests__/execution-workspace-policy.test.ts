@@ -86,7 +86,21 @@ describe("execution workspace policy helpers", () => {
     });
   });
 
-  it("defaults the fully unconfigured shared_workspace path to git_worktree isolation (DUR-82)", () => {
+  it("defaults the fully unconfigured shared_workspace path to git_worktree isolation for a project-linked issue (DUR-82)", () => {
+    const result = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {},
+      projectPolicy: null,
+      issueSettings: null,
+      mode: "shared_workspace",
+      legacyUseProjectWorkspace: null,
+      issueProjectId: "11111111-1111-4111-8111-111111111111",
+      issueProjectWorkspaceId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(result.workspaceStrategy).toEqual({ type: "git_worktree" });
+  });
+
+  it("does not force git_worktree onto an unconfigured shared_workspace run with no project linkage (DUR-111)", () => {
     const result = buildExecutionWorkspaceAdapterConfig({
       agentConfig: {},
       projectPolicy: null,
@@ -95,7 +109,21 @@ describe("execution workspace policy helpers", () => {
       legacyUseProjectWorkspace: null,
     });
 
-    expect(result.workspaceStrategy).toEqual({ type: "git_worktree" });
+    expect(result.workspaceStrategy).toBeUndefined();
+  });
+
+  it("does not force git_worktree onto a project-workspace-linked issue that is missing its project id (DUR-111)", () => {
+    const result = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {},
+      projectPolicy: null,
+      issueSettings: null,
+      mode: "shared_workspace",
+      legacyUseProjectWorkspace: null,
+      issueProjectId: null,
+      issueProjectWorkspaceId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(result.workspaceStrategy).toBeUndefined();
   });
 
   it("still honors an explicit project_primary policy for shared_workspace (does not force git_worktree)", () => {

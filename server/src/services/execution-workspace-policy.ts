@@ -210,6 +210,8 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
   issueSettings: IssueExecutionWorkspaceSettings | null;
   mode: ParsedExecutionWorkspaceMode;
   legacyUseProjectWorkspace: boolean | null;
+  issueProjectId?: string | null;
+  issueProjectWorkspaceId?: string | null;
 }): Record<string, unknown> {
   const nextConfig = { ...input.agentConfig };
   const projectHasPolicy = Boolean(input.projectPolicy?.enabled);
@@ -246,10 +248,25 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
     // (DUR-75/DUR-82). Default it to git_worktree instead of leaving
     // workspaceStrategy unset, which used to fall through to the shared
     // checkout in realizeExecutionWorkspace's own default.
-    nextConfig.workspaceStrategy = { type: "git_worktree" } satisfies ExecutionWorkspaceStrategy as unknown as Record<
-      string,
-      unknown
-    >;
+    //
+    // Only default to git_worktree when the issue is actually linked to a
+    // project workspace with a resolvable project id — that's the only case
+    // that can suffer the DUR-75 collision (concurrent runs sharing that
+    // project's primary checkout). Issues with no project linkage at all
+    // resolve to a per-agent/per-task-session cwd that was never shared, so
+    // forcing a worktree there would instead try (and likely fail) to
+    // resolve a git repo root that doesn't correspond to any real checkout.
+    // Issues linked to a project workspace but missing a project id are a
+    // separate misconfiguration that must surface the existing friendly
+    // "missing_project_id" validation error later in dispatch
+    // (assertGitSensitiveAdapterWorkspaceValid), not an opaque worktree
+    // setup failure.
+    if (input.issueProjectWorkspaceId && input.issueProjectId) {
+      nextConfig.workspaceStrategy = { type: "git_worktree" } satisfies ExecutionWorkspaceStrategy as unknown as Record<
+        string,
+        unknown
+      >;
+    }
   }
 
   return nextConfig;
