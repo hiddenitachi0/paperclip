@@ -117,6 +117,7 @@ function createAgent(): Agent {
     name: "Routine Agent",
     role: "engineer",
     title: null,
+    avatarAssetId: null,
     status: "active",
     reportsTo: null,
     capabilities: null,

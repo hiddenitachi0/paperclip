@@ -545,6 +545,7 @@ function buildAcpxAgent({
     role: "engineer",
     title: `ACPX ${acpAgent} agent`,
     icon: "code",
+    avatarAssetId: null,
     status: "idle",
     reportsTo: null,
     capabilities: "Routes work through the ACPX adapter for skill-tagged agent flows.",

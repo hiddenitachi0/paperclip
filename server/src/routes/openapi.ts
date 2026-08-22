@@ -683,6 +683,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/issues/{id}/interactions/{interactionId}/accept",
   "POST /api/issues/{id}/interactions/{interactionId}/reject",
   "POST /api/issues/{id}/interactions/{interactionId}/respond",
+  "POST /api/companies/{companyId}/agents/{agentId}/avatar",
+  "DELETE /api/companies/{companyId}/agents/{agentId}/avatar",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -704,6 +706,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/approvals/{id}/comments",
   "POST /api/companies/{companyId}/assets/images",
   "POST /api/companies/{companyId}/logo",
+  "POST /api/companies/{companyId}/agents/{agentId}/avatar",
   "POST /api/cli-auth/challenges",
   "POST /api/board-api-keys",
   "POST /api/companies",
@@ -3396,6 +3399,24 @@ registry.registerPath({
   summary: "Upload company logo",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/agents/{agentId}/avatar",
+  tags: ["assets"],
+  summary: "Upload an agent's avatar picture",
+  request: { params: z.object({ companyId: z.string(), agentId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/companies/{companyId}/agents/{agentId}/avatar",
+  tags: ["assets"],
+  summary: "Clear an agent's avatar picture",
+  request: { params: z.object({ companyId: z.string(), agentId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({

@@ -12,6 +12,7 @@ function makeAgent(): Agent {
     role: "engineer",
     title: "Engineer",
     icon: null,
+    avatarAssetId: null,
     status: "active",
     reportsTo: null,
     capabilities: null,

@@ -48,6 +48,7 @@ function makeAgent(id: string, name: string, role: string): Agent {
     role: role as Agent["role"],
     title: null,
     icon: null,
+    avatarAssetId: null,
     status: "active",
     reportsTo: null,
     capabilities: null,

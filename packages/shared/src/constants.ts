@@ -126,6 +126,18 @@ export const AGENT_ICON_NAMES = [
 ] as const;
 export type AgentIconName = (typeof AGENT_ICON_NAMES)[number];
 
+export const MAX_AGENT_AVATAR_BYTES = 2_000_000;
+
+export const ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "image/svg+xml",
+] as const;
+export type AllowedImageUploadContentType = (typeof ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES)[number];
+
 /**
  * Curated Lucide icon set for projects (PAP-68 part 3).
  *

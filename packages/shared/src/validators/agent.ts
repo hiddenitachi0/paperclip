@@ -156,6 +156,11 @@ export const updateAgentSchema = createAgentSchema
   .partial()
   .extend({
     permissions: z.never().optional(),
+    // Agents may not set their own (or any other agent's) picture through
+    // the general PATCH route — only the dedicated avatar upload/delete
+    // routes (POST/DELETE .../agents/:agentId/avatar) may write this
+    // column. This does not, by itself, fix DUR-55.
+    avatarAssetId: z.never().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
