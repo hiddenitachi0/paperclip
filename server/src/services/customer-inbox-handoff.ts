@@ -152,7 +152,7 @@ async function findDueCandidates(db: Db, now: Date): Promise<CandidateRow[]> {
         isNull(issues.hiddenAt),
         sql`(${agents.runtimeConfig} ->> 'handOffUnhandledAfterMinutes') is not null`,
         sql`(${agents.runtimeConfig} ->> 'handOffUnhandledAfterMinutes')::int > 0`,
-        sql`${issues.createdAt} + ((${agents.runtimeConfig} ->> 'handOffUnhandledAfterMinutes')::int * interval '1 minute') <= ${now}`,
+        sql`${issues.createdAt} + ((${agents.runtimeConfig} ->> 'handOffUnhandledAfterMinutes')::int * interval '1 minute') <= ${now.toISOString()}::timestamptz`,
       ),
     )
     .orderBy(issues.createdAt)
