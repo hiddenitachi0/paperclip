@@ -30,8 +30,10 @@ import {
   buildSelfReviewPassIdempotencyKey,
   buildSelfReviewPassInstruction,
   detectRiskySurfaceFromDiff,
+  detectRiskySurfaceFromDiffContent,
   evaluateSelfReviewDoneGate,
   findExistingSelfReviewPassNoticeCommentForRun,
+  getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
   isSelfReviewPassContext,
   isSelfReviewPassRun,
@@ -206,6 +208,46 @@ describe("detectRiskySurfaceFromDiff", () => {
   });
 });
 
+describe("detectRiskySurfaceFromDiffContent", () => {
+  it("returns no categories for an ordinary diff", () => {
+    const diff = ["diff --git a/foo.ts b/foo.ts", "+++ b/foo.ts", "+export const widgetCount = 3;"].join("\n");
+    expect(detectRiskySurfaceFromDiffContent(diff)).toEqual([]);
+  });
+
+  it("returns an empty array for empty diff content", () => {
+    expect(detectRiskySurfaceFromDiffContent("")).toEqual([]);
+  });
+
+  // DUR-91: this is exactly the DUR-67 blind spot -- codex-home.ts/runtime-config.ts match no
+  // filename pattern, but the added lines strip an mcp_servers block whose env can carry secrets.
+  it("flags secrets/mcp content in an added line even when the file path is generic", () => {
+    const diff = [
+      "diff --git a/packages/adapters/codex-local/src/server/codex-home.ts b/packages/adapters/codex-local/src/server/codex-home.ts",
+      "+++ b/packages/adapters/codex-local/src/server/codex-home.ts",
+      "-const config = readToml(source);",
+      "+const config = stripMcpServersBlocks(readToml(source)); // mcp_servers env may carry secrets",
+    ].join("\n");
+    const categories = detectRiskySurfaceFromDiffContent(diff);
+    expect(categories).toEqual(
+      expect.arrayContaining(["agent_configuration", "secrets_or_credentials"]),
+    );
+  });
+
+  it("ignores the '+++ b/path' file header line so a risky filename alone doesn't trigger a content match", () => {
+    const diff = ["diff --git a/server/src/services/secrets.ts b/server/src/services/secrets.ts", "+++ b/server/src/services/secrets.ts", "+export const NOTHING_RISKY = 1;"].join(
+      "\n",
+    );
+    expect(detectRiskySurfaceFromDiffContent(diff)).toEqual([]);
+  });
+
+  it("ignores removed and context lines, only scanning added lines", () => {
+    const diff = ["diff --git a/foo.ts b/foo.ts", "+++ b/foo.ts", "-const secretToken = getSecret();", " const unrelated = 1;", "+const ok = 2;"].join(
+      "\n",
+    );
+    expect(detectRiskySurfaceFromDiffContent(diff)).toEqual([]);
+  });
+});
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -254,9 +296,11 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
   /**
    * A real temp git checkout with a base ref ("base") and a HEAD commit that changed
    * `changedFilePath` -- so getChangedFilePathsForIssueWorkspace/detectRiskySurfaceFromDiff
-   * run against an actual diff, not a stubbed file list.
+   * run against an actual diff, not a stubbed file list. `content` defaults to an innocuous
+   * line; pass a risky one to exercise the DUR-91 content-based signal for a generically
+   * named file.
    */
-  async function createTempRepoWithChange(changedFilePath: string) {
+  async function createTempRepoWithChange(changedFilePath: string, content = "// change under test\n") {
     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-self-review-gate-"));
     tempDirs.add(repoRoot);
     await runGit(repoRoot, ["init"]);
@@ -270,7 +314,7 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
 
     const targetPath = path.join(repoRoot, changedFilePath);
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
-    await fs.writeFile(targetPath, "// change under test\n", "utf8");
+    await fs.writeFile(targetPath, content, "utf8");
     await runGit(repoRoot, ["add", changedFilePath]);
     await runGit(repoRoot, ["commit", "-m", "Work for this issue"]);
 
@@ -509,9 +553,9 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
   });
 
   describe("risky-surface detection reads the real diff of the issue's workspace", () => {
-    async function seedIssueWithWorkspace(input: { changedFilePath: string }) {
+    async function seedIssueWithWorkspace(input: { changedFilePath: string; content?: string }) {
       const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
-      const repoRoot = await createTempRepoWithChange(input.changedFilePath);
+      const repoRoot = await createTempRepoWithChange(input.changedFilePath, input.content);
       const executionWorkspaceId = randomUUID();
       await db.insert(executionWorkspaces).values({
         id: executionWorkspaceId,
@@ -595,6 +639,43 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       expect(comments[0]?.body).toContain(
         "- Check that every requirement in the description is actually met, not just partially addressed.",
       );
+    });
+
+    it("DUR-91: adds the adversarial questions for a risky change in a generically-named file, driven by diff content -- the DUR-67 blind spot", async () => {
+      // Neither the file path nor anything about it matches RISKY_SURFACE_PATTERNS -- only
+      // the added line's content (mcp_servers/secret literals) does. Reproduces the exact gap
+      // DUR-67 slipped through: detectRiskySurfaceFromDiff(["server/src/adapter-home.ts"]) alone
+      // would return [].
+      const { companyId, projectId, agentId, issueId, runId } = await seedIssueWithWorkspace({
+        changedFilePath: "server/src/adapter-home.ts",
+        content: "export function stripMcpServersBlocks(toml) {\n  // mcp_servers env can carry secrets\n  return toml;\n}\n",
+      });
+      const { wakeup } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(result?.message).toContain("agent configuration");
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("risky surface");
+      expect(comments[0]?.body).toContain("If a dishonest agent wanted to abuse this change");
+    });
+
+    it("reads the full added-line diff content for a real diff via git", async () => {
+      const { companyId, issueId } = await seedIssueWithWorkspace({
+        changedFilePath: "server/src/adapter-home.ts",
+        content: "// mcp_servers secret handling\n",
+      });
+      const diffContent = await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId });
+      expect(diffContent).toContain("+// mcp_servers secret handling");
     });
 
     it("DUR-83: still detects the risky surface after the assignee clears issue.executionWorkspaceId, because detection resolves the workspace by execution_workspaces.sourceIssueId, not the mutable issue column", async () => {

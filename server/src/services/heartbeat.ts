@@ -171,7 +171,9 @@ import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-
 import {
   buildSelfReviewPassInstruction,
   detectRiskySurfaceFromDiff,
+  detectRiskySurfaceFromDiffContent,
   findExistingSelfReviewPassNoticeCommentForRun,
+  getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
   issueExecutionPolicyOptsOutOfSelfReview,
   issueProjectHasGitWorkspace,
@@ -7017,12 +7019,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // (for handoffs that skip the synchronous PATCH gate) gets the same diff-driven
             // adversarial questions on a risky surface as the synchronous gate does — otherwise
             // a risky change that lands via this path would only ever get the confirmatory
-            // prompt.
-            const changedFilePaths = await getChangedFilePathsForIssueWorkspace(db, {
-              companyId: issue.companyId,
-              issueId: issue.id,
-            });
-            const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
+            // prompt. DUR-91: also checks the diff content (not just changed file paths), so a
+            // risky change in a generically-named file gets caught here too.
+            const [changedFilePaths, diffContent] = await Promise.all([
+              getChangedFilePathsForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
+              getChangedDiffContentForIssueWorkspace(db, { companyId: issue.companyId, issueId: issue.id }),
+            ]);
+            const riskySurfaceCategories = [
+              ...new Set([
+                ...(changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : []),
+                ...(diffContent ? detectRiskySurfaceFromDiffContent(diffContent) : []),
+              ]),
+            ];
             const noticeBody = buildSelfReviewPassInstruction({
               issueIdentifier: issue.identifier,
               alreadyHandedOff: true,
