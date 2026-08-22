@@ -1,6 +1,7 @@
 import type { Request } from "express";
 import { forbidden, unauthorized } from "../errors.js";
 import type { accessService } from "../services/access.js";
+import { logger } from "../middleware/logger.js";
 
 export function assertAuthenticated(req: Request) {
   if (req.actor.type === "none") {
@@ -54,6 +55,15 @@ export function assertInstanceAdmin(req: Request) {
 export function assertCompanyAccess(req: Request, companyId: string) {
   assertAuthenticated(req);
   if (req.actor.type === "agent" && req.actor.companyId !== companyId) {
+    logger.error({
+      event: "security.cross_company_write_blocked",
+      actorType: "agent",
+      actorAgentId: req.actor.agentId ?? null,
+      actorCompanyId: req.actor.companyId,
+      targetCompanyId: companyId,
+      method: req.method,
+      path: req.originalUrl ?? req.path,
+    }, "Refused a cross-company write attempt: agent key does not belong to the target company");
     throw forbidden("Agent key cannot access another company");
   }
   if (req.actor.type === "board" && req.actor.source !== "local_implicit") {
