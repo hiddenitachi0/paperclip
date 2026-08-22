@@ -454,6 +454,45 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
     });
 
+    // DUR-109: DUR-69's "MEASURED" section flagged this rollback route as an
+    // open gap for the instructions-bundle keys specifically -- closed by
+    // DUR-57 (assertAgentSelfUpdateRollbackAllowed reduces the rollback to
+    // the same assertAgentSelfUpdateAllowed the PATCH path uses), but nothing
+    // proved that for these five keys before this test. Mirrors the
+    // mcpServers rollback test above, for adapterConfig.instructionsFilePath
+    // and .instructionsBundleMode instead.
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different instructions bundle path", async () => {
+      mockRevision({
+        ...baseAgent,
+        adapterConfig: {
+          instructionsBundleMode: "external",
+          instructionsFilePath: "/etc/passwd",
+        },
+      });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("still allows a board-authenticated caller to roll back to a revision that restores an instructions bundle path", async () => {
+      mockRevision({
+        ...baseAgent,
+        adapterConfig: {
+          instructionsBundleMode: "external",
+          instructionsFilePath: "/etc/passwd",
+        },
+      });
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
     // DUR-57: rollback restores a revision's snapshot wholesale, so it must be checked against the SAME
     // allow-list the PATCH route uses (see assertAgentSelfUpdateRollbackAllowed in routes/agents.ts) —
     // otherwise an agent could use rollback to restore a reportsTo/budgetMonthlyCents value it could
