@@ -5922,7 +5922,6 @@ export function issueRoutes(
         companyId: existing.companyId,
         projectId: existing.projectId,
         executionPolicy: existing.executionPolicy,
-        executionWorkspaceId: existing.executionWorkspaceId ?? null,
       },
       actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
       requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,

@@ -531,23 +531,23 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     }
 
     it("reads the changed file paths for a real diff via git", async () => {
-      const { companyId, executionWorkspaceId } = await seedIssueWithWorkspace({
+      const { companyId, issueId } = await seedIssueWithWorkspace({
         changedFilePath: "server/src/services/authorization.ts",
       });
-      const changedFiles = await getChangedFilePathsForIssueWorkspace(db, { companyId, executionWorkspaceId });
+      const changedFiles = await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId });
       expect(changedFiles).toEqual(["server/src/services/authorization.ts"]);
     });
 
     it("returns null (not empty) when there's no execution workspace on the issue, so callers can't mistake 'couldn't check' for 'checked, found nothing'", async () => {
       const changedFiles = await getChangedFilePathsForIssueWorkspace(db, {
         companyId: randomUUID(),
-        executionWorkspaceId: null,
+        issueId: null,
       });
       expect(changedFiles).toBeNull();
     });
 
     it("gets ONLY the ordinary confirmatory prompt for a change that doesn't touch a risky surface, from a real diff read", async () => {
-      const { companyId, projectId, agentId, issueId, runId, executionWorkspaceId } = await seedIssueWithWorkspace({
+      const { companyId, projectId, agentId, issueId, runId } = await seedIssueWithWorkspace({
         changedFilePath: "ui/src/components/WidgetCard.tsx",
       });
       const { wakeup } = makeRecordingWakeup(db, companyId);
@@ -555,7 +555,7 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       await evaluateSelfReviewDoneGate({
         db,
         wakeup,
-        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null, executionWorkspaceId },
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
         actor: { actorType: "agent", agentId, runId },
         requestedStatus: "done",
         currentStatus: "in_progress",
@@ -568,7 +568,7 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     });
 
     it("adds the adversarial questions when the diff touches a risky surface -- driven by the diff, not the agent's own say-so", async () => {
-      const { companyId, projectId, agentId, issueId, runId, executionWorkspaceId } = await seedIssueWithWorkspace({
+      const { companyId, projectId, agentId, issueId, runId } = await seedIssueWithWorkspace({
         changedFilePath: "server/src/services/authorization.ts",
       });
       const { wakeup } = makeRecordingWakeup(db, companyId);
@@ -578,7 +578,7 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
         wakeup,
         // Note: the actor/caller never asserts riskiness themselves -- there is no "isRisky"
         // input anywhere here. The gate must derive it itself from the workspace's diff.
-        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null, executionWorkspaceId },
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
         actor: { actorType: "agent", agentId, runId },
         requestedStatus: "done",
         currentStatus: "in_progress",
@@ -597,6 +597,27 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       );
     });
 
+    it("DUR-83: still detects the risky surface after the assignee clears issue.executionWorkspaceId, because detection resolves the workspace by execution_workspaces.sourceIssueId, not the mutable issue column", async () => {
+      const { companyId, projectId, agentId, issueId, runId } = await seedIssueWithWorkspace({
+        changedFilePath: "server/src/services/authorization.ts",
+      });
+      // Simulate exactly the bypass DUR-83 describes: a plain field-only PATCH that clears
+      // the issue's own executionWorkspaceId pointer without touching status.
+      await db.update(issues).set({ executionWorkspaceId: null }).where(eq(issues.id, issueId));
+      const { wakeup } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(result?.message).toContain("authorization or permissions");
+    });
+
     it("falls back to the ordinary-only prompt when the workspace path can't actually be read (never guesses risky)", async () => {
       const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
       const executionWorkspaceId = randomUUID();
@@ -611,13 +632,14 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
         providerType: "local_fs",
         cwd: "/nonexistent/paperclip-self-review-gate-test-path",
         baseRef: "base",
+        sourceIssueId: issueId,
       });
       const { wakeup } = makeRecordingWakeup(db, companyId);
 
       await evaluateSelfReviewDoneGate({
         db,
         wakeup,
-        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null, executionWorkspaceId },
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
         actor: { actorType: "agent", agentId, runId },
         requestedStatus: "done",
         currentStatus: "in_progress",

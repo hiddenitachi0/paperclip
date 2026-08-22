@@ -6981,7 +6981,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         executionState: issues.executionState,
         executionPolicy: issues.executionPolicy,
         projectId: issues.projectId,
-        executionWorkspaceId: issues.executionWorkspaceId,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
@@ -7020,7 +7019,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // prompt.
             const changedFilePaths = await getChangedFilePathsForIssueWorkspace(db, {
               companyId: issue.companyId,
-              executionWorkspaceId: issue.executionWorkspaceId ?? null,
+              issueId: issue.id,
             });
             const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
             const noticeBody = buildSelfReviewPassInstruction({
