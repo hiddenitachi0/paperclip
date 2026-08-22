@@ -153,6 +153,7 @@ import {
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
+import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -5979,6 +5980,21 @@ export function issueRoutes(
     });
     if (goalConditionGateResult) {
       res.status(409).json({ error: goalConditionGateResult.message });
+      return;
+    }
+    // DUR-99: composes with the two gates above -- self-review and the goal-condition judge
+    // both ask "is the WORK actually finished"; this asks a narrower, purely mechanical
+    // question -- "if the only completing action was a merge into the deploy branch, did that
+    // change actually go live" -- so it belongs last, right before the disposition check.
+    const deployCompletionGateResult = await evaluateDeployCompletionDoneGate({
+      db,
+      issue: { id: existing.id, identifier: existing.identifier, companyId: existing.companyId },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (deployCompletionGateResult) {
+      res.status(409).json({ error: deployCompletionGateResult.message });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =
