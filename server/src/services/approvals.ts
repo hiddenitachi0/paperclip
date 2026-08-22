@@ -1,7 +1,11 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvalComments, approvals } from "@paperclipai/db";
-import { modelBoostRequestPayloadSchema, toolGrantRequestPayloadSchema } from "@paperclipai/shared";
+import {
+  instructionProposalPayloadSchema,
+  modelBoostRequestPayloadSchema,
+  toolGrantRequestPayloadSchema,
+} from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
@@ -10,6 +14,7 @@ import { escalationGrantService } from "./escalation-grants.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
+import { agentInstructionsService } from "./agent-instructions.js";
 
 function isModelBoostApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
   return approval.type === "request_board_approval" && approval.payload?.kind === "model_boost";
@@ -17,6 +22,10 @@ function isModelBoostApproval(approval: Pick<typeof approvals.$inferSelect, "typ
 
 function isToolGrantApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
   return approval.type === "request_board_approval" && approval.payload?.kind === "tool_grant";
+}
+
+function isInstructionProposalApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "propose_instruction_change";
 }
 
 export interface ToolGrantApplyResult {
@@ -302,6 +311,32 @@ export function approvalService(db: Db) {
             serverName: payload.server.name,
             capability: describeToolCapability(summary),
           };
+        }
+      }
+
+      if (applied && isInstructionProposalApproval(updated)) {
+        const payload = instructionProposalPayloadSchema.parse(updated.payload);
+        const targetAgent = await agentsSvc.getById(payload.targetAgentId);
+        if (targetAgent) {
+          const instructionsSvc = agentInstructionsService();
+          const result = await instructionsSvc.writeFile(
+            targetAgent,
+            payload.entryFile,
+            payload.proposedContent,
+          );
+          // Record a revision naming both the proposing boss and the approver,
+          // and stamp instructionsLastReviewedAt so staleness resets.
+          await agentsSvc.update(
+            targetAgent.id,
+            { adapterConfig: result.adapterConfig, instructionsLastReviewedAt: new Date() },
+            {
+              recordRevision: {
+                createdByAgentId: payload.proposerAgentId,
+                createdByUserId: decidedByUserId,
+                source: "instruction_proposal_approved",
+              },
+            },
+          );
         }
       }
 

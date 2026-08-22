@@ -34,6 +34,8 @@ export const instanceGeneralSettingsSchema = z.object({
   // Execution policy. Absent/"any" = unrestricted; "kubernetes" forces the
   // Kubernetes sandbox provider and denies local/ssh execution (cloud_tenant).
   executionMode: z.enum(["kubernetes", "any"]).optional(),
+  // DUR-69: how many days before an agent's instructions are considered stale.
+  instructionsStalenessThresholdDays: z.number().int().positive().default(60),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();

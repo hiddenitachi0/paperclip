@@ -228,6 +228,7 @@ export {
   agentInstructionsBundleModeSchema,
   updateAgentInstructionsBundleSchema,
   upsertAgentInstructionsFileSchema,
+  proposeAgentInstructionsSchema,
   updateAgentInstructionsPathSchema,
   agentApiKeyScopeSchema,
   normalizeAgentApiKeyScope,
@@ -465,6 +466,7 @@ export {
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
+  instructionProposalPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -473,6 +475,7 @@ export {
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
+  type InstructionProposalPayload,
 } from "./approval.js";
 
 export {

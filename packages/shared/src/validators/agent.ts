@@ -46,6 +46,13 @@ export const upsertAgentInstructionsFileSchema = z.object({
 
 export type UpsertAgentInstructionsFile = z.infer<typeof upsertAgentInstructionsFileSchema>;
 
+export const proposeAgentInstructionsSchema = z.object({
+  proposedContent: z.string().min(1),
+  reason: z.string().trim().min(1),
+});
+
+export type ProposeAgentInstructions = z.infer<typeof proposeAgentInstructionsSchema>;
+
 // A single MCP (Model Context Protocol) server definition. Cross-adapter
 // shape: stdio servers (`command`, spawned locally) and remote servers
 // (`url`, http/sse) are both representable here, but individual adapters may

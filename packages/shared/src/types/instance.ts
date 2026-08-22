@@ -42,6 +42,8 @@ export interface InstanceGeneralSettings {
    * Kubernetes sandbox provider and denies local/ssh execution.
    */
   executionMode?: InstanceExecutionMode;
+  /** Days before an agent's instructions are considered stale (default: 60). */
+  instructionsStalenessThresholdDays: number;
 }
 
 export interface InstanceExperimentalSettings {

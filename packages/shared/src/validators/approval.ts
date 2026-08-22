@@ -108,3 +108,25 @@ export const toolGrantRequestPayloadSchema = z
   .strict();
 
 export type ToolGrantRequestPayload = z.infer<typeof toolGrantRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload for a boss proposing new instructions for a
+ * direct report (DUR-69). Approving applies the instructions immediately.
+ * Rejecting changes nothing. "Send back for changes" uses request-revision
+ * with a note the boss can read.
+ */
+export const instructionProposalPayloadSchema = z
+  .object({
+    kind: z.literal("propose_instruction_change"),
+    targetAgentId: z.string().uuid(),
+    proposerAgentId: z.string().uuid(),
+    entryFile: z.string().min(1),
+    currentContent: z.string(),
+    proposedContent: z.string().min(1),
+    reason: multilineTextSchema.pipe(z.string().trim().min(1)),
+    title: z.string().min(1),
+    summary: multilineTextSchema,
+  })
+  .strict();
+
+export type InstructionProposalPayload = z.infer<typeof instructionProposalPayloadSchema>;

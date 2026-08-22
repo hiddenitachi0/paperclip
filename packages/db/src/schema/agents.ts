@@ -39,6 +39,7 @@ export const agents = pgTable(
     // in the migration SQL instead (see 0132_agent_avatar.sql).
     avatarAssetId: uuid("avatar_asset_id"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+    instructionsLastReviewedAt: timestamp("instructions_last_reviewed_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

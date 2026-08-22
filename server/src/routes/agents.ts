@@ -20,6 +20,7 @@ import {
   type AgentSkillSnapshot,
   type InstanceSchedulerHeartbeatAgent,
   upsertAgentInstructionsFileSchema,
+  proposeAgentInstructionsSchema,
   updateAgentInstructionsBundleSchema,
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
@@ -574,15 +575,29 @@ export function agentRoutes(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
     options?: { restricted?: boolean },
   ) {
-    const [chainOfCommand, accessState] = await Promise.all([
+    const [chainOfCommand, accessState, generalSettings] = await Promise.all([
       svc.getChainOfCommand(agent.id),
       buildAgentAccessState(agent),
+      instanceSettings.getGeneral(),
     ]);
+
+    const thresholdDays = generalSettings.instructionsStalenessThresholdDays ?? 60;
+    const lastReviewedAt = agent.instructionsLastReviewedAt ?? null;
+    const daysSinceReview = lastReviewedAt
+      ? Math.floor((Date.now() - new Date(lastReviewedAt).getTime()) / 86_400_000)
+      : null;
+    const instructionsStaleness = {
+      lastReviewedAt,
+      daysSinceReview,
+      thresholdDays,
+      isStale: daysSinceReview === null || daysSinceReview >= thresholdDays,
+    };
 
     return {
       ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
       chainOfCommand,
       access: accessState,
+      instructionsStaleness,
     };
   }
 
@@ -2922,7 +2937,7 @@ export function agentRoutes(
     );
     await svc.update(
       id,
-      { adapterConfig: normalizedAdapterConfig },
+      { adapterConfig: normalizedAdapterConfig, instructionsLastReviewedAt: new Date() },
       {
         recordRevision: {
           createdByAgentId: actor.agentId,
@@ -2983,6 +2998,108 @@ export function agentRoutes(
     });
 
     res.json(result.bundle);
+  });
+
+  // DUR-69: a boss proposes replacement instructions for a direct report.
+  // The proposal creates a board approval — nothing changes until Filip approves.
+  // A boss may not propose for itself. Only agent-authenticated callers may file.
+  router.post("/agents/:id/instruction-proposals", validate(proposeAgentInstructionsSchema), async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId) {
+      res.status(403).json({ error: "Only agent-authenticated callers may propose instruction changes" });
+      return;
+    }
+    const targetId = req.params.id as string;
+    const target = await svc.getById(targetId);
+    if (!target) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    assertCompanyAccess(req, target.companyId);
+
+    const proposerAgentId = req.actor.agentId;
+    if (proposerAgentId === targetId) {
+      res.status(403).json({ error: "A boss may not propose instruction changes for itself" });
+      return;
+    }
+    // Caller must be the direct boss of the target
+    if (target.reportsTo !== proposerAgentId) {
+      res.status(403).json({ error: "Only the agent's direct boss may propose instruction changes for it" });
+      return;
+    }
+
+    const { proposedContent, reason } = req.body as { proposedContent: string; reason: string };
+
+    // Read the current entry file for the before-and-after display
+    const bundle = await instructions.getBundle(target);
+    const entryFile = bundle.entryFile ?? "AGENTS.md";
+    let currentContent = "";
+    try {
+      const fileDetail = await instructions.readFile(target, entryFile);
+      currentContent = fileDetail.content ?? "";
+    } catch {
+      currentContent = "";
+    }
+
+    const proposerAgent = await svc.getById(proposerAgentId);
+    const proposerName = proposerAgent?.name ?? proposerAgentId;
+    const targetName = target.name;
+
+    const diffSummary = currentContent.trim().length > 0
+      ? `Current instructions (${currentContent.length} chars) → proposed (${proposedContent.length} chars)`
+      : `No existing instructions → proposed (${proposedContent.length} chars)`;
+
+    const approvalTitle = `${proposerName} proposes new instructions for ${targetName}`;
+    const approvalSummary =
+      `**Why:** ${reason}\n\n` +
+      `**Agent:** ${targetName} (${targetId})\n` +
+      `**Proposed by:** ${proposerName}\n\n` +
+      `**Change:** ${diffSummary}\n\n` +
+      `**Before:**\n\`\`\`\n${currentContent.slice(0, 1500)}${currentContent.length > 1500 ? "\n…(truncated)" : ""}\n\`\`\`\n\n` +
+      `**After:**\n\`\`\`\n${proposedContent.slice(0, 1500)}${proposedContent.length > 1500 ? "\n…(truncated)" : ""}\n\`\`\`\n\n` +
+      `Approving applies the new instructions immediately. ` +
+      `Use "Send back for changes" to return the proposal with notes — the agent will be notified.`;
+
+    const actor = getActorInfo(req);
+    const approval = await approvalsSvc.create(target.companyId, {
+      type: "request_board_approval",
+      requestedByAgentId: proposerAgentId,
+      requestedByUserId: null,
+      payload: {
+        kind: "propose_instruction_change",
+        targetAgentId: targetId,
+        proposerAgentId,
+        entryFile,
+        currentContent,
+        proposedContent,
+        reason,
+        title: approvalTitle,
+        summary: approvalSummary,
+      },
+      status: "pending",
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      updatedAt: new Date(),
+    });
+
+    await logActivity(db, {
+      companyId: target.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.instruction_proposal_filed",
+      entityType: "agent",
+      entityId: targetId,
+      details: {
+        proposerAgentId,
+        approvalId: approval.id,
+        entryFile,
+        reason,
+      },
+    });
+
+    res.status(201).json(approval);
   });
 
   router.patch("/agents/:id", validate(updateAgentSchema), async (req, res) => {

@@ -427,6 +427,22 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
     });
 
+    // DUR-69: the rollback route must also refuse an agent-authenticated caller
+    // from restoring instructionsFilePath (or any other instruction bundle key),
+    // completing the "agent may never change its own instructions" rule.
+    it("rejects an agent-authenticated caller rolling back to a revision that restores instructionsFilePath", async () => {
+      mockRevision({
+        ...baseAgent,
+        adapterConfig: { instructionsFilePath: "/home/agent/different-instructions.md" },
+      });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
     it("rejects an agent-authenticated caller rolling back to a revision that restores a tool connection", async () => {
       mockRevision({
         ...baseAgent,
