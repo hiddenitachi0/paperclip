@@ -109,6 +109,7 @@ import { Identity } from "./Identity";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
 import { IssueThreadInteractionCard } from "./IssueThreadInteractionCard";
 import { AgentIcon } from "./AgentIconPicker";
+import { AgentAvatar } from "./AgentAvatar";
 import {
   AssigneeChip,
   ComposerHandoffPreviewRow,
@@ -1629,7 +1630,8 @@ function IssueChatAssistantMessage({
   const runAgentId = typeof custom.runAgentId === "string" ? custom.runAgentId : null;
   const runStatus = typeof custom.runStatus === "string" ? custom.runStatus : null;
   const agentId = authorAgentId ?? runAgentId;
-  const agentIcon = agentId ? agentMap?.get(agentId)?.icon : undefined;
+  const agent = agentId ? agentMap?.get(agentId) : undefined;
+  const agentIcon = agent?.icon;
   const commentId = typeof custom.commentId === "string" ? custom.commentId : null;
   const sourceTrust = isSourceTrustMetadata(custom.sourceTrust) ? custom.sourceTrust : null;
   const notices = Array.isArray(custom.notices)
@@ -1688,13 +1690,7 @@ function IssueChatAssistantMessage({
     kind === "comment" && !!commentId && !isRunning && (hasCommentText || deleted);
 
   const agentAvatar = (
-    <Avatar size="sm" className="shrink-0">
-      {agentIcon ? (
-        <AvatarFallback><AgentIcon icon={agentIcon} className="h-3.5 w-3.5" /></AvatarFallback>
-      ) : (
-        <AvatarFallback>{initialsForName(authorName)}</AvatarFallback>
-      )}
-    </Avatar>
+    <AgentAvatar agent={agent} size="sm" className="shrink-0" iconClassName="h-3.5 w-3.5" />
   );
 
   const messageActionBar = (
@@ -1809,13 +1805,7 @@ function IssueChatAssistantMessage({
           {/* Icon + name together in a header ABOVE the bubble (PAP-95 rev 7). */}
           <div className="mb-1 flex items-center gap-1.5 px-1">
             <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
-              {agentIcon ? (
-                <AgentIcon icon={agentIcon} className="h-4 w-4" />
-              ) : (
-                <Avatar size="sm" className="size-5">
-                  <AvatarFallback className="text-[10px]">{initialsForName(authorName)}</AvatarFallback>
-                </Avatar>
-              )}
+              <AgentAvatar agent={agent} size="xs" iconClassName="h-4 w-4" />
             </span>
             <span className="text-sm font-medium text-foreground">{authorName}</span>
             <SourceTrustBadge sourceTrust={sourceTrust} artifactLabel="comment" />

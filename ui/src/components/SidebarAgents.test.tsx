@@ -330,6 +330,19 @@ describe("SidebarAgents", () => {
     expect(container.querySelector('button[aria-label="Agents section actions"]')).toBeNull();
   });
 
+  it("renders the agent's symbol when avatar_asset_id is null (fixture, not a live row)", async () => {
+    mockAgentsApi.list.mockResolvedValue([
+      makeAgent({ id: "agent-fixture", name: "Fixture Agent", urlKey: "fixture-agent", icon: "rocket" }),
+    ]);
+
+    await renderSidebarAgents();
+
+    const fallback = container.querySelector('[data-slot="avatar-fallback"]');
+    expect(fallback).toBeTruthy();
+    expect(fallback?.querySelector("svg")).toBeTruthy();
+    expect(container.querySelector('[data-slot="avatar-image"]')).toBeNull();
+  });
+
   it("keeps top mode in stored org-aware order", async () => {
     localStorage.setItem("paperclip.agentOrder:company-1:user-1", JSON.stringify(["agent-b", "agent-a", "agent-c"]));
     mockAgentsApi.list.mockResolvedValue([

@@ -1,5 +1,6 @@
 import type { AssetImage } from "@paperclipai/shared";
 import { api } from "./client";
+import { downscaleAvatarImage } from "../lib/downscale-image";
 
 export const assetsApi = {
   uploadImage: async (companyId: string, file: File, namespace?: string) => {
@@ -26,4 +27,17 @@ export const assetsApi = {
     form.append("file", safeFile);
     return api.postForm<AssetImage>(`/companies/${companyId}/logo`, form);
   },
+
+  uploadAgentAvatar: async (companyId: string, agentId: string, file: File) => {
+    const shrunk = await downscaleAvatarImage(file);
+    const buffer = await shrunk.arrayBuffer();
+    const safeFile = new File([buffer], shrunk.name, { type: shrunk.type });
+
+    const form = new FormData();
+    form.append("file", safeFile);
+    return api.postForm<AssetImage>(`/companies/${companyId}/agents/${agentId}/avatar`, form);
+  },
+
+  deleteAgentAvatar: (companyId: string, agentId: string) =>
+    api.delete<void>(`/companies/${companyId}/agents/${agentId}/avatar`),
 };

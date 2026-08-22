@@ -42,7 +42,7 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { AGENT_ICON_NAMES, type AgentIconName } from "@paperclipai/shared";
+import { AGENT_ICON_NAMES, agentAvatarUrl as sharedAgentAvatarUrl, type AgentIconName } from "@paperclipai/shared";
 
 export const AGENT_ICONS: Record<AgentIconName, LucideIcon> = {
   bot: Bot,
@@ -95,4 +95,14 @@ export function getAgentIcon(iconName: string | null | undefined): LucideIcon {
     return AGENT_ICONS[iconName as AgentIconName];
   }
   return AGENT_ICONS[DEFAULT_ICON];
+}
+
+// Permissive over the real `Agent` shape: callers here (sidebar rows, org
+// chart cards, chat-thread avatars) often only have a partial/nullable agent
+// on hand. Delegates URL construction to the shared implementation so the
+// two never drift.
+export function agentAvatarUrl(
+  agent: { avatarAssetId?: string | null } | null | undefined,
+): string | null {
+  return agent?.avatarAssetId ? sharedAgentAvatarUrl({ avatarAssetId: agent.avatarAssetId }) : null;
 }

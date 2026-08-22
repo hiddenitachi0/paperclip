@@ -319,6 +319,15 @@ describe("OrgChart mobile tree view", () => {
     expect(container.textContent).toContain("Engineer");
   });
 
+  it("renders each fixture agent's symbol (avatar_asset_id null) instead of a picture", async () => {
+    await renderOrgChart();
+
+    // Fixture agents (not live production rows) — both lack an avatar picture.
+    const symbols = container.querySelectorAll('[data-testid="agent-icon"]');
+    expect(symbols.length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector('[data-slot="avatar-image"]')).toBeNull();
+  });
+
   it("collapses and re-expands a node's reports", async () => {
     await renderOrgChart();
 
