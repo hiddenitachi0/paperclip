@@ -2,9 +2,9 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { agentAvatarUrl } from "../lib/agent-icons";
 import { AgentIcon } from "./AgentIconPicker";
 
-// Structural rather than `Agent`-typed so this compiles ahead of the sibling
-// backend change that adds `avatarAssetId` to the shared `Agent` type. Real
-// `Agent` values satisfy this shape unchanged once that lands.
+// Structural rather than `Agent`-typed: callers (sidebar rows, org chart
+// cards, chat-thread avatars) often only have a partial/nullable agent-like
+// object on hand, not a full `Agent`.
 interface AgentAvatarSource {
   icon?: string | null;
   avatarAssetId?: string | null;
