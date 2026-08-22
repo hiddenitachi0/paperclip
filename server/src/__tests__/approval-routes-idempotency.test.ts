@@ -39,6 +39,10 @@ const mockEscalationGrantService = vi.hoisted(() => ({
   getForIssue: vi.fn(),
 }));
 
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
@@ -47,6 +51,7 @@ const mockAccessService = vi.hoisted(() => ({
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
+    agentService: () => mockAgentService,
     approvalService: () => mockApprovalService,
     escalationGrantService: () => mockEscalationGrantService,
     heartbeatService: () => mockHeartbeatService,

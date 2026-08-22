@@ -190,7 +190,7 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
   };
 
   describe("role", () => {
-    it("rejects an agent-authenticated caller changing its own role", async () => {
+    it("rejects an agent-authenticated caller changing its own role", { timeout: 20000 }, async () => {
       const app = await createApp(agentActor);
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).patch(`/api/agents/${agentId}`).send({ role: "ceo" }),

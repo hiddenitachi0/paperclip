@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvalComments, approvals } from "@paperclipai/db";
-import { modelBoostRequestPayloadSchema } from "@paperclipai/shared";
+import { modelBoostRequestPayloadSchema, toolGrantRequestPayloadSchema } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
@@ -9,9 +9,21 @@ import { budgetService } from "./budgets.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
 
 function isModelBoostApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
   return approval.type === "request_board_approval" && approval.payload?.kind === "model_boost";
+}
+
+function isToolGrantApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "tool_grant";
+}
+
+export interface ToolGrantApplyResult {
+  agentId: string;
+  companyId: string;
+  serverName: string;
+  capability: string;
 }
 
 export function approvalService(db: Db) {
@@ -22,7 +34,7 @@ export function approvalService(db: Db) {
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
   type ApprovalRecord = typeof approvals.$inferSelect;
-  type ResolutionResult = { approval: ApprovalRecord; applied: boolean };
+  type ResolutionResult = { approval: ApprovalRecord; applied: boolean; toolGrant?: ToolGrantApplyResult | null };
 
   function redactApprovalComment<T extends { body: string }>(comment: T, censorUsernameInLogs: boolean): T {
     return {
@@ -196,7 +208,51 @@ export function approvalService(db: Db) {
         });
       }
 
-      return { approval: updated, applied };
+      let toolGrant: ToolGrantApplyResult | null = null;
+      if (applied && isToolGrantApproval(updated)) {
+        // Approving a tool_grant is the operator's explicit, named grant --
+        // this is the only place a new tool connection (adapterConfig.mcpServers
+        // entry) is ever actually applied for an agent-requested grant; nothing
+        // takes effect just because the agent asked. Mirrors how hire_agent
+        // above is the only place a pending-approval agent actually activates.
+        const payload = toolGrantRequestPayloadSchema.parse(updated.payload);
+        const targetAgent = await agentsSvc.getById(payload.agentId);
+        if (targetAgent) {
+          const existingAdapterConfig =
+            targetAgent.adapterConfig && typeof targetAgent.adapterConfig === "object"
+              && !Array.isArray(targetAgent.adapterConfig)
+              ? (targetAgent.adapterConfig as Record<string, unknown>)
+              : {};
+          const existingServers = Array.isArray(existingAdapterConfig.mcpServers)
+            ? (existingAdapterConfig.mcpServers as unknown[])
+            : [];
+          const nextServers = [
+            ...existingServers.filter((server) => {
+              const summary = summarizeMcpServer(server);
+              return !summary || summary.name !== payload.server.name;
+            }),
+            payload.server,
+          ];
+          await agentsSvc.update(
+            targetAgent.id,
+            { adapterConfig: { ...existingAdapterConfig, mcpServers: nextServers } },
+            { recordRevision: { createdByUserId: decidedByUserId, source: "tool_grant_approval" } },
+          );
+          const summary = summarizeMcpServer(payload.server) ?? {
+            name: payload.server.name,
+            kind: "command" as const,
+            target: payload.server.command ?? payload.server.url ?? "",
+          };
+          toolGrant = {
+            agentId: targetAgent.id,
+            companyId: targetAgent.companyId,
+            serverName: payload.server.name,
+            capability: describeToolCapability(summary),
+          };
+        }
+      }
+
+      return { approval: updated, applied, toolGrant };
     },
 
     reject: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
