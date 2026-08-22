@@ -983,6 +983,9 @@ export function IssueProperties({
     setMonitorOpen(false);
   };
   const currentMonitorLabel = (() => {
+    const goalCondition = issue.executionPolicy?.monitor?.kind === "goal_condition"
+      ? issue.executionPolicy.monitor.condition
+      : null;
     if (issue.executionPolicy?.monitor?.nextCheckAt) {
       return `Next check ${formatDate(new Date(issue.executionPolicy.monitor.nextCheckAt))}`;
     }
@@ -991,6 +994,9 @@ export function IssueProperties({
     }
     if (issue.monitorLastTriggeredAt) {
       return `Last triggered ${timeAgo(issue.monitorLastTriggeredAt)}`;
+    }
+    if (goalCondition) {
+      return goalCondition;
     }
     return "None";
   })();
@@ -1198,7 +1204,7 @@ export function IssueProperties({
           )}
           onClick={() => setMonitorKindInput(kind)}
         >
-          {kind === "external_service" ? "External service" : "Goal condition"}
+          {kind === "external_service" ? "External service" : "Goal"}
         </button>
       ))}
     </div>
@@ -1208,10 +1214,13 @@ export function IssueProperties({
       {monitorKindTabs}
       {monitorKindInput === "goal_condition" ? (
         <>
+          <div className="text-[11px] text-muted-foreground">
+            The agent keeps working until this is true, checked by someone other than the agent doing the work.
+          </div>
           <Textarea
             value={monitorConditionInput}
             onChange={(e) => setMonitorConditionInput(e.target.value)}
-            placeholder="Plain-English finish line, e.g. All tests pass and the PR is merged"
+            placeholder="e.g. All tests pass and the PR is merged"
             rows={3}
             className="text-xs"
           />
