@@ -29,7 +29,7 @@ import {
 import { resolveProjectDeployBranches, type ProjectDeployBranches } from "../services/deploy-branches.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
-import { unprocessable } from "../errors.js";
+import { conflict, unprocessable } from "../errors.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
@@ -82,6 +82,45 @@ function isMergePrRequestApproval(type: unknown, payload: Record<string, unknown
  */
 function isToolGrantRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "tool_grant";
+}
+
+/**
+ * DUR-101: DUR-98 Class D found duplicate approvals for the same PR, deploy,
+ * and hire piling up (six hire approvals for three roles, four deploy
+ * approvals for one deploy) because nothing checked for an already-open
+ * approval on the same target before filing a new one. Resolve to the
+ * existing open (pending / revision_requested) approval that targets the
+ * same PR, deploy target, or hire role, if any.
+ */
+async function findDuplicateOpenApproval(
+  svc: ReturnType<typeof approvalService>,
+  companyId: string,
+  type: unknown,
+  payload: Record<string, unknown>,
+): Promise<{ id: string; targetDescription: string } | null> {
+  if (type === "hire_agent") {
+    const role = typeof payload.role === "string" && payload.role.trim() ? payload.role.trim() : "general";
+    const existing = await svc.findOpenHireApprovalForRole(companyId, role);
+    return existing ? { id: existing.id, targetDescription: `a hire request for the "${role}" role` } : null;
+  }
+  if (isMergePrRequestApproval(type, payload)) {
+    const repo = typeof payload.repo === "string" ? payload.repo.trim() : "";
+    const prNumber =
+      typeof payload.prNumber === "number" || typeof payload.prNumber === "string"
+        ? String(payload.prNumber).trim()
+        : "";
+    if (!repo || !prNumber) return null;
+    const existing = await svc.findOpenMergePrApproval(companyId, repo, prNumber);
+    return existing ? { id: existing.id, targetDescription: `a merge approval for ${repo}#${prNumber}` } : null;
+  }
+  if (isDeployRequestApproval(type, payload)) {
+    const projectId = typeof payload.projectId === "string" ? payload.projectId : "";
+    const workspaceId = typeof payload.workspaceId === "string" ? payload.workspaceId : "";
+    if (!projectId || !workspaceId) return null;
+    const existing = await svc.findOpenDeployApproval(companyId, projectId, workspaceId);
+    return existing ? { id: existing.id, targetDescription: "a deploy request for this project/workspace" } : null;
+  }
+  return null;
 }
 
 /**
@@ -424,6 +463,23 @@ export function approvalRoutes(
         normalizedPayload,
         mergePrDeployBranches,
       );
+    }
+
+    const duplicate = await findDuplicateOpenApproval(svc, companyId, approvalInput.type, approvalInput.payload);
+    if (duplicate) {
+      const acknowledgedDuplicateId =
+        typeof approvalInput.payload.acknowledgedDuplicateOfApprovalId === "string"
+          ? approvalInput.payload.acknowledgedDuplicateOfApprovalId
+          : null;
+      if (acknowledgedDuplicateId !== duplicate.id) {
+        throw conflict(
+          `There is already an open approval for ${duplicate.targetDescription}. Review or resolve it instead of filing a second one — pass acknowledgedDuplicateOfApprovalId to confirm you need a genuine second approval.`,
+          { existingApprovalId: duplicate.id },
+        );
+      }
+      // A legitimate second approval was explicitly acknowledged: keep it linked
+      // to the earlier one rather than letting it exist independently and silently.
+      normalizedPayload = { ...normalizedPayload, relatedApprovalId: duplicate.id };
     }
 
     const approval = await svc.create(companyId, {

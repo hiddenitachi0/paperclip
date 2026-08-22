@@ -126,6 +126,59 @@ export function approvalService(db: Db) {
       return rows[0] ?? null;
     },
 
+    // DUR-101: same-target duplicate detection at filing time. Distinct from
+    // findOpenHireApprovalForAgent (which dedups a re-activation of one already-
+    // hired agent) -- this dedups a brand new hire request for the same role,
+    // which is the "six approvals for three roles" incident from DUR-98.
+    findOpenHireApprovalForRole: async (companyId: string, role: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "hire_agent"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'role' = ${role}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
+    findOpenMergePrApproval: async (companyId: string, repo: string, prNumber: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'kind' = 'merge_pr'`,
+            sql`${approvals.payload} ->> 'repo' = ${repo}`,
+            sql`${approvals.payload} ->> 'prNumber' = ${prNumber}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
+    findOpenDeployApproval: async (companyId: string, projectId: string, workspaceId: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'kind' = 'deploy'`,
+            sql`${approvals.payload} ->> 'projectId' = ${projectId}`,
+            sql`${approvals.payload} ->> 'workspaceId' = ${workspaceId}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
     create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
       db
         .insert(approvals)
