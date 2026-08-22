@@ -6,6 +6,7 @@ import {
   createAgentHireSchema,
   updateAgentSchema,
   updateAgentPermissionsSchema,
+  proposeAgentInstructionsSchema,
   updateAgentInstructionsPathSchema,
   updateAgentInstructionsBundleSchema,
   upsertAgentInstructionsFileSchema,
@@ -1308,6 +1309,18 @@ registry.registerPath({
   summary: "Get agent configuration",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/instruction-proposals",
+  tags: ["agents"],
+  summary: "Propose replacement instructions for a direct report",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(proposeAgentInstructionsSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({
