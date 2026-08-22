@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAgentSchema, mcpServerConfigSchema } from "./agent.js";
+import { createAgentSchema, mcpServerConfigSchema, updateAgentSchema } from "./agent.js";
 
 function baseAgent(adapterConfig: Record<string, unknown>) {
   return {
@@ -81,5 +81,17 @@ describe("createAgentSchema adapterConfig.mcpServers", () => {
       }),
     );
     expect(result.success).toBe(false);
+  });
+});
+
+describe("updateAgentSchema avatarAssetId", () => {
+  it("rejects a patch that sets avatarAssetId", () => {
+    const result = updateAgentSchema.safeParse({ avatarAssetId: "11111111-1111-4111-8111-111111111111" });
+    expect(result.success).toBe(false);
+  });
+
+  it("still accepts an otherwise-ordinary patch", () => {
+    const result = updateAgentSchema.safeParse({ name: "x" });
+    expect(result.success).toBe(true);
   });
 });

@@ -33,6 +33,11 @@ export const agents = pgTable(
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     errorReason: text("error_reason"),
     permissions: jsonb("permissions").$type<Record<string, unknown>>().notNull().default({}),
+    // Plain uuid column, no `.references()` — a typed FK reference here would
+    // create a schema import cycle since assets.ts already imports agents.ts.
+    // The FK constraint (assets(id) ON DELETE SET NULL) is declared by hand
+    // in the migration SQL instead (see 0132_agent_avatar.sql).
+    avatarAssetId: uuid("avatar_asset_id"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

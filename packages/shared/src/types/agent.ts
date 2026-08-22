@@ -91,6 +91,7 @@ export interface Agent {
   role: AgentRole;
   title: string | null;
   icon: string | null;
+  avatarAssetId: string | null;
   status: AgentStatus;
   reportsTo: string | null;
   capabilities: string | null;
@@ -109,6 +110,14 @@ export interface Agent {
   orgChainHealth?: AgentOrgChainHealth;
   createdAt: Date;
   updatedAt: Date;
+}
+
+// Beside AgentIconPicker's getAgentIcon (ui/src/lib/agent-icons.ts), which
+// falls back to `icon`/symbol when there is no uploaded picture: the content
+// path for an agent's uploaded avatar, or null when it should fall back to
+// its icon/symbol.
+export function agentAvatarUrl(agent: Pick<Agent, "avatarAssetId">): string | null {
+  return agent.avatarAssetId ? `/api/assets/${agent.avatarAssetId}/content` : null;
 }
 
 export interface AgentDetail extends Agent {

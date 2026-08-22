@@ -2,21 +2,22 @@ import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { createAssetImageMetadataSchema } from "@paperclipai/shared";
+import { agents as agentsTable, assets as assetsTable } from "@paperclipai/db";
+import {
+  createAssetImageMetadataSchema,
+  ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES,
+  MAX_AGENT_AVATAR_BYTES,
+} from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
-import { assetService, logActivity } from "../services/index.js";
+import { accessService, agentService, assetService, logActivity } from "../services/index.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { forbidden, notFound } from "../errors.js";
+import { assertCanUpdateAgent, assertCompanyAccess, getActorInfo } from "./authz.js";
 const SVG_CONTENT_TYPE = "image/svg+xml";
-const ALLOWED_COMPANY_LOGO_CONTENT_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/webp",
-  "image/gif",
-  SVG_CONTENT_TYPE,
-]);
+const ALLOWED_COMPANY_LOGO_CONTENT_TYPES = new Set<string>(ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES);
+const ALLOWED_AGENT_AVATAR_CONTENT_TYPES = new Set<string>(ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES);
 
 function sanitizeSvgBuffer(input: Buffer): Buffer | null {
   const raw = input.toString("utf8").trim();
@@ -92,6 +93,10 @@ export function assetRoutes(db: Db, storage: StorageService) {
   const companyLogoUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
+  });
+  const agentAvatarUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_AGENT_AVATAR_BYTES, files: 1 },
   });
 
   async function runSingleFileUpload(
@@ -307,6 +312,169 @@ export function assetRoutes(db: Db, storage: StorageService) {
       updatedAt: asset.updatedAt,
       contentPath: `/api/assets/${asset.id}/content`,
     });
+  });
+
+  async function loadAgentForAvatarMutation(req: Request, companyId: string, agentId: string) {
+    if (req.actor.type === "agent") {
+      throw forbidden("Agent-authenticated callers cannot manage an agent's avatar");
+    }
+    const agentRow = await db
+      .select()
+      .from(agentsTable)
+      .where(eq(agentsTable.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    if (!agentRow || agentRow.companyId !== companyId) {
+      throw notFound("Agent not found");
+    }
+    await assertCanUpdateAgent(req, agentRow, accessService(db));
+    return agentRow;
+  }
+
+  router.post("/companies/:companyId/agents/:agentId/avatar", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const agentId = req.params.agentId as string;
+    const agentRow = await loadAgentForAvatarMutation(req, companyId, agentId);
+
+    try {
+      await runSingleFileUpload(agentAvatarUpload, req, res);
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(422).json({ error: `Image exceeds ${MAX_AGENT_AVATAR_BYTES} bytes` });
+          return;
+        }
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
+    if (!file) {
+      res.status(400).json({ error: "Missing file field 'file'" });
+      return;
+    }
+
+    const contentType = (file.mimetype || "").toLowerCase();
+    if (!ALLOWED_AGENT_AVATAR_CONTENT_TYPES.has(contentType)) {
+      res.status(422).json({ error: `Unsupported image type: ${contentType || "unknown"}` });
+      return;
+    }
+
+    let fileBody = file.buffer;
+    if (contentType === SVG_CONTENT_TYPE) {
+      const sanitized = sanitizeSvgBuffer(file.buffer);
+      if (!sanitized || sanitized.length <= 0) {
+        res.status(422).json({ error: "SVG could not be sanitized" });
+        return;
+      }
+      fileBody = sanitized;
+    }
+    if (fileBody.length <= 0) {
+      res.status(422).json({ error: "Image is empty" });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    const stored = await storage.putFile({
+      companyId,
+      namespace: "assets/agents",
+      originalFilename: file.originalname || null,
+      contentType,
+      body: fileBody,
+    });
+
+    const previousAsset = agentRow.avatarAssetId ? await svc.getById(agentRow.avatarAssetId) : null;
+
+    const createdAsset = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const created = await assetService(txDb).create(companyId, {
+        provider: stored.provider,
+        objectKey: stored.objectKey,
+        contentType: stored.contentType,
+        byteSize: stored.byteSize,
+        sha256: stored.sha256,
+        originalFilename: stored.originalFilename,
+        createdByAgentId: actor.agentId,
+        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      });
+      await tx
+        .update(agentsTable)
+        .set({ avatarAssetId: created.id, updatedAt: new Date() })
+        .where(eq(agentsTable.id, agentId));
+      if (previousAsset) {
+        await tx.delete(assetsTable).where(eq(assetsTable.id, previousAsset.id));
+      }
+      return created;
+    });
+
+    if (previousAsset) {
+      await storage.deleteObject(companyId, previousAsset.objectKey);
+    }
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.avatar_updated",
+      entityType: "agent",
+      entityId: agentId,
+      details: {
+        assetId: createdAsset.id,
+        contentType: createdAsset.contentType,
+        byteSize: createdAsset.byteSize,
+        replacedAssetId: previousAsset?.id ?? null,
+      },
+    });
+
+    const updatedAgent = await agentService(db).getById(agentId);
+    res.status(201).json(updatedAgent);
+  });
+
+  router.delete("/companies/:companyId/agents/:agentId/avatar", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const agentId = req.params.agentId as string;
+    const agentRow = await loadAgentForAvatarMutation(req, companyId, agentId);
+
+    if (!agentRow.avatarAssetId) {
+      res.status(200).json(await agentService(db).getById(agentId));
+      return;
+    }
+
+    const previousAsset = await svc.getById(agentRow.avatarAssetId);
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(agentsTable)
+        .set({ avatarAssetId: null, updatedAt: new Date() })
+        .where(eq(agentsTable.id, agentId));
+      if (previousAsset) {
+        await tx.delete(assetsTable).where(eq(assetsTable.id, previousAsset.id));
+      }
+    });
+
+    if (previousAsset) {
+      await storage.deleteObject(companyId, previousAsset.objectKey);
+    }
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.avatar_cleared",
+      entityType: "agent",
+      entityId: agentId,
+      details: {
+        removedAssetId: previousAsset?.id ?? null,
+      },
+    });
+
+    res.status(200).json(await agentService(db).getById(agentId));
   });
 
   router.get("/assets/:assetId/content", async (req, res, next) => {

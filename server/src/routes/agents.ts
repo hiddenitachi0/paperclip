@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
@@ -48,6 +48,7 @@ import {
   agentInstructionsService,
   accessService,
   approvalService,
+  assetService,
   companySkillService,
   budgetService,
   heartbeatService,
@@ -59,8 +60,9 @@ import {
   syncInstructionsBundleConfigFromFilePath,
   workspaceOperationService,
 } from "../services/index.js";
+import type { StorageService } from "../storage/types.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
-import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import { assertBoard, assertCanUpdateAgent, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectAgentAdapterWorkspaceCommandPaths,
@@ -139,7 +141,7 @@ function readRunIssueId(context: Record<string, unknown> | null) {
 
 export function agentRoutes(
   db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: { pluginWorkerManager?: PluginWorkerManager; storageService?: StorageService } = {},
 ) {
   // Legacy hardcoded maps — used as fallback when adapter module does not
   // declare capability flags explicitly.
@@ -182,6 +184,7 @@ export function agentRoutes(
   const router = Router();
   const svc = agentService(db);
   const access = accessService(db);
+  const storage = options.storageService;
   const approvalsSvc = approvalService(db);
   const budgets = budgetService(db);
   const environmentsSvc = environmentService(db);
@@ -827,17 +830,6 @@ export function agentRoutes(
       executionAgentId: executionRun.agentId,
       executionAgentName,
     };
-  }
-
-  async function assertCanUpdateAgent(req: Request, targetAgent: { id: string; companyId: string }) {
-    assertCompanyAccess(req, targetAgent.companyId);
-    const decision = await access.decide({
-      actor: req.actor,
-      action: "agent_config:update",
-      resource: { type: "agent", companyId: targetAgent.companyId, agentId: targetAgent.id },
-    });
-    if (decision.allowed) return;
-    throw forbidden(decision.explanation);
   }
 
   // DUR-57: single allow-list-based gate for an agent-authenticated
@@ -1865,7 +1857,7 @@ export function agentRoutes(
         res.status(404).json({ error: "Agent not found" });
         return;
       }
-      await assertCanUpdateAgent(req, agent);
+      await assertCanUpdateAgent(req, agent, access);
 
       const requestedSkills = normalizeDesiredSkillSelections(req.body.desiredSkills);
       const {
@@ -2244,7 +2236,7 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    await assertCanUpdateAgent(req, existing);
+    await assertCanUpdateAgent(req, existing, access);
 
     const targetRevision = await svc.getConfigRevision(id, revisionId);
     if (!targetRevision) {
@@ -3000,7 +2992,7 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    await assertCanUpdateAgent(req, existing);
+    await assertCanUpdateAgent(req, existing, access);
 
     if (hasOwn(req.body as object, "permissions")) {
       res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
@@ -3366,6 +3358,14 @@ export function agentRoutes(
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
+    }
+
+    if (agent.avatarAssetId) {
+      const avatarAsset = await assetService(db).getById(agent.avatarAssetId);
+      await db.delete(assetsTable).where(eq(assetsTable.id, agent.avatarAssetId));
+      if (avatarAsset && storage) {
+        await storage.deleteObject(agent.companyId, avatarAsset.objectKey);
+      }
     }
 
     await logActivity(db, {

@@ -158,6 +158,7 @@ export type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestResult,
 } from "./agent.js";
+export { agentAvatarUrl } from "./agent.js";
 export type {
   AgentEligibilityAgent,
   AgentEligibilityLifecycleReason,
