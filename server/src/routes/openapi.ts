@@ -138,6 +138,11 @@ import {
   remoteSecretImportSchema,
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
+  // Agent roles
+  createAgentRoleSchema,
+  updateAgentRoleSchema,
+  duplicateAgentRoleSchema,
+  assignAgentRoleSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -685,6 +690,14 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/issues/{id}/interactions/{interactionId}/respond",
   "POST /api/companies/{companyId}/agents/{agentId}/avatar",
   "DELETE /api/companies/{companyId}/agents/{agentId}/avatar",
+  "GET /api/companies/{companyId}/agent-roles",
+  "POST /api/companies/{companyId}/agent-roles",
+  "GET /api/companies/{companyId}/agent-roles/{id}",
+  "PATCH /api/companies/{companyId}/agent-roles/{id}",
+  "DELETE /api/companies/{companyId}/agent-roles/{id}",
+  "POST /api/companies/{companyId}/agent-roles/{id}/duplicate",
+  "POST /api/agents/{id}/role",
+  "GET /api/agents/{id}/role-overrides",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -738,6 +751,8 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/secrets",
   "POST /api/companies/{companyId}/skills",
   "POST /api/companies/{companyId}/skills/import",
+  "POST /api/companies/{companyId}/agent-roles",
+  "POST /api/companies/{companyId}/agent-roles/{id}/duplicate",
   "POST /api/join-requests/{requestId}/claim-api-key",
   "POST /api/admin/users/{userId}/promote-instance-admin",
   "POST /api/plugins/install",
@@ -1161,6 +1176,92 @@ registry.registerPath({
   summary: "List agent configurations for a company",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+// ─── Agent roles (jobs) ──────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/agent-roles",
+  tags: ["agents"],
+  summary: "List agent roles (jobs) in a company (board only)",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/agent-roles",
+  tags: ["agents"],
+  summary: "Create an agent role (job) (board only)",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(createAgentRoleSchema),
+  },
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/agent-roles/{id}",
+  tags: ["agents"],
+  summary: "Get an agent role (job) (board only)",
+  request: { params: z.object({ companyId: z.string(), id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/api/companies/{companyId}/agent-roles/{id}",
+  tags: ["agents"],
+  summary: "Update an agent role (job) (board only)",
+  request: {
+    params: z.object({ companyId: z.string(), id: z.string() }),
+    body: jsonBody(updateAgentRoleSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/companies/{companyId}/agent-roles/{id}",
+  tags: ["agents"],
+  summary: "Delete an agent role (job) (board only)",
+  request: { params: z.object({ companyId: z.string(), id: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/agent-roles/{id}/duplicate",
+  tags: ["agents"],
+  summary: "Duplicate an agent role (job) into another company (board only)",
+  request: {
+    params: z.object({ companyId: z.string(), id: z.string() }),
+    body: jsonBody(duplicateAgentRoleSchema),
+  },
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/role",
+  tags: ["agents"],
+  summary: "Assign or unassign an agent's role (job) (board only, never self-assignable)",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(assignAgentRoleSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/role-overrides",
+  tags: ["agents"],
+  summary: "Diff an agent's live tools/rights against what its role applied at assignment time (board only)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({
