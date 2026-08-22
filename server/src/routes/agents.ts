@@ -38,6 +38,12 @@ import {
 import { trackAgentCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import {
+  agentSelfUpdateDisallowedFields,
+  agentSelfUpdateDisallowedRuntimeConfigKeys,
+  computeChangedConfigFields,
+  configPatchFromSnapshot,
+} from "../services/agent-self-update-policy.js";
+import {
   agentService,
   agentInstructionsService,
   accessService,
@@ -833,41 +839,38 @@ export function agentRoutes(
     throw forbidden(decision.explanation);
   }
 
-  // DUR-56: a job title (role) is not a label here — `role === "ceo"` is a
-  // blanket permission grant. An agent-authenticated caller must never be
-  // able to change a role, whether the target is itself or another agent it
-  // otherwise has update rights on. Only a board-authenticated (human) actor
-  // may set it.
-  function assertNoAgentRoleMutation(req: Request, patch: Record<string, unknown>) {
+  // DUR-57: single allow-list-based gate for an agent-authenticated
+  // self-update. `patch` is checked against AGENT_SELF_UPDATE_ALLOWED_FIELDS
+  // (server/src/services/agent-self-update-policy.ts) — every field not on
+  // that list is refused, including role (DUR-56), reportsTo, budgetMonthlyCents, and any
+  // field added to updateAgentSchema after this guard was written. This
+  // replaces the old per-field deny checks that each newly-sensitive field
+  // had to remember to add to by hand.
+  //
+  // Both PATCH /agents/:id and the config-revision rollback route call this
+  // SAME function (see assertAgentSelfUpdateRollbackAllowed below, which
+  // reduces a rollback to the equivalent patch and calls through here) so a
+  // field's allow-listed status is enforced identically on both paths.
+  function assertAgentSelfUpdateAllowed(req: Request, patch: Record<string, unknown>) {
     if (req.actor.type !== "agent") return;
-    if (!hasOwn(patch, "role")) return;
-    throw forbidden(
-      "Agent-authenticated callers cannot change an agent's job title (role). Only board-authenticated callers can.",
-    );
-  }
-
-  // DUR-68: the customer-inbox hand-off timer reassigns a stalled task to
-  // whoever the agent reports to, so guarding the timer alone guards
-  // nothing if reportsTo can be repointed first. budgetMonthlyCents is the
-  // real backstop on a cheap-model agent's spend (the model choice itself
-  // is not guarded). None of these three is a legitimate self-service field.
-  function assertNoAgentSelfEscalationMutation(req: Request, patch: Record<string, unknown>) {
-    if (req.actor.type !== "agent") return;
-    if (hasOwn(patch, "reportsTo")) {
+    const disallowedFields = agentSelfUpdateDisallowedFields(patch);
+    if (disallowedFields.length > 0) {
       throw forbidden(
-        "Agent-authenticated callers cannot change who they report to. Only board-authenticated callers can.",
+        `Agent-authenticated callers cannot set ${disallowedFields.map((field) => `"${field}"`).join(", ")} on their own agent record. Only board-authenticated callers can.`,
       );
     }
-    if (hasOwn(patch, "budgetMonthlyCents")) {
-      throw forbidden(
-        "Agent-authenticated callers cannot change their own monthly budget. Only board-authenticated callers can.",
-      );
+    if (hasOwn(patch, "adapterConfig")) {
+      assertNoAgentAdapterConfigMutation(req, asRecord(patch.adapterConfig) ?? {});
     }
-    const runtimeConfig = asRecord(patch.runtimeConfig);
-    if (runtimeConfig && hasOwn(runtimeConfig, "handOffUnhandledAfterMinutes")) {
-      throw forbidden(
-        "Agent-authenticated callers cannot change their own customer-inbox hand-off timer. Only board-authenticated callers can.",
-      );
+    if (hasOwn(patch, "runtimeConfig")) {
+      const runtimeConfig = asRecord(patch.runtimeConfig) ?? {};
+      const disallowedRuntimeConfigKeys = agentSelfUpdateDisallowedRuntimeConfigKeys(runtimeConfig);
+      if (disallowedRuntimeConfigKeys.length > 0) {
+        throw forbidden(
+          `Agent-authenticated callers cannot set ${disallowedRuntimeConfigKeys.map((key) => `"runtimeConfig.${key}"`).join(", ")} on their own agent record. Only board-authenticated callers can.`,
+        );
+      }
+      assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
     }
   }
 
@@ -1436,62 +1439,26 @@ export function agentRoutes(
     );
   }
 
-  // DUR-55 / DUR-56: rolling back to a config revision restores that
-  // revision's role and adapterConfig wholesale, bypassing the PATCH-path
-  // guards above entirely. If any board-authenticated caller ever set a
-  // role or a tool connection in the past, an agent-authenticated caller
-  // could otherwise self-service-restore it later via rollback with no
-  // guard in the way. Refuse a rollback that would actually change role or
-  // adapterConfig.mcpServers for an agent-authenticated caller; unrelated
-  // rollbacks (e.g. reverting capabilities/instructions) are unaffected.
-  function assertNoAgentPrivilegedRollback(
+  // DUR-55 / DUR-56 / DUR-57: rolling back to a config revision restores
+  // that revision's snapshot wholesale, bypassing the PATCH-path allow-list
+  // above entirely unless it is re-applied here. configPatchFromSnapshot
+  // normalizes the revision snapshot the exact same way
+  // agentService(db).rollbackConfigRevision itself does before persisting
+  // it, and computeChangedConfigFields narrows that down to only the fields
+  // the rollback would actually change against the agent's current row — a
+  // rollback that leaves every field unchanged is not "setting" any of
+  // them. The result is handed to the SAME assertAgentSelfUpdateAllowed the
+  // PATCH route uses, so a field's allow-listed status can never diverge
+  // between the two paths.
+  function assertAgentSelfUpdateRollbackAllowed(
     req: Request,
-    existing: {
-      role: string;
-      adapterConfig: unknown;
-      reportsTo: string | null;
-      budgetMonthlyCents: number;
-      runtimeConfig: unknown;
-    },
+    existing: Record<string, unknown>,
     snapshot: Record<string, unknown>,
   ) {
     if (req.actor.type !== "agent") return;
-    if (typeof snapshot.role === "string" && snapshot.role !== existing.role) {
-      throw forbidden(
-        "Agent-authenticated callers cannot roll back to a revision that changes an agent's job title (role). Only board-authenticated callers can.",
-      );
-    }
-    const snapshotAdapterConfig = asRecord(snapshot.adapterConfig) ?? {};
-    const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
-    if (JSON.stringify(snapshotAdapterConfig.mcpServers) !== JSON.stringify(existingAdapterConfig.mcpServers)) {
-      throw forbidden(
-        "Agent-authenticated callers cannot roll back a change to tool connections (adapterConfig.mcpServers). Only board-authenticated callers can.",
-      );
-    }
-    // DUR-68: rollback restores a revision's snapshot wholesale, bypassing
-    // the PATCH-path assertNoAgentSelfEscalationMutation guard entirely, so
-    // the same three keys are re-checked here against the diff a rollback
-    // would actually apply.
-    const snapshotReportsTo = typeof snapshot.reportsTo === "string" ? snapshot.reportsTo : null;
-    if (snapshotReportsTo !== (existing.reportsTo ?? null)) {
-      throw forbidden(
-        "Agent-authenticated callers cannot roll back to a revision that changes who they report to. Only board-authenticated callers can.",
-      );
-    }
-    if (typeof snapshot.budgetMonthlyCents === "number" && snapshot.budgetMonthlyCents !== existing.budgetMonthlyCents) {
-      throw forbidden(
-        "Agent-authenticated callers cannot roll back to a revision that changes their own monthly budget. Only board-authenticated callers can.",
-      );
-    }
-    const snapshotRuntimeConfig = asRecord(snapshot.runtimeConfig) ?? {};
-    const existingRuntimeConfig = asRecord(existing.runtimeConfig) ?? {};
-    if (
-      snapshotRuntimeConfig.handOffUnhandledAfterMinutes !== existingRuntimeConfig.handOffUnhandledAfterMinutes
-    ) {
-      throw forbidden(
-        "Agent-authenticated callers cannot roll back a change to their own customer-inbox hand-off timer. Only board-authenticated callers can.",
-      );
-    }
+    const patch = configPatchFromSnapshot(snapshot);
+    const changedFields = computeChangedConfigFields(existing, patch);
+    assertAgentSelfUpdateAllowed(req, changedFields);
   }
 
   function summarizeAgentUpdateDetails(patch: Record<string, unknown>) {
@@ -2244,7 +2211,7 @@ export function agentRoutes(
       return;
     }
     const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
-    assertNoAgentPrivilegedRollback(req, existing, targetSnapshot);
+    assertAgentSelfUpdateRollbackAllowed(req, existing, targetSnapshot);
 
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
@@ -2955,17 +2922,15 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
-    assertNoAgentRoleMutation(req, patchData);
-    assertNoAgentSelfEscalationMutation(req, patchData);
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
+    assertAgentSelfUpdateAllowed(req, patchData);
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {
         res.status(422).json({ error: "adapterConfig must be an object" });
         return;
       }
-      assertNoAgentAdapterConfigMutation(req, adapterConfig);
       const changingInstructionsConfig = adapterConfigTouchesInstructionsConfig(adapterConfig);
       if (changingInstructionsConfig) {
         await assertCanManageInstructionsPath(req, existing);
@@ -2983,7 +2948,6 @@ export function agentRoutes(
         res.status(422).json({ error: "runtimeConfig must be an object" });
         return;
       }
-      assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
       requestedRuntimeConfig = runtimeConfig;
     }
     const touchesAdapterConfiguration =
