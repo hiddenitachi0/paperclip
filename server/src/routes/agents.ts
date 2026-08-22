@@ -2395,6 +2395,22 @@ export function agentRoutes(
           userId: actor.actorType === "user" ? actor.actorId : null,
         });
       }
+    } else if (agent.budgetMonthlyCents > 0) {
+      // When requireBoardApprovalForNewAgents is off, the agent goes live
+      // immediately with no approval to attach a budget policy to later
+      // (approvalsSvc.approve() is what does that on the approval path).
+      // Without this, budgetMonthlyCents is persisted on the agent row as
+      // display-only metadata and the hire has no enforced spending cap.
+      await budgets.upsertPolicy(
+        companyId,
+        {
+          scopeType: "agent",
+          scopeId: agent.id,
+          amount: agent.budgetMonthlyCents,
+          windowKind: "calendar_month_utc",
+        },
+        actor.actorType === "user" ? actor.actorId : null,
+      );
     }
 
     await logActivity(db, {
