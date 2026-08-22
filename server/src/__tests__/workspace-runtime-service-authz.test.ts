@@ -135,6 +135,53 @@ describeEmbeddedPostgres("workspace runtime service authz helper", () => {
     })).resolves.toBeUndefined();
   });
 
+  it("denies a ceo-titled agent once canManageAllWorkspaceRuntimes is explicitly revoked", async () => {
+    const companyId = await seedCompany();
+    const { projectWorkspaceId } = await seedProjectWorkspace(companyId);
+    const ceoAgentId = await seedAgent(companyId, { role: "ceo", name: "CEO" });
+    await db
+      .update(agents)
+      .set({ permissions: { canManageAllWorkspaceRuntimes: false } })
+      .where(eq(agents.id, ceoAgentId));
+
+    await expect(assertCanManageProjectWorkspaceRuntimeServices(db, {
+      actor: {
+        type: "agent",
+        agentId: ceoAgentId,
+        companyId,
+        source: "agent_key",
+      },
+    } as any, {
+      companyId,
+      projectWorkspaceId,
+    })).rejects.toMatchObject({
+      status: 403,
+      message: "Missing permission to manage workspace runtime services",
+    });
+  });
+
+  it("allows a non-ceo agent with an explicit canManageAllWorkspaceRuntimes grant", async () => {
+    const companyId = await seedCompany();
+    const { projectWorkspaceId } = await seedProjectWorkspace(companyId);
+    const managerAgentId = await seedAgent(companyId, { role: "engineering-manager", name: "Manager" });
+    await db
+      .update(agents)
+      .set({ permissions: { canManageAllWorkspaceRuntimes: true } })
+      .where(eq(agents.id, managerAgentId));
+
+    await expect(assertCanManageProjectWorkspaceRuntimeServices(db, {
+      actor: {
+        type: "agent",
+        agentId: managerAgentId,
+        companyId,
+        source: "agent_key",
+      },
+    } as any, {
+      companyId,
+      projectWorkspaceId,
+    })).resolves.toBeUndefined();
+  });
+
   it("allows CEO agents to manage any project workspace runtime services in their company", async () => {
     const companyId = await seedCompany();
     const { projectWorkspaceId } = await seedProjectWorkspace(companyId);
