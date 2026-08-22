@@ -11,12 +11,14 @@ import {
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
+  toolGrantRequestPayloadSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
 import {
   approvalService,
   accessService,
+  agentService,
   escalationGrantService,
   heartbeatService,
   issueApprovalService,
@@ -28,6 +30,7 @@ import { resolveProjectDeployBranches, type ProjectDeployBranches } from "../ser
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { unprocessable } from "../errors.js";
+import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
@@ -67,6 +70,18 @@ function isModelBoostRequestApproval(type: unknown, payload: Record<string, unkn
  */
 function isMergePrRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "merge_pr";
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"tool_grant"`
+ * are how an agent requests a new tool connection (MCP server) for itself --
+ * the only path it has to gain one at all, since assertNoAgentToolConnectionMutation
+ * refuses the direct PATCH path unconditionally for agent-authenticated callers.
+ * Approving one is the operator's explicit, named grant: which agent, which
+ * tool, and what it would be allowed to do (see appendToolGrantCapabilitySummary).
+ */
+function isToolGrantRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "tool_grant";
 }
 
 /**
@@ -135,6 +150,31 @@ function appendMergeConsequenceSentence(
   payload.plainSummary = existing ? `${existing}\n\n${consequence}` : consequence;
 }
 
+/**
+ * Same idea as appendMergeConsequenceSentence, for `kind:"tool_grant"`: an
+ * operator deciding whether to grant an agent a new tool connection needs to
+ * see, in the same plain-language `summary` the approval UI already renders,
+ * what the tool can reach and what it would be allowed to do. Always
+ * computed from the `server` definition and always applied, regardless of
+ * what the requesting agent wrote in `reason` -- the capability description
+ * is exactly the part a requester can't be trusted to characterize fairly.
+ */
+function appendToolGrantCapabilitySummary(payload: Record<string, unknown>) {
+  if (payload.kind !== "tool_grant") return;
+  const server = summarizeMcpServer(payload.server);
+  if (!server) return;
+  const capability = describeToolCapability(server);
+  payload.capabilitySummary = capability;
+
+  const existingSummary = typeof payload.summary === "string" ? payload.summary.trim() : "";
+  payload.summary = existingSummary ? `${existingSummary}\n\n${capability}` : capability;
+
+  const existingRisks = Array.isArray(payload.risks)
+    ? payload.risks.filter((risk): risk is string => typeof risk === "string")
+    : [];
+  payload.risks = existingRisks.includes(capability) ? existingRisks : [...existingRisks, capability];
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
@@ -143,6 +183,7 @@ async function normalizeRequestBoardApprovalPayload(
   mergePrDeployBranches: ProjectDeployBranches | null = null,
 ) {
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
+  appendToolGrantCapabilitySummary(payload);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
   payload.title = formatApprovalTitle(projectLabel, payload.title);
@@ -194,6 +235,7 @@ export function approvalRoutes(
   const router = Router();
   const svc = approvalService(db);
   const access = accessService(db);
+  const agentsSvc = agentService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -339,6 +381,18 @@ export function approvalRoutes(
         reason: boostPayload.reason,
       });
     }
+    if (isToolGrantRequestApproval(approvalInput.type, approvalInput.payload)) {
+      const toolGrantPayload = toolGrantRequestPayloadSchema.parse(approvalInput.payload);
+      if (actor.actorType === "agent" && actor.actorId !== toolGrantPayload.agentId) {
+        res.status(403).json({ error: "An agent can only request a tool connection for itself" });
+        return;
+      }
+      const targetAgent = await agentsSvc.getById(toolGrantPayload.agentId);
+      if (!targetAgent || targetAgent.companyId !== companyId) {
+        res.status(422).json({ error: "Tool connection request must target an agent in this company" });
+        return;
+      }
+    }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       const base =
@@ -427,7 +481,7 @@ export function approvalRoutes(
       return;
     }
     const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
+    const { approval, applied, toolGrant } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
 
     if (applied) {
       // DUR-29: an agent may have raised a request_confirmation for the same decision as
@@ -462,6 +516,29 @@ export function approvalRoutes(
           linkedIssueIds,
         },
       });
+
+      // A tool_grant approval is exactly when an agent's tool connections
+      // change as a result of approving a request -- this must be as
+      // operator-visible, in plain language, as a board caller adding one
+      // directly through the agent's own PATCH path (see appendAgentAuditDetails
+      // in routes/agents.ts). Logged against the target agent, not just the
+      // approval, so it shows up on the agent's own activity history too.
+      if (toolGrant) {
+        await logActivity(db, {
+          companyId: toolGrant.companyId,
+          actorType: "user",
+          actorId: req.actor.userId ?? "board",
+          action: "agent.tool_connection_granted",
+          entityType: "agent",
+          entityId: toolGrant.agentId,
+          details: {
+            serverName: toolGrant.serverName,
+            capability: toolGrant.capability,
+            approvalId: approval.id,
+            requestedByAgentId: approval.requestedByAgentId,
+          },
+        });
+      }
 
       if (approval.requestedByAgentId) {
         try {

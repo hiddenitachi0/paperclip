@@ -372,6 +372,68 @@ describe("ensureServerWorkspaceLinksCurrent", () => {
 });
 
 describe("realizeExecutionWorkspace", () => {
+  it("warns when a project_primary checkout already has uncommitted changes", async () => {
+    const repoRoot = await createTempRepo();
+    await fs.writeFile(path.join(repoRoot, "wip.txt"), "someone else's work\n", "utf8");
+
+    const workspace = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: null,
+      },
+      config: {},
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-447",
+        title: "Add Worktree Support",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    expect(workspace.strategy).toBe("project_primary");
+    expect(workspace.cwd).toBe(repoRoot);
+    expect(workspace.warnings).toHaveLength(1);
+    expect(workspace.warnings[0]).toContain("project_primary");
+    expect(workspace.warnings[0]).toContain("uncommitted change");
+  });
+
+  it("does not warn when a project_primary checkout is clean", async () => {
+    const repoRoot = await createTempRepo();
+
+    const workspace = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: null,
+      },
+      config: {},
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-447",
+        title: "Add Worktree Support",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    expect(workspace.strategy).toBe("project_primary");
+    expect(workspace.warnings).toEqual([]);
+  });
+
   it("defaults new git worktrees to freshly fetched origin/master", async () => {
     const sourceRepo = await createTempRepo("master");
     const remoteDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-remote-"));

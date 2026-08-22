@@ -25,6 +25,7 @@ import { useProjectOrder } from "../hooks/useProjectOrder";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
 import { getRecentProjectIds, trackRecentProject } from "../lib/recent-projects";
 import { buildExecutionPolicy, buildGoalConditionMonitor } from "../lib/issue-execution-policy";
+import { extractSuggestedGoalCondition } from "../lib/goal-condition-suggestion";
 import { isIssueWorkMode, nextWorkMode, workModeMetaFor, workModeMetaList } from "../lib/work-mode-meta";
 import { useToastActions } from "../context/ToastContext";
 import {
@@ -420,12 +421,12 @@ export function NewIssueDialog() {
   const [watchdogInstructions, setWatchdogInstructions] = useState("");
   const [showWatchdogRow, setShowWatchdogRow] = useState(false);
   const [watchdogEditorOpen, setWatchdogEditorOpen] = useState(false);
-  const [showGoalConditionRow, setShowGoalConditionRow] = useState(false);
-  const [goalConditionEditorOpen, setGoalConditionEditorOpen] = useState(false);
   const [goalConditionText, setGoalConditionText] = useState("");
   const [goalConditionEvaluatorProfile, setGoalConditionEvaluatorProfile] = useState("");
   const [goalConditionSpendCapInput, setGoalConditionSpendCapInput] = useState("");
   const [goalConditionMaxAttemptsInput, setGoalConditionMaxAttemptsInput] = useState("");
+  const [goalAdvancedOpen, setGoalAdvancedOpen] = useState(false);
+  const [goalSuggestion, setGoalSuggestion] = useState<string | null>(null);
   const [participantMenuOpen, setParticipantMenuOpen] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [projectWorkspaceId, setProjectWorkspaceId] = useState("");
@@ -811,7 +812,8 @@ export function NewIssueDialog() {
       setGoalConditionEvaluatorProfile("");
       setGoalConditionSpendCapInput("");
       setGoalConditionMaxAttemptsInput("");
-      setShowGoalConditionRow(false);
+      setGoalAdvancedOpen(false);
+      setGoalSuggestion(null);
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
@@ -847,7 +849,10 @@ export function NewIssueDialog() {
       setGoalConditionEvaluatorProfile(draft.goalConditionEvaluatorProfile ?? "");
       setGoalConditionSpendCapInput(draft.goalConditionSpendCapInput ?? "");
       setGoalConditionMaxAttemptsInput(draft.goalConditionMaxAttemptsInput ?? "");
-      setShowGoalConditionRow(!!(draft.goalConditionText));
+      setGoalAdvancedOpen(
+        Boolean(draft.goalConditionEvaluatorProfile || draft.goalConditionSpendCapInput || draft.goalConditionMaxAttemptsInput),
+      );
+      setGoalSuggestion(null);
       setProjectId(restoredProjectId);
       setProjectWorkspaceId(
         hasExplicitProjectWorkspaceId
@@ -897,7 +902,8 @@ export function NewIssueDialog() {
       setGoalConditionEvaluatorProfile("");
       setGoalConditionSpendCapInput("");
       setGoalConditionMaxAttemptsInput("");
-      setShowGoalConditionRow(false);
+      setGoalAdvancedOpen(false);
+      setGoalSuggestion(null);
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
@@ -998,7 +1004,8 @@ export function NewIssueDialog() {
     setGoalConditionEvaluatorProfile("");
     setGoalConditionSpendCapInput("");
     setGoalConditionMaxAttemptsInput("");
-    setShowGoalConditionRow(false);
+    setGoalAdvancedOpen(false);
+    setGoalSuggestion(null);
     setProjectId("");
     setProjectWorkspaceId("");
     setAssigneeOptionsOpen(false);
@@ -1034,7 +1041,8 @@ export function NewIssueDialog() {
     setGoalConditionEvaluatorProfile("");
     setGoalConditionSpendCapInput("");
     setGoalConditionMaxAttemptsInput("");
-    setShowGoalConditionRow(false);
+    setGoalAdvancedOpen(false);
+    setGoalSuggestion(null);
     setProjectId("");
     setProjectWorkspaceId("");
     setAssigneeModelLane("primary");
@@ -1083,7 +1091,7 @@ export function NewIssueDialog() {
     const executionWorkspaceSettings = executionWorkspacePolicy?.enabled
       ? { mode: requestedExecutionWorkspaceMode }
       : null;
-    const goalConditionMonitor = showGoalConditionRow && goalConditionText.trim()
+    const goalConditionMonitor = goalConditionText.trim()
       ? buildGoalConditionMonitor({
           condition: goalConditionText,
           evaluatorModelProfile: (goalConditionEvaluatorProfile || null) as ModelProfileKey | null,
@@ -1603,7 +1611,7 @@ export function NewIssueDialog() {
                   <button
                     type="button"
                     className="inline-flex items-center justify-center rounded-md p-1 text-muted-foreground hover:bg-accent/50 transition-colors"
-                    title={taskWatchdogsEnabled ? "Add reviewer, approver, watchdog, or goal condition" : "Add reviewer, approver, or goal condition"}
+                    title={taskWatchdogsEnabled ? "Add reviewer, approver, or watchdog" : "Add reviewer or approver"}
                   >
                     <MoreHorizontal className="h-4 w-4" />
                   </button>
@@ -1660,31 +1668,150 @@ export function NewIssueDialog() {
                       Watchdog
                     </button>
                   )}
-                  <button
-                    className={cn(
-                      "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
-                      showGoalConditionRow && "bg-accent",
-                    )}
-                    onClick={() => {
-                      if (showGoalConditionRow) {
-                        setShowGoalConditionRow(false);
-                        setGoalConditionText("");
-                        setGoalConditionEvaluatorProfile("");
-                        setGoalConditionSpendCapInput("");
-                        setGoalConditionMaxAttemptsInput("");
-                        setGoalConditionEditorOpen(false);
-                      } else {
-                        setShowGoalConditionRow(true);
-                        setGoalConditionEditorOpen(true);
-                      }
-                      setParticipantMenuOpen(false);
-                    }}
-                  >
-                    <Target className="h-3 w-3" />
-                    Goal condition
-                  </button>
                 </PopoverContent>
               </Popover>
+              </div>
+            </div>
+
+            {/* Goal — always visible; the point of DUR-72 is that this must not require
+                opening the three-dot menu to discover. */}
+            <div className="flex items-start gap-2 text-sm text-muted-foreground mt-1">
+              <span className="w-6 shrink-0 flex items-center justify-center pt-1"><Target className="h-3.5 w-3.5" /></span>
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-foreground">
+                    Goal <span className="font-normal text-muted-foreground">(optional)</span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                      onClick={() => {
+                        const suggestion = extractSuggestedGoalCondition(descriptionRef.current);
+                        if (suggestion) {
+                          setGoalSuggestion(suggestion);
+                        } else {
+                          setGoalSuggestion(null);
+                          pushToast({
+                            title: "No suggestion found",
+                            body: "Add acceptance criteria or a bullet list to the description first.",
+                            tone: "info",
+                          });
+                        }
+                      }}
+                    >
+                      Suggest from description
+                    </button>
+                    {goalConditionText.trim() ? (
+                      <button
+                        type="button"
+                        className="text-[11px] text-muted-foreground hover:text-destructive transition-colors"
+                        onClick={() => {
+                          setGoalConditionText("");
+                          setGoalConditionEvaluatorProfile("");
+                          setGoalConditionSpendCapInput("");
+                          setGoalConditionMaxAttemptsInput("");
+                          setGoalAdvancedOpen(false);
+                        }}
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  The agent keeps working until this is true, checked by someone other than the agent doing the work.
+                </div>
+                {goalSuggestion && !goalConditionText.trim() ? (
+                  <div className="flex items-start gap-2 rounded-md border border-dashed border-border px-2 py-1.5 text-xs">
+                    <span className="min-w-0 flex-1 text-muted-foreground">
+                      Suggested from description: &ldquo;{goalSuggestion}&rdquo;
+                    </span>
+                    <button
+                      type="button"
+                      className="shrink-0 text-foreground underline underline-offset-2"
+                      onClick={() => {
+                        setGoalConditionText(goalSuggestion);
+                        setGoalSuggestion(null);
+                      }}
+                    >
+                      Use
+                    </button>
+                    <button
+                      type="button"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                      onClick={() => setGoalSuggestion(null)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                ) : null}
+                <Textarea
+                  value={goalConditionText}
+                  onChange={(event) => setGoalConditionText(event.target.value)}
+                  placeholder="e.g. All tests pass and the PR is merged"
+                  rows={2}
+                  className="text-xs"
+                />
+                <button
+                  type="button"
+                  className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setGoalAdvancedOpen((v) => !v)}
+                >
+                  {goalAdvancedOpen ? "Hide advanced options" : "Advanced options"}
+                </button>
+                {goalAdvancedOpen ? (
+                  <div className="space-y-2 pt-1">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-medium text-foreground">
+                          Judge model <span className="font-normal text-muted-foreground">(optional)</span>
+                        </div>
+                        <select
+                          className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+                          value={goalConditionEvaluatorProfile}
+                          onChange={(event) => setGoalConditionEvaluatorProfile(event.target.value)}
+                        >
+                          <option value="">Default</option>
+                          {MODEL_PROFILE_KEYS.map((profile) => (
+                            <option key={profile} value={profile}>{profile}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-medium text-foreground">
+                          Max attempts <span className="font-normal text-muted-foreground">(optional)</span>
+                        </div>
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+                          placeholder="Unlimited"
+                          value={goalConditionMaxAttemptsInput}
+                          onChange={(event) => setGoalConditionMaxAttemptsInput(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-[11px] font-medium text-foreground">
+                        Spend cap <span className="font-normal text-muted-foreground">(optional)</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-muted-foreground">$</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs"
+                          placeholder="No cap"
+                          value={goalConditionSpendCapInput}
+                          onChange={(event) => setGoalConditionSpendCapInput(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -1868,103 +1995,6 @@ export function NewIssueDialog() {
               </div>
             )}
 
-            {/* Goal condition row */}
-            {showGoalConditionRow && (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground mt-1">
-                <span className="w-6 shrink-0 flex items-center justify-center"><Target className="h-3.5 w-3.5" /></span>
-                <Popover open={goalConditionEditorOpen} onOpenChange={setGoalConditionEditorOpen}>
-                  <PopoverTrigger asChild>
-                    <button
-                      type="button"
-                      className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors min-w-0"
-                      title="Configure goal condition"
-                    >
-                      {goalConditionText.trim() ? (
-                        <span className="truncate text-foreground">{goalConditionText.trim()}</span>
-                      ) : (
-                        <span className="text-muted-foreground">Set goal condition</span>
-                      )}
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-80 p-3 space-y-3" align="start">
-                    <div className="space-y-1.5">
-                      <div className="text-xs font-medium text-foreground">Finish line</div>
-                      <div className="text-[11px] text-muted-foreground">
-                        Plain-English condition an independent judge re-checks after every round, looping the assignee until it&rsquo;s met.
-                      </div>
-                      <Textarea
-                        value={goalConditionText}
-                        onChange={(event) => setGoalConditionText(event.target.value)}
-                        placeholder="e.g. All tests pass and the PR is merged"
-                        rows={3}
-                        className="text-xs"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="space-y-1.5">
-                        <div className="text-xs font-medium text-foreground">Judge model <span className="font-normal text-muted-foreground">(optional)</span></div>
-                        <select
-                          className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs"
-                          value={goalConditionEvaluatorProfile}
-                          onChange={(event) => setGoalConditionEvaluatorProfile(event.target.value)}
-                        >
-                          <option value="">Default</option>
-                          {MODEL_PROFILE_KEYS.map((profile) => (
-                            <option key={profile} value={profile}>{profile}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="space-y-1.5">
-                        <div className="text-xs font-medium text-foreground">Max attempts <span className="font-normal text-muted-foreground">(optional)</span></div>
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs"
-                          placeholder="Unlimited"
-                          value={goalConditionMaxAttemptsInput}
-                          onChange={(event) => setGoalConditionMaxAttemptsInput(event.target.value)}
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-1.5">
-                      <div className="text-xs font-medium text-foreground">Spend cap <span className="font-normal text-muted-foreground">(optional)</span></div>
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs text-muted-foreground">$</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs"
-                          placeholder="No cap"
-                          value={goalConditionSpendCapInput}
-                          onChange={(event) => setGoalConditionSpendCapInput(event.target.value)}
-                        />
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <button
-                        type="button"
-                        className="text-xs text-muted-foreground hover:text-destructive transition-colors"
-                        onClick={() => {
-                          setGoalConditionText("");
-                          setGoalConditionEvaluatorProfile("");
-                          setGoalConditionSpendCapInput("");
-                          setGoalConditionMaxAttemptsInput("");
-                          setShowGoalConditionRow(false);
-                          setGoalConditionEditorOpen(false);
-                        }}
-                      >
-                        Remove
-                      </button>
-                      <Button type="button" size="sm" className="h-7 text-xs" onClick={() => setGoalConditionEditorOpen(false)}>
-                        Done
-                      </Button>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              </div>
-            )}
           </div>
 
           {isSubIssueMode ? (

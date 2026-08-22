@@ -302,6 +302,45 @@ describe("seedManagedCodexHome", () => {
     }
   });
 
+  // DUR-67: the shared host config.toml can carry [mcp_servers.*] tables with
+  // command/args/env (secrets in env), unlike claude_local's settings.json
+  // path which already strips the equivalent fields before seeding a
+  // sandbox/remote target.
+  it("strips [mcp_servers.*] tables from config.toml before copying it into the seeded home", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-seed-toml-"));
+    try {
+      const sharedCodexHome = path.join(root, "shared-codex-home");
+      const agentHome = path.join(root, "agent-home");
+      await fs.mkdir(sharedCodexHome, { recursive: true });
+      await fs.writeFile(
+        path.join(sharedCodexHome, "config.toml"),
+        [
+          "model = \"gpt-5.1-codex\"",
+          "",
+          "[mcp_servers.secrets-fetcher]",
+          "command = \"npx\"",
+          "",
+          "[mcp_servers.secrets-fetcher.env]",
+          "API_TOKEN = \"sk-super-secret\"",
+          "",
+          "[model_providers.bifrost]",
+          "name = \"bifrost\"",
+        ].join("\n"),
+        "utf8",
+      );
+
+      await seedManagedCodexHome(agentHome, { CODEX_HOME: sharedCodexHome }, async () => {});
+
+      const seeded = await fs.readFile(path.join(agentHome, "config.toml"), "utf8");
+      expect(seeded).toContain("model = \"gpt-5.1-codex\"");
+      expect(seeded).toContain("[model_providers.bifrost]");
+      expect(seeded).not.toContain("mcp_servers");
+      expect(seeded).not.toContain("sk-super-secret");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("writes an API-key auth.json into the home when an apiKey is supplied", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-seed-apikey-"));
     try {

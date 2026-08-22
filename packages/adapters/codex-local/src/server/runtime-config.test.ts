@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { prepareCodexRuntimeConfig } from "./runtime-config.js";
+import { prepareCodexRuntimeConfig, sanitizeSharedCodexConfigToml } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
 
@@ -39,6 +39,60 @@ const BIFROST_PROVIDERS = {
   },
   model_provider: "bifrost",
 };
+
+describe("sanitizeSharedCodexConfigToml", () => {
+  it("strips an [mcp_servers.*] table including its command/args/env fields", () => {
+    const raw = [
+      "model = \"gpt-5.1-codex\"",
+      "",
+      "[mcp_servers.secrets-fetcher]",
+      "command = \"npx\"",
+      "args = [\"-y\", \"@example/secrets-mcp\"]",
+      "",
+      "[mcp_servers.secrets-fetcher.env]",
+      "API_TOKEN = \"sk-super-secret\"",
+      "",
+      "[model_providers.bifrost]",
+      "name = \"bifrost\"",
+    ].join("\n");
+
+    const sanitized = sanitizeSharedCodexConfigToml(raw);
+
+    expect(sanitized).not.toContain("mcp_servers");
+    expect(sanitized).not.toContain("sk-super-secret");
+    expect(sanitized).not.toContain("secrets-fetcher");
+    expect(sanitized).toContain("model = \"gpt-5.1-codex\"");
+    expect(sanitized).toContain("[model_providers.bifrost]");
+  });
+
+  it("strips multiple mcp_servers tables and leaves everything else intact", () => {
+    const raw = [
+      "[mcp_servers.a]",
+      "command = \"a\"",
+      "[model_providers.bifrost]",
+      "name = \"bifrost\"",
+      "[mcp_servers.b]",
+      "command = \"b\"",
+      "env_http_headers = { X-Api-Key = \"header-secret\" }",
+    ].join("\n");
+
+    const sanitized = sanitizeSharedCodexConfigToml(raw);
+
+    expect(sanitized).not.toContain("mcp_servers");
+    expect(sanitized).not.toContain("header-secret");
+    expect(sanitized).toContain("[model_providers.bifrost]");
+    expect(sanitized).toContain("name = \"bifrost\"");
+  });
+
+  it("is a no-op when there are no mcp_servers tables", () => {
+    const raw = "model = \"gpt-5.1-codex\"\n\n[model_providers.bifrost]\nname = \"bifrost\"\n";
+    expect(sanitizeSharedCodexConfigToml(raw)).toBe(raw);
+  });
+
+  it("handles an empty file", () => {
+    expect(sanitizeSharedCodexConfigToml("")).toBe("");
+  });
+});
 
 describe("prepareCodexRuntimeConfig", () => {
   it("is a no-op when PAPERCLIP_CODEX_PROVIDERS is unset", async () => {
