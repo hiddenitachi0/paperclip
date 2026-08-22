@@ -2391,6 +2391,13 @@ export function routineService(
     ): Promise<{ trigger: RoutineTrigger; revision: RoutineRevision } | null> => {
       const existing = await getTriggerById(id);
       if (!existing) return null;
+      // dispatchWebhookTrigger/sendCustomerInboxTestMessage only build a
+      // bearer Authorization header for the customer-inbox door -- letting
+      // this drift to another signing mode would make every delivery
+      // (and the test-message button) fail with rejected_signature.
+      if (existing.customerInboxChannel && patch.signingMode !== undefined && patch.signingMode !== "bearer") {
+        throw unprocessable("A customer-inbox trigger must keep signingMode \"bearer\"");
+      }
 
       let nextRunAt = existing.nextRunAt;
       let cronExpression = existing.cronExpression;
@@ -2799,10 +2806,8 @@ export function routineService(
         .then((rows) => rows[0] ?? null);
       if (!trigger) throw notFound("Trigger not found");
       if (!trigger.customerInboxChannel) throw conflict("This trigger is not a customer-inbox trigger");
-      const routine = await getRoutineById(routineId);
-      if (!routine) throw notFound("Routine not found");
 
-      const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+      const secretValue = await resolveTriggerSecret(trigger, trigger.companyId);
       const messageId = `test-${crypto.randomUUID()}`;
       const payload = {
         channel: trigger.customerInboxChannel,

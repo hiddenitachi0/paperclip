@@ -146,7 +146,17 @@ export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
   baseTriggerSchema.extend({
     kind: z.literal("api"),
   }),
-]);
+]).refine(
+  (trigger) =>
+    trigger.kind !== "webhook" || !trigger.customerInboxChannel || trigger.signingMode === "bearer",
+  {
+    // dispatchWebhookTrigger/sendCustomerInboxTestMessage only ever build a
+    // bearer Authorization header for the customer-inbox door -- any other
+    // signing mode would make every delivery fail with rejected_signature.
+    message: "A customer-inbox trigger must use signingMode \"bearer\"",
+    path: ["signingMode"],
+  },
+);
 
 export type CreateRoutineTrigger = z.infer<typeof createRoutineTriggerSchema>;
 
