@@ -3588,6 +3588,75 @@ describe("company portability", () => {
     }));
   });
 
+  it("keeps an agent's icon but drops its avatar picture across an export/import round trip", async () => {
+    const portability = companyPortabilityService({} as any);
+    agentSvc.list.mockResolvedValueOnce([
+      {
+        id: "agent-1",
+        name: "ClaudeCoder",
+        status: "idle",
+        role: "engineer",
+        title: "Software Engineer",
+        icon: "code",
+        avatarAssetId: "asset-avatar-1",
+        reportsTo: null,
+        capabilities: "Writes code",
+        adapterType: "claude_local",
+        adapterConfig: { promptTemplate: "You are ClaudeCoder." },
+        runtimeConfig: {},
+        budgetMonthlyCents: 0,
+        permissions: { canCreateAgents: false },
+        metadata: null,
+      },
+    ]);
+
+    const exported = await portability.exportBundle("company-1", {
+      include: { company: true, agents: true, projects: false, issues: false },
+    });
+
+    const extension = asTextFile(exported.files[".paperclip.yaml"]);
+    expect(extension).toContain('icon: "code"');
+    expect(extension).not.toContain("avatarAssetId");
+    expect(extension).not.toContain("asset-avatar-1");
+
+    agentSvc.list.mockResolvedValue([]);
+    secretSvc.normalizeAdapterConfigForPersistence.mockResolvedValueOnce({ normalized: true });
+    agentSvc.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      id: "agent-created",
+      name: String(input.name),
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      status: input.status,
+    }));
+
+    const result = await portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: ["claudecoder"],
+      collisionStrategy: "rename",
+    }, "user-1");
+
+    expect(result.warnings ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/avatar/i)]),
+    );
+    expect(agentSvc.create).toHaveBeenCalledWith("company-imported", expect.not.objectContaining({
+      avatarAssetId: expect.anything(),
+    }));
+  });
+
   it("normalizes adapter config on replace imports before updating existing agents", async () => {
     const portability = companyPortabilityService({} as any);
     const exported = await portability.exportBundle("company-1", {

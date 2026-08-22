@@ -87,6 +87,11 @@ const mockIssueApprovalService = vi.hoisted(() => ({
 
 const mockIssueService = vi.hoisted(() => ({
   list: vi.fn(),
+  listDependencyReadiness: vi.fn(),
+}));
+
+const mockIssueRecoveryActionService = vi.hoisted(() => ({
+  listActiveForIssues: vi.fn(),
 }));
 
 const mockSecretService = vi.hoisted(() => ({
@@ -201,6 +206,7 @@ function registerModuleMocks() {
     ISSUE_LIST_DEFAULT_LIMIT: 500,
     issueApprovalService: () => mockIssueApprovalService,
     issueService: () => mockIssueService,
+    issueRecoveryActionService: () => mockIssueRecoveryActionService,
     logActivity: mockLogActivity,
     secretService: () => mockSecretService,
     syncInstructionsBundleConfigFromFilePath: mockSyncInstructionsBundleConfigFromFilePath,
@@ -329,6 +335,8 @@ describe.sequential("agent permission routes", () => {
     mockHeartbeatService.cancelInvocationsForAgents.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
     mockIssueService.list.mockReset();
+    mockIssueService.listDependencyReadiness.mockReset();
+    mockIssueRecoveryActionService.listActiveForIssues.mockReset();
     mockSecretService.normalizeAdapterConfigForPersistence.mockReset();
     mockSecretService.resolveAdapterConfigForRuntime.mockReset();
     mockAgentInstructionsService.materializeManagedBundle.mockReset();
@@ -1871,6 +1879,46 @@ describe.sequential("agent permission routes", () => {
       status: "backlog,todo,in_progress,in_review,blocked,done",
       limit: 500,
     });
+  });
+
+  it("includes the actor's own backlog issues in inbox-lite (DUR-108)", async () => {
+    mockIssueService.list.mockResolvedValue([
+      {
+        id: "issue-2",
+        identifier: "PAP-911",
+        title: "Parked follow-up",
+        status: "backlog",
+        priority: "high",
+        projectId: null,
+        goalId: null,
+        parentId: null,
+        updatedAt: new Date("2026-08-22T00:00:00.000Z"),
+        activeRun: null,
+      },
+    ]);
+    mockIssueService.listDependencyReadiness.mockResolvedValue(new Map());
+    mockIssueRecoveryActionService.listActiveForIssues.mockResolvedValue(new Map());
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/agents/me/inbox-lite"));
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.list).toHaveBeenCalledWith(companyId, {
+      assigneeAgentId: agentId,
+      status: "todo,in_progress,blocked,backlog",
+      includeRoutineExecutions: true,
+      limit: 500,
+    });
+    expect(res.body).toEqual([
+      expect.objectContaining({ id: "issue-2", identifier: "PAP-911", status: "backlog" }),
+    ]);
   });
 
   describe("agent configuration read gate", () => {

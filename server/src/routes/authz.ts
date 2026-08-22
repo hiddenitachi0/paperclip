@@ -1,5 +1,6 @@
 import type { Request } from "express";
 import { forbidden, unauthorized } from "../errors.js";
+import type { accessService } from "../services/access.js";
 
 export function assertAuthenticated(req: Request) {
   if (req.actor.type === "none") {
@@ -72,6 +73,24 @@ export function assertCompanyAccess(req: Request, companyId: string) {
       }
     }
   }
+}
+
+// Shared by the agent config routes (PATCH /agents/:id) and the agent
+// avatar routes (POST/DELETE .../agents/:agentId/avatar in assets.ts) so
+// "who may update this agent's record" is decided in exactly one place.
+export async function assertCanUpdateAgent(
+  req: Request,
+  targetAgent: { id: string; companyId: string },
+  access: ReturnType<typeof accessService>,
+) {
+  assertCompanyAccess(req, targetAgent.companyId);
+  const decision = await access.decide({
+    actor: req.actor,
+    action: "agent_config:update",
+    resource: { type: "agent", companyId: targetAgent.companyId, agentId: targetAgent.id },
+  });
+  if (decision.allowed) return;
+  throw forbidden(decision.explanation);
 }
 
 export function getActorInfo(req: Request): (

@@ -119,6 +119,9 @@ export {
   MODEL_PROFILE_KEYS,
   GOAL_CONDITION_VERDICTS,
   AGENT_ICON_NAMES,
+  MAX_AGENT_AVATAR_BYTES,
+  ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES,
+  type AllowedImageUploadContentType,
   PROJECT_ICON_NAMES,
   ISSUE_STATUSES,
   INBOX_MINE_ISSUE_STATUSES,
@@ -951,6 +954,7 @@ export type {
   ProviderQuotaResult,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES } from "./types/index.js";
+export { agentAvatarUrl } from "./types/index.js";
 export {
   ISSUE_REFERENCE_IDENTIFIER_RE,
   buildIssueReferenceHref,
