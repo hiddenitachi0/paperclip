@@ -918,6 +918,13 @@
       "when": 1786810000000,
       "tag": "0130_escalation_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1787020000000,
+      "tag": "0131_customer_inbox",
+      "breakpoints": true
     }
   ]
 }
