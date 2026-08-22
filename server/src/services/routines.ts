@@ -6,6 +6,7 @@ import {
   companySecretBindings,
   companySecretVersions,
   companySecrets,
+  customerInboxConversations,
   customerInboxDeliveries,
   documentRevisions,
   documents,
@@ -65,6 +66,7 @@ import { getSecretProvider } from "../secrets/provider-registry.js";
 import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
+import { touchIssueForCompanyInboxes } from "./customer-inbox-handoff.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
@@ -1457,6 +1459,26 @@ export function routineService(
     return { trigger, routine };
   }
 
+  // Shared by `dispatchWebhookTrigger` and the conversation-continuation
+  // short-circuit in `receiveCustomerInboxMessage` (DUR-93) — the latter
+  // skips `dispatchRoutineRun` entirely (it comments on an existing issue
+  // instead of creating one) but must never skip authentication.
+  async function assertWebhookTriggerDispatchable(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: WebhookTriggerAuthInput & { allowCustomerInboxTrigger?: boolean },
+  ) {
+    if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
+    // One door: a trigger owned by the customer-inbox address (DUR-68) is
+    // not reachable through the generic fire route, so the old door stays
+    // shut on the same publicId.
+    if (trigger.customerInboxChannel && !input.allowCustomerInboxTrigger) {
+      throw conflict("This routine only accepts messages at its customer-inbox address.");
+    }
+
+    await verifyWebhookTriggerAuth(trigger, routine, input);
+  }
+
   // Shared by `firePublicTrigger` (the generic door) and
   // `receiveCustomerInboxMessage` (the customer-inbox door, DUR-68). Both
   // authenticate and dispatch the same way; `allowCustomerInboxTrigger`
@@ -1475,15 +1497,7 @@ export function routineService(
       allowCustomerInboxTrigger?: boolean;
     },
   ) {
-    if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
-    // One door: a trigger owned by the customer-inbox address (DUR-68) is
-    // not reachable through the generic fire route, so the old door stays
-    // shut on the same publicId.
-    if (trigger.customerInboxChannel && !input.allowCustomerInboxTrigger) {
-      throw conflict("This routine only accepts messages at its customer-inbox address.");
-    }
-
-    await verifyWebhookTriggerAuth(trigger, routine, input);
+    await assertWebhookTriggerDispatchable(trigger, routine, input);
 
     return dispatchRoutineRun({
       routine,
@@ -1830,6 +1844,230 @@ export function routineService(
     return run;
   }
 
+  // DUR-93: rejected_signature is ledger-only ("that traffic isn't ours").
+  // rejected_shape/failed opens exactly one task per trigger carrying the
+  // excerpt, for the routine's default agent's `reportsTo` (generic --
+  // never hardcode an escalation target here). Further bad deliveries
+  // while that task is open append a comment instead of opening a second
+  // one; the DB-level partial unique index on (companyId, originKind,
+  // originId) is the real backstop against a create-race, mirroring the
+  // harness_liveness_escalation pattern.
+  async function escalateUnreadableCustomerInboxDelivery(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: { outcomeDetail: string | null; excerpt: string },
+  ): Promise<void> {
+    if (!routine.assigneeAgentId) return;
+    const defaultAgent = await db
+      .select({ reportsTo: agents.reportsTo })
+      .from(agents)
+      .where(eq(agents.id, routine.assigneeAgentId))
+      .then((rows) => rows[0] ?? null);
+    const escalationTargetAgentId = defaultAgent?.reportsTo ?? null;
+    if (!escalationTargetAgentId) {
+      logger.warn(
+        { triggerId: trigger.id, routineAssigneeAgentId: routine.assigneeAgentId },
+        "customer-inbox unreadable-message escalation: default agent has no reports_to, cannot escalate",
+      );
+      return;
+    }
+
+    const excerptBlock = ["```", input.excerpt, "```"].join("\n");
+    const findOpenEscalation = () =>
+      db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, trigger.companyId),
+            eq(issues.originKind, "customer_inbox_unreadable"),
+            eq(issues.originId, trigger.id),
+            isNull(issues.hiddenAt),
+            not(inArray(issues.status, ["done", "cancelled"])),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+    const existing = await findOpenEscalation();
+    if (existing) {
+      await issueSvc.addComment(
+        existing.id,
+        [
+          `Enda en melding vi ikke klarte å lese kom inn${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          "",
+          excerptBlock,
+        ].join("\n"),
+        {},
+        undefined,
+        db,
+      );
+      await touchIssueForCompanyInboxes(db, { companyId: trigger.companyId, issueId: existing.id, touchedAt: new Date() });
+      return;
+    }
+
+    let escalation: Awaited<ReturnType<typeof issueSvc.create>>;
+    try {
+      escalation = await issueSvc.create(trigger.companyId, {
+        projectId: routine.projectId,
+        title: "Vi klarte ikke å lese en innkommende kundemelding",
+        description: [
+          `En melding til rutinen "${routine.title}" kunne ikke leses${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          "",
+          excerptBlock,
+        ].join("\n"),
+        status: "todo",
+        priority: "high",
+        assigneeAgentId: escalationTargetAgentId,
+        originKind: "customer_inbox_unreadable",
+        originId: trigger.id,
+      });
+    } catch (error) {
+      const isRaceConflict =
+        !!error &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error as { code?: string }).code === "23505" &&
+        "constraint" in error &&
+        (error as { constraint?: string }).constraint === "issues_active_customer_inbox_unreadable_uq";
+      if (!isRaceConflict) throw error;
+      const raced = await findOpenEscalation();
+      if (!raced) throw error;
+      await issueSvc.addComment(
+        raced.id,
+        [
+          `Enda en melding vi ikke klarte å lese kom inn${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          "",
+          excerptBlock,
+        ].join("\n"),
+        {},
+        undefined,
+        db,
+      );
+      await touchIssueForCompanyInboxes(db, { companyId: trigger.companyId, issueId: raced.id, touchedAt: new Date() });
+      return;
+    }
+
+    await touchIssueForCompanyInboxes(db, { companyId: trigger.companyId, issueId: escalation.id, touchedAt: new Date() });
+    queueIssueAssignmentWakeup({
+      heartbeat,
+      issue: escalation,
+      reason: "customer_inbox.unreadable_message",
+      mutation: "create",
+      contextSource: "customer_inbox.unreadable_escalation",
+      requestedByActorType: "system",
+    });
+  }
+
+  // Ledger + escalation bookkeeping shared by every place `receiveCustomerInboxMessage`
+  // can fail to accept a delivery. Escalation failures are logged, not thrown --
+  // the caller's own error (the actual reason the delivery failed) is what
+  // the HTTP response reports.
+  async function recordFailedCustomerInboxDelivery(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    error: unknown,
+    ctx: {
+      updateLedger: (fields: Partial<typeof customerInboxDeliveries.$inferInsert>) => Promise<unknown>;
+      rawBody?: Buffer | null;
+      payload: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    const outcome: CustomerInboxDeliveryOutcome =
+      error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
+    const outcomeDetail = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+    const rawPayloadExcerpt = outcome === "failed" ? truncateCustomerInboxExcerpt(ctx.rawBody, ctx.payload) : null;
+    await ctx.updateLedger({
+      outcome,
+      outcomeDetail,
+      ...(rawPayloadExcerpt !== null ? { rawPayloadExcerpt } : {}),
+    });
+    if (outcome === "failed") {
+      await escalateUnreadableCustomerInboxDelivery(trigger, routine, {
+        outcomeDetail,
+        excerpt: rawPayloadExcerpt ?? "",
+      }).catch((err) => {
+        logger.error({ err, triggerId: trigger.id }, "customer-inbox unreadable-message escalation failed");
+      });
+    }
+  }
+
+  type CustomerInboxConversationMapping = {
+    linkedIssueId: string;
+    issueStatus: string;
+  };
+
+  async function findCustomerInboxConversationMapping(
+    triggerId: string,
+    conversationId: string,
+  ): Promise<CustomerInboxConversationMapping | null> {
+    return db
+      .select({
+        linkedIssueId: customerInboxConversations.linkedIssueId,
+        issueStatus: issues.status,
+      })
+      .from(customerInboxConversations)
+      .innerJoin(issues, eq(issues.id, customerInboxConversations.linkedIssueId))
+      .where(
+        and(
+          eq(customerInboxConversations.routineTriggerId, triggerId),
+          eq(customerInboxConversations.conversationId, conversationId),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  // DUR-93: "a reply must not become a second task." A message whose
+  // conversationId already maps to a task attaches to that task instead of
+  // going through the normal create-a-new-issue dispatch. A task that was
+  // already closed is reopened rather than superseded by a second linked
+  // task, so there is always exactly one task per conversation to read;
+  // its assignee is woken either way since a reopened task needs the same
+  // attention as one that was already open.
+  async function attachCustomerInboxMessageToConversation(
+    mapping: CustomerInboxConversationMapping,
+    input: { fromAddress: string | null; fromName: string | null; subject: string | null; body: string | null },
+  ): Promise<void> {
+    const senderLine = input.fromName
+      ? `${input.fromName} <${input.fromAddress ?? "ukjent adresse"}>`
+      : input.fromAddress ?? "ukjent avsender";
+    const messageBlock = [
+      `Fra: ${senderLine}`,
+      `Emne: ${input.subject ?? "(ingen emnelinje)"}`,
+      "",
+      "```",
+      input.body ?? "(ingen tekst)",
+      "```",
+    ].join("\n");
+
+    const wasTerminal = mapping.issueStatus === "done" || mapping.issueStatus === "cancelled";
+    if (wasTerminal) {
+      await issueSvc.update(mapping.linkedIssueId, { status: "todo" }, db);
+    }
+    await issueSvc.addComment(
+      mapping.linkedIssueId,
+      `${wasTerminal ? "Ny melding i samme samtale. Oppgaven er gjenåpnet." : "Ny melding i samme samtale."}\n\n${messageBlock}`,
+      {},
+      undefined,
+      db,
+    );
+
+    const refreshed = await db
+      .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, mapping.linkedIssueId))
+      .then((rows) => rows[0]);
+    queueIssueAssignmentWakeup({
+      heartbeat,
+      issue: refreshed,
+      reason: "customer_inbox.conversation_continued",
+      mutation: "customer_inbox_conversation_comment",
+      contextSource: "customer_inbox.conversation",
+      requestedByActorType: "system",
+    });
+  }
+
   // The customer-inbox door (DUR-68): a company points any message source
   // (email, contact form, ...) at this address. A ledger row is written
   // for every delivery before any signature/shape validation, so nothing
@@ -1847,6 +2085,7 @@ export function routineService(
     const payload = isPlainRecord(input.payload) ? input.payload : {};
     const readString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
     const externalMessageId = readString(payload.messageId);
+    const conversationId = readString(payload.conversationId);
     const channel = readString(payload.channel);
     const fromAddress = readString(payload.fromAddress);
     const fromName = readString(payload.fromName);
@@ -1863,6 +2102,7 @@ export function routineService(
         companyId: null,
         routineTriggerId: null,
         externalMessageId,
+        conversationId,
         channel,
         fromAddress,
         fromName,
@@ -1881,6 +2121,7 @@ export function routineService(
         companyId: trigger.companyId,
         routineTriggerId: trigger.id,
         externalMessageId,
+        conversationId,
         channel: channel ?? trigger.customerInboxChannel,
         fromAddress,
         fromName,
@@ -1898,10 +2139,17 @@ export function routineService(
     // fingerprint unique per message — not the auth mechanism itself, but a
     // message we cannot tell apart from any other is unreadable all the same.
     if (!externalMessageId) {
+      const excerpt = truncateCustomerInboxExcerpt(input.rawBody, payload);
       await updateLedger({
         outcome: "rejected_shape",
         outcomeDetail: "messageId missing",
-        rawPayloadExcerpt: truncateCustomerInboxExcerpt(input.rawBody, payload),
+        rawPayloadExcerpt: excerpt,
+      });
+      await escalateUnreadableCustomerInboxDelivery(trigger, routine, {
+        outcomeDetail: "messageId missing",
+        excerpt,
+      }).catch((err) => {
+        logger.error({ err, triggerId: trigger.id }, "customer-inbox unreadable-message escalation failed");
       });
       throw unprocessable("messageId is required");
     }
@@ -1909,6 +2157,69 @@ export function routineService(
     const idempotencyKey = input.idempotencyKeyHeader?.trim() || externalMessageId;
     const subjectShort = subject ? subject.slice(0, 120) : undefined;
     const dispatchPayload = subjectShort !== undefined ? { ...payload, subjectShort } : payload;
+
+    // DUR-93: a message in a conversation that already maps to a task
+    // attaches to that task instead of creating a second one. Auth still
+    // runs first here -- this is a routing decision AFTER authentication,
+    // never a bypass of it.
+    if (conversationId) {
+      try {
+        await assertWebhookTriggerDispatchable(trigger, routine, {
+          authorizationHeader: input.authorizationHeader,
+          signatureHeader: input.signatureHeader,
+          hubSignatureHeader: input.hubSignatureHeader,
+          timestampHeader: input.timestampHeader,
+          rawBody: input.rawBody,
+          payload: dispatchPayload,
+          allowCustomerInboxTrigger: true,
+        });
+      } catch (error) {
+        await recordFailedCustomerInboxDelivery(trigger, routine, error, {
+          updateLedger,
+          rawBody: input.rawBody,
+          payload,
+        });
+        throw error;
+      }
+
+      const mapping = await findCustomerInboxConversationMapping(trigger.id, conversationId);
+      if (mapping) {
+        // Same idempotency guarantee the normal path gets from routineRuns:
+        // a message already recorded `accepted` under this messageId is a
+        // replay, not a second event, and must not comment twice.
+        const alreadyAccepted = await db
+          .select({ linkedIssueId: customerInboxDeliveries.linkedIssueId })
+          .from(customerInboxDeliveries)
+          .where(
+            and(
+              eq(customerInboxDeliveries.companyId, trigger.companyId),
+              eq(customerInboxDeliveries.routineTriggerId, trigger.id),
+              eq(customerInboxDeliveries.externalMessageId, externalMessageId),
+              eq(customerInboxDeliveries.outcome, "accepted"),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
+        if (alreadyAccepted) {
+          const issueId = alreadyAccepted.linkedIssueId ?? mapping.linkedIssueId;
+          await updateLedger({ outcome: "duplicate", linkedIssueId: issueId });
+          return { outcome: "duplicate" as CustomerInboxDeliveryOutcome, routineRunId: null, issueId };
+        }
+
+        await attachCustomerInboxMessageToConversation(mapping, {
+          fromAddress,
+          fromName,
+          subject,
+          body: readString(payload.body),
+        });
+        await updateLedger({ outcome: "accepted", linkedIssueId: mapping.linkedIssueId });
+        return { outcome: "accepted" as CustomerInboxDeliveryOutcome, routineRunId: null, issueId: mapping.linkedIssueId };
+      }
+      // No mapping yet -- this is the conversation's first message. Fall
+      // through to the normal create-a-new-issue path below, then remember
+      // the mapping so the NEXT message in this conversation attaches here.
+    }
 
     try {
       const run = await dispatchWebhookTrigger(trigger, routine, {
@@ -1938,6 +2249,18 @@ export function routineService(
         .then((rows) => rows.length > 0);
       const outcome: CustomerInboxDeliveryOutcome = alreadyAccepted ? "duplicate" : "accepted";
 
+      if (outcome === "accepted" && conversationId && run.linkedIssueId) {
+        await db
+          .insert(customerInboxConversations)
+          .values({
+            companyId: trigger.companyId,
+            routineTriggerId: trigger.id,
+            conversationId,
+            linkedIssueId: run.linkedIssueId,
+          })
+          .onConflictDoNothing();
+      }
+
       await updateLedger({
         outcome,
         linkedRoutineRunId: run.id,
@@ -1945,11 +2268,10 @@ export function routineService(
       });
       return { outcome, routineRunId: run.id, issueId: run.linkedIssueId ?? null };
     } catch (error) {
-      const outcome: CustomerInboxDeliveryOutcome =
-        error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
-      await updateLedger({
-        outcome,
-        outcomeDetail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      await recordFailedCustomerInboxDelivery(trigger, routine, error, {
+        updateLedger,
+        rawBody: input.rawBody,
+        payload,
       });
       throw error;
     }
