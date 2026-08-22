@@ -1169,6 +1169,71 @@ describe.sequential("agent permission routes", () => {
     );
   });
 
+  it("creates a budget policy for an immediately-live hire when board approval is not required", async () => {
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, budgetMonthlyCents: 17000 });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "Backend Engineer",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+        budgetMonthlyCents: 17000,
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
+      companyId,
+      {
+        scopeType: "agent",
+        scopeId: agentId,
+        amount: 17000,
+        windowKind: "calendar_month_utc",
+      },
+      "board-user",
+    );
+  });
+
+  it("does not create a budget policy for a hire that is still pending board approval", async () => {
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, budgetMonthlyCents: 17000 });
+    mockApprovalService.create.mockResolvedValue({ id: "approval-1" });
+
+    const app = await createApp(
+      {
+        type: "board",
+        userId: "board-user",
+        source: "local_implicit",
+        isInstanceAdmin: true,
+        companyIds: [companyId],
+      },
+      { requireBoardApprovalForNewAgents: true },
+    );
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "Backend Engineer",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+        budgetMonthlyCents: 17000,
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalled();
+    expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+  });
+
   it("allows board users to directly approve pending agents", async () => {
     const pendingAgent = {
       ...baseAgent,
