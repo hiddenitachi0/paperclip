@@ -2693,8 +2693,10 @@ export function agentRoutes(
       existing.id,
       "tasks:assign",
     );
+    // `existing` is already role-normalized by svc.getById (normalizeAgentPermissions
+    // defaults canCreateAgents to true for role "ceo"), so no separate role check is needed here.
     const previousCanAssignTasks =
-      existing.role === "ceo" || Boolean(existing.permissions?.canCreateAgents) || previousExplicitTaskAssignGrant;
+      Boolean(existing.permissions?.canCreateAgents) || previousExplicitTaskAssignGrant;
     const previousPermissions = {
       canCreateAgents: existing.permissions?.canCreateAgents ?? false,
       canCreateSkills: existing.permissions?.canCreateSkills ?? true,
