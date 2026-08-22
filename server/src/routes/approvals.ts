@@ -886,6 +886,19 @@ export function approvalRoutes(
           )
         : req.body.payload
       : undefined;
+    if (normalizedPayload) {
+      // DUR-112: a resubmit body is caller-controlled, so the requesting boss
+      // could otherwise strip/mutate payload.kind to dodge the instructions_change
+      // safety branch below (forced beforeContent/summary recompute) while still
+      // landing whatever forged title/summary text it wants as a "pending" approval
+      // again. Key the kind check off what's already persisted on this approval --
+      // resubmit can update the rest of the payload, but never what kind it is.
+      const existingKind = (existing.payload as Record<string, unknown> | null)?.kind;
+      if (typeof existingKind === "string" && normalizedPayload.kind !== existingKind) {
+        res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
+        return;
+      }
+    }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
       // Re-verify the boss/report relationship still holds -- it may have
       // changed since the original proposal was filed -- and recompute

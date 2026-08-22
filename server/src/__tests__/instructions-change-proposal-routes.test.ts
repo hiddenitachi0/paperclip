@@ -369,4 +369,45 @@ describe("instructions change proposal resubmit after send-back-for-changes (DUR
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
   }, TEST_TIMEOUT);
+
+  it("refuses a resubmit that strips payload.kind, so the forced beforeContent/summary recompute can't be dodged (DUR-112)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-1",
+      companyId,
+      type: "request_board_approval",
+      status: "revision_requested",
+      payload: instructionsChangePayload({ beforeContent: "# Current instructions on disk" }),
+      requestedByAgentId: bossAgentId,
+    });
+
+    const { kind: _kind, ...payloadWithoutKind } = instructionsChangePayload({
+      afterContent: "# Forged rewrite",
+      summary: "Forged summary text that looks legitimate.",
+    });
+
+    const res = await request(await createApp(agentActor(bossAgentId)))
+      .post("/api/approvals/approval-1/resubmit")
+      .send({ payload: payloadWithoutKind });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT);
+
+  it("refuses a resubmit that swaps payload.kind to a different approval kind", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-1",
+      companyId,
+      type: "request_board_approval",
+      status: "revision_requested",
+      payload: instructionsChangePayload({ beforeContent: "# Current instructions on disk" }),
+      requestedByAgentId: bossAgentId,
+    });
+
+    const res = await request(await createApp(agentActor(bossAgentId)))
+      .post("/api/approvals/approval-1/resubmit")
+      .send({ payload: { kind: "tool_grant", summary: "Forged summary text that looks legitimate." } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT);
 });
