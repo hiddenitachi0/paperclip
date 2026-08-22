@@ -12,6 +12,8 @@ export interface AdapterAgent {
   name: string;
   adapterType: string | null;
   adapterConfig: unknown;
+  /** DUR-61: operator-authored tone-of-voice text, resolved server-side into a persona block. */
+  personality?: string | null;
 }
 
 export interface AdapterRuntime {

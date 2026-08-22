@@ -666,20 +666,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
     const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
+    const personaText = typeof agent.personality === "string" ? agent.personality : null;
     let instructionsPrefix = "";
     let instructionsChars = 0;
+    let personaChars = 0;
     if (instructionsFilePath) {
       try {
         const rawInstructionsContents = await fs.readFile(instructionsFilePath, "utf8");
         const instructionsContents = await resolveCombinedAgentInstructionsContent({
           companyId: agent.companyId,
           agentInstructionsContent: rawInstructionsContents,
+          personaText,
         });
         instructionsPrefix =
           `${instructionsContents}\n\n` +
           `The above agent instructions were loaded from ${instructionsFilePath}. ` +
           `Resolve any relative file references from ${instructionsDir}.\n\n`;
         instructionsChars = instructionsPrefix.length;
+        if (personaText && personaText.trim().length > 0) personaChars = personaText.length;
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         await onLog(
@@ -687,6 +691,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
         );
       }
+    } else if (personaText && personaText.trim().length > 0) {
+      // DUR-61: apply the operator's saved voice even when this agent has no
+      // instructions bundle configured — otherwise the box looks saved but
+      // the voice silently never applies.
+      const instructionsContents = await resolveCombinedAgentInstructionsContent({
+        companyId: agent.companyId,
+        agentInstructionsContent: "",
+        personaText,
+      });
+      instructionsPrefix = `${instructionsContents}\n\n`;
+      instructionsChars = instructionsPrefix.length;
+      personaChars = personaText.length;
     }
     const repoAgentsNote =
       "Codex exec automatically applies repo-scoped AGENTS.md instructions from the current workspace; Paperclip does not currently suppress that discovery.";
@@ -708,6 +724,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const shouldUseResumeDeltaPrompt = Boolean(sessionId) && wakePrompt.length > 0;
     const promptInstructionsPrefix = shouldUseResumeDeltaPrompt ? "" : instructionsPrefix;
     instructionsChars = promptInstructionsPrefix.length;
+    if (shouldUseResumeDeltaPrompt) personaChars = 0;
     const continuationSummary = parseObject(context.paperclipContinuationSummary);
     const continuationSummaryBody = asString(continuationSummary.body, "").trim() || null;
     const codexFallbackHandoffNote =
@@ -721,6 +738,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const commandNotes = (() => {
       if (!instructionsFilePath) {
         const notes = [repoAgentsNote];
+        if (personaChars > 0) {
+          notes.push(
+            `Applied agent personality (${personaChars} characters, voice only) — no instructions bundle configured for this agent.`,
+          );
+        }
         if (forceSaferInvocation) {
           notes.push("Codex transient fallback requested safer invocation settings for this retry.");
         }
@@ -749,6 +771,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
           repoAgentsNote,
         ];
+        if (personaChars > 0) {
+          notes.push(`Applied agent personality (${personaChars} characters, voice only).`);
+        }
         if (forceSaferInvocation) {
           notes.push("Codex transient fallback requested safer invocation settings for this retry.");
         }
@@ -794,6 +819,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       wakePromptChars: wakePrompt.length,
       sessionHandoffChars: sessionHandoffNote.length,
       heartbeatPromptChars: renderedPrompt.length,
+      personaChars,
     };
 
     const runAttempt = async (resumeSessionId: string | null) => {

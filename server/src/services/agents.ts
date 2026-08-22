@@ -94,6 +94,8 @@ function buildConfigSnapshot(
     name: row.name,
     role: row.role,
     title: row.title,
+    icon: row.icon,
+    personality: row.personality,
     reportsTo: row.reportsTo,
     capabilities: row.capabilities,
     adapterType: row.adapterType,
@@ -386,9 +388,15 @@ export function agentService(db: Db) {
       Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig") &&
       isPlainRecord(normalizedPatch.adapterConfig)
     ) {
+      // DUR-61: paperclipPersona is resolved server-side from the agent row's
+      // personality column on every run (see heartbeat.ts), never read from a
+      // caller-supplied adapterConfig — strip any smuggled value here so it
+      // can never be persisted, regardless of actor type.
+      const { paperclipPersona: _paperclipPersona, ...adapterConfigWithoutPersona } =
+        normalizedPatch.adapterConfig as Record<string, unknown>;
       normalizedPatch.adapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
         existing.companyId,
-        normalizedPatch.adapterConfig,
+        adapterConfigWithoutPersona,
         { adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string },
       );
     }
@@ -469,7 +477,14 @@ export function agentService(db: Db) {
       const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig);
       const adapterType = data.adapterType ?? "process";
       const adapterConfig = isPlainRecord(data.adapterConfig)
-        ? await secretsSvc.normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
+        ? await secretsSvc.normalizeAdapterConfigForPersistence(
+            companyId,
+            // DUR-61: same paperclipPersona-smuggling guard as updateAgent above.
+            (({ paperclipPersona: _paperclipPersona, ...rest }) => rest)(
+              data.adapterConfig as Record<string, unknown>,
+            ),
+            { adapterType },
+          )
         : {};
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;

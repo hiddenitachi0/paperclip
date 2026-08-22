@@ -713,13 +713,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // When instructionsFilePath is configured, build a stable content-addressed
   // file that includes both the file content and the path directive, so we only
   // need --append-system-prompt-file (Claude CLI forbids using both flags together).
+  const personaText = typeof agent.personality === "string" ? agent.personality : null;
   let combinedInstructionsContents: string | null = null;
+  let personaChars = 0;
   if (instructionsFilePath) {
     try {
       const rawInstructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
       const instructionsContent = await resolveCombinedAgentInstructionsContent({
         companyId: agent.companyId,
         agentInstructionsContent: rawInstructionsContent,
+        personaText,
       });
       const pathDirective =
         `\nThe above agent instructions were loaded from ${instructionsFilePath}. ` +
@@ -727,6 +730,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `This base directory is authoritative for sibling instruction files such as ` +
         `./HEARTBEAT.md, ./SOUL.md, and ./TOOLS.md; do not resolve those from the parent agent directory.`;
       combinedInstructionsContents = instructionsContent + pathDirective;
+      if (personaText && personaText.trim().length > 0) personaChars = personaText.length;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
@@ -734,6 +738,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
       );
     }
+  } else if (personaText && personaText.trim().length > 0) {
+    // DUR-61: apply the operator's saved voice even when this agent has no
+    // instructions bundle configured — otherwise the box looks saved but the
+    // voice silently never applies.
+    combinedInstructionsContents = await resolveCombinedAgentInstructionsContent({
+      companyId: agent.companyId,
+      agentInstructionsContent: "",
+      personaText,
+    });
+    personaChars = personaText.length;
   }
   const promptBundle = await prepareClaudePromptBundle({
     companyId: agent.companyId,
@@ -1016,6 +1030,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     sessionHandoffChars: sessionHandoffNote.length,
     taskContextChars: taskContextNote.length,
     heartbeatPromptChars: renderedPrompt.length,
+    personaChars,
   };
 
   const buildClaudeArgs = (
@@ -1066,10 +1081,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "Using a broad --allowedTools whitelist for remote execution so hosted targets do not inherit local Claude bypass permissions.",
       );
     }
-    if (attemptInstructionsFilePath && !resumeSessionId) {
+    if (instructionsFilePath && attemptInstructionsFilePath && !resumeSessionId) {
       commandNotes.push(
         `Injected agent instructions via --append-system-prompt-file ${instructionsFilePath} (with path directive appended)`,
       );
+    } else if (attemptInstructionsFilePath && !resumeSessionId) {
+      // DUR-61: no instructions bundle configured for this agent, but a
+      // persona was applied — combinedInstructionsContents was built from
+      // company instructions + the persona block alone (see the `else if`
+      // above), so the CLI still gets an --append-system-prompt-file, just
+      // not one sourced from an on-disk agent instructions file.
+      commandNotes.push(
+        "Injected agent voice via --append-system-prompt-file (no instructions bundle configured for this agent).",
+      );
+    }
+    if (attemptInstructionsFilePath && !resumeSessionId && personaChars > 0) {
+      commandNotes.push(`Applied agent personality (${personaChars} characters, voice only).`);
     }
     if (onMeta) {
       await onMeta({

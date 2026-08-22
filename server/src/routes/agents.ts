@@ -1448,6 +1448,22 @@ export function agentRoutes(
     return KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) => adapterConfig[key] !== undefined);
   }
 
+  // DUR-61: the two create paths (hire, direct-create) build a brand-new
+  // agent row rather than diffing a patch, so neither goes through
+  // assertAgentSelfUpdateAllowed. An agent that can hire must not be able to
+  // mint a colleague with a self-authored voice — only a board-authenticated
+  // caller may set personality, on hire or on an existing agent (PATCH path:
+  // "personality" is deliberately absent from AGENT_SELF_UPDATE_ALLOWED_FIELDS
+  // in agent-self-update-policy.ts).
+  function assertNoAgentPersonalityMutation(req: Request, personality: unknown) {
+    if (req.actor.type !== "agent") return;
+    if (personality === undefined || personality === null) return;
+    if (typeof personality === "string" && personality.trim().length === 0) return;
+    throw forbidden(
+      "Agent-authenticated callers cannot set \"personality\" when hiring or creating an agent. Only board-authenticated callers can.",
+    );
+  }
+
   // DUR-55: an agent-authenticated caller must never be able to add, change, or
   // remove a tool connection (MCP server) on any agent's adapterConfig,
   // including its own — that is a command run on the host or a URL data gets
@@ -2407,6 +2423,7 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, hireInput.runtimeConfig);
+    assertNoAgentPersonalityMutation(req, hireInput.personality);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2492,6 +2509,7 @@ export function agentRoutes(
           role: normalizedHireInput.role,
           title: normalizedHireInput.title ?? null,
           icon: normalizedHireInput.icon ?? null,
+          personality: normalizedHireInput.personality ?? null,
           reportsTo: normalizedHireInput.reportsTo ?? null,
           capabilities: normalizedHireInput.capabilities ?? null,
           adapterType: requestedAdapterType,
@@ -2624,6 +2642,7 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, createInput.runtimeConfig);
+    assertNoAgentPersonalityMutation(req, createInput.personality);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
