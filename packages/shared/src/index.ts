@@ -1,5 +1,12 @@
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
+  SORTERINGSREGLER_START_MARKER,
+  SORTERINGSREGLER_END_MARKER,
+  extractSorteringsreglerBlock,
+  withSorteringsreglerBlock,
+  parseSorteringsreglerRuleTargetNames,
+} from "./customer-inbox-rules.js";
+export {
   formatApprovalTechnicalReference,
   formatApprovalTitle,
   stripLegacyTitlePrefix,
@@ -385,6 +392,10 @@ export {
   type PluginApiRouteCheckoutPolicy,
   type PluginEventType,
   type PluginBridgeErrorCode,
+  CUSTOMER_INBOX_CHANNELS,
+  type CustomerInboxChannel,
+  CUSTOMER_INBOX_DELIVERY_OUTCOMES,
+  type CustomerInboxDeliveryOutcome,
 } from "./constants.js";
 export {
   KNOWN_INTEGRATION_ENV_KEYS,

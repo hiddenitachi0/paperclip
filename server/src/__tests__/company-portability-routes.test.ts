@@ -212,6 +212,7 @@ describe.sequential("company portability routes", () => {
       id,
       companyId,
       role: id === ceoAgentId ? "ceo" : "engineer",
+      permissions: { canManageCompanySettings: id === ceoAgentId },
     }));
     mockCompanyPortabilityService.exportBundle.mockResolvedValue(createExportResult());
     mockCompanyPortabilityService.previewExport.mockResolvedValue({
@@ -245,7 +246,7 @@ describe.sequential("company portability routes", () => {
       .send(exportRequest);
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage");
     expect(mockCompanyPortabilityService.previewExport).not.toHaveBeenCalled();
   });
 
@@ -263,7 +264,7 @@ describe.sequential("company portability routes", () => {
       .send({ agents: [123] });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage");
     expect(mockCompanyPortabilityService.previewExport).not.toHaveBeenCalled();
   });
 
@@ -280,7 +281,7 @@ describe.sequential("company portability routes", () => {
       const res = await request(app).post(path).send(exportRequest);
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain("Only CEO agents");
+      expect(res.body.error).toContain("Missing permission to manage");
     }
     expect(mockCompanyPortabilityService.exportBundle).not.toHaveBeenCalled();
   });
@@ -555,7 +556,7 @@ describe.sequential("company portability routes", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage");
     expect(mockCompanyPortabilityService.previewImport).not.toHaveBeenCalled();
   });
 
@@ -573,7 +574,7 @@ describe.sequential("company portability routes", () => {
       .send({ target: { mode: "existing_company", companyId: "not-a-uuid" } });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage");
     expect(mockCompanyPortabilityService.previewImport).not.toHaveBeenCalled();
   });
 
@@ -596,7 +597,7 @@ describe.sequential("company portability routes", () => {
       });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage");
     expect(mockCompanyPortabilityService.importBundle).not.toHaveBeenCalled();
   });
 

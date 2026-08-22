@@ -5,5 +5,37 @@
       "description": "Kom i gang ved å opprette et selskap.",
       "newCompany": "Nytt selskap"
     }
+  },
+  "routines": {
+    "customerInbox": {
+      "deliveries": {
+        "title": "Leveranser",
+        "empty": "Ingen leveranser ennå.",
+        "columns": {
+          "time": "Tidspunkt",
+          "channel": "Kanal",
+          "sender": "Avsender",
+          "outcome": "Status"
+        },
+        "outcome": {
+          "accepted": "Mottatt",
+          "duplicate": "Duplikat",
+          "rejected_signature": "Avvist (ugyldig passord)",
+          "rejected_shape": "Avvist (kunne ikke leses)",
+          "failed": "Feilet",
+          "unknown_target": "Ukjent adresse"
+        },
+        "channel": {
+          "email": "E-post",
+          "contact_form": "Kontaktskjema"
+        }
+      },
+      "testMessage": {
+        "button": "Send en testmelding",
+        "sending": "Sender…",
+        "success": "Testmelding sendt.",
+        "error": "Kunne ikke sende testmelding."
+      }
+    }
   }
 }

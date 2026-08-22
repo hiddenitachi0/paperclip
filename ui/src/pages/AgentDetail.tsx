@@ -41,6 +41,7 @@ import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { AgentActionButtons } from "../components/AgentActionButtons";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
@@ -1150,14 +1151,17 @@ export function AgentDetail() {
       )}
 
       {activeView === "instructions" && (
-        <PromptsTab
-          agent={agent}
-          companyId={resolvedCompanyId ?? undefined}
-          onDirtyChange={setConfigDirty}
-          onSaveActionChange={setSaveConfigAction}
-          onCancelActionChange={setCancelConfigAction}
-          onSavingChange={setConfigSaving}
-        />
+        <div className="space-y-4">
+          <SorteringsreglerCard agentId={agent.id} companyId={resolvedCompanyId ?? undefined} />
+          <PromptsTab
+            agent={agent}
+            companyId={resolvedCompanyId ?? undefined}
+            onDirtyChange={setConfigDirty}
+            onSaveActionChange={setSaveConfigAction}
+            onCancelActionChange={setCancelConfigAction}
+            onSavingChange={setConfigSaving}
+          />
+        </div>
       )}
 
       {activeView === "configuration" && (
@@ -1667,11 +1671,9 @@ function ConfigurationTab({
   const taskAssignSource = agent.access?.taskAssignSource ?? "none";
   const taskAssignLocked = agent.role === "ceo" || canCreateAgents;
   const taskAssignHint =
-    taskAssignSource === "ceo_role"
-      ? "Enabled automatically for CEO agents."
-      : taskAssignSource === "agent_creator"
-        ? "Enabled automatically while this agent can create new agents."
-        : taskAssignSource === "explicit_grant"
+    taskAssignSource === "agent_creator"
+      ? "Enabled automatically while this agent can create new agents."
+      : taskAssignSource === "explicit_grant"
           ? "Enabled via explicit company permission grant."
           : taskAssignSource === "simple_default"
             ? "Enabled by simple company-wide task assignment defaults."

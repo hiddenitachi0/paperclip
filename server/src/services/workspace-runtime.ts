@@ -1079,6 +1079,30 @@ async function isGitCheckout(cwd: string): Promise<boolean> {
   return Boolean(await runGit(["rev-parse", "--git-dir"], cwd).catch(() => null));
 }
 
+// project_primary hands every run the same baseCwd with no per-run isolation or
+// locking. If it's already dirty when a run starts, that's very likely another
+// run's in-progress (possibly concurrent) work — warn loudly instead of letting
+// an agent silently stash/reset/checkout over it. See DUR-75.
+async function detectSharedCheckoutForeignWorkInProgress(baseCwd: string): Promise<string[]> {
+  const isRepo = await isGitCheckout(baseCwd).catch(() => false);
+  if (!isRepo) return [];
+  try {
+    const [branch, statusOutput] = await Promise.all([
+      runGit(["rev-parse", "--abbrev-ref", "HEAD"], baseCwd).catch(() => "unknown"),
+      runGit(["status", "--porcelain"], baseCwd).catch(() => ""),
+    ]);
+    if (!statusOutput) return [];
+    const changedFileCount = statusOutput.split("\n").filter((line) => line.length > 0).length;
+    return [
+      `Shared "project_primary" checkout at ${baseCwd} already has ${changedFileCount} uncommitted change(s) on branch "${branch}". ` +
+        `This workspace strategy has no per-run isolation or locking, so this is likely another run's in-progress (possibly concurrent) work. ` +
+        `Do not stash, reset, or switch branches here without first checking whether another run owns this checkout — consider "git_worktree" mode for real per-run isolation.`,
+    ];
+  } catch {
+    return [];
+  }
+}
+
 async function detectDefaultBranch(repoRoot: string): Promise<string | null> {
   const originMasterRef = "origin/master";
   await refreshRemoteTrackingBaseRef(repoRoot, originMasterRef);
@@ -1589,7 +1613,7 @@ export async function realizeExecutionWorkspace(input: {
       cwd: input.base.baseCwd,
       branchName: null,
       worktreePath: null,
-      warnings: [],
+      warnings: await detectSharedCheckoutForeignWorkInProgress(input.base.baseCwd),
       created: false,
       baseRefSha: null,
     };
