@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
@@ -150,12 +150,19 @@ const RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1024 * 1024;
  * missing base ref, or the git command failing -- so callers can tell "no risky surface
  * detected" apart from "couldn't check" and fall back to the ordinary-only prompt rather
  * than guessing.
+ *
+ * DUR-83: resolves the workspace by execution_workspaces.sourceIssueId (set only by the
+ * server when a workspace is realized, never writable by an issue PATCH) rather than by
+ * trusting issues.executionWorkspaceId. That field is a plain, ungated column an issue's
+ * own assignee can PATCH to null on an unrelated field-only update -- doing so right before
+ * a status transition would silently skip risk detection (and any adversarial questions)
+ * without ever tripping the self-review gate itself.
  */
 export async function getChangedFilePathsForIssueWorkspace(
   db: Db,
-  input: { companyId: string; executionWorkspaceId: string | null | undefined },
+  input: { companyId: string; issueId: string | null | undefined },
 ): Promise<string[] | null> {
-  if (!input.executionWorkspaceId) return null;
+  if (!input.issueId) return null;
   const workspace = await db
     .select({
       cwd: executionWorkspaces.cwd,
@@ -164,7 +171,8 @@ export async function getChangedFilePathsForIssueWorkspace(
       baseRef: executionWorkspaces.baseRef,
     })
     .from(executionWorkspaces)
-    .where(and(eq(executionWorkspaces.id, input.executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)))
+    .where(and(eq(executionWorkspaces.sourceIssueId, input.issueId), eq(executionWorkspaces.companyId, input.companyId)))
+    .orderBy(desc(executionWorkspaces.lastUsedAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (!workspace) return null;
@@ -337,7 +345,6 @@ export async function evaluateSelfReviewDoneGate(input: {
     companyId: string;
     projectId: string | null;
     executionPolicy: unknown;
-    executionWorkspaceId?: string | null;
   };
   actor: { actorType: string; agentId: string | null; runId: string | null };
   requestedStatus: string | undefined;
@@ -374,7 +381,7 @@ export async function evaluateSelfReviewDoneGate(input: {
   // about to schedule a new pass), not on every duplicate/retry hit of this gate.
   const changedFilePaths = await getChangedFilePathsForIssueWorkspace(input.db, {
     companyId: input.issue.companyId,
-    executionWorkspaceId: input.issue.executionWorkspaceId ?? null,
+    issueId: input.issue.id,
   });
   const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
   const riskySurfaceNote =
