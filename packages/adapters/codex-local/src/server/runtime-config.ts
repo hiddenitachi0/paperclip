@@ -296,6 +296,33 @@ function stripManagedBlock(lines: string[], begin: string, end: string): string[
   return out;
 }
 
+// Strips every [mcp_servers.*] table (and its subtables) from a config.toml
+// before it is copied from the shared host CODEX_HOME into a less-trusted
+// sandbox/remote Codex home. mcp_servers entries are stdio server defs
+// (command/args/env, see parseCodexMcpServersConfig) and env can carry
+// secrets, so the shared host's own mcp_servers must never be copied
+// verbatim -- mirroring claude_local's sanitizeRemoteClaudeSettings, which
+// strips the equivalent mcpServers/hooks fields from settings.json. Per-agent
+// MCP servers are seeded separately via prepareCodexRuntimeConfig's own
+// [mcp_servers.*] merge, so dropping the shared copy wholesale does not lose
+// any agent-scoped config.
+export function sanitizeSharedCodexConfigToml(content: string): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    const headerPath = parseTableHeaderPath(line);
+    if (headerPath) {
+      skipping = headerPath[0] === "mcp_servers";
+      if (skipping) continue;
+    } else if (skipping) {
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 // Despite the name, this strips every Paperclip-managed region: custom model
 // providers AND per-agent MCP servers. Kept as one function/export since both
 // are stripped together at every call site (fresh-merge base and crash

@@ -2,14 +2,18 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// DUR-55 / DUR-56: an agent-authenticated caller must never be able to
-// change its own (or another agent's) job title, and must never be able to
-// add/change a tool connection (MCP server) on any agent's adapterConfig.
-// Both holes came from `allow_self` granting blanket write access to an
-// agent's own record with no field-level guard. These tests prove the
-// guard added in server/src/routes/agents.ts closes both holes while
-// leaving board-authenticated (human) updates and unrelated agent
-// self-updates unaffected.
+// DUR-55 / DUR-56 / DUR-57: an agent-authenticated caller must never be able
+// to change its own (or another agent's) job title, add/change a tool
+// connection (MCP server) on any agent's adapterConfig, re-parent itself
+// (reportsTo), or raise its own spend ceiling (budgetMonthlyCents). All of
+// these came from `allow_self` granting blanket write access to an agent's
+// own record. DUR-57 replaced the field-by-field deny-list that closed the
+// first two holes with a named allow-list (server/src/services/agent-self-update-policy.ts)
+// so a field NOT on that list is refused by default — these tests prove that
+// guard (assertAgentSelfUpdateAllowed in server/src/routes/agents.ts) on
+// both the PATCH route and the config-revision rollback route, while leaving
+// board-authenticated (human) updates and legitimate agent self-updates
+// unaffected.
 
 const agentId = "11111111-1111-4111-8111-111111111111";
 const peerAgentId = "33333333-3333-4333-8333-333333333333";
@@ -99,12 +103,52 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp(actor: Record<string, unknown>) {
+async function createApp(
+  actor: Record<string, unknown>,
+  options?: {
+    // DUR-57: stands in for a future updateAgentSchema change that lets an
+    // unrecognized field reach the route handler (today zod's `validate`
+    // middleware strips any key it doesn't know about, so a genuinely novel
+    // field can never reach assertAgentSelfUpdateAllowed through a real HTTP
+    // request yet). Bypassing validation is how this suite proves the
+    // allow-list itself — not zod — is what refuses an unknown field.
+    bypassValidation?: boolean;
+    // DUR-57: stands in for a future CONFIG_REVISION_FIELDS addition that
+    // computeChangedConfigFields would surface before anyone remembers to
+    // add it to AGENT_SELF_UPDATE_ALLOWED_FIELDS.
+    injectUnknownRollbackField?: boolean;
+  },
+) {
   vi.resetModules();
   vi.doUnmock("../routes/agents.js");
   vi.doUnmock("../routes/authz.js");
   vi.doUnmock("../middleware/index.js");
+  // DUR-57: bypassValidation / injectUnknownRollbackField register a doMock
+  // for these two modules that vi.resetModules() alone does not undo — an
+  // explicit doUnmock here keeps that override scoped to the single test
+  // that opts in, instead of leaking into every later test in this file.
+  vi.doUnmock("../middleware/validate.js");
+  vi.doUnmock("../services/agent-self-update-policy.js");
   registerModuleMocks();
+  if (options?.bypassValidation) {
+    vi.doMock("../middleware/validate.js", () => ({
+      validate: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    }));
+  }
+  if (options?.injectUnknownRollbackField) {
+    vi.doMock("../services/agent-self-update-policy.js", async () => {
+      const actual = await vi.importActual<typeof import("../services/agent-self-update-policy.js")>(
+        "../services/agent-self-update-policy.js",
+      );
+      return {
+        ...actual,
+        computeChangedConfigFields: (existing: Record<string, unknown>, patch: Record<string, unknown>) => ({
+          ...actual.computeChangedConfigFields(existing, patch as never),
+          aFieldNobodyHasWrittenYet: "surprise",
+        }),
+      };
+    });
+  }
 
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
@@ -190,7 +234,7 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
   };
 
   describe("role", () => {
-    it("rejects an agent-authenticated caller changing its own role", async () => {
+    it("rejects an agent-authenticated caller changing its own role", { timeout: 20000 }, async () => {
       const app = await createApp(agentActor);
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).patch(`/api/agents/${agentId}`).send({ role: "ceo" }),
@@ -278,6 +322,89 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
     });
   });
 
+  // DUR-57: the self-update guard is now allow-list based (server/src/services/agent-self-update-policy.ts)
+  // instead of a hand-maintained deny-list. reportsTo and budgetMonthlyCents are the two concrete fields
+  // named in DUR-56's follow-up as still exploitable through the old deny-list; they are proven refused
+  // here purely because they are absent from the allow-list, not because of a field-specific check.
+  describe("allow-list (DUR-57)", () => {
+    it("rejects an agent-authenticated caller changing who it reports to", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ reportsTo: peerAgentId }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller raising its own monthly budget", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ budgetMonthlyCents: 1_000_000 }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+
+    it("still allows a board-authenticated caller to change reportsTo and budgetMonthlyCents", async () => {
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl)
+          .patch(`/api/agents/${agentId}`)
+          .send({ reportsTo: peerAgentId, budgetMonthlyCents: 1_000_000 }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalledWith(
+        agentId,
+        expect.objectContaining({ reportsTo: peerAgentId, budgetMonthlyCents: 1_000_000 }),
+        expect.anything(),
+      );
+    });
+
+    it("still allows an agent to set desiredSkills on itself", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ desiredSkills: ["writes-tests"] }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalled();
+    });
+
+    it("still allows an agent to set runtimeConfig.modelProfiles on itself", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl)
+          .patch(`/api/agents/${agentId}`)
+          .send({ runtimeConfig: { modelProfiles: { cheap: { adapterConfig: {} } } } }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller setting a runtimeConfig key other than modelProfiles", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl)
+          .patch(`/api/agents/${agentId}`)
+          .send({ runtimeConfig: { handOffUnhandledAfterMinutes: 30 } }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+
+    // DUR-57: proves the allow-list itself refuses a field it has never heard
+    // of — not merely the specific fields this test file happens to name —
+    // by bypassing zod's own key-stripping (see bypassValidation on
+    // createApp) so a genuinely novel field reaches assertAgentSelfUpdateAllowed.
+    it("rejects an agent-authenticated caller setting a brand-new field the allow-list doesn't know about", async () => {
+      const app = await createApp(agentActor, { bypassValidation: true });
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ aFieldNobodyHasWrittenYet: "surprise" }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe("config-revision rollback", () => {
     const revisionId = "44444444-4444-4444-8444-444444444444";
 
@@ -325,6 +452,56 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       );
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    // DUR-57: rollback restores a revision's snapshot wholesale, so it must be checked against the SAME
+    // allow-list the PATCH route uses (see assertAgentSelfUpdateRollbackAllowed in routes/agents.ts) —
+    // otherwise an agent could use rollback to restore a reportsTo/budgetMonthlyCents value it could
+    // never set directly through PATCH.
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different reportsTo", async () => {
+      mockRevision({ ...baseAgent, reportsTo: peerAgentId });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a higher budgetMonthlyCents", async () => {
+      mockRevision({ ...baseAgent, budgetMonthlyCents: 1_000_000 });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("still allows a board-authenticated caller to roll back to a revision that restores reportsTo and budgetMonthlyCents", async () => {
+      mockRevision({ ...baseAgent, reportsTo: peerAgentId, budgetMonthlyCents: 1_000_000 });
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    // DUR-57: same property as the PATCH-path test above, proven on the
+    // rollback path — a rollback diff can't smuggle in a field name the
+    // route has never heard of and still succeed. Since
+    // configPatchFromSnapshot only ever emits today's known
+    // CONFIG_REVISION_FIELDS, this simulates a future field via
+    // injectUnknownRollbackField rather than a real revision snapshot.
+    it("rejects an agent-authenticated caller rolling back a diff containing a brand-new field the allow-list doesn't know about", async () => {
+      mockRevision({ ...baseAgent, capabilities: "writes tests" });
+      const app = await createApp(agentActor, { injectUnknownRollbackField: true });
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
     });
 
     it("still allows an agent to roll back to a revision that leaves role and tool connections unchanged", async () => {
