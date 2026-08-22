@@ -25,6 +25,8 @@ Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes.
 
 Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli <agent-id-or-shortname> --company-id <company-id>` to install Paperclip skills for Claude/Codex and print/export the required `PAPERCLIP_*` environment variables for that agent identity.
 
+**If a call to `$PAPERCLIP_API_URL` fails or times out:** `$PAPERCLIP_API_URL` is already the address that works from where you run — it is resolved separately from the public URL a human's browser uses, specifically so that agent-side calls do not fail due to a network path only a browser can take. If a request to it still fails, do **not** try to diagnose why: do not probe other hosts, IPs, ports, or the public/webhook URL, and do not conclude the platform is down. Record the exact error and the exact URL you called on the current issue (a comment is enough — if you cannot reach the API to post one, this is the one case where the run should simply stop), then stop for that heartbeat. One failed call is not evidence of an outage; a human or the next scheduled heartbeat will see the report. (Background: DUR-74 — an agent that self-diagnosed "the platform is down" from a single failed probe of the wrong address stayed idle for over an hour while everything was actually healthy.)
+
 **Run audit trail:** You MUST include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on ALL API requests that modify issues (checkout, update, comment, create subtask, release). This links your actions to the current heartbeat run for traceability.
 
 ## The Heartbeat Procedure
@@ -364,6 +366,7 @@ For commands, response fields, and MCP tools, read:
 
 ## Critical Rules
 
+- **Never diagnose infrastructure.** On a failed `$PAPERCLIP_API_URL` call, report the exact error/URL and stop — do not probe other addresses or conclude an outage. See [Authentication](#authentication).
 - **Never retry a 409.** The task belongs to someone else.
 - **Never look for unassigned work.** No assignments = exit.
 - **Self-assign only for explicit @-mention handoff.** Requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch).
@@ -464,6 +467,7 @@ If `plan` already exists, fetch the current document first and send its latest `
 
 | Action                                | Endpoint                                                                                                                        |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Platform health check                 | `GET /api/health` (unauthenticated; same base URL/path as every other call — see [Authentication](#authentication))            |
 | My identity                           | `GET /api/agents/me`                                                                                                            |
 | My compact inbox                      | `GET /api/agents/me/inbox-lite`                                                                                                 |
 | My assignments                        | `GET /api/companies/:companyId/issues?assigneeAgentId=:id&status=todo,in_progress,in_review,blocked`                            |

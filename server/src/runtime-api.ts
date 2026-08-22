@@ -80,6 +80,30 @@ export function choosePrimaryRuntimeApiUrl(input: {
   return formatOrigin("http:", "localhost", input.port);
 }
 
+/**
+ * Resolves the address an agent process running alongside the server (same
+ * container / network namespace, e.g. a local adapter's child process)
+ * should use to reach the API.
+ *
+ * This is deliberately independent of `authPublicBaseUrl` and
+ * `allowedHostnames`: those describe how an operator's browser or an
+ * outside service reaches the server, and are not guaranteed to be
+ * reachable from inside the container the server itself runs in (tailnet
+ * addresses, public hostnames, and reverse-proxy fronted domains routinely
+ * are not). An in-container agent should always be able to reach the
+ * server via loopback, so that is the only thing this function trusts.
+ */
+export function chooseAgentRuntimeApiUrl(input: {
+  bindHost: string;
+  port: number;
+}): string {
+  const bindHost = normalizeHost(input.bindHost);
+  if (bindHost && !isWildcardHost(bindHost) && !isLoopbackHost(bindHost)) {
+    return formatOrigin("http:", bindHost, input.port);
+  }
+  return formatOrigin("http:", "127.0.0.1", input.port);
+}
+
 export function collectReachableInterfaceHosts(input: {
   networkInterfacesMap?: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
 } = {}): string[] {

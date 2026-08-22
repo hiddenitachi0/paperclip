@@ -372,7 +372,7 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
     );
   });
 
-  it("rewrites explicit-port auth public URLs when detect-port selects a new port", async () => {
+  it("rewrites explicit-port auth public URLs when detect-port selects a new port, but keeps the agent runtime URL on loopback", async () => {
     loadConfigMock.mockReturnValueOnce(buildTestConfig({
       port: 3100,
       authBaseUrlMode: "explicit",
@@ -384,10 +384,12 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
 
     expect(started.listenPort).toBe(3110);
     expect(started.apiUrl).toBe("http://my-host.ts.net:3110");
-    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://my-host.ts.net:3110");
+    // DUR-74: agents run alongside the server and cannot reach the public/tailnet
+    // hostname from inside the container, so the runtime URL must stay loopback.
+    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://127.0.0.1:3110");
   });
 
-  it("keeps no-port auth public URLs stable when detect-port selects a new port", async () => {
+  it("keeps no-port auth public URLs stable when detect-port selects a new port, but keeps the agent runtime URL on loopback", async () => {
     loadConfigMock.mockReturnValueOnce(buildTestConfig({
       port: 3100,
       authBaseUrlMode: "explicit",
@@ -399,6 +401,7 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
 
     expect(started.listenPort).toBe(3110);
     expect(started.apiUrl).toBe("https://paperclip.example");
-    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("https://paperclip.example");
+    // DUR-74: the public base URL must never leak into the agent-facing runtime URL.
+    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://127.0.0.1:3110");
   });
 });

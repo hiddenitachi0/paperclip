@@ -53,7 +53,7 @@ import {
   reconcileAdapterAvailability,
 } from "./services/adapter-registry-bootstrap.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
-import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
+import { buildRuntimeApiCandidateUrls, chooseAgentRuntimeApiUrl, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
@@ -682,13 +682,19 @@ export async function startServer(): Promise<StartedServer> {
   }
   
   const runtimeListenHost = config.host;
-  const runtimeApiUrl = choosePrimaryRuntimeApiUrl({
+  // This is the PUBLIC/operator-facing address (used for webhook URLs shown
+  // to operators and outside services) — it intentionally prefers
+  // authPublicBaseUrl. It must never be handed to an agent process as "the"
+  // API URL: that address is frequently unreachable from inside the
+  // container the server itself runs in (tailnet hostnames, reverse
+  // proxies, etc.), which is what caused DUR-74.
+  const publicApiUrl = choosePrimaryRuntimeApiUrl({
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
     allowedHostnames: config.allowedHostnames,
     bindHost: runtimeListenHost,
     port: listenPort,
   });
-  const configuredApiUrl = process.env.PAPERCLIP_API_URL?.trim() || runtimeApiUrl;
+  const configuredApiUrl = process.env.PAPERCLIP_API_URL?.trim() || publicApiUrl;
   const runtimeApiCandidates = buildRuntimeApiCandidateUrls({
     preferredApiUrl: configuredApiUrl,
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
@@ -696,9 +702,16 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: runtimeListenHost,
     port: listenPort,
   });
+  // This is the address an agent process running alongside the server
+  // (same container/network namespace) should use — always loopback-based,
+  // never derived from the public base URL or allowed hostnames.
+  const agentRuntimeApiUrl = chooseAgentRuntimeApiUrl({
+    bindHost: runtimeListenHost,
+    port: listenPort,
+  });
   process.env.PAPERCLIP_LISTEN_HOST = runtimeListenHost;
   process.env.PAPERCLIP_LISTEN_PORT = String(listenPort);
-  process.env.PAPERCLIP_RUNTIME_API_URL = runtimeApiUrl;
+  process.env.PAPERCLIP_RUNTIME_API_URL = agentRuntimeApiUrl;
   process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = JSON.stringify(runtimeApiCandidates);
   process.env.PAPERCLIP_API_URL = configuredApiUrl;
   
