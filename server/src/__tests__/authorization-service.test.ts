@@ -1025,6 +1025,42 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
+  it("grants agent-creator authority to any role with an explicit canCreateAgents grant, not just the ceo title", async () => {
+    const company = await createCompany(db, "CapabilityDriven");
+    const actorAgent = await createAgent(db, company.id, {
+      role: "engineer",
+      permissions: { canCreateAgents: true },
+    });
+
+    const decision = await authorizationService(db).decide({
+      actor: { type: "agent", agentId: actorAgent.id, companyId: company.id, source: "agent_jwt" },
+      action: "agents:create",
+      resource: { type: "company", companyId: company.id },
+    });
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      reason: "allow_legacy_agent_creator",
+    });
+  });
+
+  it("no longer treats the ceo job title alone as sufficient once canCreateAgents is explicitly revoked", async () => {
+    const company = await createCompany(db, "TitleAloneIsNotEnough");
+    const actorAgent = await createAgent(db, company.id, {
+      role: "ceo",
+      permissions: { canCreateAgents: false },
+    });
+
+    const decision = await authorizationService(db).decide({
+      actor: { type: "agent", agentId: actorAgent.id, companyId: company.id, source: "agent_jwt" },
+      action: "agents:create",
+      resource: { type: "company", companyId: company.id },
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).not.toBe("allow_legacy_agent_creator");
+  });
+
   it("denies active-checkout management outside the CEO caller company scope", async () => {
     const sourceCompany = await createCompany(db, "CheckoutSource");
     const targetCompany = await createCompany(db, "CheckoutTarget");

@@ -1639,6 +1639,65 @@ describe.sequential("agent permission routes", () => {
     expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
   });
 
+  it("denies a same-company agent-authenticated caller without canManageOtherAgentsPermissions, even if it once would have been CEO-gated", async () => {
+    // baseAgent has role "engineer" and permissions.canCreateAgents: false --
+    // i.e. no named capability that should grant this. Confirms there is no
+    // remaining `role === "ceo"` fallback path left to trip.
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Missing permission to manage other agents' permissions");
+    expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+    expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent-authenticated caller with an explicit canManageOtherAgentsPermissions grant, regardless of job title", async () => {
+    const managerAgentId = "55555555-5555-4555-8555-555555555555";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === managerAgentId) {
+        return {
+          ...baseAgent,
+          id: managerAgentId,
+          role: "engineering-manager",
+          permissions: { canCreateAgents: false, canManageOtherAgentsPermissions: true },
+        };
+      }
+      return baseAgent;
+    });
+    mockAgentService.updatePermissions.mockResolvedValue({
+      ...baseAgent,
+      permissions: { canCreateAgents: true },
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: managerAgentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true }));
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.updatePermissions).toHaveBeenCalledWith(agentId, {
+      canCreateAgents: true,
+      canAssignTasks: true,
+    });
+  });
+
   it("exposes a dedicated agent route for the inbox mine view", async () => {
     mockIssueService.list.mockResolvedValue([
       {
