@@ -60,14 +60,14 @@ describe("AgentAvatar", () => {
     // This deliberately can't prove the broken-URL-falls-back-to-symbol case —
     // only that the initial, always-true-in-jsdom state renders the symbol.
     const el = render(
-      <AgentAvatar agent={{ id: "fixture-4", icon: "bot", avatarAssetId: "fixture-asset-id" }} />,
+      <AgentAvatar agent={{ icon: "bot", avatarAssetId: "fixture-asset-id" }} />,
     );
     expect(el.querySelector('[data-slot="avatar-fallback"] svg')).toBeTruthy();
     expect(el.querySelector('[data-slot="avatar-image"]')).toBeFalsy();
   });
 
   it.each(["default", "xs", "sm", "lg"] as const)("renders at the %s size without crashing", (size) => {
-    const el = render(<AgentAvatar agent={{ id: "fixture-5", icon: "bot" }} size={size} />);
+    const el = render(<AgentAvatar agent={{ icon: "bot" }} size={size} />);
     expect(el.querySelector('[data-slot="avatar"]')).toBeTruthy();
   });
 });
