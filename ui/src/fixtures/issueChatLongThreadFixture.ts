@@ -28,6 +28,7 @@ function createAgent(id: string, name: string, icon: string, urlKey: string): Ag
     role: "engineer",
     title: null,
     icon,
+    avatarAssetId: null,
     status: "active",
     reportsTo: null,
     capabilities: null,

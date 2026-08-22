@@ -546,6 +546,7 @@ function createAgent(overrides: Partial<Agent> = {}): Agent {
     role: "engineer",
     title: "Software Engineer",
     icon: "code",
+    avatarAssetId: null,
     status: "active",
     reportsTo: null,
     capabilities: null,
