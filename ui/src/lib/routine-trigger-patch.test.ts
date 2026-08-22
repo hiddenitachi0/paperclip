@@ -18,6 +18,7 @@ function makeScheduleTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTr
     secretId: null,
     signingMode: null,
     replayWindowSec: null,
+    customerInboxChannel: null,
     lastRotatedAt: null,
     lastResult: null,
     createdByAgentId: null,
