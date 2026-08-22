@@ -7,6 +7,7 @@ import {
   deployRequestPayloadSchema,
   formatApprovalTechnicalReference,
   formatApprovalTitle,
+  type InstructionsChangeRequestPayload,
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
   requestApprovalRevisionSchema,
@@ -115,6 +116,32 @@ async function resolveInstructionsChangeBeforeContent(
 ): Promise<string> {
   const current = await instructions.readFile(targetAgent, relativePath).catch(() => null);
   return current?.content ?? "";
+}
+
+/**
+ * DUR-109 follow-up: `summary` on instructionsChangeRequestPayloadSchema is an
+ * optional, caller-supplied field. Trusting it would let a proposing boss
+ * write whatever it wants into the text an operator reads to decide -- the
+ * one field this ticket most needs to be honest is exactly the one a
+ * self-interested proposer controls. Always overwrite it here with a
+ * before/after built straight from the same beforeContent/afterContent that
+ * get applied, so the approval text can never diverge from the actual change.
+ */
+function composeInstructionsChangeSummary(
+  payload: Pick<InstructionsChangeRequestPayload, "beforeContent" | "afterContent" | "reason">,
+  targetAgentName: string,
+): string {
+  const truncate = (content: string) =>
+    content.length > 1500 ? `${content.slice(0, 1500)}\n…(truncated)` : content;
+  const before = payload.beforeContent.trim().length > 0 ? truncate(payload.beforeContent) : "(no existing instructions)";
+  return (
+    `**Agent:** ${targetAgentName}\n\n` +
+    `**Why:** ${payload.reason}\n\n` +
+    `**Before:**\n\`\`\`\n${before}\n\`\`\`\n\n` +
+    `**After:**\n\`\`\`\n${truncate(payload.afterContent)}\n\`\`\`\n\n` +
+    `Approving applies these instructions immediately and records the change as a revision naming both the ` +
+    `proposing boss and the approver. "Send back for changes" returns it to the boss with a note instead of applying anything.`
+  );
 }
 
 /**
@@ -507,6 +534,10 @@ export function approvalRoutes(
       approvalInput.payload = instructionsChangeRequestPayloadSchema.parse({
         ...instructionsPayload,
         beforeContent,
+        summary: composeInstructionsChangeSummary(
+          { beforeContent, afterContent: instructionsPayload.afterContent, reason: instructionsPayload.reason },
+          targetAgent.name || targetAgent.id,
+        ),
       });
     }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
@@ -882,6 +913,10 @@ export function approvalRoutes(
       normalizedPayload = instructionsChangeRequestPayloadSchema.parse({
         ...instructionsPayload,
         beforeContent,
+        summary: composeInstructionsChangeSummary(
+          { beforeContent, afterContent: instructionsPayload.afterContent, reason: instructionsPayload.reason },
+          targetAgent.name || targetAgent.id,
+        ),
       });
     }
     const approval = await svc.resubmit(id, normalizedPayload);

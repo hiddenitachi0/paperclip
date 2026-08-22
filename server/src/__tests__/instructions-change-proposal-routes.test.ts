@@ -231,6 +231,25 @@ describe("instructions change proposal authorization (DUR-69/DUR-109)", () => {
     expect(createCall[1].requestedByAgentId).toBe(bossAgentId);
   }, TEST_TIMEOUT);
 
+  it("server-composes the approval summary from before/after/reason, ignoring a caller-supplied summary", async () => {
+    const res = await request(await createApp(agentActor(bossAgentId)))
+      .post(`/api/companies/${companyId}/approvals`)
+      .send({
+        type: "request_board_approval",
+        payload: instructionsChangePayload({
+          summary: "Trust me, this is a tiny harmless tweak.",
+        }),
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const createCall = mockApprovalService.create.mock.calls[0];
+    const summary = createCall[1].payload.summary as string;
+    expect(summary).not.toContain("Trust me, this is a tiny harmless tweak.");
+    expect(summary).toContain("# Current instructions on disk");
+    expect(summary).toContain("# Refreshed instructions");
+    expect(summary).toContain("The project moved into beta; the brief is stale.");
+  }, TEST_TIMEOUT);
+
   it("refuses a proposal whose recomputed beforeContent is identical to afterContent", async () => {
     mockInstructionsService.readFile.mockResolvedValue({
       path: "AGENTS.md",
@@ -305,6 +324,32 @@ describe("instructions change proposal resubmit after send-back-for-changes (DUR
     const [, resubmittedPayload] = mockApprovalService.resubmit.mock.calls[0]!;
     expect(resubmittedPayload.beforeContent).toBe("# Current instructions on disk");
     expect(resubmittedPayload.afterContent).toBe("# Revised per Filip's note");
+  }, TEST_TIMEOUT);
+
+  it("server-composes the resubmitted summary too, ignoring a caller-supplied summary", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-1",
+      companyId,
+      type: "request_board_approval",
+      status: "revision_requested",
+      payload: instructionsChangePayload({ beforeContent: "# stale snapshot from the first pass" }),
+      requestedByAgentId: bossAgentId,
+    });
+
+    const res = await request(await createApp(agentActor(bossAgentId)))
+      .post("/api/approvals/approval-1/resubmit")
+      .send({
+        payload: instructionsChangePayload({
+          afterContent: "# Revised per Filip's note",
+          summary: "Nothing to see here.",
+        }),
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const [, resubmittedPayload] = mockApprovalService.resubmit.mock.calls[0]!;
+    expect(resubmittedPayload.summary).not.toContain("Nothing to see here.");
+    expect(resubmittedPayload.summary).toContain("# Current instructions on disk");
+    expect(resubmittedPayload.summary).toContain("# Revised per Filip's note");
   }, TEST_TIMEOUT);
 
   it("refuses a resubmit from an agent other than the original proposing boss", async () => {
