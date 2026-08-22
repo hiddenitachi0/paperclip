@@ -19,6 +19,7 @@ import {
   type TrustPresetResolution,
 } from "./trust-preset-resolver.js";
 import { logger } from "../middleware/logger.js";
+import { normalizeAgentPermissions } from "./agent-permissions.js";
 
 export type AuthorizationActor =
   {
@@ -130,8 +131,12 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null 
   return action;
 }
 
+// DUR-58: `canCreateAgents` is an explicit, persisted grant on the agent's own
+// record (set from role only at creation time — see defaultPermissionsForRole
+// — and editable afterward only via the /agents/:id/permissions endpoint).
+// This must never re-derive the grant from the agent's current role field, or
+// a role edit becomes a silent, total access change again (DUR-56).
 function canCreateAgentsLegacy(agent: { role: string; permissions: unknown }) {
-  if (agent.role === "ceo") return true;
   if (!agent.permissions || typeof agent.permissions !== "object") return false;
   return Boolean((agent.permissions as Record<string, unknown>).canCreateAgents);
 }
@@ -519,7 +524,7 @@ export function authorizationService(db: Db) {
   }
 
   async function loadAgent(agentId: string): Promise<AgentAuthorizationRow | null> {
-    return db
+    const row = await db
       .select({
         id: agents.id,
         companyId: agents.companyId,
@@ -531,6 +536,13 @@ export function authorizationService(db: Db) {
       .from(agents)
       .where(eq(agents.id, agentId))
       .then((rows) => rows[0] ?? null);
+    if (!row) return null;
+    // This is a raw DB read, bypassing the agent service's normalization. Run
+    // it through the same role-derived defaulting the service applies so a
+    // "ceo" agent whose stored permissions blob predates a given capability
+    // still gets that capability's default here -- without ever comparing
+    // `role` to `"ceo"` directly in an authorization decision.
+    return { ...row, permissions: normalizeAgentPermissions(row.permissions, row.role) };
   }
 
   async function loadProject(projectId: string): Promise<ProjectAuthorizationRow | null> {

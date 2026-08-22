@@ -9,6 +9,7 @@ import { parseProjectExecutionWorkspacePolicy } from "../services/execution-work
 import { isLowTrustRuntimeManagementAllowed } from "../services/low-trust-runtime-containment.js";
 import { resolveCoreTrustPreset, type TrustPresetResolution } from "../services/trust-preset-resolver.js";
 import { readObject } from "../lib/objects.js";
+import { normalizeAgentPermissions } from "../services/agent-permissions.js";
 
 const WORKSPACE_RUNTIME_ELIGIBLE_ISSUE_STATUSES: string[] = [
   "backlog",
@@ -73,7 +74,7 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     throw forbidden("Agent authentication required");
   }
 
-  const actorAgent = await db
+  const actorAgentRow = await db
     .select({
       id: agents.id,
       companyId: agents.companyId,
@@ -84,9 +85,15 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     .where(eq(agents.id, req.actor.agentId))
     .then((rows) => rows[0] ?? null);
 
-  if (!actorAgent || actorAgent.companyId !== input.companyId) {
+  if (!actorAgentRow || actorAgentRow.companyId !== input.companyId) {
     throw forbidden("Agent key cannot access another company");
   }
+
+  // This is a raw DB read (not routed through the agent service), so run it
+  // through the same role-derived defaulting the service applies elsewhere.
+  // This is what lets a "ceo" agent still get `canManageAllWorkspaceRuntimes`
+  // by default below, without this file ever comparing `role` to `"ceo"`.
+  const actorAgent = { ...actorAgentRow, permissions: normalizeAgentPermissions(actorAgentRow.permissions, actorAgentRow.role) };
 
   const actorRun = req.actor.runId
     ? await db
@@ -112,7 +119,7 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     runExecutionPolicy,
   });
 
-  if (actorAgent.role === "ceo" && actorRuntimeTrust.kind === "standard") {
+  if (actorAgent.permissions.canManageAllWorkspaceRuntimes && actorRuntimeTrust.kind === "standard") {
     return;
   }
 
@@ -184,7 +191,7 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     });
   }
 
-  if (actorAgent.role === "ceo") {
+  if (actorAgent.permissions.canManageAllWorkspaceRuntimes) {
     return;
   }
 
