@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
@@ -143,20 +143,21 @@ export function detectRiskySurfaceFromDiff(changedFilePaths: readonly string[]):
 const RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 
 /**
- * Looks up the issue's current execution workspace and, if it's a local, on-disk checkout
- * (local_fs/git_worktree with a base ref recorded), runs `git diff --name-only` against it
- * to get the paths changed since the base ref. Returns null (not an empty array) whenever
- * the diff genuinely can't be read -- cloud/adapter-managed workspaces, a missing path, a
- * missing base ref, or the git command failing -- so callers can tell "no risky surface
- * detected" apart from "couldn't check" and fall back to the ordinary-only prompt rather
- * than guessing.
+ * DUR-83: resolves the workspace to diff by looking up executionWorkspaces.sourceIssueId
+ * (most-recently-used first), NOT the issue row's own executionWorkspaceId column. That
+ * column is a plain, ungated field on the issue update schema -- the issue's own assignee
+ * can PATCH it to null (or to an unrelated workspace) without touching status, which never
+ * trips the self-review gate, then immediately PATCH status:done so this check reads a
+ * cleared/wrong pointer and silently falls back to the non-adversarial prompt. sourceIssueId
+ * is only ever set server-side when a workspace is created for a run (see
+ * executionWorkspacesSvc.create call sites) and isn't part of the agent-facing
+ * updateExecutionWorkspaceSchema, so it isn't a lever the assignee can pull the same way.
  */
-export async function getChangedFilePathsForIssueWorkspace(
+async function findMostRecentIssueWorkspace(
   db: Db,
-  input: { companyId: string; executionWorkspaceId: string | null | undefined },
-): Promise<string[] | null> {
-  if (!input.executionWorkspaceId) return null;
-  const workspace = await db
+  input: { companyId: string; issueId: string },
+) {
+  return db
     .select({
       cwd: executionWorkspaces.cwd,
       providerRef: executionWorkspaces.providerRef,
@@ -164,9 +165,26 @@ export async function getChangedFilePathsForIssueWorkspace(
       baseRef: executionWorkspaces.baseRef,
     })
     .from(executionWorkspaces)
-    .where(and(eq(executionWorkspaces.id, input.executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)))
+    .where(and(eq(executionWorkspaces.companyId, input.companyId), eq(executionWorkspaces.sourceIssueId, input.issueId)))
+    .orderBy(desc(executionWorkspaces.lastUsedAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
+}
+
+/**
+ * Looks up the issue's most recently used execution workspace and, if it's a local, on-disk
+ * checkout (local_fs/git_worktree with a base ref recorded), runs `git diff --name-only`
+ * against it to get the paths changed since the base ref. Returns null (not an empty array)
+ * whenever the diff genuinely can't be read -- cloud/adapter-managed workspaces, a missing
+ * path, a missing base ref, or the git command failing -- so callers can tell "no risky
+ * surface detected" apart from "couldn't check" and fall back to the ordinary-only prompt
+ * rather than guessing.
+ */
+export async function getChangedFilePathsForIssueWorkspace(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<string[] | null> {
+  const workspace = await findMostRecentIssueWorkspace(db, input);
   if (!workspace) return null;
   if (workspace.providerType !== "local_fs" && workspace.providerType !== "git_worktree") return null;
 
@@ -337,7 +355,6 @@ export async function evaluateSelfReviewDoneGate(input: {
     companyId: string;
     projectId: string | null;
     executionPolicy: unknown;
-    executionWorkspaceId?: string | null;
   };
   actor: { actorType: string; agentId: string | null; runId: string | null };
   requestedStatus: string | undefined;
@@ -374,7 +391,7 @@ export async function evaluateSelfReviewDoneGate(input: {
   // about to schedule a new pass), not on every duplicate/retry hit of this gate.
   const changedFilePaths = await getChangedFilePathsForIssueWorkspace(input.db, {
     companyId: input.issue.companyId,
-    executionWorkspaceId: input.issue.executionWorkspaceId ?? null,
+    issueId: input.issue.id,
   });
   const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
   const riskySurfaceNote =
