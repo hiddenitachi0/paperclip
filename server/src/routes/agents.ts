@@ -2109,9 +2109,15 @@ export function agentRoutes(
 
     const issuesSvc = issueService(db);
     const recoveryActionsSvc = issueRecoveryActionService(db);
+    // DUR-108: backlog is included here (self-scoped only — this query is
+    // already filtered to the actor's own assignments) so an agent's own
+    // parked backlog issues are discoverable from its normal heartbeat
+    // inbox. Without this, a backlog issue assigned to an agent was a
+    // structural dead end: nothing ever told the assignee to look for it,
+    // and no one else is authorized to mutate it on the assignee's behalf.
     const rows = await issuesSvc.list(req.actor.companyId, {
       assigneeAgentId: req.actor.agentId,
-      status: "todo,in_progress,blocked",
+      status: "todo,in_progress,blocked,backlog",
       includeRoutineExecutions: true,
       limit: ISSUE_LIST_DEFAULT_LIMIT,
     });
