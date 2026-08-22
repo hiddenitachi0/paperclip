@@ -1780,6 +1780,15 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/api/issues/{id}/blockers/clear-terminal",
+  tags: ["issues"],
+  summary: "Unlink terminal (done/cancelled) blockers from an issue",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/api/issues/{id}/read",
   tags: ["issues"],
   summary: "Mark an issue as read",
