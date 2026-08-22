@@ -1977,6 +1977,53 @@ describe("issue approval link permissions (DUR-43)", () => {
     expect(mockIssueApprovalService.link).not.toHaveBeenCalled();
   });
 
+  it("lets a CEO-titled agent (via canCreateAgents) link an approval it did not request", async () => {
+    // Proves the old `actorAgent.role === "ceo"` bypass here is gone: this
+    // now goes through canCreateAgents exactly like any other agent would,
+    // and a "ceo" role gets that capability by default (normalizeAgentPermissions).
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) return makeAgent(ownerAgentId, { role: "ceo", permissions: { canCreateAgents: true } });
+      if (id === peerAgentId) return makeAgent(peerAgentId);
+      return null;
+    });
+    mockIssueApprovalService.getApproval.mockResolvedValue({
+      id: approvalId,
+      companyId,
+      requestedByAgentId: peerAgentId,
+    });
+    mockIssueApprovalService.link.mockResolvedValue({ issueId, approvalId });
+
+    const app = await createApp(ownerActor());
+    const res = await request(app).post(`/api/issues/${issueId}/approvals`).send({ approvalId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueApprovalService.link).toHaveBeenCalledWith(
+      issueId,
+      approvalId,
+      expect.objectContaining({ agentId: ownerAgentId }),
+    );
+  });
+
+  it("denies a CEO-titled agent once canCreateAgents has been explicitly revoked", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) return makeAgent(ownerAgentId, { role: "ceo", permissions: { canCreateAgents: false } });
+      if (id === peerAgentId) return makeAgent(peerAgentId);
+      return null;
+    });
+    mockIssueApprovalService.getApproval.mockResolvedValue({
+      id: approvalId,
+      companyId,
+      requestedByAgentId: peerAgentId,
+    });
+
+    const app = await createApp(ownerActor());
+    const res = await request(app).post(`/api/issues/${issueId}/approvals`).send({ approvalId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Missing permission to link approvals");
+    expect(mockIssueApprovalService.link).not.toHaveBeenCalled();
+  });
+
   it("denies linking an approval from a different company even if requestedByAgentId matches", async () => {
     mockIssueApprovalService.getApproval.mockResolvedValue({
       id: approvalId,

@@ -27,6 +27,8 @@ import {
   updateAgentSchema,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
+  extractSorteringsreglerBlock,
+  parseSorteringsreglerRuleTargetNames,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -519,15 +521,10 @@ export function agentRoutes(
       : [];
     const hasExplicitTaskAssignGrant = grants.some((grant) => grant.permissionKey === "tasks:assign");
 
-    if (agent.role === "ceo") {
-      return {
-        canAssignTasks: true,
-        taskAssignSource: "ceo_role" as const,
-        membership,
-        grants,
-      };
-    }
-
+    // Agents with a "ceo" job title used to get an unconditional bypass here.
+    // `svc.getById` already normalizes `agent.permissions.canCreateAgents` to
+    // `true` by default for the "ceo" role (see normalizeAgentPermissions),
+    // so a CEO agent still lands in this branch without a direct role check.
     if (canCreateAgents(agent)) {
       return {
         canAssignTasks: true,
@@ -847,6 +844,52 @@ export function agentRoutes(
     throw forbidden(
       "Agent-authenticated callers cannot change an agent's job title (role). Only board-authenticated callers can.",
     );
+  }
+
+  // DUR-68: the customer-inbox hand-off timer reassigns a stalled task to
+  // whoever the agent reports to, so guarding the timer alone guards
+  // nothing if reportsTo can be repointed first. budgetMonthlyCents is the
+  // real backstop on a cheap-model agent's spend (the model choice itself
+  // is not guarded). None of these three is a legitimate self-service field.
+  function assertNoAgentSelfEscalationMutation(req: Request, patch: Record<string, unknown>) {
+    if (req.actor.type !== "agent") return;
+    if (hasOwn(patch, "reportsTo")) {
+      throw forbidden(
+        "Agent-authenticated callers cannot change who they report to. Only board-authenticated callers can.",
+      );
+    }
+    if (hasOwn(patch, "budgetMonthlyCents")) {
+      throw forbidden(
+        "Agent-authenticated callers cannot change their own monthly budget. Only board-authenticated callers can.",
+      );
+    }
+    const runtimeConfig = asRecord(patch.runtimeConfig);
+    if (runtimeConfig && hasOwn(runtimeConfig, "handOffUnhandledAfterMinutes")) {
+      throw forbidden(
+        "Agent-authenticated callers cannot change their own customer-inbox hand-off timer. Only board-authenticated callers can.",
+      );
+    }
+  }
+
+  // DUR-68: Filip's sorting rules live in a fenced block inside the
+  // secretary's AGENTS.md, one line per rule, each ending in the name of the
+  // agent it routes to (after the line's last colon). Saving a rule whose
+  // trailing name doesn't resolve to exactly one live (non-terminated) agent
+  // in the company blocks the write so a typo can't silently misroute
+  // customer messages to nobody.
+  async function assertSorteringsreglerRuleNamesResolve(companyId: string, content: string) {
+    const block = extractSorteringsreglerBlock(content);
+    if (block == null) return;
+
+    const liveAgents = await svc.list(companyId);
+    const liveNames = new Set(liveAgents.map((agent) => agent.name));
+
+    for (const { ruleIndex, name } of parseSorteringsreglerRuleTargetNames(block)) {
+      if (liveNames.has(name)) continue;
+      throw unprocessable(
+        `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
+      );
+    }
   }
 
   async function assertCanReadAgent(req: Request, targetAgent: { companyId: string }) {
@@ -1403,7 +1446,13 @@ export function agentRoutes(
   // rollbacks (e.g. reverting capabilities/instructions) are unaffected.
   function assertNoAgentPrivilegedRollback(
     req: Request,
-    existing: { role: string; adapterConfig: unknown },
+    existing: {
+      role: string;
+      adapterConfig: unknown;
+      reportsTo: string | null;
+      budgetMonthlyCents: number;
+      runtimeConfig: unknown;
+    },
     snapshot: Record<string, unknown>,
   ) {
     if (req.actor.type !== "agent") return;
@@ -1417,6 +1466,30 @@ export function agentRoutes(
     if (JSON.stringify(snapshotAdapterConfig.mcpServers) !== JSON.stringify(existingAdapterConfig.mcpServers)) {
       throw forbidden(
         "Agent-authenticated callers cannot roll back a change to tool connections (adapterConfig.mcpServers). Only board-authenticated callers can.",
+      );
+    }
+    // DUR-68: rollback restores a revision's snapshot wholesale, bypassing
+    // the PATCH-path assertNoAgentSelfEscalationMutation guard entirely, so
+    // the same three keys are re-checked here against the diff a rollback
+    // would actually apply.
+    const snapshotReportsTo = typeof snapshot.reportsTo === "string" ? snapshot.reportsTo : null;
+    if (snapshotReportsTo !== (existing.reportsTo ?? null)) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back to a revision that changes who they report to. Only board-authenticated callers can.",
+      );
+    }
+    if (typeof snapshot.budgetMonthlyCents === "number" && snapshot.budgetMonthlyCents !== existing.budgetMonthlyCents) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back to a revision that changes their own monthly budget. Only board-authenticated callers can.",
+      );
+    }
+    const snapshotRuntimeConfig = asRecord(snapshot.runtimeConfig) ?? {};
+    const existingRuntimeConfig = asRecord(existing.runtimeConfig) ?? {};
+    if (
+      snapshotRuntimeConfig.handOffUnhandledAfterMinutes !== existingRuntimeConfig.handOffUnhandledAfterMinutes
+    ) {
+      throw forbidden(
+        "Agent-authenticated callers cannot roll back a change to their own customer-inbox hand-off timer. Only board-authenticated callers can.",
       );
     }
   }
@@ -2577,8 +2650,8 @@ export function agentRoutes(
         res.status(403).json({ error: "Forbidden" });
         return;
       }
-      if (actorAgent.role !== "ceo") {
-        res.status(403).json({ error: "Only CEO can manage permissions" });
+      if (!actorAgent.permissions?.canManageOtherAgentsPermissions) {
+        res.status(403).json({ error: "Missing permission to manage other agents' permissions" });
         return;
       }
     } else {
@@ -2592,7 +2665,7 @@ export function agentRoutes(
     }
 
     const effectiveCanAssignTasks =
-      agent.role === "ceo" || Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
+      Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
     await access.ensureMembership(agent.companyId, "agent", agent.id, "member", "active");
     await access.setPrincipalPermission(
       agent.companyId,
@@ -2791,6 +2864,7 @@ export function agentRoutes(
       return;
     }
     await assertCanManageInstructionsPath(req, existing);
+    await assertSorteringsreglerRuleNamesResolve(existing.companyId, req.body.content as string);
 
     const actor = getActorInfo(req);
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
@@ -2882,6 +2956,7 @@ export function agentRoutes(
 
     const patchData = { ...(req.body as Record<string, unknown>) };
     assertNoAgentRoleMutation(req, patchData);
+    assertNoAgentSelfEscalationMutation(req, patchData);
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
     if (hasOwn(patchData, "adapterConfig")) {

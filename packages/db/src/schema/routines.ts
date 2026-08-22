@@ -107,6 +107,10 @@ export const routineTriggers = pgTable(
     secretId: uuid("secret_id").references(() => companySecrets.id, { onDelete: "set null" }),
     signingMode: text("signing_mode"),
     replayWindowSec: integer("replay_window_sec"),
+    // Non-null marks this trigger as owned by the customer-inbox door
+    // (POST /api/customer-inbox/:publicId) rather than the generic webhook
+    // fire route. See server/src/routes/customer-inbox.ts (DUR-68).
+    customerInboxChannel: text("customer_inbox_channel"),
     lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }),
     lastResult: text("last_result"),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),

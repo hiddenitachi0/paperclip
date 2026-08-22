@@ -96,7 +96,13 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     assertCompanyAccess(req, target.companyId);
   }
 
-  async function assertSameCompanyCeoAgentOrBoard(req: Request, companyId: string, capability: string) {
+  // NOTE: this used to gate on `actorAgent.role === "ceo"` directly, which
+  // made the "ceo" job title a blanket bypass for every capability guarded
+  // here (company exports/imports/settings/branding). It now checks the
+  // named `canManageCompanySettings` capability, which defaults to `true`
+  // for the "ceo" role (see normalizeAgentPermissions) but can be granted to
+  // or revoked from any agent independent of its title.
+  async function assertAgentCanManageCompanySettingsOrBoard(req: Request, companyId: string, capability: string) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "board") {
       return;
@@ -107,8 +113,8 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (!actorAgent || actorAgent.companyId !== companyId) {
       throw forbidden("Agent key cannot access another company");
     }
-    if (actorAgent.role !== "ceo") {
-      throw forbidden(`Only CEO agents can manage ${capability}`);
+    if (!actorAgent.permissions?.canManageCompanySettings) {
+      throw forbidden(`Missing permission to manage ${capability}`);
     }
   }
 
@@ -315,7 +321,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/export", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company exports");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company exports");
     const body = companyPortabilityExportSchema.parse(req.body);
     const result = await portability.exportBundle(companyId, body);
     res.json(result);
@@ -375,7 +381,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/exports/preview", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company exports");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company exports");
     const body = companyPortabilityExportSchema.parse(req.body);
     const preview = await portability.previewExport(companyId, body);
     res.json(preview);
@@ -383,7 +389,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/exports", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company exports");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company exports");
     const body = companyPortabilityExportSchema.parse(req.body);
     const result = await portability.exportBundle(companyId, body);
     res.json(result);
@@ -391,7 +397,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/imports/preview", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company imports");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company imports");
     const body = companyPortabilityPreviewSchema.parse(req.body);
     if (body.target.mode === "existing_company" && body.target.companyId !== companyId) {
       throw forbidden("Safe import route can only target the route company");
@@ -408,7 +414,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/imports/apply", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company imports");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company imports");
     const body = companyPortabilityImportSchema.parse(req.body);
     if (body.target.mode === "existing_company" && body.target.companyId !== companyId) {
       throw forbidden("Safe import route can only target the route company");
@@ -481,7 +487,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.patch("/:companyId", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company settings");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company settings");
 
     const actor = getActorInfo(req);
     let body: Record<string, unknown>;
@@ -557,7 +563,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.patch("/:companyId/branding", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertSameCompanyCeoAgentOrBoard(req, companyId, "company branding");
+    await assertAgentCanManageCompanySettingsOrBoard(req, companyId, "company branding");
     const body = updateCompanyBrandingSchema.parse(req.body);
     const company = await svc.update(companyId, body);
     if (!company) {

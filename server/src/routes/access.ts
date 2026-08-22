@@ -2976,8 +2976,12 @@ export function accessRoutes(
       if (!actorAgent || actorAgent.companyId !== companyId) {
         throw forbidden("Agent key cannot access another company");
       }
-      if (actorAgent.role !== "ceo") {
-        throw forbidden("Only CEO agents can generate OpenClaw invite prompts");
+      // Was gated on `actorAgent.role === "ceo"`; now uses the same
+      // `canManageCompanySettings` capability as the other company
+      // administration actions in routes/companies.ts, so the "ceo" title is
+      // no longer itself a source of authority here.
+      if (!actorAgent.permissions?.canManageCompanySettings) {
+        throw forbidden("Missing permission to generate OpenClaw invite prompts");
       }
       return;
     }
