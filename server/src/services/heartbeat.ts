@@ -10661,6 +10661,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueSettings: issueExecutionWorkspaceSettings,
       mode: requestedExecutionWorkspaceMode,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
+      issueProjectId: issueRef?.projectId ?? null,
+      issueProjectWorkspaceId: issueRef?.projectWorkspaceId ?? null,
     });
     let adapterModelProfiles: AdapterModelProfileDefinition[] = [];
     let profileResolutionFallbackReason: string | null = null;
