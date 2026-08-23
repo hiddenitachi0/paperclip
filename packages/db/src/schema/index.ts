@@ -9,6 +9,7 @@ export { companyAgentRoles } from "./company_agent_roles.js";
 export { agents } from "./agents.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";
+export { boardDelegateTokens } from "./board_delegate_tokens.js";
 export { cliAuthChallenges } from "./cli_auth_challenges.js";
 export { companyMemberships } from "./company_memberships.js";
 export { companyUserSidebarPreferences } from "./company_user_sidebar_preferences.js";

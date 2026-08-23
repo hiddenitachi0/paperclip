@@ -107,7 +107,7 @@ import {
 import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/task-watchdogs.js";
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 async function alertOwningCompanyOfCrossCompanyWriteAttempt(
   db: Db,
@@ -5870,7 +5870,7 @@ export function issueRoutes(
   });
 
   router.post("/issues/:id/scheduled-retry/retry-now", async (req, res) => {
-    assertBoard(req);
+    assertBoardOrDelegate(req, "issue.scheduled_retry_retry_now");
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5901,6 +5901,18 @@ export function issueRoutes(
         outcome: result.outcome,
         message: result.message,
         scheduledRetry: result.scheduledRetry,
+        // DUR-128: performed by a delegate token, under the operator
+        // authority named by actorId above -- not the operator's own session.
+        // delegateId (not delegateTokenId): logActivity's sanitizeRecord
+        // redacts any details key containing "token" as secret-shaped.
+        ...(req.actor.type === "board_delegate"
+          ? {
+              performedBy: "delegate",
+              delegateId: req.actor.delegateTokenId,
+              delegateName: req.actor.delegateName,
+              actingUnderUserId: req.actor.userId,
+            }
+          : {}),
       },
     });
 

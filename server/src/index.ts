@@ -42,6 +42,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   mergeDeployVisibilityService,
+  agentErrorAlertsService,
   instanceSettingsService,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
@@ -798,6 +799,7 @@ export async function startServer(): Promise<StartedServer> {
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
+    const agentErrorAlerts = agentErrorAlertsService(db as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery.
@@ -927,6 +929,20 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      // DUR-128: an agent left sitting in "error" is invisible until someone
+      // happens to look. Raise it as soon as it crosses the stall threshold
+      // (see agent-error-alerts.ts) instead of waiting to be discovered.
+      void agentErrorAlerts
+        .tick(new Date())
+        .then((result) => {
+          if (result.alerted > 0) {
+            logger.warn({ ...result }, "agent-error alert tick raised stalled-agent alerts");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "agent-error alert tick failed");
         });
 
       void environmentCustomImages

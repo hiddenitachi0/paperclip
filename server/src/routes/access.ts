@@ -33,6 +33,7 @@ import {
   createCliAuthChallengeSchema,
   claimJoinRequestApiKeySchema,
   createBoardApiKeySchema,
+  createDelegateTokenSchema,
   createCompanyInviteSchema,
   createOpenClawInvitePromptSchema,
   listCompanyInvitesQuerySchema,
@@ -2906,6 +2907,97 @@ export function accessRoutes(
     }
 
     res.json({ ok: true, keyId: key.id });
+  });
+
+  // DUR-128: a delegated operator credential. Board-only to create/list/
+  // revoke -- a delegate token can never mint or manage another delegate
+  // token, since that would let it re-grant itself scopes. The token itself
+  // never authenticates as "board"; see the board_delegate actor branch in
+  // middleware/auth.ts and assertBoardOrDelegate in authz.ts for how it's
+  // actually consumed.
+  router.get("/board-delegate-tokens", async (req, res) => {
+    if (req.actor.type !== "board" || !req.actor.userId) {
+      throw unauthorized("Board authentication required");
+    }
+    const tokens = await boardAuth.listDelegateTokens(req.actor.userId, {
+      includeInactive: req.query.includeInactive === "true",
+    });
+    res.json(tokens);
+  });
+
+  router.post(
+    "/board-delegate-tokens",
+    validate(createDelegateTokenSchema),
+    async (req, res) => {
+      if (req.actor.type !== "board" || !req.actor.userId) {
+        throw unauthorized("Board authentication required");
+      }
+
+      const created = await boardAuth.createNamedDelegateToken({
+        userId: req.actor.userId,
+        name: req.body.name,
+        scopes: req.body.scopes,
+        expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : null,
+      });
+
+      const companyIds = await boardAuth.resolveBoardActivityCompanyIds({
+        userId: req.actor.userId,
+      });
+      for (const companyId of companyIds) {
+        await logActivity(db, {
+          companyId,
+          actorType: "user",
+          actorId: req.actor.userId,
+          action: "board_delegate_token.created",
+          entityType: "user",
+          entityId: req.actor.userId,
+          // delegateId (not delegateTokenId): logActivity's sanitizeRecord
+          // redacts any details key containing "token" as secret-shaped.
+          details: {
+            delegateId: created.id,
+            name: created.name,
+            scopes: created.scopes,
+            expiresAt: created.expiresAt?.toISOString() ?? null,
+          },
+        });
+      }
+
+      res.status(201).json(created);
+    },
+  );
+
+  router.post("/board-delegate-tokens/:tokenId/revoke", async (req, res) => {
+    if (req.actor.type !== "board" || !req.actor.userId) {
+      throw unauthorized("Board authentication required");
+    }
+    const tokenId = (req.params.tokenId as string).trim();
+    if (!isUuidLike(tokenId)) {
+      throw badRequest("Invalid delegate token ID");
+    }
+    const existing = await boardAuth.getDelegateTokenForUser(tokenId, req.actor.userId);
+    if (!existing) throw notFound("Delegate token not found");
+    const revoked = await boardAuth.revokeDelegateToken(tokenId, req.actor.userId);
+    if (!revoked) throw notFound("Delegate token not found");
+
+    const companyIds = await boardAuth.resolveBoardActivityCompanyIds({
+      userId: req.actor.userId,
+    });
+    for (const companyId of companyIds) {
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId,
+        action: "board_delegate_token.revoked",
+        entityType: "user",
+        entityId: req.actor.userId,
+        details: {
+          delegateId: revoked.id,
+          name: revoked.name,
+        },
+      });
+    }
+
+    res.json({ ok: true, tokenId: revoked.id });
   });
 
   router.post("/cli-auth/revoke-current", async (req, res) => {

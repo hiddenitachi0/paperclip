@@ -4,15 +4,21 @@ import type { Db } from "@paperclipai/db";
 import {
   authUsers,
   boardApiKeys,
+  boardDelegateTokens,
   cliAuthChallenges,
   companies,
   companyMemberships,
   instanceUserRoles,
 } from "@paperclipai/db";
+import { normalizeDelegateTokenScopes, type DelegateTokenScope } from "@paperclipai/shared";
 import { conflict, forbidden, notFound } from "../errors.js";
 
 export const BOARD_API_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const CLI_AUTH_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+
+export function createDelegateToken() {
+  return `pcp_delegate_${randomBytes(24).toString("hex")}`;
+}
 
 export type CliAuthChallengeStatus = "pending" | "approved" | "cancelled" | "expired";
 
@@ -405,6 +411,102 @@ export function boardAuthService(db: Db) {
     return { status: "cancelled" as const, challenge: updated };
   }
 
+  async function createNamedDelegateToken(input: {
+    userId: string;
+    name: string;
+    scopes: DelegateTokenScope[];
+    expiresAt?: Date | null;
+  }) {
+    const token = createDelegateToken();
+    const created = await db
+      .insert(boardDelegateTokens)
+      .values({
+        userId: input.userId,
+        name: input.name.trim(),
+        keyHash: hashBearerToken(token),
+        scopes: normalizeDelegateTokenScopes(input.scopes),
+        expiresAt: input.expiresAt ?? null,
+      })
+      .returning()
+      .then((rows) => rows[0]);
+
+    return {
+      id: created.id,
+      name: created.name,
+      scopes: normalizeDelegateTokenScopes(created.scopes),
+      token,
+      createdAt: created.createdAt,
+      lastUsedAt: created.lastUsedAt,
+      revokedAt: created.revokedAt,
+      expiresAt: created.expiresAt,
+    };
+  }
+
+  async function listDelegateTokens(userId: string, opts: { includeInactive?: boolean } = {}) {
+    const conditions = [eq(boardDelegateTokens.userId, userId)];
+    if (!opts.includeInactive) {
+      const activeExpirationCondition = or(
+        isNull(boardDelegateTokens.expiresAt),
+        gt(boardDelegateTokens.expiresAt, new Date()),
+      );
+      conditions.push(isNull(boardDelegateTokens.revokedAt));
+      if (activeExpirationCondition) conditions.push(activeExpirationCondition);
+    }
+    const rows = await db
+      .select({
+        id: boardDelegateTokens.id,
+        name: boardDelegateTokens.name,
+        scopes: boardDelegateTokens.scopes,
+        createdAt: boardDelegateTokens.createdAt,
+        lastUsedAt: boardDelegateTokens.lastUsedAt,
+        revokedAt: boardDelegateTokens.revokedAt,
+        expiresAt: boardDelegateTokens.expiresAt,
+      })
+      .from(boardDelegateTokens)
+      .where(and(...conditions))
+      .orderBy(sql`${boardDelegateTokens.createdAt} desc`);
+    return rows.map((row) => ({ ...row, scopes: normalizeDelegateTokenScopes(row.scopes) }));
+  }
+
+  async function getDelegateTokenForUser(id: string, userId: string) {
+    return db
+      .select()
+      .from(boardDelegateTokens)
+      .where(and(eq(boardDelegateTokens.id, id), eq(boardDelegateTokens.userId, userId)))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function revokeDelegateToken(id: string, userId: string) {
+    const now = new Date();
+    return db
+      .update(boardDelegateTokens)
+      .set({ revokedAt: now, lastUsedAt: now })
+      .where(and(
+        eq(boardDelegateTokens.id, id),
+        eq(boardDelegateTokens.userId, userId),
+        isNull(boardDelegateTokens.revokedAt),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function findDelegateTokenByToken(token: string) {
+    const tokenHash = hashBearerToken(token);
+    const now = new Date();
+    return db
+      .select()
+      .from(boardDelegateTokens)
+      .where(and(
+        eq(boardDelegateTokens.keyHash, tokenHash),
+        isNull(boardDelegateTokens.revokedAt),
+      ))
+      .then((rows) => rows.find((row) => !row.expiresAt || row.expiresAt.getTime() > now.getTime()) ?? null);
+  }
+
+  async function touchDelegateToken(id: string) {
+    await db.update(boardDelegateTokens).set({ lastUsedAt: new Date() }).where(eq(boardDelegateTokens.id, id));
+  }
+
   async function assertCurrentBoardKey(keyId: string | undefined, userId: string | undefined) {
     if (!keyId || !userId) throw conflict("Board API key context is required");
     const key = await db
@@ -431,5 +533,11 @@ export function boardAuthService(db: Db) {
     cancelCliAuthChallenge,
     assertCurrentBoardKey,
     resolveBoardActivityCompanyIds,
+    createNamedDelegateToken,
+    listDelegateTokens,
+    getDelegateTokenForUser,
+    revokeDelegateToken,
+    findDelegateTokenByToken,
+    touchDelegateToken,
   };
 }

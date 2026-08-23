@@ -9694,6 +9694,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           ? "idle"
           : "error";
 
+    const enteringError = nextStatus === "error" && existing.status !== "error";
     const updated = await db
       .update(agents)
       .set({
@@ -9702,6 +9703,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // error so operators see it on the agent page without digging into run
         // events; clear it whenever the agent leaves error.
         errorReason: nextStatus === "error" ? truncateAgentErrorReason(failureReason) : null,
+        // DUR-128: errorAt marks the start of this error episode so the
+        // stall sweep can measure how long it's been unattended. Only stamped
+        // on the *first* transition into error -- repeated failed heartbeats
+        // while already in error must not keep pushing this timestamp
+        // forward, or a stuck agent would never cross the alert threshold.
+        ...(nextStatus === "error"
+          ? { errorAt: enteringError ? new Date() : undefined }
+          : { errorAt: null, errorAlertedAt: null }),
         lastHeartbeatAt: new Date(),
         updatedAt: new Date(),
       })
