@@ -10,6 +10,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { errorHandler } from "../middleware/error-handler.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const agentId   = "11111111-1111-4111-8111-111111111111";
@@ -185,15 +186,13 @@ describe("agent roles — role body validation rejects deploy-approval grants", 
   });
 
   it("rejects deploys:approve in defaultGrants at service layer", async () => {
-    const { sanitizeGrantsForTest } = await import("../services/agent-roles.js").catch(() => ({
-      sanitizeGrantsForTest: undefined,
-    }));
-    // Since sanitizeGrants is internal, we test through createRole
-    const { createRole: _createRole } = await import("../services/agent-roles.js");
-    // Reset the mock to use the real implementation for this check
-    vi.unmock("../services/agent-roles.js");
     // We test the route validation — the PERMISSION_KEYS enum won't include deploys:approve
-    // so z.enum will reject it before even reaching the service.
+    // so z.enum will reject it before even reaching the service. (Does NOT unmock
+    // "../services/agent-roles.js": vi.unmock is hoisted to module top-level by
+    // Vitest regardless of where in the file it's called, so doing that here would
+    // silently unmock the service for every test in this file, not just this one —
+    // that caused the other two tests in this describe block to 500/timeout against
+    // a real service call with no real db.)
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
@@ -201,6 +200,7 @@ describe("agent roles — role body validation rejects deploy-approval grants", 
       from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }),
     });
     app.use("/api", agentRoleRoutes({ select: mockSelect2 } as any));
+    app.use(errorHandler);
 
     const res = await request(app)
       .post(`/api/companies/${companyId}/agent-roles`)
@@ -214,14 +214,11 @@ describe("agent roles — role body validation rejects deploy-approval grants", 
   });
 });
 
-describe("PATCH /agents/:id rejects role fields", () => {
-  it("returns 422 when roleId is in the patch body", async () => {
-    // This is tested through the agents route guard added in DUR-114.
-    // We verify the guard is in place by importing the check logic.
-    // The actual route test lives in agent-audit-trail.test.ts pattern;
-    // here we confirm the guard text for documentation.
-    const agentsRouteSrc = await import("../routes/agents.js");
-    // Presence of the export means the module compiled correctly with the guard.
-    expect(agentsRouteSrc.agentRoutes).toBeDefined();
-  });
-});
+// PATCH /agents/:id rejecting roleId/role-snapshot fields with a real 422 is
+// covered end-to-end (real express app, real `validate(updateAgentSchema)`
+// middleware, real route handler, supertest request) in
+// agent-permissions-routes.test.ts, which already has the full service-mock
+// fixture this route needs. A prior version of this test here only asserted
+// that ../routes/agents.js imports without throwing — that passed even while
+// the guard was dead code (see DUR-114 self-review), so it has been removed
+// rather than duplicated with a lighter, less trustworthy fixture.

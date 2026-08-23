@@ -54,8 +54,9 @@ export function agentRoleRoutes(db: Db) {
     validate(roleBodySchema),
     async (req, res) => {
       assertBoard(req);
-      await assertCompanyAccess(req, req.params.companyId!);
-      const role = await createRole(db, req.params.companyId!, req.body);
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const role = await createRole(db, companyId, req.body);
       res.status(201).json(role);
     }
   );
@@ -79,13 +80,14 @@ export function agentRoleRoutes(db: Db) {
     validate(roleUpdateSchema),
     async (req, res) => {
       assertBoard(req);
-      const existing = await getRole(db, req.params.roleId!);
+      const roleId = req.params.roleId as string;
+      const existing = await getRole(db, roleId);
       if (!existing) {
         res.status(404).json({ error: "Role not found" });
         return;
       }
       await assertCompanyAccess(req, existing.companyId);
-      const updated = await updateRole(db, req.params.roleId!, req.body);
+      const updated = await updateRole(db, roleId, req.body);
       res.json(updated);
     }
   );
@@ -109,14 +111,15 @@ export function agentRoleRoutes(db: Db) {
     validate(z.object({ targetCompanyId: z.string().uuid() })),
     async (req, res) => {
       assertBoard(req);
-      const existing = await getRole(db, req.params.roleId!);
+      const roleId = req.params.roleId as string;
+      const existing = await getRole(db, roleId);
       if (!existing) {
         res.status(404).json({ error: "Role not found" });
         return;
       }
       await assertCompanyAccess(req, existing.companyId);
       await assertCompanyAccess(req, req.body.targetCompanyId);
-      const copied = await copyRoleToCompany(db, req.params.roleId!, req.body.targetCompanyId);
+      const copied = await copyRoleToCompany(db, roleId, req.body.targetCompanyId);
       res.status(201).json(copied);
     }
   );
@@ -136,14 +139,14 @@ export function agentRoleRoutes(db: Db) {
       // Hard rule: board actors only. assertBoard rejects agent-authenticated requests.
       assertBoard(req);
 
-      const { agentId } = req.params;
+      const agentId = req.params.agentId as string;
       const { roleId } = req.body as { roleId: string | null };
 
       // Load the agent to check company membership
       const [agent] = await db
         .select({ id: agents.id, companyId: agents.companyId })
         .from(agents)
-        .where(eq(agents.id, agentId!));
+        .where(eq(agents.id, agentId));
       if (!agent) {
         res.status(404).json({ error: "Agent not found" });
         return;
@@ -164,7 +167,7 @@ export function agentRoleRoutes(db: Db) {
       }
 
       const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
-      const updated = await assignRoleToAgent(db, agentId!, roleId, { grantedByUserId });
+      const updated = await assignRoleToAgent(db, agentId, roleId, { grantedByUserId });
       res.json(updated);
     }
   );
