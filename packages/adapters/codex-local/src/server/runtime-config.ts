@@ -153,6 +153,41 @@ function parseCodexProvidersConfig(
   return { providers, modelProvider };
 }
 
+// DUR-132: by the time adapterConfig.mcpServers reaches this parser, every
+// env value must already be a resolved literal string -- secret_ref
+// bindings are resolved upstream by resolveAdapterConfigForRuntime (server/
+// src/services/secrets.ts) before the config is handed to the adapter. A
+// non-string value here (e.g. an unresolved `{type:"secret_ref",...}`)
+// means secret resolution failed or was skipped upstream, and this server
+// is about to launch unauthenticated -- that must be a hard failure, not a
+// silently-dropped credential.
+export class UnresolvedCodexMcpCredentialError extends Error {
+  constructor(serverName: string, key: string) {
+    super(
+      `MCP server "${serverName}" has an unresolved credential for env.${key}: expected a resolved string ` +
+        `value but found something else (e.g. an unresolved secret_ref). Refusing to launch this server ` +
+        `without a valid credential.`,
+    );
+    this.name = "UnresolvedCodexMcpCredentialError";
+  }
+}
+
+// DUR-132 item 8: an MCP server carrying any env value at all is treated as
+// credential-bearing (env exists specifically to hold tokens/keys, and a
+// resolved secret_ref is indistinguishable from a non-secret literal here).
+// Used to refuse syncing CODEX_HOME to a remote execution target -- see
+// execute.ts. Operates on the raw, not-yet-parsed adapterConfig.mcpServers
+// value so it works even for entries parseCodexMcpServersConfig would skip
+// (e.g. url-only entries), and does not need `notes`/throw on malformed input.
+export function codexMcpServersConfigCarriesCredentials(raw: unknown): boolean {
+  if (!Array.isArray(raw)) return false;
+  return raw.some((entry) => {
+    if (!isPlainObject(entry)) return false;
+    const env = entry.env;
+    return isPlainObject(env) && Object.keys(env).length > 0;
+  });
+}
+
 // Per-agent MCP server config (adapterConfig.mcpServers). Unlike
 // PAPERCLIP_CODEX_PROVIDERS this arrives as already-parsed JS values (an
 // array from the agent's adapterConfig JSONB column), not a JSON string.
@@ -189,7 +224,10 @@ function parseCodexMcpServersConfig(raw: unknown, notes: string[]): ParsedCodexM
     if (isPlainObject(entry.env)) {
       const env: Record<string, string> = {};
       for (const [key, value] of Object.entries(entry.env)) {
-        if (typeof value === "string") env[key] = value;
+        if (typeof value !== "string") {
+          throw new UnresolvedCodexMcpCredentialError(name, key);
+        }
+        env[key] = value;
       }
       if (Object.keys(env).length > 0) fields.env = env;
     }
@@ -482,7 +520,7 @@ export async function prepareCodexRuntimeConfig(input: {
       if (backup !== null) {
         // Full-fidelity restore: the backup is the pre-run original, including
         // any user provider sections the crashed run's merge excised.
-        await fs.writeFile(configTomlPath, backup, "utf8");
+        await fs.writeFile(configTomlPath, backup, { encoding: "utf8", mode: 0o600 });
         await fs.rm(backupPath, { force: true });
         return {
           notes: [
@@ -497,7 +535,7 @@ export async function prepareCodexRuntimeConfig(input: {
       if (existing !== null) {
         const stripped = stripManagedCodexProviderBlocks(existing);
         if (stripped !== existing) {
-          await fs.writeFile(configTomlPath, stripped, "utf8");
+          await fs.writeFile(configTomlPath, stripped, { encoding: "utf8", mode: 0o600 });
           return {
             notes: [
               ...notes,
@@ -534,11 +572,14 @@ export async function prepareCodexRuntimeConfig(input: {
     mcpServerNames,
     parsed?.modelProvider != null,
   );
-  await fs.mkdir(input.codexHome, { recursive: true });
+  // DUR-132 item 8: config.toml can now carry per-agent MCP server
+  // credentials (resolved secret_ref values) -- lock CODEX_HOME and the file
+  // itself down to the owning process user.
+  await fs.mkdir(input.codexHome, { recursive: true, mode: 0o700 });
   // Persist the original BEFORE writing the merged file so a run that never
   // reaches cleanup() can be restored by the next prepare.
-  await fs.writeFile(backupPath, original ?? "", "utf8");
-  await fs.writeFile(configTomlPath, buildMergedConfigToml(base, parsed, mcpParsed), "utf8");
+  await fs.writeFile(backupPath, original ?? "", { encoding: "utf8", mode: 0o600 });
+  await fs.writeFile(configTomlPath, buildMergedConfigToml(base, parsed, mcpParsed), { encoding: "utf8", mode: 0o600 });
 
   const mergeDescriptions: string[] = [];
   if (parsed) {
@@ -563,7 +604,7 @@ export async function prepareCodexRuntimeConfig(input: {
       if (original === null) {
         await fs.rm(configTomlPath, { force: true });
       } else {
-        await fs.writeFile(configTomlPath, original, "utf8");
+        await fs.writeFile(configTomlPath, original, { encoding: "utf8", mode: 0o600 });
       }
       await fs.rm(backupPath, { force: true });
     },

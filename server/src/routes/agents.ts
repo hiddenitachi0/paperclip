@@ -95,7 +95,7 @@ import {
   refreshAdapterModels,
   requireServerAdapter,
 } from "../adapters/index.js";
-import { redactEventPayload } from "../redaction.js";
+import { redactEventPayload, SECRET_PAYLOAD_KEY_RE } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -624,7 +624,7 @@ export function agentRoutes(
 
   async function buildAgentDetail(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
-    options?: { restricted?: boolean },
+    options?: { restricted?: boolean; maskSecrets?: boolean },
   ) {
     const [chainOfCommand, accessState, agentWithStaleness] = await Promise.all([
       svc.getChainOfCommand(agent.id),
@@ -633,7 +633,11 @@ export function agentRoutes(
     ]);
 
     return {
-      ...(options?.restricted ? redactForRestrictedAgentView(agentWithStaleness) : agentWithStaleness),
+      ...(options?.restricted
+        ? redactForRestrictedAgentView(agentWithStaleness)
+        : options?.maskSecrets
+          ? redactForSecretMaskedAgentView(agentWithStaleness)
+          : agentWithStaleness),
       chainOfCommand,
       access: accessState,
     };
@@ -1309,10 +1313,13 @@ export function agentRoutes(
 
   // codex_local agents inherit whatever Codex login is already on the device
   // (the host's ~/.codex or $CODEX_HOME) by default, so a fresh agent needs no
-  // env overrides at all. We only carve out an isolated per-agent CODEX_HOME
-  // when the agent sets its own OPENAI_API_KEY, so that key's api-key auth.json
-  // does not collide with the shared company home other agents use for the host
-  // login. Agents without a key share the host credentials.
+  // env overrides at all. We carve out an isolated per-agent CODEX_HOME when
+  // either: (a) the agent sets its own OPENAI_API_KEY, so that key's api-key
+  // auth.json does not collide with the shared company home other agents use
+  // for the host login, or (b) DUR-132: the agent has any mcpServers
+  // configured, so its MCP server credentials (merged into config.toml at run
+  // dispatch) never land in a CODEX_HOME shared with other agents. Agents with
+  // neither share the host credentials.
   function applyCodexLocalKeyIsolation(
     companyId: string,
     agentId: string,
@@ -1320,9 +1327,10 @@ export function agentRoutes(
     adapterConfig: Record<string, unknown>,
   ): Record<string, unknown> {
     if (adapterType !== "codex_local") return adapterConfig;
-    const existingEnv = asRecord(adapterConfig.env);
-    if (!existingEnv) return adapterConfig;
-    if (!codexLocalEnvKeyConfigured(existingEnv.OPENAI_API_KEY)) return adapterConfig;
+    const existingEnv = asRecord(adapterConfig.env) ?? {};
+    const hasApiKey = codexLocalEnvKeyConfigured(existingEnv.OPENAI_API_KEY);
+    const hasMcpServers = Array.isArray(adapterConfig.mcpServers) && adapterConfig.mcpServers.length > 0;
+    if (!hasApiKey && !hasMcpServers) return adapterConfig;
     if (codexLocalEnvKeyConfigured(existingEnv.CODEX_HOME)) return adapterConfig;
     return {
       ...adapterConfig,
@@ -1723,6 +1731,77 @@ export function agentRoutes(
       adapterConfig: {},
       runtimeConfig: {},
     };
+  }
+
+  // DUR-132 item 7: a peer agent actor (not self, not board) should never see
+  // another agent's live credentials just because it happens to hold
+  // agents:create/agent_config:update. Unlike redactForRestrictedAgentView
+  // (which wipes adapterConfig/runtimeConfig entirely) this keeps every other
+  // field -- icon, capabilities, budgetMonthlyCents, defaultEnvironmentId,
+  // etc. -- intact and only redacts secret-shaped values within
+  // adapterConfig/runtimeConfig via the existing field-name-based
+  // redactEventPayload helper (the same one used for approval payloads and
+  // config revisions elsewhere in this file). redactEventPayload builds a new
+  // object rather than mutating in place, so this never touches the
+  // underlying row -- a board/self read of the same agent is unaffected.
+  function redactForSecretMaskedAgentView(agent: Awaited<ReturnType<typeof svc.getById>>) {
+    if (!agent) return null;
+    return {
+      ...agent,
+      adapterConfig: redactEventPayload(asRecord(agent.adapterConfig)) ?? {},
+      runtimeConfig: redactEventPayload(asRecord(agent.runtimeConfig)) ?? {},
+    };
+  }
+
+  // DUR-132 item 6: mcpServers env/header key names that look like a
+  // credential (SECRET_PAYLOAD_KEY_RE -- the same pattern used to redact
+  // logs) but hold a literal string rather than a secret_ref are not
+  // rejected -- they still save -- but the response carries a plain-language
+  // advisory so a future UI can offer to move the value into a saved
+  // password. No hard-reject in this ticket; there are no persona rows yet.
+  function buildMcpCredentialAdvisories(adapterConfig: unknown): Array<{
+    configPath: string;
+    serverName: string;
+    key: string;
+    message: string;
+    canMoveToSavedPassword: true;
+  }> {
+    const record = asRecord(adapterConfig);
+    const mcpServers = record?.mcpServers;
+    if (!Array.isArray(mcpServers)) return [];
+    const advisories: Array<{
+      configPath: string;
+      serverName: string;
+      key: string;
+      message: string;
+      canMoveToSavedPassword: true;
+    }> = [];
+    for (const rawEntry of mcpServers) {
+      const entry = asRecord(rawEntry);
+      if (!entry) continue;
+      const serverName = typeof entry.name === "string" ? entry.name : "";
+      for (const field of ["env", "headers"] as const) {
+        const fieldValue = asRecord(entry[field]);
+        if (!fieldValue) continue;
+        for (const [key, value] of Object.entries(fieldValue)) {
+          // Only literal strings are candidates -- a secret_ref (or a
+          // {type:"plain",value} wrapper) is either already a saved password
+          // or handled by its own shape; this advisory is specifically about
+          // plaintext values sitting in a credential-shaped field.
+          if (typeof value !== "string") continue;
+          if (!SECRET_PAYLOAD_KEY_RE.test(key)) continue;
+          advisories.push({
+            configPath: `mcpServers[${serverName}].${field}.${key}`,
+            serverName,
+            key,
+            message:
+              "This password is stored as readable text. Save it as a password instead so only this agent can use it.",
+            canMoveToSavedPassword: true,
+          });
+        }
+      }
+    }
+    return advisories;
   }
 
   function redactAgentConfiguration(agent: Awaited<ReturnType<typeof svc.getById>>) {
@@ -2298,6 +2377,14 @@ export function agentRoutes(
       res.json(await buildAgentDetail(agent, { restricted: true }));
       return;
     }
+    // DUR-132 item 7: a peer agent actor (agents:create/agent_config:update
+    // grant, but not itself the target agent) gets every field except live
+    // credentials -- board callers and an agent reading its own record still
+    // get the real, unmasked config.
+    if (!isSelf && req.actor.type === "agent") {
+      res.json(await buildAgentDetail(agent, { maskSecrets: true }));
+      return;
+    }
     res.json(await buildAgentDetail(agent));
   });
 
@@ -2518,17 +2605,17 @@ export function agentRoutes(
     // company has configured requireBoardApprovalForNewAgents (DUR-81).
     const requiresApproval = req.actor.type === "agent" || company.requireBoardApprovalForNewAgents;
     const status = requiresApproval ? "pending_approval" : "idle";
+    const actor = getActorInfo(req);
     const createdAgent = await svc.create(companyId, {
       id: hiredAgentId,
       ...normalizedHireInput,
       status,
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
-    });
+    }, { actor: { actorType: actor.actorType, agentId: actor.agentId } });
     const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
 
     let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
-    const actor = getActorInfo(req);
 
     if (requiresApproval) {
       const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
@@ -2648,7 +2735,11 @@ export function agentRoutes(
       });
     }
 
-    res.status(201).json({ agent, approval });
+    // DUR-132 item 6: advisory-only, see the matching comment on PATCH /agents/:id.
+    const mcpCredentialAdvisories = buildMcpCredentialAdvisories(agent.adapterConfig);
+    res.status(201).json(
+      mcpCredentialAdvisories.length > 0 ? { agent, approval, mcpCredentialAdvisories } : { agent, approval },
+    );
   });
 
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
@@ -2721,6 +2812,7 @@ export function agentRoutes(
       allowedSandboxProviders: allowedSandboxProvidersForAgent(createInput.adapterType),
     });
 
+    const actor = getActorInfo(req);
     const createdAgent = await svc.create(companyId, {
       id: agentId,
       ...createInput,
@@ -2729,10 +2821,8 @@ export function agentRoutes(
       status: "idle",
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
-    });
+    }, { actor: { actorType: actor.actorType, agentId: actor.agentId } });
     const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
-
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -2772,7 +2862,9 @@ export function agentRoutes(
       );
     }
 
-    res.status(201).json(agent);
+    // DUR-132 item 6: advisory-only, see the matching comment on PATCH /agents/:id.
+    const mcpCredentialAdvisories = buildMcpCredentialAdvisories(agent.adapterConfig);
+    res.status(201).json(mcpCredentialAdvisories.length > 0 ? { ...agent, mcpCredentialAdvisories } : agent);
   });
 
   router.patch("/agents/:id/permissions", validate(updateAgentPermissionsSchema), async (req, res) => {
@@ -3245,6 +3337,7 @@ export function agentRoutes(
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
         source: "patch",
       },
+      actor: { actorType: actor.actorType, agentId: actor.agentId },
     });
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
@@ -3263,7 +3356,13 @@ export function agentRoutes(
       details: appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
     });
 
-    res.json(agent);
+    // DUR-132 item 6: advisory-only -- the save already succeeded above. There
+    // are no persona rows yet (persona work lands in Ticket B/C), so a literal
+    // credential-shaped mcpServers value is never hard-rejected here.
+    const mcpCredentialAdvisories = touchesAdapterConfiguration
+      ? buildMcpCredentialAdvisories(agent.adapterConfig)
+      : [];
+    res.json(mcpCredentialAdvisories.length > 0 ? { ...agent, mcpCredentialAdvisories } : agent);
   });
 
   router.post("/agents/:id/pause", async (req, res) => {

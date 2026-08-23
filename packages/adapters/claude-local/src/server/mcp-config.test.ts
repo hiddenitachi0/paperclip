@@ -4,8 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildClaudeMcpConfigFileContents,
+  claudeMcpServersCarryCredentials,
   parseClaudeMcpServersConfig,
   prepareClaudeMcpConfigSeed,
+  UnresolvedMcpCredentialError,
 } from "./mcp-config.js";
 
 describe("parseClaudeMcpServersConfig", () => {
@@ -47,11 +49,50 @@ describe("parseClaudeMcpServersConfig", () => {
     expect(servers).toEqual([{ name: "ok", command: "npx" }]);
   });
 
-  it("drops non-string entries from args/env/headers rather than failing the whole server", () => {
+  it("drops non-string entries from args rather than failing the whole server", () => {
     const { servers } = parseClaudeMcpServersConfig([
-      { name: "fs", command: "npx", args: ["-y", 5, null], env: { FOO: "bar", BAD: 5 } },
+      { name: "fs", command: "npx", args: ["-y", 5, null], env: { FOO: "bar" } },
     ]);
     expect(servers).toEqual([{ name: "fs", command: "npx", args: ["-y"], env: { FOO: "bar" } }]);
+  });
+
+  // DUR-132 item 2: a non-string env/headers value reaching this parser means
+  // secret resolution failed or was skipped upstream -- that must be a hard
+  // failure, not a silently-dropped credential.
+  it("throws naming the server and key when env holds an unresolved (non-string) value", () => {
+    expect(() =>
+      parseClaudeMcpServersConfig([
+        { name: "fs", command: "npx", env: { FOO: "bar", BAD: { type: "secret_ref", secretId: "s1" } } },
+      ]),
+    ).toThrow(UnresolvedMcpCredentialError);
+  });
+
+  it("throws naming the server and key when headers holds an unresolved (non-string) value", () => {
+    expect(() =>
+      parseClaudeMcpServersConfig([
+        { name: "higgsfield", url: "https://mcp.higgsfield.ai", headers: { Authorization: { type: "secret_ref", secretId: "s1" } } },
+      ]),
+    ).toThrow(UnresolvedMcpCredentialError);
+  });
+});
+
+describe("claudeMcpServersCarryCredentials", () => {
+  it("is false when no server has env or headers", () => {
+    expect(claudeMcpServersCarryCredentials([{ name: "fs", command: "npx" }])).toBe(false);
+  });
+
+  it("is true when any server has a non-empty env", () => {
+    expect(
+      claudeMcpServersCarryCredentials([{ name: "fs", command: "npx", env: { FOO: "bar" } }]),
+    ).toBe(true);
+  });
+
+  it("is true when any server has non-empty headers", () => {
+    expect(
+      claudeMcpServersCarryCredentials([
+        { name: "higgsfield", url: "https://mcp.higgsfield.ai", headers: { Authorization: "Bearer x" } },
+      ]),
+    ).toBe(true);
   });
 });
 

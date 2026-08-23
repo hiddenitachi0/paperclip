@@ -62,7 +62,11 @@ import {
   prepareClaudeConfigSeed,
   resolveSharedClaudeConfigDir,
 } from "./claude-config.js";
-import { parseClaudeMcpServersConfig, prepareClaudeMcpConfigSeed } from "./mcp-config.js";
+import {
+  claudeMcpServersCarryCredentials,
+  parseClaudeMcpServersConfig,
+  prepareClaudeMcpConfigSeed,
+} from "./mcp-config.js";
 import { claudeCommandSupportsEffortFlag } from "./cli-capabilities.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
@@ -768,6 +772,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await onLog(
       "stderr",
       `[paperclip] Warning: ignored ${skippedMcpServerCount} malformed entr${skippedMcpServerCount === 1 ? "y" : "ies"} in adapterConfig.mcpServers (each needs a non-empty "name" and either "command" or "url").\n`,
+    );
+  }
+  // DUR-132 item 8: an MCP server config carrying a real credential (resolved
+  // secret_ref or a literal token) must never be synced to a remote execution
+  // target -- that would copy the plaintext value onto infrastructure outside
+  // Paperclip's control (a sandbox host, a remote box). Fail the run instead
+  // of silently shipping it.
+  if (executionTargetIsRemote && claudeMcpServersCarryCredentials(configuredMcpServers)) {
+    throw new Error(
+      `This agent's MCP servers include credentials (env/headers), and this run's execution target ` +
+        `(${describeAdapterExecutionTarget(executionTarget)}) is remote. Refusing to sync credential-bearing ` +
+        `MCP server config off this host -- use a local execution target for agents with MCP server ` +
+        `credentials, or remove the credentials from the MCP server config.`,
     );
   }
   const claudeMcpConfigSeed = configuredMcpServers.length > 0

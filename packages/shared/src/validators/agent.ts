@@ -6,7 +6,7 @@ import {
   INBOX_MINE_ISSUE_STATUS_FILTER,
 } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
-import { envConfigSchema } from "./secret.js";
+import { envBindingSchema, envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 
@@ -52,14 +52,21 @@ export type UpsertAgentInstructionsFile = z.infer<typeof upsertAgentInstructions
 // only support a subset — e.g. codex_local's config.toml only has a stdio
 // `[mcp_servers.*]` table, so url-based entries are accepted by this schema
 // but skipped (with a note) at codex_local run dispatch.
+// DUR-132: env/headers values may be a literal string OR a
+// `{type:"secret_ref", secretId, version}` reference (same envBindingSchema
+// used by adapterConfig.env), so a per-agent MCP server credential can be
+// stored as a bound secret instead of readable plaintext. Resolution to a
+// literal value happens server-side at run dispatch (see
+// resolveAdapterConfigForRuntime in server/src/services/secrets.ts); an
+// unresolved secret_ref must never reach the adapter's config parser.
 export const mcpServerConfigSchema = z.object({
   name: z.string().trim().min(1),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   command: z.string().trim().min(1).optional(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string(), z.string()).optional(),
+  env: z.record(z.string(), envBindingSchema).optional(),
   url: z.string().trim().min(1).optional(),
-  headers: z.record(z.string(), z.string()).optional(),
+  headers: z.record(z.string(), envBindingSchema).optional(),
 }).strict().superRefine((value, ctx) => {
   const hasCommand = typeof value.command === "string" && value.command.length > 0;
   const hasUrl = typeof value.url === "string" && value.url.length > 0;

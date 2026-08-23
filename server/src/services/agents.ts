@@ -26,7 +26,7 @@ import {
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
+import { syncAgentAdapterEnvBindings, type AgentSecretBindingActor } from "./agent-secret-bindings.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
@@ -55,6 +55,10 @@ interface RevisionMetadata {
 
 interface UpdateAgentOptions {
   recordRevision?: RevisionMetadata;
+  // DUR-132: identity of the caller saving this agent, forwarded to the
+  // secret-binding sync gate so an agent actor can only ever bind a saved
+  // password (secret_ref) to its own agent record.
+  actor?: AgentSecretBindingActor;
 }
 
 interface AgentShortnameRow {
@@ -357,6 +361,7 @@ export function agentService(db: Db) {
   async function syncAgentSecretBindings(
     agent: { id: string; companyId: string; adapterConfig: unknown },
     dbClient: Db = db,
+    actor?: AgentSecretBindingActor,
   ) {
     const scopedSecretsSvc = dbClient === db ? secretsSvc : secretService(dbClient);
     await syncAgentAdapterEnvBindings({
@@ -364,6 +369,7 @@ export function agentService(db: Db) {
       companyId: agent.companyId,
       agentId: agent.id,
       adapterConfig: agent.adapterConfig,
+      actor,
     });
   }
 
@@ -439,7 +445,7 @@ export function agentService(db: Db) {
       if (!updated) return null;
 
       if (Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig")) {
-        await syncAgentSecretBindings(updated, txDb);
+        await syncAgentSecretBindings(updated, txDb, options?.actor);
       }
 
       const normalizedUpdated = await agentService(txDb).getById(updated.id);
@@ -485,7 +491,11 @@ export function agentService(db: Db) {
 
     getById,
 
-    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+    create: async (
+      companyId: string,
+      data: Omit<typeof agents.$inferInsert, "companyId">,
+      options?: { actor?: AgentSecretBindingActor },
+    ) => {
       assertNoRoleAssignmentFields(data as Record<string, unknown>);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
@@ -527,7 +537,7 @@ export function agentService(db: Db) {
           })
           .returning()
           .then((rows) => rows[0]);
-        await syncAgentSecretBindings(created, txDb);
+        await syncAgentSecretBindings(created, txDb, options?.actor);
         const normalizedCreated = await agentService(txDb).getById(created.id);
         if (!normalizedCreated) {
           throw notFound("Agent not found");

@@ -407,6 +407,79 @@ describe("agent routes adapter validation", () => {
     expect(String(env.CODEX_HOME)).toContain(`/companies/company-1/agents/${agentId}/codex-home`);
   });
 
+  // DUR-132 item 9: a codex_local agent with mcpServers but no OPENAI_API_KEY
+  // override used to share the host/company CODEX_HOME with every other
+  // codex_local agent -- its MCP server credentials would land in a config.toml
+  // visible to whichever agent happened to run next in that home.
+  it("isolates CODEX_HOME when a codex_local agent has mcpServers but no OPENAI_API_KEY", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/company-1/agents")
+        .send({
+          name: "MCP Codex",
+          adapterType: "codex_local",
+          adapterConfig: {
+            mcpServers: [{ name: "fs", command: "npx", env: { TOKEN: "secret-value" } }],
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const createInput = mockAgentService.create.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    const agentId = String(createInput.id);
+    const adapterConfig = createInput.adapterConfig as Record<string, unknown>;
+    const env = adapterConfig.env as Record<string, unknown> | undefined;
+    expect(String(env?.CODEX_HOME)).toContain(`/companies/company-1/agents/${agentId}/codex-home`);
+  });
+
+  // DUR-132 item 6: a literal credential-shaped mcpServers value is not
+  // rejected -- there are no persona rows yet -- but the response carries a
+  // plain-language advisory so a future UI can offer to move it into a saved
+  // password.
+  it("returns an advisory (not a rejection) when creating an agent with a literal credential-shaped mcpServers value", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/company-1/agents")
+        .send({
+          name: "Higgsfield Agent",
+          adapterType: "claude_local",
+          adapterConfig: {
+            mcpServers: [
+              { name: "higgsfield", url: "https://mcp.higgsfield.ai", headers: { Authorization: "Bearer sk-live-token" } },
+            ],
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.mcpCredentialAdvisories).toEqual([
+      expect.objectContaining({
+        configPath: "mcpServers[higgsfield].headers.Authorization",
+        canMoveToSavedPassword: true,
+      }),
+    ]);
+  });
+
+  it("omits mcpCredentialAdvisories when no mcpServers value looks like a credential", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/company-1/agents")
+        .send({
+          name: "Plain Agent",
+          adapterType: "claude_local",
+          adapterConfig: {
+            mcpServers: [{ name: "fs", command: "npx", env: { LOG_LEVEL: "debug" } }],
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.mcpCredentialAdvisories).toBeUndefined();
+  });
+
   it("rejects unknown adapter types even when schema accepts arbitrary strings", async () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
