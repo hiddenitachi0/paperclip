@@ -203,6 +203,75 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     expect(row).toEqual({ checkoutRunId: failedRunId, executionRunId: runningRunId });
   });
 
+  it("clears lock columns when checkoutRunId points at a scheduled_retry run overdue well past its grace period", async () => {
+    const { companyId, agentId } = await seed();
+    const staleRetryRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: staleRetryRunId,
+      companyId,
+      agentId,
+      status: "scheduled_retry",
+      invocationSource: "manual",
+      scheduledRetryAt: new Date(Date.now() - 60 * 60 * 1000), // 1h overdue, promotion should have already happened
+      scheduledRetryAttempt: 1,
+    });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Stale lock — checkoutRunId stuck in scheduled_retry",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: staleRetryRunId,
+      executionRunId: staleRetryRunId,
+      executionLockedAt: new Date(),
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.sweepStaleIssueLocks();
+
+    expect(result.cleared).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+  });
+
+  it("does not clear a lock while the referenced scheduled_retry run is still within its grace period", async () => {
+    const { companyId, agentId } = await seed();
+    const freshRetryRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: freshRetryRunId,
+      companyId,
+      agentId,
+      status: "scheduled_retry",
+      invocationSource: "manual",
+      scheduledRetryAt: new Date(Date.now() + 5 * 60 * 1000), // due 5m from now — nothing wrong yet
+      scheduledRetryAttempt: 1,
+    });
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Live lock — scheduled_retry not yet due",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: freshRetryRunId,
+      executionRunId: freshRetryRunId,
+      executionLockedAt: new Date(),
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.sweepStaleIssueLocks();
+
+    expect(result.cleared).toBe(0);
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: freshRetryRunId, executionRunId: freshRetryRunId });
+  });
+
   it("is idempotent — second pass finds nothing to clear", async () => {
     const { companyId, agentId, failedRunId } = await seed();
     const issueId = randomUUID();

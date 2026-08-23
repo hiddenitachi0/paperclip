@@ -213,6 +213,89 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     });
   });
 
+  it("lets the rightful assignee release after the owning run stalls in scheduled_retry past its grace period (DUR-129)", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const stalledRetryRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: stalledRetryRunId,
+      companyId,
+      agentId,
+      status: "scheduled_retry",
+      invocationSource: "manual",
+      scheduledRetryAt: new Date(Date.now() - 60 * 60 * 1000), // long overdue — promotion never happened
+      scheduledRetryAttempt: 1,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Stuck scheduled_retry release",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: stalledRetryRunId,
+      executionRunId: stalledRetryRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .post(`/api/issues/${issueId}/release`)
+      .send();
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const row = await db
+      .select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      status: "todo",
+      assigneeAgentId: null,
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+  });
+
+  it("still blocks release while the owning run is a scheduled_retry not yet past its grace period", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const freshRetryRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: freshRetryRunId,
+      companyId,
+      agentId,
+      status: "scheduled_retry",
+      invocationSource: "manual",
+      scheduledRetryAt: new Date(Date.now() + 5 * 60 * 1000), // due soon — still a legitimate hold
+      scheduledRetryAttempt: 1,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Fresh scheduled_retry release attempt",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: freshRetryRunId,
+      executionRunId: freshRetryRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .post(`/api/issues/${issueId}/release`)
+      .send();
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+  });
+
   it("lets the current assignee recover a timed_out stale checkout owner during PATCH", async () => {
     const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
     const timedOutRunId = randomUUID();

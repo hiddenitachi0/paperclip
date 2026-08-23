@@ -36,7 +36,7 @@ import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
-import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
+import { TERMINAL_HEARTBEAT_RUN_STATUSES, isHeartbeatRunLockStale, issueService } from "../issues.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeIdempotencyKey,
@@ -4411,18 +4411,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const runRows =
       referencedRunIds.length > 0
         ? await db
-            .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+            .select({
+              id: heartbeatRuns.id,
+              status: heartbeatRuns.status,
+              scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+            })
             .from(heartbeatRuns)
             .where(inArray(heartbeatRuns.id, referencedRunIds))
         : [];
     const runStatusById = new Map<string, string>();
-    for (const row of runRows) runStatusById.set(row.id, row.status);
+    const runById = new Map<string, { status: string; scheduledRetryAt: Date | string | null }>();
+    for (const row of runRows) {
+      runStatusById.set(row.id, row.status);
+      runById.set(row.id, row);
+    }
 
     const isCleanable = (runId: string | null) => {
       if (!runId) return true;
-      const status = runStatusById.get(runId);
-      if (!status) return true; // missing run row → no real claim
-      return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status);
+      const run = runById.get(runId);
+      if (!run) return true; // missing run row → no real claim
+      return isHeartbeatRunLockStale(run);
     };
 
     for (const issue of candidates) {
