@@ -54,8 +54,8 @@ function draftFromJob(job: Job): JobDraft {
     name: job.name,
     description: job.description,
     instructions: job.instructions,
-    defaultTools: job.defaultTools,
-    defaultRights: job.defaultRights,
+    defaultTools: job.defaultTools ?? [],
+    defaultRights: job.defaultRights ?? [],
   };
 }
 
@@ -192,11 +192,11 @@ export function Jobs() {
                 <div className="mt-1.5 flex items-center gap-3 text-xs text-muted-foreground">
                   <span className="inline-flex items-center gap-1">
                     <Wrench className="h-3 w-3" />
-                    {job.defaultTools.length} {job.defaultTools.length === 1 ? "tool" : "tools"}
+                    {(job.defaultTools?.length ?? 0)} {(job.defaultTools?.length ?? 0) === 1 ? "tool" : "tools"}
                   </span>
                   <span className="inline-flex items-center gap-1">
                     <ShieldCheck className="h-3 w-3" />
-                    {job.defaultRights.length} {job.defaultRights.length === 1 ? "right" : "rights"}
+                    {(job.defaultRights?.length ?? 0)} {(job.defaultRights?.length ?? 0) === 1 ? "right" : "rights"}
                   </span>
                 </div>
               </div>
