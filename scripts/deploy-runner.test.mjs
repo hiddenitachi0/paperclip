@@ -85,6 +85,24 @@ const FAKE_DOCKER = [
   "    aid=\"$(printf '%s' \"$cmd\" | sed -n 's/.*approval get \\([^ ]*\\).*/\\1/p')\"",
   '    cat "$SCENARIO_DIR/approval-$aid.json"',
   '    ;;',
+  '  *"approval issues "*)',
+  "    aid=\"$(printf '%s' \"$cmd\" | sed -n 's/.*approval issues \\([^ ]*\\).*/\\1/p')\"",
+  '    fixture="$SCENARIO_DIR/approval-issues-$aid.json"',
+  '    if [ -f "$fixture" ]; then cat "$fixture"; else printf \'[]\'; fi',
+  '    ;;',
+  '  *"issue comment "*)',
+  "    iid=\"$(printf '%s' \"$cmd\" | sed -n 's/.*issue comment \\([^ ]*\\).*/\\1/p')\"",
+  '    fail_count_file="$SCENARIO_DIR/fail-count-issue-comment-$iid"',
+  '    if [ -f "$fail_count_file" ]; then',
+  '      remaining="$(cat "$fail_count_file")"',
+  '      if [ "$remaining" -gt 0 ]; then',
+  '        echo $((remaining - 1)) > "$fail_count_file"',
+  '        exit 1',
+  '      fi',
+  '    fi',
+  '    printf \'%s\\n\' "${BODY:-}" >> "$SCENARIO_DIR/issue-comment-$iid.log"',
+  '    exit 0',
+  '    ;;',
   '  *"project get "*)',
   "    pid=\"$(printf '%s' \"$cmd\" | sed -n 's/.*project get \\([^ ]*\\).*/\\1/p')\"",
   '    cat "$SCENARIO_DIR/project-$pid.json"',
@@ -117,6 +135,11 @@ function makeScenario() {
     },
     commentsFor(aid) {
       const file = path.join(dir, `comment-${aid}.log`);
+      if (!existsSync(file)) return [];
+      return readFileSync(file, "utf8").split("\n").filter(Boolean);
+    },
+    issueCommentsFor(iid) {
+      const file = path.join(dir, `issue-comment-${iid}.log`);
       if (!existsSync(file)) return [];
       return readFileSync(file, "utf8").split("\n").filter(Boolean);
     },
@@ -263,6 +286,91 @@ test("an approval whose comment can never be delivered is left unprocessed for t
       "the approval must NOT be marked processed — it must stay eligible for retry next poll cycle",
     );
     assert.match(scenario.readLog(), /could not deliver a comment after 3 attempts/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-136 regression: a deploy outcome comment must not be visible only on
+// the approval object — an approval whose payload has a bad projectId can
+// fail loudly on the approval while the issue it was deploying for (e.g. a
+// ticket sitting in_review) never shows any sign the deploy didn't happen.
+test("a deploy failure comment is mirrored onto every issue linked to the approval, not just the approval", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-bad-project",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-08-23T14:18:37Z",
+        payload: { kind: "deploy", projectId: "ws-not-a-real-project", workspaceId: "ws-not-a-real-project" },
+      },
+    ]);
+    scenario.writeJson("approval-aid-bad-project.json", {
+      id: "aid-bad-project",
+      payload: { kind: "deploy", projectId: "ws-not-a-real-project", workspaceId: "ws-not-a-real-project" },
+    });
+    scenario.writeJson("approval-issues-aid-bad-project.json", [
+      { id: "issue-1" },
+      { id: "issue-2" },
+    ]);
+    // Deliberately no project-ws-not-a-real-project.json fixture — `project get`
+    // hits the fake docker's unhandled-command fallback and fails, same as the
+    // real server 404ing on a projectId that's actually a workspace id.
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main()");
+
+    const approvalComments = scenario.commentsFor("aid-bad-project");
+    assert.equal(approvalComments.length, 1);
+    assert.match(approvalComments[0], /Deploy failed/);
+
+    for (const iid of ["issue-1", "issue-2"]) {
+      const issueComments = scenario.issueCommentsFor(iid);
+      assert.equal(issueComments.length, 1, `expected the failure comment mirrored onto ${iid}`);
+      assert.equal(issueComments[0], approvalComments[0], `${iid}'s comment must match the approval's comment body`);
+    }
+
+    assert.deepEqual(scenario.processedIds(), ["aid-bad-project"]);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("a failure to mirror onto a linked issue is logged but never blocks marking the approval processed", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-mirror-fails",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-08-23T14:18:37Z",
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+      },
+    ]);
+    scenario.writeJson("approval-aid-mirror-fails.json", {
+      id: "aid-mirror-fails",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+    });
+    scenario.writeJson("project-proj-1.json", DISABLED_POLICY_PROJECT);
+    scenario.writeJson("approval-issues-aid-mirror-fails.json", [{ id: "issue-unreachable" }]);
+    writeFileSync(path.join(scenario.dir, "fail-count-issue-comment-issue-unreachable"), "999");
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main()");
+
+    assert.equal(scenario.commentsFor("aid-mirror-fails").length, 1, "approval comment must still be delivered");
+    assert.equal(scenario.issueCommentsFor("issue-unreachable").length, 0, "the mirrored comment never got through");
+    assert.deepEqual(
+      scenario.processedIds(),
+      ["aid-mirror-fails"],
+      "the approval must still be marked processed — mirroring is best-effort and never gates processing",
+    );
+    assert.match(scenario.readLog(), /could not mirror comment onto issue issue-unreachable/);
   } finally {
     scenario.cleanup();
   }
