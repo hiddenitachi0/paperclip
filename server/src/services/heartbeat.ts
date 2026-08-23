@@ -472,6 +472,18 @@ function mergeAdapterRecoveryMetadata(input: {
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  // DUR-125: evaluateSelfReviewDoneGate's isSelfReviewPassRunId(actor.runId) check already
+  // ran (and failed — that's why this wakeup exists) before this wakeup call started. If it
+  // were allowed to silently coalesce into whatever heartbeat run happens to already be
+  // active for this agent — including the very run whose own gate evaluation just requested
+  // it — the selfReviewPass marker only lands in that run's contextSnapshot *after* its own
+  // PATCH attempt already failed. A run that takes that 409 as final and ends its turn (the
+  // common case) never retries and never sees the exemption it was just granted, so the
+  // issue is left bouncing between in_progress and repeated self-review passes indefinitely.
+  // Routing this reason through the same "needs a new run boundary" path as
+  // approval_approved/ISSUE_BLOCKERS_RESOLVED guarantees the exemption is live in a *fresh*
+  // run's contextSnapshot before anything evaluates the gate against it again.
+  SELF_REVIEW_PASS_REASON,
 ]);
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",

@@ -15,6 +15,7 @@ import {
 import { runningProcesses } from "../adapters/index.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY } from "../services/recovery/index.ts";
+import { SELF_REVIEW_PASS_CONTEXT_KEY, SELF_REVIEW_PASS_REASON } from "../services/self-review-gate.ts";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -288,6 +289,134 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
       wakeReason: "approval_approved",
     });
 
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
+  });
+
+  it("defers self-review-pass wakes for a running issue instead of coalescing into the run that requested them (DUR-125)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const heartbeat = heartbeatService(db);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CEO",
+      role: "ceo",
+      status: "running",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    // This run is still "running" -- it's the run whose own PATCH .../done attempt is what
+    // triggers evaluateSelfReviewDoneGate to call heartbeat.wakeup(...) below, synchronously,
+    // *while this run's request handler is still on the stack*.
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        wakeReason: "issue_continuation_needed",
+      },
+    });
+    runningProcesses.set(runId, {
+      child: {} as never,
+      graceSec: 0,
+      processGroupId: null,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Ship the fix",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      executionRunId: runId,
+      executionAgentNameKey: "ceo",
+      executionLockedAt: new Date(),
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+    });
+
+    // Mirrors exactly what evaluateSelfReviewDoneGate (self-review-gate.ts) passes to
+    // input.wakeup(...) after rejecting runId's own PATCH .../done attempt with a 409.
+    const followupRun = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {
+        issueId,
+        taskId: issueId,
+        resumeIntent: true,
+        resumeFromRunId: runId,
+        [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
+      },
+      contextSnapshot: {
+        issueId,
+        wakeReason: SELF_REVIEW_PASS_REASON,
+        [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
+        resumeFromRunId: runId,
+      },
+      idempotencyKey: `self_review_pass:${issueId}:${runId}`,
+      requestedByActorType: "system",
+      requestedByActorId: "issue_self_review_gate",
+    });
+
+    // DUR-125: before the fix, this wakeup coalesced straight into runId's own heartbeat_runs
+    // row (kind: "coalesced"), so isSelfReviewPassRunId(runId) only became true *after*
+    // runId's own PATCH attempt had already been rejected with a 409 -- a run that takes that
+    // rejection as final and ends its turn (the common case) never retries and never sees the
+    // exemption it was just granted, leaving the issue stuck bouncing indefinitely.
+    expect(followupRun).toBeNull();
+
+    const wakeupRows = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId)));
+
+    expect(wakeupRows).toHaveLength(1);
+    expect(wakeupRows[0]?.status).toBe("deferred_issue_execution");
+    expect(wakeupRows[0]?.reason).toBe("issue_execution_deferred");
+    expect((wakeupRows[0]?.payload as Record<string, unknown>)._paperclipWakeContext).toMatchObject({
+      issueId,
+      wakeReason: SELF_REVIEW_PASS_REASON,
+      [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
+      resumeFromRunId: runId,
+    });
+
+    // The run that requested the self-review pass must NOT have had the exemption merged
+    // into its own (still in-flight) contextSnapshot -- that's precisely the race that let
+    // the same run's rejected attempt slip through unretried.
+    const sourceRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(
+      (sourceRun?.contextSnapshot as Record<string, unknown> | null)?.[SELF_REVIEW_PASS_CONTEXT_KEY],
+    ).toBeUndefined();
+
+    // No second run was spawned synchronously by this call -- the deferred wake is picked up
+    // and turned into a fresh run once runId actually finishes.
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
     expect(runs).toHaveLength(1);
     expect(runs[0]?.id).toBe(runId);
