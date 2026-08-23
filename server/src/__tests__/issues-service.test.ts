@@ -3699,6 +3699,86 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     });
   });
 
+  it("resolves the finalize barrier when a child blocker's own finalize op is recorded under its parent's issueId", async () => {
+    // Mirrors a real recurring pattern: a small "commit + open PR" ticket is
+    // created as a CHILD of the issue it blocks (`blockParentUntilDone`), but
+    // the actual git work happens while the parent's workspace is checked
+    // out, so the workspace_finalize row lands attributed to the parent, not
+    // the child blocker itself. The blocker is done, its own work genuinely
+    // finalized — the dependent must not be stuck behind it forever.
+    const {
+      companyId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+      assigneeAgentId,
+    } = await seedSharedWorkspaceDependency();
+
+    await db.update(issues).set({ parentId: dependentId }).where(eq(issues.id, blockerId));
+
+    // Finalize succeeded, but attributed to the parent (dependentId), not the
+    // child blocker (blockerId) — the blocker itself has no attributed ops.
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: dependentId,
+      phase: "workspace_finalize",
+      status: "succeeded",
+      startedAt: new Date("2026-05-23T22:00:00.000Z"),
+    });
+
+    await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
+      expect.objectContaining({
+        id: dependentId,
+        assigneeAgentId,
+        blockerIssueIds: [blockerId],
+      }),
+    ]);
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: true,
+      pendingFinalizeBlockerIssueIds: [],
+      unresolvedBlockerIssueIds: [],
+    });
+  });
+
+  it("still gates on an unrelated foreign issue's in-flight work even when the blocker is a child of the dependent", async () => {
+    const {
+      companyId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+      foreignIssueId,
+    } = await seedSharedWorkspaceDependency();
+
+    await db.update(issues).set({ parentId: dependentId }).where(eq(issues.id, blockerId));
+
+    // The blocker's parent (the dependent) has a genuine finalize...
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: dependentId,
+      phase: "workspace_finalize",
+      status: "succeeded",
+      startedAt: new Date("2026-05-23T22:00:00.000Z"),
+    });
+    // ...but a later, completely unrelated issue's unattributed op should not
+    // matter here since the blocker now resolves via its parent's attributed
+    // finalize, not the unattributed fallback.
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: foreignIssueId,
+      phase: "worktree_prepare",
+      status: "running",
+      startedAt: new Date("2026-05-23T22:10:00.000Z"),
+    });
+
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: true,
+      pendingFinalizeBlockerIssueIds: [],
+    });
+  });
+
   it("treats blockers with no executionWorkspaceId as not subject to the workspace-finalize barrier", async () => {
     const companyId = randomUUID();
     const assigneeAgentId = randomUUID();
