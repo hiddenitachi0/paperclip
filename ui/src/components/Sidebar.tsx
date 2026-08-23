@@ -10,6 +10,7 @@ import {
   Network,
   Briefcase,
   Boxes,
+  Plug,
   Repeat,
   GitBranch,
   Package,
@@ -185,6 +186,7 @@ export function Sidebar() {
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />
           <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
+          <SidebarNavItem to="/tools" label="Tools" icon={Plug} />
           {showWorkspacesLink ? (
             <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
           ) : null}

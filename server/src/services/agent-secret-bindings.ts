@@ -150,8 +150,18 @@ export async function syncAgentAdapterEnvBindings(input: {
   agentId: string;
   adapterConfig: unknown;
   actor?: AgentSecretBindingActor;
+  // DUR-143: secret refs carried by this agent's granted tool-library
+  // entries (see collectMcpToolLibrarySecretRefs in mcp-tool-library.ts).
+  // Folded into the same replaceAll sync as adapterConfig-derived refs so a
+  // save that touches only adapterConfig can never wipe tool-granted
+  // bindings out from under an unrelated save.
+  extraRefs?: Array<{
+    secretId: string;
+    configPath: string;
+    versionSelector?: SecretVersionSelector;
+  }>;
 }) {
-  const refs = collectSecretRefs(input.adapterConfig);
+  const refs = [...collectSecretRefs(input.adapterConfig), ...(input.extraRefs ?? [])];
   if (
     input.actor?.actorType === "agent" &&
     refs.length > 0 &&
