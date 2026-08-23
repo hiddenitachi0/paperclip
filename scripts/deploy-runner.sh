@@ -188,6 +188,7 @@ project_id = payload.get("projectId")
 workspace_id = payload.get("workspaceId")
 commit = payload.get("commit") or ""
 title = payload.get("title") or ""
+allow_backward_deploy = "1" if payload.get("allowBackwardDeploy") else ""
 
 policy = project.get("deployPolicy") or {}
 if not policy.get("enabled"):
@@ -246,6 +247,7 @@ fields = {
     "DV_ENV_FILE": env_file,
     "DV_HEALTH_CHECK_URL": health_check_url,
     "DV_ROLLBACK": rollback,
+    "DV_ALLOW_BACKWARD_DEPLOY": allow_backward_deploy,
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(value)}")
@@ -262,8 +264,8 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
-git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
-  local target_dir="$1" repo_url="$2" ref="$3" token="$4"
+git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward -> 0 ok, 1 fetch/resolve failed, 2 refused (would move backward)
+  local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}"
   (
     cd "$target_dir" || exit 1
     if [ -n "$token" ]; then
@@ -286,11 +288,35 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
     # becomes a silent no-op that still reports success at the old commit.
     # Only fall back to bare "$ref" for a pinned commit SHA, which has no
     # origin/<sha> equivalent.
+    local target_commit
     if git rev-parse --verify --quiet "origin/$ref^{commit}" >/dev/null; then
-      git reset --hard --quiet "origin/$ref"
+      target_commit="$(git rev-parse "origin/$ref")"
     else
-      git reset --hard --quiet "$ref"
+      target_commit="$(git rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null)" || exit 1
     fi
+
+    # DUR-137: never let a reset move the checkout backward *silently*.
+    # Approvals are grouped/ordered by decidedAt, not git ancestry, so a
+    # stale approval (targeting a commit that shipped earlier) can end up
+    # approved and processed after a newer commit is already live —
+    # including across separate poll cycles, where the newer approval is
+    # long since marked processed and isn't even in the same batch to
+    # compare against. The only reliable check is against what's actually
+    # checked out right now: if the target is an ancestor of (or equal to)
+    # the current HEAD, resetting to it would discard everything that
+    # shipped since. Refuse unless the approval explicitly opted in via
+    # payload.allowBackwardDeploy — a genuine intentional rollback still
+    # needs a way through, it just can't happen by accident.
+    if [ -z "$allow_backward" ]; then
+      local current_commit
+      current_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
+      if [ -n "$current_commit" ] && [ "$target_commit" != "$current_commit" ] && \
+         git merge-base --is-ancestor "$target_commit" "$current_commit" 2>/dev/null; then
+        exit 2
+      fi
+    fi
+
+    git reset --hard --quiet "$target_commit"
   )
 }
 
@@ -383,7 +409,13 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
-  if ! git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token"; then
+  git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY"
+  local fetch_reset_status=$?
+  if [ "$fetch_reset_status" -eq 2 ]; then
+    log "runner: $aid refused — $target_ref is already reachable from the live commit $before_commit; deploying it would move production backward"
+    comment "$aid" "$company_id" "Deploy skipped — approval target ($target_ref) is an ancestor of the currently live commit ($before_commit): applying it would reset production backward and silently discard whatever has shipped since (DUR-137 guard). If a rollback is genuinely intended, re-file the deploy approval with payload.allowBackwardDeploy: true to confirm that explicitly."
+    return
+  elif [ "$fetch_reset_status" -ne 0 ]; then
     log "runner: $aid git fetch/reset failed"
     comment "$aid" "$company_id" "Deploy failed — git fetch/reset of $DV_DEPLOY_TARGET_PATH to $target_ref failed. Check deploy-runner.log."
     return
@@ -464,7 +496,7 @@ run_superseded_approval() { # approval_id, company_id, keep_approval_id
   result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
   (
     trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
-    if comment "$aid" "$company_id" "Skipped — a newer deploy approval ($keep_id) for the same project was approved in this poll cycle and will be deployed instead; both target the same git ref, so running this one too would be redundant."; then
+    if comment "$aid" "$company_id" "Skipped — a newer deploy approval ($keep_id) for the same project/workspace was approved in this poll cycle and will run instead, to avoid two resets racing on the same checkout. If this approval targets a different commit than $keep_id ends up deploying, deploy-runner's backward-deploy guard (DUR-137) will still refuse to apply it if it's older than what's live — re-file it if it genuinely needs to run."; then
       echo ok > "$result_file"
     fi
   )

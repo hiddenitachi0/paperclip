@@ -431,6 +431,155 @@ test("git_fetch_reset advances a branch-name deploy to the freshly fetched commi
   }
 });
 
+test("git_fetch_reset refuses to reset backward when the target commit is an ancestor of the current HEAD", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-backward-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+    const commitB = g(originDir, ["rev-parse", "HEAD"]);
+
+    // Deploy target is already live on the newer commit B (simulating a
+    // separate, already-processed approval that shipped it in an earlier
+    // poll cycle).
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitB);
+
+    // DUR-137 scenario: a stale approval targeting the older commit A gets
+    // approved after B is already live and processed, so it's alone in its
+    // group and would trivially become "KEEP" — this must still refuse.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitA}" ""
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assert.equal(result.status, 2, `expected refusal exit code 2\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    const targetHead = g(targetDir, ["rev-parse", "HEAD"]);
+    assert.equal(targetHead, commitB, "target checkout must stay on the newer live commit, never reset backward to an ancestor");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("git_fetch_reset allows an explicit backward reset when payload.allowBackwardDeploy opted in", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-backward-override-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+    const commitB = g(originDir, ["rev-parse", "HEAD"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitB);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitA}" "" "1"
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assertSuccess(result, "git_fetch_reset with allow_backward");
+
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitA, "an explicit allow_backward opt-in must still be able to roll back intentionally");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("process_approval posts a skip comment (not a false success) when the backward-deploy guard fires", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    mkdirSync(path.join(targetPath, ".git"), { recursive: true });
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef", kind: "deploy" },
+    });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 2; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy skipped/);
+    assert.match(comments[0], /backward/);
+    assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
 test("run_one_approval's crash-fallback comment does not double-comment when the real outcome comment already delivered", () => {
   const scenario = makeScenario();
   try {
