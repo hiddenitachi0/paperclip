@@ -453,3 +453,138 @@ test("run_one_approval's crash-fallback comment does not double-comment when the
     scenario.cleanup();
   }
 });
+
+// DUR-137 regression: main()'s group-by-(projectId, workspaceId) supersede
+// logic only orders same-cycle approvals by decidedAt, with no awareness of
+// git ancestry. A stale approval that gets board-approved AFTER a newer
+// commit already deployed (DUR-136's actual incident: 10d6d8e8 approved
+// after bf20cdf0 was already live) must never reach `reset --hard` — it has
+// to be refused, loudly, regardless of its decidedAt.
+test("commit_is_ancestor_of correctly classifies older/equal/newer commits", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ancestry-test-"));
+  try {
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(dir, { recursive: true });
+    g(dir, ["init", "--quiet", "-b", "main"]);
+    writeFileSync(path.join(dir, "f.txt"), "A");
+    g(dir, ["add", "f.txt"]);
+    g(dir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(dir, ["rev-parse", "HEAD"]);
+    writeFileSync(path.join(dir, "f.txt"), "B");
+    g(dir, ["add", "f.txt"]);
+    g(dir, ["commit", "--quiet", "-m", "B"]);
+    const commitB = g(dir, ["rev-parse", "HEAD"]);
+
+    const check = (candidate, current) => {
+      const script = `
+        set -uo pipefail
+        source "${SCRIPT}"
+        commit_is_ancestor_of "${dir}" "${candidate}" "${current}"
+      `;
+      return run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } }).status;
+    };
+
+    assert.equal(check(commitA, commitB), 0, "an older commit must be classified as an ancestor of a newer one");
+    assert.equal(check(commitB, commitA), 1, "a newer commit must NOT be classified as an ancestor of an older one");
+    assert.equal(check(commitB, commitB), 1, "a commit must NOT be classified as a (strict) ancestor of itself — a same-commit redeploy is not a rollback");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("process_approval refuses to deploy a stale approval whose target commit is an ancestor of what's already live, and never touches the checkout", () => {
+  const scenario = makeScenario();
+  const gitDir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ancestry-e2e-"));
+  try {
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    const originDir = path.join(gitDir, "origin.git");
+    const targetDir = path.join(gitDir, "target");
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "main"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A (DUR-132)"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B (DUR-135, already live)"]);
+    const commitB = g(originDir, ["rev-parse", "HEAD"]);
+
+    // The target checkout is already sitting on the newer commit B — same
+    // as production after bf20cdf0 (DUR-135) had already deployed.
+    g(gitDir, ["clone", "--quiet", originDir, targetDir]);
+    const marker = path.join(targetDir, "deploy-ran.marker");
+
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-stale",
+        type: "request_board_approval",
+        status: "approved",
+        // Decided AFTER commit B was already live — exactly DUR-136's
+        // 10d6d8e8 scenario. decidedAt alone would make this the KEEP.
+        decidedAt: "2026-08-23T15:01:45Z",
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: commitA },
+      },
+    ]);
+    scenario.writeJson("approval-aid-stale.json", {
+      id: "aid-stale",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: commitA },
+    });
+    scenario.writeJson("project-proj-1.json", {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetDir,
+        deployCommand: `touch ${marker}`,
+        healthCheckUrl: "http://127.0.0.1:1/unused",
+        rollback: "none",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: originDir, repoRef: "main" }],
+    });
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main()");
+
+    const comments = scenario.commentsFor("aid-stale");
+    assert.equal(comments.length, 1, `expected exactly one comment, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[0], /refused/i, "must be a loud refusal, not a silent skip or a generic failure");
+    assert.match(comments[0], /ancestor/i);
+    assert.doesNotMatch(comments[0], /Deploy failed/, "this is a deliberate safety refusal, not a generic failure");
+
+    assert.deepEqual(scenario.processedIds(), ["aid-stale"]);
+
+    const targetHead = g(targetDir, ["rev-parse", "HEAD"]);
+    assert.equal(targetHead, commitB, "the checkout must NOT be reset backward to the stale commit");
+    assert.equal(existsSync(marker), false, "the deploy recipe must never run for a refused (backward) deploy");
+  } finally {
+    scenario.cleanup();
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});

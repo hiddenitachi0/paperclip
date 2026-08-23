@@ -59,7 +59,17 @@
 # trying to say so. If two approved deploy requests target the same
 # project+workspace in one poll cycle, only the most recently *approved* one
 # actually deploys (they converge on the same git ref reset anyway) — the
-# older one gets a "superseded" comment instead of silently vanishing.
+# older one gets a "superseded" comment instead of silently vanishing. That
+# same-cycle grouping is decidedAt-only and has no idea about git history, so
+# DUR-137 adds an independent, unconditional check: right before ANY approval
+# (whether or not it went through the grouping above) would reset the
+# checkout, its target commit is compared against what's currently deployed
+# there via `git merge-base --is-ancestor`. A target that is a strict
+# ancestor of (i.e. older than) what's already live is refused outright — a
+# loud "Deploy refused" comment instead of a silent rollback — no matter how
+# recently the approval itself was decided. This is what stops a stale
+# approval that gets board-approved *after* a newer commit already shipped
+# (DUR-136's actual incident) from resetting production backward.
 # Every comment attempt (delivered or not) is also mirrored, best-effort, as
 # a JSON line into $STATUS_PATH inside the server container's own volume, so
 # an agent without host/docker access can see recent runner activity via the
@@ -262,8 +272,8 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
-git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
-  local target_dir="$1" repo_url="$2" ref="$3" token="$4"
+git_fetch() { # target_dir, ref, github_token -> 0 on success (objects for $ref available locally)
+  local target_dir="$1" ref="$2" token="$3"
   (
     cd "$target_dir" || exit 1
     if [ -n "$token" ]; then
@@ -276,7 +286,14 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
       git -c credential.helper= \
           -c "credential.https://github.com.helper=$GIT_CREDENTIAL_HELPER" \
           -c "credential.https://github.com.useHttpPath=false" \
-          fetch --quiet origin 2>>"$LOG" || exit 1
+          fetch --quiet origin 2>>"$LOG"
+  )
+}
+
+resolve_ref() { # target_dir, ref -> prints origin/$ref if it exists, else bare $ref (DUR-53)
+  local target_dir="$1" ref="$2"
+  (
+    cd "$target_dir" || exit 1
     # DUR-53: prefer the just-fetched remote-tracking ref (origin/$ref) when
     # $ref names a branch. Checking bare "$ref" first is a trap when this
     # checkout already has a local branch of the same name (the normal case
@@ -287,11 +304,43 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
     # Only fall back to bare "$ref" for a pinned commit SHA, which has no
     # origin/<sha> equivalent.
     if git rev-parse --verify --quiet "origin/$ref^{commit}" >/dev/null; then
-      git reset --hard --quiet "origin/$ref"
+      echo "origin/$ref"
     else
-      git reset --hard --quiet "$ref"
+      echo "$ref"
     fi
   )
+}
+
+# DUR-137: a deploy approval's target commit is only safe to actually deploy
+# if it is not OLDER than what's already live — regardless of when the
+# approval itself was decided. deploy-runner's group-by-(projectId,
+# workspaceId) supersede logic (below, in main()) only orders same-cycle
+# approvals by decidedAt, with no awareness of git ancestry: a stale
+# already-superseded approval that gets board-approved AFTER a newer one has
+# already deployed will still reach process_approval() as a normal KEEP, and
+# git_fetch_reset would silently `reset --hard` production backward, undoing
+# whatever shipped in between (exactly what happened with DUR-136's
+# 10d6d8e8, approved after bf20cdf0 was already live). This is the actual
+# gate: called with the target dir already fetched, so it only needs to
+# resolve refs and compare, never touch the network itself.
+commit_is_ancestor_of() { # target_dir, candidate_ref, current_commit -> 0 if candidate resolves to a STRICT ancestor of current_commit (older, not equal)
+  local target_dir="$1" candidate_ref="$2" current="$3" candidate_sha current_sha
+  [ -z "$candidate_ref" ] && return 1
+  [ -z "$current" ] || [ "$current" = "unknown" ] && return 1
+  (
+    cd "$target_dir" || exit 1
+    candidate_sha="$(git rev-parse --quiet --verify "$candidate_ref^{commit}" 2>/dev/null)" || exit 1
+    current_sha="$(git rev-parse --quiet --verify "$current^{commit}" 2>/dev/null)" || exit 1
+    [ "$candidate_sha" = "$current_sha" ] && exit 1
+    git merge-base --is-ancestor "$candidate_sha" "$current_sha" 2>/dev/null
+  )
+}
+
+git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
+  local target_dir="$1" repo_url="$2" ref="$3" token="$4" resolved
+  git_fetch "$target_dir" "$ref" "$token" || return 1
+  resolved="$(resolve_ref "$target_dir" "$ref")" || return 1
+  git -C "$target_dir" reset --hard --quiet "$resolved"
 }
 
 run_recipe() { # target_dir, kind, services, command, compose_files, env_file
@@ -379,13 +428,31 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   token="$(cli_json secrets deploy-github-token -C "$company_id" | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("token") or "")' 2>/dev/null)" || token=""
 
   local target_ref="${DV_COMMIT:-$DV_REPO_REF}"
-  local before_commit
+  local before_commit before_commit_full
   before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  before_commit_full="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --quiet --verify HEAD 2>/dev/null || echo unknown)"
+
+  # DUR-137: fetch first (so the candidate ref/commit is resolvable locally),
+  # then check ancestry BEFORE ever touching the checkout with reset --hard.
+  if ! git_fetch "$DV_DEPLOY_TARGET_PATH" "$target_ref" "$token"; then
+    log "runner: $aid git fetch failed"
+    comment "$aid" "$company_id" "Deploy failed — git fetch of $DV_DEPLOY_TARGET_PATH for $target_ref failed. Check deploy-runner.log."
+    return
+  fi
+  local resolved_ref
+  resolved_ref="$(resolve_ref "$DV_DEPLOY_TARGET_PATH" "$target_ref")"
+  if commit_is_ancestor_of "$DV_DEPLOY_TARGET_PATH" "$resolved_ref" "$before_commit_full"; then
+    log "runner: $aid target $target_ref ($resolved_ref) is an ancestor of the currently deployed commit $before_commit — refusing to deploy backward"
+    comment "$aid" "$company_id" "Deploy refused — target ($target_ref) resolves to a commit that is an ancestor of the currently deployed commit ($before_commit), i.e. older than what's already live. Deploying it would silently roll production backward, undoing whatever shipped in between. This approval was likely decided after a newer deploy already went out. If you actually need to roll back, that must be done deliberately, not via a stale re-approval — file a fresh deploy request that targets a commit which is a descendant of $before_commit, or ask an operator to roll back manually."
+    return
+  fi
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
-  if ! git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token"; then
-    log "runner: $aid git fetch/reset failed"
-    comment "$aid" "$company_id" "Deploy failed — git fetch/reset of $DV_DEPLOY_TARGET_PATH to $target_ref failed. Check deploy-runner.log."
+  # Already fetched + ancestry-checked above; just reset to the resolved ref
+  # (no need to fetch a second time).
+  if ! git -C "$DV_DEPLOY_TARGET_PATH" reset --hard --quiet "$resolved_ref"; then
+    log "runner: $aid git reset failed"
+    comment "$aid" "$company_id" "Deploy failed — git reset of $DV_DEPLOY_TARGET_PATH to $resolved_ref ($target_ref) failed. Check deploy-runner.log."
     return
   fi
   local after_commit
