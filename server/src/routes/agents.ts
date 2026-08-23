@@ -2069,6 +2069,11 @@ export function agentRoutes(
           createdByUserId: actor.actorType === "user" ? actor.actorId : null,
           source: "skill-sync",
         },
+        // DUR-132 item 5: forward the actor so the self-only secret_ref
+        // binding gate applies here too, consistent with every other
+        // svc.update call site (this route can't inject new mcpServers
+        // content today, but the gate should hold regardless of that).
+        actor: { actorType: actor.actorType, agentId: actor.agentId },
       });
       if (!updated) {
         res.status(404).json({ error: "Agent not found" });
@@ -2143,6 +2148,19 @@ export function agentRoutes(
     }));
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
+      // DUR-132 item 7: the list route grants the same agents:create-based
+      // access as GET /agents/:id, so it must apply the same peer-vs-self
+      // secret masking -- otherwise a peer agent could bypass the detail
+      // route's masking simply by reading the list instead.
+      if (req.actor.type === "agent") {
+        const selfAgentId = req.actor.agentId;
+        res.json(
+          result.map((agent) =>
+            agent.id === selfAgentId ? agent : redactForSecretMaskedAgentView(agent),
+          ),
+        );
+        return;
+      }
       res.json(result);
       return;
     }
@@ -2947,7 +2965,13 @@ export function agentRoutes(
       },
     });
 
-    res.json(await buildAgentDetail(agent));
+    // DUR-132 item 7: this route is reachable by a peer agent holding
+    // canManageOtherAgentsPermissions, not just board/self -- mask the
+    // returned config the same way GET /agents/:id does.
+    const isSelf = req.actor.type === "agent" && req.actor.agentId === agent.id;
+    res.json(
+      await buildAgentDetail(agent, req.actor.type === "agent" && !isSelf ? { maskSecrets: true } : undefined),
+    );
   });
 
   router.patch("/agents/:id/instructions-path", validate(updateAgentInstructionsPathSchema), async (req, res) => {
@@ -3362,7 +3386,15 @@ export function agentRoutes(
     const mcpCredentialAdvisories = touchesAdapterConfiguration
       ? buildMcpCredentialAdvisories(agent.adapterConfig)
       : [];
-    res.json(mcpCredentialAdvisories.length > 0 ? { ...agent, mcpCredentialAdvisories } : agent);
+    // DUR-132 item 7: assertCanUpdateAgent allows a peer agent holding
+    // agents:create to reach this route for a non-self target (that grant is
+    // exactly the threat model item 7 masks on GET /agents/:id) -- mask the
+    // same way here so the PATCH response can't be used to read another
+    // agent's live credentials back out.
+    const isSelfUpdate = actor.actorType === "agent" && actor.agentId === agent.id;
+    const responseAgent =
+      actor.actorType === "agent" && !isSelfUpdate ? redactForSecretMaskedAgentView(agent) : agent;
+    res.json(mcpCredentialAdvisories.length > 0 ? { ...responseAgent, mcpCredentialAdvisories } : responseAgent);
   });
 
   router.post("/agents/:id/pause", async (req, res) => {

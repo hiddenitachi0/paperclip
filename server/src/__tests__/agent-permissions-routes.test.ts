@@ -2132,6 +2132,123 @@ describe.sequential("agent permission routes", () => {
       expect(boardRes.status, JSON.stringify(boardRes.body)).toBe(200);
       expect(boardRes.body.adapterConfig.env.OPENAI_API_KEY).toBe("sk-live-secret");
     });
+
+    // DUR-132 item 7 regression: GET /agents/:id masking is worthless if a
+    // peer agent can read the same live credentials back out through the
+    // company agent list, the permissions PATCH response, or the config
+    // PATCH response instead. All three must apply the same masking as the
+    // detail route for a non-self agent actor.
+    it("masks secret-shaped adapterConfig in the company agent list for a peer agent actor, but not for its own entry", async () => {
+      const peerAgentId = "66666666-6666-4666-8666-666666666666";
+      const secretPeer = {
+        ...baseAgent,
+        id: peerAgentId,
+        adapterConfig: { command: "pnpm agent:run", env: { OPENAI_API_KEY: "sk-live-secret" } },
+      };
+      const selfWithSecret = {
+        ...baseAgent,
+        adapterConfig: { command: "pnpm agent:run", env: { OPENAI_API_KEY: "self-secret" } },
+      };
+      mockAgentService.list.mockResolvedValue([selfWithSecret, secretPeer]);
+      mockAccessService.hasPermission.mockImplementation(
+        async (_companyId: string, _principalType: string, principalId: string, key: string) => {
+          return principalId === agentId && key === "agents:create";
+        },
+      );
+
+      const app = await createApp({
+        type: "agent",
+        agentId,
+        companyId,
+        runId: "run-1",
+        source: "agent_key",
+      });
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl).get(`/api/companies/${companyId}/agents`));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const self = res.body.find((a: { id: string }) => a.id === agentId);
+      const peer = res.body.find((a: { id: string }) => a.id === peerAgentId);
+      expect(self.adapterConfig.env.OPENAI_API_KEY).toBe("self-secret");
+      expect(peer.adapterConfig.env.OPENAI_API_KEY).not.toBe("sk-live-secret");
+    });
+
+    it("masks secret-shaped config in the PATCH /agents/:id/permissions response for a peer agent actor", async () => {
+      const managerAgentId = "77777777-7777-4777-8777-777777777777";
+      const secretAgent = {
+        ...baseAgent,
+        permissions: { canCreateAgents: true },
+        adapterConfig: { command: "pnpm agent:run", env: { OPENAI_API_KEY: "sk-live-secret" } },
+      };
+      mockAgentService.getById.mockImplementation(async (id: string) => {
+        if (id === managerAgentId) {
+          return {
+            ...baseAgent,
+            id: managerAgentId,
+            permissions: { canCreateAgents: false, canManageOtherAgentsPermissions: true },
+          };
+        }
+        if (id === agentId) return secretAgent;
+        return null;
+      });
+      mockAgentService.updatePermissions.mockResolvedValue(secretAgent);
+
+      const app = await createApp({
+        type: "agent",
+        agentId: managerAgentId,
+        companyId,
+        runId: "run-1",
+        source: "agent_key",
+      });
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({ canCreateAgents: true, canAssignTasks: true }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.adapterConfig.env.OPENAI_API_KEY).not.toBe("sk-live-secret");
+    });
+
+    it("masks secret-shaped config in the PATCH /agents/:id response for a peer agent actor, but not for a self-update", async () => {
+      const peerAgentId = "88888888-8888-4888-8888-888888888888";
+      const secretAgent = {
+        ...baseAgent,
+        id: peerAgentId,
+        adapterConfig: { command: "pnpm agent:run", env: { OPENAI_API_KEY: "sk-live-secret" } },
+      };
+      mockAgentService.getById.mockImplementation(async (id: string) => {
+        if (id === peerAgentId) return { ...baseAgent, id: peerAgentId };
+        return baseAgent;
+      });
+      mockAgentService.update.mockResolvedValue(secretAgent);
+
+      const peerApp = await createApp({
+        type: "agent",
+        agentId,
+        companyId,
+        runId: "run-1",
+        source: "agent_key",
+      });
+      const peerRes = await requestApp(peerApp, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${peerAgentId}`)
+        .send({ capabilities: "Updated capabilities" }));
+      expect(peerRes.status, JSON.stringify(peerRes.body)).toBe(200);
+      expect(peerRes.body.adapterConfig.env.OPENAI_API_KEY).not.toBe("sk-live-secret");
+
+      mockAgentService.update.mockResolvedValue({ ...secretAgent, id: agentId });
+      const selfApp = await createApp({
+        type: "agent",
+        agentId,
+        companyId,
+        runId: "run-1",
+        source: "agent_key",
+      });
+      const selfRes = await requestApp(selfApp, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}`)
+        .send({ capabilities: "Updated capabilities" }));
+      expect(selfRes.status, JSON.stringify(selfRes.body)).toBe(200);
+      expect(selfRes.body.adapterConfig.env.OPENAI_API_KEY).toBe("sk-live-secret");
+    });
   });
 
   it("rejects heartbeat cancellation outside the caller company scope", async () => {
