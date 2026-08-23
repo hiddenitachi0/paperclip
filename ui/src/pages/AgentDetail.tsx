@@ -23,6 +23,7 @@ import { useToastActions } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
+import { AgentJobSection } from "../components/jobs/AgentJobSection";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PageTabBar } from "../components/PageTabBar";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
@@ -1821,6 +1822,8 @@ function ConfigurationTab({
           </div>
         </div>
       </div>
+
+      <AgentJobSection agentId={agent.id} companyId={companyId} />
     </div>
   );
 }
