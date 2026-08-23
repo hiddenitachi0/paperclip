@@ -208,8 +208,8 @@ export function agentRoleRoutes(db: Db) {
 
     const mcpOverrides = {
       added: currentMcpServers
-        .filter((s) => !appliedNames.has(String(s.name ?? "")))
-        .map((s) => s.name),
+        .filter((s) => s.name != null && !appliedNames.has(String(s.name)))
+        .map((s) => String(s.name)),
       removed: [...appliedNames].filter((n) => !currentNames.has(n)),
     };
 

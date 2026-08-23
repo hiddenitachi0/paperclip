@@ -1,6 +1,6 @@
 // DUR-114: agent roles ("jobs") service — create/read/update/delete roles,
 // assign a role to an agent (apply-once model), copy roles across companies.
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -98,9 +98,29 @@ export async function updateRole(
   };
   if (input.name !== undefined) {
     updates.name = input.name;
-    // Re-derive key when name changes — do NOT auto-update if there's a collision;
-    // just keep the old key to avoid breaking agent snapshots.
-    updates.key = deriveKey(input.name);
+    // Re-derive key when name changes. If the derived key is already taken by
+    // another role in the same company, keep the existing key to avoid a
+    // unique-constraint 500 and to preserve agent snapshots.
+    const candidateKey = deriveKey(input.name);
+    const current = await db
+      .select({ companyId: companyAgentRoles.companyId, key: companyAgentRoles.key })
+      .from(companyAgentRoles)
+      .where(eq(companyAgentRoles.id, roleId))
+      .then((rows) => rows[0] ?? null);
+    if (current) {
+      const collision = await db
+        .select({ id: companyAgentRoles.id })
+        .from(companyAgentRoles)
+        .where(
+          and(
+            eq(companyAgentRoles.companyId, current.companyId),
+            eq(companyAgentRoles.key, candidateKey)
+          )
+        );
+      // Only update the key when there's no collision (or the collision IS this row).
+      const collidingOther = collision.filter((r) => r.id !== roleId);
+      updates.key = collidingOther.length === 0 ? candidateKey : current.key;
+    }
   }
   if ("description" in input) updates.description = input.description ?? null;
   if ("defaultInstructions" in input) updates.defaultInstructions = input.defaultInstructions ?? null;
@@ -152,18 +172,43 @@ export async function assignRoleToAgent(
   roleId: string | null,
   options: AssignRoleOptions = {}
 ) {
-  // Clearing the role: just null out the FK and snapshots.
+  // Clearing the role: null out the FK and snapshots, and revoke any permission
+  // grants that were applied from the role (using the snapshot to know which ones).
   if (roleId === null) {
-    const [updated] = await db
-      .update(agents)
-      .set({
-        roleId: null,
-        roleAppliedMcpServerNames: [],
-        roleAppliedPermissionKeys: [],
-        updatedAt: new Date(),
-      })
+    const agent = await db
+      .select({ id: agents.id, companyId: agents.companyId, roleAppliedPermissionKeys: agents.roleAppliedPermissionKeys })
+      .from(agents)
       .where(eq(agents.id, agentId))
-      .returning();
+      .then((rows) => rows[0] ?? null);
+    if (!agent) throw notFound("Agent not found");
+
+    const appliedKeys = (agent.roleAppliedPermissionKeys as string[] | null) ?? [];
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(agents)
+        .set({
+          roleId: null,
+          roleAppliedMcpServerNames: [],
+          roleAppliedPermissionKeys: [],
+          updatedAt: new Date(),
+        })
+        .where(eq(agents.id, agentId));
+
+      if (appliedKeys.length > 0) {
+        await tx
+          .delete(principalPermissionGrants)
+          .where(
+            and(
+              eq(principalPermissionGrants.principalType, "agent"),
+              eq(principalPermissionGrants.principalId, agentId),
+              inArray(principalPermissionGrants.permissionKey, appliedKeys as [string, ...string[]])
+            )
+          );
+      }
+    });
+
+    const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!updated) throw notFound("Agent not found");
     return updated;
   }
