@@ -9,7 +9,6 @@ import type {
 } from "@paperclipai/shared";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
-  PERSONALITY_PRESETS,
   supportedEnvironmentDriversForAdapter,
 } from "@paperclipai/shared";
 import type { AdapterModel } from "../api/agents";
@@ -943,18 +942,6 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
                 return (
                   <>
-                    <div className="flex flex-wrap gap-1.5 mb-1.5">
-                      {PERSONALITY_PRESETS.map((preset) => (
-                        <button
-                          key={preset.key}
-                          type="button"
-                          className="text-xs px-2 py-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:border-foreground/40 transition-colors"
-                          onClick={() => mark("identity", "personality", preset.text)}
-                        >
-                          {preset.label}
-                        </button>
-                      ))}
-                    </div>
                     <MarkdownEditor
                       value={personalityValue}
                       onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 1200) || null)}
