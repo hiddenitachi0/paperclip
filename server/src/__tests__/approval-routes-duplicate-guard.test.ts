@@ -9,6 +9,8 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { projects } from "@paperclipai/db";
+import { getTableName } from "drizzle-orm";
 
 // vi.resetModules() + dynamic imports take ~7s in this test environment.
 const TEST_TIMEOUT = 20_000;
@@ -68,9 +70,19 @@ function registerModuleMocks() {
 function createRouteDb() {
   return {
     select: vi.fn(() => ({
-      from: vi.fn(() => ({
+      // DUR-136: the deploy-approval route now checks payload.projectId
+      // resolves to a real project before filing/resubmitting -- match
+      // it here for the `projects` table so the pre-existing 409
+      // duplicate-guard test (which files a deploy payload) still
+      // reaches that check instead of failing earlier on a fake id.
+      from: vi.fn((table: unknown) => ({
         where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
+          then: async (resolve: (rows: unknown[]) => unknown) =>
+            resolve(
+              getTableName(table as any) === getTableName(projects)
+                ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "company-1" }]
+                : [],
+            ),
           limit: vi.fn(() => ({
             then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
           })),

@@ -55,6 +55,41 @@ function isDeployRequestApproval(type: unknown, payload: Record<string, unknown>
 }
 
 /**
+ * DUR-136: `deployRequestPayloadSchema` only checks that `projectId` is *a*
+ * UUID, not that it names a real project -- an agent that copy-pastes
+ * `PAPERCLIP_WORKSPACE_ID` into both fields (a workspace id is a UUID too)
+ * produces a payload that parses cleanly, gets approved, and only fails
+ * hours later when scripts/deploy-runner.sh tries to fetch a project by
+ * that id and can't. Catch that class of mistake at filing time instead,
+ * the same way isToolGrantRequestApproval/isInstructionsChangeRequestApproval
+ * already verify their target ids resolve to something real in this company.
+ */
+async function assertDeployRequestProjectExists(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string },
+) {
+  const projectRow = await db
+    .select({ id: projects.id, companyId: projects.companyId })
+    .from(projects)
+    .where(eq(projects.id, payload.projectId))
+    .then((rows) => rows[0] ?? null);
+  if (!projectRow) {
+    throw unprocessable(
+      `Deploy approval payload.projectId "${payload.projectId}" does not match any project. ` +
+        "Double-check it's the project id, not the workspace id -- they're both UUIDs but not interchangeable.",
+      { projectId: payload.projectId },
+    );
+  }
+  if (projectRow.companyId !== companyId) {
+    throw unprocessable(
+      `Deploy approval payload.projectId "${payload.projectId}" belongs to a different company.`,
+      { projectId: payload.projectId },
+    );
+  }
+}
+
+/**
  * `request_board_approval` approvals whose payload carries `kind:"model_boost"`
  * follow the temporary model/effort escalation convention (DUR-31) and must
  * validate against modelBoostRequestPayloadSchema before an operator sees them.
@@ -469,7 +504,8 @@ export function approvalRoutes(
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
-      deployRequestPayloadSchema.parse(approvalInput.payload);
+      const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
+      await assertDeployRequestProjectExists(db, companyId, deployPayload);
     }
     if (isModelBoostRequestApproval(approvalInput.type, approvalInput.payload)) {
       const boostPayload = modelBoostRequestPayloadSchema.parse(approvalInput.payload);
@@ -875,7 +911,8 @@ export function approvalRoutes(
     }
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
-      deployRequestPayloadSchema.parse(req.body.payload);
+      const deployPayload = deployRequestPayloadSchema.parse(req.body.payload);
+      await assertDeployRequestProjectExists(db, existing.companyId, deployPayload);
     }
     let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
