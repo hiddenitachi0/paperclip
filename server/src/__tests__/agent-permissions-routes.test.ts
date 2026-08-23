@@ -523,6 +523,42 @@ describe.sequential("agent permission routes", () => {
     expect(res.status).toBe(403);
   });
 
+  it("rejects roleId/role-snapshot fields on PATCH /agents/:id with 422, even for a fully-authorized board actor (DUR-114)", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ roleId: "33333333-3333-4333-8333-333333333333" }));
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("/agents/:id/role");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects roleAppliedMcpServerNames/roleAppliedPermissionKeys snapshot fields on PATCH /agents/:id with 422 (DUR-114)", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ roleAppliedMcpServerNames: ["github-mcp"], roleAppliedPermissionKeys: ["tasks:assign"] }));
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("/agents/:id/role");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("blocks api key creation for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 

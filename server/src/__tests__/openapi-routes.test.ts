@@ -56,6 +56,8 @@ const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head",
 const explicitOpenApiCoverageExclusions = new Set([
   // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
   "pipelines.ts",
+  // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
+  "agent-roles.ts",
 ]);
 
 function createApp() {
