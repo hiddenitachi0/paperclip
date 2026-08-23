@@ -1,11 +1,11 @@
 // DUR-114: routes for company agent roles ("jobs") and role assignment.
 // Board-only throughout — agents are structurally blocked from reaching these routes.
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { agents } from "@paperclipai/db";
-import { PERMISSION_KEYS } from "@paperclipai/shared";
+import { agents, principalPermissionGrants } from "@paperclipai/db";
+import { PERMISSION_KEYS, type PermissionKey } from "@paperclipai/shared";
 import { mcpServerConfigSchema } from "@paperclipai/shared/validators/agent";
 import { validate } from "../middleware/validate.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
@@ -172,7 +172,11 @@ export function agentRoleRoutes(db: Db) {
     }
   );
 
-  // GET /agents/:id/role — return the agent's current role with override metadata
+  // GET /agents/:id/role — return the agent's current role plus tool/right
+  // overrides, in the AgentRoleState shape the UI (ui/src/api/jobs.ts) expects.
+  // No role assigned is the normal case (all 22 live agents at the time of
+  // DUR-142), so this always returns the full shape with empty arrays rather
+  // than a shorter "no role" variant the UI was never built to read.
   router.get("/agents/:agentId/role", async (req, res) => {
     assertBoard(req);
     const { agentId } = req.params;
@@ -187,48 +191,66 @@ export function agentRoleRoutes(db: Db) {
     }
     await assertCompanyAccess(req, agent.companyId);
 
-    if (!agent.roleId) {
-      res.json({ role: null, overrides: null });
-      return;
-    }
+    const role = agent.roleId ? await getRole(db, agent.roleId) : null;
 
-    const role = await getRole(db, agent.roleId);
-    if (!role) {
-      res.json({ role: null, overrides: null });
-      return;
-    }
-
-    // Compute MCP server override diff: which names were added or removed vs snapshot
+    // Tool diff: which of the role's snapshot names are still present on the
+    // agent (fromJob), which current names weren't part of that snapshot
+    // (added), and which snapshot names are no longer present (removed).
     const appliedNames = new Set<string>(
       (agent.roleAppliedMcpServerNames as string[] | null) ?? []
     );
-    const currentConfig = agent.adapterConfig as Record<string, unknown> ?? {};
+    const currentConfig = (agent.adapterConfig as Record<string, unknown>) ?? {};
     const currentMcpServers = (currentConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? [];
     const currentNames = new Set(currentMcpServers.map((s) => String(s.name ?? "")));
 
-    const mcpOverrides = {
-      added: currentMcpServers
-        .filter((s) => s.name != null && !appliedNames.has(String(s.name)))
-        .map((s) => String(s.name)),
-      removed: [...appliedNames].filter((n) => !currentNames.has(n)),
-    };
-
-    // Compute permission grant override diff
+    // Same diff shape for permission grants, using the live grants table as
+    // "current" instead of adapterConfig.
     const appliedKeys = new Set<string>(
       (agent.roleAppliedPermissionKeys as string[] | null) ?? []
     );
-    // Live grants are fetched by the caller from the permissions API; here we
-    // just report what was applied from the role so the UI can compute diffs.
-    const permissionOverrides = {
-      appliedKeys: [...appliedKeys],
-    };
+    const liveGrants = await db
+      .select({
+        permissionKey: principalPermissionGrants.permissionKey,
+        scope: principalPermissionGrants.scope,
+      })
+      .from(principalPermissionGrants)
+      .where(
+        and(
+          eq(principalPermissionGrants.principalType, "agent"),
+          eq(principalPermissionGrants.principalId, agentId!)
+        )
+      );
+    const liveGrantsByKey = new Map(liveGrants.map((g) => [g.permissionKey, g]));
+    const roleGrantsByKey = new Map(
+      (
+        (role?.defaultGrants as Array<{ permissionKey: string; scope: Record<string, unknown> | null }> | undefined) ?? []
+      ).map((g) => [g.permissionKey, g])
+    );
 
     res.json({
-      role,
-      appliedMcpServerNames: [...appliedNames],
-      appliedPermissionKeys: [...appliedKeys],
-      mcpOverrides,
-      permissionOverrides,
+      job: role ? { id: role.id, name: role.name, description: role.description ?? "" } : null,
+      // Assignment time isn't tracked on the agent row yet — not rendered
+      // anywhere in the UI today, so left null rather than guessed.
+      assignedAt: null,
+      tools: {
+        fromJob: [...appliedNames].filter((n) => currentNames.has(n)),
+        added: [...currentNames].filter((n) => !appliedNames.has(n)),
+        removed: [...appliedNames].filter((n) => !currentNames.has(n)),
+      },
+      rights: {
+        fromJob: [...appliedKeys]
+          .filter((k) => liveGrantsByKey.has(k))
+          .map((k) => ({
+            permissionKey: k as PermissionKey,
+            scope: roleGrantsByKey.get(k)?.scope ?? liveGrantsByKey.get(k)!.scope ?? null,
+          })),
+        added: liveGrants
+          .filter((g) => !appliedKeys.has(g.permissionKey))
+          .map((g) => ({ permissionKey: g.permissionKey as PermissionKey, scope: g.scope })),
+        removed: [...appliedKeys]
+          .filter((k) => !liveGrantsByKey.has(k))
+          .map((k) => ({ permissionKey: k as PermissionKey, scope: roleGrantsByKey.get(k)?.scope ?? null })),
+      },
     });
   });
 
