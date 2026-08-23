@@ -1481,6 +1481,35 @@ describe("shouldDeferFollowupWakeForSameIssue", () => {
       }),
     ).toBe(false);
   });
+
+  // DUR-125: a self-review-pass (or similar bounded gate) wake scheduled while the source
+  // run is still "running" must defer to a new run instead of coalescing into that
+  // still-executing run's own row -- otherwise the exemption marker lands on a run whose
+  // gate check for this very wake already evaluated (and correctly found not-exempt), and
+  // the bounded "exactly one extra pass" guarantee is defeated.
+  it("defers a same-agent follow-up when the wake requires a distinct run boundary", () => {
+    expect(
+      shouldDeferFollowupWakeForSameIssue({
+        activeRunStatus: "running",
+        isSameExecutionAgent: true,
+        wakeCommentId: null,
+        forceFreshSession: false,
+        requiresDistinctRunBoundary: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not defer when requiresDistinctRunBoundary is false and nothing else asks for it", () => {
+    expect(
+      shouldDeferFollowupWakeForSameIssue({
+        activeRunStatus: "running",
+        isSameExecutionAgent: true,
+        wakeCommentId: null,
+        forceFreshSession: false,
+        requiresDistinctRunBoundary: false,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("buildWorkspaceLockAdoptionWarning", () => {
