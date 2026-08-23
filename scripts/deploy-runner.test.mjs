@@ -485,6 +485,53 @@ test("git_fetch_reset refuses to reset backward when the target commit is an anc
   }
 });
 
+test("git_fetch_reset allows an explicit backward reset when payload.allowBackwardDeploy opted in", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-backward-override-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+    const commitB = g(originDir, ["rev-parse", "HEAD"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitB);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitA}" "" "1"
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assertSuccess(result, "git_fetch_reset with allow_backward");
+
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitA, "an explicit allow_backward opt-in must still be able to roll back intentionally");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("process_approval posts a skip comment (not a false success) when the backward-deploy guard fires", () => {
   const scenario = makeScenario();
   try {
