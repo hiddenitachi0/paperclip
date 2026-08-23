@@ -800,15 +800,37 @@ export async function listUnfinalizedExecutionWorkspaceIds(
 async function listPendingFinalizeBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
-  blockerWorkspacePairs: Array<{ blockerIssueId: string; executionWorkspaceId: string }>,
+  blockerWorkspacePairs: Array<{
+    blockerIssueId: string;
+    executionWorkspaceId: string;
+    blockerParentIssueId?: string | null;
+  }>,
 ): Promise<Set<string>> {
   const pending = new Set<string>();
-  const blockerIssueIds = [...new Set(blockerWorkspacePairs.map((pair) => pair.blockerIssueId))];
   const executionWorkspaceIds = [...new Set(blockerWorkspacePairs.map((pair) => pair.executionWorkspaceId))];
-  if (blockerIssueIds.length === 0 || executionWorkspaceIds.length === 0) return pending;
-  const blockerWorkspaceKeys = new Set(
-    blockerWorkspacePairs.map((pair) => `${pair.blockerIssueId}:${pair.executionWorkspaceId}`),
-  );
+  if (blockerWorkspacePairs.length === 0 || executionWorkspaceIds.length === 0) return pending;
+
+  // A blocker ticket's actual finalize op is sometimes recorded against a
+  // parent issue instead of the blocker itself (e.g. a small "commit + open
+  // PR" child ticket whose work happens under the parent's already-checked-out
+  // workspace). Accept ops attributed to either the blocker or its direct
+  // parent as evidence of that blocker's own finalize state — but keep this
+  // scoped to parent/child, not the whole shared workspace, so an unrelated
+  // issue's in-flight work on the same reused workspace still correctly holds
+  // the barrier.
+  const attributionIssueIds = new Set<string>();
+  const blockerKeysByAttributionKey = new Map<string, Set<string>>();
+  for (const pair of blockerWorkspacePairs) {
+    const blockerKey = `${pair.blockerIssueId}:${pair.executionWorkspaceId}`;
+    for (const attributionIssueId of [pair.blockerIssueId, pair.blockerParentIssueId]) {
+      if (!attributionIssueId) continue;
+      attributionIssueIds.add(attributionIssueId);
+      const attributionKey = `${attributionIssueId}:${pair.executionWorkspaceId}`;
+      const blockerKeys = blockerKeysByAttributionKey.get(attributionKey) ?? new Set<string>();
+      blockerKeys.add(blockerKey);
+      blockerKeysByAttributionKey.set(attributionKey, blockerKeys);
+    }
+  }
 
   const rows = await dbOrTx
     .select({
@@ -823,7 +845,7 @@ async function listPendingFinalizeBlockerIssueIds(
       and(
         eq(workspaceOperations.companyId, companyId),
         inArray(workspaceOperations.executionWorkspaceId, executionWorkspaceIds),
-        or(inArray(workspaceOperations.issueId, blockerIssueIds), isNull(workspaceOperations.issueId)),
+        or(inArray(workspaceOperations.issueId, [...attributionIssueIds]), isNull(workspaceOperations.issueId)),
       ),
     );
 
@@ -832,15 +854,18 @@ async function listPendingFinalizeBlockerIssueIds(
   for (const row of rows) {
     if (!row.executionWorkspaceId) continue;
     if (row.issueId) {
-      const key = `${row.issueId}:${row.executionWorkspaceId}`;
-      if (!blockerWorkspaceKeys.has(key)) continue;
-      const current = latestAttributedByBlockerWorkspace.get(key);
-      if (!current || row.startedAt > current.startedAt) {
-        latestAttributedByBlockerWorkspace.set(key, {
-          phase: row.phase,
-          status: row.status,
-          startedAt: row.startedAt,
-        });
+      const attributionKey = `${row.issueId}:${row.executionWorkspaceId}`;
+      const blockerKeys = blockerKeysByAttributionKey.get(attributionKey);
+      if (!blockerKeys) continue;
+      for (const blockerKey of blockerKeys) {
+        const current = latestAttributedByBlockerWorkspace.get(blockerKey);
+        if (!current || row.startedAt > current.startedAt) {
+          latestAttributedByBlockerWorkspace.set(blockerKey, {
+            phase: row.phase,
+            status: row.status,
+            startedAt: row.startedAt,
+          });
+        }
       }
       continue;
     }
@@ -921,6 +946,7 @@ async function listIssueDependencyReadinessMap(
       blockerIssueId: issueRelations.issueId,
       blockerStatus: issues.status,
       blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+      blockerParentIssueId: issues.parentId,
     })
     .from(issueRelations)
     .innerJoin(issues, eq(issueRelations.issueId, issues.id))
@@ -935,12 +961,17 @@ async function listIssueDependencyReadinessMap(
   // Collect issue/workspace pairs of "done" blockers — these are the only ones
   // subject to the workspace-finalize barrier. Blockers that aren't done already
   // mark the dependent as not-ready and don't need a finalize check.
-  const doneBlockerWorkspacePairs: Array<{ blockerIssueId: string; executionWorkspaceId: string }> = [];
+  const doneBlockerWorkspacePairs: Array<{
+    blockerIssueId: string;
+    executionWorkspaceId: string;
+    blockerParentIssueId?: string | null;
+  }> = [];
   for (const row of blockerRows) {
     if (row.blockerStatus === "done" && row.blockerExecutionWorkspaceId) {
       doneBlockerWorkspacePairs.push({
         blockerIssueId: row.blockerIssueId,
         executionWorkspaceId: row.blockerExecutionWorkspaceId,
+        blockerParentIssueId: row.blockerParentIssueId,
       });
     }
   }
