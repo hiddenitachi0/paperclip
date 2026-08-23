@@ -3749,6 +3749,28 @@ function isCheckoutConflictError(error: unknown): boolean {
   return error instanceof HttpError && error.status === 409 && error.message === "Issue checkout conflict";
 }
 
+// A checkout call can silently reclaim the issue's execution lock from a
+// *different* prior run whenever that run's heartbeat status looks terminal
+// (see clearExecutionRunIfTerminal / clearCheckoutRunIfTerminal / stale-run
+// adoption in issues.ts). That status can be wrong -- e.g. a process-lost
+// false negative -- while the prior run's process is still alive and
+// mutating the shared git worktree (DUR-120). Surface it loudly instead of
+// silently proceeding as if this run were always the sole owner.
+export function buildWorkspaceLockAdoptionWarning(input: {
+  actorRunId: string;
+  previousExecutionRunId: string | null;
+}): string | null {
+  if (!input.previousExecutionRunId) return null;
+  if (input.previousExecutionRunId === input.actorRunId) return null;
+  return (
+    `This run (${input.actorRunId}) just took over the execution lock for this issue from a different run ` +
+    `(${input.previousExecutionRunId}) whose heartbeat status already looked terminal. If that determination was wrong ` +
+    `and the prior run's process is still alive, it may still be mutating this worktree concurrently. Before running ` +
+    "any destructive git command (`git reset --hard`, `git checkout .`, `git clean -f`, `git stash`), check `git status`, " +
+    "`git reflog`, and `git stash list` for unexpected changes, and check ListAgents for a live peer session before discarding anything."
+  );
+}
+
 function deriveCommentId(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
@@ -5058,6 +5080,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         originKind: issues.originKind,
         originId: issues.originId,
         originRunId: issues.originRunId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
         updatedAt: issues.updatedAt,
       })
       .from(issues)
@@ -10298,6 +10322,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const issueDependencyReadiness = issueId
       ? await issuesSvc.listDependencyReadiness(agent.companyId, [issueId]).then((rows) => rows.get(issueId) ?? null)
       : null;
+    let workspaceLockAdoptionWarning: string | null = null;
     if (
       issueId &&
       issueContext &&
@@ -10309,9 +10334,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         agentId: agent.id,
       })
     ) {
+      const previousExecutionRunId = issueContext.executionRunId ?? null;
       try {
         await issuesSvc.checkout(issueId, agent.id, ["todo", "backlog", "blocked"], run.id);
         context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = true;
+        workspaceLockAdoptionWarning = buildWorkspaceLockAdoptionWarning({
+          actorRunId: run.id,
+          previousExecutionRunId,
+        });
       } catch (error) {
         if (!isCheckoutConflictError(error)) throw error;
         context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
@@ -11314,6 +11344,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const runtimeWorkspaceWarnings = [
       ...resolvedWorkspace.warnings,
       ...executionWorkspace.warnings,
+      ...(workspaceLockAdoptionWarning ? [workspaceLockAdoptionWarning] : []),
       ...(runtimeSessionResolution.warning ? [runtimeSessionResolution.warning] : []),
       ...(requestedShouldReuseExisting && workspaceConfigFreshness.reasons.length > 0
         ? [
