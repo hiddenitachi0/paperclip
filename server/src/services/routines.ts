@@ -3398,3 +3398,216 @@ export function routineService(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Schedule chain bootstrap verification (DUR-100)
+//
+// Incident this exists to catch: on 22 August the server boot routine logged
+// "9/9 chain bootstraps ran" / "already scheduled" for nine schedule chains
+// while four had a live `routineTriggers` row with no usable cron/timezone/
+// nextRunAt data (orphaned) and five had no live trigger row at all
+// (missing), even though each routine's own saved configuration
+// (`routines.latestRevisionId` -> `routineRevisions.snapshot`) still declared
+// a schedule trigger for it. The bootstrap never checked — it only recorded
+// that a bootstrap function had been invoked without throwing. This is
+// DUR-98's "kill the false-positive health report" item, applied here as the
+// concrete case that motivated it.
+//
+// `routineRevisions.snapshot` is the durable record of what each routine's
+// config declares ("registry entry"); the live `routineTriggers` row is what
+// the scheduler (`tickScheduledTriggers` above) actually reads ("job data").
+// A declared schedule trigger with no live row, or a live row missing
+// cron/timezone/nextRunAt, cannot possibly fire — no matter what a boot log
+// claims.
+// ---------------------------------------------------------------------------
+
+export interface ScheduleChainRef {
+  routineId: string;
+  triggerId: string;
+}
+
+export interface OrphanedScheduleChain extends ScheduleChainRef {
+  reason: string;
+}
+
+export interface IndeterminateScheduleRoutine {
+  routineId: string;
+  reason: string;
+}
+
+export interface ScheduleChainBootstrapVerification {
+  verifiedAt: Date;
+  /** Number of schedule chains declared by an active routine's latest saved config. */
+  totalDeclaredChains: number;
+  /** Live trigger row present, enabled, with cron/timezone/nextRunAt all set. */
+  verifiedChains: ScheduleChainRef[];
+  /** Live trigger row present but missing usable schedule data ("registry entry with no matching schedule"). */
+  orphanedChains: OrphanedScheduleChain[];
+  /** No live trigger row at all for a declared chain ("no job data at all, no registry entry"). */
+  missingChains: ScheduleChainRef[];
+  /** A routine whose own declared chain set could not be loaded — never counted as verified. */
+  indeterminateRoutines: IndeterminateScheduleRoutine[];
+}
+
+/**
+ * Verifies, for every active routine, that each schedule trigger its own
+ * latest saved config declares actually exists in the live scheduler table
+ * with usable job data — rather than trusting that a bootstrap step ran
+ * without throwing. See the block comment above for the incident this
+ * reproduces.
+ */
+export async function verifyScheduleChainBootstrap(
+  db: Db,
+  opts: { now?: Date } = {},
+): Promise<ScheduleChainBootstrapVerification> {
+  const now = opts.now ?? new Date();
+
+  const activeRoutines = await db
+    .select({ id: routines.id, latestRevisionId: routines.latestRevisionId })
+    .from(routines)
+    .where(eq(routines.status, "active"));
+
+  const indeterminateRoutines: IndeterminateScheduleRoutine[] = [];
+  const declared: ScheduleChainRef[] = [];
+
+  const revisionIds = [...new Set(activeRoutines.map((r) => r.latestRevisionId).filter((id): id is string => !!id))];
+  const revisionRows = revisionIds.length
+    ? await db
+      .select({ id: routineRevisions.id, snapshot: routineRevisions.snapshot })
+      .from(routineRevisions)
+      .where(inArray(routineRevisions.id, revisionIds))
+    : [];
+  const snapshotByRevisionId = new Map(revisionRows.map((r) => [r.id, r.snapshot]));
+
+  for (const routine of activeRoutines) {
+    if (!routine.latestRevisionId) {
+      indeterminateRoutines.push({
+        routineId: routine.id,
+        reason: "active routine has no latestRevisionId — cannot determine its declared schedule chains",
+      });
+      continue;
+    }
+    const snapshot = snapshotByRevisionId.get(routine.latestRevisionId);
+    if (!snapshot) {
+      indeterminateRoutines.push({
+        routineId: routine.id,
+        reason: `latest revision snapshot ${routine.latestRevisionId} could not be loaded`,
+      });
+      continue;
+    }
+    for (const trigger of snapshot.triggers ?? []) {
+      if (trigger.kind === "schedule" && trigger.enabled) {
+        declared.push({ routineId: routine.id, triggerId: trigger.id });
+      }
+    }
+  }
+
+  const triggerIds = declared.map((d) => d.triggerId);
+  const liveRows = triggerIds.length
+    ? await db.select().from(routineTriggers).where(inArray(routineTriggers.id, triggerIds))
+    : [];
+  const liveById = new Map(liveRows.map((r) => [r.id, r]));
+
+  const verifiedChains: ScheduleChainRef[] = [];
+  const orphanedChains: OrphanedScheduleChain[] = [];
+  const missingChains: ScheduleChainRef[] = [];
+
+  for (const chain of declared) {
+    const live = liveById.get(chain.triggerId);
+    if (!live) {
+      missingChains.push(chain);
+      continue;
+    }
+    if (!live.enabled) {
+      orphanedChains.push({ ...chain, reason: "live trigger row is disabled" });
+      continue;
+    }
+    if (!live.cronExpression || !live.timezone) {
+      orphanedChains.push({ ...chain, reason: "live trigger row has no cron expression or timezone" });
+      continue;
+    }
+    if (!live.nextRunAt) {
+      orphanedChains.push({ ...chain, reason: "live trigger row has no nextRunAt — it will never be picked up by tickScheduledTriggers" });
+      continue;
+    }
+    verifiedChains.push(chain);
+  }
+
+  return {
+    verifiedAt: now,
+    totalDeclaredChains: declared.length,
+    verifiedChains,
+    orphanedChains,
+    missingChains,
+    indeterminateRoutines,
+  };
+}
+
+/**
+ * Renders a verification result as a plain-language summary and a healthy
+ * flag. `healthy` is true only when every declared chain was positively
+ * confirmed present with usable job data — a chain that could not be
+ * determined is never reported as healthy (DUR-98's "verified present" vs.
+ * "could not determine" rule).
+ */
+export function formatScheduleChainBootstrapReport(result: ScheduleChainBootstrapVerification): {
+  healthy: boolean;
+  summary: string;
+} {
+  const { totalDeclaredChains, verifiedChains, orphanedChains, missingChains, indeterminateRoutines } = result;
+  const healthy =
+    verifiedChains.length === totalDeclaredChains
+    && orphanedChains.length === 0
+    && missingChains.length === 0
+    && indeterminateRoutines.length === 0;
+
+  const parts = [`${verifiedChains.length}/${totalDeclaredChains} scheduled chains verified healthy`];
+  if (orphanedChains.length > 0) {
+    parts.push(`${orphanedChains.length} orphaned (registry entry present, no matching schedule data)`);
+  }
+  if (missingChains.length > 0) {
+    parts.push(`${missingChains.length} missing (no registry entry)`);
+  }
+  if (indeterminateRoutines.length > 0) {
+    parts.push(`${indeterminateRoutines.length} could not be determined`);
+  }
+
+  return { healthy, summary: parts.join("; ") };
+}
+
+/**
+ * Runs the verification and logs it — never as a bare "ran" / "already
+ * scheduled" claim. Logs `info` only when every declared chain was verified
+ * healthy; otherwise logs `error` with the specific orphaned/missing/
+ * indeterminate chains so the operator does not have to read the database by
+ * hand to find them (DUR-98). Call this from server startup, alongside the
+ * other boot-time reconciliation steps.
+ */
+export async function logScheduleChainBootstrapVerification(
+  db: Db,
+  opts: { now?: Date; log?: typeof logger } = {},
+): Promise<ScheduleChainBootstrapVerification> {
+  const log = opts.log ?? logger;
+  const result = await verifyScheduleChainBootstrap(db, { now: opts.now });
+  const report = formatScheduleChainBootstrapReport(result);
+
+  if (report.healthy) {
+    log.info(
+      { verifiedCount: result.verifiedChains.length, total: result.totalDeclaredChains },
+      `startup schedule chain bootstrap verification: ${report.summary}`,
+    );
+  } else {
+    log.error(
+      {
+        total: result.totalDeclaredChains,
+        verifiedCount: result.verifiedChains.length,
+        orphanedChains: result.orphanedChains,
+        missingChains: result.missingChains,
+        indeterminateRoutines: result.indeterminateRoutines,
+      },
+      `startup schedule chain bootstrap verification found unhealthy chains: ${report.summary}`,
+    );
+  }
+
+  return result;
+}
