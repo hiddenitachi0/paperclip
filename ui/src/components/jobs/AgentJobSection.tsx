@@ -98,14 +98,21 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
   if (isLoading) {
     return <p className="text-xs text-muted-foreground">Loading job…</p>;
   }
-  if (error || !roleState) {
+  if (error || !roleState || !roleState.tools || !roleState.rights) {
     return <p className="text-xs text-muted-foreground">Could not load this agent's job. Try again once the jobs feature is live.</p>;
   }
 
-  const currentToolNames = new Set([...roleState.tools.fromJob, ...roleState.tools.added]);
+  const toolsFromJob = roleState.tools.fromJob ?? [];
+  const toolsAdded = roleState.tools.added ?? [];
+  const toolsRemoved = roleState.tools.removed ?? [];
+  const rightsFromJob = roleState.rights.fromJob ?? [];
+  const rightsAdded = roleState.rights.added ?? [];
+  const rightsRemoved = roleState.rights.removed ?? [];
+
+  const currentToolNames = new Set([...toolsFromJob, ...toolsAdded]);
   const currentRightKeys = new Set([
-    ...roleState.rights.fromJob.map((g) => g.permissionKey),
-    ...roleState.rights.added.map((g) => g.permissionKey),
+    ...rightsFromJob.map((g) => g.permissionKey),
+    ...rightsAdded.map((g) => g.permissionKey),
   ]);
 
   return (
@@ -157,10 +164,10 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
             Tools
           </div>
           <ul className="mt-1.5 space-y-1">
-            {roleState.tools.fromJob.map((name) => (
+            {toolsFromJob.map((name) => (
               <OverrideRow key={`from-job-${name}`} label={name} tag="From job" />
             ))}
-            {roleState.tools.added.map((name) => (
+            {toolsAdded.map((name) => (
               <OverrideRow
                 key={`added-${name}`}
                 label={name}
@@ -169,10 +176,10 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
                 removing={removeTool.isPending}
               />
             ))}
-            {roleState.tools.removed.map((name) => (
+            {toolsRemoved.map((name) => (
               <OverrideRow key={`removed-${name}`} label={name} tag="Removed" muted />
             ))}
-            {currentToolNames.size === 0 && roleState.tools.removed.length === 0 ? (
+            {currentToolNames.size === 0 && toolsRemoved.length === 0 ? (
               <p className="text-xs text-muted-foreground">No tools.</p>
             ) : null}
           </ul>
@@ -200,10 +207,10 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
             Rights
           </div>
           <ul className="mt-1.5 space-y-1">
-            {roleState.rights.fromJob.map((grant) => (
+            {rightsFromJob.map((grant) => (
               <OverrideRow key={`from-job-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="From job" />
             ))}
-            {roleState.rights.added.map((grant) => (
+            {rightsAdded.map((grant) => (
               <OverrideRow
                 key={`added-${grant.permissionKey}`}
                 label={permissionLabel(grant.permissionKey)}
@@ -212,10 +219,10 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
                 removing={removeRight.isPending}
               />
             ))}
-            {roleState.rights.removed.map((grant) => (
+            {rightsRemoved.map((grant) => (
               <OverrideRow key={`removed-${grant.permissionKey}`} label={permissionLabel(grant.permissionKey)} tag="Removed" muted />
             ))}
-            {currentRightKeys.size === 0 && roleState.rights.removed.length === 0 ? (
+            {currentRightKeys.size === 0 && rightsRemoved.length === 0 ? (
               <p className="text-xs text-muted-foreground">No rights.</p>
             ) : null}
           </ul>
