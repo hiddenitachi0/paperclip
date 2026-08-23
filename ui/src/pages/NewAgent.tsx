@@ -3,10 +3,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useToastActions } from "../context/ToastContext";
 import { agentsApi } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
+import { jobsApi } from "../api/jobs";
 import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import {
@@ -35,6 +37,7 @@ import { getUIAdapter, listUIAdapters } from "../adapters";
 import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
 import { isValidAdapterType } from "../adapters/metadata";
 import { ReportsToPicker } from "../components/ReportsToPicker";
+import { JobPicker } from "../components/jobs/JobPicker";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
@@ -64,6 +67,7 @@ function createValuesForAdapterType(
 export function NewAgent() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -79,6 +83,7 @@ export function NewAgent() {
     buildPermissionsForTrustPreset(null, "standard"),
   );
   const [selectedSkillKeys, setSelectedSkillKeys] = useState<string[]>([]);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [roleOpen, setRoleOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [testAgentAction, setTestAgentAction] = useState<(() => void) | null>(null);
@@ -102,6 +107,13 @@ export function NewAgent() {
     queryFn: () => companySkillsApi.list(selectedCompanyId!),
     enabled: Boolean(selectedCompanyId),
   });
+
+  const { data: jobs } = useQuery({
+    queryKey: ["jobs", selectedCompanyId ?? "__none__"],
+    queryFn: () => jobsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const selectedJob = (jobs ?? []).find((job) => job.id === jobId) ?? null;
 
   const lowTrustSelected = getTrustPreset(permissions) === "low_trust_review";
 
@@ -149,9 +161,20 @@ export function NewAgent() {
   const createAgent = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
       agentsApi.hire(selectedCompanyId!, data),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+      if (jobId) {
+        try {
+          await jobsApi.assignToAgent(result.agent.id, jobId);
+        } catch (error) {
+          pushToast({
+            title: "Agent created, but the job could not be assigned",
+            body: error instanceof Error ? error.message : "Try assigning it from the agent's page.",
+            tone: "error",
+          });
+        }
+      }
       navigate(agentUrl(result.agent));
     },
     onError: (error) => {
@@ -313,7 +336,22 @@ export function NewAgent() {
             onChange={setReportsTo}
             disabled={isFirstAgent}
           />
+
+          <JobPicker
+            jobs={jobs ?? []}
+            value={jobId}
+            onChange={setJobId}
+            disabled={isFirstAgent}
+            placeholder="No job"
+          />
         </div>
+
+        {selectedJob ? (
+          <div className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
+            Assigning "{selectedJob.name}" copies its instructions, tools, and rights onto this agent once when it's
+            created. Changing the job later won't change this agent.
+          </div>
+        ) : null}
 
         <div className="border-t border-border px-4 py-4">
           <TrustPresetSection

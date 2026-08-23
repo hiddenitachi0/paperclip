@@ -1,12 +1,12 @@
 export {};
 
-import type { AgentApiKeyScope } from "@paperclipai/shared";
+import type { AgentApiKeyScope, DelegateTokenScope } from "@paperclipai/shared";
 
 declare global {
   namespace Express {
     interface Request {
       actor: {
-        type: "board" | "agent" | "none";
+        type: "board" | "agent" | "board_delegate" | "none";
         userId?: string;
         userName?: string | null;
         userEmail?: string | null;
@@ -22,7 +22,22 @@ declare global {
         keyId?: string;
         keyScope?: AgentApiKeyScope;
         runId?: string;
-        source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant" | "none";
+        source?:
+          | "local_implicit"
+          | "session"
+          | "board_key"
+          | "agent_key"
+          | "agent_jwt"
+          | "cloud_tenant"
+          | "board_delegate_key"
+          | "none";
+        // Present only when type === "board_delegate": the delegate token's
+        // own identity, distinct from userId (the operator whose authority
+        // it acts under). Never grants board access on its own -- routes must
+        // opt in via assertBoardOrDelegate with a specific required scope.
+        delegateTokenId?: string;
+        delegateName?: string;
+        delegateScopes?: DelegateTokenScope[];
       };
     }
   }

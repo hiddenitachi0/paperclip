@@ -221,6 +221,15 @@ export {
 } from "./trust-policy.js";
 
 export {
+  DELEGATE_TOKEN_SCOPES,
+  isDelegateTokenScope,
+  normalizeDelegateTokenScopes,
+  createDelegateTokenSchema,
+  type DelegateTokenScope,
+  type CreateDelegateToken,
+} from "./board-delegate.js";
+
+export {
   createAgentSchema,
   createAgentHireSchema,
   updateAgentSchema,

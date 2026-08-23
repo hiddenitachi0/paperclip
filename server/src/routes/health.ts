@@ -11,7 +11,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
 
 function shouldExposeFullHealthDetails(
-  actorType: "none" | "board" | "agent" | null | undefined,
+  actorType: "none" | "board" | "agent" | "board_delegate" | null | undefined,
   deploymentMode: DeploymentMode,
 ) {
   if (deploymentMode !== "authenticated") return true;

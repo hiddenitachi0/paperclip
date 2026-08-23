@@ -16,7 +16,10 @@ import { forbidden, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 
 type BoardActor = {
-  type: "board" | "agent" | "none";
+  // assertBoardSelfMembershipAccess below requires type === "board" exactly,
+  // so board_delegate (never granted this action) is rejected the same way
+  // "agent"/"none" already are -- this widening is for type soundness only.
+  type: "board" | "agent" | "board_delegate" | "none";
   userId?: string;
   companyIds?: string[];
   memberships?: Array<{

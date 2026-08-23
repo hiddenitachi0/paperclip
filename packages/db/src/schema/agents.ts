@@ -34,6 +34,13 @@ export const agents = pgTable(
     pauseReason: text("pause_reason"),
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     errorReason: text("error_reason"),
+    // DUR-128: when this agent last transitioned into "error" (cleared
+    // whenever it leaves error, via resume/clear-error/pause/terminate).
+    // Distinct from updatedAt, which other unrelated writes also bump.
+    // errorAlertedAt records when the stall sweep last raised an operator
+    // alert for the current error episode, so it fires once, not every tick.
+    errorAt: timestamp("error_at", { withTimezone: true }),
+    errorAlertedAt: timestamp("error_alerted_at", { withTimezone: true }),
     permissions: jsonb("permissions").$type<Record<string, unknown>>().notNull().default({}),
     // Plain uuid column, no `.references()` — a typed FK reference here would
     // create a schema import cycle since assets.ts already imports agents.ts.

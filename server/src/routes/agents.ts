@@ -63,7 +63,14 @@ import {
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
-import { assertBoard, assertCanUpdateAgent, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import {
+  assertBoard,
+  assertBoardOrDelegate,
+  assertCanUpdateAgent,
+  assertCompanyAccess,
+  assertInstanceAdmin,
+  getActorInfo,
+} from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectAgentAdapterWorkspaceCommandPaths,
@@ -774,6 +781,24 @@ export function agentRoutes(
     return null;
   }
 
+  // DUR-128: when a recovery action was performed by a delegate token, name
+  // both the delegate and the operator authority it acted under in the
+  // activity log details -- actorId above stays the operator's userId (the
+  // authority), this is the "performed by the delegate" half of the record.
+  function delegateActivityDetails(req: Request): Record<string, unknown> | undefined {
+    if (req.actor.type !== "board_delegate") return undefined;
+    return {
+      performedBy: "delegate",
+      // Named delegateId, not delegateTokenId: logActivity's sanitizeRecord
+      // redacts any details key containing "token" as a secret-shaped field.
+      // This is an opaque row id, not the bearer credential -- redacting it
+      // would defeat the whole point of naming which delegate acted.
+      delegateId: req.actor.delegateTokenId,
+      delegateName: req.actor.delegateName,
+      actingUnderUserId: req.actor.userId,
+    };
+  }
+
   async function getAccessibleAgent(req: Request, res: Response, id: string) {
     const agent = await svc.getById(id);
     if (!agent) {
@@ -783,6 +808,26 @@ export function agentRoutes(
     assertCompanyAccess(req, agent.companyId);
     if (req.actor.type === "board") {
       await assertBoardCanManageAgentsForCompany(req, agent.companyId);
+    } else if (req.actor.type === "board_delegate") {
+      // Same "agents:create" permission decision a genuine board session for
+      // this same user would get -- evaluated for the operator's own
+      // identity, never with isInstanceAdmin escalation, so a delegate token
+      // can never reach more than its granting operator's plain membership
+      // would allow. assertBoardOrDelegate (called by the route handler)
+      // additionally restricts *which* actions the token may reach at all.
+      const decision = await access.decide({
+        actor: {
+          type: "board",
+          userId: req.actor.userId,
+          source: "session",
+          isInstanceAdmin: false,
+          companyIds: req.actor.companyIds,
+          memberships: req.actor.memberships,
+        },
+        action: "agents:create",
+        resource: { type: "company", companyId: agent.companyId },
+      });
+      if (!decision.allowed) throw forbidden(decision.explanation);
     }
     return agent;
   }
@@ -3248,7 +3293,7 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/resume", async (req, res) => {
-    assertBoard(req);
+    assertBoardOrDelegate(req, "agent.resume");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
     if (!existing) {
@@ -3273,13 +3318,14 @@ export function agentRoutes(
       action: "agent.resumed",
       entityType: "agent",
       entityId: agent.id,
+      details: delegateActivityDetails(req),
     });
 
     res.json(agent);
   });
 
   router.post("/agents/:id/clear-error", async (req, res) => {
-    assertBoard(req);
+    assertBoardOrDelegate(req, "agent.clear_error");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
     if (!existing) {
@@ -3305,6 +3351,7 @@ export function agentRoutes(
       action: "agent.error_cleared",
       entityType: "agent",
       entityId: agent.id,
+      details: delegateActivityDetails(req),
     });
 
     res.json(agent);

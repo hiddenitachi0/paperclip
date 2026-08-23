@@ -1332,6 +1332,7 @@ export const PLUGIN_EVENT_TYPES = [
   "agent.updated",
   "agent.status_changed",
   "agent.error_cleared",
+  "agent.error_stalled",
   "agent.run.started",
   "agent.run.finished",
   "agent.run.failed",
