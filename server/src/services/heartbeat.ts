@@ -2704,12 +2704,21 @@ export function shouldDeferFollowupWakeForSameIssue(input: {
   isSameExecutionAgent: boolean;
   wakeCommentId: string | null | undefined;
   forceFreshSession: boolean;
+  requiresDistinctRunBoundary?: boolean;
 }) {
   // A comment follow-up or explicit fresh-session wake needs a new run boundary.
   if (!input.isSameExecutionAgent) return false;
   if (input.activeRunStatus !== "running") return false;
   if (input.wakeCommentId) return true;
   if (input.forceFreshSession) return true;
+  // DUR-125: a bounded gate pass (self-review, goal-condition judge, ...) must land on a
+  // genuinely new run so isSelfReviewPassRunId/isGoalConditionJudgeRunId can exempt it from
+  // the gate that scheduled it. Coalescing it into the still-running run that triggered the
+  // gate instead merges the exemption marker onto that run's own row -- a row whose gate
+  // check for THIS wake already evaluated (and correctly found not-exempt) before the merge
+  // landed, and whose retry may never come if that run ends without attempting the PATCH
+  // again. See DUR-125.
+  if (input.requiresDistinctRunBoundary) return true;
   return false;
 }
 
@@ -13902,6 +13911,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             isSameExecutionAgent,
             wakeCommentId,
             forceFreshSession: enrichedContextSnapshot.forceFreshSession === true,
+            requiresDistinctRunBoundary: enrichedContextSnapshot.requiresDistinctRunBoundary === true,
           });
           const shouldQueueFollowupForRunningWake =
             shouldQueueFollowupForRunningIssueWake({ contextSnapshot: enrichedContextSnapshot, wakeCommentId }) &&

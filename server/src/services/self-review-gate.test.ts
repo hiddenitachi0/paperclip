@@ -438,6 +438,11 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     // Plain-language, non-technical instruction (matches buildSelfReviewPassInstruction).
     expect(comments[0]?.body).toContain("Review your diff/changes against the task description");
     expect(comments[0]?.body).not.toContain("self_review_pass");
+
+    // DUR-125: the scheduled wake must ask heartbeat.ts's coalescing logic for a genuinely
+    // new run rather than letting it merge onto the source run's own (still-running, already
+    // gated) row -- see shouldDeferFollowupWakeForSameIssue's requiresDistinctRunBoundary.
+    expect(calls[0]?.opts.contextSnapshot?.requiresDistinctRunBoundary).toBe(true);
   });
 
   it("does not double-post the comment when a self-review wake already exists for this run chain", async () => {

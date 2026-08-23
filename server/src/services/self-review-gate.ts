@@ -489,6 +489,14 @@ export async function evaluateSelfReviewDoneGate(input: {
         wakeReason: SELF_REVIEW_PASS_REASON,
         [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
         resumeFromRunId: sourceRunId,
+        // DUR-125: the run this scheduling call spawns must be exempt from this same gate
+        // (see isSelfReviewPassRunId above). That only holds if it lands as a genuinely new
+        // heartbeat_runs row -- if the source run is still "running" when this fires, the
+        // generic same-agent/same-issue coalescing in heartbeat.ts's enqueueWakeup would
+        // otherwise merge this contextSnapshot onto the source run's own (already-gated) row
+        // instead of producing a new one. This flag routes it through the defer-and-promote
+        // path so the exemption always lands on a fresh run.
+        requiresDistinctRunBoundary: true,
       },
       idempotencyKey,
       requestedByActorType: "system",
