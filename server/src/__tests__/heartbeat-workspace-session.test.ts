@@ -15,6 +15,7 @@ import {
   buildEffectiveRunSessionConfigMetadata,
   buildEffectiveRunWorkspaceConfigMetadata,
   buildWorkspaceConfigFreshnessOperation,
+  buildWorkspaceLockAdoptionWarning,
   deriveTaskKeyWithHeartbeatFallback,
   extractWakeCommentIds,
   formatRuntimeWorkspaceWarningLog,
@@ -1479,6 +1480,37 @@ describe("shouldDeferFollowupWakeForSameIssue", () => {
         forceFreshSession: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("buildWorkspaceLockAdoptionWarning", () => {
+  it("returns null when there was no prior execution run", () => {
+    expect(
+      buildWorkspaceLockAdoptionWarning({
+        actorRunId: "run-b",
+        previousExecutionRunId: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when the run already owned the lock", () => {
+    expect(
+      buildWorkspaceLockAdoptionWarning({
+        actorRunId: "run-a",
+        previousExecutionRunId: "run-a",
+      }),
+    ).toBeNull();
+  });
+
+  it("warns when this run just took over the lock from a different run", () => {
+    const warning = buildWorkspaceLockAdoptionWarning({
+      actorRunId: "run-b",
+      previousExecutionRunId: "run-a",
+    });
+    expect(warning).toContain("run-b");
+    expect(warning).toContain("run-a");
+    expect(warning).toContain("git reset --hard");
+    expect(warning).toContain("ListAgents");
   });
 });
 
