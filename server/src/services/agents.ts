@@ -535,6 +535,8 @@ export function agentService(db: Db) {
           pauseReason: reason,
           pausedAt: new Date(),
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id))
@@ -558,6 +560,8 @@ export function agentService(db: Db) {
           pauseReason: null,
           pausedAt: null,
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id))
@@ -584,6 +588,8 @@ export function agentService(db: Db) {
           pauseReason: null,
           pausedAt: null,
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(and(eq(agents.id, id), eq(agents.status, "error")))
@@ -607,6 +613,8 @@ export function agentService(db: Db) {
           pauseReason: null,
           pausedAt: null,
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id));

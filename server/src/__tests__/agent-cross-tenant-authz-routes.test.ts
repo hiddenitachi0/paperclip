@@ -150,6 +150,15 @@ vi.mock("../routes/authz.js", async () => {
     throw forbidden("Instance admin access required");
   }
 
+  function assertBoardOrDelegate(req: Express.Request, requiredScope: string) {
+    if (req.actor.type === "board") return;
+    if (req.actor.type === "board_delegate") {
+      if ((req.actor as any).delegateScopes?.includes(requiredScope)) return;
+      throw forbidden(`Delegate token is not scoped for ${requiredScope}`);
+    }
+    throw forbidden("Board or delegate access required");
+  }
+
   function getActorInfo(req: Express.Request) {
     assertAuthenticated(req);
     if (req.actor.type === "agent") {
@@ -171,6 +180,7 @@ vi.mock("../routes/authz.js", async () => {
   return {
     assertAuthenticated,
     assertBoard,
+    assertBoardOrDelegate,
     assertCompanyAccess,
     assertInstanceAdmin,
     getActorInfo,

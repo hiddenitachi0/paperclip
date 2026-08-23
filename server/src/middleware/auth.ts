@@ -4,7 +4,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentApiKeys, agents, authUsers, companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
-import { normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
+import { normalizeAgentApiKeyScope, normalizeDelegateTokenScopes, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
@@ -123,6 +123,35 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           keyId: boardKey.id,
           runId: runIdHeader || undefined,
           source: "board_key",
+        };
+        next();
+        return;
+      }
+    }
+
+    // DUR-128: a delegate token authenticates as the delegate acting under
+    // the granting operator's authority -- never as the operator ("board")
+    // itself. It only ever satisfies assertBoardOrDelegate on the specific
+    // scopes it was minted with; assertBoard (merge/deploy approval, and
+    // every other board-only route) keeps rejecting it by construction.
+    const delegateToken = await boardAuth.findDelegateTokenByToken(token);
+    if (delegateToken) {
+      const access = await boardAuth.resolveBoardAccess(delegateToken.userId);
+      if (access.user) {
+        await boardAuth.touchDelegateToken(delegateToken.id);
+        req.actor = {
+          type: "board_delegate",
+          userId: delegateToken.userId,
+          userName: access.user?.name ?? null,
+          userEmail: access.user?.email ?? null,
+          companyIds: access.companyIds,
+          memberships: access.memberships,
+          isInstanceAdmin: false,
+          delegateTokenId: delegateToken.id,
+          delegateName: delegateToken.name,
+          delegateScopes: normalizeDelegateTokenScopes(delegateToken.scopes),
+          runId: runIdHeader || undefined,
+          source: "board_delegate_key",
         };
         next();
         return;

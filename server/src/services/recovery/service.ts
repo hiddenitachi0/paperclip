@@ -156,6 +156,12 @@ function readWorkspaceValidationFingerprint(latestRun: LatestIssueRun): string |
 type WatchdogDecisionActor =
   | { type: "board"; userId?: string | null; runId?: string | null }
   | { type: "agent"; agentId?: string | null; runId?: string | null }
+  // recordWatchdogDecision only grants boardActor for type === "board" and
+  // assignedRecoveryOwner for type === "agent" -- board_delegate matches
+  // neither, so it hits the existing "Only the board or the assigned
+  // recovery owner" forbidden the same way "none" already does. Widened here
+  // for type soundness only, not to grant delegates this action.
+  | { type: "board_delegate"; userId?: string | null; runId?: string | null }
   | { type: "none" };
 
 export type RunOutputSilenceSummary = {
