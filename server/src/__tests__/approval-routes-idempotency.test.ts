@@ -96,11 +96,22 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
     agentId,
     contextSnapshot,
   }];
+  // DUR-136: the deploy-approval route now looks up payload.projectId via
+  // `select({ id: projects.id, companyId: projects.companyId })` before
+  // filing/resubmitting -- match that exact projection here so the
+  // pre-existing well-formed-deploy-payload tests still resolve to a real
+  // project in company-1 instead of failing earlier on a fake id.
+  const projectExistenceKeys = ["companyId", "id"].sort().join(",");
   return {
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => ({
         where: vi.fn(() => {
-          const rows = Object.keys(selection).includes("contextSnapshot") ? runRows : [];
+          const selectionKeys = Object.keys(selection).sort().join(",");
+          const rows = Object.keys(selection).includes("contextSnapshot")
+            ? runRows
+            : selectionKeys === projectExistenceKeys
+              ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "company-1" }]
+              : [];
           const resolvable = {
             then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
             limit: vi.fn(() => resolvable),
