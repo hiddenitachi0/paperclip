@@ -524,6 +524,7 @@ interface AdapterPickerItem {
   slug: string;
   name: string;
   adapterType: string;
+  personality: string | null;
 }
 
 function AdapterPickerList({
@@ -600,6 +601,14 @@ function AdapterPickerList({
                 </div>
                 {isExpanded && (
                   <div className="border-t border-border bg-accent/10 px-4 py-3 space-y-3">
+                    {agent.personality && (
+                      <div>
+                        <div className="text-xs font-medium text-muted-foreground mb-1">How this agent talks</div>
+                        <div className="text-xs text-foreground/70 whitespace-pre-wrap rounded-md border border-border bg-background px-2 py-1.5">
+                          {agent.personality}
+                        </div>
+                      </div>
+                    )}
                     <AgentConfigForm
                       mode="create"
                       values={vals}
@@ -1054,6 +1063,7 @@ export function CompanyImport() {
       slug: a.slug,
       name: a.name,
       adapterType: a.adapterType,
+      personality: a.personality,
     }));
   }, [importPreview]);
 

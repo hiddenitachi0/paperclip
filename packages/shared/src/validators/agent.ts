@@ -129,6 +129,13 @@ export const createAgentSchema = z.object({
   role: z.enum(AGENT_ROLES).optional().default("general"),
   title: z.string().optional().nullable(),
   icon: z.enum(AGENT_ICON_NAMES).optional().nullable(),
+  personality: z
+    .string()
+    .trim()
+    .max(1200, "Personality is limited to 1200 characters — it describes tone of voice, not what the agent should do.")
+    .transform((v) => (v && v.trim() ? v.trim() : null))
+    .optional()
+    .nullable(),
   reportsTo: z.string().uuid().optional().nullable(),
   capabilities: z.string().optional().nullable(),
   desiredSkills: z.array(agentDesiredSkillSelectionSchema).optional(),

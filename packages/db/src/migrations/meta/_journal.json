@@ -967,6 +967,13 @@
       "when": 1787080000000,
       "tag": "0137_board_delegate_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1787090000000,
+      "tag": "0138_agent_personality",
+      "breakpoints": true
     }
   ]
 }

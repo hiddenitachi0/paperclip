@@ -93,6 +93,7 @@ type StagedGrokAssets = {
   stagedSkillsCount: number;
   stagedInstructionsPath: string | null;
   rulesFilePath: string | null;
+  personaChars: number;
 };
 
 async function pathExists(candidate: string): Promise<boolean> {
@@ -103,6 +104,7 @@ async function stageGrokProjectAssets(input: {
   cwd: string;
   companyId: string;
   instructionsFilePath: string;
+  personaText: string | null;
   skillEntries: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames: string[];
   onLog: AdapterExecutionContext["onLog"];
@@ -118,6 +120,8 @@ async function stageGrokProjectAssets(input: {
   let stagedInstructionsPath: string | null = null;
   let rulesFilePath: string | null = null;
   let stagedSkillsCount = 0;
+  let personaChars = 0;
+  const personaText = input.personaText && input.personaText.trim().length > 0 ? input.personaText : null;
 
   const instructionsTarget = path.join(input.cwd, "Agents.md");
   if (input.instructionsFilePath) {
@@ -126,20 +130,24 @@ async function stageGrokProjectAssets(input: {
       const combinedInstructions = await resolveCombinedAgentInstructionsContent({
         companyId: input.companyId,
         agentInstructionsContent: rawInstructions,
+        personaText,
       });
       await fs.writeFile(instructionsTarget, combinedInstructions, "utf8");
       ensureCleanupFile(instructionsTarget);
       stagedInstructionsPath = instructionsTarget;
+      if (personaText) personaChars = personaText.length;
     } else if (path.resolve(instructionsTarget) !== path.resolve(input.instructionsFilePath)) {
       const rawInstructions = await fs.readFile(input.instructionsFilePath, "utf8");
       const combinedInstructions = await resolveCombinedAgentInstructionsContent({
         companyId: input.companyId,
         agentInstructionsContent: rawInstructions,
+        personaText,
       });
       const combinedRulesPath = path.join(input.cwd, ".paperclip-combined-instructions.md");
       await fs.writeFile(combinedRulesPath, combinedInstructions, "utf8");
       ensureCleanupFile(combinedRulesPath);
       rulesFilePath = combinedRulesPath;
+      if (personaText) personaChars = personaText.length;
       await input.onLog(
         "stdout",
         `[paperclip] Grok workspace already contains ${instructionsTarget}; using --rules @${combinedRulesPath} instead of overwriting it.\n`,
@@ -152,10 +160,25 @@ async function stageGrokProjectAssets(input: {
       const combinedInstructions = await resolveCombinedAgentInstructionsContent({
         companyId: input.companyId,
         agentInstructionsContent: rawInstructions,
+        personaText,
       });
       await fs.writeFile(instructionsTarget, combinedInstructions, "utf8");
       ensureCleanupFile(instructionsTarget);
       stagedInstructionsPath = instructionsTarget;
+      if (personaText) personaChars = personaText.length;
+    } else if (!await pathExists(instructionsTarget) && personaText) {
+      // DUR-61: no instructions bundle configured and no repo AGENTS.md to
+      // borrow from, but a persona was set — apply the voice on its own
+      // instead of leaving the box saved-but-silent for this agent.
+      const combinedInstructions = await resolveCombinedAgentInstructionsContent({
+        companyId: input.companyId,
+        agentInstructionsContent: "",
+        personaText,
+      });
+      await fs.writeFile(instructionsTarget, combinedInstructions, "utf8");
+      ensureCleanupFile(instructionsTarget);
+      stagedInstructionsPath = instructionsTarget;
+      personaChars = personaText.length;
     }
   }
 
@@ -192,6 +215,7 @@ async function stageGrokProjectAssets(input: {
     stagedSkillsCount,
     stagedInstructionsPath,
     rulesFilePath,
+    personaChars,
     cleanup: async () => {
       for (const entry of [...cleanup].reverse()) {
         if (entry.kind === "file") {
@@ -250,10 +274,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const grokSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredGrokSkillNames = resolvePaperclipDesiredSkillNames(config, grokSkillEntries);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const personaText = typeof agent.personality === "string" ? agent.personality : null;
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
     companyId: agent.companyId,
     instructionsFilePath,
+    personaText,
     skillEntries: grokSkillEntries,
     desiredSkillNames: desiredGrokSkillNames,
     onLog,
@@ -419,6 +445,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (stagedAssets.stagedSkillsCount > 0) {
         notes.push(`Staged ${stagedAssets.stagedSkillsCount} Paperclip skill(s) into .claude/skills for native Grok discovery.`);
       }
+      if (stagedAssets.personaChars > 0) {
+        notes.push(`Applied agent personality (${stagedAssets.personaChars} characters, voice only).`);
+      }
       return notes;
     })();
 
@@ -450,6 +479,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionHandoffChars: sessionHandoffNote.length,
       runtimeNoteChars: paperclipEnvNote.length + apiAccessNote.length,
       heartbeatPromptChars: renderedPrompt.length,
+      personaChars: stagedAssets.personaChars,
     };
 
     const buildArgs = (resumeSessionId: string | null) => {
