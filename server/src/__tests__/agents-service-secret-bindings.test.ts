@@ -226,6 +226,153 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
     });
   });
 
+  // DUR-132 item 3: adapterConfig.mcpServers[*].env/.headers secret_refs must
+  // produce a binding row keyed by `mcpServers[<name>].env.<KEY>` / `.headers.<KEY>`,
+  // exactly like top-level env.<KEY> does.
+  it("creates agent secret bindings for mcpServers env/headers secret_ref values", async () => {
+    const companyId = await seedCompany();
+    const secrets = secretService(db);
+    const envSecret = await secrets.create(companyId, {
+      name: `mcp-env-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "mcp-env-value",
+    });
+    const headerSecret = await secrets.create(companyId, {
+      name: `mcp-header-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "mcp-header-value",
+    });
+
+    const created = await agentService(db).create(companyId, {
+      name: "MCP Binder",
+      role: "engineer",
+      adapterType: "claude_local",
+      adapterConfig: {
+        mcpServers: [
+          { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: envSecret.id, version: "latest" } } },
+          {
+            name: "higgsfield",
+            url: "https://mcp.higgsfield.ai",
+            headers: { Authorization: { type: "secret_ref", secretId: headerSecret.id, version: "latest" } },
+          },
+        ],
+      },
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+
+    const bindings = await db
+      .select()
+      .from(companySecretBindings)
+      .where(and(
+        eq(companySecretBindings.companyId, companyId),
+        eq(companySecretBindings.targetType, "agent"),
+        eq(companySecretBindings.targetId, created.id),
+      ));
+
+    expect(bindings).toHaveLength(2);
+    expect(bindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ secretId: envSecret.id, configPath: "mcpServers[fs].env.TOKEN" }),
+      expect.objectContaining({ secretId: headerSecret.id, configPath: "mcpServers[higgsfield].headers.Authorization" }),
+    ]));
+  });
+
+  // DUR-132 item 5: an agent actor may only bind a secret_ref to its own
+  // agent record, never to a peer's -- even if it holds agents:create/
+  // agent_config:update and is the one issuing the update.
+  it("rejects an agent actor binding a secret_ref to a peer agent's mcpServers, writing no binding row", async () => {
+    const companyId = await seedCompany();
+    const secrets = secretService(db);
+    const secret = await secrets.create(companyId, {
+      name: `peer-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "peer-value",
+    });
+
+    const actingAgent = await agentService(db).create(companyId, {
+      name: "Acting Agent",
+      role: "engineer",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+    const peerAgent = await agentService(db).create(companyId, {
+      name: "Peer Agent",
+      role: "engineer",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+
+    await expect(
+      agentService(db).update(peerAgent.id, {
+        adapterConfig: {
+          mcpServers: [
+            { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
+          ],
+        },
+      }, {
+        actor: { actorType: "agent", agentId: actingAgent.id },
+      }),
+    ).rejects.toThrow();
+
+    const bindings = await db
+      .select()
+      .from(companySecretBindings)
+      .where(and(
+        eq(companySecretBindings.companyId, companyId),
+        eq(companySecretBindings.targetType, "agent"),
+        eq(companySecretBindings.targetId, peerAgent.id),
+      ));
+    expect(bindings).toHaveLength(0);
+  });
+
+  it("allows an agent actor binding a secret_ref to its own mcpServers", async () => {
+    const companyId = await seedCompany();
+    const secrets = secretService(db);
+    const secret = await secrets.create(companyId, {
+      name: `self-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "self-value",
+    });
+
+    const actingAgent = await agentService(db).create(companyId, {
+      name: "Self Binder",
+      role: "engineer",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+
+    await agentService(db).update(actingAgent.id, {
+      adapterConfig: {
+        mcpServers: [
+          { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
+        ],
+      },
+    }, {
+      actor: { actorType: "agent", agentId: actingAgent.id },
+    });
+
+    const bindings = await db
+      .select()
+      .from(companySecretBindings)
+      .where(and(
+        eq(companySecretBindings.companyId, companyId),
+        eq(companySecretBindings.targetType, "agent"),
+        eq(companySecretBindings.targetId, actingAgent.id),
+      ));
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]).toMatchObject({ secretId: secret.id, configPath: "mcpServers[fs].env.TOKEN" });
+  });
+
   it("backfills missing secret bindings when a legacy pending agent is approved", async () => {
     const companyId = await seedCompany();
     const secrets = secretService(db);

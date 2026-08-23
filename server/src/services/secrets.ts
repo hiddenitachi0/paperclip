@@ -59,7 +59,11 @@ import { isSecretProviderClientError } from "../secrets/types.js";
 import { authorizationService } from "./authorization.js";
 import { findActiveServerAdapter } from "../adapters/index.js";
 
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Exported so other services (e.g. agent-secret-bindings.ts, DUR-132) that
+// need to validate env/header key names before persisting or resolving
+// bindings share exactly this pattern instead of re-declaring a copy that
+// could drift out of sync.
+export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SENSITIVE_ENV_KEY_RE =
   /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
 const REDACTED_SENTINEL = "***REDACTED***";
@@ -901,6 +905,73 @@ export function secretService(db: Db) {
       logger.warn({ err, adapterType }, "adapter config schema unavailable while normalizing secret fields");
       return fallback;
     }
+  }
+
+  // DUR-132: adapterConfig.mcpServers[*].env / .headers may carry secret_ref
+  // bindings (see collectMcpServerSecretRefs in agent-secret-bindings.ts,
+  // which persists the matching company_secret_bindings rows keyed by the
+  // same `mcpServers[<name>].env.<KEY>` / `.headers.<KEY>` configPath used
+  // here). Resolution reuses resolveSecretValueInternal so every resolved
+  // value still goes through assertBindingContext (binding-scoped
+  // authorization) and recordAccessEvent (secret_access_events audit row) --
+  // the same guarantees env.<KEY> resolution gets. An unresolved (still
+  // secret_ref-shaped) value is never allowed to survive resolution; if it
+  // does, resolveSecretValueInternal itself throws and the run fails instead
+  // of the adapter silently launching an unauthenticated MCP server.
+  async function resolveMcpServersForRuntime(
+    companyId: string,
+    rawMcpServers: unknown,
+    context: Omit<SecretConsumerContext, "configPath"> | undefined,
+    accumulate: { manifest: RuntimeSecretManifestEntry[]; secretValues: Set<string> },
+  ): Promise<unknown> {
+    if (!Array.isArray(rawMcpServers)) return rawMcpServers;
+    const resolvedServers: unknown[] = [];
+    for (const rawEntry of rawMcpServers) {
+      const entry = asRecord(rawEntry);
+      if (!entry) {
+        resolvedServers.push(rawEntry);
+        continue;
+      }
+      const name = typeof entry.name === "string" ? entry.name : "";
+      const resolvedEntry: Record<string, unknown> = { ...entry };
+      for (const field of ["env", "headers"] as const) {
+        const fieldValue = asRecord(entry[field]);
+        if (!fieldValue) continue;
+        const resolvedField: Record<string, string> = {};
+        for (const [key, rawBinding] of Object.entries(fieldValue)) {
+          if (!ENV_KEY_RE.test(key)) {
+            throw unprocessable(`Invalid MCP server "${name}" ${field} key name: ${key}`);
+          }
+          const parsed = envBindingSchema.safeParse(rawBinding);
+          if (!parsed.success) {
+            throw unprocessable(`Invalid MCP server "${name}" ${field} binding for key: ${key}`);
+          }
+          const binding = canonicalizeBinding(parsed.data as EnvBinding);
+          const configPath = `mcpServers[${name}].${field}.${key}`;
+          if (binding.type === "plain") {
+            resolvedField[key] = binding.value;
+          } else {
+            const secretResolution = await resolveSecretValueInternal(
+              companyId,
+              binding.secretId,
+              binding.version,
+              context
+                ? {
+                    bindingContext: { ...context, configPath },
+                    accessContext: { ...context, configPath },
+                  }
+                : undefined,
+            );
+            resolvedField[key] = secretResolution.value;
+            accumulate.manifest.push(secretResolution.manifestEntry);
+            accumulate.secretValues.add(secretResolution.value);
+          }
+        }
+        resolvedEntry[field] = resolvedField;
+      }
+      resolvedServers.push(resolvedEntry);
+    }
+    return resolvedServers;
   }
 
   async function normalizeSchemaSecretFieldForPersistence(
@@ -2788,9 +2859,22 @@ export function secretService(db: Db) {
       adapterConfig: Record<string, unknown>,
       context?: Omit<SecretConsumerContext, "configPath">,
       opts?: { adapterType?: string | null },
-    ): Promise<{ config: Record<string, unknown>; secretKeys: Set<string>; manifest: RuntimeSecretManifestEntry[] }> => {
+    ): Promise<{
+      config: Record<string, unknown>;
+      secretKeys: Set<string>;
+      // DUR-132: literal resolved secret VALUES (not just top-level env key
+      // names) so callers can scrub them out of raw run output. mcpServers
+      // credentials never land in a process env var whose *name* is known
+      // ahead of time -- they're nested inside adapterConfig.mcpServers[*]
+      // .env/.headers and end up written into a per-agent MCP config file
+      // -- so the existing `secretKeys` (key-name-based `meta.env` masking)
+      // cannot mask them. This set is the redaction mechanism for those.
+      secretValues: Set<string>;
+      manifest: RuntimeSecretManifestEntry[];
+    }> => {
       const resolved = { ...adapterConfig };
       const secretKeys = new Set<string>();
+      const secretValues = new Set<string>();
       const manifest: RuntimeSecretManifestEntry[] = [];
       if (Object.prototype.hasOwnProperty.call(adapterConfig, "env")) {
         const record = asRecord(adapterConfig.env);
@@ -2824,6 +2908,7 @@ export function secretService(db: Db) {
               env[key] = secretResolution.value;
               manifest.push(secretResolution.manifestEntry);
               secretKeys.add(key);
+              secretValues.add(secretResolution.value);
             }
           }
           resolved.env = env;
@@ -2849,8 +2934,17 @@ export function secretService(db: Db) {
         resolved[key] = secretResolution.value;
         manifest.push(secretResolution.manifestEntry);
         secretKeys.add(key);
+        secretValues.add(secretResolution.value);
       }
-      return { config: resolved, secretKeys, manifest };
+      if (Object.prototype.hasOwnProperty.call(adapterConfig, "mcpServers")) {
+        resolved.mcpServers = await resolveMcpServersForRuntime(
+          companyId,
+          adapterConfig.mcpServers,
+          context,
+          { manifest, secretValues },
+        );
+      }
+      return { config: resolved, secretKeys, secretValues, manifest };
     },
   };
 }

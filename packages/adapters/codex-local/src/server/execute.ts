@@ -54,7 +54,7 @@ import {
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
 } from "./codex-home.js";
-import { prepareCodexRuntimeConfig } from "./runtime-config.js";
+import { codexMcpServersConfigCarriesCredentials, prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -395,9 +395,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       apiKey: configuredOpenAiApiKey,
     });
   }
+  // DUR-132 item 8: an MCP server carrying a real credential must never be
+  // synced to a remote execution target -- that would copy the plaintext
+  // value onto infrastructure outside Paperclip's control (a sandbox host, a
+  // remote box). Fail the run instead of silently shipping it.
+  if (executionTargetIsRemote && codexMcpServersConfigCarriesCredentials(config.mcpServers)) {
+    throw new Error(
+      `This agent's MCP servers include credentials (env), and this run's execution target ` +
+        `(${describeAdapterExecutionTarget(executionTarget)}) is remote. Refusing to sync credential-bearing ` +
+        `CODEX_HOME off this host -- use a local execution target for agents with MCP server credentials, ` +
+        `or remove the credentials from the MCP server config.`,
+    );
+  }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
-  await fs.mkdir(effectiveCodexHome, { recursive: true });
+  // DUR-132 item 8: CODEX_HOME now routinely carries per-agent MCP server
+  // credentials in config.toml (in addition to auth.json, which was already
+  // 0600) -- lock the directory down to the owning process user.
+  await fs.mkdir(effectiveCodexHome, { recursive: true, mode: 0o700 });
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json and
   // with OPENAI_API_KEY="" the provider rejects every request with
@@ -419,7 +434,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
   // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
   // target, so both local and sandboxed Codex processes pick up the routing.
-  // An explicit env.CODEX_HOME override is treated as user-managed and skipped.
+  // Only a genuine external/user-managed CODEX_HOME override is skipped here --
+  // DUR-132: a Paperclip-managed home (configuredHomeIsManaged, e.g. the
+  // per-agent home carved out below for MCP server isolation) must still get
+  // this merge, or its MCP servers/providers never reach config.toml.
   const envConfigStrings = Object.fromEntries(
     Object.entries(envConfig).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -427,7 +445,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const preparedRuntimeConfig = await prepareCodexRuntimeConfig({
     env: envConfigStrings,
-    codexHome: configuredCodexHome ? null : effectiveCodexHome,
+    codexHome: effectiveHomeIsManaged ? effectiveCodexHome : null,
     mcpServers: config.mcpServers,
   });
   try {

@@ -226,7 +226,7 @@ import {
   redactCurrentUserValue,
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
-import { redactEventPayload, redactSensitiveText } from "../redaction.js";
+import { redactEventPayload, redactKnownSecretValues, redactSensitiveText } from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -743,7 +743,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
           : undefined,
       )
     : { env: {}, secretKeys: new Set<string>(), manifest: [] };
-  const { config: resolvedConfig, secretKeys, manifest } = await input.secretsSvc.resolveAdapterConfigForRuntime(
+  const { config: resolvedConfig, secretKeys, secretValues, manifest } = await input.secretsSvc.resolveAdapterConfigForRuntime(
     input.companyId,
     executionRunConfig,
     input.agentId
@@ -823,6 +823,11 @@ export async function resolveExecutionRunAdapterConfig(input: {
   return {
     resolvedConfig,
     secretKeys,
+    // DUR-132: literal resolved secret values (currently only ever
+    // populated from adapterConfig.mcpServers[*].env/.headers -- see
+    // resolveMcpServersForRuntime in secrets.ts) for output redaction that
+    // can't key off a known process-env variable name.
+    secretValues: secretValues ?? new Set<string>(),
     secretManifest: [
       ...(environmentEnvResolution.manifest ?? []),
       ...(manifest ?? []),
@@ -10789,7 +10794,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
-    const { resolvedConfig, secretKeys, secretManifest } = await resolveExecutionRunAdapterConfig({
+    const { resolvedConfig, secretKeys, secretValues, secretManifest } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
       adapterType: agent.adapterType,
@@ -11624,8 +11629,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const secretScrubbedChunk = secretValues.size > 0
+          ? redactKnownSecretValues(chunk, secretValues)
+          : chunk;
         const sanitizedChunk = compactRunLogChunk(
-          redactCurrentUserText(chunk, currentUserRedactionOptions),
+          redactCurrentUserText(secretScrubbedChunk, currentUserRedactionOptions),
         );
         if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
         if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);

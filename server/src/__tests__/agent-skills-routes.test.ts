@@ -571,6 +571,7 @@ describe.sequential("agent skill routes", () => {
           }),
         }),
       }),
+      expect.anything(),
     );
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
@@ -601,6 +602,7 @@ describe.sequential("agent skill routes", () => {
       expect.objectContaining({
         role: "security",
       }),
+      expect.anything(),
     );
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
@@ -796,6 +798,7 @@ describe.sequential("agent skill routes", () => {
           }),
         }),
       }),
+      expect.anything(),
     );
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       "company-1",
