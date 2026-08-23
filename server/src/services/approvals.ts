@@ -451,6 +451,36 @@ export function approvalService(db: Db) {
         .then((rows) => rows[0]);
     },
 
+    // DUR-141: the requesting agent's own self-serve way to kill a
+    // not-yet-decided approval it filed (e.g. a duplicate merge_pr request
+    // whose PR was since closed) without needing a board actor to reject it.
+    // Reuses the "cancelled" terminal status, which existed in
+    // APPROVAL_STATUSES but was never actually set anywhere before this.
+    withdraw: async (id: string, decisionNote?: string | null) => {
+      const existing = await getExistingApproval(id);
+      if (!canResolveStatuses.has(existing.status)) {
+        throw unprocessable("Only pending or revision requested approvals can be withdrawn");
+      }
+
+      const now = new Date();
+      const updated = await db
+        .update(approvals)
+        .set({
+          status: "cancelled",
+          decisionNote: decisionNote ?? null,
+          decidedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+
+      if (!updated) {
+        throw unprocessable("Only pending or revision requested approvals can be withdrawn");
+      }
+      return updated;
+    },
+
     listComments: async (approvalId: string) => {
       const existing = await getExistingApproval(approvalId);
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();

@@ -14,6 +14,7 @@ import {
   resolveApprovalSchema,
   resubmitApprovalSchema,
   toolGrantRequestPayloadSchema,
+  withdrawApprovalSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
@@ -981,6 +982,53 @@ export function approvalRoutes(
       entityId: approval.id,
       details: { type: approval.type },
     });
+    res.json(redactApprovalPayload(approval));
+  });
+
+  // DUR-141: agent-only self-serve withdraw. Unlike approve/reject/request-
+  // revision (assertBoard), this is deliberately NOT a board action -- it
+  // lets the requesting agent kill its own stale/duplicate approval (e.g. a
+  // merge_pr request whose PR was closed) instead of leaving a dead entry in
+  // the board's pending queue indefinitely with only a "please ignore this"
+  // comment as mitigation.
+  router.post("/approvals/:id/withdraw", validate(withdrawApprovalSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Approval not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+    if (
+      !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
+        describeBlockedAction: () => "withdraw an approval",
+        resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, existing.id),
+      }))
+    ) return;
+
+    if (req.actor.type !== "agent" || req.actor.agentId !== existing.requestedByAgentId) {
+      res.status(403).json({ error: "Only the requesting agent can withdraw this approval" });
+      return;
+    }
+
+    const approval = await svc.withdraw(id, req.body.decisionNote);
+
+    await interactionsSvc.resolveInteractionsLinkedToApproval(approval, {
+      agentId: req.actor.agentId ?? null,
+      userId: null,
+    });
+
+    await logActivity(db, {
+      companyId: approval.companyId,
+      actorType: "agent",
+      actorId: req.actor.agentId ?? "unknown",
+      agentId: req.actor.agentId ?? undefined,
+      action: "approval.withdrawn",
+      entityType: "approval",
+      entityId: approval.id,
+      details: { type: approval.type },
+    });
+
     res.json(redactApprovalPayload(approval));
   });
 
