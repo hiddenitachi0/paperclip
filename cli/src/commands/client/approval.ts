@@ -109,6 +109,22 @@ export function registerApprovalCommands(program: Command): void {
 
   addCommonClientOptions(
     approval
+      .command("issues")
+      .description("List issues linked to an approval")
+      .argument("<approvalId>", "Approval ID")
+      .action(async (approvalId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const issues = await ctx.api.get(apiPath`/api/approvals/${approvalId}/issues`);
+          printOutput(issues, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
       .command("create")
       .description("Create an approval request")
       .requiredOption("-C, --company-id <id>", "Company ID")

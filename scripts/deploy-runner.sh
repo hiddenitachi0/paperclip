@@ -135,7 +135,38 @@ comment() { # approval_id, company_id, body -> 0 if delivered, 1 if not (after r
     log "runner: $aid could not deliver a comment after $COMMENT_RETRIES attempts — will retry next poll cycle"
   fi
   record_status "$aid" "$company_id" "$body" "$delivered"
+  mirror_comment_to_linked_issues "$aid" "$body"
   return "$delivered"
+}
+
+# Best-effort mirror of a deploy outcome comment onto every issue linked to
+# the approval — not just the approval object itself. Without this, a deploy
+# failure (e.g. a bad projectId in the approval payload) is only ever visible
+# on the approval, which nobody watching the issue thread has any reason to
+# check (the DUR-98/DUR-136 silent-failure pattern: an issue can sit
+# `in_review` looking done while its deploy quietly failed). Never affects
+# whether the approval itself is considered processed — a failure here is
+# logged and swallowed, same as record_status.
+mirror_comment_to_linked_issues() { # approval_id, body
+  local aid="$1" body="$2" issue_ids issue_id
+  issue_ids="$(docker exec "$DOCKER_SERVER_CONTAINER" sh -lc "$CLI approval issues $aid $ARGS" 2>>"$LOG" | \
+    python3 -c 'import json,sys
+try:
+    items = json.load(sys.stdin)
+except Exception:
+    items = []
+for i in items:
+    iid = i.get("id") if isinstance(i, dict) else None
+    if iid:
+        print(iid)
+' 2>>"$LOG")"
+  [ -z "${issue_ids//[[:space:]]/}" ] && return 0
+  while IFS= read -r issue_id; do
+    [ -z "$issue_id" ] && continue
+    docker exec -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -lc \
+      "$CLI issue comment $issue_id --body \"\$BODY\" $ARGS" >/dev/null 2>>"$LOG" || \
+      log "runner: $aid could not mirror comment onto issue $issue_id (non-fatal)"
+  done <<< "$issue_ids"
 }
 
 already_processed() { grep -qxF "$1" "$PROCESSED" 2>/dev/null; }
