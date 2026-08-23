@@ -5,7 +5,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companyMcpTools } from "@paperclipai/db";
-import { envBindingSchema, type SecretVersionSelector } from "@paperclipai/shared";
+import { envBindingSecretRefSchema, type SecretVersionSelector } from "@paperclipai/shared";
 import type { McpToolLibraryConnection } from "@paperclipai/shared/validators/mcp-tool-library";
 import { notFound } from "../errors.js";
 
@@ -153,10 +153,9 @@ export async function collectMcpToolLibrarySecretRefs(
       const fieldValue = asRecord(connection[field]);
       if (!fieldValue) continue;
       for (const [key, rawBinding] of Object.entries(fieldValue)) {
-        const parsed = envBindingSchema.safeParse(rawBinding);
+        const parsed = envBindingSecretRefSchema.safeParse(rawBinding);
         if (!parsed.success) continue;
         const binding = parsed.data;
-        if (typeof binding !== "object" || binding === null || binding.type !== "secret_ref") continue;
         refs.push({
           secretId: binding.secretId,
           configPath: `mcpServers[${row.key}].${field}.${key}`,

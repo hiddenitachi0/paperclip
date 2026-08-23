@@ -151,6 +151,22 @@ describe("mcp tool library routes — board-only", () => {
     expect(mockToolLibraryService.createMcpTool).not.toHaveBeenCalled();
   });
 
+  it("rejects a plain-text credential value — headers must be a saved secret", async () => {
+    mockAuthz.assertBoard.mockReturnValue(undefined);
+    const app = await buildApp();
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/mcp-tools`)
+      .send({
+        name: "Fal.ai",
+        description: "Makes images",
+        connection: { url: "https://fal.run/mcp", headers: { Authorization: { type: "plain", value: "sk-real-key" } } },
+      });
+
+    expect(res.status).toBe(400);
+    expect(mockToolLibraryService.createMcpTool).not.toHaveBeenCalled();
+  });
+
   it("rejects assigning a tool that belongs to a different company", async () => {
     mockAuthz.assertBoard.mockReturnValue(undefined);
     mockToolLibraryService.getMcpTool.mockResolvedValue({ ...baseTool, companyId: otherCompanyId });

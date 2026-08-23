@@ -52,8 +52,6 @@ function errorMessage(error: unknown, fallback: string): string {
 type CredentialRow = {
   id: string;
   key: string;
-  valueKind: "plain" | "secret";
-  plainValue: string;
   secretId: string;
 };
 
@@ -73,13 +71,14 @@ function draftFromTool(tool: McpToolLibraryEntry): ToolDraft {
   const connection = tool.connection ?? {};
   const kind: "command" | "url" = connection.command ? "command" : "url";
   const field = kind === "command" ? connection.env : connection.headers;
-  const credentialRows: CredentialRow[] = Object.entries(field ?? {}).map(([key, binding]) => {
-    if (typeof binding === "object" && binding !== null && binding.type === "secret_ref") {
-      return { id: key, key, valueKind: "secret", plainValue: "", secretId: binding.secretId ?? "" };
-    }
-    const plainValue = typeof binding === "string" ? binding : binding?.value ?? "";
-    return { id: key, key, valueKind: "plain", plainValue, secretId: "" };
-  });
+  // Every row here is a secret_ref — the tool library never stores a plain
+  // credential value, so there is nothing else to reconstruct into a row.
+  const credentialRows: CredentialRow[] = Object.entries(field ?? {})
+    .filter((entry): entry is [string, { type: "secret_ref"; secretId: string }] => {
+      const binding = entry[1];
+      return typeof binding === "object" && binding !== null && binding.type === "secret_ref";
+    })
+    .map(([key, binding]) => ({ id: key, key, secretId: binding.secretId ?? "" }));
   return {
     name: tool.name,
     description: tool.description,
@@ -90,16 +89,11 @@ function draftFromTool(tool: McpToolLibraryEntry): ToolDraft {
 }
 
 function draftToConnection(draft: ToolDraft): McpToolConnection {
-  const field: Record<string, { type: "plain"; value: string } | { type: "secret_ref"; secretId: string; version: "latest" }> = {};
+  const field: Record<string, { type: "secret_ref"; secretId: string; version: "latest" }> = {};
   for (const row of draft.credentialRows) {
     const key = row.key.trim();
-    if (!key) continue;
-    if (row.valueKind === "secret") {
-      if (!row.secretId) continue;
-      field[key] = { type: "secret_ref", secretId: row.secretId, version: "latest" };
-    } else {
-      field[key] = { type: "plain", value: row.plainValue };
-    }
+    if (!key || !row.secretId) continue;
+    field[key] = { type: "secret_ref", secretId: row.secretId, version: "latest" };
   }
   const hasField = Object.keys(field).length > 0;
   return draft.kind === "command"
@@ -326,7 +320,7 @@ function ToolFormDialog({
       ...prev,
       credentialRows: [
         ...prev.credentialRows,
-        { id: `row-${Date.now()}-${Math.random().toString(36).slice(2)}`, key: "", valueKind: "secret", plainValue: "", secretId: "" },
+        { id: `row-${Date.now()}-${Math.random().toString(36).slice(2)}`, key: "", secretId: "" },
       ],
     }));
   }
@@ -425,49 +419,29 @@ function ToolFormDialog({
                       onChange={(event) => updateCredentialRow(row.id, { key: event.target.value })}
                       disabled={isPending}
                     />
-                    {row.valueKind === "secret" ? (
-                      <Select
-                        value={row.secretId}
-                        onValueChange={(secretId) => updateCredentialRow(row.id, { secretId })}
-                        disabled={isPending}
-                      >
-                        <SelectTrigger className="min-w-0 flex-1">
-                          <SelectValue placeholder="Pick a saved secret" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {secrets.length === 0 ? (
-                            <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                              No secrets yet — add one in Settings → Secrets first.
-                            </div>
-                          ) : (
-                            secrets.map((secret) => (
-                              <SelectItem key={secret.id} value={secret.id}>
-                                <KeyRound className="mr-1.5 inline h-3 w-3" />
-                                {secret.name}
-                              </SelectItem>
-                            ))
-                          )}
-                        </SelectContent>
-                      </Select>
-                    ) : (
-                      <Input
-                        className="min-w-0 flex-1"
-                        placeholder="Value"
-                        value={row.plainValue}
-                        onChange={(event) => updateCredentialRow(row.id, { plainValue: event.target.value })}
-                        disabled={isPending}
-                      />
-                    )}
-                    <button
-                      type="button"
-                      className="shrink-0 text-xs text-muted-foreground underline decoration-dotted"
-                      onClick={() =>
-                        updateCredentialRow(row.id, { valueKind: row.valueKind === "secret" ? "plain" : "secret" })
-                      }
+                    <Select
+                      value={row.secretId}
+                      onValueChange={(secretId) => updateCredentialRow(row.id, { secretId })}
                       disabled={isPending}
                     >
-                      {row.valueKind === "secret" ? "use plain text" : "use a secret"}
-                    </button>
+                      <SelectTrigger className="min-w-0 flex-1">
+                        <SelectValue placeholder="Pick a saved secret" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {secrets.length === 0 ? (
+                          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                            No secrets yet — add one in Settings → Secrets first.
+                          </div>
+                        ) : (
+                          secrets.map((secret) => (
+                            <SelectItem key={secret.id} value={secret.id}>
+                              <KeyRound className="mr-1.5 inline h-3 w-3" />
+                              {secret.name}
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
                     <button
                       type="button"
                       className="shrink-0 text-muted-foreground hover:text-foreground"
