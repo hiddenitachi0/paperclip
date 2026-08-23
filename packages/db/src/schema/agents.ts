@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { environments } from "./environments.js";
+import { companyAgentRoles } from "./company_agent_roles.js";
 
 export const agents = pgTable(
   "agents",
@@ -47,6 +48,17 @@ export const agents = pgTable(
     // on every new agent, so "days since last reviewed" starts counting from
     // a known point rather than reading as an indefinite null.
     instructionsReviewedAt: timestamp("instructions_reviewed_at", { withTimezone: true }).notNull().defaultNow(),
+    // DUR-114: nullable FK to company_agent_roles. Distinct from agents.role (the
+    // legacy 12-value enum text column) — do not conflate them.
+    roleId: uuid("role_id").references(() => companyAgentRoles.id, { onDelete: "set null" }),
+    // Snapshot of what was applied when the role was assigned, so UI can diff
+    // "from role" vs "changed on this agent". Updated at assignment time only.
+    roleAppliedMcpServerNames: jsonb("role_applied_mcp_server_names")
+      .$type<string[]>()
+      .default([]),
+    roleAppliedPermissionKeys: jsonb("role_applied_permission_keys")
+      .$type<string[]>()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

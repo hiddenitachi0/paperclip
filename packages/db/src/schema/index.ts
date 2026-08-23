@@ -5,6 +5,7 @@ export { instanceSettings } from "./instance_settings.js";
 export { cloudUpstreamConnections, cloudUpstreamRuns } from "./cloud_upstreams.js";
 export { instanceUserRoles } from "./instance_user_roles.js";
 export { userSidebarPreferences } from "./user_sidebar_preferences.js";
+export { companyAgentRoles } from "./company_agent_roles.js";
 export { agents } from "./agents.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";

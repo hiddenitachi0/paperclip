@@ -175,6 +175,29 @@ export function deduplicateAgentName(
   return `${candidateName} ${Date.now()}`;
 }
 
+// DUR-114: role-assignment fields may only be written by assignRoleToAgent
+// (server/src/services/agent-roles.ts), which updates them directly via
+// db.update(agents) and never calls agentService.create/.update. Blocking
+// them here — not just at the PATCH /agents/:id route — closes every other
+// caller of these generic functions, including company import
+// (company-portability.ts), which writes straight through the service layer
+// and bypasses route-level guards (the DUR-56 bypass pattern).
+const ROLE_ASSIGNMENT_FIELDS = [
+  "roleId",
+  "roleAssignedAt",
+  "roleAppliedMcpServerNames",
+  "roleAppliedPermissionKeys",
+] as const;
+
+function assertNoRoleAssignmentFields(data: Record<string, unknown>) {
+  const present = ROLE_ASSIGNMENT_FIELDS.filter((field) => Object.prototype.hasOwnProperty.call(data, field));
+  if (present.length > 0) {
+    throw unprocessable(
+      `Role-assignment fields (${present.join(", ")}) cannot be set through agentService.create/update. Use the dedicated role-assignment endpoint.`,
+    );
+  }
+}
+
 export function agentService(db: Db) {
   const secretsSvc = secretService(db);
 
@@ -349,6 +372,7 @@ export function agentService(db: Db) {
     data: Partial<typeof agents.$inferInsert>,
     options?: UpdateAgentOptions,
   ) {
+    assertNoRoleAssignmentFields(data as Record<string, unknown>);
     const existing = await getById(id);
     if (!existing) return null;
 
@@ -462,6 +486,7 @@ export function agentService(db: Db) {
     getById,
 
     create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+      assertNoRoleAssignmentFields(data as Record<string, unknown>);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }

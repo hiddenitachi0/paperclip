@@ -3074,6 +3074,16 @@ export function agentRoutes(
       res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
       return;
     }
+    // DUR-114: role assignment fields are role-endpoint-only. Rejecting them here
+    // ensures no path (including company import) can bypass the board-only guard.
+    if (
+      hasOwn(req.body as object, "roleId") ||
+      hasOwn(req.body as object, "roleAppliedMcpServerNames") ||
+      hasOwn(req.body as object, "roleAppliedPermissionKeys")
+    ) {
+      res.status(422).json({ error: "Use /api/agents/:id/role for role assignment" });
+      return;
+    }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;

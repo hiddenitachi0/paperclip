@@ -168,6 +168,18 @@ export const updateAgentSchema = createAgentSchema
     // routes (POST/DELETE .../agents/:agentId/avatar) may write this
     // column. This does not, by itself, fix DUR-55.
     avatarAssetId: z.never().optional(),
+    // DUR-114: role assignment/override fields are role-endpoint-only
+    // (POST /agents/:id/role). A plain z.never() here would make Zod
+    // throw and short-circuit to a generic 400 in validate() — bypassing
+    // the route-level hasOwn() check below (agents.ts) that returns the
+    // specific 422 "use /agents/:id/role" error. Declaring these as
+    // permissive-but-known keys instead means the (non-strict) object
+    // schema no longer silently strips them as "unrecognized", so they
+    // survive schema.parse() into req.body and the hasOwn() guard can
+    // see and reject them with 422 as intended.
+    roleId: z.unknown().optional(),
+    roleAppliedMcpServerNames: z.unknown().optional(),
+    roleAppliedPermissionKeys: z.unknown().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
