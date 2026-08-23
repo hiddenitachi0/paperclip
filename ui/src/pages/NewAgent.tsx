@@ -13,7 +13,6 @@ import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import {
   AGENT_ROLES,
-  PERSONALITY_PRESETS,
   type AdapterEnvironmentTestResult,
   type AgentPermissions,
 } from "@paperclipai/shared";
@@ -270,18 +269,6 @@ export function NewAgent() {
 
         {/* How this agent talks (personality) */}
         <div className="px-4 pb-2">
-          <div className="flex flex-wrap gap-1.5 mb-1.5">
-            {PERSONALITY_PRESETS.map((preset) => (
-              <button
-                key={preset.key}
-                type="button"
-                className="text-xs px-2 py-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:border-foreground/40 transition-colors"
-                onClick={() => setPersonality(preset.text)}
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
           <textarea
             className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
             placeholder="How this agent talks — warm and cheerful. Short sentences, no corporate filler."

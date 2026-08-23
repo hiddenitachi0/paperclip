@@ -126,37 +126,6 @@ export const AGENT_ICON_NAMES = [
 ] as const;
 export type AgentIconName = (typeof AGENT_ICON_NAMES)[number];
 
-// DUR-61: click-to-fill starting points for the "how this agent talks" box.
-// These are editable text, never a stored enum — clicking a chip fills the
-// personality textarea with this text, which the operator can then edit or
-// replace entirely. Placeholder copy pending the operator's own wording (see
-// "What Filip must do himself" on DUR-61); keep these short, in first/second
-// person voice-of-the-agent, and free of any reference to specific people,
-// customer names, or account numbers.
-export const PERSONALITY_PRESETS = [
-  {
-    key: "warm_and_cheerful",
-    label: "Warm and cheerful",
-    text: "Warm and upbeat. Use short sentences and plain words. Skip corporate filler and jargon.",
-  },
-  {
-    key: "direct_and_factual",
-    label: "Direct and factual",
-    text: "Direct and to the point. State the decision and the reason in the first sentence. No hedging, no filler.",
-  },
-  {
-    key: "diplomatic_and_careful",
-    label: "Diplomatic and careful",
-    text: "Measured and considerate. Acknowledge trade-offs before landing on a recommendation. Avoid absolutes.",
-  },
-  {
-    key: "dry_and_brief",
-    label: "Dry and brief",
-    text: "Brief and understated. One or two sentences per update. No enthusiasm, no exclamation points.",
-  },
-] as const;
-export type PersonalityPresetKey = (typeof PERSONALITY_PRESETS)[number]["key"];
-
 export const MAX_AGENT_AVATAR_BYTES = 2_000_000;
 
 export const ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES = [
