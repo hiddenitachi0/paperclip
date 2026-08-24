@@ -72,6 +72,22 @@ export const agents = pgTable(
     roleAppliedPermissionKeys: jsonb("role_applied_permission_keys")
       .$type<string[]>()
       .default([]),
+    // DUR-149: explicit add/remove deltas layered on top of the assigned
+    // job — shape is { skills?: {add?, remove?}, connectors?: {add?, remove?},
+    // rights?: {add?: {permissionKey,scope}[], remove?: string[]} }. Never
+    // settable through agentService.create/update (see
+    // assertNoRoleAssignmentFields) — only the dedicated role-overrides
+    // endpoint may write it, same board-only gate as role assignment itself.
+    roleOverrides: jsonb("role_overrides").$type<Record<string, unknown>>().notNull().default({}),
+    // Resolved-effective-set snapshot written by resolveAgentRoleProvisioning
+    // (job UNION operator-add, MINUS operator-remove). Deliberately separate
+    // from adapterConfig, which an agent can self-update (subject to the
+    // DUR-55/57 mcpServers sub-key guard) — provenance must live somewhere
+    // that guard doesn't need to cover because no self-update path reaches it.
+    roleProvisionedSkillKeys: jsonb("role_provisioned_skill_keys").$type<string[]>().notNull().default([]),
+    roleProvisionedConnectorKeys: jsonb("role_provisioned_connector_keys").$type<string[]>().notNull().default([]),
+    roleProvisionedPermissionKeys: jsonb("role_provisioned_permission_keys").$type<string[]>().notNull().default([]),
+    roleResolvedAt: timestamp("role_resolved_at", { withTimezone: true }),
     // DUR-143: ids of company_mcp_tools rows this agent is checked-on for.
     // Live selection, re-read and merged into adapterConfig.mcpServers on
     // every dispatch (see resolveAgentMcpToolLibraryServers in

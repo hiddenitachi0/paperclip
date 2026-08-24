@@ -6,7 +6,9 @@
 // This does NOT backfill deploys:request onto any existing agent. Filip's
 // 21 Aug ruling on DUR-65 is explicit: "Start with nobody holding it and
 // let Filip assign it." Assigning the Boss job to an agent is the only way
-// it gains that right.
+// it gains that right. (The merges:request backfill for existing agents
+// lives in principal-access-compatibility.ts, alongside the rest of the
+// standing access-compatibility backfill.)
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companies } from "@paperclipai/db";
@@ -41,6 +43,7 @@ export async function seedDurStarterJobs(db: Db): Promise<{ created: string[] }>
         { permissionKey: "deploys:request", scope: null },
         { permissionKey: "merges:request", scope: null },
       ],
+      isBuiltin: true,
     });
     created.push("boss");
   }
@@ -52,6 +55,7 @@ export async function seedDurStarterJobs(db: Db): Promise<{ created: string[] }>
         "Builds and ships features. Can ask Filip to merge a finished pull request. Cannot ask for a deploy " +
         "— that stays with the Boss job.",
       defaultGrants: [{ permissionKey: "merges:request", scope: null }],
+      isBuiltin: true,
     });
     created.push("developer");
   }

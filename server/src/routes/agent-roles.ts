@@ -1,6 +1,6 @@
 // DUR-114: routes for company agent roles ("jobs") and role assignment.
 // Board-only throughout — agents are structurally blocked from reaching these routes.
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
@@ -24,6 +24,8 @@ import {
   removeAgentToolOverride,
   addAgentRightOverride,
   removeAgentRightOverride,
+  addAgentCatalogOverride,
+  removeAgentCatalogOverride,
 } from "../services/agent-roles.js";
 
 // Board-only, and explicitly refuses actor==target even though assertBoard
@@ -47,12 +49,19 @@ const grantSchema = z.object({
   scope: z.record(z.unknown()).nullable().optional().transform((v) => v ?? null),
 });
 
+// Opaque catalog keys (company_skills / company_mcp_tools). Not validated
+// against either catalog here — see the PR description for why resolving
+// them into live agent state is scoped out of this change.
+const catalogKeySchema = z.string().trim().min(1).max(200);
+
 const roleBodySchema = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().max(2000).nullable().optional(),
   defaultInstructions: z.string().max(100_000).nullable().optional(),
   defaultMcpServers: z.array(mcpServerConfigSchema).max(50).optional(),
   defaultGrants: z.array(grantSchema).max(50).optional(),
+  skillKeys: z.array(catalogKeySchema).max(100).optional(),
+  connectorKeys: z.array(catalogKeySchema).max(100).optional(),
 });
 
 const roleUpdateSchema = roleBodySchema.partial();
@@ -303,6 +312,68 @@ export function agentRoleRoutes(db: Db) {
     await assertCompanyAccess(req, agent.companyId);
 
     res.json(await removeAgentRightOverride(db, agentId, req.params.permissionKey as string, actorFor(req)));
+  });
+
+  // ── DUR-149: per-agent skill_key / connector_key overrides ──────────────
+  // Same board-only, non-self shape as tools/rights above. `category` is
+  // "skills" or "connectors" — validated in the handler (not the route path
+  // regex — Express 5's path-to-regexp doesn't support the old inline-group
+  // syntax the same way v4 did) so a typo 404s instead of silently no-op'ing
+  // inside the service.
+  const catalogCategorySchema = z.enum(["skills", "connectors"]);
+
+  function parseCatalogCategory(req: Request, res: any): "skills" | "connectors" | null {
+    const parsed = catalogCategorySchema.safeParse(req.params.category);
+    if (!parsed.success) {
+      res.status(404).json({ error: "Unknown override category" });
+      return null;
+    }
+    return parsed.data;
+  }
+
+  router.post(
+    "/agents/:agentId/role/:category",
+    validate(z.object({ key: catalogKeySchema })),
+    async (req, res) => {
+      assertBoard(req);
+      const agentId = req.params.agentId as string;
+      assertNotSelfRoleMutation(req, agentId);
+      const category = parseCatalogCategory(req, res);
+      if (!category) return;
+
+      const [agent] = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, agentId));
+      if (!agent) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCompanyAccess(req, agent.companyId);
+
+      const { key } = req.body as { key: string };
+      res.json(await addAgentCatalogOverride(db, agentId, category, key, actorFor(req)));
+    }
+  );
+
+  router.delete("/agents/:agentId/role/:category/:key", async (req, res) => {
+    assertBoard(req);
+    const agentId = req.params.agentId as string;
+    assertNotSelfRoleMutation(req, agentId);
+    const category = parseCatalogCategory(req, res);
+    if (!category) return;
+
+    const [agent] = await db
+      .select({ companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCompanyAccess(req, agent.companyId);
+
+    res.json(await removeAgentCatalogOverride(db, agentId, category, req.params.key as string, actorFor(req)));
   });
 
   return router;

@@ -38,12 +38,23 @@ function sanitizeGrants(
   }) as Array<{ permissionKey: PermissionKey; scope: Record<string, unknown> | null }>;
 }
 
+// Non-empty, trimmed, deduped — same shape whether the keys came from a
+// human-authored request body or a seed script.
+function sanitizeKeys(keys: string[] | undefined): string[] {
+  if (!keys) return [];
+  return [...new Set(keys.map((k) => k.trim()).filter((k) => k.length > 0))];
+}
+
 export interface RoleCreateInput {
   name: string;
   description?: string | null;
   defaultInstructions?: string | null;
   defaultMcpServers?: Array<Record<string, unknown>>;
   defaultGrants?: Array<{ permissionKey: string; scope: Record<string, unknown> | null }>;
+  skillKeys?: string[];
+  connectorKeys?: string[];
+  // Provenance only — never gates edit/delete of the role it's set on.
+  isBuiltin?: boolean;
 }
 
 export async function createRole(db: Db, companyId: string, input: RoleCreateInput) {
@@ -67,6 +78,9 @@ export async function createRole(db: Db, companyId: string, input: RoleCreateInp
       defaultInstructions: input.defaultInstructions ?? null,
       defaultMcpServers: input.defaultMcpServers ?? [],
       defaultGrants: grants,
+      skillKeys: sanitizeKeys(input.skillKeys),
+      connectorKeys: sanitizeKeys(input.connectorKeys),
+      isBuiltin: input.isBuiltin ?? false,
     })
     .returning();
   return created!;
@@ -126,6 +140,11 @@ export async function updateRole(
   if ("defaultInstructions" in input) updates.defaultInstructions = input.defaultInstructions ?? null;
   if ("defaultMcpServers" in input) updates.defaultMcpServers = input.defaultMcpServers ?? [];
   if ("defaultGrants" in input) updates.defaultGrants = sanitizeGrants(input.defaultGrants ?? []);
+  if ("skillKeys" in input) updates.skillKeys = sanitizeKeys(input.skillKeys);
+  if ("connectorKeys" in input) updates.connectorKeys = sanitizeKeys(input.connectorKeys);
+  // isBuiltin is deliberately not updatable here — it's a creation-time
+  // provenance record (was this role created by a seed script?), not a
+  // togglable flag, and it never gates edit/delete either way.
 
   const [updated] = await db
     .update(companyAgentRoles)
@@ -156,6 +175,10 @@ export async function copyRoleToCompany(
     defaultInstructions: source.defaultInstructions,
     defaultMcpServers: source.defaultMcpServers as Array<Record<string, unknown>>,
     defaultGrants: source.defaultGrants as Array<{ permissionKey: string; scope: Record<string, unknown> | null }>,
+    skillKeys: source.skillKeys as string[],
+    connectorKeys: source.connectorKeys as string[],
+    // Deliberately not copying isBuiltin — a copy is a new, operator-created
+    // role even if the source was seeded.
   });
 }
 
@@ -232,6 +255,7 @@ export async function assignRoleToAgent(
       }
     });
 
+    await resolveAgentRoleProvisioning(db, agentId);
     const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!updated) throw notFound("Agent not found");
     return updated;
@@ -337,12 +361,189 @@ export async function assignRoleToAgent(
     }
   });
 
+  await resolveAgentRoleProvisioning(db, agentId);
+
   // Return the updated agent row
   const [updated] = await db
     .select()
     .from(agents)
     .where(eq(agents.id, agentId));
   return updated!;
+}
+
+// ── DUR-149: provisioning — resolve effective skills/connectors/rights ─────
+// Three provenance buckets feed the effective set for each of the three
+// categories (skills, connectors, rights):
+//   - job-owned:            the currently-assigned role's skillKeys/connectorKeys/defaultGrants
+//   - operator-granted:     agent.roleOverrides.<category>.add — never touched below
+//   - migration-backfilled: whatever a one-time backfill wrote straight into
+//                            role_provisioned_* before any job existed; treated
+//                            as job-owned for reconciliation (droppable), not
+//                            as a permanent operator grant.
+// Effective = (job-owned ∪ operator-add) − operator-remove.
+//
+// Reconciliation only ever touches the "job-owned-or-backfilled" portion of
+// what was previously provisioned (previous ∖ operator-add) — an
+// operator-granted entry is never revoked just because the job changed.
+export interface RoleOverridesShape {
+  skills?: { add?: string[]; remove?: string[] };
+  connectors?: { add?: string[]; remove?: string[] };
+  rights?: { add?: Array<{ permissionKey: string; scope: Record<string, unknown> | null }>; remove?: string[] };
+}
+
+function effectiveSet(
+  jobOwned: string[],
+  operatorAdd: string[],
+  operatorRemove: string[]
+): { effective: string[]; operatorAddKeys: Set<string> } {
+  const removeSet = new Set(operatorRemove);
+  const effectiveSetValue = new Set<string>([...jobOwned, ...operatorAdd].filter((k) => !removeSet.has(k)));
+  return { effective: [...effectiveSetValue], operatorAddKeys: new Set(operatorAdd) };
+}
+
+export async function resolveAgentRoleProvisioning(db: Db, agentId: string) {
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  const role = agent.roleId ? await getRole(db, agent.roleId) : null;
+  const overrides = (agent.roleOverrides as RoleOverridesShape | null) ?? {};
+
+  const jobSkillKeys = (role?.skillKeys as string[] | null) ?? [];
+  const jobConnectorKeys = (role?.connectorKeys as string[] | null) ?? [];
+  const jobGrants = sanitizeGrants(
+    (role?.defaultGrants as Array<{ permissionKey: string; scope: Record<string, unknown> | null }> | null) ?? []
+  );
+  const jobPermissionKeys = jobGrants.map((g) => g.permissionKey);
+  const grantScopeByKey = new Map(jobGrants.map((g) => [g.permissionKey, g.scope]));
+
+  const rightsAdd = sanitizeGrants(overrides.rights?.add ?? []);
+  for (const g of rightsAdd) grantScopeByKey.set(g.permissionKey, g.scope);
+
+  const skills = effectiveSet(jobSkillKeys, overrides.skills?.add ?? [], overrides.skills?.remove ?? []);
+  const connectors = effectiveSet(jobConnectorKeys, overrides.connectors?.add ?? [], overrides.connectors?.remove ?? []);
+  const rights = effectiveSet(
+    jobPermissionKeys,
+    rightsAdd.map((g) => g.permissionKey),
+    overrides.rights?.remove ?? []
+  );
+
+  const previousRightKeys = (agent.roleProvisionedPermissionKeys as string[] | null) ?? [];
+  const reconcilableRightKeys = previousRightKeys.filter((k) => !rights.operatorAddKeys.has(k));
+  const toRevoke = reconcilableRightKeys.filter((k) => !rights.effective.includes(k));
+  const toGrant = rights.effective.filter((k) => !previousRightKeys.includes(k));
+
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    if (toRevoke.length > 0) {
+      await tx
+        .delete(principalPermissionGrants)
+        .where(
+          and(
+            eq(principalPermissionGrants.principalType, "agent"),
+            eq(principalPermissionGrants.principalId, agentId),
+            inArray(principalPermissionGrants.permissionKey, toRevoke as [string, ...string[]])
+          )
+        );
+    }
+    if (toGrant.length > 0) {
+      await tx
+        .insert(principalPermissionGrants)
+        .values(
+          toGrant.map((permissionKey) => ({
+            companyId: agent.companyId,
+            principalType: "agent",
+            principalId: agentId,
+            permissionKey,
+            scope: grantScopeByKey.get(permissionKey as PermissionKey) ?? null,
+            grantedByUserId: null,
+            createdAt: now,
+            updatedAt: now,
+          }))
+        )
+        .onConflictDoNothing();
+    }
+    await tx
+      .update(agents)
+      .set({
+        roleProvisionedSkillKeys: skills.effective,
+        roleProvisionedConnectorKeys: connectors.effective,
+        roleProvisionedPermissionKeys: rights.effective,
+        roleResolvedAt: now,
+      })
+      .where(eq(agents.id, agentId));
+  });
+
+  const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
+  return updated!;
+}
+
+// Add/remove one skill_key or connector_key on top of the assigned job — same
+// one-at-a-time shape as addAgentToolOverride/addAgentRightOverride above, so
+// the route layer stays consistent. Board-only, same actor guard as role
+// assignment itself: an override is exactly as sensitive as assigning a role.
+function addToOverrideCategory(
+  overrides: RoleOverridesShape,
+  category: "skills" | "connectors",
+  key: string
+): RoleOverridesShape {
+  const existing = overrides[category] ?? {};
+  return {
+    ...overrides,
+    [category]: {
+      add: [...new Set([...(existing.add ?? []), key])],
+      remove: (existing.remove ?? []).filter((k) => k !== key),
+    },
+  };
+}
+
+function removeFromOverrideCategory(
+  overrides: RoleOverridesShape,
+  category: "skills" | "connectors",
+  key: string
+): RoleOverridesShape {
+  const existing = overrides[category] ?? {};
+  return {
+    ...overrides,
+    [category]: {
+      add: (existing.add ?? []).filter((k) => k !== key),
+      remove: [...new Set([...(existing.remove ?? []), key])],
+    },
+  };
+}
+
+export async function addAgentCatalogOverride(
+  db: Db,
+  agentId: string,
+  category: "skills" | "connectors",
+  key: string,
+  actor: RoleMutationActor
+) {
+  assertBoardActorForRoleMutation(actor, agentId);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+  const sanitized = sanitizeKeys([key]);
+  if (sanitized.length === 0) throw unprocessable("A non-empty key is required");
+
+  const overrides = addToOverrideCategory((agent.roleOverrides as RoleOverridesShape | null) ?? {}, category, sanitized[0]!);
+  await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: new Date() }).where(eq(agents.id, agentId));
+  return resolveAgentRoleProvisioning(db, agentId);
+}
+
+export async function removeAgentCatalogOverride(
+  db: Db,
+  agentId: string,
+  category: "skills" | "connectors",
+  key: string,
+  actor: RoleMutationActor
+) {
+  assertBoardActorForRoleMutation(actor, agentId);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  const overrides = removeFromOverrideCategory((agent.roleOverrides as RoleOverridesShape | null) ?? {}, category, key);
+  await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: new Date() }).where(eq(agents.id, agentId));
+  return resolveAgentRoleProvisioning(db, agentId);
 }
 
 // ── Role state + per-agent overrides on top of an assigned job ─────────────
@@ -509,6 +710,16 @@ export async function addAgentRightOverride(
     });
   }
 
+  // Record this as an explicit operator grant in roleOverrides.rights.add so
+  // resolveAgentRoleProvisioning's reconciliation (called next) treats it as
+  // protected — never auto-revoked just because the assigned job changes.
+  const overrides = { ...((agent.roleOverrides as RoleOverridesShape | null) ?? {}) };
+  const existingAdd = (overrides.rights?.add ?? []).filter((g) => g.permissionKey !== sanitized.permissionKey);
+  const existingRemove = (overrides.rights?.remove ?? []).filter((k) => k !== sanitized.permissionKey);
+  overrides.rights = { add: [...existingAdd, sanitized], remove: existingRemove };
+  await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: now }).where(eq(agents.id, agentId));
+
+  await resolveAgentRoleProvisioning(db, agentId);
   return getAgentRoleState(db, agentId);
 }
 
@@ -532,5 +743,16 @@ export async function removeAgentRightOverride(
       )
     );
 
+  // Record the removal in roleOverrides.rights.remove so reconciliation never
+  // re-grants it from the job's defaults, and drop any prior operator-add
+  // entry for the same key (removed wins over a stale add).
+  const overrides = { ...((agent.roleOverrides as RoleOverridesShape | null) ?? {}) };
+  const existingAdd = (overrides.rights?.add ?? []).filter((g) => g.permissionKey !== permissionKey);
+  const existingRemove = new Set(overrides.rights?.remove ?? []);
+  existingRemove.add(permissionKey);
+  overrides.rights = { add: existingAdd, remove: [...existingRemove] };
+  await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: new Date() }).where(eq(agents.id, agentId));
+
+  await resolveAgentRoleProvisioning(db, agentId);
   return getAgentRoleState(db, agentId);
 }

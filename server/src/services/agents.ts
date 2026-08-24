@@ -195,6 +195,13 @@ const ROLE_ASSIGNMENT_FIELDS = [
   "roleAssignedAt",
   "roleAppliedMcpServerNames",
   "roleAppliedPermissionKeys",
+  // DUR-149: same reasoning — only assignRoleToAgent / updateAgentRoleOverrides
+  // / resolveAgentRoleProvisioning (services/agent-roles.ts) may write these.
+  "roleOverrides",
+  "roleProvisionedSkillKeys",
+  "roleProvisionedConnectorKeys",
+  "roleProvisionedPermissionKeys",
+  "roleResolvedAt",
 ] as const;
 
 function assertNoRoleAssignmentFields(data: Record<string, unknown>) {

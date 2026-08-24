@@ -1,5 +1,6 @@
 // DUR-114: role-assignment fields (roleId, roleAssignedAt,
-// roleAppliedMcpServerNames, roleAppliedPermissionKeys) must only ever be
+// roleAppliedMcpServerNames, roleAppliedPermissionKeys, and — DUR-149 —
+// roleOverrides/roleProvisioned*/roleResolvedAt) must only ever be
 // writable through assignRoleToAgent (server/src/services/agent-roles.ts),
 // which updates the agents row directly via db.update(agents) and never
 // calls agentService.create/.update.
@@ -107,6 +108,18 @@ describeEmbeddedPostgres("agentService role-assignment field guard", () => {
     await expect(
       agentService(db).update(agentId, {
         roleAssignedAt: new Date(),
+      } as never),
+    ).rejects.toMatchObject({ status: 422 });
+
+    await expect(
+      agentService(db).update(agentId, {
+        roleOverrides: { rights: { add: [{ permissionKey: "deploys:request", scope: null }] } },
+      } as never),
+    ).rejects.toMatchObject({ status: 422 });
+
+    await expect(
+      agentService(db).update(agentId, {
+        roleProvisionedPermissionKeys: ["deploys:request"],
       } as never),
     ).rejects.toMatchObject({ status: 422 });
 
