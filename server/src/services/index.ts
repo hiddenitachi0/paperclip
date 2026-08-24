@@ -95,6 +95,11 @@ export {
   type PrincipalAccessCompatibilityBackfillStats,
 } from "./principal-access-compatibility.js";
 export { seedDurStarterJobs, DUR_COMPANY_ID } from "./agent-role-seed.js";
+export {
+  resolveAgentRoleProvisioning,
+  addAgentCatalogOverride,
+  removeAgentCatalogOverride,
+} from "./agent-roles.js";
 export { authorizationService } from "./authorization.js";
 export type {
   AuthorizationAction,
