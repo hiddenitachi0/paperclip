@@ -795,6 +795,18 @@ export function pluginRoutes(
   }
 
   /**
+   * DUR-195: a company can disable a plugin for itself via
+   * `plugin_company_settings.enabled` while the plugin stays `ready`
+   * instance-wide. Absence of a settings row means the plugin has never been
+   * toggled for that company and defaults to enabled (matches the column's
+   * `DEFAULT true` and `upsertCompanySettings`' own default).
+   */
+  async function isPluginEnabledForCompany(pluginDbId: string, companyId: string): Promise<boolean> {
+    const settings = await registry.getCompanySettings(pluginDbId, companyId);
+    return settings ? settings.enabled : true;
+  }
+
+  /**
    * GET /api/plugins
    *
    * List all installed plugins, optionally filtered by lifecycle status.
@@ -915,6 +927,11 @@ export function pluginRoutes(
    *
    * Query params:
    * - `pluginId` (optional): Filter to tools from a specific plugin
+   * - `companyId` (optional, board callers only): Scope the listing to a
+   *   company the caller has access to, excluding tools from plugins that
+   *   company has disabled via `plugin_company_settings.enabled`. Agent
+   *   callers are always scoped to their own company. Board callers who
+   *   omit this get the unfiltered, instance-wide listing (unchanged).
    *
    * Response: `AgentToolDescriptor[]`
    * Errors: 501 if tool dispatcher is not configured
@@ -930,7 +947,35 @@ export function pluginRoutes(
     const pluginId = req.query.pluginId as string | undefined;
     const filter = pluginId ? { pluginId } : undefined;
     const tools = toolDeps.toolDispatcher.listToolsForAgent(filter);
-    res.json(tools);
+
+    // DUR-195: scope the listing to plugins enabled for the caller's
+    // company. Agents are always scoped to their own company. Board callers
+    // may pass ?companyId= to scope the listing to a specific company;
+    // without it the listing stays instance-wide, matching prior admin/CLI
+    // discovery behavior.
+    let companyId: string | undefined;
+    if (req.actor.type === "agent") {
+      companyId = req.actor.companyId;
+    } else {
+      const rawCompanyId = req.query.companyId;
+      if (typeof rawCompanyId === "string" && rawCompanyId.trim().length > 0) {
+        assertCompanyAccess(req, rawCompanyId);
+        companyId = rawCompanyId;
+      }
+    }
+
+    if (!companyId) {
+      res.json(tools);
+      return;
+    }
+
+    const uniquePluginDbIds = [...new Set(tools.map((tool) => tool.pluginId))];
+    const enabledByPluginDbId = new Map(
+      await Promise.all(
+        uniquePluginDbIds.map(async (dbId) => [dbId, await isPluginEnabledForCompany(dbId, companyId!)] as const),
+      ),
+    );
+    res.json(tools.filter((tool) => enabledByPluginDbId.get(tool.pluginId) !== false));
   });
 
   /**
@@ -949,6 +994,8 @@ export function pluginRoutes(
    * Response: `ToolExecutionResult`
    * Errors:
    * - 400 if request validation fails
+   * - 403 if `runContext.companyId` has disabled the tool's plugin via
+   *   `plugin_company_settings.enabled`
    * - 404 if tool is not found
    * - 501 if tool dispatcher is not configured
    * - 502 if the plugin worker is unavailable or the RPC call fails
@@ -998,6 +1045,17 @@ export function pluginRoutes(
     const registeredTool = toolDeps.toolDispatcher.getTool(tool);
     if (!registeredTool) {
       res.status(404).json({ error: `Tool "${tool}" not found` });
+      return;
+    }
+
+    // DUR-195: the target company may have disabled this tool's plugin
+    // (`plugin_company_settings.enabled = false`) even though the plugin is
+    // `ready` instance-wide. Enforce that gate here, not just at listing.
+    const pluginEnabled = await isPluginEnabledForCompany(registeredTool.pluginDbId, runContext.companyId);
+    if (!pluginEnabled) {
+      res.status(403).json({
+        error: `Plugin "${registeredTool.pluginId}" is disabled for this company`,
+      });
       return;
     }
 
