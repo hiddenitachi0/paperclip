@@ -1703,7 +1703,10 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         if (!isInCompany(parentIssue, companyId)) {
           throw new Error(`Issue not found: ${issueId}`);
         }
-        if (options?.runId && parentIssue.checkoutRunId !== options.runId) {
+        if (!options?.runId) {
+          throw new Error("runId is required");
+        }
+        if (parentIssue.checkoutRunId !== options.runId) {
           throw new Error("Issue is not currently checked out by the invoking run");
         }
         const buffer = Buffer.from(input.contentBase64, "base64");

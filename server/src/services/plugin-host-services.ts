@@ -2067,19 +2067,21 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
 
-        // Cross-check against the issue currently owning the invoking run, when
-        // a runId is supplied (tool calls always supply one). This keeps a
-        // plugin from attaching generated content to an issue it isn't
-        // currently running against, even though it declares issue.attachments.create.
-        if (params.runId) {
-          const checkoutRow = await db
-            .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
-            .from(issuesTable)
-            .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
-            .then((rows) => rows[0] ?? null);
-          if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
-            throw new Error("Issue is not currently checked out by the invoking run");
-          }
+        // runId is required and host-enforced (not opt-in): a plugin cannot
+        // attach content to an issue it isn't currently running against, even
+        // though it declares issue.attachments.create. Without this check the
+        // only remaining boundary would be company scope, which every issue
+        // in the company passes.
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const checkoutRow = await db
+          .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
+          .from(issuesTable)
+          .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
+          .then((rows) => rows[0] ?? null);
+        if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
+          throw new Error("Issue is not currently checked out by the invoking run");
         }
 
         const contentType = normalizeContentType(params.contentType);

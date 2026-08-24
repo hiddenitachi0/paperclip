@@ -39,6 +39,20 @@ function toInput(params: Record<string, unknown>): GenerationInput {
 const DATA_URL_PATTERN = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/s;
 
 /**
+ * A generation provider is expected to return an image. The host's
+ * attachment allowlist is company-wide and includes non-image types (e.g.
+ * text/html), so a misbehaving or compromised provider must not be able to
+ * smuggle non-image content through by way of its response Content-Type.
+ */
+function assertImageContentType(contentType: string): string {
+  const normalized = (contentType || "").trim().toLowerCase();
+  if (!normalized.startsWith("image/")) {
+    throw new Error(`Provider returned a non-image content type: "${contentType}"`);
+  }
+  return normalized;
+}
+
+/**
  * Resolve a generation result to raw base64 bytes. Fal only returns a remote
  * URL (bytes are never downloaded by the provider), so that path is fetched
  * host-side via ctx.http.fetch; ComfyUI/mock already embed a base64 data URL.
@@ -52,14 +66,14 @@ async function toAttachmentBytes(
     if (!match) throw new Error("Unrecognized image data URL from provider");
     const [, mime, isBase64, payload] = match;
     if (!isBase64) throw new Error("Expected a base64-encoded image data URL");
-    return { contentBase64: payload, contentType: mime || result.contentType };
+    return { contentBase64: payload, contentType: assertImageContentType(mime || result.contentType) };
   }
   if (result.imageUrl) {
     const response = await ctx.http.fetch(result.imageUrl);
     const bytes = await response.arrayBuffer();
     return {
       contentBase64: Buffer.from(bytes).toString("base64"),
-      contentType: response.headers?.get?.("content-type") || result.contentType,
+      contentType: assertImageContentType(response.headers?.get?.("content-type") || result.contentType),
     };
   }
   throw new Error("Provider returned neither imageDataUrl nor imageUrl");

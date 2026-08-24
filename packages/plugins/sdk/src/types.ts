@@ -1471,16 +1471,16 @@ export interface PluginIssuesClient {
    * Write a binary result (e.g. a generated image) as a Paperclip issue
    * attachment. Requires `issue.attachments.create`.
    *
-   * When called from a tool handler, pass the invoking `ToolRunContext.runId`
-   * as `options.runId` — the host cross-checks it against the issue's
-   * `checkoutRunId` so a plugin cannot attach to an issue it is not
-   * currently running against.
+   * Only callable from a tool handler: pass the invoking `ToolRunContext.runId`
+   * as `options.runId` — the host requires it and rejects the call unless it
+   * matches the issue's `checkoutRunId`, so a plugin cannot attach to an issue
+   * it is not currently running against.
    */
   createAttachment(
     issueId: string,
     input: { contentBase64: string; contentType: string; filename?: string | null },
     companyId: string,
-    options?: { authorAgentId?: string; runId?: string },
+    options: { authorAgentId?: string; runId: string },
   ): Promise<IssueAttachment>;
   /** Read and write issue documents. Requires `issue.documents.read` / `issue.documents.write`. */
   documents: PluginIssueDocumentsClient;

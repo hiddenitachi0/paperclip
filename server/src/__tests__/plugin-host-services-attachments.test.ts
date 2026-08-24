@@ -157,6 +157,23 @@ describeEmbeddedPostgres("plugin-host-services issues.createAttachment", () => {
     ).rejects.toThrow("Issue not found");
   });
 
+  it("rejects when runId is omitted, even though the caller has issue.attachments.create", async () => {
+    const { companyId, issueId } = await seed();
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
+      storage: createStorageServiceStub(),
+    });
+
+    await expect(
+      services.issues.createAttachment({
+        issueId,
+        companyId,
+        contentBase64: Buffer.from("x").toString("base64"),
+        contentType: "image/png",
+        runId: undefined as unknown as string,
+      }),
+    ).rejects.toThrow("runId is required");
+  });
+
   it("rejects when the supplied runId does not own the issue's checkout", async () => {
     const { companyId, issueId, staleRunId } = await seed();
     const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {

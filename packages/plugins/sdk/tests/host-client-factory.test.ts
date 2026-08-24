@@ -197,7 +197,7 @@ describe("createHostClientHandlers invocation company scope", () => {
 
     await expect(
       handlers["issues.createAttachment"](
-        { issueId: "issue-a", companyId: "company-b", contentBase64: "AA==", contentType: "image/png" },
+        { issueId: "issue-a", companyId: "company-b", contentBase64: "AA==", contentType: "image/png", runId: "run-a" },
         { invocationScope: { companyId: "company-a" } },
       ),
     ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
@@ -217,7 +217,7 @@ describe("createHostClientHandlers invocation company scope", () => {
       services,
     });
 
-    const params = { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png" };
+    const params = { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png", runId: "run-a" };
     await expect(
       handlers["issues.createAttachment"](params, { invocationScope: { companyId: "company-a" } }),
     ).resolves.toEqual({ id: "attachment-a" });
