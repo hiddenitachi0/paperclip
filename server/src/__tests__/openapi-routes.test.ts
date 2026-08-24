@@ -60,6 +60,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "agent-roles.ts",
   // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.
   "mcp-tool-library.ts",
+  // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
+  "personas.ts",
 ]);
 
 function createApp() {
