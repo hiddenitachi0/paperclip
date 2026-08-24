@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -19,6 +19,11 @@ export const personas = pgTable(
     // persona_accounts table.
     handle: text("handle"),
     status: text("status").notNull().default("draft"),
+    // DUR-63 operator decision: no global default cap -- null means
+    // unlimited until the operator sets one for this persona at creation.
+    // Enforcement (blocking generation once hit) is separate follow-up work
+    // in the routine that briefs her; this column is storage only.
+    dailyGenerationCap: integer("daily_generation_cap"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
