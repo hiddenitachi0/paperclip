@@ -747,7 +747,20 @@ export function pluginRoutes(
     return companyId === undefined ? base : { ...base, companyId };
   }
 
-  async function validateToolRunContextScope(runContext: ToolRunContext): Promise<string | null> {
+  async function validateToolRunContextScope(
+    runContext: ToolRunContext,
+    actor: Request["actor"],
+  ): Promise<string | null> {
+    // DUR-174: an agent-authenticated caller must be the same agent named in
+    // runContext.agentId, so two agents (e.g. two personas) in one company
+    // cannot reach each other's plugin tool config/secrets by supplying a
+    // runContext for someone else. Board/human callers are exempt, matching
+    // the same-agent-id guard pattern used in issues.ts checkout and
+    // costs.ts cost-event reporting.
+    if (actor.type === "agent" && actor.agentId !== runContext.agentId) {
+      return '"runContext.agentId" does not match the authenticated agent';
+    }
+
     const [agent] = await db
       .select({ companyId: agents.companyId })
       .from(agents)
@@ -975,7 +988,7 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, runContext.companyId);
-    const scopeError = await validateToolRunContextScope(runContext);
+    const scopeError = await validateToolRunContextScope(runContext, req.actor);
     if (scopeError) {
       res.status(403).json({ error: scopeError });
       return;
