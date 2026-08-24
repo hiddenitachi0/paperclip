@@ -110,6 +110,65 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     expect(result).toBeNull();
   });
 
+  it("DUR-152: allows done when the linked deploy approval was superseded but deploy-runner confirmed its commit shipped as part of a different deploy", async () => {
+    const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval(), deployApproval()]);
+    // This approval's own comment never contains the runner's literal success sentence --
+    // it was never the one that actually ran the deploy -- but the runner independently
+    // confirmed via git ancestry that its commit is live, and recorded that as a structured
+    // outcome rather than free text.
+    const readStatusLog = vi.fn().mockReturnValue([
+      {
+        ts: "t",
+        approvalId: "deploy-approval-1",
+        companyId: "company-1",
+        commentDelivered: true,
+        body: "Skipped -- a newer deploy approval (deploy-approval-2) for the same project/workspace was approved in this poll cycle and ran instead. This approval's own target commit (abc123) is already reachable from what's now live, so its change shipped as part of deploy-approval-2's deploy -- see deploy-approval-2 for that deploy's outcome.",
+        outcome: "carried",
+        commit: "abc123",
+      },
+    ]);
+
+    const result = await evaluateDeployCompletionDoneGate({
+      db: {} as any,
+      issue: ISSUE,
+      actor: AGENT_ACTOR,
+      requestedStatus: "done",
+      currentStatus: "in_review",
+      readStatusLog,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("DUR-152: a plain 'skipped, superseded' entry with no confirmed outcome still blocks done", async () => {
+    const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval(), deployApproval()]);
+    const readStatusLog = vi.fn().mockReturnValue([
+      {
+        ts: "t",
+        approvalId: "deploy-approval-1",
+        companyId: "company-1",
+        commentDelivered: true,
+        body: "Skipped -- a newer deploy approval (deploy-approval-2) for the same project/workspace was approved in this poll cycle and will run instead, to avoid two resets racing on the same checkout.",
+      },
+    ]);
+
+    const result = await evaluateDeployCompletionDoneGate({
+      db: {} as any,
+      issue: ISSUE,
+      actor: AGENT_ACTOR,
+      requestedStatus: "done",
+      currentStatus: "in_review",
+      readStatusLog,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.message).toContain("has not yet recorded it completing");
+  });
+
   it("DUR-116: does not let a completed deploy approval filed for a DIFFERENT project clear the gate", async () => {
     const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });

@@ -580,6 +580,181 @@ test("process_approval posts a skip comment (not a false success) when the backw
   }
 });
 
+// DUR-152 regression: a stale deploy approval whose commit already shipped (as an ancestor of
+// what's live) never got a runner-log entry deploy-completion-gate.ts could recognize as
+// "completed" -- its comment could only ever say "skipped", never the literal success sentence
+// (see the guardrail test just above), so whoever was waiting on it stayed stuck indefinitely.
+// This checks the structured `outcome`/`commit` fields the backward-deploy-guard path now
+// records alongside that honest "skipped" comment.
+test("DUR-152: process_approval records outcome=carried with the resolved commit when the backward-deploy guard fires", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    mkdirSync(path.join(targetPath, ".git"), { recursive: true });
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const carriedCommit = "cafef00dcafef00dcafef00dcafef00dcafef00d";
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { printf '%s' "${carriedCommit}"; return 2; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy skipped/);
+    assert.match(comments[0], /backward/);
+    assert.match(comments[0], new RegExp(carriedCommit), "the outcome comment should name the commit that's already live");
+    assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entry = statusLines.find((e) => e.approvalId === "aid-1");
+    assert.ok(entry, "expected a status-log entry for aid-1");
+    assert.equal(entry.outcome, "carried", "deploy-completion-gate.ts keys off this to confirm a superseded approval by commit, not comment text");
+    assert.equal(entry.commit, carriedCommit);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-152: the same-cycle SUPERSEDED path (two deploy approvals for the same project approved
+// in one poll cycle) using real git repos end-to-end through main(), proving the ancestry check
+// against the checkout's ACTUAL post-KEEP state, not a stub.
+test("DUR-152: a same-cycle superseded approval whose commit already shipped via the kept approval's deploy is recorded as carried", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-carried-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+    const commitB = g(originDir, ["rev-parse", "HEAD"]);
+
+    // Deploy target starts checked out at the OLDER commit A -- KEEP (targeting B) fetches +
+    // resets it forward during this poll cycle.
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    g(targetDir, ["reset", "--hard", "--quiet", commitA]);
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-older",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-08-24T02:00:00Z",
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: commitA },
+      },
+      {
+        id: "aid-newer",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-08-24T02:00:10Z",
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: commitB },
+      },
+    ]);
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetDir,
+        deployCommand: "true",
+        // Fails fast (connection refused) so health_check exhausts its one retry immediately --
+        // KEEP's outcome comment doesn't matter for this test, only that the checkout actually
+        // advanced to commitB (rollback: none leaves it there even though health "failed").
+        healthCheckUrl: "http://127.0.0.1:1/health",
+        rollback: "none",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: originDir, repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-newer.json", {
+      id: "aid-newer",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: commitB },
+    });
+    scenario.writeJson("approval-aid-older.json", {
+      id: "aid-older",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: commitA },
+    });
+
+    const result = runMain(scenario, {
+      PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES: "1",
+      PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "0",
+    });
+    assertSuccess(result, "main()");
+
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitB, "KEEP must have actually advanced the checkout to the newer commit");
+
+    const olderComments = scenario.commentsFor("aid-older");
+    assert.equal(olderComments.length, 1);
+    assert.match(olderComments[0], /already reachable from what's now live/);
+    assert.match(olderComments[0], new RegExp(commitA));
+
+    assert.deepEqual(scenario.processedIds().sort(), ["aid-newer", "aid-older"]);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const olderEntry = statusLines.find((e) => e.approvalId === "aid-older");
+    assert.ok(olderEntry, "expected a status-log entry for the superseded approval");
+    assert.equal(olderEntry.outcome, "carried");
+    assert.equal(olderEntry.commit, commitA);
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run_one_approval's crash-fallback comment does not double-comment when the real outcome comment already delivered", () => {
   const scenario = makeScenario();
   try {
