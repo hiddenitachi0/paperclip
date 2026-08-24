@@ -563,4 +563,87 @@ describe("plugin-worker-manager stderr failure context", () => {
       await handle.stop().catch(() => undefined);
     }
   });
+
+  it("serializes invocation scope even when two calls are dispatched back-to-back with no await between them (DUR-193/DUR-196)", async () => {
+    // Regression test for a TOCTOU race: acquiring the invocation scope and
+    // registering it used to be split across an `await` boundary, so two
+    // calls issued in the same synchronous turn (before either had
+    // registered) could both pass their conflict check and end up
+    // simultaneously "active" for different companies. This dispatches
+    // callA and callB synchronously back-to-back — deliberately without any
+    // `await`/`vi.waitFor` between them — to hit that cold-start window.
+    let releaseCompanyA: (() => void) | null = null;
+    const callOrder: string[] = [];
+    const companiesGet = vi.fn(async (params: { companyId: string }) => {
+      callOrder.push(params.companyId);
+      if (params.companyId === "company-a") {
+        await new Promise<void>((resolve) => {
+          releaseCompanyA = resolve;
+        });
+      }
+      return { id: params.companyId };
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers: {
+        "companies.get": companiesGet as never,
+      },
+      serializeInvocationScope: true,
+    });
+
+    try {
+      await handle.start();
+
+      // No await between these two dispatches — both `callInternal`
+      // invocations run in the same synchronous turn, with
+      // `activeInvocations` still empty when the second one's conflict
+      // check would run under the old (buggy) implementation.
+      const callA = handle.call("performAction", {
+        key: "probe",
+        params: { mode: "echo", requestedCompanyId: "company-a" },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-a",
+        },
+        renderEnvironment: null,
+      });
+      const callB = handle.call("performAction", {
+        key: "probe",
+        params: { mode: "echo", requestedCompanyId: "company-b" },
+        actorContext: {
+          type: "agent",
+          userId: null,
+          agentId: "agent-1",
+          runId: "run-1",
+          companyId: "company-b",
+        },
+        renderEnvironment: null,
+      });
+
+      // company-a's invocation is still active (its companiesGet handler is
+      // paused) — company-b's call must not reach the worker yet, no matter
+      // how close together the two calls were dispatched.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+      expect(callOrder).toEqual(["company-a"]);
+
+      releaseCompanyA?.();
+      await callA;
+
+      await expect(callB).resolves.toEqual({ id: "company-b" });
+      expect(callOrder).toEqual(["company-a", "company-b"]);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
 });

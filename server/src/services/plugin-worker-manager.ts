@@ -570,15 +570,27 @@ export function createPluginWorkerHandle(
 
   /**
    * Blocks (when `serializeInvocationScope` is enabled) until no other
-   * company's invocation is active in this worker process. Must be awaited
-   * before `registerInvocation` for any scope-bearing host→worker call —
-   * see `WorkerStartOptions.serializeInvocationScope`.
+   * company's invocation is active in this worker process, then registers
+   * this invocation, atomically with respect to that final conflict check.
+   *
+   * The check and the registration must happen with no `await` between them
+   * on the *fast* (no-conflict) path — an `await`, even on an
+   * already-resolved value, always defers the caller's continuation to a
+   * microtask, which would let a second call for a different company run
+   * its own conflict check before this one has registered, defeating
+   * `serializeInvocationScope`. As written, when there's no conflict this
+   * function runs synchronously to completion (check → register) inside a
+   * single turn, so a concurrently-dispatched call for another company can
+   * never observe the gap. See DUR-193/DUR-196.
    */
-  async function acquireInvocationScope(scope: PluginInvocationScope): Promise<void> {
-    if (!serializeInvocationScope) return;
-    while (hasConflictingActiveInvocation(scope.companyId)) {
+  async function acquireInvocationScope(
+    scope: PluginInvocationScope,
+    ttlMs?: number,
+  ): Promise<PluginInvocationContext> {
+    while (serializeInvocationScope && hasConflictingActiveInvocation(scope.companyId)) {
       await new Promise<void>((resolve) => invocationScopeWaiters.push(resolve));
     }
+    return registerInvocation(scope, ttlMs);
   }
 
   function registerInvocation(scope: PluginInvocationScope, ttlMs?: number): PluginInvocationContext {
@@ -1177,13 +1189,14 @@ export function createPluginWorkerHandle(
     const invocationScope = deriveInvocationScope(method, params);
 
     const rpcPromise = (async (): Promise<HostToWorkerMethods[M][1]> => {
-      // Must resolve before this call's invocation id is registered, so a
-      // concurrent call for a different company never has both ids live in
-      // `activeInvocations` at once (see `serializeInvocationScope`).
-      if (invocationScope) await acquireInvocationScope(invocationScope);
+      // Acquire and register are done atomically by `acquireInvocationScope`
+      // itself, so a concurrent call for a different company never has both
+      // ids live in `activeInvocations` at once (see `serializeInvocationScope`).
+      const invocation = invocationScope ? await acquireInvocationScope(invocationScope) : null;
 
       return new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
         if (!childProcess?.stdin?.writable) {
+          clearInvocation(invocation);
           reject(
             new Error(
               `Cannot call "${method}" — worker for "${pluginId}" is not running`,
@@ -1194,7 +1207,6 @@ export function createPluginWorkerHandle(
 
         const id = nextRequestId++;
         const timeout = Math.min(timeoutMs ?? rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
-        const invocation = invocationScope ? registerInvocation(invocationScope) : null;
 
         // Guard against double-settlement. When a process exits all pending
         // requests are rejected via rejectAllPending(), but the timeout timer
@@ -1319,13 +1331,17 @@ export function createPluginWorkerHandle(
       if (status !== "running") return;
       const invocationScope = deriveInvocationScope(method, params);
       void (async () => {
-        // Same ordering requirement as callInternal: acquire before
-        // registering so a concurrent notification for another company
-        // never overlaps this one's invocation id.
-        if (invocationScope) await acquireInvocationScope(invocationScope);
+        // Same ordering requirement as callInternal: acquire and register
+        // atomically so a concurrent notification for another company never
+        // overlaps this one's invocation id.
+        const invocation = invocationScope
+          ? await acquireInvocationScope(invocationScope, MAX_RPC_TIMEOUT_MS)
+          : null;
         // Worker may have stopped while this notification was queued.
-        if (status !== "running") return;
-        const invocation = invocationScope ? registerInvocation(invocationScope, MAX_RPC_TIMEOUT_MS) : null;
+        if (status !== "running") {
+          clearInvocation(invocation);
+          return;
+        }
         try {
           sendMessage({
             jsonrpc: JSONRPC_VERSION,
