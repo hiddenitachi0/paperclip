@@ -38,6 +38,7 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   backfillPrincipalAccessCompatibility,
+  seedDurStarterJobs,
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
   heartbeatService,
@@ -537,8 +538,16 @@ export async function startServer(): Promise<StartedServer> {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
   const accessBackfill = await backfillPrincipalAccessCompatibility(db as any);
-  if (accessBackfill.agentMembershipsInserted > 0 || accessBackfill.humanGrantsInserted > 0) {
+  if (
+    accessBackfill.agentMembershipsInserted > 0
+    || accessBackfill.humanGrantsInserted > 0
+    || accessBackfill.agentMergeRequestGrantsInserted > 0
+  ) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
+  }
+  const durStarterJobsSeeded = await seedDurStarterJobs(db as any);
+  if (durStarterJobsSeeded.created.length > 0) {
+    logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
   }
   if (config.deploymentMode === "authenticated") {
     const {
