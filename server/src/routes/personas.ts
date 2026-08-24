@@ -62,5 +62,50 @@ export function personaRoutes(db: Db) {
     },
   );
 
+  router.get("/companies/:companyId/personas", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const list = await service.listPersonasForCompany(companyId);
+    res.json(list);
+  });
+
+  async function loadPersonaOrRespond(req: import("express").Request, res: import("express").Response, personaId: string) {
+    const persona = await service.getPersonaWithAgentById(personaId);
+    if (!persona) {
+      res.status(404).json({ error: "Persona not found" });
+      return null;
+    }
+    await assertCompanyAccess(req, persona.companyId);
+    return persona;
+  }
+
+  router.get("/personas/:personaId", async (req, res) => {
+    assertBoard(req);
+    const persona = await loadPersonaOrRespond(req, res, req.params.personaId as string);
+    if (!persona) return;
+    res.json(persona);
+  });
+
+  router.patch(
+    "/personas/:personaId",
+    validate(updatePersonaSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const existing = await loadPersonaOrRespond(req, res, req.params.personaId as string);
+      if (!existing) return;
+      const persona = await service.updatePersonaById(existing.id, req.body);
+      res.json(persona);
+    },
+  );
+
+  router.delete("/personas/:personaId", async (req, res) => {
+    assertBoard(req);
+    const existing = await loadPersonaOrRespond(req, res, req.params.personaId as string);
+    if (!existing) return;
+    await service.deletePersonaById(existing.id);
+    res.status(204).end();
+  });
+
   return router;
 }

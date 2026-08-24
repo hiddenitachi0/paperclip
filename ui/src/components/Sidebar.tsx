@@ -21,6 +21,7 @@ import {
   Pin,
   MessagesSquare,
   RadioTower,
+  UserRound,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -187,6 +188,7 @@ export function Sidebar() {
           <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/tools" label="Tools" icon={Plug} />
+          <SidebarNavItem to="/personas" label="Personas" icon={UserRound} />
           {showWorkspacesLink ? (
             <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
           ) : null}

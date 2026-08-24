@@ -5,7 +5,7 @@
 // row: handle + lifecycle status) and renders that identity into a
 // PERSONA.md file inside the agent's managed instructions bundle, which
 // AGENTS.md references with exactly one line.
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, personas } from "@paperclipai/db";
 import type { CreatePersonaInput, UpdatePersonaInput } from "@paperclipai/shared/validators/persona";
@@ -20,6 +20,42 @@ const PERSONA_REFERENCE_LINE = "_Persona identity: see [PERSONA.md](./PERSONA.md
 
 type AgentRow = typeof agents.$inferSelect;
 type PersonaRow = typeof personas.$inferSelect;
+
+// The API/UI shape: a persona's name, face and voice are agent fields
+// (agents.name/avatarAssetId/personality/tone -- DUR-60/DUR-61) rendered
+// alongside the persona-specific columns (handle/status/dailyGenerationCap).
+// Nothing duplicates that data in the personas table itself.
+export interface PersonaWithAgent {
+  id: string;
+  companyId: string;
+  agentId: string;
+  displayName: string;
+  handle: string | null;
+  bio: string | null;
+  voice: string | null;
+  avatarAssetId: string | null;
+  status: string;
+  dailyGenerationCap: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+function toPersonaWithAgent(persona: PersonaRow, agent: Pick<AgentRow, "name" | "personality" | "tone" | "avatarAssetId">): PersonaWithAgent {
+  return {
+    id: persona.id,
+    companyId: persona.companyId,
+    agentId: persona.agentId,
+    displayName: agent.name,
+    handle: persona.handle,
+    bio: agent.personality,
+    voice: agent.tone,
+    avatarAssetId: agent.avatarAssetId,
+    status: persona.status,
+    dailyGenerationCap: persona.dailyGenerationCap,
+    createdAt: persona.createdAt,
+    updatedAt: persona.updatedAt,
+  };
+}
 
 function renderPersonaMarkdown(agent: Pick<AgentRow, "name" | "personality">, persona: Pick<PersonaRow, "handle" | "status">): string {
   const lines = [`# ${agent.name}`, ""];
@@ -71,8 +107,20 @@ async function loadAgent(db: Db, agentId: string): Promise<AgentRow> {
   return agent;
 }
 
+async function applyAgentIdentityFields(db: Db, agent: AgentRow, input: CreatePersonaInput | UpdatePersonaInput): Promise<AgentRow> {
+  const agentUpdates: Partial<Pick<AgentRow, "name" | "personality" | "tone" | "avatarAssetId">> = {};
+  if (input.displayName !== undefined) agentUpdates.name = input.displayName;
+  if (input.bio !== undefined) agentUpdates.personality = input.bio;
+  if (input.voice !== undefined) agentUpdates.tone = input.voice;
+  if (input.avatarAssetId !== undefined) agentUpdates.avatarAssetId = input.avatarAssetId;
+  if (Object.keys(agentUpdates).length === 0) return agent;
+
+  const [updated] = await db.update(agents).set(agentUpdates).where(eq(agents.id, agent.id)).returning();
+  return updated!;
+}
+
 export function personaService(db: Db) {
-  async function createPersona(agentId: string, input: CreatePersonaInput): Promise<PersonaRow> {
+  async function createPersona(agentId: string, input: CreatePersonaInput): Promise<PersonaWithAgent> {
     const agent = await loadAgent(db, agentId);
     const [existing] = await db.select({ id: personas.id }).from(personas).where(eq(personas.agentId, agentId));
     if (existing) throw conflict("This agent already has a persona.");
@@ -87,8 +135,9 @@ export function personaService(db: Db) {
         dailyGenerationCap: input.dailyGenerationCap ?? null,
       })
       .returning();
-    await syncPersonaInstructions(agent, created!);
-    return created!;
+    const finalAgent = await applyAgentIdentityFields(db, agent, input);
+    await syncPersonaInstructions(finalAgent, created!);
+    return toPersonaWithAgent(created!, finalAgent);
   }
 
   async function getPersonaByAgentId(agentId: string): Promise<PersonaRow | null> {
@@ -96,7 +145,27 @@ export function personaService(db: Db) {
     return row ?? null;
   }
 
-  async function updatePersona(agentId: string, input: UpdatePersonaInput): Promise<PersonaRow> {
+  async function getPersonaWithAgentById(personaId: string): Promise<PersonaWithAgent | null> {
+    const [row] = await db
+      .select({ persona: personas, agent: agents })
+      .from(personas)
+      .innerJoin(agents, eq(agents.id, personas.agentId))
+      .where(eq(personas.id, personaId));
+    if (!row) return null;
+    return toPersonaWithAgent(row.persona, row.agent);
+  }
+
+  async function listPersonasForCompany(companyId: string): Promise<PersonaWithAgent[]> {
+    const rows = await db
+      .select({ persona: personas, agent: agents })
+      .from(personas)
+      .innerJoin(agents, eq(agents.id, personas.agentId))
+      .where(eq(personas.companyId, companyId))
+      .orderBy(desc(personas.createdAt));
+    return rows.map((row) => toPersonaWithAgent(row.persona, row.agent));
+  }
+
+  async function updatePersona(agentId: string, input: UpdatePersonaInput): Promise<PersonaWithAgent> {
     const agent = await loadAgent(db, agentId);
     const existing = await getPersonaByAgentId(agentId);
     if (!existing) throw notFound("This agent has no persona yet.");
@@ -111,9 +180,30 @@ export function personaService(db: Db) {
       })
       .where(eq(personas.id, existing.id))
       .returning();
-    await syncPersonaInstructions(agent, updated!);
-    return updated!;
+    const finalAgent = await applyAgentIdentityFields(db, agent, input);
+    await syncPersonaInstructions(finalAgent, updated!);
+    return toPersonaWithAgent(updated!, finalAgent);
   }
 
-  return { createPersona, getPersonaByAgentId, updatePersona };
+  async function updatePersonaById(personaId: string, input: UpdatePersonaInput): Promise<PersonaWithAgent> {
+    const [existing] = await db.select().from(personas).where(eq(personas.id, personaId));
+    if (!existing) throw notFound("Persona not found");
+    return updatePersona(existing.agentId, input);
+  }
+
+  async function deletePersonaById(personaId: string): Promise<void> {
+    const [existing] = await db.select().from(personas).where(eq(personas.id, personaId));
+    if (!existing) throw notFound("Persona not found");
+    await db.delete(personas).where(eq(personas.id, personaId));
+  }
+
+  return {
+    createPersona,
+    getPersonaByAgentId,
+    getPersonaWithAgentById,
+    listPersonasForCompany,
+    updatePersona,
+    updatePersonaById,
+    deletePersonaById,
+  };
 }
