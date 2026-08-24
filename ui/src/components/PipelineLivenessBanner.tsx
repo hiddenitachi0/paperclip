@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/router";
 import { cn } from "../lib/utils";
 import { createIssueDetailPath } from "../lib/issueDetailBreadcrumb";
+import { permissionLabel } from "../lib/permission-labels";
 import {
   derivePipelineLivenessBanner,
   type LivenessBannerLink,
@@ -115,11 +116,8 @@ export function PipelineLivenessBanner({
           <p className="text-sm opacity-85">{view.body}</p>
           {view.permissionKey ? (
             <p className="text-sm opacity-85">
-              Required permission:{" "}
-              <code className="rounded-sm bg-black/10 px-1 py-0.5 text-xs font-medium dark:bg-white/10">
-                {view.permissionKey}
-              </code>{" "}
-              on the target pipeline.
+              Required permission: <span className="font-medium">{permissionLabel(view.permissionKey)}</span> on
+              the target pipeline.
             </p>
           ) : null}
           {view.blockerLink || view.automationLink ? (
