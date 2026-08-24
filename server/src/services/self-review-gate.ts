@@ -284,6 +284,7 @@ export function buildSelfReviewPassInstruction(input: {
   issueIdentifier: string | null;
   alreadyHandedOff: boolean;
   riskySurfaceCategories?: readonly RiskySurfaceCategory[];
+  requestedStatus?: string | null;
 }) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   const lines = [
@@ -304,8 +305,15 @@ export function buildSelfReviewPassInstruction(input: {
       "This issue already shows as handed off. If your review finds nothing wrong, leave the status as-is — no further action is required. If you find a real problem, fix it and leave a short comment describing what you fixed.",
     );
   } else {
+    // DUR-125: this run IS the exempt self-review pass — its own PATCH will not be re-gated.
+    // Past runs read "continue the normal handoff" as license to just report back and defer
+    // to "the next self-review-pass run," which never comes (this exemption is one-shot), so
+    // the transition never actually landed. Naming the concrete PATCH call closes that gap.
+    const statusLine = input.requestedStatus
+      ? ` This run's own \`PATCH .../${input.requestedStatus}\` will not be gated again — call it yourself, right now, in this same run.`
+      : "";
     lines.push(
-      "Once you've done this check (and fixed anything real that came up), continue the normal handoff for this issue.",
+      `Once you've done this check (and fixed anything real that came up), continue the normal handoff for this issue.${statusLine} Do not defer this to "the next self-review-pass run" — this run already is that pass, and there is no other one coming.`,
     );
   }
   return lines.join("\n");
@@ -469,6 +477,7 @@ export async function evaluateSelfReviewDoneGate(input: {
     issueIdentifier: input.issue.identifier,
     alreadyHandedOff: false,
     riskySurfaceCategories,
+    requestedStatus: input.requestedStatus,
   });
 
   try {
