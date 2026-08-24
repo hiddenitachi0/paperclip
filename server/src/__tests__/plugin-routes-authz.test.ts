@@ -993,6 +993,41 @@ describe.sequential("plugin tool and bridge authz", () => {
     );
   });
 
+  it("rejects agent JWT when runContext.agentId belongs to a different agent (DUR-174)", async () => {
+    const otherAgentInSameCompany = "88888888-8888-4888-8888-888888888888";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor(),
+      {},
+      {
+        db: createSelectQueueDb([]),
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: {
+          agentId: otherAgentInSameCompany,
+          runId: runA,
+          companyId: companyA,
+          projectId: projectA,
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
   it("rejects agent JWT when runContext.companyId is outside the agent's company scope", async () => {
     const executeTool = vi.fn();
     const { app } = await createApp(
