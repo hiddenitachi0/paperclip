@@ -90,7 +90,7 @@ describeEmbeddedPostgres("assignRoleToAgent — job switch reconciliation (DUR-1
       defaultGrants: [{ permissionKey: "tasks:assign", scope: null }],
     });
 
-    await assignRoleToAgent(db, agentId, jobX.id, {});
+    await assignRoleToAgent(db, agentId, jobX.id, { actor: { type: "board" } });
 
     // Operator adds a grant and a tool that are NOT part of either job's
     // defaults, after Job X was assigned.
@@ -117,7 +117,7 @@ describeEmbeddedPostgres("assignRoleToAgent — job switch reconciliation (DUR-1
       .where(eq(agents.id, agentId));
 
     // Switch the agent from Job X to Job Y.
-    await assignRoleToAgent(db, agentId, jobY.id, {});
+    await assignRoleToAgent(db, agentId, jobY.id, { actor: { type: "board" } });
 
     const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
     expect(updated!.roleId).toBe(jobY.id);
@@ -146,7 +146,7 @@ describeEmbeddedPostgres("assignRoleToAgent — job switch reconciliation (DUR-1
       defaultGrants: [{ permissionKey: "tasks:assign", scope: null }],
     });
 
-    await assignRoleToAgent(db, agentId, job.id, {});
+    await assignRoleToAgent(db, agentId, job.id, { actor: { type: "board" } });
 
     const grants = await db
       .select({ permissionKey: principalPermissionGrants.permissionKey })
