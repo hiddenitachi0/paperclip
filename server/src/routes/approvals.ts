@@ -410,6 +410,34 @@ export function approvalRoutes(
     return false;
   }
 
+  // DUR-146 Stage 1: filing a deploy or merge request approval requires the
+  // "ask" right (deploys:request / merges:request) — company_scope:read alone
+  // (assertApprovalAccessAllowed above) is not enough. This never touches who
+  // may APPROVE — assertBoard on /approvals/:id/approve is unchanged and no
+  // grant here ever satisfies it (see DEPLOY_APPROVAL_KEYS in
+  // services/agent-roles.ts, which refuses to let a role carry
+  // "deploys:approve"/"merges:approve" in the first place).
+  async function assertApprovalRequestPermissionAllowed(
+    req: Request,
+    res: any,
+    companyId: string,
+    permissionKey: "deploys:request" | "merges:request",
+  ): Promise<boolean> {
+    const decision = await access.decide({
+      actor: req.actor,
+      action: permissionKey,
+      resource: { type: "company", companyId },
+    });
+    if (decision.allowed) return true;
+    res.status(403).json({
+      error:
+        permissionKey === "deploys:request"
+          ? "This actor does not hold the right to ask for a deploy."
+          : "This actor does not hold the right to ask for a merge.",
+    });
+    return false;
+  }
+
   async function assertApprovalMutationAllowedByRunContext(
     req: Request,
     res: any,
@@ -505,8 +533,12 @@ export function approvalRoutes(
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
+      if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
       const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
       await assertDeployRequestProjectExists(db, companyId, deployPayload);
+    }
+    if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
+      if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
     }
     if (isModelBoostRequestApproval(approvalInput.type, approvalInput.payload)) {
       const boostPayload = modelBoostRequestPayloadSchema.parse(approvalInput.payload);
