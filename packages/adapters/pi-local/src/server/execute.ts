@@ -45,6 +45,7 @@ import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   runChildProcess,
   resolveCombinedAgentInstructionsContent,
+  composeVoiceText,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
@@ -566,7 +567,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : "";
     const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
 
-    const personaText = typeof agent.personality === "string" ? agent.personality : null;
+    const personaText = composeVoiceText(agent.tone, agent.personality);
     let systemPromptExtension = "";
     let instructionsReadFailed = false;
     let personaChars = 0;
@@ -649,7 +650,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (!resolvedInstructionsFilePath) {
         if (personaChars > 0) {
           notes.push(
-            `Applied agent personality (${personaChars} characters, voice only) — no instructions bundle configured for this agent.`,
+            `Applied agent voice (tone/personality, ${personaChars} characters) — no instructions bundle configured for this agent.`,
           );
         }
         return notes;
@@ -665,7 +666,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`,
       );
       if (personaChars > 0) {
-        notes.push(`Applied agent personality (${personaChars} characters, voice only).`);
+        notes.push(`Applied agent voice (tone/personality, ${personaChars} characters).`);
       }
       return notes;
     })();

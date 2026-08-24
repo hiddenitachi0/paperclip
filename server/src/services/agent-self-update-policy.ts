@@ -12,11 +12,19 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 // hand-picked shape of "../services/agents.js"; importing from a fresh,
 // nobody-mocks-it-yet module means an agent-config field added here doesn't
 // also require updating a dozen unrelated test mocks).
+// roleId is included so every revision snapshot records which job was active
+// at that point in time — but it must NEVER appear in the patch that
+// configPatchFromSnapshot returns for a rollback (see below): role
+// assignment fields are role-endpoint-only (DUR-148), and a rollback patch
+// containing roleId would be rejected by assertNoRoleAssignmentFields in
+// services/agents.ts. `permissions` is included and IS safe to roll back —
+// unlike roleId it has always been settable through agentService.update.
 export const CONFIG_REVISION_FIELDS = [
   "name",
   "role",
   "title",
   "icon",
+  "tone",
   "personality",
   "reportsTo",
   "capabilities",
@@ -26,6 +34,8 @@ export const CONFIG_REVISION_FIELDS = [
   "defaultEnvironmentId",
   "budgetMonthlyCents",
   "metadata",
+  "permissions",
+  "roleId",
 ] as const;
 
 export type ConfigRevisionField = (typeof CONFIG_REVISION_FIELDS)[number];
@@ -144,19 +154,33 @@ export function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agent
     metadata: isPlainRecord(snapshot.metadata) || snapshot.metadata === null ? snapshot.metadata : null,
   };
 
-  // icon and personality were added to CONFIG_REVISION_FIELDS after this
-  // table started recording revisions, so every pre-existing revision row's
-  // snapshot lacks both keys. Only set them when the snapshot actually has
-  // the key — an unconditional `?? null` would wipe a legacy agent's icon
-  // (or a personality set after the fact but before its next revision) on
-  // the first rollback to any revision that predates this change.
+  // icon, tone, and personality were added to CONFIG_REVISION_FIELDS after
+  // this table started recording revisions, so every pre-existing revision
+  // row's snapshot lacks these keys. Only set them when the snapshot
+  // actually has the key — an unconditional `?? null` would wipe a legacy
+  // agent's icon (or a tone/personality set after the fact but before its
+  // next revision) on the first rollback to any revision that predates this
+  // change.
   if (Object.prototype.hasOwnProperty.call(snapshot, "icon")) {
     patch.icon = typeof snapshot.icon === "string" || snapshot.icon === null ? snapshot.icon : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(snapshot, "tone")) {
+    patch.tone = typeof snapshot.tone === "string" || snapshot.tone === null ? snapshot.tone : null;
   }
   if (Object.prototype.hasOwnProperty.call(snapshot, "personality")) {
     patch.personality =
       typeof snapshot.personality === "string" || snapshot.personality === null ? snapshot.personality : null;
   }
+  if (Object.prototype.hasOwnProperty.call(snapshot, "permissions")) {
+    patch.permissions = isPlainRecord(snapshot.permissions) ? snapshot.permissions : {};
+  }
+
+  // roleId is deliberately NOT restored here even though it's captured in
+  // every snapshot (see the CONFIG_REVISION_FIELDS comment above): role
+  // assignment fields are role-endpoint-only, and agentService.update
+  // rejects any patch containing roleId regardless of caller. A rollback
+  // changes everything else about a revision but leaves the agent's
+  // currently-assigned job untouched.
 
   return patch;
 }

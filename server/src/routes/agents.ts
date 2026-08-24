@@ -1505,15 +1505,15 @@ export function agentRoutes(
   // agent row rather than diffing a patch, so neither goes through
   // assertAgentSelfUpdateAllowed. An agent that can hire must not be able to
   // mint a colleague with a self-authored voice — only a board-authenticated
-  // caller may set personality, on hire or on an existing agent (PATCH path:
-  // "personality" is deliberately absent from AGENT_SELF_UPDATE_ALLOWED_FIELDS
-  // in agent-self-update-policy.ts).
-  function assertNoAgentPersonalityMutation(req: Request, personality: unknown) {
+  // caller may set tone or personality, on hire or on an existing agent
+  // (PATCH path: both are deliberately absent from
+  // AGENT_SELF_UPDATE_ALLOWED_FIELDS in agent-self-update-policy.ts).
+  function assertNoAgentVoiceFieldMutation(req: Request, field: "tone" | "personality", value: unknown) {
     if (req.actor.type !== "agent") return;
-    if (personality === undefined || personality === null) return;
-    if (typeof personality === "string" && personality.trim().length === 0) return;
+    if (value === undefined || value === null) return;
+    if (typeof value === "string" && value.trim().length === 0) return;
     throw forbidden(
-      "Agent-authenticated callers cannot set \"personality\" when hiring or creating an agent. Only board-authenticated callers can.",
+      `Agent-authenticated callers cannot set "${field}" when hiring or creating an agent. Only board-authenticated callers can.`,
     );
   }
 
@@ -1588,10 +1588,13 @@ export function agentRoutes(
 
   // Any change to an agent's job title (role), display title, or tool
   // connections (adapterConfig.mcpServers) must be operator-visible in plain
-  // language regardless of who made it -- an agent-authenticated caller can
-  // no longer touch role or mcpServers at all (see assertNoAgentRoleMutation
-  // / assertNoAgentToolConnectionMutation above), but a board-authenticated
-  // (human) caller still can, and today's `changedTopLevelKeys` /
+  // language regardless of who made it. roleChange is now reachable only
+  // through the config-revision rollback path (PATCH /agents/:id itself
+  // rejects the legacy `role` field outright for every caller, board
+  // included, since DUR-148 — see the route-level hasOwn("role") check
+  // below), so a rollback that restores an earlier org-chart role is the one
+  // remaining place this can fire; titleChange and toolConnectionChange stay
+  // reachable from both PATCH and rollback. Today's `changedTopLevelKeys` /
   // `changedAdapterConfigKeys` summaries only name the fields that changed,
   // not what actually changed. This attaches the old -> new values (and, for
   // tool connections, what each added/removed server can reach) so the
@@ -2044,6 +2047,17 @@ export function agentRoutes(
         return;
       }
       await assertCanUpdateAgent(req, agent, access);
+      // DUR-148: assertCanUpdateAgent allows a self-agent holding
+      // agent_config:update to reach this route, but skill sync is exactly
+      // the kind of self-grant the role/permissions lockdown is meant to
+      // close — an agent should not be able to expand its own installed
+      // skill set unilaterally. Board-authenticated callers, and peer agents
+      // acting on another agent, are unaffected.
+      if (req.actor.type === "agent" && req.actor.agentId === id) {
+        throw forbidden(
+          "Agent-authenticated callers cannot sync skills onto their own agent record. Only board-authenticated callers, or a peer agent, can.",
+        );
+      }
 
       const requestedSkills = normalizeDesiredSkillSelections(req.body.desiredSkills);
       const {
@@ -2060,6 +2074,12 @@ export function agentRoutes(
       if (!desiredSkills || !desiredSkillEntries || !runtimeSkillEntries) {
         throw unprocessable("Skill sync requires desiredSkills.");
       }
+      // Defense in depth: this route's adapterConfig write bypasses
+      // assertAgentSelfUpdateAllowed (the generic PATCH /agents/:id path's
+      // guard), so if resolveDesiredSkillAssignment ever starts touching
+      // adapterConfig.mcpServers, the DUR-55 tool-connection lockdown must
+      // still apply here too.
+      assertNoAgentToolConnectionMutation(req, nextAdapterConfig, "adapterConfig");
       const actor = getActorInfo(req);
       const updated = await svc.update(agent.id, {
         adapterConfig: nextAdapterConfig,
@@ -2573,7 +2593,8 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, hireInput.runtimeConfig);
-    assertNoAgentPersonalityMutation(req, hireInput.personality);
+    assertNoAgentVoiceFieldMutation(req, "tone", hireInput.tone);
+    assertNoAgentVoiceFieldMutation(req, "personality", hireInput.personality);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2659,6 +2680,7 @@ export function agentRoutes(
           role: normalizedHireInput.role,
           title: normalizedHireInput.title ?? null,
           icon: normalizedHireInput.icon ?? null,
+          tone: normalizedHireInput.tone ?? null,
           personality: normalizedHireInput.personality ?? null,
           reportsTo: normalizedHireInput.reportsTo ?? null,
           capabilities: normalizedHireInput.capabilities ?? null,
@@ -2796,7 +2818,8 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, createInput.runtimeConfig);
-    assertNoAgentPersonalityMutation(req, createInput.personality);
+    assertNoAgentVoiceFieldMutation(req, "tone", createInput.tone);
+    assertNoAgentVoiceFieldMutation(req, "personality", createInput.personality);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -3231,13 +3254,23 @@ export function agentRoutes(
     }
     await assertCanUpdateAgent(req, existing, access);
 
-    if (hasOwn(req.body as object, "permissions")) {
-      res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
-      return;
-    }
-    // DUR-114: role assignment fields are role-endpoint-only. Rejecting them here
-    // ensures no path (including company import) can bypass the board-only guard.
+    // `permissions` is declared `z.never()` in updateAgentSchema, so validate()
+    // (which ran before this handler) already rejects any body containing it
+    // with a generic 400 — a route-level hasOwn("permissions") check here can
+    // never fire and was dead code (DUR-148). `roleId`/`roleAppliedMcpServerNames`/
+    // `roleAppliedPermissionKeys`/`role` below are different: they're declared
+    // permissively in updateAgentSchema specifically so they survive validate()
+    // and reach this hasOwn check, which returns the intended specific 422.
+    //
+    // DUR-114/DUR-148: role assignment fields are role-endpoint-only. Rejecting
+    // them here ensures no path (including company import) can bypass the
+    // board-only guard. `role` (the legacy organizational-role enum) gets the
+    // same treatment: a caller holding `agent_config:update` on a peer agent
+    // could otherwise PATCH { role: "ceo" } directly, which silently grants
+    // canCreateAgents via the "ceo" default-permissions branch (see
+    // canCreateAgents above) with no board-only/self-assignment check at all.
     if (
+      hasOwn(req.body as object, "role") ||
       hasOwn(req.body as object, "roleId") ||
       hasOwn(req.body as object, "roleAppliedMcpServerNames") ||
       hasOwn(req.body as object, "roleAppliedPermissionKeys")

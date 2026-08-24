@@ -559,6 +559,27 @@ describe.sequential("agent permission routes", () => {
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 
+  it("rejects the legacy role field on PATCH /agents/:id with 422, even for a fully-authorized board actor (DUR-148)", async () => {
+    // canCreateAgents() defaults to true for role "ceo" (see normalizeAgentPermissions),
+    // so a bare PATCH { role: "ceo" } would otherwise be a silent privilege grant
+    // with no board-only/self-assignment check of its own.
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ role: "ceo" }));
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("/agents/:id/role");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("blocks api key creation for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 
