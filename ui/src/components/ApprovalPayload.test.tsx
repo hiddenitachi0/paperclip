@@ -3,7 +3,13 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ApprovalPayloadRenderer, approvalLabel, approvalTechnicalReference } from "./ApprovalPayload";
+import {
+  ApprovalPayloadRenderer,
+  approvalDuplicateKey,
+  approvalLabel,
+  approvalTargetBadge,
+  approvalTechnicalReference,
+} from "./ApprovalPayload";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -30,6 +36,46 @@ describe("approvalTechnicalReference", () => {
 
   it("returns null when the payload carries no technical reference", () => {
     expect(approvalTechnicalReference({ title: "Approve hosting spend" })).toBeNull();
+  });
+});
+
+describe("approvalTargetBadge", () => {
+  it("shows the PR number for a merge_pr board approval", () => {
+    expect(approvalTargetBadge({ kind: "merge_pr", repo: "fork", prNumber: 103 })).toBe("PR #103");
+  });
+
+  it("shows a short commit for a deploy board approval", () => {
+    expect(approvalTargetBadge({ kind: "deploy", commit: "ac5efb821234567" })).toBe("commit ac5efb8");
+  });
+
+  it("returns null for kinds with nothing to badge", () => {
+    expect(approvalTargetBadge({ kind: "instructions_change" })).toBeNull();
+    expect(approvalTargetBadge(null)).toBeNull();
+  });
+});
+
+describe("approvalDuplicateKey", () => {
+  it("keys merge_pr approvals by repo + PR number", () => {
+    expect(approvalDuplicateKey({ kind: "merge_pr", repo: "fork", prNumber: 100 })).toBe(
+      "merge_pr:fork:100",
+    );
+  });
+
+  it("treats the same PR number in different repos as distinct", () => {
+    const a = approvalDuplicateKey({ kind: "merge_pr", repo: "fork", prNumber: 100 });
+    const b = approvalDuplicateKey({ kind: "merge_pr", repo: "dashboard", prNumber: 100 });
+    expect(a).not.toBe(b);
+  });
+
+  it("keys deploy approvals by commit", () => {
+    expect(approvalDuplicateKey({ kind: "deploy", commit: "abc123" })).toBe("deploy:abc123");
+  });
+
+  it("returns null when there's nothing to key on", () => {
+    expect(approvalDuplicateKey({ kind: "merge_pr" })).toBeNull();
+    expect(approvalDuplicateKey({ kind: "deploy" })).toBeNull();
+    expect(approvalDuplicateKey({ kind: "hire_agent" })).toBeNull();
+    expect(approvalDuplicateKey(null)).toBeNull();
   });
 });
 
