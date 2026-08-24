@@ -269,6 +269,17 @@ export {
 } from "./agent.js";
 
 export {
+  mcpToolLibraryConnectionSchema,
+  mcpToolLibraryEntryBodySchema,
+  mcpToolLibraryEntryUpdateSchema,
+  agentMcpToolSelectionSchema,
+  type McpToolLibraryConnection,
+  type McpToolLibraryEntryBody,
+  type McpToolLibraryEntryUpdate,
+  type AgentMcpToolSelection,
+} from "./mcp-tool-library.js";
+
+export {
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,

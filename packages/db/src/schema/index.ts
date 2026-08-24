@@ -6,6 +6,7 @@ export { cloudUpstreamConnections, cloudUpstreamRuns } from "./cloud_upstreams.j
 export { instanceUserRoles } from "./instance_user_roles.js";
 export { userSidebarPreferences } from "./user_sidebar_preferences.js";
 export { companyAgentRoles } from "./company_agent_roles.js";
+export { companyMcpTools } from "./company_mcp_tools.js";
 export { agents } from "./agents.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";
@@ -105,3 +106,4 @@ export { pluginDatabaseNamespaces, pluginMigrations } from "./plugin_database.js
 export { pluginJobs, pluginJobRuns } from "./plugin_jobs.js";
 export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
+export { untrackedWriteIncidents } from "./untracked_write_incidents.js";

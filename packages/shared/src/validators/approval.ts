@@ -49,6 +49,13 @@ export const deployRequestPayloadSchema = z
     commit: z.string().optional(),
     title: z.string().min(1),
     note: multilineTextSchema,
+    // DUR-138: lets a caller explicitly acknowledge an already-open duplicate
+    // (see findDuplicateOpenApproval / the acknowledgedDuplicateOfApprovalId
+    // check in server/src/routes/approvals.ts) and file a genuine second
+    // approval anyway. Without this field, the .strict() parse below threw
+    // before that check ever ran, making the documented escape hatch dead
+    // code for this kind.
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -73,6 +80,7 @@ export const modelBoostRequestPayloadSchema = z
     durationMinutes: z.number().int().positive().max(ESCALATION_GRANT_MAX_DURATION_MINUTES).optional(),
     title: z.string().min(1),
     summary: multilineTextSchema,
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict()
   .refine((data) => Boolean(data.requestedModel || data.requestedEffort), {
@@ -104,6 +112,7 @@ export const toolGrantRequestPayloadSchema = z
     summary: multilineTextSchema.optional(),
     capabilitySummary: z.string().optional(),
     risks: z.array(z.string()).optional(),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -137,6 +146,7 @@ export const instructionsChangeRequestPayloadSchema = z
     reason: multilineTextSchema.pipe(z.string().trim().min(1)),
     title: z.string().min(1),
     summary: multilineTextSchema.optional(),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict()
   .refine((data) => data.beforeContent !== data.afterContent, {

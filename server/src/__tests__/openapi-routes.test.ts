@@ -58,6 +58,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "pipelines.ts",
   // Agent role/job routes (DUR-114) are a new backend feature not yet in the public OpenAPI document.
   "agent-roles.ts",
+  // MCP tool library routes (DUR-143) are a new backend feature not yet in the public OpenAPI document.
+  "mcp-tool-library.ts",
 ]);
 
 function createApp() {
