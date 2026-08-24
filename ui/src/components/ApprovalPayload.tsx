@@ -49,6 +49,49 @@ export function approvalTechnicalReference(payload?: Record<string, unknown> | n
   return firstNonEmptyString(payload?.technicalReference);
 }
 
+/**
+ * Compact "what this acts on" badge for a list row — a PR number for a
+ * merge_pr board approval, a short commit for a deploy. Unlike
+ * approvalTechnicalReference (full sentence, detail page only), this is
+ * short enough to sit on the row itself (see DUR-156).
+ */
+export function approvalTargetBadge(payload?: Record<string, unknown> | null): string | null {
+  const kind = firstNonEmptyString(payload?.kind);
+  const prNumber = payload?.prNumber;
+  if (kind === "merge_pr" && prNumber !== undefined && prNumber !== null && prNumber !== "") {
+    return `PR #${prNumber}`;
+  }
+  const commit = firstNonEmptyString(payload?.commit);
+  if (kind === "deploy" && commit) {
+    return `commit ${commit.slice(0, 7)}`;
+  }
+  return null;
+}
+
+/**
+ * Key used to detect two pending approvals that target the same underlying
+ * thing — same repo+PR for a merge, same commit for a deploy — so the Now
+ * view can flag them as duplicates of each other (DUR-156). Mirrors the
+ * server-side filing-time guard (findOpenMergePrApproval) for merge_pr;
+ * deploy is keyed by commit here rather than projectId+workspaceId because
+ * that's what the operator actually needs to tell apart on the row.
+ */
+export function approvalDuplicateKey(payload?: Record<string, unknown> | null): string | null {
+  const kind = firstNonEmptyString(payload?.kind);
+  if (kind === "merge_pr") {
+    const repo = firstNonEmptyString(payload?.repo) ?? "";
+    const prNumber = payload?.prNumber;
+    if (prNumber === undefined || prNumber === null || prNumber === "") return null;
+    return `merge_pr:${repo}:${prNumber}`;
+  }
+  if (kind === "deploy") {
+    const commit = firstNonEmptyString(payload?.commit);
+    if (!commit) return null;
+    return `deploy:${commit}`;
+  }
+  return null;
+}
+
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
 export function approvalLabel(type: string, payload?: Record<string, unknown> | null): string {
   const base = typeLabel[type] ?? type;

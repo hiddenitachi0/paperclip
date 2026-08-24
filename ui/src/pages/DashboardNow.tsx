@@ -30,6 +30,8 @@ import {
   approvalLabel,
   typeIcon,
   defaultTypeIcon,
+  approvalTargetBadge,
+  approvalDuplicateKey,
 } from "../components/ApprovalPayload";
 
 // Live board polling cadence. Fast enough to feel live, slow enough to stay cheap
@@ -248,6 +250,41 @@ export function DashboardNow() {
     [approvals],
   );
 
+  // Two pending approvals can target the very same PR or commit under
+  // different wording (see DUR-156) — count how many actionable approvals
+  // share each duplicate key so rows can flag it without anyone having to
+  // open both to compare.
+  const duplicateKeyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const approval of actionableApprovals) {
+      const key = approvalDuplicateKey(approval.payload as Record<string, unknown>);
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [actionableApprovals]);
+
+  // Fetch the issue(s) each pending approval is linked to, so its row can
+  // show the human-readable reference (e.g. "DUR-142") without opening the
+  // approval (DUR-156). Small, bounded list — one query per actionable row.
+  const approvalIssueQueries = useQueries({
+    queries: actionableApprovals.map((approval) => ({
+      queryKey: [...queryKeys.approvals.list(selectedCompanyId ?? ""), approval.id, "issues"],
+      queryFn: () => approvalsApi.listIssues(approval.id),
+      enabled: !!selectedCompanyId,
+      staleTime: 30_000,
+      retry: false,
+    })),
+  });
+  const issuesByApprovalId = useMemo(() => {
+    const map = new Map<string, Issue[]>();
+    actionableApprovals.forEach((approval, index) => {
+      const data = approvalIssueQueries[index]?.data;
+      if (data) map.set(approval.id, data);
+    });
+    return map;
+  }, [actionableApprovals, approvalIssueQueries]);
+
   const agentById = useMemo(() => {
     const map = new Map<string, Agent>();
     for (const agent of agents ?? []) map.set(agent.id, agent);
@@ -311,18 +348,25 @@ export function DashboardNow() {
             <Lane key={lane.key} meta={lane} count={count}>
               {lane.key === "needs_you" ? (
                 <>
-                  {actionableApprovals.map((approval) => (
-                    <ApprovalRow
-                      key={`approval-${approval.id}`}
-                      approval={approval}
-                      companyId={selectedCompanyId}
-                      requester={
-                        approval.requestedByAgentId
-                          ? agentById.get(approval.requestedByAgentId) ?? null
-                          : null
-                      }
-                    />
-                  ))}
+                  {actionableApprovals.map((approval) => {
+                    const duplicateKey = approvalDuplicateKey(
+                      approval.payload as Record<string, unknown>,
+                    );
+                    return (
+                      <ApprovalRow
+                        key={`approval-${approval.id}`}
+                        approval={approval}
+                        companyId={selectedCompanyId}
+                        requester={
+                          approval.requestedByAgentId
+                            ? agentById.get(approval.requestedByAgentId) ?? null
+                            : null
+                        }
+                        linkedIssues={issuesByApprovalId.get(approval.id) ?? []}
+                        isDuplicate={!!duplicateKey && (duplicateKeyCounts.get(duplicateKey) ?? 0) > 1}
+                      />
+                    );
+                  })}
                   {(pendingInteractions ?? []).map((interaction) => (
                     <InteractionRow
                       key={`interaction-${interaction.id}`}
@@ -556,14 +600,23 @@ function ApprovalRow({
   approval,
   companyId,
   requester,
+  linkedIssues,
+  isDuplicate,
 }: {
   approval: Approval;
   companyId: string;
   requester: Agent | null;
+  linkedIssues: Issue[];
+  isDuplicate: boolean;
 }) {
   const queryClient = useQueryClient();
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
-  const label = approvalLabel(approval.type, approval.payload as Record<string, unknown>);
+  const payload = approval.payload as Record<string, unknown>;
+  const label = approvalLabel(approval.type, payload);
+  const targetBadge = approvalTargetBadge(payload);
+  const issueRefs = linkedIssues
+    .map((issue) => issue.identifier)
+    .filter((identifier): identifier is string => Boolean(identifier));
 
   const approveMutation = useMutation({
     mutationFn: () => approvalsApi.approve(approval.id),
@@ -583,7 +636,20 @@ function ApprovalRow({
   const isCredentialRequest = approval.type === "credential_request";
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2">
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-lg border px-2.5 py-2",
+        isDuplicate
+          ? "border-red-500/50 bg-red-500/[0.06]"
+          : "border-amber-500/40 bg-amber-500/[0.04]",
+      )}
+    >
+      {isDuplicate ? (
+        <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          Same {targetBadge ?? "target"} as another pending approval — approving both is likely wrong
+        </p>
+      ) : null}
       <Link
         to={`/approvals/${approval.id}`}
         className="group flex items-start gap-1.5"
@@ -593,6 +659,23 @@ function ApprovalRow({
           <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
             {label}
           </p>
+          {(issueRefs.length > 0 || targetBadge) && (
+            <div className="mt-0.5 flex flex-wrap items-center gap-1">
+              {issueRefs.map((ref) => (
+                <span
+                  key={ref}
+                  className="rounded bg-muted px-1 py-px font-mono text-[10px] text-muted-foreground"
+                >
+                  {ref}
+                </span>
+              ))}
+              {targetBadge ? (
+                <span className="rounded bg-muted px-1 py-px font-mono text-[10px] text-muted-foreground">
+                  {targetBadge}
+                </span>
+              ) : null}
+            </div>
+          )}
           <p className="text-[10px] text-muted-foreground">
             {requester ? `From ${requester.name} · ` : ""}
             {relativeTime(approval.createdAt)}
