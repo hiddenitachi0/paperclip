@@ -84,6 +84,7 @@ export function personaService(db: Db) {
         agentId,
         handle: input.handle ?? null,
         status: input.status ?? "draft",
+        dailyGenerationCap: input.dailyGenerationCap ?? null,
       })
       .returning();
     await syncPersonaInstructions(agent, created!);
@@ -105,6 +106,7 @@ export function personaService(db: Db) {
       .set({
         handle: input.handle !== undefined ? input.handle : existing.handle,
         status: input.status ?? existing.status,
+        dailyGenerationCap: input.dailyGenerationCap !== undefined ? input.dailyGenerationCap : existing.dailyGenerationCap,
         updatedAt: new Date(),
       })
       .where(eq(personas.id, existing.id))
