@@ -26,6 +26,16 @@ export const DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 60;
 export const MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 1;
 export const MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 3650;
 
+// DUR-151: hard ceiling on how many heartbeat runs may be `running` across
+// the WHOLE instance at once, regardless of how many agents want to run or
+// what their individual `maxConcurrentRuns` allows. Per-agent caps alone
+// don't prevent the box from being oversubscribed once enough agents are
+// active at the same time. Default of 4 matches this fork's own 4-CPU box;
+// operators on different hardware should tune it.
+export const DEFAULT_INSTANCE_CONCURRENCY_CAP = 4;
+export const MIN_INSTANCE_CONCURRENCY_CAP = 1;
+export const MAX_INSTANCE_CONCURRENCY_CAP = 50;
+
 /**
  * Instance-wide execution policy.
  *
@@ -51,6 +61,13 @@ export interface InstanceGeneralSettings {
   executionMode?: InstanceExecutionMode;
   /** Days since `agents.instructionsReviewedAt` before an agent is flagged stale. */
   instructionsStalenessThresholdDays: number;
+  /**
+   * Hard ceiling on `running` heartbeat runs across the whole instance,
+   * independent of any agent's own `maxConcurrentRuns`. Runs that can't
+   * start because this cap is full stay `queued` (see
+   * `heartbeatRuns.capacityWaitSince`) instead of being spawned and lost.
+   */
+  instanceConcurrencyCap: number;
 }
 
 export interface InstanceExperimentalSettings {

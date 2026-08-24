@@ -47,6 +47,14 @@ export interface HeartbeatRun {
   scheduledRetryAttempt?: number;
   scheduledRetryReason?: string | null;
   retryExhaustedReason?: string | null;
+  /**
+   * Set the moment a `queued` run is held back specifically because the
+   * instance-wide concurrency cap is full (not because of its own agent's
+   * cap, and not yet attempted at all). Cleared when the run is claimed.
+   * Lets the run record say "waiting for capacity" instead of looking like
+   * an ordinary just-created queued run.
+   */
+  capacityWaitSince?: Date | null;
   livenessState: RunLivenessState | null;
   livenessReason: string | null;
   continuationAttempt: number;

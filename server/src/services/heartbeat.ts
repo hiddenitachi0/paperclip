@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -211,6 +211,7 @@ import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
+import { createInstanceStartLock } from "./instance-start-lock.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -4904,6 +4905,7 @@ export interface HeartbeatServiceOptions {
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const instanceSettings = instanceSettingsService(db);
+  const { withInstanceStartLock } = createInstanceStartLock();
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
@@ -9269,6 +9271,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  // DUR-151: count of `running` runs across every agent and every company on
+  // this instance, deliberately unscoped by agentId/companyId -- the whole
+  // point is a ceiling that per-agent policy can't see past.
+  async function countRunningRunsInstanceWide() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+    return Number(count ?? 0);
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -9363,6 +9376,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .set({
         status: "running",
         startedAt: run.startedAt ?? claimedAt,
+        capacityWaitSince: null,
         updatedAt: claimedAt,
       })
       .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
@@ -10090,6 +10104,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       await finalizeAgentStatus(run.agentId, "failed", baseMessage);
       await startNextQueuedRunForAgent(run.agentId);
+      await wakeInstanceCapacityWaitingAgents();
       runningProcesses.delete(run.id);
       reaped.push(run.id);
     }
@@ -10239,8 +10254,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
-      if (availableSlots <= 0) return [];
+      const agentAvailableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+      if (agentAvailableSlots <= 0) return [];
 
       const queuedRuns = await db
         .select()
@@ -10287,6 +10302,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return left.createdAt.getTime() - right.createdAt.getTime();
       });
 
+      // Only the "read the instance-wide count, then decide how many slots
+      // are free" step is lock-protected -- NOT the claim loop below. Claiming
+      // a queued run (claimQueuedRun) can itself cancel it and recursively
+      // call back into startNextQueuedRunForAgent (e.g. via cancelRunInternal
+      // -> wakeInstanceCapacityWaitingAgents), which would try to reacquire
+      // this same lock from inside its own callback and deadlock -- the lock
+      // isn't reentrant. Keeping the locked section to just the read-and-decide
+      // step avoids that while still closing the great majority of the race
+      // (two agents both observing stale spare capacity at once); the actual
+      // per-row claim below is independently atomic (`WHERE status='queued'`),
+      // so at worst a rare race lets the instance overshoot the cap by a run
+      // or two -- acceptable for a soft ceiling, not worth a reentrant lock.
+      const instanceAvailableSlots = await withInstanceStartLock(async () => {
+        const { instanceConcurrencyCap } = await instanceSettings.getGeneral();
+        const instanceRunningCount = await countRunningRunsInstanceWide();
+        return Math.max(0, instanceConcurrencyCap - instanceRunningCount);
+      });
+      const availableSlots = Math.min(agentAvailableSlots, instanceAvailableSlots);
+
+      if (availableSlots <= 0) {
+        if (instanceAvailableSlots <= 0) {
+          await markRunsWaitingForInstanceCapacity(prioritizedRuns.map((run) => run.id));
+        }
+        return [];
+      }
+
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
@@ -10302,6 +10343,37 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       return claimedRuns;
     });
+  }
+
+  // DUR-151: stamp queued runs that are being held back specifically because
+  // the instance-wide concurrency cap is full, so the run record can tell
+  // "waiting for capacity" apart from "just created" or a genuine failure.
+  // Only sets the timestamp the first time (idempotent) -- it marks when the
+  // wait STARTED, not the most recent check.
+  async function markRunsWaitingForInstanceCapacity(runIds: string[]) {
+    if (runIds.length === 0) return;
+    await db
+      .update(heartbeatRuns)
+      .set({ capacityWaitSince: new Date(), updatedAt: new Date() })
+      .where(and(inArray(heartbeatRuns.id, runIds), isNull(heartbeatRuns.capacityWaitSince)));
+  }
+
+  // DUR-151: a run leaving "running" may free an instance-wide slot that a
+  // DIFFERENT agent's queued run is waiting on -- startNextQueuedRunForAgent
+  // alone only ever re-checks the agent whose own run just changed state.
+  // Deliberately cheap in the (overwhelmingly common) case where nothing is
+  // capacity-blocked: one indexed-ish existence-shaped query, no join across
+  // every company's queued work like a full resumeQueuedRuns() sweep would
+  // do. Only agents this function itself previously marked via
+  // markRunsWaitingForInstanceCapacity are touched.
+  async function wakeInstanceCapacityWaitingAgents() {
+    const waitingAgentIds = await db
+      .selectDistinct({ agentId: heartbeatRuns.agentId })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.status, "queued"), isNotNull(heartbeatRuns.capacityWaitSince)));
+    for (const { agentId } of waitingAgentIds) {
+      await startNextQueuedRunForAgent(agentId);
+    }
   }
 
   async function executeRun(runId: string) {
@@ -12639,6 +12711,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           activeRunExecutions.delete(run.id);
           await startNextQueuedRunForAgent(run.agentId);
+          await wakeInstanceCapacityWaitingAgents();
         }
   }
 
@@ -14494,6 +14567,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     await finalizeAgentStatus(run.agentId, "cancelled");
     await startNextQueuedRunForAgent(run.agentId);
+    await wakeInstanceCapacityWaitingAgents();
     return cancelled;
   }
 

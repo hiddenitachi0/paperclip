@@ -11,6 +11,9 @@ import {
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  DEFAULT_INSTANCE_CONCURRENCY_CAP,
+  MIN_INSTANCE_CONCURRENCY_CAP,
+  MAX_INSTANCE_CONCURRENCY_CAP,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
 
@@ -43,6 +46,12 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS)
     .max(MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS)
     .default(DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS),
+  instanceConcurrencyCap: z
+    .number()
+    .int()
+    .min(MIN_INSTANCE_CONCURRENCY_CAP)
+    .max(MAX_INSTANCE_CONCURRENCY_CAP)
+    .default(DEFAULT_INSTANCE_CONCURRENCY_CAP),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
