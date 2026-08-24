@@ -75,6 +75,12 @@ import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 import { sanitizeRecord } from "../redaction.js";
+import { getStorageService } from "../storage/index.js";
+import {
+  isAllowedContentType,
+  normalizeContentType,
+  normalizeIssueAttachmentMaxBytes,
+} from "../attachment-types.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -493,8 +499,13 @@ export function buildHostServices(
   pluginKey: string,
   eventBus: PluginEventBus,
   notifyWorker?: (method: string, params: unknown) => void,
-  options: { pluginWorkerManager?: PluginWorkerManager; manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1 } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
+    storage?: import("../storage/types.js").StorageService;
+  } = {},
 ): HostServices & { dispose(): void } {
+  const getStorage = () => options.storage ?? getStorageService();
   const registry = pluginRegistryService(db);
   const stateStore = pluginStateStore(db);
   const pluginDb = pluginDatabaseService(db);
@@ -2050,6 +2061,88 @@ export function buildHostServices(
           },
         });
         return interaction as any;
+      },
+      async createAttachment(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+
+        // Cross-check against the issue currently owning the invoking run, when
+        // a runId is supplied (tool calls always supply one). This keeps a
+        // plugin from attaching generated content to an issue it isn't
+        // currently running against, even though it declares issue.attachments.create.
+        if (params.runId) {
+          const checkoutRow = await db
+            .select({ id: issuesTable.id, checkoutRunId: issuesTable.checkoutRunId })
+            .from(issuesTable)
+            .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
+            .then((rows) => rows[0] ?? null);
+          if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
+            throw new Error("Issue is not currently checked out by the invoking run");
+          }
+        }
+
+        const contentType = normalizeContentType(params.contentType);
+        if (!isAllowedContentType(contentType)) {
+          throw new Error(`Attachment content type "${contentType}" is not allowed`);
+        }
+
+        let buffer: Buffer;
+        try {
+          buffer = Buffer.from(params.contentBase64, "base64");
+        } catch {
+          throw new Error("contentBase64 is not valid base64");
+        }
+        if (buffer.length <= 0) {
+          throw new Error("Attachment is empty");
+        }
+
+        const company = await companies.getById(companyId);
+        const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        if (buffer.length > attachmentMaxBytes) {
+          throw new Error(`Attachment exceeds ${attachmentMaxBytes} bytes`);
+        }
+
+        const stored = await getStorage().putFile({
+          companyId,
+          namespace: `issues/${issue.id}`,
+          originalFilename: params.filename ?? null,
+          contentType,
+          body: buffer,
+        });
+
+        const attachment = await issues.createAttachment({
+          issueId: issue.id,
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: stored.originalFilename,
+          createdByAgentId: params.authorAgentId ?? null,
+        });
+
+        await logPluginActivity({
+          companyId,
+          action: "issue.attachment.created",
+          entityType: "issue",
+          entityId: issue.id,
+          actor: { actorAgentId: params.authorAgentId ?? null, actorRunId: params.runId ?? null },
+          details: {
+            identifier: issue.identifier,
+            attachmentId: attachment.id,
+            contentType: attachment.contentType,
+            byteSize: attachment.byteSize,
+          },
+        });
+
+        const contentPath = `/api/attachments/${attachment.id}/content`;
+        return {
+          ...attachment,
+          contentPath,
+          openPath: contentPath,
+          downloadPath: `${contentPath}?download=1`,
+        } as any;
       },
     },
 

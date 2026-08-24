@@ -862,6 +862,23 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("issues.createComment", { issueId, body, companyId, authorAgentId: options?.authorAgentId });
         },
 
+        async createAttachment(
+          issueId: string,
+          input: { contentBase64: string; contentType: string; filename?: string | null },
+          companyId: string,
+          options?: { authorAgentId?: string; runId?: string },
+        ) {
+          return callHost("issues.createAttachment", {
+            issueId,
+            companyId,
+            contentBase64: input.contentBase64,
+            contentType: input.contentType,
+            filename: input.filename,
+            runId: options?.runId,
+            authorAgentId: options?.authorAgentId,
+          });
+        },
+
         async createInteraction(issueId: string, interaction, companyId: string, options?: { authorAgentId?: string }) {
           return callHost("issues.createInteraction", {
             issueId,

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
 import type {
   PaperclipPluginManifestV1,
@@ -15,6 +15,7 @@ import type {
   RoutineRun,
   Issue,
   IssueComment,
+  IssueAttachment,
   IssueThreadInteraction,
   CreateIssueThreadInteraction,
   IssueDocument,
@@ -492,6 +493,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const blockedByIssueIds = new Map<string, string[]>();
   const issueComments = new Map<string, IssueComment[]>();
   const issueInteractions = new Map<string, IssueThreadInteraction[]>();
+  const issueAttachments = new Map<string, IssueAttachment[]>();
   const issueDocuments = new Map<string, IssueDocument>();
   const agents = new Map<string, Agent>();
   const goals = new Map<string, Goal>();
@@ -1694,6 +1696,43 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         current.push(comment);
         issueComments.set(issueId, current);
         return comment;
+      },
+      async createAttachment(issueId, input, companyId, options) {
+        requireCapability(manifest, capabilitySet, "issue.attachments.create");
+        const parentIssue = issues.get(issueId);
+        if (!isInCompany(parentIssue, companyId)) {
+          throw new Error(`Issue not found: ${issueId}`);
+        }
+        if (options?.runId && parentIssue.checkoutRunId !== options.runId) {
+          throw new Error("Issue is not currently checked out by the invoking run");
+        }
+        const buffer = Buffer.from(input.contentBase64, "base64");
+        const now = new Date();
+        const contentPath = `/api/attachments/${randomUUID()}/content`;
+        const attachment: IssueAttachment = {
+          id: randomUUID(),
+          companyId: parentIssue.companyId,
+          issueId,
+          issueCommentId: null,
+          assetId: randomUUID(),
+          provider: "memory",
+          objectKey: `issues/${issueId}/${randomUUID()}`,
+          contentType: input.contentType,
+          byteSize: buffer.length,
+          sha256: createHash("sha256").update(buffer).digest("hex"),
+          originalFilename: input.filename ?? null,
+          createdByAgentId: options?.authorAgentId ?? null,
+          createdByUserId: null,
+          createdAt: now,
+          updatedAt: now,
+          contentPath,
+          openPath: contentPath,
+          downloadPath: `${contentPath}?download=1`,
+        };
+        const current = issueAttachments.get(issueId) ?? [];
+        current.push(attachment);
+        issueAttachments.set(issueId, current);
+        return attachment;
       },
       async createInteraction(issueId, interaction, companyId, options) {
         requireCapability(manifest, capabilitySet, "issue.interactions.create");

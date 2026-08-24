@@ -118,6 +118,12 @@ describe("createHostClientHandlers invocation company scope", () => {
       { companyId: "company-a" },
       (services: HostServices) => vi.mocked(services.authorization.searchAudit),
     ],
+    [
+      "issues.createAttachment",
+      "issue.attachments.create",
+      { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png" },
+      (services: HostServices) => vi.mocked(services.issues.createAttachment),
+    ],
   ] as const)(
     "rejects %s when the plugin lacks %s",
     async (method, capability, params, getDelegate) => {
@@ -130,6 +136,9 @@ describe("createHostClientHandlers invocation company scope", () => {
           setGrants: vi.fn(async () => []),
           updatePolicy: vi.fn(async () => ({ policy: null })),
           searchAudit: vi.fn(async () => []),
+        },
+        issues: {
+          createAttachment: vi.fn(async () => ({ id: "attachment-a" })),
         },
       } as unknown as HostServices;
       const handlers = createHostClientHandlers({
@@ -171,5 +180,47 @@ describe("createHostClientHandlers invocation company scope", () => {
       ),
     ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
     expect(searchAudit).not.toHaveBeenCalled();
+  });
+
+  it("rejects issues.createAttachment for an issue outside the current invocation company", async () => {
+    const createAttachment = vi.fn(async () => ({ id: "attachment-a" }));
+    const services = {
+      issues: {
+        createAttachment,
+      },
+    } as unknown as HostServices;
+    const handlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: ["issue.attachments.create"],
+      services,
+    });
+
+    await expect(
+      handlers["issues.createAttachment"](
+        { issueId: "issue-a", companyId: "company-b", contentBase64: "AA==", contentType: "image/png" },
+        { invocationScope: { companyId: "company-a" } },
+      ),
+    ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(createAttachment).not.toHaveBeenCalled();
+  });
+
+  it("allows issues.createAttachment within the current invocation company", async () => {
+    const createAttachment = vi.fn(async () => ({ id: "attachment-a" }));
+    const services = {
+      issues: {
+        createAttachment,
+      },
+    } as unknown as HostServices;
+    const handlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: ["issue.attachments.create"],
+      services,
+    });
+
+    const params = { issueId: "issue-a", companyId: "company-a", contentBase64: "AA==", contentType: "image/png" };
+    await expect(
+      handlers["issues.createAttachment"](params, { invocationScope: { companyId: "company-a" } }),
+    ).resolves.toEqual({ id: "attachment-a" });
+    expect(createAttachment).toHaveBeenCalledWith(params);
   });
 });

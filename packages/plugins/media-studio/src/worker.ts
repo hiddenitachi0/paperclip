@@ -36,6 +36,35 @@ function toInput(params: Record<string, unknown>): GenerationInput {
   };
 }
 
+const DATA_URL_PATTERN = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/s;
+
+/**
+ * Resolve a generation result to raw base64 bytes. Fal only returns a remote
+ * URL (bytes are never downloaded by the provider), so that path is fetched
+ * host-side via ctx.http.fetch; ComfyUI/mock already embed a base64 data URL.
+ */
+async function toAttachmentBytes(
+  ctx: PluginContext,
+  result: GenerationResult,
+): Promise<{ contentBase64: string; contentType: string }> {
+  if (result.imageDataUrl) {
+    const match = DATA_URL_PATTERN.exec(result.imageDataUrl);
+    if (!match) throw new Error("Unrecognized image data URL from provider");
+    const [, mime, isBase64, payload] = match;
+    if (!isBase64) throw new Error("Expected a base64-encoded image data URL");
+    return { contentBase64: payload, contentType: mime || result.contentType };
+  }
+  if (result.imageUrl) {
+    const response = await ctx.http.fetch(result.imageUrl);
+    const bytes = await response.arrayBuffer();
+    return {
+      contentBase64: Buffer.from(bytes).toString("base64"),
+      contentType: response.headers?.get?.("content-type") || result.contentType,
+    };
+  }
+  throw new Error("Provider returned neither imageDataUrl nor imageUrl");
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     // Agent-callable tool: an employee can generate a preview as part of its work.
@@ -54,14 +83,24 @@ const plugin = definePlugin({
           required: ["prompt"],
         },
       },
-      async (params, _runCtx): Promise<ToolResult> => {
-        const input = toInput(params as Record<string, unknown>);
+      async (params, runCtx): Promise<ToolResult> => {
+        const rawParams = params as Record<string, unknown>;
+        const input = toInput(rawParams);
         if (!input.prompt) return { error: "prompt is required" };
+        const issueId = typeof rawParams.issueId === "string" ? rawParams.issueId : "";
+        if (!issueId) return { error: "issueId is required" };
         try {
           const result = await runGeneration(ctx, input);
+          const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);
+          const attachment = await ctx.issues.createAttachment(
+            issueId,
+            { contentBase64, contentType, filename: `${result.provider}-generation.${contentType.split("/")[1] ?? "bin"}` },
+            runCtx.companyId,
+            { authorAgentId: runCtx.agentId, runId: runCtx.runId },
+          );
           return {
-            content: `Generated a ${result.provider} preview. Submit it for board approval before posting.`,
-            data: result,
+            content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.`,
+            data: { ...result, attachmentId: attachment.id, contentPath: attachment.contentPath },
           };
         } catch (err) {
           return { error: err instanceof Error ? err.message : String(err) };

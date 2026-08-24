@@ -19,6 +19,7 @@ import type {
   Project,
   Issue,
   IssueComment,
+  IssueAttachment,
   IssueDocument,
   IssueDocumentSummary,
   IssueRelationIssueSummary,
@@ -119,6 +120,7 @@ export type {
   Project,
   Issue,
   IssueComment,
+  IssueAttachment,
   IssueDocument,
   IssueDocumentSummary,
   IssueRelationIssueSummary,
@@ -1465,6 +1467,21 @@ export interface PluginIssuesClient {
     companyId: string,
     options?: { authorAgentId?: string },
   ): Promise<RequestCheckboxConfirmationInteraction>;
+  /**
+   * Write a binary result (e.g. a generated image) as a Paperclip issue
+   * attachment. Requires `issue.attachments.create`.
+   *
+   * When called from a tool handler, pass the invoking `ToolRunContext.runId`
+   * as `options.runId` — the host cross-checks it against the issue's
+   * `checkoutRunId` so a plugin cannot attach to an issue it is not
+   * currently running against.
+   */
+  createAttachment(
+    issueId: string,
+    input: { contentBase64: string; contentType: string; filename?: string | null },
+    companyId: string,
+    options?: { authorAgentId?: string; runId?: string },
+  ): Promise<IssueAttachment>;
   /** Read and write issue documents. Requires `issue.documents.read` / `issue.documents.write`. */
   documents: PluginIssueDocumentsClient;
   /** Read and write blocker relationships. */
