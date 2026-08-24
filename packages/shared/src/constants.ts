@@ -878,6 +878,14 @@ export const PERMISSION_KEYS = [
   "tasks:manage_active_checkouts",
   "pipelines:write",
   "joins:approve",
+  // DUR-65: the right to file a deploy/merge *request* approval. This is
+  // deliberately never granted by default to any existing principal (Filip's
+  // 22 Aug ruling: "Start with nobody holding it and let Filip assign it") --
+  // it is only ever obtained via an explicit Jobs role grant or an operator
+  // grant. Approving one still always requires a board actor (see assertBoard
+  // in routes/approvals.ts); this key only gates who may *ask*.
+  "deploys:request",
+  "merges:request",
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 

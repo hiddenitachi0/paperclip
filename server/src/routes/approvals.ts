@@ -410,6 +410,44 @@ export function approvalRoutes(
     return false;
   }
 
+  /**
+   * DUR-65: filing a deploy/merge *request* approval requires the matching
+   * "ask" right (deploys:request / merges:request). This never blocks
+   * deciding an approval -- assertBoard still gates approve/reject
+   * unconditionally -- it only gates who may ask. A board actor (local
+   * implicit board or instance admin) always passes access.decide()
+   * regardless of grants, so this only constrains real company members and
+   * agents, matching every other permission-keyed check in this codebase.
+   */
+  async function assertApprovalRequestRightAllowed(
+    req: Request,
+    res: any,
+    companyId: string,
+    type: unknown,
+    payload: Record<string, unknown>,
+  ) {
+    const action = isDeployRequestApproval(type, payload)
+      ? "deploys:request"
+      : isMergePrRequestApproval(type, payload)
+        ? "merges:request"
+        : null;
+    if (!action) return true;
+    const decision = await access.decide({
+      actor: req.actor,
+      action,
+      resource: { type: "company", companyId },
+    });
+    if (decision.allowed) return true;
+    res.status(403).json({
+      error:
+        action === "deploys:request"
+          ? "This actor is not allowed to ask for a deploy"
+          : "This actor is not allowed to ask for a merge",
+      details: { reason: decision.reason },
+    });
+    return false;
+  }
+
   async function assertApprovalMutationAllowedByRunContext(
     req: Request,
     res: any,
@@ -496,6 +534,9 @@ export function approvalRoutes(
       !(await assertApprovalMutationAllowedByRunContext(req, res, companyId, {
         describeBlockedAction: () => describeApprovalMutationForEscalation(req.body),
       }))
+    ) return;
+    if (
+      !(await assertApprovalRequestRightAllowed(req, res, companyId, req.body.type, req.body.payload))
     ) return;
     const rawIssueIds = req.body.issueIds;
     const issueIds = Array.isArray(rawIssueIds)

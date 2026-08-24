@@ -34,6 +34,8 @@ export function grantsForHumanRole(
         { permissionKey: "users:manage_permissions", scope: null },
         { permissionKey: "tasks:assign", scope: null },
         { permissionKey: "joins:approve", scope: null },
+        { permissionKey: "deploys:request", scope: null },
+        { permissionKey: "merges:request", scope: null },
       ];
     case "admin":
       return [
@@ -43,8 +45,14 @@ export function grantsForHumanRole(
         { permissionKey: "users:invite", scope: null },
         { permissionKey: "tasks:assign", scope: null },
         { permissionKey: "joins:approve", scope: null },
+        { permissionKey: "deploys:request", scope: null },
+        { permissionKey: "merges:request", scope: null },
       ];
     case "operator":
+      // DUR-65: deliberately not granted here -- an operator-level human
+      // member is not a "boss" by default. Filing a deploy/merge approval as
+      // an operator now requires an explicit grant, same as any agent would
+      // need. (owner/admin retain it above; see grantsForHumanRole callers.)
       return [{ permissionKey: "tasks:assign", scope: null }];
     case "viewer":
       return [];
