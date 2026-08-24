@@ -78,7 +78,15 @@ LOG="${PAPERCLIP_DEPLOY_RUNNER_LOG:-$REPO_DIR/deploy-runner.log}"
 DOCKER_SERVER_CONTAINER="${PAPERCLIP_DEPLOY_RUNNER_CONTAINER:-docker-server-1}"
 CLI='cd /app && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts'
 ARGS='--api-base http://127.0.0.1:3100 --data-dir /paperclip/cli-state --json'
-HEALTH_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES:-30}"
+# DUR-164: 8b89106e's own code booted clean and passed /api/health in ~11s
+# when reproduced in isolation (fresh embedded Postgres, all 142 migrations
+# incl. 0140/0141 applied) — no startup crash, no slow migration. The 90s
+# budget (30 * 3s) that deploy previously ran against just wasn't enough
+# margin on this box, which DUR-151 already flagged as routinely oversubscribed
+# with concurrent agent runs; a real container recreate can take meaningfully
+# longer than a bare-process boot under that contention. Widened to 180s
+# (60 * 3s) so a slow-but-healthy boot doesn't get killed and rolled back.
+HEALTH_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES:-60}"
 HEALTH_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP:-3}"
 # How hard to try to actually deliver the outcome comment before giving up
 # and leaving the approval unprocessed for the next poll cycle. Sized to
