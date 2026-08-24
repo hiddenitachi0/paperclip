@@ -214,6 +214,89 @@ describe("agent roles — role body validation rejects deploy-approval grants", 
   });
 });
 
+describe("GET /agents/:agentId/role — response shape (DUR-142)", () => {
+  // DUR-142: the UI's AgentRoleState type (job/assignedAt/tools{fromJob,added,removed}/
+  // rights{fromJob,added,removed}) never matched what this route returned
+  // (role/overrides), so every agent detail page crashed on `roleState.tools.fromJob`.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAuthz.assertBoard.mockReturnValue(undefined);
+    mockAuthz.assertCompanyAccess.mockResolvedValue(undefined);
+  });
+
+  it("returns the full shape with empty arrays for an agent with no role assigned", async () => {
+    const mockSelect = vi
+      .fn()
+      .mockReturnValueOnce({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue([{ ...baseAgent, roleId: null }]),
+        }),
+      })
+      .mockReturnValueOnce({
+        from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }),
+      });
+    const fakeDb = { select: mockSelect } as any;
+
+    const app = express();
+    app.use(express.json());
+    const { agentRoleRoutes } = await import("../routes/agent-roles.js");
+    app.use("/api", agentRoleRoutes(fakeDb));
+
+    const res = await request(app).get(`/api/agents/${agentId}/role`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      job: null,
+      assignedAt: null,
+      tools: { fromJob: [], added: [], removed: [] },
+      rights: { fromJob: [], added: [], removed: [] },
+    });
+  });
+
+  it("computes tool/right override diffs for an agent with an assigned role", async () => {
+    mockAgentRolesService.getRole.mockResolvedValue(baseRole);
+    const agentWithRole = {
+      ...baseAgent,
+      roleId,
+      adapterConfig: { mcpServers: [{ name: "github-mcp" }, { name: "extra-tool" }] },
+      roleAppliedMcpServerNames: ["github-mcp", "removed-tool"],
+      roleAppliedPermissionKeys: ["tasks:assign", "revoked:key"],
+    };
+    const mockSelect = vi
+      .fn()
+      .mockReturnValueOnce({
+        from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([agentWithRole]) }),
+      })
+      .mockReturnValueOnce({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue([
+            { permissionKey: "tasks:assign", scope: null },
+            { permissionKey: "extra:grant", scope: null },
+          ]),
+        }),
+      });
+    const fakeDb = { select: mockSelect } as any;
+
+    const app = express();
+    app.use(express.json());
+    const { agentRoleRoutes } = await import("../routes/agent-roles.js");
+    app.use("/api", agentRoleRoutes(fakeDb));
+
+    const res = await request(app).get(`/api/agents/${agentId}/role`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.job).toEqual({ id: roleId, name: "Tech developer", description: "Writes code" });
+    expect(res.body.tools).toEqual({
+      fromJob: ["github-mcp"],
+      added: ["extra-tool"],
+      removed: ["removed-tool"],
+    });
+    expect(res.body.rights.fromJob).toEqual([{ permissionKey: "tasks:assign", scope: null }]);
+    expect(res.body.rights.added).toEqual([{ permissionKey: "extra:grant", scope: null }]);
+    expect(res.body.rights.removed).toEqual([{ permissionKey: "revoked:key", scope: null }]);
+  });
+});
+
 // PATCH /agents/:id rejecting roleId/role-snapshot fields with a real 422 is
 // covered end-to-end (real express app, real `validate(updateAgentSchema)`
 // middleware, real route handler, supertest request) in

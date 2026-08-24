@@ -94,7 +94,9 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       title: overrides.title ?? "Watched issue",
       status: overrides.status ?? "done",
       priority: overrides.priority ?? "medium",
-      identifier: overrides.identifier ?? `WDOG-${Math.floor(Math.random() * 10_000)}`,
+      // Offset well above the file's hardcoded literals (WDOG-1..WDOG-4, WDOG-WAKE, ...)
+      // so a random draw can never collide with them and hit the identifier unique index.
+      identifier: overrides.identifier ?? `WDOG-R${100_000 + Math.floor(Math.random() * 900_000)}`,
       issueNumber: overrides.issueNumber ?? Math.floor(Math.random() * 10_000),
       parentId: overrides.parentId,
       assigneeAgentId: overrides.assigneeAgentId,
