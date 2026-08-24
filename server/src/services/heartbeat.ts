@@ -13432,7 +13432,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       },
     });
 
-    await startNextQueuedRunForAgent(promotedRun.agentId);
+    // DUR-151: this can run nested inside another agent's in-flight
+    // startNextQueuedRunForAgent call (e.g. a daily-cap cancellation
+    // promoting a peer's deferred wake from inside claimQueuedRun, which is
+    // itself inside withGlobalRunStartLock). Awaiting here would re-enter
+    // the same global lock before the outer call releases it and deadlock
+    // for up to AGENT_START_LOCK_STALE_MS. Fire-and-forget, same as the
+    // claimed-run dispatch below — the promoted run already exists as
+    // "queued" from the transaction above, so callers observing that row
+    // don't need this call to have completed.
+    void startNextQueuedRunForAgent(promotedRun.agentId).catch((err) => {
+      logger.error({ err, agentId: promotedRun.agentId }, "failed to start promoted queued run");
+    });
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
@@ -14526,8 +14537,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     await finalizeAgentStatus(run.agentId, "cancelled");
     // DUR-151: cancelling a running run can free a whole-instance slot for a
-    // different agent's queued run, not just this agent's own.
-    await resumeQueuedRuns();
+    // different agent's queued run, not just this agent's own. Fire-and-forget:
+    // claimQueuedRun calls cancelRunInternal for several reject reasons (agent
+    // missing/not invokable, budget block, pause hold) from inside its own
+    // startNextQueuedRunForAgent call, which already holds the global run-start
+    // lock — awaiting resumeQueuedRuns() here would re-enter that same lock
+    // before the outer call releases it and deadlock for up to
+    // AGENT_START_LOCK_STALE_MS.
+    void resumeQueuedRuns().catch((err) => {
+      logger.error({ err, runId: run.id }, "failed to resume queued runs after cancellation");
+    });
     return cancelled;
   }
 
