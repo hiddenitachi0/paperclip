@@ -280,6 +280,13 @@ export {
 } from "./mcp-tool-library.js";
 
 export {
+  createPersonaSchema,
+  updatePersonaSchema,
+  type CreatePersona,
+  type UpdatePersona,
+} from "./persona.js";
+
+export {
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,

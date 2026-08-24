@@ -107,3 +107,4 @@ export { pluginJobs, pluginJobRuns } from "./plugin_jobs.js";
 export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
 export { untrackedWriteIncidents } from "./untracked_write_incidents.js";
+export { personas } from "./personas.js";
