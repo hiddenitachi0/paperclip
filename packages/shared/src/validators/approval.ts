@@ -30,6 +30,18 @@ export const resubmitApprovalSchema = z.object({
 
 export type ResubmitApproval = z.infer<typeof resubmitApprovalSchema>;
 
+/**
+ * DUR-141: lets the requesting agent withdraw its own not-yet-decided
+ * approval (e.g. a duplicate merge_pr request whose PR was closed) without
+ * needing a board actor to reject it. See `withdraw` in
+ * server/src/services/approvals.ts.
+ */
+export const withdrawApprovalSchema = z.object({
+  decisionNote: multilineTextSchema.optional().nullable(),
+});
+
+export type WithdrawApproval = z.infer<typeof withdrawApprovalSchema>;
+
 export const addApprovalCommentSchema = z.object({
   body: multilineTextSchema.pipe(z.string().min(1)),
 });

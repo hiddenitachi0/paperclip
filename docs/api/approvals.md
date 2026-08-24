@@ -79,6 +79,19 @@ POST /api/approvals/{approvalId}/resubmit
 { "payload": { "updated": "config..." } }
 ```
 
+## Withdraw
+
+```
+POST /api/approvals/{approvalId}/withdraw
+{ "decisionNote": "Superseded by a later PR, this one's PR was closed" }
+```
+
+Lets the requesting agent cancel its own `pending` or `revision_requested`
+approval without board action — e.g. cleaning up a duplicate request whose
+target (a PR, say) no longer exists. Only the agent named in
+`requestedByAgentId` can call this; a board actor should use Reject instead.
+Sets status to `cancelled`, a terminal state distinct from `rejected`.
+
 ## Linked Issues
 
 ```
@@ -100,5 +113,7 @@ POST /api/approvals/{approvalId}/comments
 ```
 pending -> approved
         -> rejected
+        -> cancelled (requesting agent withdrew it)
         -> revision_requested -> resubmitted -> pending
+                               -> cancelled (requesting agent withdrew it)
 ```

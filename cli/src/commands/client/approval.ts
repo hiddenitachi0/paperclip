@@ -4,6 +4,7 @@ import {
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
+  withdrawApprovalSchema,
   type Approval,
   type ApprovalComment,
 } from "@paperclipai/shared";
@@ -230,6 +231,26 @@ export function registerApprovalCommands(program: Command): void {
             payload: opts.payload ? parseJsonObject(opts.payload, "payload") : undefined,
           });
           const updated = await ctx.api.post<Approval>(apiPath`/api/approvals/${approvalId}/resubmit`, payload);
+          printOutput(updated, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
+      .command("withdraw")
+      .description("Withdraw your own not-yet-decided approval request (e.g. a stale duplicate)")
+      .argument("<approvalId>", "Approval ID")
+      .option("--decision-note <text>", "Decision note")
+      .action(async (approvalId: string, opts: ApprovalDecisionOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const payload = withdrawApprovalSchema.parse({
+            decisionNote: opts.decisionNote,
+          });
+          const updated = await ctx.api.post<Approval>(apiPath`/api/approvals/${approvalId}/withdraw`, payload);
           printOutput(updated, { json: ctx.json });
         } catch (err) {
           handleCommandError(err);
