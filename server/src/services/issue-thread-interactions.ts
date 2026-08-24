@@ -1793,7 +1793,9 @@ export function issueThreadInteractionService(db: Db) {
       approval: { id: string; companyId: string; status: string },
       actor: InteractionActor,
     ): Promise<IssueThreadInteraction[]> => {
-      if (approval.status !== "approved" && approval.status !== "rejected") return [];
+      if (approval.status !== "approved" && approval.status !== "rejected" && approval.status !== "cancelled") {
+        return [];
+      }
 
       const rows = await db
         .select()
@@ -1805,6 +1807,8 @@ export function issueThreadInteractionService(db: Db) {
         ));
       if (rows.length === 0) return [];
 
+      // DUR-141: a withdrawn approval closes its linked interaction the same
+      // way a rejected one does -- there's nothing left to confirm.
       const targetStatus = approval.status === "approved" ? "accepted" : "rejected";
       const reason = `Closed automatically: the linked board approval was ${approval.status}.`;
       const now = new Date();
