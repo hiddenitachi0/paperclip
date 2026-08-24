@@ -8,23 +8,28 @@ export interface Persona {
   id: string;
   companyId: string;
   agentId: string;
+  // Name/bio/voice/avatar are stored on the underlying agent row
+  // (DUR-60/DUR-61), not duplicated here -- the server joins them in.
   displayName: string;
   handle: string | null;
   bio: string | null;
   voice: string | null;
   avatarAssetId: string | null;
-  status: "active" | "paused";
+  status: "draft" | "active" | "paused";
+  dailyGenerationCap: number | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface CreatePersonaInput {
   agentId: string;
-  displayName: string;
+  displayName?: string;
   handle?: string;
   bio?: string;
   voice?: string;
   avatarAssetId?: string;
+  status?: "draft" | "active" | "paused";
+  dailyGenerationCap?: number | null;
 }
 
 export interface UpdatePersonaInput {
@@ -33,13 +38,13 @@ export interface UpdatePersonaInput {
   bio?: string | null;
   voice?: string | null;
   avatarAssetId?: string | null;
-  status?: "active" | "paused";
+  status?: "draft" | "active" | "paused";
+  dailyGenerationCap?: number | null;
 }
 
 export const personasApi = {
   list: (companyId: string) => api.get<Persona[]>(`/companies/${companyId}/personas`),
-  create: (companyId: string, data: CreatePersonaInput) =>
-    api.post<Persona>(`/companies/${companyId}/personas`, data),
+  create: ({ agentId, ...data }: CreatePersonaInput) => api.post<Persona>(`/agents/${agentId}/persona`, data),
   get: (personaId: string) => api.get<Persona>(`/personas/${personaId}`),
   update: (personaId: string, data: UpdatePersonaInput) =>
     api.patch<Persona>(`/personas/${personaId}`, data),

@@ -159,8 +159,9 @@ export function PersonaDetail() {
       <section className="space-y-1.5">
         <h2 className="text-sm font-semibold">Daily picture limit</h2>
         <p className="text-sm text-muted-foreground">
-          Coming soon: a limit on how many pictures she can make in a day, so she never runs wild even if you're
-          not watching.
+          {persona.dailyGenerationCap != null
+            ? `Up to ${persona.dailyGenerationCap} picture${persona.dailyGenerationCap === 1 ? "" : "s"} a day.`
+            : "No limit set -- she can make as many pictures as her tools allow."}
         </p>
       </section>
     </div>

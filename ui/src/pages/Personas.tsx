@@ -57,10 +57,11 @@ type PersonaDraft = {
   bio: string;
   voice: string;
   avatarAssetId: string;
+  dailyGenerationCap: string;
 };
 
 function emptyDraft(): PersonaDraft {
-  return { agentId: "", displayName: "", handle: "", bio: "", voice: "", avatarAssetId: "" };
+  return { agentId: "", displayName: "", handle: "", bio: "", voice: "", avatarAssetId: "", dailyGenerationCap: "" };
 }
 
 function draftFromPersona(persona: Persona): PersonaDraft {
@@ -71,7 +72,18 @@ function draftFromPersona(persona: Persona): PersonaDraft {
     bio: persona.bio ?? "",
     voice: persona.voice ?? "",
     avatarAssetId: persona.avatarAssetId ?? "",
+    dailyGenerationCap: persona.dailyGenerationCap != null ? String(persona.dailyGenerationCap) : "",
   };
+}
+
+// Empty string means "no cap set" (unlimited) -- distinct from 0, which
+// isn't a valid cap (createPersonaSchema/updatePersonaSchema require a
+// positive integer).
+function parseDailyGenerationCap(value: string): number | null | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 // DUR-184 item 14: the Personas page -- list, create, edit. Deliberately does
@@ -115,13 +127,15 @@ export function Personas() {
 
   const createPersona = useMutation({
     mutationFn: (draft: PersonaDraft) =>
-      personasApi.create(selectedCompanyId!, {
+      personasApi.create({
         agentId: draft.agentId,
         displayName: draft.displayName.trim(),
         handle: draft.handle.trim() || undefined,
         bio: draft.bio.trim() || undefined,
         voice: draft.voice.trim() || undefined,
         avatarAssetId: draft.avatarAssetId || undefined,
+        status: "active",
+        dailyGenerationCap: parseDailyGenerationCap(draft.dailyGenerationCap),
       }),
     onSuccess: () => {
       invalidatePersonas();
@@ -139,6 +153,7 @@ export function Personas() {
         bio: draft.bio.trim() || null,
         voice: draft.voice.trim() || null,
         avatarAssetId: draft.avatarAssetId || null,
+        dailyGenerationCap: parseDailyGenerationCap(draft.dailyGenerationCap),
       }),
     onSuccess: () => {
       invalidatePersonas();
@@ -343,7 +358,10 @@ function PersonaFormDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const canSubmit = draft.displayName.trim().length > 0 && (isEditing || draft.agentId.length > 0);
+  const canSubmit =
+    draft.displayName.trim().length > 0 &&
+    (isEditing || draft.agentId.length > 0) &&
+    parseDailyGenerationCap(draft.dailyGenerationCap) !== undefined;
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -460,6 +478,21 @@ function PersonaFormDialog({
               rows={3}
               disabled={isPending}
             />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-muted-foreground">Daily picture limit (optional)</label>
+            <Input
+              type="number"
+              min={1}
+              placeholder="No limit"
+              value={draft.dailyGenerationCap}
+              onChange={(event) => setDraft((prev) => ({ ...prev, dailyGenerationCap: event.target.value }))}
+              disabled={isPending}
+            />
+            <p className="text-xs text-muted-foreground">
+              How many pictures she can make in a day. Leave blank for no limit.
+            </p>
           </div>
 
           {draft.agentId && (
