@@ -188,6 +188,27 @@ export interface WorkerStartOptions {
    * The host wires this to the PluginStreamBus to fan out events to SSE clients.
    */
   onStreamNotification?: (method: string, params: Record<string, unknown>) => void;
+  /**
+   * When true, a second invocation scope for a *different* company is not
+   * registered until every currently-active invocation for another company
+   * has cleared — the host→worker call (or notification) blocks until then.
+   * Same-company invocations may still run concurrently.
+   *
+   * This plugin's worker process is single/shared instance-wide (`workers`
+   * is keyed only by `pluginId`), and a worker is untrusted, unsandboxed
+   * code by this system's own threat model. Without this, two companies'
+   * invocation ids can be simultaneously "active" in `activeInvocations`,
+   * and a malicious worker can read either id straight off its own stdin
+   * and echo the other company's id on a `secrets.resolve` call to steal
+   * that company's secret. Serializing per company closes that: at any
+   * moment, only one company's invocation scope is live in this process, so
+   * there is never another company's id to steal. Only set this for
+   * plugins that can actually turn a leaked scope into a secret (see
+   * `SECRET_REF_ENABLED_PLUGIN_KEYS` in plugin-secrets-handler.ts) — every
+   * other plugin keeps full concurrency since a leaked scope there can't
+   * unlock anything. See DUR-188/DUR-193.
+   */
+  serializeInvocationScope?: boolean;
 }
 
 /**
@@ -392,6 +413,8 @@ export function createPluginWorkerHandle(
   const pendingRequests = new Map<string | number, PendingRequest>();
   let nextRequestId = 1;
   const activeInvocations = new Map<string, ActiveInvocation>();
+  const serializeInvocationScope = options.serializeInvocationScope ?? false;
+  let invocationScopeWaiters: Array<() => void> = [];
 
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
@@ -531,6 +554,33 @@ export function createPluginWorkerHandle(
     return null;
   }
 
+  function wakeInvocationScopeWaiters(): void {
+    if (invocationScopeWaiters.length === 0) return;
+    const waiters = invocationScopeWaiters;
+    invocationScopeWaiters = [];
+    for (const wake of waiters) wake();
+  }
+
+  function hasConflictingActiveInvocation(companyId: string): boolean {
+    for (const entry of activeInvocations.values()) {
+      if (entry.scope.companyId !== companyId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Blocks (when `serializeInvocationScope` is enabled) until no other
+   * company's invocation is active in this worker process. Must be awaited
+   * before `registerInvocation` for any scope-bearing host→worker call —
+   * see `WorkerStartOptions.serializeInvocationScope`.
+   */
+  async function acquireInvocationScope(scope: PluginInvocationScope): Promise<void> {
+    if (!serializeInvocationScope) return;
+    while (hasConflictingActiveInvocation(scope.companyId)) {
+      await new Promise<void>((resolve) => invocationScopeWaiters.push(resolve));
+    }
+  }
+
   function registerInvocation(scope: PluginInvocationScope, ttlMs?: number): PluginInvocationContext {
     const invocation: PluginInvocationContext = {
       id: randomUUID(),
@@ -540,6 +590,7 @@ export function createPluginWorkerHandle(
     if (ttlMs !== undefined) {
       entry.timer = setTimeout(() => {
         activeInvocations.delete(invocation.id);
+        wakeInvocationScopeWaiters();
       }, ttlMs);
       if (entry.timer.unref) entry.timer.unref();
     }
@@ -552,6 +603,7 @@ export function createPluginWorkerHandle(
     const entry = activeInvocations.get(invocation.id);
     if (entry?.timer) clearTimeout(entry.timer);
     activeInvocations.delete(invocation.id);
+    wakeInvocationScopeWaiters();
   }
 
   function contextForWorkerMessage(message: JsonRpcRequest | JsonRpcNotification): WorkerHostCallContext {
@@ -873,6 +925,7 @@ export function createPluginWorkerHandle(
       if (invocation.timer) clearTimeout(invocation.timer);
     }
     activeInvocations.clear();
+    wakeInvocationScopeWaiters();
   }
 
   // -----------------------------------------------------------------------
@@ -1121,84 +1174,92 @@ export function createPluginWorkerHandle(
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
   ): Promise<HostToWorkerMethods[M][1]> {
-    const rpcPromise = new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
-      if (!childProcess?.stdin?.writable) {
-        reject(
-          new Error(
-            `Cannot call "${method}" — worker for "${pluginId}" is not running`,
-          ),
-        );
-        return;
-      }
+    const invocationScope = deriveInvocationScope(method, params);
 
-      const id = nextRequestId++;
-      const timeout = Math.min(timeoutMs ?? rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
-      const invocationScope = deriveInvocationScope(method, params);
-      const invocation = invocationScope ? registerInvocation(invocationScope) : null;
+    const rpcPromise = (async (): Promise<HostToWorkerMethods[M][1]> => {
+      // Must resolve before this call's invocation id is registered, so a
+      // concurrent call for a different company never has both ids live in
+      // `activeInvocations` at once (see `serializeInvocationScope`).
+      if (invocationScope) await acquireInvocationScope(invocationScope);
 
-      // Guard against double-settlement. When a process exits all pending
-      // requests are rejected via rejectAllPending(), but the timeout timer
-      // may still be running. Without this guard the timer's reject fires on
-      // an already-settled promise, producing an unhandled rejection.
-      let settled = false;
+      return new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
+        if (!childProcess?.stdin?.writable) {
+          reject(
+            new Error(
+              `Cannot call "${method}" — worker for "${pluginId}" is not running`,
+            ),
+          );
+          return;
+        }
 
-      const settle = <T>(fn: (value: T) => void, value: T): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        pendingRequests.delete(id);
-        clearInvocation(invocation);
-        fn(value);
-      };
+        const id = nextRequestId++;
+        const timeout = Math.min(timeoutMs ?? rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
+        const invocation = invocationScope ? registerInvocation(invocationScope) : null;
 
-      const timer = setTimeout(() => {
-        settle(
-          reject,
-          new JsonRpcCallError({
-            code: PLUGIN_RPC_ERROR_CODES.TIMEOUT,
-            message: `RPC call "${method}" timed out after ${timeout}ms`,
-          }),
-        );
-      }, timeout);
+        // Guard against double-settlement. When a process exits all pending
+        // requests are rejected via rejectAllPending(), but the timeout timer
+        // may still be running. Without this guard the timer's reject fires on
+        // an already-settled promise, producing an unhandled rejection.
+        let settled = false;
 
-      const pending: PendingRequest = {
-        id,
-        method,
-        resolve: (response: JsonRpcResponse) => {
-          if (isJsonRpcSuccessResponse(response)) {
-            settle(resolve, response.result as HostToWorkerMethods[M][1]);
-          } else if ("error" in response && response.error) {
-            settle(reject, new JsonRpcCallError(response.error));
-          } else {
-            settle(reject, new Error(`Unexpected response format for "${method}"`));
-          }
-        },
-        timer,
-        sentAt: Date.now(),
-        invocationId: invocation?.id,
-      };
-
-      pendingRequests.set(id, pending);
-
-      try {
-        const request = {
-          ...createRequest(method, params, id),
-          ...(invocation ? { paperclipInvocation: invocation } : {}),
+        const settle = <T>(fn: (value: T) => void, value: T): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          pendingRequests.delete(id);
+          clearInvocation(invocation);
+          fn(value);
         };
-        sendMessage(request);
-      } catch (err) {
-        clearTimeout(timer);
-        pendingRequests.delete(id);
-        clearInvocation(invocation);
-        reject(
-          new Error(
-            `Failed to send "${method}" to worker: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          ),
-        );
-      }
-    });
+
+        const timer = setTimeout(() => {
+          settle(
+            reject,
+            new JsonRpcCallError({
+              code: PLUGIN_RPC_ERROR_CODES.TIMEOUT,
+              message: `RPC call "${method}" timed out after ${timeout}ms`,
+            }),
+          );
+        }, timeout);
+
+        const pending: PendingRequest = {
+          id,
+          method,
+          resolve: (response: JsonRpcResponse) => {
+            if (isJsonRpcSuccessResponse(response)) {
+              settle(resolve, response.result as HostToWorkerMethods[M][1]);
+            } else if ("error" in response && response.error) {
+              settle(reject, new JsonRpcCallError(response.error));
+            } else {
+              settle(reject, new Error(`Unexpected response format for "${method}"`));
+            }
+          },
+          timer,
+          sentAt: Date.now(),
+          invocationId: invocation?.id,
+        };
+
+        pendingRequests.set(id, pending);
+
+        try {
+          const request = {
+            ...createRequest(method, params, id),
+            ...(invocation ? { paperclipInvocation: invocation } : {}),
+          };
+          sendMessage(request);
+        } catch (err) {
+          clearTimeout(timer);
+          pendingRequests.delete(id);
+          clearInvocation(invocation);
+          reject(
+            new Error(
+              `Failed to send "${method}" to worker: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          );
+        }
+      });
+    })();
 
     // Some call sites hand these promises across async boundaries before
     // attaching their own handlers. Mark the promise as handled here so a
@@ -1257,18 +1318,26 @@ export function createPluginWorkerHandle(
     notify(method: string, params: unknown) {
       if (status !== "running") return;
       const invocationScope = deriveInvocationScope(method, params);
-      const invocation = invocationScope ? registerInvocation(invocationScope, MAX_RPC_TIMEOUT_MS) : null;
-      try {
-        sendMessage({
-          jsonrpc: JSONRPC_VERSION,
-          method,
-          params,
-          ...(invocation ? { paperclipInvocation: invocation } : {}),
-        });
-      } catch {
-        clearInvocation(invocation);
-        log.warn({ method }, "failed to send notification to worker");
-      }
+      void (async () => {
+        // Same ordering requirement as callInternal: acquire before
+        // registering so a concurrent notification for another company
+        // never overlaps this one's invocation id.
+        if (invocationScope) await acquireInvocationScope(invocationScope);
+        // Worker may have stopped while this notification was queued.
+        if (status !== "running") return;
+        const invocation = invocationScope ? registerInvocation(invocationScope, MAX_RPC_TIMEOUT_MS) : null;
+        try {
+          sendMessage({
+            jsonrpc: JSONRPC_VERSION,
+            method,
+            params,
+            ...(invocation ? { paperclipInvocation: invocation } : {}),
+          });
+        } catch {
+          clearInvocation(invocation);
+          log.warn({ method }, "failed to send notification to worker");
+        }
+      })();
     },
 
     on<K extends WorkerHandleEventName>(

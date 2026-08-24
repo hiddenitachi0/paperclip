@@ -60,8 +60,18 @@ export const PLUGIN_SECRET_REFS_DISABLED_MESSAGE =
  * DUR-189 (per-agent/per-company provider config) lands.
  *
  * DUR-174 sub-item (a).
+ *
+ * Exported so `plugin-loader.ts` can tell `plugin-worker-manager.ts` to
+ * serialize invocation-scope registration for exactly these plugins (see
+ * `WorkerStartOptions.serializeInvocationScope`) — the DUR-193 security
+ * review found that a shared worker process can hold two different
+ * companies' invocation scopes active at once, which turns
+ * `context.invocationScope.companyId` into a replayable bearer credential
+ * for a malicious/compromised worker. Every plugin not on this list keeps
+ * the unconditional fail-closed throw below regardless of invocation scope,
+ * so only plugins that can actually resolve secrets need serialization.
  */
-const SECRET_REF_ENABLED_PLUGIN_KEYS = new Set<string>(["paperclip.media-studio"]);
+export const SECRET_REF_ENABLED_PLUGIN_KEYS = new Set<string>(["paperclip.media-studio"]);
 
 // ---------------------------------------------------------------------------
 // Error helpers
