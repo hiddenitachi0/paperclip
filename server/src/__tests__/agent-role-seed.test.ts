@@ -2,7 +2,8 @@
 // asked for ("Boss", "Developer") on the DUR board's own company, exactly
 // once, and gives them the rights the operator ruling specified: Boss holds
 // both deploys:request and merges:request, Developer holds merges:request
-// only. No other agent or role is ever touched by this seed.
+// only. No other agent or role is ever touched by this seed. Both are
+// seeded is_builtin=true, which (DUR-149) must never block edit/delete.
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { companies, companyAgentRoles, createDb } from "@paperclipai/db";
@@ -14,6 +15,12 @@ import { DUR_COMPANY_ID, seedDurStarterJobs } from "../services/agent-role-seed.
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres agent-role-seed tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+  );
+}
 
 describeEmbeddedPostgres("seedDurStarterJobs", () => {
   let db!: ReturnType<typeof createDb>;
@@ -33,7 +40,7 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
     await tempDb?.cleanup();
   });
 
-  it("seeds Boss (deploy+merge ask-rights) and Developer (merge only) exactly once", async () => {
+  it("seeds Boss (deploy+merge ask-rights) and Developer (merge only) exactly once, as builtin roles", async () => {
     await db.insert(companies).values({
       id: DUR_COMPANY_ID,
       name: "Durkan Agency",
@@ -56,6 +63,8 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
     const developer = roles.find((role) => role.key === "developer")!;
     expect(boss).toBeTruthy();
     expect(developer).toBeTruthy();
+    expect(boss.isBuiltin).toBe(true);
+    expect(developer.isBuiltin).toBe(true);
 
     const bossKeys = (boss.defaultGrants as Array<{ permissionKey: string }>)
       .map((grant) => grant.permissionKey)
@@ -66,6 +75,18 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
       .map((grant) => grant.permissionKey)
       .sort();
     expect(developerKeys).toEqual(["merges:request"]);
+
+    // is_builtin is provenance-only — it must never block a plain edit/delete.
+    await db
+      .update(companyAgentRoles)
+      .set({ name: "Developer (renamed)" })
+      .where(eq(companyAgentRoles.id, developer.id));
+    await db.delete(companyAgentRoles).where(eq(companyAgentRoles.id, developer.id));
+    const remaining = await db
+      .select()
+      .from(companyAgentRoles)
+      .where(eq(companyAgentRoles.companyId, DUR_COMPANY_ID));
+    expect(remaining).toHaveLength(1);
   });
 
   it("skips silently when the DUR company row does not exist on this instance", async () => {

@@ -77,6 +77,8 @@ const mockAgentRolesService = vi.hoisted(() => ({
   removeAgentToolOverride: vi.fn(),
   addAgentRightOverride: vi.fn(),
   removeAgentRightOverride: vi.fn(),
+  addAgentCatalogOverride: vi.fn(),
+  removeAgentCatalogOverride: vi.fn(),
 }));
 
 vi.mock("../services/agent-roles.js", () => mockAgentRolesService);
@@ -309,6 +311,89 @@ describe("agent roles — security", () => {
 
     expect(res.status).toBe(403);
     expect(mockAgentRolesService.removeAgentRightOverride).not.toHaveBeenCalled();
+  });
+
+  // DUR-149: skill_key / connector_key override endpoints — same board-only
+  // shape as tools/rights above, plus the category-in-path 404 guard.
+  it("rejects agent-authenticated callers on POST /agents/:id/role/skills", async () => {
+    mockAuthz.assertBoard.mockImplementation(() => {
+      const err = new Error("Forbidden") as any;
+      err.status = 403;
+      throw err;
+    });
+
+    const app = express();
+    app.use(express.json());
+    const { agentRoleRoutes } = await import("../routes/agent-roles.js");
+    app.use("/api", agentRoleRoutes({} as any));
+
+    const res = await request(app)
+      .post(`/api/agents/${agentId}/role/skills`)
+      .send({ key: "customer-inbox" });
+
+    expect(res.status).toBe(403);
+    expect(mockAgentRolesService.addAgentCatalogOverride).not.toHaveBeenCalled();
+  });
+
+  it("allows a board actor to add and remove a connector_key override", async () => {
+    mockAuthz.assertBoard.mockReturnValue(undefined);
+    const mockSelect = vi.fn().mockReturnValue({
+      from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([{ id: agentId, companyId }]) }),
+    });
+    const fakeDb = { select: mockSelect } as any;
+    mockAgentRolesService.addAgentCatalogOverride.mockResolvedValue({ ...baseAgent });
+    mockAgentRolesService.removeAgentCatalogOverride.mockResolvedValue({ ...baseAgent });
+
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as any).actor = { type: "board", userId: "user-123" };
+      next();
+    });
+    const { agentRoleRoutes } = await import("../routes/agent-roles.js");
+    app.use("/api", agentRoleRoutes(fakeDb));
+
+    const addRes = await request(app)
+      .post(`/api/agents/${agentId}/role/connectors`)
+      .send({ key: "zendesk" });
+    expect(addRes.status).toBe(200);
+    expect(mockAgentRolesService.addAgentCatalogOverride).toHaveBeenCalledWith(
+      fakeDb,
+      agentId,
+      "connectors",
+      "zendesk",
+      expect.objectContaining({ type: "board" }),
+    );
+
+    const removeRes = await request(app).delete(`/api/agents/${agentId}/role/connectors/zendesk`);
+    expect(removeRes.status).toBe(200);
+    expect(mockAgentRolesService.removeAgentCatalogOverride).toHaveBeenCalledWith(
+      fakeDb,
+      agentId,
+      "connectors",
+      "zendesk",
+      expect.objectContaining({ type: "board" }),
+    );
+  });
+
+  it("404s an unknown override category instead of silently no-op'ing", async () => {
+    mockAuthz.assertBoard.mockReturnValue(undefined);
+
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as any).actor = { type: "board", userId: "user-123" };
+      next();
+    });
+    const { agentRoleRoutes } = await import("../routes/agent-roles.js");
+    app.use("/api", agentRoleRoutes({} as any));
+
+    const res = await request(app)
+      .post(`/api/agents/${agentId}/role/not-a-real-category`)
+      .send({ key: "x" });
+
+    expect(res.status).toBe(404);
+    expect(mockAgentRolesService.addAgentCatalogOverride).not.toHaveBeenCalled();
   });
 });
 
