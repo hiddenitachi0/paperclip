@@ -66,6 +66,14 @@ export const agents = pgTable(
     roleAppliedPermissionKeys: jsonb("role_applied_permission_keys")
       .$type<string[]>()
       .default([]),
+    // DUR-143: ids of company_mcp_tools rows this agent is checked-on for.
+    // Live selection, re-read and merged into adapterConfig.mcpServers on
+    // every dispatch (see resolveAgentMcpToolLibraryServers in
+    // services/mcp-tool-library.ts) — unlike roleAppliedMcpServerNames above,
+    // this is NOT a one-time snapshot. Never settable through the generic
+    // agentService.create/update patch (see assertNoToolLibraryAssignmentFields
+    // in services/agents.ts); only the dedicated assignment route may write it.
+    mcpToolIds: jsonb("mcp_tool_ids").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -981,6 +981,13 @@
       "when": 1787100000000,
       "tag": "0139_untracked_write_incidents",
       "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1787110000000,
+      "tag": "0140_mcp_tool_library",
+      "breakpoints": true
     }
   ]
 }

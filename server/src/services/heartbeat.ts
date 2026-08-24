@@ -148,6 +148,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import {
   evaluateExecutionAllowlist,
   isExecutionForcedToKubernetes,
@@ -10777,6 +10778,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       grantAdapterConfig: escalationGrantAdapterConfig,
       issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
     });
+    // DUR-143: fold in this agent's checkbox-granted tool-library servers.
+    // mergeModelProfileAdapterConfig above is a plain object-spread — whoever
+    // sets mcpServers last wins wholesale — so this must concatenate onto
+    // whatever mergedConfig.mcpServers already resolved to, not replace it.
+    // The agent's own explicit servers always win on a name collision.
+    {
+      const existingMcpServers = Array.isArray(mergedConfig.mcpServers)
+        ? (mergedConfig.mcpServers as Array<Record<string, unknown>>)
+        : [];
+      const existingNames = new Set(existingMcpServers.map((s) => String(s.name ?? "")));
+      const grantedToolServers = await resolveAgentMcpToolLibraryServers(
+        db,
+        agent.companyId,
+        (agent.mcpToolIds as string[] | null) ?? [],
+        existingNames,
+      );
+      if (grantedToolServers.length > 0) {
+        mergedConfig.mcpServers = [...existingMcpServers, ...grantedToolServers];
+      }
+    }
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
     const selectedEnvironmentForConfig = selectedEnvironmentId === localEnvironment.id

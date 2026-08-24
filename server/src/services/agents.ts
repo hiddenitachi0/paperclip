@@ -27,6 +27,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { syncAgentAdapterEnvBindings, type AgentSecretBindingActor } from "./agent-secret-bindings.js";
+import { collectMcpToolLibrarySecretRefs } from "./mcp-tool-library.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
@@ -202,6 +203,24 @@ function assertNoRoleAssignmentFields(data: Record<string, unknown>) {
   }
 }
 
+// DUR-143: mcpToolIds (which tool-library entries this agent is granted) may
+// only be written by syncMcpToolSelection below, which updates it directly
+// via db.update(agents) and always resyncs the matching secret bindings in
+// the same call. Blocking it here closes every other writer of the generic
+// create/update functions, exactly like ROLE_ASSIGNMENT_FIELDS above.
+const TOOL_LIBRARY_ASSIGNMENT_FIELDS = ["mcpToolIds"] as const;
+
+function assertNoToolLibraryAssignmentFields(data: Record<string, unknown>) {
+  const present = TOOL_LIBRARY_ASSIGNMENT_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(data, field),
+  );
+  if (present.length > 0) {
+    throw unprocessable(
+      `Tool-library assignment fields (${present.join(", ")}) cannot be set through agentService.create/update. Use the dedicated tool-assignment endpoint.`,
+    );
+  }
+}
+
 export function agentService(db: Db) {
   const secretsSvc = secretService(db);
 
@@ -359,17 +378,28 @@ export function agentService(db: Db) {
   }
 
   async function syncAgentSecretBindings(
-    agent: { id: string; companyId: string; adapterConfig: unknown },
+    agent: { id: string; companyId: string; adapterConfig: unknown; mcpToolIds?: string[] | null },
     dbClient: Db = db,
     actor?: AgentSecretBindingActor,
   ) {
     const scopedSecretsSvc = dbClient === db ? secretsSvc : secretService(dbClient);
+    // DUR-143: always resync tool-library-derived refs alongside
+    // adapterConfig-derived ones, on every call site (adapterConfig save,
+    // agent creation, activation, and tool-selection changes) — this is a
+    // full replaceAll sync, so any call that omitted them would silently
+    // wipe out bindings for this agent's granted tools.
+    const toolLibraryRefs = await collectMcpToolLibrarySecretRefs(
+      dbClient,
+      agent.companyId,
+      agent.mcpToolIds ?? [],
+    );
     await syncAgentAdapterEnvBindings({
       secretsSvc: scopedSecretsSvc,
       companyId: agent.companyId,
       agentId: agent.id,
       adapterConfig: agent.adapterConfig,
       actor,
+      extraRefs: toolLibraryRefs,
     });
   }
 
@@ -379,6 +409,7 @@ export function agentService(db: Db) {
     options?: UpdateAgentOptions,
   ) {
     assertNoRoleAssignmentFields(data as Record<string, unknown>);
+    assertNoToolLibraryAssignmentFields(data as Record<string, unknown>);
     const existing = await getById(id);
     if (!existing) return null;
 
@@ -497,6 +528,7 @@ export function agentService(db: Db) {
       options?: { actor?: AgentSecretBindingActor },
     ) => {
       assertNoRoleAssignmentFields(data as Record<string, unknown>);
+      assertNoToolLibraryAssignmentFields(data as Record<string, unknown>);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
@@ -547,6 +579,27 @@ export function agentService(db: Db) {
     },
 
     update: updateAgent,
+
+    // DUR-143: the only writer of agents.mcpToolIds — board-only at the
+    // route layer (see routes/mcp-tool-library.ts), and the only path that
+    // ever changes this column, so it always stays paired with a fresh
+    // secret-binding resync via syncAgentSecretBindings.
+    syncMcpToolSelection: async (agentId: string, desiredToolIds: string[]) => {
+      return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        const updated = await tx
+          .update(agents)
+          .set({ mcpToolIds: desiredToolIds, updatedAt: new Date() })
+          .where(eq(agents.id, agentId))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updated) throw notFound("Agent not found");
+        await syncAgentSecretBindings(updated, txDb);
+        const normalized = await agentService(txDb).getById(updated.id);
+        if (!normalized) throw notFound("Agent not found");
+        return normalized;
+      });
+    },
 
     pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
       const existing = await getById(id);
