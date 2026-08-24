@@ -269,6 +269,14 @@ export {
 } from "./agent.js";
 
 export {
+  personaStatusSchema,
+  createPersonaSchema,
+  updatePersonaSchema,
+  type CreatePersonaInput,
+  type UpdatePersonaInput,
+} from "./persona.js";
+
+export {
   mcpToolLibraryConnectionSchema,
   mcpToolLibraryEntryBodySchema,
   mcpToolLibraryEntryUpdateSchema,
