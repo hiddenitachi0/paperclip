@@ -9,7 +9,7 @@ import {
 } from "@paperclipai/db";
 import type { PermissionKey } from "@paperclipai/shared";
 import { PERMISSION_KEYS } from "@paperclipai/shared";
-import { notFound, unprocessable } from "../errors.js";
+import { forbidden, notFound, unprocessable } from "../errors.js";
 
 // Derive a URL-safe slug from a human name. Unique within a company is enforced
 // at the DB level; callers that need to disambiguate should append a suffix.
@@ -159,9 +159,31 @@ export async function copyRoleToCompany(
   });
 }
 
+// The caller's identity, required on every role-mutating service function so
+// that a caller who reaches these functions directly (bypassing the
+// assertBoard-gated routes in routes/agent-roles.ts — e.g. a future route, a
+// script, or an import path like company-portability.ts) cannot assign or
+// modify a role without board authority, and can never target its own agent
+// id. This mirrors assertNoRoleAssignmentFields in services/agents.ts, which
+// protects the same fields on the generic create/update path (DUR-148).
+export interface RoleMutationActor {
+  type: string;
+  agentId?: string | null;
+}
+
+function assertBoardActorForRoleMutation(actor: RoleMutationActor | undefined, targetAgentId: string) {
+  if (!actor || actor.type !== "board") {
+    throw forbidden("Only board-authenticated callers may assign or modify an agent's role.");
+  }
+  if (actor.agentId && actor.agentId === targetAgentId) {
+    throw forbidden("An agent cannot assign or modify its own role.");
+  }
+}
+
 interface AssignRoleOptions {
   // Board actor performing the assignment (for audit trail on grants)
   grantedByUserId?: string | null;
+  actor: RoleMutationActor;
 }
 
 // Apply a role to an agent once at assignment time. This is NOT continuous
@@ -170,8 +192,10 @@ export async function assignRoleToAgent(
   db: Db,
   agentId: string,
   roleId: string | null,
-  options: AssignRoleOptions = {}
+  options: AssignRoleOptions
 ) {
+  assertBoardActorForRoleMutation(options.actor, agentId);
+
   // Clearing the role: null out the FK and snapshots, and revoke any permission
   // grants that were applied from the role (using the snapshot to know which ones).
   if (roleId === null) {
@@ -292,4 +316,194 @@ export async function assignRoleToAgent(
     .from(agents)
     .where(eq(agents.id, agentId));
   return updated!;
+}
+
+// ── Role state + per-agent overrides on top of an assigned job ─────────────
+// "Overrides" are tools/rights added or removed directly on the agent, on top
+// of (or in the absence of) whatever its assigned job would have given it.
+// They are NOT recorded into roleAppliedMcpServerNames/roleAppliedPermissionKeys
+// (those snapshots track only what the JOB granted), so an override naturally
+// shows up in the "added"/"removed" diff buckets computed below.
+
+export interface AgentRoleStateDto {
+  job: { id: string; name: string; description: string } | null;
+  assignedAt: null;
+  tools: { fromJob: string[]; added: string[]; removed: string[] };
+  rights: {
+    fromJob: Array<{ permissionKey: PermissionKey; scope: Record<string, unknown> | null }>;
+    added: Array<{ permissionKey: PermissionKey; scope: Record<string, unknown> | null }>;
+    removed: Array<{ permissionKey: PermissionKey; scope: Record<string, unknown> | null }>;
+  };
+}
+
+export async function getAgentRoleState(db: Db, agentId: string): Promise<AgentRoleStateDto> {
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  const role = agent.roleId ? await getRole(db, agent.roleId) : null;
+
+  const appliedNames = new Set<string>((agent.roleAppliedMcpServerNames as string[] | null) ?? []);
+  const currentConfig = (agent.adapterConfig as Record<string, unknown>) ?? {};
+  const currentMcpServers = (currentConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? [];
+  const currentNames = new Set(currentMcpServers.map((s) => String(s.name ?? "")));
+
+  const appliedKeys = new Set<string>((agent.roleAppliedPermissionKeys as string[] | null) ?? []);
+  const liveGrants = await db
+    .select({
+      permissionKey: principalPermissionGrants.permissionKey,
+      scope: principalPermissionGrants.scope,
+    })
+    .from(principalPermissionGrants)
+    .where(
+      and(
+        eq(principalPermissionGrants.principalType, "agent"),
+        eq(principalPermissionGrants.principalId, agentId)
+      )
+    );
+  const liveGrantsByKey = new Map(liveGrants.map((g) => [g.permissionKey, g]));
+  const roleGrantsByKey = new Map(
+    (
+      (role?.defaultGrants as Array<{ permissionKey: string; scope: Record<string, unknown> | null }> | undefined) ?? []
+    ).map((g) => [g.permissionKey, g])
+  );
+
+  return {
+    job: role ? { id: role.id, name: role.name, description: role.description ?? "" } : null,
+    assignedAt: null,
+    tools: {
+      fromJob: [...appliedNames].filter((n) => currentNames.has(n)),
+      added: [...currentNames].filter((n) => !appliedNames.has(n)),
+      removed: [...appliedNames].filter((n) => !currentNames.has(n)),
+    },
+    rights: {
+      fromJob: [...appliedKeys]
+        .filter((k) => liveGrantsByKey.has(k))
+        .map((k) => ({
+          permissionKey: k as PermissionKey,
+          scope: roleGrantsByKey.get(k)?.scope ?? liveGrantsByKey.get(k)!.scope ?? null,
+        })),
+      added: liveGrants
+        .filter((g) => !appliedKeys.has(g.permissionKey))
+        .map((g) => ({ permissionKey: g.permissionKey as PermissionKey, scope: g.scope })),
+      removed: [...appliedKeys]
+        .filter((k) => !liveGrantsByKey.has(k))
+        .map((k) => ({ permissionKey: k as PermissionKey, scope: roleGrantsByKey.get(k)?.scope ?? null })),
+    },
+  };
+}
+
+export async function addAgentToolOverride(
+  db: Db,
+  agentId: string,
+  tool: Record<string, unknown>,
+  actor: RoleMutationActor
+) {
+  assertBoardActorForRoleMutation(actor, agentId);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  const toolName = String(tool.name ?? "");
+  const adapterConfig = (agent.adapterConfig as Record<string, unknown>) ?? {};
+  const existingServers = (adapterConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? [];
+  const nextServers = [...existingServers.filter((s) => String(s.name ?? "") !== toolName), tool];
+
+  await db
+    .update(agents)
+    .set({ adapterConfig: { ...adapterConfig, mcpServers: nextServers }, updatedAt: new Date() })
+    .where(eq(agents.id, agentId));
+
+  return getAgentRoleState(db, agentId);
+}
+
+export async function removeAgentToolOverride(
+  db: Db,
+  agentId: string,
+  toolName: string,
+  actor: RoleMutationActor
+) {
+  assertBoardActorForRoleMutation(actor, agentId);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  const adapterConfig = (agent.adapterConfig as Record<string, unknown>) ?? {};
+  const existingServers = (adapterConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? [];
+  const nextServers = existingServers.filter((s) => String(s.name ?? "") !== toolName);
+
+  await db
+    .update(agents)
+    .set({ adapterConfig: { ...adapterConfig, mcpServers: nextServers }, updatedAt: new Date() })
+    .where(eq(agents.id, agentId));
+
+  return getAgentRoleState(db, agentId);
+}
+
+export async function addAgentRightOverride(
+  db: Db,
+  agentId: string,
+  grant: { permissionKey: string; scope: Record<string, unknown> | null },
+  actor: RoleMutationActor,
+  grantedByUserId: string | null = null
+) {
+  assertBoardActorForRoleMutation(actor, agentId);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  const [sanitized] = sanitizeGrants([grant]);
+  if (!sanitized) throw unprocessable(`Unknown permission key '${grant.permissionKey}'`);
+
+  const existing = await db
+    .select({ id: principalPermissionGrants.id })
+    .from(principalPermissionGrants)
+    .where(
+      and(
+        eq(principalPermissionGrants.principalType, "agent"),
+        eq(principalPermissionGrants.principalId, agentId),
+        eq(principalPermissionGrants.permissionKey, sanitized.permissionKey)
+      )
+    )
+    .then((rows) => rows[0] ?? null);
+
+  const now = new Date();
+  if (existing) {
+    await db
+      .update(principalPermissionGrants)
+      .set({ scope: sanitized.scope, grantedByUserId, updatedAt: now })
+      .where(eq(principalPermissionGrants.id, existing.id));
+  } else {
+    await db.insert(principalPermissionGrants).values({
+      companyId: agent.companyId,
+      principalType: "agent",
+      principalId: agentId,
+      permissionKey: sanitized.permissionKey,
+      scope: sanitized.scope,
+      grantedByUserId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  return getAgentRoleState(db, agentId);
+}
+
+export async function removeAgentRightOverride(
+  db: Db,
+  agentId: string,
+  permissionKey: string,
+  actor: RoleMutationActor
+) {
+  assertBoardActorForRoleMutation(actor, agentId);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!agent) throw notFound("Agent not found");
+
+  await db
+    .delete(principalPermissionGrants)
+    .where(
+      and(
+        eq(principalPermissionGrants.principalType, "agent"),
+        eq(principalPermissionGrants.principalId, agentId),
+        eq(principalPermissionGrants.permissionKey, permissionKey)
+      )
+    );
+
+  return getAgentRoleState(db, agentId);
 }

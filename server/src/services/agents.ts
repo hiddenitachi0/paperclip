@@ -109,6 +109,8 @@ function buildConfigSnapshot(
     defaultEnvironmentId: row.defaultEnvironmentId,
     budgetMonthlyCents: row.budgetMonthlyCents,
     metadata,
+    permissions: row.permissions,
+    roleId: row.roleId,
   };
 }
 

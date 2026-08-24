@@ -22,7 +22,7 @@ import { AGENT_ROLE_LABELS } from "@paperclipai/shared";
 export const help: Record<string, string> = {
   name: "Display name for this agent.",
   title: "Job title shown in the org chart.",
-  role: "Organizational role. Determines position and capabilities.",
+  role: "Organizational role shown in the org chart. Tools and permissions come from the agent's assigned job and permission grants, not from this field.",
   reportsTo: "The agent this one reports to in the org hierarchy.",
   capabilities: "Describes what this agent can do. Shown in the org chart and used for task routing.",
   personality: "Changes only the wording of what this agent writes. It never changes what the agent decides, what it flags, or how it reports bad news. Approval requests to you always stay plain. Saving a new voice starts the agent's next run fresh, so it re-reads its instructions.",
