@@ -20,6 +20,16 @@ export type DeployRunnerStatusEntry = {
   companyId: string;
   commentDelivered: boolean;
   body: string;
+  // DUR-152: optional structured outcome alongside the free-text `body` a
+  // human reads. `scripts/deploy-runner.sh` sets this to "carried" when it
+  // determines (via a real `git merge-base --is-ancestor` check, not string
+  // matching) that this approval's own target commit already shipped as
+  // part of a different approval's deploy — so a consumer of this log can
+  // confirm the change is live without depending on the runner's literal
+  // success sentence, which a superseded approval's comment never contains.
+  outcome?: string;
+  // The commit this entry's outcome pertains to, when known.
+  commit?: string;
 };
 
 function isDeployRunnerStatusEntry(value: unknown): value is DeployRunnerStatusEntry {
@@ -30,7 +40,9 @@ function isDeployRunnerStatusEntry(value: unknown): value is DeployRunnerStatusE
     typeof v.approvalId === "string" &&
     typeof v.companyId === "string" &&
     typeof v.commentDelivered === "boolean" &&
-    typeof v.body === "string"
+    typeof v.body === "string" &&
+    (v.outcome === undefined || typeof v.outcome === "string") &&
+    (v.commit === undefined || typeof v.commit === "string")
   );
 }
 

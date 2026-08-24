@@ -101,17 +101,31 @@ cli_json() { # subcommand args... -> JSON on stdout (runs inside the server cont
 # Mirrors every comment attempt (delivered or not) into $STATUS_PATH inside
 # the server container's volume. Best-effort only — never affects whether
 # the approval is considered processed.
-record_status() { # approval_id, company_id, body, delivered(0/1)
-  local aid="$1" company_id="$2" body="$3" delivered="$4" line
-  line="$(AID="$aid" COMPANY_ID="$company_id" BODY="$body" DELIVERED="$delivered" TS="$(ts)" python3 -c '
+#
+# DUR-152: `outcome`/`commit` are optional structured fields alongside the
+# free-text `body` a human reads. `deploy-completion-gate.ts` used to be able
+# to confirm a deploy ONLY by string-matching `body` for the runner's own
+# literal success sentence — which a superseded-but-actually-live approval
+# can never contain (see run_superseded_approval / the DUR-137 guard branch
+# in process_approval, both of which now pass outcome="carried"). Passing a
+# structured outcome instead of growing more special-cased substrings keeps
+# that matching honest and machine-checkable.
+record_status() { # approval_id, company_id, body, delivered(0/1), outcome(optional), commit(optional)
+  local aid="$1" company_id="$2" body="$3" delivered="$4" outcome="${5:-}" commit="${6:-}" line
+  line="$(AID="$aid" COMPANY_ID="$company_id" BODY="$body" DELIVERED="$delivered" OUTCOME="$outcome" COMMIT="$commit" TS="$(ts)" python3 -c '
 import json, os
-print(json.dumps({
+entry = {
     "ts": os.environ["TS"],
     "approvalId": os.environ["AID"],
     "companyId": os.environ["COMPANY_ID"],
     "commentDelivered": os.environ["DELIVERED"] == "0",
     "body": os.environ["BODY"],
-}))
+}
+if os.environ.get("OUTCOME"):
+    entry["outcome"] = os.environ["OUTCOME"]
+if os.environ.get("COMMIT"):
+    entry["commit"] = os.environ["COMMIT"]
+print(json.dumps(entry))
 ' 2>>"$LOG")"
   [ -z "$line" ] && return 0
   docker exec -e STATUS_LINE="$line" -e STATUS_PATH="$STATUS_PATH" "$DOCKER_SERVER_CONTAINER" sh -lc \
@@ -119,8 +133,8 @@ print(json.dumps({
     >/dev/null 2>>"$LOG" || log "runner: $aid failed to record status line (non-fatal)"
 }
 
-comment() { # approval_id, company_id, body -> 0 if delivered, 1 if not (after retries)
-  local aid="$1" company_id="$2" body="$3" attempt=1 delivered=1
+comment() { # approval_id, company_id, body, outcome(optional), commit(optional) -> 0 if delivered, 1 if not (after retries)
+  local aid="$1" company_id="$2" body="$3" outcome="${4:-}" commit="${5:-}" attempt=1 delivered=1
   while [ "$attempt" -le "$COMMENT_RETRIES" ]; do
     if docker exec -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -lc \
          "$CLI approval comment $aid --body \"\$BODY\" $ARGS" >/dev/null 2>>"$LOG"; then
@@ -134,7 +148,7 @@ comment() { # approval_id, company_id, body -> 0 if delivered, 1 if not (after r
   if [ "$delivered" -ne 0 ]; then
     log "runner: $aid could not deliver a comment after $COMMENT_RETRIES attempts — will retry next poll cycle"
   fi
-  record_status "$aid" "$company_id" "$body" "$delivered"
+  record_status "$aid" "$company_id" "$body" "$delivered" "$outcome" "$commit"
   mirror_comment_to_linked_issues "$aid" "$body"
   return "$delivered"
 }
@@ -264,8 +278,8 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
-git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward -> 0 ok, 1 fetch/resolve failed, 2 refused (would move backward)
-  local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}"
+git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward, dry_run -> stdout: resolved target commit (refusal path only); 0 ok, 1 fetch/resolve failed, 2 refused (would move backward)
+  local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}" dry_run="${6:-}"
   (
     cd "$target_dir" || exit 1
     if [ -n "$token" ]; then
@@ -312,8 +326,18 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_b
       current_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
       if [ -n "$current_commit" ] && [ "$target_commit" != "$current_commit" ] && \
          git merge-base --is-ancestor "$target_commit" "$current_commit" 2>/dev/null; then
+        # DUR-152: print the resolved commit so a caller that only wants to
+        # know "is this commit already live" (never intending to deploy it
+        # itself — e.g. a superseded approval checking what shipped under a
+        # different approval) can record it, instead of only learning THAT
+        # it was refused.
+        printf '%s' "$target_commit"
         exit 2
       fi
+    fi
+
+    if [ -n "$dry_run" ]; then
+      exit 0
     fi
 
     git reset --hard --quiet "$target_commit"
@@ -409,11 +433,20 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
-  git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY"
+  local carried_commit
+  carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY")"
   local fetch_reset_status=$?
   if [ "$fetch_reset_status" -eq 2 ]; then
     log "runner: $aid refused — $target_ref is already reachable from the live commit $before_commit; deploying it would move production backward"
-    comment "$aid" "$company_id" "Deploy skipped — approval target ($target_ref) is an ancestor of the currently live commit ($before_commit): applying it would reset production backward and silently discard whatever has shipped since (DUR-137 guard). If a rollback is genuinely intended, re-file the deploy approval with payload.allowBackwardDeploy: true to confirm that explicitly."
+    # DUR-152: this approval's own change already shipped (as an ancestor of
+    # what's live now, via an earlier or concurrent deploy) — record it as
+    # "carried" so deploy-completion-gate.ts can confirm it by commit instead
+    # of leaving whoever filed/is waiting on this approval stuck forever
+    # watching an id that will never get its own success comment. Still
+    # phrased as a skip, not a success — DUR-137's own guard exists because
+    # this script never actually re-ran the health check against THIS
+    # approval's target, only against what an earlier deploy already proved.
+    comment "$aid" "$company_id" "Deploy skipped — approval target ($target_ref, commit ${carried_commit:-unknown}) is an ancestor of the currently live commit ($before_commit): its change has already shipped as part of an earlier or concurrent deploy, so applying this approval directly would only reset production backward and silently discard whatever has shipped since (DUR-137 guard). If a rollback is genuinely intended, re-file the deploy approval with payload.allowBackwardDeploy: true to confirm that explicitly." "carried" "$carried_commit"
     return
   elif [ "$fetch_reset_status" -ne 0 ]; then
     log "runner: $aid git fetch/reset failed"
@@ -491,12 +524,57 @@ run_one_approval() { # approval_id, company_id
   rm -f "$result_file"
 }
 
+# DUR-152: resolves aid's OWN target commit (never resetting anything — pure
+# read-only fetch + a dry-run git_fetch_reset call) and checks whether it is
+# already an ancestor of (or equal to) whatever the deploy target checkout is
+# CURRENTLY sitting on. Meant to be called for a same-cycle SUPERSEDED
+# approval AFTER its group's KEEP approval has already run, so "currently
+# checked out" reflects KEEP's real outcome (success or failure — either way
+# it's the truth, not a guess). Prints the resolved commit and returns 0 when
+# it's confirmed already live; returns 1 (nothing printed) if the approval's
+# own project/policy doesn't resolve, its commit can't be fetched, or it
+# genuinely isn't reachable from what's live — callers must fall back to a
+# plain "skipped" message in every 1-case, not assume "not yet checked" means
+# "not live".
+check_commit_already_live() { # approval_id, company_id
+  local aid="$1" company_id="$2"
+  local approval_json project_json
+  approval_json="$(cli_json approval get "$aid")" || return 1
+  local project_id
+  project_id="$(printf '%s' "$approval_json" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("payload") or {}).get("projectId") or "")' 2>/dev/null)" || return 1
+  [ -z "$project_id" ] && return 1
+  project_json="$(cli_json project get "$project_id" -C "$company_id")" || return 1
+  local vars
+  vars="$(resolve_deploy_vars "$approval_json" "$project_json" 2>/dev/null)" || return 1
+  eval "$vars"
+  [ -d "$DV_DEPLOY_TARGET_PATH/.git" ] || return 1
+  local token
+  token="$(cli_json secrets deploy-github-token -C "$company_id" | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("token") or "")' 2>/dev/null)" || token=""
+  local target_ref="${DV_COMMIT:-$DV_REPO_REF}"
+  local out status
+  out="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "" "1")"
+  status=$?
+  [ "$status" -eq 2 ] || return 1
+  printf '%s' "$out"
+  return 0
+}
+
 run_superseded_approval() { # approval_id, company_id, keep_approval_id
   local aid="$1" company_id="$2" keep_id="$3" result_file
   result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
   (
     trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
-    if comment "$aid" "$company_id" "Skipped — a newer deploy approval ($keep_id) for the same project/workspace was approved in this poll cycle and will run instead, to avoid two resets racing on the same checkout. If this approval targets a different commit than $keep_id ends up deploying, deploy-runner's backward-deploy guard (DUR-137) will still refuse to apply it if it's older than what's live — re-file it if it genuinely needs to run."; then
+    local body outcome="" commit=""
+    local carried_commit
+    if carried_commit="$(check_commit_already_live "$aid" "$company_id")"; then
+      log "runner: $aid (superseded by $keep_id) — its own target ($carried_commit) is already reachable from what $keep_id just deployed; recording as carried"
+      body="Skipped — a newer deploy approval ($keep_id) for the same project/workspace was approved in this poll cycle and ran instead. This approval's own target commit ($carried_commit) is already reachable from what's now live, so its change shipped as part of $keep_id's deploy — see $keep_id for that deploy's outcome."
+      outcome="carried"
+      commit="$carried_commit"
+    else
+      body="Skipped — a newer deploy approval ($keep_id) for the same project/workspace was approved in this poll cycle and ran instead, to avoid two resets racing on the same checkout. If this approval targets a different commit than $keep_id ends up deploying, deploy-runner's backward-deploy guard (DUR-137) will still refuse to apply it if it's older than what's live — re-file it if it genuinely needs to run."
+    fi
+    if comment "$aid" "$company_id" "$body" "$outcome" "$commit"; then
       echo ok > "$result_file"
     fi
   )
@@ -565,10 +643,15 @@ for group in groups.values():
     group.sort(key=decided_key)
     keep = group[-1]
     keep_id = keep.get("id")
+    # DUR-152: KEEP runs first, SUPERSEDED entries after. A superseded
+    # approval'\''s own outcome comment now checks (via check_commit_already_live)
+    # whether its target commit already shipped as part of KEEP'\''s deploy —
+    # that check is only meaningful once KEEP has actually run and the
+    # checkout reflects its real result (success or failure), not before.
+    print(f"KEEP\t{keep_id}")
     for superseded in group[:-1]:
         superseded_id = superseded.get("id")
         print(f"SUPERSEDED\t{superseded_id}\t{keep_id}")
-    print(f"KEEP\t{keep_id}")
 ')"
     [ -z "${selection//[[:space:]]/}" ] && continue
 

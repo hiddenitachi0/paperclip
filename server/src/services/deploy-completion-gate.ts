@@ -62,10 +62,17 @@ function approvalPayloadProjectId(payload: unknown): string | null {
 }
 
 /**
- * True when at least one of the given deploy-approval ids has a runner-log entry recording a
- * successful deploy. Known coupling: this matches on `scripts/deploy-runner.sh`'s success
- * sentence ("... is live and healthy ...", DUR-44), not a structured status field, because none
- * exists on the approval row today (see this file's top docblock).
+ * True when at least one of the given deploy-approval ids has a runner-log entry recording
+ * either (a) a successful deploy of that exact approval — matched on `scripts/deploy-runner.sh`'s
+ * success sentence ("... is live and healthy ...", DUR-44), not a structured status field, because
+ * none existed on the approval row for this case (see this file's top docblock) — or (b)
+ * `outcome: "carried"` (DUR-152): the approval was superseded by (or lost the backward-deploy
+ * guard race to) a *different* approval, but deploy-runner independently confirmed via
+ * `git merge-base --is-ancestor` that this approval's own target commit already shipped as part
+ * of that other deploy. Without (b), a superseded approval's comment can never contain the
+ * literal success sentence (see the deploy-runner.sh test asserting exactly that — a skipped
+ * deploy must never read like a successful one) and so could never satisfy this gate, leaving
+ * whoever is waiting on it stuck forever even though its change is genuinely live.
  */
 function deployApprovalCompletedInStatusLog(
   deployApprovalIds: string[],
@@ -74,7 +81,9 @@ function deployApprovalCompletedInStatusLog(
   if (deployApprovalIds.length === 0) return false;
   const idSet = new Set(deployApprovalIds);
   return statusEntries.some(
-    (entry) => idSet.has(entry.approvalId) && entry.body.includes(DEPLOY_SUCCESS_MARKER),
+    (entry) =>
+      idSet.has(entry.approvalId) &&
+      (entry.body.includes(DEPLOY_SUCCESS_MARKER) || entry.outcome === "carried"),
   );
 }
 
