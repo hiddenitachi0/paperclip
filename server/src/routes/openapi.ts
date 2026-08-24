@@ -4147,6 +4147,27 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/agents/{agentId}/plugin-tool-grants",
+  tags: ["plugins"],
+  summary: "Get an agent's plugin tool grants",
+  request: { params: z.object({ agentId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{agentId}/plugin-tool-grants/sync",
+  tags: ["plugins"],
+  summary: "Replace an agent's plugin tool grants",
+  request: {
+    params: z.object({ agentId: z.string() }),
+    body: jsonBody(z.object({ desiredToolNames: z.array(z.string()).max(200) })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/plugins/{pluginId}/jobs",
   tags: ["plugins"],
   summary: "List plugin jobs",
