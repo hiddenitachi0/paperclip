@@ -684,6 +684,13 @@ type GitWorktreeBranchIncoherenceEvidence = {
     attempted: boolean;
     succeeded: boolean;
     reason: string;
+    // "checkout_existing_branch": the expected branch already exists at the same
+    // HEAD the worktree is clean on -- just switch to it.
+    // "create_from_base": the expected branch does not exist at all (e.g. it was
+    // deleted after its PR merged, but the worktree directory/registration was
+    // never cleaned up) -- create it fresh from the resolved base ref, since the
+    // worktree is clean and there is nothing local to lose.
+    mode: "checkout_existing_branch" | "create_from_base" | null;
   };
 };
 
@@ -725,6 +732,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   actualBranchName: string | null;
   sourceIssue: ExecutionWorkspaceIssueRef | null;
   executionWorkspaceId?: string | null;
+  baseRef?: string | null;
 }): Promise<GitWorktreeBranchIncoherenceEvidence> {
   const status = await runGit(
     ["status", "--porcelain", "--untracked-files=all"],
@@ -749,17 +757,40 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   const registeredBranchMatchesHead = Boolean(registered && registeredBranchRef === actualBranchRef);
   const sameHead = Boolean(expectedHeadSha && actualHeadSha && expectedHeadSha === actualHeadSha);
   const expectedBranchExists = Boolean(expectedHeadSha);
-  const eligible = cleanliness === "clean" && expectedBranchExists && sameHead && registeredBranchMatchesHead;
-  const safeRepairReason = eligible
+
+  const checkoutExistingEligible =
+    cleanliness === "clean" && expectedBranchExists && sameHead && registeredBranchMatchesHead;
+  // The expected branch is gone entirely -- most commonly because it already
+  // merged and was deleted -- but the worktree directory is still registered and
+  // has no local changes to lose. Recreating the branch from the base ref gets a
+  // future run a working workspace instead of failing forever against a branch
+  // that will never come back.
+  const createFromBaseEligible =
+    !checkoutExistingEligible &&
+    cleanliness === "clean" &&
+    !expectedBranchExists &&
+    Boolean(registered) &&
+    Boolean(input.baseRef);
+  const eligible = checkoutExistingEligible || createFromBaseEligible;
+  const mode: GitWorktreeBranchIncoherenceEvidence["safeRepair"]["mode"] = checkoutExistingEligible
+    ? "checkout_existing_branch"
+    : createFromBaseEligible
+      ? "create_from_base"
+      : null;
+  const safeRepairReason = checkoutExistingEligible
     ? "clean worktree and expected branch points at the current HEAD"
-    : cleanliness !== "clean"
-      ? "worktree is not clean"
-      : !registered
-        ? "worktree path is not registered"
-      : !registeredBranchMatchesHead
-        ? "registered worktree branch does not match HEAD"
-      : !expectedBranchExists
-        ? "expected branch does not exist"
+    : createFromBaseEligible
+      ? `expected branch does not exist; recreating it from base ref "${input.baseRef}"`
+      : cleanliness !== "clean"
+        ? "worktree is not clean"
+        : !registered
+          ? "worktree path is not registered"
+        : !expectedBranchExists
+          ? !input.baseRef
+            ? "expected branch does not exist and no base ref was provided to recreate it from"
+            : "expected branch does not exist"
+        : !registeredBranchMatchesHead
+          ? "registered worktree branch does not match HEAD"
         : !sameHead
           ? "expected branch and current HEAD differ"
           : "safe repair could not be proven";
@@ -803,6 +834,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
       attempted: false,
       succeeded: false,
       reason: safeRepairReason,
+      mode,
     },
   };
 }
@@ -823,6 +855,10 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   sourceIssue: ExecutionWorkspaceIssueRef | null;
   executionWorkspaceId?: string | null;
   actualBranchName?: string | null;
+  // Base ref to recreate the expected branch from when it no longer exists at
+  // all (e.g. deleted after merging). Omit to keep the old strict behavior of
+  // always failing when the expected branch is missing.
+  baseRef?: string | null;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
   const expectedBranchName = input.expectedBranchName?.trim();
@@ -840,17 +876,22 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     actualBranchName: currentBranch,
     sourceIssue: input.sourceIssue,
     executionWorkspaceId: input.executionWorkspaceId ?? null,
+    baseRef: input.baseRef ?? null,
   });
 
   if (!evidence.safeRepair.eligible) {
     throw branchIncoherenceValidationFailure(evidence);
   }
 
+  const repairArgs = evidence.safeRepair.mode === "create_from_base"
+    ? ["checkout", "-b", expectedBranchName, input.baseRef as string]
+    : ["checkout", expectedBranchName];
+
   evidence.safeRepair.attempted = true;
   try {
     await recordGitOperation(input.recorder, {
       phase: "worktree_prepare",
-      args: ["checkout", expectedBranchName],
+      args: repairArgs,
       cwd: input.worktreePath,
       metadata: {
         repoRoot: input.repoRoot,
@@ -858,16 +899,19 @@ export async function ensureGitWorktreeBranchCoherent(input: {
         expectedBranchName,
         actualBranchName: currentBranch,
         branchIncoherenceRepair: true,
+        branchIncoherenceRepairMode: evidence.safeRepair.mode,
         fingerprint: evidence.fingerprint,
         sourceIssueId: evidence.sourceIssueId,
         executionWorkspaceId: evidence.executionWorkspaceId,
       },
-      successMessage: `Repaired clean git worktree branch mismatch at ${input.worktreePath}: checked out ${expectedBranchName}\n`,
-      failureLabel: `git checkout ${expectedBranchName}`,
+      successMessage: evidence.safeRepair.mode === "create_from_base"
+        ? `Repaired git worktree at ${input.worktreePath}: recreated missing branch ${expectedBranchName} from ${input.baseRef}\n`
+        : `Repaired clean git worktree branch mismatch at ${input.worktreePath}: checked out ${expectedBranchName}\n`,
+      failureLabel: `git ${repairArgs.join(" ")}`,
     });
   } catch (error) {
     evidence.safeRepair.succeeded = false;
-    evidence.safeRepair.reason = `safe checkout failed: ${error instanceof Error ? error.message : String(error)}`;
+    evidence.safeRepair.reason = `safe ${evidence.safeRepair.mode === "create_from_base" ? "branch creation" : "checkout"} failed: ${error instanceof Error ? error.message : String(error)}`;
     throw branchIncoherenceValidationFailure(evidence);
   }
 
@@ -1727,6 +1771,7 @@ export async function realizeExecutionWorkspace(input: {
         actualBranchName: validation.actualBranchName ?? null,
         sourceIssue: input.issue,
         executionWorkspaceId: null,
+        baseRef,
         recorder: input.recorder ?? null,
       });
       return await validateLinkedGitWorktree({
@@ -1892,6 +1937,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         expectedBranchName: realized.branchName,
         sourceIssue: input.issue,
         executionWorkspaceId: input.workspace.id ?? null,
+        baseRef: reuseBaseRef,
         recorder: input.recorder ?? null,
       });
     }

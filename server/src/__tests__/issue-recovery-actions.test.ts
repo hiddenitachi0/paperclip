@@ -474,6 +474,76 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(enqueueWakeup).not.toHaveBeenCalled();
   });
 
+  it("escalates after three consecutive workspace_validation_failed recoveries even when each is cleared/reassigned in between", async () => {
+    // Reproduces the DUR-169 loop: a well-meaning agent resolves the active
+    // recovery action and reassigns/reopens the issue between each failure,
+    // which must not reset the "this keeps failing the same way" signal.
+    const { companyId, coderId, sourceIssue } = await seedCompany();
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+    const recoveryActionSvc = issueRecoveryActionService(db);
+
+    async function failOnceAndClear(attempt: number) {
+      const workspaceFingerprint = `workspace_incoherence:v1:sha256:${"a".repeat(63)}${attempt}`;
+      const latestRun = {
+        id: randomUUID(),
+        agentId: coderId,
+        status: "failed",
+        error: "workspace branch mismatch",
+        errorCode: "workspace_validation_failed",
+        contextSnapshot: {},
+        livenessState: "failed",
+        resultJson: {
+          workspaceValidation: {
+            reason: "git_worktree_branch_incoherence",
+            fingerprint: workspaceFingerprint,
+            sourceIssueId: sourceIssue.id,
+            expectedBranch: "DUR-132-expected",
+            actualBranch: "custom",
+            cleanliness: "clean",
+            safeRepair: { eligible: false, attempted: false, succeeded: false, reason: "expected branch does not exist" },
+          },
+        },
+      } as const;
+
+      await recovery.escalateStrandedAssignedIssue({
+        issue: sourceIssue,
+        previousStatus: "in_progress",
+        latestRun,
+        comment: "Workspace failed validation.",
+        recoveryCause: "workspace_validation_failed",
+      });
+
+      const active = await recoveryActionSvc.getActiveForIssue(companyId, sourceIssue.id);
+      // Simulate a human/agent "clearing the lock" and reassigning the issue back
+      // to a live status -- exactly the recovery-return-owner behavior observed on
+      // DUR-132 -- instead of actually repairing the workspace.
+      await recoveryActionSvc.resolveActiveForIssue({
+        companyId,
+        sourceIssueId: sourceIssue.id,
+        actionId: active!.id,
+        status: "resolved",
+        outcome: "reassigned",
+        resolutionNote: "Cleared the lock and reassigned.",
+      });
+      return active!;
+    }
+
+    const first = await failOnceAndClear(1);
+    const second = await failOnceAndClear(2);
+    const third = await failOnceAndClear(3);
+
+    expect(first.status).toBe("active");
+    expect(second.status).toBe("active");
+    expect(third.status).toBe("escalated");
+    expect(third.nextAction).toContain("ESCALATED");
+    expect((third.evidence as Record<string, unknown> | null)?.consecutiveFailureCount).toBe(3);
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
+    const escalatedComment = comments.find((comment) => comment.body.includes(`Recovery action: \`${third.id}\``));
+    expect(escalatedComment?.body).toContain("**Escalated:**");
+  });
+
   it("keeps the source issue blocked when source-scoped wakeup is claimed synchronously", async () => {
     const { companyId, managerId, coderId, sourceIssue } = await seedCompany();
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, managerId));
