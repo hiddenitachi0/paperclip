@@ -254,6 +254,10 @@ export const queryKeys = {
     list: (companyId: string) => ["mcp-tools", companyId] as const,
     forAgent: (agentId: string) => ["mcp-tools", "agent", agentId] as const,
   },
+  personas: {
+    list: (companyId: string) => ["personas", companyId] as const,
+    detail: (id: string) => ["personas", "detail", id] as const,
+  },
   companySearch: {
     search: (companyId: string, q: string, scope: string, limit: number, offset: number) =>
       ["company-search", companyId, q, scope, limit, offset] as const,
