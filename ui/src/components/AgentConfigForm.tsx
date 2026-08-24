@@ -937,24 +937,47 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 }}
               />
             </Field>
-            <Field label="How this agent talks" hint={help.personality}>
+            <Field label="Tone" hint={help.tone}>
               {(() => {
-                const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
+                const toneValue = eff("identity", "tone", props.agent.tone ?? "") ?? "";
                 return (
                   <>
                     <MarkdownEditor
-                      value={personalityValue}
-                      onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 1200) || null)}
+                      value={toneValue}
+                      onChange={(v) => mark("identity", "tone", (v ?? "").slice(0, 600) || null)}
                       placeholder="Warm and cheerful. Short sentences, no corporate filler."
                       contentClassName="min-h-[44px] text-sm"
                     />
                     <div
                       className={cn(
                         "text-xs mt-1 text-right",
-                        personalityValue.length > 1200 ? "text-destructive" : "text-muted-foreground",
+                        toneValue.length > 600 ? "text-destructive" : "text-muted-foreground",
                       )}
                     >
-                      {personalityValue.length}/1200
+                      {toneValue.length}/600
+                    </div>
+                  </>
+                );
+              })()}
+            </Field>
+            <Field label="Personality" hint={help.personality}>
+              {(() => {
+                const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
+                return (
+                  <>
+                    <MarkdownEditor
+                      value={personalityValue}
+                      onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 20000) || null)}
+                      placeholder="Backstory, likes and dislikes, how she looks, how she behaves. Only for persona agents — leave blank otherwise."
+                      contentClassName="min-h-[88px] text-sm"
+                    />
+                    <div
+                      className={cn(
+                        "text-xs mt-1 text-right",
+                        personalityValue.length > 20000 ? "text-destructive" : "text-muted-foreground",
+                      )}
+                    >
+                      {personalityValue.length}/20000
                     </div>
                   </>
                 );

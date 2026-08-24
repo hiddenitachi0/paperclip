@@ -95,3 +95,40 @@ describe("updateAgentSchema avatarAssetId", () => {
     expect(result.success).toBe(true);
   });
 });
+
+// DUR-61 addendum: tone (short, how this agent speaks) and personality (long,
+// who this agent is) are two separate fields, not one field with a length
+// slider — each has its own cap sized to what it actually needs to hold.
+describe("createAgentSchema tone/personality", () => {
+  it("accepts a short tone and stores it trimmed", () => {
+    const result = createAgentSchema.safeParse(baseAgent({}) as never);
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a tone over 600 characters", () => {
+    const result = createAgentSchema.safeParse({ ...baseAgent({}), tone: "a".repeat(601) });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a personality well past 1200 characters (it is the long field now)", () => {
+    const result = createAgentSchema.safeParse({ ...baseAgent({}), personality: "a".repeat(5000) });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a personality over 20000 characters", () => {
+    const result = createAgentSchema.safeParse({ ...baseAgent({}), personality: "a".repeat(20001) });
+    expect(result.success).toBe(false);
+  });
+
+  it("transforms an empty or whitespace-only tone to null rather than storing \"\"", () => {
+    const result = createAgentSchema.safeParse({ ...baseAgent({}), tone: "   " });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tone).toBeNull();
+  });
+
+  it("transforms an empty or whitespace-only personality to null rather than storing \"\"", () => {
+    const result = createAgentSchema.safeParse({ ...baseAgent({}), personality: "   " });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.personality).toBeNull();
+  });
+});

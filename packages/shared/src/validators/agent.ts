@@ -136,10 +136,20 @@ export const createAgentSchema = z.object({
   role: z.enum(AGENT_ROLES).optional().default("general"),
   title: z.string().optional().nullable(),
   icon: z.enum(AGENT_ICON_NAMES).optional().nullable(),
+  // DUR-61 addendum: TONE and PERSONALITY are two fields with different
+  // purposes, not one field with a length slider. Tone is short and applies
+  // to any agent; personality is long and only persona agents need it.
+  tone: z
+    .string()
+    .trim()
+    .max(600, "Tone is limited to 600 characters — a few sentences on how this agent speaks, not who it is.")
+    .transform((v) => (v && v.trim() ? v.trim() : null))
+    .optional()
+    .nullable(),
   personality: z
     .string()
     .trim()
-    .max(1200, "Personality is limited to 1200 characters — it describes tone of voice, not what the agent should do.")
+    .max(20000, "Personality is limited to 20,000 characters — it describes who this agent is, not what it should do.")
     .transform((v) => (v && v.trim() ? v.trim() : null))
     .optional()
     .nullable(),

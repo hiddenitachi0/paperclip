@@ -988,6 +988,13 @@
       "when": 1787110000000,
       "tag": "0140_mcp_tool_library",
       "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1787120000000,
+      "tag": "0141_agent_tone",
+      "breakpoints": true
     }
   ]
 }

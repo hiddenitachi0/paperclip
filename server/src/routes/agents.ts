@@ -1505,15 +1505,15 @@ export function agentRoutes(
   // agent row rather than diffing a patch, so neither goes through
   // assertAgentSelfUpdateAllowed. An agent that can hire must not be able to
   // mint a colleague with a self-authored voice — only a board-authenticated
-  // caller may set personality, on hire or on an existing agent (PATCH path:
-  // "personality" is deliberately absent from AGENT_SELF_UPDATE_ALLOWED_FIELDS
-  // in agent-self-update-policy.ts).
-  function assertNoAgentPersonalityMutation(req: Request, personality: unknown) {
+  // caller may set tone or personality, on hire or on an existing agent
+  // (PATCH path: both are deliberately absent from
+  // AGENT_SELF_UPDATE_ALLOWED_FIELDS in agent-self-update-policy.ts).
+  function assertNoAgentVoiceFieldMutation(req: Request, field: "tone" | "personality", value: unknown) {
     if (req.actor.type !== "agent") return;
-    if (personality === undefined || personality === null) return;
-    if (typeof personality === "string" && personality.trim().length === 0) return;
+    if (value === undefined || value === null) return;
+    if (typeof value === "string" && value.trim().length === 0) return;
     throw forbidden(
-      "Agent-authenticated callers cannot set \"personality\" when hiring or creating an agent. Only board-authenticated callers can.",
+      `Agent-authenticated callers cannot set "${field}" when hiring or creating an agent. Only board-authenticated callers can.`,
     );
   }
 
@@ -2573,7 +2573,8 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, hireInput.runtimeConfig);
-    assertNoAgentPersonalityMutation(req, hireInput.personality);
+    assertNoAgentVoiceFieldMutation(req, "tone", hireInput.tone);
+    assertNoAgentVoiceFieldMutation(req, "personality", hireInput.personality);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2659,6 +2660,7 @@ export function agentRoutes(
           role: normalizedHireInput.role,
           title: normalizedHireInput.title ?? null,
           icon: normalizedHireInput.icon ?? null,
+          tone: normalizedHireInput.tone ?? null,
           personality: normalizedHireInput.personality ?? null,
           reportsTo: normalizedHireInput.reportsTo ?? null,
           capabilities: normalizedHireInput.capabilities ?? null,
@@ -2796,7 +2798,8 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, createInput.runtimeConfig);
-    assertNoAgentPersonalityMutation(req, createInput.personality);
+    assertNoAgentVoiceFieldMutation(req, "tone", createInput.tone);
+    assertNoAgentVoiceFieldMutation(req, "personality", createInput.personality);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,

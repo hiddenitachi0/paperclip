@@ -100,6 +100,7 @@ function buildConfigSnapshot(
     role: row.role,
     title: row.title,
     icon: row.icon,
+    tone: row.tone,
     personality: row.personality,
     reportsTo: row.reportsTo,
     capabilities: row.capabilities,

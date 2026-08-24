@@ -12,7 +12,9 @@ export interface AdapterAgent {
   name: string;
   adapterType: string | null;
   adapterConfig: unknown;
-  /** DUR-61: operator-authored tone-of-voice text, resolved server-side into a persona block. */
+  /** DUR-61: operator-authored short tone-of-voice text, resolved server-side into a persona block. */
+  tone?: string | null;
+  /** DUR-61: operator-authored long backstory/persona text, resolved server-side into a persona block. */
   personality?: string | null;
 }
 
