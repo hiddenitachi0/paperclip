@@ -7,12 +7,26 @@
 // 21 Aug ruling on DUR-65 is explicit: "Start with nobody holding it and
 // let Filip assign it." Assigning the Boss job to an agent is the only way
 // it gains that right.
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { companies } from "@paperclipai/db";
 import { createRole, listRoles } from "./agent-roles.js";
 
 export const DUR_COMPANY_ID = "7600f03c-c836-4326-8d48-c801813c3a87";
 
 export async function seedDurStarterJobs(db: Db): Promise<{ created: string[] }> {
+  // The DUR company row does not exist on every instance this server code
+  // runs on (fresh onboarding, e2e tests, other operators' deployments of
+  // this fork). Skip silently rather than letting the FK violation on
+  // company_agent_roles.company_id crash server startup entirely.
+  const [company] = await db
+    .select({ id: companies.id })
+    .from(companies)
+    .where(eq(companies.id, DUR_COMPANY_ID));
+  if (!company) {
+    return { created: [] };
+  }
+
   const existing = await listRoles(db, DUR_COMPANY_ID);
   const existingKeys = new Set(existing.map((role) => role.key));
   const created: string[] = [];

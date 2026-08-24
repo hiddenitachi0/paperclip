@@ -67,4 +67,12 @@ describeEmbeddedPostgres("seedDurStarterJobs", () => {
       .sort();
     expect(developerKeys).toEqual(["merges:request"]);
   });
+
+  it("skips silently when the DUR company row does not exist on this instance", async () => {
+    const result = await seedDurStarterJobs(db);
+    expect(result.created).toEqual([]);
+
+    const roles = await db.select().from(companyAgentRoles);
+    expect(roles).toHaveLength(0);
+  });
 });
