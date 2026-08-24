@@ -257,6 +257,17 @@ export async function assignRoleToAgent(
   const mcpServerNames = mcpServers.map((s) => String(s.name ?? ""));
   const permissionKeys = grants.map((g) => g.permissionKey);
 
+  // Job switch (assigning a different role over an already-assigned one): the
+  // previous role's job-owned grants/tools that the new role doesn't also carry
+  // must be revoked, the same way clearing a role (roleId === null, above)
+  // revokes them. Only keys/names recorded in the PREVIOUS snapshot are
+  // candidates for revocation, so an operator-granted permission that was never
+  // part of a role snapshot is untouched and survives the switch.
+  const previouslyAppliedKeys = (agent.roleAppliedPermissionKeys as string[] | null) ?? [];
+  const previouslyAppliedMcpNames = (agent.roleAppliedMcpServerNames as string[] | null) ?? [];
+  const keysToRevoke = previouslyAppliedKeys.filter((k) => !permissionKeys.includes(k as PermissionKey));
+  const mcpNamesToRemove = previouslyAppliedMcpNames.filter((n) => !mcpServerNames.includes(n));
+
   const now = new Date();
 
   await db.transaction(async (tx) => {
@@ -269,9 +280,13 @@ export async function assignRoleToAgent(
       newAdapterConfig.bootstrapPromptTemplate = role.defaultInstructions;
     }
 
-    // Merge MCP servers: add any role-defined servers that aren't already present
-    // (match by name). We do not remove existing servers.
-    const existingServers = (newAdapterConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? [];
+    // Merge MCP servers: drop any servers owned by the previous role that the
+    // new role doesn't also carry, then add any new role-defined servers that
+    // aren't already present (match by name). Servers outside both role
+    // snapshots (operator-added) are left untouched either way.
+    const existingServers = (
+      (newAdapterConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? []
+    ).filter((s) => !mcpNamesToRemove.includes(String(s.name ?? "")));
     const existingNames = new Set(existingServers.map((s) => String(s.name ?? "")));
     const toAdd = mcpServers.filter((s) => !existingNames.has(String(s.name ?? "")));
     newAdapterConfig.mcpServers = [...existingServers, ...toAdd];
@@ -287,6 +302,18 @@ export async function assignRoleToAgent(
         updatedAt: now,
       })
       .where(eq(agents.id, agentId));
+
+    if (keysToRevoke.length > 0) {
+      await tx
+        .delete(principalPermissionGrants)
+        .where(
+          and(
+            eq(principalPermissionGrants.principalType, "agent"),
+            eq(principalPermissionGrants.principalId, agentId),
+            inArray(principalPermissionGrants.permissionKey, keysToRevoke as [string, ...string[]])
+          )
+        );
+    }
 
     // Apply permission grants (upsert by the unique index on companyId+type+id+key).
     // We use INSERT … ON CONFLICT DO NOTHING — the grant already exists, no need to
