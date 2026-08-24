@@ -25,6 +25,7 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import { AgentJobSection } from "../components/jobs/AgentJobSection";
+import { jobsApi } from "../api/jobs";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PageTabBar } from "../components/PageTabBar";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
@@ -724,6 +725,14 @@ export function AgentDetail() {
     enabled: Boolean(resolvedAgentId) && needsDashboardData,
   });
 
+  // DUR-146 Stage 1 item 17: shared query key with AgentJobSection further
+  // down this page, so assigning a job invalidates both at once.
+  const { data: headerRoleState } = useQuery({
+    queryKey: ["agents", "role-state", resolvedAgentId ?? routeAgentRef] as const,
+    queryFn: () => jobsApi.getAgentRoleState(resolvedAgentId!),
+    enabled: Boolean(resolvedAgentId),
+  });
+
   const { data: heartbeats } = useQuery({
     queryKey: queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined),
     queryFn: () => heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined),
@@ -1068,7 +1077,7 @@ export function AgentDetail() {
           <div className="min-w-0">
             <h2 className="text-2xl font-bold truncate">{agent.name}</h2>
             <p className="text-sm text-muted-foreground truncate">
-              {roleLabels[agent.role] ?? agent.role}
+              {headerRoleState?.job?.name ?? roleLabels[agent.role] ?? agent.role}
               {agent.title ? ` - ${agent.title}` : ""}
             </p>
           </div>

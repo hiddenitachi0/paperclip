@@ -878,6 +878,13 @@ export const PERMISSION_KEYS = [
   "tasks:manage_active_checkouts",
   "pipelines:write",
   "joins:approve",
+  // DUR-146 Stage 1: the "ask" half of deploy/merge authority. Neither key
+  // ever approves anything — approving still requires a board actor
+  // (assertBoard) regardless of any grant. A role may carry these; nothing
+  // may ever carry "deploys:approve" or "merges:approve" (see
+  // DEPLOY_APPROVAL_KEYS in server/src/services/agent-roles.ts).
+  "deploys:request",
+  "merges:request",
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 

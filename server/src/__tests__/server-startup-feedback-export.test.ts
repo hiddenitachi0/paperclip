@@ -141,7 +141,9 @@ vi.mock("../services/index.js", () => ({
   backfillPrincipalAccessCompatibility: vi.fn(async () => ({
     agentMembershipsInserted: 0,
     humanGrantsInserted: 0,
+    agentMergeRequestGrantsInserted: 0,
   })),
+  seedDurStarterJobs: vi.fn(async () => ({ created: [] })),
   feedbackService: feedbackServiceFactoryMock,
   bootstrapExecutionPolicyFromEnv: vi.fn(async () => null),
   heartbeatService: vi.fn(() => ({

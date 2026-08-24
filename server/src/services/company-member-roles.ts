@@ -34,6 +34,10 @@ export function grantsForHumanRole(
         { permissionKey: "users:manage_permissions", scope: null },
         { permissionKey: "tasks:assign", scope: null },
         { permissionKey: "joins:approve", scope: null },
+        // DUR-146: the right to ASK for a deploy/merge, never to approve one
+        // (approving is board-only regardless of any grant).
+        { permissionKey: "deploys:request", scope: null },
+        { permissionKey: "merges:request", scope: null },
       ];
     case "admin":
       return [
@@ -43,6 +47,8 @@ export function grantsForHumanRole(
         { permissionKey: "users:invite", scope: null },
         { permissionKey: "tasks:assign", scope: null },
         { permissionKey: "joins:approve", scope: null },
+        { permissionKey: "deploys:request", scope: null },
+        { permissionKey: "merges:request", scope: null },
       ];
     case "operator":
       return [{ permissionKey: "tasks:assign", scope: null }];

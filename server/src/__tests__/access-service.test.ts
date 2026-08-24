@@ -410,6 +410,24 @@ describeEmbeddedPostgres("access service", () => {
     expect(memberships.every((membership) => membership.membershipRole === "member")).toBe(true);
     expect(memberships.some((membership) => membership.principalId === pendingAgent.id)).toBe(false);
     expect(memberships.some((membership) => membership.principalId === terminatedAgent.id)).toBe(false);
+
+    // DUR-146 Stage 1: merges:request is backfilled to every non-terminal
+    // agent (so filing a merge_pr approval keeps working once creation is
+    // gated on it), but deploys:request is deliberately NOT backfilled to
+    // anyone — Filip's ruling was "start with nobody holding it."
+    expect(first.agentMergeRequestGrantsInserted).toBe(2);
+    expect(second.agentMergeRequestGrantsInserted).toBe(0);
+    const agentGrants = await db
+      .select()
+      .from(principalPermissionGrants)
+      .where(eq(principalPermissionGrants.principalType, "agent"));
+    expect(
+      agentGrants
+        .filter((grant) => grant.permissionKey === "merges:request")
+        .map((grant) => grant.principalId)
+        .sort(),
+    ).toEqual([idleAgent.id, runningAgent.id].sort());
+    expect(agentGrants.some((grant) => grant.permissionKey === "deploys:request")).toBe(false);
   });
 
   it("copies active user memberships with role-default grants for safe company imports", async () => {
