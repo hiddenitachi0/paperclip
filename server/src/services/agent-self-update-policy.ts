@@ -24,6 +24,7 @@ export const CONFIG_REVISION_FIELDS = [
   "role",
   "title",
   "icon",
+  "tone",
   "personality",
   "reportsTo",
   "capabilities",
@@ -153,14 +154,18 @@ export function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agent
     metadata: isPlainRecord(snapshot.metadata) || snapshot.metadata === null ? snapshot.metadata : null,
   };
 
-  // icon and personality were added to CONFIG_REVISION_FIELDS after this
-  // table started recording revisions, so every pre-existing revision row's
-  // snapshot lacks both keys. Only set them when the snapshot actually has
-  // the key — an unconditional `?? null` would wipe a legacy agent's icon
-  // (or a personality set after the fact but before its next revision) on
-  // the first rollback to any revision that predates this change.
+  // icon, tone, and personality were added to CONFIG_REVISION_FIELDS after
+  // this table started recording revisions, so every pre-existing revision
+  // row's snapshot lacks these keys. Only set them when the snapshot
+  // actually has the key — an unconditional `?? null` would wipe a legacy
+  // agent's icon (or a tone/personality set after the fact but before its
+  // next revision) on the first rollback to any revision that predates this
+  // change.
   if (Object.prototype.hasOwnProperty.call(snapshot, "icon")) {
     patch.icon = typeof snapshot.icon === "string" || snapshot.icon === null ? snapshot.icon : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(snapshot, "tone")) {
+    patch.tone = typeof snapshot.tone === "string" || snapshot.tone === null ? snapshot.tone : null;
   }
   if (Object.prototype.hasOwnProperty.call(snapshot, "personality")) {
     patch.personality =

@@ -38,6 +38,7 @@ import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
   resolveCombinedAgentInstructionsContent,
+  composeVoiceText,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseCodexJsonl,
@@ -684,7 +685,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
     const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
-    const personaText = typeof agent.personality === "string" ? agent.personality : null;
+    const personaText = composeVoiceText(agent.tone, agent.personality);
     let instructionsPrefix = "";
     let instructionsChars = 0;
     let personaChars = 0;
@@ -758,7 +759,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const notes = [repoAgentsNote];
         if (personaChars > 0) {
           notes.push(
-            `Applied agent personality (${personaChars} characters, voice only) — no instructions bundle configured for this agent.`,
+            `Applied agent voice (tone/personality, ${personaChars} characters) — no instructions bundle configured for this agent.`,
           );
         }
         if (forceSaferInvocation) {
@@ -790,7 +791,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           repoAgentsNote,
         ];
         if (personaChars > 0) {
-          notes.push(`Applied agent personality (${personaChars} characters, voice only).`);
+          notes.push(`Applied agent voice (tone/personality, ${personaChars} characters).`);
         }
         if (forceSaferInvocation) {
           notes.push("Codex transient fallback requested safer invocation settings for this retry.");

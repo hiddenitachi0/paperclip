@@ -74,6 +74,7 @@ export function NewAgent() {
 
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
+  const [tone, setTone] = useState("");
   const [personality, setPersonality] = useState("");
   const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
@@ -200,6 +201,7 @@ export function NewAgent() {
         name,
         effectiveRole,
         title,
+        tone,
         personality,
         reportsTo,
         selectedSkillKeys,
@@ -267,22 +269,41 @@ export function NewAgent() {
           />
         </div>
 
-        {/* How this agent talks (personality) */}
+        {/* Tone — how this agent speaks */}
         <div className="px-4 pb-2">
           <textarea
             className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
-            placeholder="How this agent talks — warm and cheerful. Short sentences, no corporate filler."
-            value={personality}
-            onChange={(e) => setPersonality(e.target.value.slice(0, 1200))}
-            maxLength={1200}
+            placeholder="Tone — warm and cheerful. Short sentences, no corporate filler."
+            value={tone}
+            onChange={(e) => setTone(e.target.value.slice(0, 600))}
+            maxLength={600}
           />
           <div
             className={cn(
               "text-xs mt-1 text-right",
-              personality.length > 1200 ? "text-destructive" : "text-muted-foreground",
+              tone.length > 600 ? "text-destructive" : "text-muted-foreground",
             )}
           >
-            {personality.length}/1200
+            {tone.length}/600
+          </div>
+        </div>
+
+        {/* Personality — who this agent is, only for persona agents */}
+        <div className="px-4 pb-2">
+          <textarea
+            className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
+            placeholder="Personality — backstory, likes and dislikes, how she behaves. Only for persona agents."
+            value={personality}
+            onChange={(e) => setPersonality(e.target.value.slice(0, 20000))}
+            maxLength={20000}
+          />
+          <div
+            className={cn(
+              "text-xs mt-1 text-right",
+              personality.length > 20000 ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {personality.length}/20000
           </div>
         </div>
 

@@ -21,6 +21,12 @@ export const agents = pgTable(
     role: text("role").notNull().default("general"),
     title: text("title"),
     icon: text("icon"),
+    // DUR-61 addendum: split into two fields. `tone` is short — how this
+    // agent speaks, applies to any agent. `personality` is long — who this
+    // agent IS (backstory, likes/dislikes, appearance), only persona agents
+    // need it. They compose: tone shapes wording, personality defines the
+    // agent underneath it.
+    tone: text("tone"),
     personality: text("personality"),
     status: text("status").notNull().default("idle"),
     reportsTo: uuid("reports_to").references((): AnyPgColumn => agents.id),

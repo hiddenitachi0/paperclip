@@ -152,6 +152,26 @@ export function combineCompanyAndAgentInstructions(
 }
 
 /**
+ * DUR-61 addendum: TONE (short, how this agent speaks) and PERSONALITY
+ * (long, who this agent is) are two separate operator-authored fields that
+ * compose into one voice-of-the-model text. Labels only render for the
+ * fields that are actually set, so an agent with only a tone doesn't get an
+ * empty "Personality:" heading, and vice versa. Returns null when neither is
+ * set, so composeAgentPersonaBlock's existing no-op behavior is unchanged.
+ */
+export function composeVoiceText(
+  toneText: string | null | undefined,
+  personalityText: string | null | undefined,
+): string | null {
+  const tone = toneText && toneText.trim().length > 0 ? toneText.trim() : null;
+  const personality = personalityText && personalityText.trim().length > 0 ? personalityText.trim() : null;
+  if (!tone && !personality) return null;
+  if (tone && !personality) return tone;
+  if (personality && !tone) return personality;
+  return `Tone (how you speak):\n${tone}\n\nPersonality (who you are):\n${personality}`;
+}
+
+/**
  * DUR-61: renders an operator-authored "how this agent talks" box as a
  * clearly-delimited, always-last block appended after company + agent
  * instructions. This is style guidance, not instruction — the block itself

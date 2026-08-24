@@ -44,6 +44,7 @@ import {
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   resolveCombinedAgentInstructionsContent,
+  composeVoiceText,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseClaudeStreamJson,
@@ -717,7 +718,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // When instructionsFilePath is configured, build a stable content-addressed
   // file that includes both the file content and the path directive, so we only
   // need --append-system-prompt-file (Claude CLI forbids using both flags together).
-  const personaText = typeof agent.personality === "string" ? agent.personality : null;
+  const personaText = composeVoiceText(agent.tone, agent.personality);
   let combinedInstructionsContents: string | null = null;
   let personaChars = 0;
   if (instructionsFilePath) {
@@ -1113,7 +1114,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
     }
     if (attemptInstructionsFilePath && !resumeSessionId && personaChars > 0) {
-      commandNotes.push(`Applied agent personality (${personaChars} characters, voice only).`);
+      commandNotes.push(`Applied agent voice (tone/personality, ${personaChars} characters).`);
     }
     if (onMeta) {
       await onMeta({

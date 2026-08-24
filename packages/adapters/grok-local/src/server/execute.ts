@@ -38,6 +38,7 @@ import {
   refreshPaperclipWorkspaceEnvForExecution,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   resolveCombinedAgentInstructionsContent,
+  composeVoiceText,
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
 import { isGrokUnknownSessionError, parseGrokJsonl } from "./parse.js";
@@ -274,7 +275,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const grokSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredGrokSkillNames = resolvePaperclipDesiredSkillNames(config, grokSkillEntries);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-  const personaText = typeof agent.personality === "string" ? agent.personality : null;
+  const personaText = composeVoiceText(agent.tone, agent.personality);
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
     companyId: agent.companyId,
@@ -446,7 +447,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         notes.push(`Staged ${stagedAssets.stagedSkillsCount} Paperclip skill(s) into .claude/skills for native Grok discovery.`);
       }
       if (stagedAssets.personaChars > 0) {
-        notes.push(`Applied agent personality (${stagedAssets.personaChars} characters, voice only).`);
+        notes.push(`Applied agent voice (tone/personality, ${stagedAssets.personaChars} characters).`);
       }
       return notes;
     })();
