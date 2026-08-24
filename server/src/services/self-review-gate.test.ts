@@ -128,7 +128,6 @@ describe("buildSelfReviewPassInstruction", () => {
       requestedStatus: "done",
     });
     expect(instruction).toContain("PATCH .../done");
-    expect(instruction).toContain("call it yourself, right now, in this same run");
     expect(instruction).toContain('Do not defer this to "the next self-review-pass run"');
   });
 
@@ -136,6 +135,18 @@ describe("buildSelfReviewPassInstruction", () => {
     const instruction = buildSelfReviewPassInstruction({ issueIdentifier: "PAP-1", alreadyHandedOff: false });
     expect(instruction).not.toContain("PATCH .../");
     expect(instruction).toContain('Do not defer this to "the next self-review-pass run"');
+  });
+
+  it("DUR-167: explicitly tells a same-run reader (the just-declined run) to stop and not retry", () => {
+    const instruction = buildSelfReviewPassInstruction({
+      issueIdentifier: "PAP-1",
+      alreadyHandedOff: false,
+      requestedStatus: "done",
+    });
+    expect(instruction).toContain("If you are the run whose PATCH was just declined: stop");
+    expect(instruction).toContain("Do not retry that PATCH in this run");
+    expect(instruction).toContain("even if you post a self-review comment first");
+    expect(instruction).toContain("If you are that freshly-started run");
   });
 
   it("is byte-for-byte unchanged for an ordinary change with no risky surface", () => {
