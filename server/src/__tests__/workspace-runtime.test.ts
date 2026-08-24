@@ -2422,6 +2422,146 @@ describe("realizeExecutionWorkspace", () => {
     });
   }, 15_000);
 
+  it("recreates a persisted git worktree's expected branch from base when it was deleted after merge", async () => {
+    const repoRoot = await createTempRepo();
+    const expectedBranch = "PAP-457-recreate-deleted-branch";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["worktree", "add", "-b", expectedBranch, worktreePath, "HEAD"]);
+
+    // Simulate the branch already having merged and been deleted, while the
+    // worktree directory/registration was never cleaned up and got reset back to
+    // some other branch by some other process -- exactly what DUR-169 found on
+    // disk for the DUR-132 worktree (checked out on "custom", not "main", since a
+    // branch can't be checked out in two worktrees at once).
+    await runGit(repoRoot, ["branch", "custom"]);
+    await runGit(worktreePath, ["checkout", "custom"]);
+    await runGit(repoRoot, ["branch", "-D", expectedBranch]);
+    const baseHead = await readGit(repoRoot, ["rev-parse", "HEAD"]);
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-deleted-branch",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName: expectedBranch,
+      },
+      issue: {
+        id: "issue-457",
+        identifier: "PAP-457",
+        title: "Recreate deleted branch",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+      recorder,
+    });
+
+    expect(restored?.cwd).toBe(worktreePath);
+    await expect(readGit(worktreePath, ["branch", "--show-current"])).resolves.toBe(expectedBranch);
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD"])).resolves.toBe(baseHead);
+    await expect(readGit(repoRoot, ["rev-parse", "--verify", `refs/heads/${expectedBranch}`])).resolves.toBe(baseHead);
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "worktree_prepare",
+          command: `git checkout -b ${expectedBranch} HEAD`,
+          metadata: expect.objectContaining({
+            branchIncoherenceRepair: true,
+            branchIncoherenceRepairMode: "create_from_base",
+            expectedBranchName: expectedBranch,
+            actualBranchName: "custom",
+            sourceIssueId: "issue-457",
+            executionWorkspaceId: "execution-workspace-deleted-branch",
+            fingerprint: expect.stringMatching(/^workspace_incoherence:v1:sha256:/),
+          }),
+        }),
+      ]),
+    );
+  }, 15_000);
+
+  it("still rejects a missing expected branch when the worktree is dirty", async () => {
+    const repoRoot = await createTempRepo();
+    const expectedBranch = "PAP-458-reject-dirty-missing-branch";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["worktree", "add", "-b", expectedBranch, worktreePath, "HEAD"]);
+    await runGit(repoRoot, ["branch", "custom"]);
+    await runGit(worktreePath, ["checkout", "custom"]);
+    await runGit(repoRoot, ["branch", "-D", expectedBranch]);
+    await fs.writeFile(path.join(worktreePath, "untracked.txt"), "uncommitted work\n", "utf8");
+
+    await expect(ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-dirty-missing-branch",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName: expectedBranch,
+      },
+      issue: {
+        id: "issue-458",
+        identifier: "PAP-458",
+        title: "Reject dirty missing branch",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    })).rejects.toMatchObject({
+      code: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: expect.objectContaining({
+          reason: "git_worktree_branch_incoherence",
+          expectedBranch,
+          actualBranch: "custom",
+          cleanliness: "dirty",
+          safeRepair: expect.objectContaining({
+            eligible: false,
+            attempted: false,
+            succeeded: false,
+            reason: "worktree is not clean",
+            mode: null,
+          }),
+        }),
+      },
+    });
+    // The untracked file must survive -- an unsafe repair must never touch a
+    // dirty worktree.
+    await expect(fs.readFile(path.join(worktreePath, "untracked.txt"), "utf8")).resolves.toBe("uncommitted work\n");
+  }, 15_000);
+
   it("does not reuse a missing persisted local filesystem workspace", async () => {
     const baseCwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-base-"));
     const missingCwd = path.join(baseCwd, "missing-workspace");
