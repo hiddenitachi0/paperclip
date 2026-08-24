@@ -197,19 +197,22 @@ describe("agent role/rights/tool-connection audit trail", () => {
     mockLogActivity.mockResolvedValue(undefined);
   });
 
-  it("records old -> new role in plain language when a board caller changes an agent's job title", { timeout: 20000 }, async () => {
+  // DUR-148: PATCH /agents/:id now rejects the legacy `role` field outright
+  // for every caller, board included (`role: "ceo"` silently granted
+  // canCreateAgents via the "ceo" default-permissions branch with no
+  // board-only/self-assignment check of its own). roleChange audit details
+  // are still produced for a role that changes via config-revision rollback
+  // — see appendAgentAuditDetails in routes/agents.ts — but this route no
+  // longer applies role changes or logs "agent.updated" for one.
+  it("rejects a board caller's attempt to change an agent's role via PATCH, with no audit entry", { timeout: 20000 }, async () => {
     const app = await createApp(boardActor);
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl).patch(`/api/agents/${agentId}`).send({ role: "ceo" }),
     );
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
 
     const call = mockLogActivity.mock.calls.find(([, input]) => input.action === "agent.updated");
-    expect(call).toBeTruthy();
-    const [, input] = call!;
-    expect(input.entityId).toBe(agentId);
-    expect(input.actorType).toBe("user");
-    expect(input.details.roleChange).toEqual({ from: "engineer", to: "ceo" });
+    expect(call).toBeUndefined();
   });
 
   it("records old -> new title in plain language when a board caller changes an agent's display title", { timeout: 20000 }, async () => {

@@ -1,14 +1,16 @@
 // DUR-114: routes for company agent roles ("jobs") and role assignment.
 // Board-only throughout — agents are structurally blocked from reaching these routes.
 import { Router } from "express";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { agents, principalPermissionGrants } from "@paperclipai/db";
-import { PERMISSION_KEYS, type PermissionKey } from "@paperclipai/shared";
+import { agents } from "@paperclipai/db";
+import { PERMISSION_KEYS } from "@paperclipai/shared";
 import { mcpServerConfigSchema } from "@paperclipai/shared/validators/agent";
 import { validate } from "../middleware/validate.js";
+import { forbidden } from "../errors.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
+import type { RoleMutationActor } from "../services/agent-roles.js";
 import {
   createRole,
   listRoles,
@@ -17,7 +19,27 @@ import {
   deleteRole,
   copyRoleToCompany,
   assignRoleToAgent,
+  getAgentRoleState,
+  addAgentToolOverride,
+  removeAgentToolOverride,
+  addAgentRightOverride,
+  removeAgentRightOverride,
 } from "../services/agent-roles.js";
+
+// Board-only, and explicitly refuses actor==target even though assertBoard
+// (called by every route below, before this) already makes that path
+// structurally unreachable today — defense in depth against a future change
+// that loosens assertBoard or adds a board-adjacent actor type that carries
+// an agentId (DUR-148).
+function assertNotSelfRoleMutation(req: { actor?: RoleMutationActor }, targetAgentId: string) {
+  if (req.actor?.agentId && req.actor.agentId === targetAgentId) {
+    throw forbidden("An agent cannot assign or modify its own role.");
+  }
+}
+
+function actorFor(req: { actor?: RoleMutationActor }): RoleMutationActor {
+  return { type: req.actor?.type ?? "none", agentId: req.actor?.agentId ?? null };
+}
 
 // Schema for the {permissionKey, scope} grant shape
 const grantSchema = z.object({
@@ -138,8 +160,9 @@ export function agentRoleRoutes(db: Db) {
     async (req, res) => {
       // Hard rule: board actors only. assertBoard rejects agent-authenticated requests.
       assertBoard(req);
-
       const agentId = req.params.agentId as string;
+      assertNotSelfRoleMutation(req, agentId);
+
       const { roleId } = req.body as { roleId: string | null };
 
       // Load the agent to check company membership
@@ -167,7 +190,7 @@ export function agentRoleRoutes(db: Db) {
       }
 
       const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
-      const updated = await assignRoleToAgent(db, agentId, roleId, { grantedByUserId });
+      const updated = await assignRoleToAgent(db, agentId, roleId, { grantedByUserId, actor: actorFor(req) });
       res.json(updated);
     }
   );
@@ -179,79 +202,107 @@ export function agentRoleRoutes(db: Db) {
   // than a shorter "no role" variant the UI was never built to read.
   router.get("/agents/:agentId/role", async (req, res) => {
     assertBoard(req);
-    const { agentId } = req.params;
+    const agentId = req.params.agentId as string;
 
     const [agent] = await db
-      .select()
+      .select({ companyId: agents.companyId })
       .from(agents)
-      .where(eq(agents.id, agentId!));
+      .where(eq(agents.id, agentId));
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
     await assertCompanyAccess(req, agent.companyId);
 
-    const role = agent.roleId ? await getRole(db, agent.roleId) : null;
+    res.json(await getAgentRoleState(db, agentId));
+  });
 
-    // Tool diff: which of the role's snapshot names are still present on the
-    // agent (fromJob), which current names weren't part of that snapshot
-    // (added), and which snapshot names are no longer present (removed).
-    const appliedNames = new Set<string>(
-      (agent.roleAppliedMcpServerNames as string[] | null) ?? []
-    );
-    const currentConfig = (agent.adapterConfig as Record<string, unknown>) ?? {};
-    const currentMcpServers = (currentConfig.mcpServers as Array<Record<string, unknown>> | undefined) ?? [];
-    const currentNames = new Set(currentMcpServers.map((s) => String(s.name ?? "")));
+  // ── Per-agent tool/right overrides on top of an assigned job ────────────
+  // Board-only, and — like POST /agents/:id/role above — explicitly refuse
+  // actor==target at the route layer as well as in the service functions
+  // themselves (DUR-148).
 
-    // Same diff shape for permission grants, using the live grants table as
-    // "current" instead of adapterConfig.
-    const appliedKeys = new Set<string>(
-      (agent.roleAppliedPermissionKeys as string[] | null) ?? []
-    );
-    const liveGrants = await db
-      .select({
-        permissionKey: principalPermissionGrants.permissionKey,
-        scope: principalPermissionGrants.scope,
-      })
-      .from(principalPermissionGrants)
-      .where(
-        and(
-          eq(principalPermissionGrants.principalType, "agent"),
-          eq(principalPermissionGrants.principalId, agentId!)
-        )
-      );
-    const liveGrantsByKey = new Map(liveGrants.map((g) => [g.permissionKey, g]));
-    const roleGrantsByKey = new Map(
-      (
-        (role?.defaultGrants as Array<{ permissionKey: string; scope: Record<string, unknown> | null }> | undefined) ?? []
-      ).map((g) => [g.permissionKey, g])
-    );
+  router.post(
+    "/agents/:agentId/role/tools",
+    validate(z.object({ tool: mcpServerConfigSchema })),
+    async (req, res) => {
+      assertBoard(req);
+      const agentId = req.params.agentId as string;
+      assertNotSelfRoleMutation(req, agentId);
 
-    res.json({
-      job: role ? { id: role.id, name: role.name, description: role.description ?? "" } : null,
-      // Assignment time isn't tracked on the agent row yet — not rendered
-      // anywhere in the UI today, so left null rather than guessed.
-      assignedAt: null,
-      tools: {
-        fromJob: [...appliedNames].filter((n) => currentNames.has(n)),
-        added: [...currentNames].filter((n) => !appliedNames.has(n)),
-        removed: [...appliedNames].filter((n) => !currentNames.has(n)),
-      },
-      rights: {
-        fromJob: [...appliedKeys]
-          .filter((k) => liveGrantsByKey.has(k))
-          .map((k) => ({
-            permissionKey: k as PermissionKey,
-            scope: roleGrantsByKey.get(k)?.scope ?? liveGrantsByKey.get(k)!.scope ?? null,
-          })),
-        added: liveGrants
-          .filter((g) => !appliedKeys.has(g.permissionKey))
-          .map((g) => ({ permissionKey: g.permissionKey as PermissionKey, scope: g.scope })),
-        removed: [...appliedKeys]
-          .filter((k) => !liveGrantsByKey.has(k))
-          .map((k) => ({ permissionKey: k as PermissionKey, scope: roleGrantsByKey.get(k)?.scope ?? null })),
-      },
-    });
+      const [agent] = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, agentId));
+      if (!agent) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCompanyAccess(req, agent.companyId);
+
+      const { tool } = req.body as { tool: Record<string, unknown> };
+      res.json(await addAgentToolOverride(db, agentId, tool, actorFor(req)));
+    }
+  );
+
+  router.delete("/agents/:agentId/role/tools/:toolName", async (req, res) => {
+    assertBoard(req);
+    const agentId = req.params.agentId as string;
+    assertNotSelfRoleMutation(req, agentId);
+
+    const [agent] = await db
+      .select({ companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCompanyAccess(req, agent.companyId);
+
+    res.json(await removeAgentToolOverride(db, agentId, req.params.toolName as string, actorFor(req)));
+  });
+
+  router.post(
+    "/agents/:agentId/role/rights",
+    validate(grantSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const agentId = req.params.agentId as string;
+      assertNotSelfRoleMutation(req, agentId);
+
+      const [agent] = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, agentId));
+      if (!agent) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCompanyAccess(req, agent.companyId);
+
+      const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
+      const updated = await addAgentRightOverride(db, agentId, req.body, actorFor(req), grantedByUserId);
+      res.json(updated);
+    }
+  );
+
+  router.delete("/agents/:agentId/role/rights/:permissionKey", async (req, res) => {
+    assertBoard(req);
+    const agentId = req.params.agentId as string;
+    assertNotSelfRoleMutation(req, agentId);
+
+    const [agent] = await db
+      .select({ companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCompanyAccess(req, agent.companyId);
+
+    res.json(await removeAgentRightOverride(db, agentId, req.params.permissionKey as string, actorFor(req)));
   });
 
   return router;
