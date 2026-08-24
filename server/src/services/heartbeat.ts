@@ -210,7 +210,7 @@ import {
 import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
-import { withAgentStartLock } from "./agent-start-lock.js";
+import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -9269,6 +9269,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  // DUR-151: whole-instance running-run count, across every agent/company —
+  // the counterpart to countRunningRunsForAgent with no agentId filter.
+  async function countRunningRunsInstanceWide() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+    return Number(count ?? 0);
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -10242,66 +10252,85 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
 
-      const queuedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt));
-      if (queuedRuns.length === 0) return [];
-
-      const dependencyReadiness = await listQueuedRunDependencyReadiness(agent.companyId, queuedRuns);
-      const queuedIssueIds = [...new Set(
-        queuedRuns
-          .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
-          .filter((issueId): issueId is string => Boolean(issueId)),
-      )];
-      const issueRows = await db
-        .select({
-          id: issues.id,
-          status: issues.status,
-          priority: issues.priority,
-        })
-        .from(issues)
-        .where(
-          queuedIssueIds.length > 0
-            ? and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds))
-            : sql`false`,
-        );
-      const issueById = new Map(issueRows.map((row) => [row.id, row]));
-      const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
-      const prioritizedRuns = [...queuedRuns].sort((left, right) => {
-        const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
-        const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
-        const leftReadiness = leftIssueId ? dependencyReadiness.get(leftIssueId) : null;
-        const rightReadiness = rightIssueId ? dependencyReadiness.get(rightIssueId) : null;
-        const leftReady = leftIssueId ? (leftReadiness?.isDependencyReady ?? true) : true;
-        const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
-        const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
-        const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-        const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-        const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-        if (leftRank !== rightRank) return leftRank - rightRank;
-        const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
-        const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
-        if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
-        return left.createdAt.getTime() - right.createdAt.getTime();
+      // DUR-151: whole-instance ceiling, on top of the per-agent one above.
+      // Serialized via a single in-process lock (safe because run dispatch
+      // is single-process — see agent-start-lock.ts) so two agents can't
+      // both read stale headroom and jointly overshoot the global cap.
+      return withGlobalRunStartLock(async () => {
+        const globalMaxConcurrentRuns = (await instanceSettings.getGeneral()).globalMaxConcurrentRuns;
+        const globalRunningCount = await countRunningRunsInstanceWide();
+        const globalAvailableSlots = Math.max(0, globalMaxConcurrentRuns - globalRunningCount);
+        const effectiveAvailableSlots = Math.min(availableSlots, globalAvailableSlots);
+        if (effectiveAvailableSlots <= 0) return [];
+        return startNextQueuedRunForAgentWithinSlots(agent, effectiveAvailableSlots);
       });
-
-      const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of prioritizedRuns) {
-        if (claimedRuns.length >= availableSlots) break;
-        const claimed = await claimQueuedRun(queuedRun, companyAgents);
-        if (claimed) claimedRuns.push(claimed);
-      }
-      if (claimedRuns.length === 0) return [];
-
-      for (const claimedRun of claimedRuns) {
-        void executeRun(claimedRun.id).catch((err) => {
-          logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
-        });
-      }
-      return claimedRuns;
     });
+  }
+
+  async function startNextQueuedRunForAgentWithinSlots(
+    agent: NonNullable<Awaited<ReturnType<typeof getAgent>>>,
+    availableSlots: number,
+  ) {
+    const agentId = agent.id;
+    const queuedRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
+      .orderBy(asc(heartbeatRuns.createdAt));
+    if (queuedRuns.length === 0) return [];
+
+    const dependencyReadiness = await listQueuedRunDependencyReadiness(agent.companyId, queuedRuns);
+    const queuedIssueIds = [...new Set(
+      queuedRuns
+        .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
+        .filter((issueId): issueId is string => Boolean(issueId)),
+    )];
+    const issueRows = await db
+      .select({
+        id: issues.id,
+        status: issues.status,
+        priority: issues.priority,
+      })
+      .from(issues)
+      .where(
+        queuedIssueIds.length > 0
+          ? and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds))
+          : sql`false`,
+      );
+    const issueById = new Map(issueRows.map((row) => [row.id, row]));
+    const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
+    const prioritizedRuns = [...queuedRuns].sort((left, right) => {
+      const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
+      const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
+      const leftReadiness = leftIssueId ? dependencyReadiness.get(leftIssueId) : null;
+      const rightReadiness = rightIssueId ? dependencyReadiness.get(rightIssueId) : null;
+      const leftReady = leftIssueId ? (leftReadiness?.isDependencyReady ?? true) : true;
+      const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
+      const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
+      const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
+      const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+      const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
+      const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
+      if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
+      return left.createdAt.getTime() - right.createdAt.getTime();
+    });
+
+    const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+    for (const queuedRun of prioritizedRuns) {
+      if (claimedRuns.length >= availableSlots) break;
+      const claimed = await claimQueuedRun(queuedRun, companyAgents);
+      if (claimed) claimedRuns.push(claimed);
+    }
+    if (claimedRuns.length === 0) return [];
+
+    for (const claimedRun of claimedRuns) {
+      void executeRun(claimedRun.id).catch((err) => {
+        logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
+      });
+    }
+    return claimedRuns;
   }
 
   async function executeRun(runId: string) {
@@ -12638,7 +12667,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           });
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           activeRunExecutions.delete(run.id);
-          await startNextQueuedRunForAgent(run.agentId);
+          // DUR-151: this run finishing may have freed a whole-instance
+          // concurrency slot, not just this agent's own — drain every
+          // agent's queue, not only run.agentId's.
+          await resumeQueuedRuns();
         }
   }
 
@@ -13400,7 +13432,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       },
     });
 
-    await startNextQueuedRunForAgent(promotedRun.agentId);
+    // DUR-151: this can run nested inside another agent's in-flight
+    // startNextQueuedRunForAgent call (e.g. a daily-cap cancellation
+    // promoting a peer's deferred wake from inside claimQueuedRun, which is
+    // itself inside withGlobalRunStartLock). Awaiting here would re-enter
+    // the same global lock before the outer call releases it and deadlock
+    // for up to AGENT_START_LOCK_STALE_MS. Fire-and-forget, same as the
+    // claimed-run dispatch below — the promoted run already exists as
+    // "queued" from the transaction above, so callers observing that row
+    // don't need this call to have completed.
+    void startNextQueuedRunForAgent(promotedRun.agentId).catch((err) => {
+      logger.error({ err, agentId: promotedRun.agentId }, "failed to start promoted queued run");
+    });
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
@@ -14493,7 +14536,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     await finalizeAgentStatus(run.agentId, "cancelled");
-    await startNextQueuedRunForAgent(run.agentId);
+    // DUR-151: cancelling a running run can free a whole-instance slot for a
+    // different agent's queued run, not just this agent's own. Fire-and-forget:
+    // claimQueuedRun calls cancelRunInternal for several reject reasons (agent
+    // missing/not invokable, budget block, pause hold) from inside its own
+    // startNextQueuedRunForAgent call, which already holds the global run-start
+    // lock — awaiting resumeQueuedRuns() here would re-enter that same lock
+    // before the outer call releases it and deadlock for up to
+    // AGENT_START_LOCK_STALE_MS.
+    void resumeQueuedRuns().catch((err) => {
+      logger.error({ err, runId: run.id }, "failed to resume queued runs after cancellation");
+    });
     return cancelled;
   }
 

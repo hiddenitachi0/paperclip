@@ -11,6 +11,9 @@ import {
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+  MIN_GLOBAL_MAX_CONCURRENT_RUNS,
+  MAX_GLOBAL_MAX_CONCURRENT_RUNS,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
 
@@ -43,6 +46,15 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS)
     .max(MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS)
     .default(DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS),
+  // Whole-instance ceiling on simultaneously running heartbeat runs, across
+  // every agent/company. Distinct from (and enforced in addition to) each
+  // agent's own maxConcurrentRuns.
+  globalMaxConcurrentRuns: z
+    .number()
+    .int()
+    .min(MIN_GLOBAL_MAX_CONCURRENT_RUNS)
+    .max(MAX_GLOBAL_MAX_CONCURRENT_RUNS)
+    .default(DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
