@@ -43,6 +43,7 @@ import {
   heartbeatService,
   mergeDeployVisibilityService,
   agentErrorAlertsService,
+  untrackedWriteAlertsService,
   instanceSettingsService,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
@@ -800,6 +801,7 @@ export async function startServer(): Promise<StartedServer> {
     const routines = routineService(db as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
     const agentErrorAlerts = agentErrorAlertsService(db as any);
+    const untrackedWriteAlerts = untrackedWriteAlertsService(db as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery.
@@ -943,6 +945,21 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "agent-error alert tick failed");
+        });
+
+      // DUR-130: the fn_flag_untracked_write trigger (migration 0139) records
+      // any write to a DUR-128-relevant table not made through the service
+      // layer, migration runner, or restore path. Surface each new row as an
+      // operator-visible alert instead of leaving it a quiet DB-only row.
+      void untrackedWriteAlerts
+        .tick(new Date())
+        .then((result) => {
+          if (result.alerted > 0) {
+            logger.warn({ ...result }, "untracked-write alert tick raised out-of-band write alerts");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "untracked-write alert tick failed");
         });
 
       void environmentCustomImages

@@ -73,6 +73,12 @@ const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
+// DUR-130: restore is a deliberate, operator-triggered bulk write outside the
+// service layer -- tag it so `fn_flag_untracked_write` (migration 0139)
+// recognizes it as legitimate instead of flooding untracked_write_incidents
+// with false positives for every row a restore touches.
+const UNTRACKED_WRITE_RESTORE_APPLICATION_NAME = "paperclip-restore";
+
 function sanitizeRestoreErrorMessage(error: unknown): string {
   if (error && typeof error === "object") {
     const record = error as Record<string, unknown>;
@@ -361,6 +367,7 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
       env: {
         ...process.env,
         PGCONNECT_TIMEOUT: String(connectTimeout),
+        PGAPPNAME: UNTRACKED_WRITE_RESTORE_APPLICATION_NAME,
       },
     },
   );
@@ -996,7 +1003,11 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
     }
   }
 
-  const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  const sql = postgres(opts.connectionString, {
+    max: 1,
+    connect_timeout: connectTimeout,
+    connection: { application_name: UNTRACKED_WRITE_RESTORE_APPLICATION_NAME },
+  });
 
   try {
     await sql`SELECT 1`;
