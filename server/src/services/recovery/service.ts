@@ -257,6 +257,20 @@ const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 
+// DUR-169: a `workspace_validation` recovery action gets auto-cancelled as soon as
+// the source issue leaves `blocked` (see routes/issues.ts's "became stale ... manually
+// moved to todo" reconciliation) -- that cancellation fires whether or not the
+// underlying git worktree/branch problem was actually fixed. An agent that just
+// clears the workspace lock and reassigns the issue back to `todo` (without touching
+// git) looks identical, to that reconciliation, to a real fix: the recovery action
+// resets to a fresh row and the per-row `attemptCount` never accumulates across
+// cycles. That let a broken worktree bounce an issue between two agents 39 times in
+// 16 hours with each individual escalation looking like a first offense. Counting
+// *all* rows (any status) for this issue+cause within a lookback window survives
+// that reset and detects the thrash pattern instead of just one failed attempt.
+const WORKSPACE_VALIDATION_THRASH_THRESHOLD = 3;
+const WORKSPACE_VALIDATION_THRASH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 type ContinuationRetryClassification = {
   kind: "transient_infra" | "non_retryable" | "default";
   maxAttempts: number;
@@ -2408,6 +2422,34 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     };
   }
 
+  // Counts every `issue_recovery_actions` row for this issue+cause created within the
+  // lookback window, regardless of status. A row still counts after it was
+  // auto-cancelled by the "became stale because the source issue was manually moved
+  // from blocked to todo" reconciliation (routes/issues.ts) -- that reconciliation
+  // cannot tell a genuine fix from a lock-clear-and-reassign that leaves the
+  // underlying git state untouched, so per-row attemptCount alone cannot see a
+  // recurring thrash across cycles. This can.
+  async function countRecentStrandedRecoveryActions(input: {
+    companyId: string;
+    sourceIssueId: string;
+    cause: StrandedRecoveryCause;
+    sinceMs: number;
+  }) {
+    const since = new Date(Date.now() - input.sinceMs);
+    const rows = await db
+      .select({ id: issueRecoveryActions.id })
+      .from(issueRecoveryActions)
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, input.companyId),
+          eq(issueRecoveryActions.sourceIssueId, input.sourceIssueId),
+          eq(issueRecoveryActions.cause, input.cause),
+          gte(issueRecoveryActions.createdAt, since),
+        ),
+      );
+    return rows.length;
+  }
+
   async function ensureSourceScopedStrandedRecoveryAction(input: {
     issue: typeof issues.$inferSelect;
     latestRun: LatestIssueRun;
@@ -2417,10 +2459,21 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
   }) {
     const recoveryCause = input.recoveryCause ?? "stranded_assigned_issue";
-    const ownerAgentId = await resolveStrandedIssueRecoveryOwnerAgentId(
-      input.issue,
-      input.recoveryOwnerAgentId,
-    );
+    const priorOccurrences = recoveryCause === "workspace_validation_failed"
+      ? await countRecentStrandedRecoveryActions({
+        companyId: input.issue.companyId,
+        sourceIssueId: input.issue.id,
+        cause: recoveryCause,
+        sinceMs: WORKSPACE_VALIDATION_THRASH_WINDOW_MS,
+      })
+      : 0;
+    const thrashDetected = priorOccurrences >= WORKSPACE_VALIDATION_THRASH_THRESHOLD;
+    const ownerAgentId = thrashDetected
+      ? null
+      : await resolveStrandedIssueRecoveryOwnerAgentId(
+        input.issue,
+        input.recoveryOwnerAgentId,
+      );
     const now = new Date();
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
@@ -2436,14 +2489,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         recoveryCause,
         latestRun: input.latestRun,
       }),
-      evidence: buildStrandedRecoveryActionEvidence({
-        issue: input.issue,
-        latestRun: input.latestRun,
-        previousStatus: input.previousStatus,
-        recoveryCause,
-        successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
-      }),
-      nextAction: recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
+      evidence: {
+        ...buildStrandedRecoveryActionEvidence({
+          issue: input.issue,
+          latestRun: input.latestRun,
+          previousStatus: input.previousStatus,
+          recoveryCause,
+          successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+        }),
+        ...(thrashDetected ? { thrashDetected: true, priorOccurrences } : {}),
+      },
+      nextAction: thrashDetected
+        ? `This workspace validation failure has recurred ${priorOccurrences + 1} times in the last 24h. ` +
+          "Clearing the workspace lock and reassigning does not fix it -- the git worktree/branch itself needs " +
+          "manual repair (or a fresh execution workspace) before this issue can proceed. No agent owner has been " +
+          "assigned; a board operator must repair the workspace and explicitly reassign."
+        : recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
         ? "Choose and record a valid issue disposition without copying transcript content."
         : recoveryCause === "workspace_validation_failed"
           ? readWorkspaceValidationPayload(input.latestRun)?.reason === "git_worktree_branch_incoherence"
@@ -2701,11 +2762,19 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       recoveryOwnerAgentId: input.recoveryOwnerAgentId,
       successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
     });
+    const thrashDetected = recoveryAction.evidence?.thrashDetected === true;
     const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
     const updated = await issuesSvc.update(input.issue.id, {
       status: "blocked",
       blockedByIssueIds: blockerIds,
-      assigneeAgentId: recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId,
+      // Normally fall back to keeping the current assignee so a human can still find
+      // this on their own queue. On a detected thrash loop that fallback is exactly
+      // what let this bounce for 16 hours: the current assignee is the agent that
+      // just failed the same way it failed last cycle, and it (or its recovery
+      // owner) will likely clear the lock and reassign again without touching git.
+      // Clear the assignee outright so no agent's normal heartbeat auto-claims it --
+      // only an explicit board/human reassignment can move it forward.
+      assigneeAgentId: thrashDetected ? null : (recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId),
     });
     if (!updated) return null;
 
@@ -2735,6 +2804,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         `- Recovery action: \`${recoveryAction.id}\``,
         `- Recovery owner: ${agentUiLink(recoveryOwner, prefix)}`,
         "- Next action: the recovery owner should either restore a live execution path or record the manual resolution on the source issue.",
+      ].join("\n")
+      : thrashDetected
+      ? [
+        "",
+        `- Recovery action: \`${recoveryAction.id}\``,
+        "- Recovery owner: none, on purpose. This issue has bounced through workspace-validation recovery repeatedly " +
+          "without the underlying git worktree/branch problem being fixed -- assigning it to another agent would " +
+          "likely repeat the same loop.",
+        "- Next action: a board operator must repair the workspace (or provision a fresh one) and then explicitly reassign this issue.",
       ].join("\n")
       : [
         "",

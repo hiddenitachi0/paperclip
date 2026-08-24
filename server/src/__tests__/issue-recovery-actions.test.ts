@@ -474,6 +474,116 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(enqueueWakeup).not.toHaveBeenCalled();
   });
 
+  // DUR-169: a source-scoped `workspace_validation` recovery action gets auto-cancelled
+  // as soon as the issue leaves `blocked` -- routes/issues.ts's "became stale because
+  // the source issue was manually moved from blocked to todo" reconciliation cannot
+  // tell a genuine git-state fix from a recovery owner that just cleared the workspace
+  // lock and reassigned it back without touching git. That let a real incident (a
+  // worktree pointed at a branch that no longer existed) bounce an issue between two
+  // agents 39 times over 16 hours -- every individual escalation looked like a first
+  // offense because the per-row attemptCount reset each cycle. This test simulates
+  // that cycle (escalate, then cancel like the reconciliation would, repeat) and
+  // asserts that once the same issue+cause has recurred enough times in the lookback
+  // window, escalation stops handing it to another agent and instead clears the
+  // assignee entirely so nothing auto-claims it -- only a human/board action can move
+  // it forward.
+  it("stops handing repeated workspace_validation_failed escalations to another agent once a thrash loop is detected", async () => {
+    const { companyId, coderId, sourceIssue } = await seedCompany();
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+
+    const makeLatestRun = () => ({
+      id: randomUUID(),
+      agentId: coderId,
+      status: "failed",
+      error: 'Execution workspace git worktree expected branch "feature-x" but found "custom".',
+      errorCode: "workspace_validation_failed",
+      contextSnapshot: {},
+      livenessState: "failed",
+      resultJson: {
+        workspaceValidation: {
+          reason: "git_worktree_branch_incoherence",
+          fingerprint: `workspace_incoherence:v1:sha256:${"b".repeat(64)}`,
+          sourceIssueId: sourceIssue.id,
+          executionWorkspaceId: "execution-workspace-thrash",
+          expectedBranch: "feature-x",
+          actualBranch: "custom",
+          cleanliness: "clean",
+          provenance: {
+            expectedBranchExists: false,
+            actualBranchExists: true,
+            expectedHeadSha: null,
+            actualHeadSha: "3333333333333333333333333333333333333333",
+            sameHead: false,
+          },
+          safeRepair: { eligible: false, attempted: false, succeeded: false, reason: "expected branch does not exist" },
+        },
+      },
+    } as const);
+
+    // Cycles 1-3: escalate, then simulate the "recovery owner cleared the lock and
+    // reassigned back to todo" pattern by cancelling the action and restoring the
+    // issue -- exactly what the real incident's comment history showed happening
+    // roughly a dozen times without ever tripping a circuit breaker.
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await recovery.escalateStrandedAssignedIssue({
+        issue: sourceIssue,
+        previousStatus: "in_progress",
+        latestRun: makeLatestRun(),
+        comment: "Workspace failed validation.",
+        recoveryCause: "workspace_validation_failed",
+      });
+      await db
+        .update(issueRecoveryActions)
+        .set({ status: "cancelled", outcome: "cancelled", resolvedAt: new Date() })
+        .where(eq(issueRecoveryActions.sourceIssueId, sourceIssue.id));
+      await db
+        .update(issues)
+        .set({ status: "todo", assigneeAgentId: coderId })
+        .where(eq(issues.id, sourceIssue.id));
+    }
+
+    const [issueBeforeThrashCycle] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+
+    // 4th cycle: three prior occurrences already recorded in the lookback window --
+    // this is the thrash trigger.
+    await recovery.escalateStrandedAssignedIssue({
+      issue: issueBeforeThrashCycle!,
+      previousStatus: "todo",
+      latestRun: makeLatestRun(),
+      comment: "Workspace failed validation.",
+      recoveryCause: "workspace_validation_failed",
+    });
+
+    const allActionRows = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, sourceIssue.id))
+      .orderBy(issueRecoveryActions.createdAt);
+    expect(allActionRows).toHaveLength(4);
+    const thrashAction = allActionRows[3]!;
+    expect(thrashAction).toMatchObject({
+      status: "active",
+      ownerType: "board",
+      ownerAgentId: null,
+    });
+    expect(thrashAction.evidence).toMatchObject({
+      thrashDetected: true,
+      priorOccurrences: 3,
+    });
+    expect(thrashAction.nextAction).toContain("recurred");
+
+    const [issueAfterThrashCycle] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+    expect(issueAfterThrashCycle?.status).toBe("blocked");
+    // The whole point: no agent is left holding this issue, so nothing can silently
+    // clear the lock and bounce it back into another identical retry cycle.
+    expect(issueAfterThrashCycle?.assigneeAgentId).toBeNull();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
+    const thrashComment = comments.find((comment) => comment.body.includes("Recovery owner: none, on purpose"));
+    expect(thrashComment).toBeDefined();
+  });
+
   it("keeps the source issue blocked when source-scoped wakeup is claimed synchronously", async () => {
     const { companyId, managerId, coderId, sourceIssue } = await seedCompany();
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, managerId));
