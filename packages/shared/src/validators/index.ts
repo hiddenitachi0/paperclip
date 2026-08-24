@@ -157,6 +157,25 @@ export {
   type CompanySkillReset,
 } from "./company-skill.js";
 export {
+  companyMcpToolCredentialSchema,
+  companyMcpToolConnectionSchema,
+  companyMcpToolCreateSchema,
+  companyMcpToolUpdateSchema,
+  mcpToolCatalogInstallSchema,
+  companyMcpToolSchema,
+  mcpToolCatalogEntrySchema,
+  agentMcpToolListItemSchema,
+  buildMcpServerConfigFromTool,
+  type CompanyMcpToolCredential,
+  type CompanyMcpToolConnection,
+  type CompanyMcpToolCreate,
+  type CompanyMcpToolUpdate,
+  type McpToolCatalogInstall,
+  type CompanyMcpTool,
+  type McpToolCatalogEntry,
+  type AgentMcpToolListItem,
+} from "./company-mcp-tool.js";
+export {
   catalogTeamKindSchema,
   catalogTeamTrustLevelSchema,
   catalogTeamCompatibilitySchema,

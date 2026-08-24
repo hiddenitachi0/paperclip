@@ -66,6 +66,14 @@ export const agents = pgTable(
     roleAppliedPermissionKeys: jsonb("role_applied_permission_keys")
       .$type<string[]>()
       .default([]),
+    // DUR-143: ids of company_mcp_tools rows currently "checked" for this
+    // agent (the tool-library equivalent of desiredSkills). Source of truth
+    // for the checkbox UI; the actual runtime wiring lives in
+    // adapterConfig.mcpServers, which assignAgentMcpTool keeps in sync by
+    // merging/removing the matching entry (see server/src/services/company-mcp-tools.ts).
+    assignedMcpToolIds: jsonb("assigned_mcp_tool_ids")
+      .$type<string[]>()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

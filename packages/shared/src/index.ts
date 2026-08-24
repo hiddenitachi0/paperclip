@@ -1562,6 +1562,23 @@ export {
   type PluginStateScopeKey,
   type SetPluginState,
   type ListPluginState,
+  companyMcpToolCredentialSchema,
+  companyMcpToolConnectionSchema,
+  companyMcpToolCreateSchema,
+  companyMcpToolUpdateSchema,
+  mcpToolCatalogInstallSchema,
+  companyMcpToolSchema,
+  mcpToolCatalogEntrySchema,
+  agentMcpToolListItemSchema,
+  buildMcpServerConfigFromTool,
+  type CompanyMcpToolCredential,
+  type CompanyMcpToolConnection,
+  type CompanyMcpToolCreate,
+  type CompanyMcpToolUpdate,
+  type McpToolCatalogInstall,
+  type CompanyMcpTool,
+  type McpToolCatalogEntry,
+  type AgentMcpToolListItem,
 } from "./validators/index.js";
 
 export { API_PREFIX, API } from "./api.js";
