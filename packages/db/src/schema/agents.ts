@@ -96,6 +96,15 @@ export const agents = pgTable(
     // agentService.create/update patch (see assertNoToolLibraryAssignmentFields
     // in services/agents.ts); only the dedicated assignment route may write it.
     mcpToolIds: jsonb("mcp_tool_ids").$type<string[]>().notNull().default([]),
+    // DUR-189: namespaced plugin tool names (e.g. "paperclip.media-studio:generate-image")
+    // this agent may call via POST /plugins/tools/execute. Empty list means
+    // unrestricted — matches every agent's behavior before this column existed,
+    // so adding it is not a backward-compat break. A non-empty list narrows the
+    // agent to exactly those tools (see assertPluginToolGranted in
+    // routes/plugins.ts). Same write posture as mcpToolIds: blocked from the
+    // generic create/update patch (assertNoPluginToolAssignmentFields in
+    // services/agents.ts), only the dedicated assignment route may write it.
+    pluginToolGrants: jsonb("plugin_tool_grants").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

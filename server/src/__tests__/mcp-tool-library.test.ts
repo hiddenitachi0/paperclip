@@ -308,4 +308,34 @@ describeEmbeddedPostgres("MCP tool library — checkbox grant end to end", () =>
       agentService(db).update(created.id, { mcpToolIds: ["not-allowed"] } as never),
     ).rejects.toThrow(/Tool-library assignment fields/);
   });
+
+  // DUR-189: same write posture as mcpToolIds above, for the sibling
+  // plugin-tool-grants column — an agent must never be able to smuggle
+  // itself broader plugin-tool access through the generic update path.
+  it("blocks pluginToolGrants from the generic update path — only syncPluginToolGrants may write it", async () => {
+    const companyId = await seedCompany();
+    const created = await agentService(db).create(companyId, {
+      name: "Persona",
+      role: "engineer",
+      status: "idle",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+    expect(created.pluginToolGrants).toEqual([]);
+
+    await expect(
+      agentService(db).update(created.id, { pluginToolGrants: ["not-allowed"] } as never),
+    ).rejects.toThrow(/Plugin-tool assignment fields/);
+
+    const granted = await agentService(db).syncPluginToolGrants(created.id, [
+      "paperclip.media-studio:generate-image",
+    ]);
+    expect(granted.pluginToolGrants).toEqual(["paperclip.media-studio:generate-image"]);
+
+    const revoked = await agentService(db).syncPluginToolGrants(created.id, []);
+    expect(revoked.pluginToolGrants).toEqual([]);
+  });
 });

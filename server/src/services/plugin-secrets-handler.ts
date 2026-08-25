@@ -34,14 +34,44 @@
  */
 
 import type { Db } from "@paperclipai/db";
+import type { WorkerHostCallContext } from "@paperclipai/plugin-sdk";
 import {
   collectSecretRefPaths,
   isUuidSecretRef,
   readConfigValueAtPath,
 } from "./json-schema-secret-refs.js";
+import { secretService } from "./secrets.js";
 
 export const PLUGIN_SECRET_REFS_DISABLED_MESSAGE =
   "Plugin secret references are disabled until company-scoped plugin config lands";
+
+/**
+ * Plugins whose secret-ref resolution is allowed, keyed by manifest `id`.
+ *
+ * The blanket disable (see the fail-closed throw at the bottom of `resolve`)
+ * stays in force for every other plugin: `plugin_config` is one row per
+ * plugin instance-wide (no per-company scope at all — see
+ * packages/db/src/schema/plugin_config.ts), so lifting the disable is only
+ * safe where resolution also asserts the secret's own companyId matches the
+ * invocation's verified companyId (below). That check makes cross-company
+ * leakage impossible (a mismatched company gets a clean failure, not someone
+ * else's secret) but does not make the config itself per-company — only one
+ * company's `falKeySecretRef` can usefully be configured at a time until
+ * DUR-189 (per-agent/per-company provider config) lands.
+ *
+ * DUR-174 sub-item (a).
+ *
+ * Exported so `plugin-loader.ts` can tell `plugin-worker-manager.ts` to
+ * serialize invocation-scope registration for exactly these plugins (see
+ * `WorkerStartOptions.serializeInvocationScope`) — the DUR-193 security
+ * review found that a shared worker process can hold two different
+ * companies' invocation scopes active at once, which turns
+ * `context.invocationScope.companyId` into a replayable bearer credential
+ * for a malicious/compromised worker. Every plugin not on this list keeps
+ * the unconditional fail-closed throw below regardless of invocation scope,
+ * so only plugins that can actually resolve secrets need serialization.
+ */
+export const SECRET_REF_ENABLED_PLUGIN_KEYS = new Set<string>(["paperclip.media-studio"]);
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -139,6 +169,14 @@ export interface PluginSecretsHandlerOptions {
    * that reach the plugin worker.
    */
   pluginId: string;
+  /**
+   * The plugin's manifest `id` (e.g. `"paperclip.media-studio"`), used only
+   * to check `SECRET_REF_ENABLED_PLUGIN_KEYS` — every plugin not on that list
+   * keeps the unconditional fail-closed behavior regardless of what it passes
+   * here. Optional so existing callers/tests that don't care about the
+   * allowlist keep working unchanged (undefined never matches the allowlist).
+   */
+  pluginKey?: string;
 }
 
 /**
@@ -149,11 +187,14 @@ export interface PluginSecretsService {
    * Resolve a secret reference to its current plaintext value.
    *
    * @param params - Contains the `secretRef` (UUID of the secret)
+   * @param context - Worker→host call context; `context.invocationScope.companyId`
+   *   is the only thing that can lift the fail-closed default, and only for an
+   *   allow-listed plugin (see `SECRET_REF_ENABLED_PLUGIN_KEYS`).
    * @returns The resolved secret value
-   * @throws {Error} If the secret is not found, has no versions, or
-   *   the provider fails to resolve
+   * @throws {Error} If the secret is not found, has no versions, belongs to a
+   *   different company than the invocation, or the provider fails to resolve
    */
-  resolve(params: PluginSecretsResolveParams): Promise<string>;
+  resolve(params: PluginSecretsResolveParams, context?: WorkerHostCallContext): Promise<string>;
 }
 
 /**
@@ -199,13 +240,14 @@ function createRateLimiter(maxAttempts: number, windowMs: number) {
 export function createPluginSecretsHandler(
   options: PluginSecretsHandlerOptions,
 ): PluginSecretsService {
-  const { pluginId } = options;
+  const { db, pluginId, pluginKey } = options;
+  const secretsSvc = secretService(db);
 
   // Rate limit: max 30 resolution attempts per plugin per minute
   const rateLimiter = createRateLimiter(30, 60_000);
 
   return {
-    async resolve(params: PluginSecretsResolveParams): Promise<string> {
+    async resolve(params: PluginSecretsResolveParams, context?: WorkerHostCallContext): Promise<string> {
       const { secretRef } = params;
 
       // ---------------------------------------------------------------
@@ -230,9 +272,53 @@ export function createPluginSecretsHandler(
         throw invalidSecretRef(trimmedRef);
       }
 
-      // Fail closed until plugin config and worker runtime both carry an
-      // explicit company scope for secret bindings and resolution.
-      throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      // ---------------------------------------------------------------
+      // 2. Fail closed for every plugin except the ones explicitly scoped
+      //    in (see SECRET_REF_ENABLED_PLUGIN_KEYS doc comment above).
+      // ---------------------------------------------------------------
+      if (!pluginKey || !SECRET_REF_ENABLED_PLUGIN_KEYS.has(pluginKey)) {
+        throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      }
+
+      // ---------------------------------------------------------------
+      // 3. Require a server-verified invocation scope. This can only be
+      //    populated by the host's executeTool dispatch (plugin-worker-
+      //    manager.ts registerInvocation/deriveInvocationScope) after
+      //    validateToolRunContextScope has confirmed the calling agent is
+      //    who it claims to be (DUR-187) — a background job, webhook, or
+      //    scheduler tick that never went through executeTool has no
+      //    invocation scope and must not be able to resolve secrets.
+      // ---------------------------------------------------------------
+      if (context?.invalidInvocationScope) {
+        throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      }
+      const invocationCompanyId = context?.invocationScope?.companyId;
+      if (!invocationCompanyId) {
+        throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      }
+
+      // ---------------------------------------------------------------
+      // 4. Resolve through the audited secret path. resolveSecretValueForPlugin
+      //    asserts the secret's own companyId matches invocationCompanyId —
+      //    that's what makes this safe even though plugin_config itself is
+      //    still one row per plugin instance-wide, not per company: a
+      //    mismatched company gets a clean failure, never another company's
+      //    secret value.
+      // ---------------------------------------------------------------
+      try {
+        return await secretsSvc.resolveSecretValueForPlugin(invocationCompanyId, trimmedRef, "latest", {
+          consumerType: "plugin",
+          consumerId: pluginId,
+          actorType: "plugin",
+          pluginId,
+        });
+      } catch {
+        // Never let secret-service internals (not-found vs wrong-company vs
+        // inactive vs provider error) leak to the plugin worker — collapse
+        // to the same invalid-ref shape a plugin author would see for any
+        // other bad reference.
+        throw invalidSecretRef(trimmedRef);
+      }
     },
   };
 }

@@ -25,6 +25,7 @@ import type {
   Project,
   Issue,
   IssueComment,
+  IssueAttachment,
   IssueDocument,
   IssueDocumentSummary,
   IssueAssigneeAdapterOverrides,
@@ -1378,6 +1379,19 @@ export interface WorkerToHostMethods {
   "issues.createComment": [
     params: { issueId: string; body: string; companyId: string; authorAgentId?: string },
     result: IssueComment,
+  ];
+  "issues.createAttachment": [
+    params: {
+      issueId: string;
+      companyId: string;
+      contentBase64: string;
+      contentType: string;
+      filename?: string | null;
+      /** The invoking tool call's run id. Required and host-enforced: must match the issue's checkoutRunId so a plugin cannot attach to an issue it is not currently running against. */
+      runId: string;
+      authorAgentId?: string | null;
+    },
+    result: IssueAttachment,
   ];
   "issues.createInteraction": [
     params: {
