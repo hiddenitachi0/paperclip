@@ -1,6 +1,7 @@
 import { api } from "./client";
 import type {
   CompanyArtifact,
+  CompanyArtifactAgentSummary,
   CompanyArtifactGroupBy,
   CompanyArtifactMediaKind,
   CompanyArtifactsResponse,
@@ -8,6 +9,7 @@ import type {
 
 export type {
   CompanyArtifact,
+  CompanyArtifactAgentSummary as ArtifactMaker,
   CompanyArtifactGroup,
   CompanyArtifactGroupBy as ArtifactGroupBy,
   CompanyArtifactMediaKind as ArtifactMediaKind,
@@ -39,6 +41,10 @@ export interface ListArtifactsParams {
   groupBy?: CompanyArtifactGroupBy;
   /** When grouping, selects a single stack to expand into its artifacts. */
   groupIssueId?: string;
+  /** Filters the list/grouping down to a single maker (agent). */
+  agentId?: string;
+  /** Filters the list/grouping down to files with no recorded maker. */
+  noAgent?: boolean;
   limit?: number;
   cursor?: string;
 }
@@ -50,6 +56,8 @@ function buildArtifactsQuery(params?: ListArtifactsParams): string {
   if (params?.q) search.set("q", params.q);
   if (params?.groupBy && params.groupBy !== "none") search.set("groupBy", params.groupBy);
   if (params?.groupIssueId) search.set("groupIssueId", params.groupIssueId);
+  if (params?.noAgent) search.set("noAgent", "true");
+  else if (params?.agentId) search.set("agentId", params.agentId);
   if (params?.limit != null) search.set("limit", String(params.limit));
   if (params?.cursor) search.set("cursor", params.cursor);
   const qs = search.toString();
@@ -81,5 +89,9 @@ export const artifactsApi = {
       `/companies/${companyId}/artifacts${buildArtifactsQuery(params)}`,
     );
     return normalizeArtifactsResponse(raw);
+  },
+  /** The set of people/agents who have made at least one file, for the maker picker. */
+  listAgents: async (companyId: string): Promise<CompanyArtifactAgentSummary[]> => {
+    return api.get<CompanyArtifactAgentSummary[]>(`/companies/${companyId}/artifacts/agents`);
   },
 };

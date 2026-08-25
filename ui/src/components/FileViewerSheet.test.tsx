@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { WorkspaceFileContent } from "@paperclipai/shared";
 import type { FileViewerUrlState } from "@/context/FileViewerContext";
@@ -166,5 +170,175 @@ describe("FileViewerMetadataRow", () => {
     const markup = renderToStaticMarkup(<FileViewerMetadataRow state={state} />);
     expect(markup).toContain("min-h-[18px]");
     expect(markup).toContain("Loading file details");
+  });
+
+  it("does not render the raw previewKind enum", () => {
+    const markup = renderToStaticMarkup(
+      <FileViewerMetadataRow
+        state={state}
+        resolvedResource={{
+          kind: "file",
+          provider: "local_fs",
+          title: "report.pdf",
+          displayPath: "report.pdf",
+          workspaceLabel: "Files",
+          workspaceKind: "project_workspace",
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          contentType: "application/pdf",
+          byteSize: 1024,
+          previewKind: "pdf",
+          capabilities: { preview: true, download: true, listChildren: false },
+        }}
+      />,
+    );
+    expect(markup).not.toContain("previewKind");
+    expect(markup).not.toMatch(/>\s*pdf\s*</i);
+  });
+});
+
+// Filip (the non-developer operator) must never see internal jargon or raw
+// MIME strings anywhere in the file viewer, regardless of file type.
+const BANNED_SUBSTRINGS = [
+  "artifact",
+  "work product",
+  "workspace",
+  "attachment",
+  "media kind",
+  "object key",
+  "previewkind",
+  "execution",
+];
+const BANNED_MIME_PATTERN = /\b(application|text|image|video|audio)\/[a-z0-9.+-]+/i;
+
+function assertNoLeakedJargon(markup: string) {
+  const withoutAttributes = markup.replace(/\s[a-zA-Z-]+="[^"]*"/g, "");
+  for (const banned of BANNED_SUBSTRINGS) {
+    expect(withoutAttributes.toLowerCase()).not.toContain(banned);
+  }
+  expect(withoutAttributes).not.toMatch(BANNED_MIME_PATTERN);
+}
+
+describe("FileContentViewer plain-language fallback", () => {
+  function unsupportedContent(overrides: Partial<WorkspaceFileContent["resource"]> = {}): WorkspaceFileContent {
+    return {
+      resource: {
+        kind: "file",
+        provider: "local_fs",
+        title: "budget.xlsx",
+        displayPath: "budget.xlsx",
+        workspaceLabel: "Files",
+        workspaceKind: "project_workspace",
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        byteSize: 2048,
+        previewKind: "unsupported",
+        capabilities: { preview: true, download: true, listChildren: false },
+        ...overrides,
+      },
+      content: { encoding: "base64", data: "" },
+    };
+  }
+
+  it.each([
+    { contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", title: "budget.xlsx" },
+    {
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      title: "brief.docx",
+    },
+    { contentType: "application/zip", title: "assets.zip" },
+    { contentType: null, title: "mystery.bin" },
+  ])("shows an honest file card with no leaked jargon or MIME strings for $title", ({ contentType, title }) => {
+    const markup = renderToStaticMarkup(
+      <FileContentViewer
+        content={unsupportedContent({ contentType, title, displayPath: title })}
+        highlightedLine={null}
+        downloadUrl="/api/files/download?token=abc"
+      />,
+    );
+    expect(markup).toContain(title);
+    expect(markup).toContain("Download");
+    assertNoLeakedJargon(markup);
+  });
+
+  it("shows real filename and file size, and a visible download control", () => {
+    const markup = renderToStaticMarkup(
+      <FileContentViewer
+        content={unsupportedContent()}
+        highlightedLine={null}
+        downloadUrl="/api/files/download?token=abc"
+      />,
+    );
+    expect(markup).toContain("budget.xlsx");
+    expect(markup).toContain("2.0 KB");
+    expect(markup).toContain(">Download<");
+  });
+});
+
+describe("FileContentViewer PDF preview", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    // jsdom does not implement Blob URL creation; stub it so the effect that
+    // builds the blob: URL for the sandboxed iframe can run.
+    URL.createObjectURL = vi.fn(() => "blob:mock-pdf-url");
+    URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    flushSync(() => root.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+  });
+
+  function pdfContent(): WorkspaceFileContent {
+    return {
+      resource: {
+        kind: "file",
+        provider: "local_fs",
+        title: "report.pdf",
+        displayPath: "report.pdf",
+        workspaceLabel: "Files",
+        workspaceKind: "project_workspace",
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        contentType: "application/pdf",
+        byteSize: 4096,
+        previewKind: "pdf",
+        capabilities: { preview: true, download: true, listChildren: false },
+      },
+      content: { encoding: "base64", data: btoa("%PDF-1.4 fake") },
+    };
+  }
+
+  it("renders the PDF in a blob: iframe sandboxed to allow-same-origin only (never allow-scripts)", async () => {
+    flushSync(() => {
+      root.render(<FileContentViewer content={pdfContent()} highlightedLine={null} />);
+    });
+    // The blob: URL is built in a passive effect, which flushSync does not
+    // guarantee runs synchronously — wait a tick for it to commit.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const iframe = container.querySelector("iframe");
+    expect(iframe).not.toBeNull();
+    expect(iframe!.getAttribute("src")).toBe("blob:mock-pdf-url");
+    expect(iframe!.getAttribute("sandbox")).toBe("allow-same-origin");
+    expect(iframe!.getAttribute("sandbox")).not.toContain("allow-scripts");
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it("revokes the blob URL on unmount", async () => {
+    const localContainer = document.createElement("div");
+    document.body.appendChild(localContainer);
+    const localRoot = createRoot(localContainer);
+    flushSync(() => {
+      localRoot.render(<FileContentViewer content={pdfContent()} highlightedLine={null} />);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync(() => localRoot.unmount());
+    localContainer.remove();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-pdf-url");
   });
 });

@@ -83,7 +83,7 @@ describe("ArtifactGroupCard", () => {
     expect(card.getAttribute("data-count")).toBe("3");
     // Two decorative stack layers sit behind the card.
     expect(mounted.container.querySelectorAll('[data-testid="artifact-stack-layer"]').length).toBe(2);
-    expect(mounted.container.textContent).toContain("3 artifacts");
+    expect(mounted.container.textContent).toContain("3 files");
   });
 
   it("omits the stack effect and uses singular count when count === 1", () => {
@@ -92,8 +92,33 @@ describe("ArtifactGroupCard", () => {
     expect(card.getAttribute("data-stacked")).toBe("false");
     expect(card.getAttribute("data-count")).toBe("1");
     expect(mounted.container.querySelectorAll('[data-testid="artifact-stack-layer"]').length).toBe(0);
-    expect(mounted.container.textContent).toContain("1 artifact");
-    expect(mounted.container.textContent).not.toContain("1 artifacts");
+    expect(mounted.container.textContent).toContain("1 file");
+    expect(mounted.container.textContent).not.toContain("1 files");
+  });
+
+  it("shows the maker's name and a plain-language label for the maker-less group when grouping by maker", () => {
+    mounted = render(
+      sampleGroup({
+        groupBy: "agent",
+        issue: null,
+        agent: { id: "agent-1", name: "Priya" },
+        title: "Priya",
+      }),
+    );
+    expect(mounted.container.textContent).toContain("Priya");
+
+    flushSync(() => mounted!.root.unmount());
+    mounted.container.remove();
+
+    mounted = render(
+      sampleGroup({
+        groupBy: "agent",
+        issue: null,
+        agent: null,
+        title: "No owner recorded",
+      }),
+    );
+    expect(mounted.container.textContent).toContain("No owner recorded");
   });
 
   it("links to the provided stack destination and shows the task subject", () => {
