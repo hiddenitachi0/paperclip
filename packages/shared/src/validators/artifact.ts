@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NO_TASK_ARTIFACT_GROUP_ID } from "../constants.js";
 
 export const COMPANY_ARTIFACTS_DEFAULT_LIMIT = 30;
 export const COMPANY_ARTIFACTS_MAX_LIMIT = 100;
@@ -16,7 +17,9 @@ export const companyArtifactsQuerySchema = z.object({
   q: z.string().trim().max(COMPANY_ARTIFACTS_MAX_QUERY_LENGTH).optional(),
   qScope: z.enum(["all", "filename"]).optional().default("all"),
   groupBy: companyArtifactGroupBySchema.optional().default("none"),
-  groupIssueId: z.string().uuid().optional(),
+  // DUR-206: "no-task" is a reserved sentinel (not a real issue id) selecting
+  // the bucket for files whose owning task was deleted.
+  groupIssueId: z.union([z.string().uuid(), z.literal(NO_TASK_ARTIFACT_GROUP_ID)]).optional(),
   groupAgentId: z.string().uuid().optional(),
   agentId: z.string().uuid().optional(),
   noAgent: z.coerce.boolean().optional(),
@@ -43,11 +46,13 @@ export const companyArtifactSchema = z.object({
   downloadPath: z.string().nullable(),
   byteSize: z.number().int().nullable(),
   originalFilename: z.string().nullable(),
+  // Null when the owning task was deleted (DUR-206) -- the file is kept,
+  // not destroyed, and surfaces under the "No task" group instead.
   issue: z.object({
     id: z.string().uuid(),
     identifier: z.string(),
     title: z.string(),
-  }),
+  }).nullable(),
   project: z.object({
     id: z.string().uuid(),
     name: z.string(),

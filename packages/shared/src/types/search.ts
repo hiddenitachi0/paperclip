@@ -33,9 +33,11 @@ export interface CompanySearchArtifactSummary {
   id: string;
   source: "document" | "attachment" | "work_product";
   mediaKind: "image" | "video" | "text" | "document" | "file" | "empty";
-  issueId: string;
-  issueIdentifier: string;
-  issueTitle: string;
+  // Null when the owning task was deleted (DUR-206) -- the file is kept,
+  // not destroyed.
+  issueId: string | null;
+  issueIdentifier: string | null;
+  issueTitle: string | null;
   projectId: string | null;
   projectName: string | null;
   updatedAt: string;

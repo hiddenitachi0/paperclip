@@ -7091,20 +7091,14 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
-    const attachments = await svc.listAttachments(id);
 
+    // DUR-206: files an agent made for this task are kept, not destroyed —
+    // svc.remove() detaches attachments/documents (issue_id -> null) instead
+    // of cascading, so there is no storage cleanup to do here.
     const issue = await svc.remove(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
-    }
-
-    for (const attachment of attachments) {
-      try {
-        await storage.deleteObject(attachment.companyId, attachment.objectKey);
-      } catch (err) {
-        logger.warn({ err, issueId: id, attachmentId: attachment.id }, "failed to delete attachment object during issue delete");
-      }
     }
 
     const actor = getActorInfo(req);
@@ -8889,13 +8883,25 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, attachment.companyId);
-    const issue = await svc.getById(attachment.issueId);
-    if (!issue) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
+
+    if (attachment.issueId === null) {
+      // DUR-206: this attachment's task was deleted (files are kept, not
+      // destroyed), so there is no owning issue left to run the per-agent
+      // mutation check against. Deleting an orphaned file is board-only --
+      // the least-privilege default absent a narrower policy ask.
+      if (req.actor.type !== "board") {
+        res.status(403).json({ error: "Only a board user can delete a file with no owning task" });
+        return;
+      }
+    } else {
+      const issue = await svc.getById(attachment.issueId);
+      if (!issue) {
+        res.status(404).json({ error: "Issue not found" });
+        return;
+      }
+      if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+      if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
     }
-    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
-    if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
     try {
       await storage.deleteObject(attachment.companyId, attachment.objectKey);
@@ -8917,8 +8923,8 @@ export function issueRoutes(
       agentId: actor.agentId,
       runId: actor.runId,
       action: "issue.attachment_removed",
-      entityType: "issue",
-      entityId: removed.issueId,
+      entityType: removed.issueId ? "issue" : "attachment",
+      entityId: removed.issueId ?? removed.id,
       details: {
         attachmentId: removed.id,
       },

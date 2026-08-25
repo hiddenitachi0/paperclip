@@ -368,6 +368,12 @@ export function isSystemIssueDocumentKey(key: string): key is SystemIssueDocumen
 export const ISSUE_REFERENCE_SOURCE_KINDS = ["title", "description", "comment", "document"] as const;
 export type IssueReferenceSourceKind = (typeof ISSUE_REFERENCE_SOURCE_KINDS)[number];
 
+// DUR-206: deleting a task keeps its files instead of destroying them, so the
+// Files page needs a group for files whose owning task is gone. Not a real
+// issue id -- reserved so `groupIssueId=no-task` round-trips between the
+// company-artifacts list endpoint and the Artifacts page without a UUID.
+export const NO_TASK_ARTIFACT_GROUP_ID = "no-task" as const;
+
 export const DOCUMENT_ANNOTATION_THREAD_STATUSES = ["open", "resolved"] as const;
 export type DocumentAnnotationThreadStatus = (typeof DOCUMENT_ANNOTATION_THREAD_STATUSES)[number];
 

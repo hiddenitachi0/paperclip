@@ -121,6 +121,22 @@ describe("ArtifactGroupCard", () => {
     expect(mounted.container.textContent).toContain("No owner recorded");
   });
 
+  it("shows a plain-language label for the 'No task' group when the owning task was deleted (DUR-206)", () => {
+    mounted = render(
+      sampleGroup({
+        groupBy: "task",
+        issue: null,
+        title: "No task",
+        href: "/PAP/artifacts?groupBy=task&groupIssueId=no-task",
+      }),
+      "?groupBy=task&groupIssueId=no-task",
+    );
+    expect(mounted.container.textContent).toContain("No task");
+    expect(mounted.container.textContent).not.toContain("No owner recorded");
+    const anchor = mounted.container.querySelector("a") as HTMLAnchorElement;
+    expect(anchor).not.toBeNull();
+  });
+
   it("links to the provided stack destination and shows the task subject", () => {
     mounted = render(sampleGroup());
     const anchor = mounted.container.querySelector("a") as HTMLAnchorElement;
