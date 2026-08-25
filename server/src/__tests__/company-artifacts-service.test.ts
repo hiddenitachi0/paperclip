@@ -667,6 +667,67 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     expect(secondPage.nextCursor).toBeNull();
   });
 
+  it("groups artifacts by agent, including a no-agent bucket for unattributed work products", async () => {
+    const { companyId, projectId, issueId } = await seedArtifacts();
+    await db.insert(issueWorkProducts).values({
+      id: "20202020-2020-4202-8202-202020202020",
+      companyId,
+      projectId,
+      issueId,
+      type: "artifact",
+      provider: "paperclip",
+      title: "Unattributed Export",
+      status: "ready_for_review",
+      summary: "No creating run",
+      isPrimary: false,
+      metadata: { contentType: "text/csv", byteSize: 10 },
+      createdByRunId: null,
+      updatedAt: new Date("2026-01-10T00:00:00.000Z"),
+    });
+
+    const grouped = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      limit: 10,
+    });
+
+    expect(grouped.artifacts).toEqual([]);
+    expect(grouped.groups?.map((group) => ({ id: group.id, agent: group.agent, count: group.count }))).toEqual([
+      { id: "agent:none", agent: null, count: 1 },
+      {
+        id: "agent:33333333-3333-4333-8333-333333333333",
+        agent: { id: "33333333-3333-4333-8333-333333333333", name: "Coder" },
+        count: 4,
+      },
+    ]);
+
+    const selectedAgent = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      groupAgentId: "33333333-3333-4333-8333-333333333333",
+      limit: 10,
+    });
+    expect(selectedAgent.groups).toBeUndefined();
+    expect(selectedAgent.selectedGroup).toMatchObject({
+      id: "agent:33333333-3333-4333-8333-333333333333",
+      groupBy: "agent",
+      agent: { id: "33333333-3333-4333-8333-333333333333", name: "Coder" },
+      count: 4,
+    });
+    expect(selectedAgent.artifacts.map((artifact) => artifact.title)).toEqual([
+      "Review Notes",
+      "direct-video.mp4",
+      "Primary Cut",
+      "notes.txt",
+    ]);
+
+    const selectedNoAgent = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      noAgent: true,
+      limit: 10,
+    });
+    expect(selectedNoAgent.selectedGroup).toMatchObject({ id: "agent:none", agent: null, count: 1 });
+    expect(selectedNoAgent.artifacts.map((artifact) => artifact.title)).toEqual(["Unattributed Export"]);
+  });
+
   it("groups parent-task artifacts under the topmost same-company ancestor", async () => {
     const { companyId, issueId, secondIssueId } = await seedArtifacts();
     const grandchildIssueId = "21212121-2121-4212-8121-212121212121";
