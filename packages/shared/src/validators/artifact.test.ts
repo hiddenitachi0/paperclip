@@ -17,6 +17,8 @@ const artifact = {
   contentPath: null,
   openPath: null,
   downloadPath: null,
+  byteSize: null,
+  originalFilename: null,
   issue,
   project: null,
   createdByAgent: null,
@@ -50,8 +52,23 @@ describe("companyArtifactsQuerySchema", () => {
   });
 
   it("rejects invalid grouped artifact query parameters", () => {
-    expect(() => companyArtifactsQuerySchema.parse({ groupBy: "agent" })).toThrow();
+    expect(() => companyArtifactsQuerySchema.parse({ groupBy: "assignee" })).toThrow();
     expect(() => companyArtifactsQuerySchema.parse({ groupIssueId: "PAP-1" })).toThrow();
+  });
+
+  it("accepts agent grouping and agent/no-agent filters", () => {
+    expect(
+      companyArtifactsQuerySchema.parse({
+        groupBy: "agent",
+        groupAgentId: "33333333-3333-4333-8333-333333333333",
+        agentId: "33333333-3333-4333-8333-333333333333",
+      }),
+    ).toMatchObject({
+      groupBy: "agent",
+      groupAgentId: "33333333-3333-4333-8333-333333333333",
+      agentId: "33333333-3333-4333-8333-333333333333",
+    });
+    expect(companyArtifactsQuerySchema.parse({ noAgent: "true" })).toMatchObject({ noAgent: true });
   });
 });
 
