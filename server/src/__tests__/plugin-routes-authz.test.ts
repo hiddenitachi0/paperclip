@@ -624,6 +624,77 @@ describe.sequential("plugin tool and bridge authz", () => {
     );
   });
 
+  it("rejects tool execution when the target company has disabled the tool's plugin (DUR-195)", async () => {
+    const executeTool = vi.fn();
+    mockRegistry.getCompanySettings.mockResolvedValue({ enabled: false });
+    const { app } = await createApp(boardActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginId: "paperclip.example", pluginDbId: pluginId })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: { q: "test" },
+        runContext: {
+          agentId: agentA,
+          runId: runA,
+          companyId: companyA,
+          projectId: projectA,
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockRegistry.getCompanySettings).toHaveBeenCalledWith(pluginId, companyA);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("allows tool execution when the plugin has no company settings row (defaults to enabled) (DUR-195)", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
+    const { app } = await createApp(boardActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginId: "paperclip.example", pluginDbId: pluginId })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: { q: "test" },
+        runContext: {
+          agentId: agentA,
+          runId: runA,
+          companyId: companyA,
+          projectId: projectA,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+  });
+
   it.each([
     ["legacy data", "post", `/api/plugins/${pluginId}/bridge/data`, { key: "health" }],
     ["legacy action", "post", `/api/plugins/${pluginId}/bridge/action`, { key: "sync" }],
@@ -954,6 +1025,34 @@ describe.sequential("plugin tool and bridge authz", () => {
 
     expect(res.status).toBe(200);
     expect(listToolsForAgent).toHaveBeenCalled();
+  });
+
+  it("excludes tools from plugins disabled for the agent's company when listing (DUR-195)", async () => {
+    const enabledPluginDbId = pluginId;
+    const disabledPluginDbId = "22222222-2222-4222-8222-222222222299";
+    const listToolsForAgent = vi.fn(() => [
+      { name: "paperclip.example:search", displayName: "Search", description: "", parametersSchema: {}, pluginId: enabledPluginDbId },
+      { name: "paperclip.other:sync", displayName: "Sync", description: "", parametersSchema: {}, pluginId: disabledPluginDbId },
+    ]);
+    mockRegistry.getCompanySettings.mockImplementation(async (pluginDbId: string) =>
+      pluginDbId === disabledPluginDbId ? { enabled: false } : null,
+    );
+    const { app } = await createApp(agentActor(), {}, {
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent,
+          getTool: vi.fn(),
+          executeTool: vi.fn(),
+        },
+      },
+    });
+
+    const res = await request(app).get("/api/plugins/tools");
+
+    expect(res.status).toBe(200);
+    expect(res.body.map((tool: { name: string }) => tool.name)).toEqual(["paperclip.example:search"]);
+    expect(mockRegistry.getCompanySettings).toHaveBeenCalledWith(enabledPluginDbId, companyA);
+    expect(mockRegistry.getCompanySettings).toHaveBeenCalledWith(disabledPluginDbId, companyA);
   });
 
   it("allows agent JWT to execute a tool within its company scope", async () => {

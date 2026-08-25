@@ -208,7 +208,7 @@ describe("Artifacts page", () => {
 
     const { root } = renderArtifacts(container);
 
-    const input = container.querySelector('input[aria-label="Search artifacts"]') as HTMLInputElement;
+    const input = container.querySelector('input[aria-label="Search files"]') as HTMLInputElement;
     expect(input).not.toBeNull();
 
     flushSync(() => {

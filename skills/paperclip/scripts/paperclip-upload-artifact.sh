@@ -73,6 +73,16 @@ detect_content_type() {
     *.csv) printf 'text/csv' ;;
     *.html|*.htm) printf 'text/html' ;;
     *.zip) printf 'application/zip' ;;
+    *.doc) printf 'application/msword' ;;
+    *.docx) printf 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ;;
+    *.xls) printf 'application/vnd.ms-excel' ;;
+    *.xlsx) printf 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ;;
+    *.ppt) printf 'application/vnd.ms-powerpoint' ;;
+    *.pptx) printf 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ;;
+    *.odt) printf 'application/vnd.oasis.opendocument.text' ;;
+    *.ods) printf 'application/vnd.oasis.opendocument.spreadsheet' ;;
+    *.odp) printf 'application/vnd.oasis.opendocument.presentation' ;;
+    *.rtf) printf 'application/rtf' ;;
     *)
       if command -v file >/dev/null 2>&1; then
         file --brief --mime-type "$path"

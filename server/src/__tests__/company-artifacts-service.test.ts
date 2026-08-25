@@ -606,7 +606,7 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       {
         issue: "PAP-2",
         count: 1,
-        mediaKinds: ["document"],
+        mediaKinds: ["text"],
         href: "/PAP/artifacts?groupBy=task&groupIssueId=77777777-7777-4777-8777-777777777777",
       },
       {
@@ -769,6 +769,295 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       nextCursor: null,
     });
   });
+
+  it("classifies real PDF/Word attachments as mediaKind document, keeps issue documents as text, and filters by kind=document", async () => {
+    const { companyId, issueId } = await seedArtifacts();
+    await db.insert(assets).values([
+      {
+        id: "31313131-3131-4131-8131-313131313131",
+        companyId,
+        provider: "local_disk",
+        objectKey: "report.pdf",
+        contentType: "application/pdf",
+        byteSize: 555,
+        sha256: "sha256-report-pdf",
+        originalFilename: "report.pdf",
+        createdByAgentId: "33333333-3333-4333-8333-333333333333",
+      },
+      {
+        id: "32323232-3232-4232-8232-323232323232",
+        companyId,
+        provider: "local_disk",
+        objectKey: "memo.docx",
+        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        byteSize: 666,
+        sha256: "sha256-memo-docx",
+        originalFilename: "memo.docx",
+        createdByAgentId: "33333333-3333-4333-8333-333333333333",
+      },
+    ]);
+    await db.insert(issueAttachments).values([
+      {
+        companyId,
+        issueId,
+        assetId: "31313131-3131-4131-8131-313131313131",
+        updatedAt: new Date("2026-01-11T00:00:00.000Z"),
+      },
+      {
+        companyId,
+        issueId,
+        assetId: "32323232-3232-4232-8232-323232323232",
+        updatedAt: new Date("2026-01-12T00:00:00.000Z"),
+      },
+    ]);
+
+    const flat = await companyArtifactsService(db, createStorageService()).list(companyId, { limit: 20 });
+    expect(flat.artifacts.find((artifact) => artifact.title === "report.pdf")?.mediaKind).toBe("document");
+    expect(flat.artifacts.find((artifact) => artifact.title === "memo.docx")?.mediaKind).toBe("document");
+    expect(flat.artifacts.find((artifact) => artifact.title === "Review Notes")?.mediaKind).toBe("text");
+
+    const documentsOnly = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      kind: "document",
+      limit: 20,
+    });
+    expect(documentsOnly.artifacts.map((artifact) => artifact.title).sort()).toEqual(["memo.docx", "report.pdf"]);
+    expect(documentsOnly.artifacts.some((artifact) => artifact.title === "Review Notes")).toBe(false);
+    expect(documentsOnly.artifacts.some((artifact) => artifact.title === "direct-video.mp4")).toBe(false);
+  });
+
+  it("filters documents by agentId using OR semantics across creator and updater", async () => {
+    const { companyId, secondIssueId } = await seedArtifacts();
+    const secondAgentId = "41414141-4141-4141-8141-414141414141";
+    await db.insert(agents).values({ id: secondAgentId, companyId, name: "Editor", role: "engineer" });
+    await db.insert(documents).values({
+      id: "42424242-4242-4242-8242-424242424242",
+      companyId,
+      title: "Co-authored Plan",
+      latestBody: "Created by one agent, revised by another.",
+      createdByAgentId: "33333333-3333-4333-8333-333333333333",
+      updatedByAgentId: secondAgentId,
+      updatedAt: new Date("2026-01-15T00:00:00.000Z"),
+    });
+    await db.insert(issueDocuments).values({
+      companyId,
+      issueId: secondIssueId,
+      documentId: "42424242-4242-4242-8242-424242424242",
+      key: "co-authored-plan",
+    });
+
+    const byCreator = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      agentId: "33333333-3333-4333-8333-333333333333",
+      limit: 20,
+    });
+    expect(byCreator.artifacts.some((artifact) => artifact.title === "Co-authored Plan")).toBe(true);
+
+    const byUpdater = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      agentId: secondAgentId,
+      limit: 20,
+    });
+    expect(byUpdater.artifacts.some((artifact) => artifact.title === "Co-authored Plan")).toBe(true);
+    expect(byUpdater.artifacts.some((artifact) => artifact.title === "Review Notes")).toBe(false);
+  });
+
+  it("rejects a cross-company agentId with notFound before reading any artifact rows", async () => {
+    const { companyId } = await seedArtifacts();
+    const otherAgentId = "44444444-4444-4444-8444-444444444444";
+
+    await expect(
+      companyArtifactsService(db, createStorageService()).list(companyId, { agentId: otherAgentId, limit: 20 }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("filters items with no maker agent via noAgent, without matching agent-authored artifacts", async () => {
+    const { companyId, issueId, otherRunId } = await seedArtifacts();
+
+    await db.insert(issueWorkProducts).values({
+      id: "51515151-5151-4151-8151-515151515151",
+      companyId,
+      issueId,
+      type: "artifact",
+      provider: "paperclip",
+      title: "Ownerless Artifact",
+      status: "ready_for_review",
+      summary: "No resolvable maker agent",
+      metadata: { contentType: "text/plain" },
+      createdByRunId: otherRunId,
+      updatedAt: new Date("2026-01-16T00:00:00.000Z"),
+    });
+
+    const noAgentResult = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      noAgent: true,
+      limit: 20,
+    });
+    expect(noAgentResult.artifacts.map((artifact) => artifact.title)).toEqual(["Ownerless Artifact"]);
+
+    const agentResult = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      agentId: "33333333-3333-4333-8333-333333333333",
+      limit: 20,
+    });
+    expect(agentResult.artifacts.some((artifact) => artifact.title === "Ownerless Artifact")).toBe(false);
+  });
+
+  it("groups artifacts by agent, including the no-agent bucket", async () => {
+    const { companyId, issueId, otherRunId } = await seedArtifacts();
+
+    await db.insert(issueWorkProducts).values({
+      id: "52525252-5252-4252-8252-525252525252",
+      companyId,
+      issueId,
+      type: "artifact",
+      provider: "paperclip",
+      title: "Ownerless Artifact",
+      status: "ready_for_review",
+      summary: "No resolvable maker agent",
+      metadata: { contentType: "text/plain" },
+      createdByRunId: otherRunId,
+      updatedAt: new Date("2026-01-16T00:00:00.000Z"),
+    });
+
+    const grouped = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      limit: 20,
+    });
+    expect(grouped.artifacts).toEqual([]);
+    const coderGroup = grouped.groups?.find((group) => group.id === "agent:33333333-3333-4333-8333-333333333333");
+    expect(coderGroup).toMatchObject({
+      groupBy: "agent",
+      agent: { id: "33333333-3333-4333-8333-333333333333", name: "Coder" },
+      issue: null,
+    });
+    expect(coderGroup?.count).toBeGreaterThan(0);
+    const noneGroup = grouped.groups?.find((group) => group.id === "agent:none");
+    expect(noneGroup).toMatchObject({ groupBy: "agent", agent: null, count: 1 });
+
+    const selectedNone = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      noAgent: true,
+      limit: 20,
+    });
+    expect(selectedNone.selectedGroup).toMatchObject({ id: "agent:none", agent: null, count: 1 });
+    expect(selectedNone.artifacts.map((artifact) => artifact.title)).toEqual(["Ownerless Artifact"]);
+
+    const selectedCoder = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      groupAgentId: "33333333-3333-4333-8333-333333333333",
+      limit: 20,
+    });
+    expect(selectedCoder.selectedGroup).toMatchObject({
+      id: "agent:33333333-3333-4333-8333-333333333333",
+      agent: { name: "Coder" },
+    });
+    expect(selectedCoder.artifacts.length).toBeGreaterThan(0);
+
+    const foreignAgent = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      groupAgentId: "44444444-4444-4444-8444-444444444444",
+      limit: 20,
+    });
+    expect(foreignAgent).toEqual({ artifacts: [], selectedGroup: null, nextCursor: null });
+  });
+
+  it("only matches filenames (not the parent task's identifier/title) when qScope=filename", async () => {
+    const { companyId } = await seedArtifacts();
+    const storage = createStorageService();
+
+    // "Write the plan" is secondIssueId's title (PAP-2), which only has a
+    // document attached (no attachments/work products) — so it isolates the
+    // document predicate's qScope behavior without also hitting the
+    // always-on issue-title clause in the (out-of-scope-for-qScope) work
+    // product predicate.
+    const allScope = await companyArtifactsService(db, storage).list(companyId, {
+      q: "Write the plan",
+      limit: 20,
+    });
+    expect(allScope.artifacts.map((artifact) => artifact.title)).toEqual(["Review Notes"]);
+
+    const filenameScope = await companyArtifactsService(db, storage).list(companyId, {
+      q: "Write the plan",
+      qScope: "filename",
+      limit: 20,
+    });
+    expect(filenameScope.artifacts).toEqual([]);
+
+    const filenameMatch = await companyArtifactsService(db, storage).list(companyId, {
+      q: "direct-video",
+      qScope: "filename",
+      limit: 20,
+    });
+    expect(filenameMatch.artifacts.map((artifact) => artifact.title)).toEqual(["direct-video.mp4"]);
+  });
+
+  it("populates byteSize/originalFilename for attachments and work products, but leaves them null for documents", async () => {
+    const { companyId } = await seedArtifacts();
+    const result = await companyArtifactsService(db, createStorageService()).list(companyId, { limit: 20 });
+
+    const attachment = result.artifacts.find((artifact) => artifact.title === "direct-video.mp4");
+    expect(attachment).toMatchObject({ byteSize: 100, originalFilename: "direct-video.mp4" });
+
+    const workProduct = result.artifacts.find((artifact) => artifact.title === "Primary Cut");
+    expect(workProduct).toMatchObject({ byteSize: 200, originalFilename: "primary-cut.mp4" });
+
+    const document = result.artifacts.find((artifact) => artifact.title === "Review Notes");
+    expect(document).toMatchObject({ byteSize: null, originalFilename: null });
+  });
+
+  it("lists agents who made at least one file, most-recently-active first", async () => {
+    const { companyId, issueId, otherRunId } = await seedArtifacts();
+
+    const secondAgentId = "61616161-6161-4161-8161-616161616161";
+    await db.insert(agents).values({ id: secondAgentId, companyId, name: "Newcomer", role: "engineer" });
+    await db.insert(assets).values({
+      id: "62626262-6262-4262-8262-626262626262",
+      companyId,
+      provider: "local_disk",
+      objectKey: "newcomer-file.txt",
+      contentType: "text/plain",
+      byteSize: 10,
+      sha256: "sha256-newcomer-file",
+      originalFilename: "newcomer-file.txt",
+      createdByAgentId: secondAgentId,
+    });
+    await db.insert(issueAttachments).values({
+      companyId,
+      issueId,
+      assetId: "62626262-6262-4262-8262-626262626262",
+      updatedAt: new Date("2026-02-01T00:00:00.000Z"),
+    });
+    // Agent-less work product should not show up as a "maker" in the roster.
+    await db.insert(issueWorkProducts).values({
+      id: "63636363-6363-4363-8363-636363636363",
+      companyId,
+      issueId,
+      type: "artifact",
+      provider: "paperclip",
+      title: "Ownerless Roster Artifact",
+      status: "ready_for_review",
+      summary: "No resolvable maker agent",
+      metadata: { contentType: "text/plain" },
+      createdByRunId: otherRunId,
+      updatedAt: new Date("2026-02-02T00:00:00.000Z"),
+    });
+
+    const agentsList = await companyArtifactsService(db, createStorageService()).listAgents(companyId);
+    expect(agentsList.map((agent) => agent.name)).toEqual(["Newcomer", "Coder"]);
+    expect(agentsList.every((agent) => agent.id !== "44444444-4444-4444-8444-444444444444")).toBe(true);
+  });
+
+  it("serves GET /:companyId/artifacts/agents with the agent roster", async () => {
+    const { companyId } = await seedArtifacts();
+    const app = express();
+    app.use((_req, _res, next) => {
+      (_req as any).actor = { type: "board", source: "local_implicit", userId: "user-1" };
+      next();
+    });
+    app.use("/api/companies", companyRoutes(db, createStorageService()));
+    app.use(errorHandler);
+
+    const res = await request(app).get(`/api/companies/${companyId}/artifacts/agents`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([{ id: "33333333-3333-4333-8333-333333333333", name: "Coder" }]);
+  });
 });
 
 describe("company artifacts route authorization", () => {
@@ -786,6 +1075,25 @@ describe("company artifacts route authorization", () => {
     app.use(errorHandler);
 
     const res = await request(app).get("/api/companies/company-denied/artifacts");
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Agent key cannot access another company");
+  });
+
+  it("rejects agent access across company boundaries before listing artifact-making agents", async () => {
+    const app = express();
+    app.use((_req, _res, next) => {
+      (_req as any).actor = {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-allowed",
+      };
+      next();
+    });
+    app.use("/api/companies", companyRoutes({} as any, createStorageService()));
+    app.use(errorHandler);
+
+    const res = await request(app).get("/api/companies/company-denied/artifacts/agents");
 
     expect(res.status).toBe(403);
     expect(res.body.error).toBe("Agent key cannot access another company");

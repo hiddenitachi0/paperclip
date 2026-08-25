@@ -37,6 +37,7 @@ import {
   updateCompanySchema,
   updateCompanyBrandingSchema,
   companyArtifactsQuerySchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactsResponseSchema,
   // Routine
   createRoutineSchema,
@@ -966,6 +967,27 @@ registry.registerPath({
       content: {
         "application/json": {
           schema: companyArtifactsResponseSchema,
+        },
+      },
+    },
+    401: r.unauthorized,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/artifacts/agents",
+  tags: ["companies"],
+  summary: "List agents who have made company artifacts",
+  request: {
+    params: z.object({ companyId: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Agents with at least one artifact, most-recent first",
+      content: {
+        "application/json": {
+          schema: companyArtifactAgentsResponseSchema,
         },
       },
     },
