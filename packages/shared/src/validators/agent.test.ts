@@ -84,6 +84,42 @@ describe("createAgentSchema adapterConfig.mcpServers", () => {
   });
 });
 
+describe("createAgentSchema adapterConfig.subscriptionQuotaExhaustedAt (DUR-210)", () => {
+  it("accepts an agent with no subscriptionQuotaExhaustedAt key at all", () => {
+    expect(createAgentSchema.safeParse(baseAgent({})).success).toBe(true);
+  });
+
+  it("accepts a valid ISO datetime with an explicit billing type override", () => {
+    const result = createAgentSchema.safeParse(
+      baseAgent({
+        subscriptionQuotaExhaustedAt: "2026-08-25T00:00:00Z",
+        subscriptionQuotaExhaustedBillingType: "credits",
+      }),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a non-ISO subscriptionQuotaExhaustedAt value", () => {
+    const result = createAgentSchema.safeParse(baseAgent({ subscriptionQuotaExhaustedAt: "yesterday" }));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some((issue) => issue.path.join(".").includes("subscriptionQuotaExhaustedAt")),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects an unrecognized subscriptionQuotaExhaustedBillingType", () => {
+    const result = createAgentSchema.safeParse(
+      baseAgent({
+        subscriptionQuotaExhaustedAt: "2026-08-25T00:00:00Z",
+        subscriptionQuotaExhaustedBillingType: "discount",
+      }),
+    );
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("updateAgentSchema avatarAssetId", () => {
   it("rejects a patch that sets avatarAssetId", () => {
     const result = updateAgentSchema.safeParse({ avatarAssetId: "11111111-1111-4111-8111-111111111111" });

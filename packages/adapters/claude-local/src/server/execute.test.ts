@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
-import { resolveClaudeAdapterResult } from "./execute.js";
+import { resolveClaudeAdapterResult, resolveClaudeBillingType, resolveClaudeSubscriptionOverage } from "./execute.js";
 import { parseClaudeStreamJson } from "./parse.js";
 
 // DUR-41: eight runs in one window were recorded `failed` (with the agent's
@@ -203,5 +203,71 @@ describe("resolveClaudeAdapterResult — DUR-41 success/failure integrity", () =
     const result = resolveClaudeAdapterResult(attempt, { fallbackSessionId: null }, baseEnv);
 
     expect(result.errorCode).toBe("claude_auth_required");
+  });
+});
+
+// DUR-210: the Claude CLI never reports when subscription-included quota ran
+// out and spend moved to overage/credits, so every run under subscription
+// auth billed $0 forever. These pin the operator-declared-boundary fix.
+describe("resolveClaudeBillingType (DUR-210)", () => {
+  it("reports metered_api for bedrock auth regardless of any overage override", () => {
+    const billingType = resolveClaudeBillingType(
+      { CLAUDE_CODE_USE_BEDROCK: "1" },
+      { exhaustedAt: new Date(0), billingType: "credits" },
+    );
+    expect(billingType).toBe("metered_api");
+  });
+
+  it("reports api when an API key is present, ignoring any overage override", () => {
+    const billingType = resolveClaudeBillingType(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      { exhaustedAt: new Date(0), billingType: "credits" },
+    );
+    expect(billingType).toBe("api");
+  });
+
+  it("reports subscription for subscription auth with no overage boundary set", () => {
+    const billingType = resolveClaudeBillingType({}, null);
+    expect(billingType).toBe("subscription");
+  });
+
+  it("still reports subscription before the declared exhaustion boundary", () => {
+    const billingType = resolveClaudeBillingType({}, {
+      exhaustedAt: new Date(Date.now() + 60_000),
+      billingType: "subscription_overage",
+    });
+    expect(billingType).toBe("subscription");
+  });
+
+  it("reports the declared override type at/after the exhaustion boundary", () => {
+    const billingType = resolveClaudeBillingType({}, {
+      exhaustedAt: new Date(Date.now() - 60_000),
+      billingType: "credits",
+    });
+    expect(billingType).toBe("credits");
+  });
+});
+
+describe("resolveClaudeSubscriptionOverage (DUR-210)", () => {
+  it("returns null when no boundary is configured", () => {
+    expect(resolveClaudeSubscriptionOverage({})).toBeNull();
+  });
+
+  it("returns null for an unparseable timestamp", () => {
+    expect(resolveClaudeSubscriptionOverage({ subscriptionQuotaExhaustedAt: "not-a-date" })).toBeNull();
+  });
+
+  it("defaults to subscription_overage when no billing type is specified", () => {
+    const result = resolveClaudeSubscriptionOverage({ subscriptionQuotaExhaustedAt: "2026-08-25T00:00:00Z" });
+    expect(result?.billingType).toBe("subscription_overage");
+    expect(result?.exhaustedAt.toISOString()).toBe("2026-08-25T00:00:00.000Z");
+  });
+
+  it("honors an explicit credits billing type override", () => {
+    const result = resolveClaudeSubscriptionOverage({
+      subscriptionQuotaExhaustedAt: "2026-08-25T00:00:00Z",
+      subscriptionQuotaExhaustedBillingType: "credits",
+    });
+    expect(result?.billingType).toBe("credits");
   });
 });
