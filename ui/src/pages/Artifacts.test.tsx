@@ -92,6 +92,8 @@ function sampleArtifact(overrides: Partial<CompanyArtifact> = {}): CompanyArtifa
     contentPath: null,
     openPath: null,
     downloadPath: null,
+    byteSize: null,
+    originalFilename: null,
     issue: { id: "issue-1", identifier: "PAP-42", title: "Ship launch" },
     project: null,
     createdByAgent: null,

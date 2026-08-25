@@ -21,6 +21,8 @@ function sampleArtifact(overrides: Partial<CompanyArtifact> = {}): CompanyArtifa
     contentPath: "/files/wp-1.mp4",
     openPath: "/files/wp-1.mp4",
     downloadPath: "/files/wp-1.mp4?download=1",
+    byteSize: null,
+    originalFilename: null,
     issue: { id: "issue-1", identifier: "PAP-10205", title: "Demo reel" },
     project: { id: "proj-1", name: "Paperclip App" },
     createdByAgent: { id: "agent-1", name: "ClaudeCoder" },

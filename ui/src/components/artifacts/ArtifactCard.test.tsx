@@ -37,6 +37,8 @@ function makeArtifact(overrides: Partial<CompanyArtifact> = {}): CompanyArtifact
     contentPath: "/files/art-1.png",
     openPath: "/files/art-1.png",
     downloadPath: "/files/art-1.png?download=1",
+    byteSize: null,
+    originalFilename: null,
     issue: { id: "issue-1", identifier: "PAP-10306", title: "Landing visuals" },
     project: { id: "proj-1", name: "Paperclip App" },
     createdByAgent: { id: "agent-1", name: "ClaudeCoder" },
