@@ -116,7 +116,7 @@ const LANES: LaneMeta[] = [
 ];
 
 export function DashboardNow() {
-  const { selectedCompanyId, companies } = useCompany();
+  const { selectedCompanyId, selectedCompany, companies } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
 
   useEffect(() => {
@@ -362,7 +362,8 @@ export function DashboardNow() {
                             ? agentById.get(approval.requestedByAgentId) ?? null
                             : null
                         }
-                        linkedIssues={issuesByApprovalId.get(approval.id) ?? []}
+                        linkedIssues={issuesByApprovalId.get(approval.id)}
+                        companyName={selectedCompany?.name ?? null}
                         isDuplicate={!!duplicateKey && (duplicateKeyCounts.get(duplicateKey) ?? 0) > 1}
                       />
                     );
@@ -601,12 +602,16 @@ function ApprovalRow({
   companyId,
   requester,
   linkedIssues,
+  companyName,
   isDuplicate,
 }: {
   approval: Approval;
   companyId: string;
   requester: Agent | null;
-  linkedIssues: Issue[];
+  // Undefined = the linked-issues fetch for this row hasn't settled yet;
+  // an empty array is a confirmed "nothing linked" defect (DUR-211).
+  linkedIssues: Issue[] | undefined;
+  companyName?: string | null;
   isDuplicate: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -614,9 +619,10 @@ function ApprovalRow({
   const payload = approval.payload as Record<string, unknown>;
   const label = approvalLabel(approval.type, payload);
   const targetBadge = approvalTargetBadge(payload);
-  const issueRefs = linkedIssues
+  const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
+  const showNoTicketFlag = linkedIssues !== undefined && issueRefs.length === 0;
 
   const approveMutation = useMutation({
     mutationFn: () => approvalsApi.approve(approval.id),
@@ -656,29 +662,36 @@ function ApprovalRow({
       >
         <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0">
-          <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
-            {label}
-          </p>
-          {(issueRefs.length > 0 || targetBadge) && (
-            <div className="mt-0.5 flex flex-wrap items-center gap-1">
+          {(issueRefs.length > 0 || showNoTicketFlag || companyName) && (
+            <div className="mb-0.5 flex flex-wrap items-center gap-1">
+              {companyName ? (
+                <span className="rounded bg-background px-1 py-px text-[10px] font-medium text-muted-foreground">
+                  {companyName}
+                </span>
+              ) : null}
               {issueRefs.map((ref) => (
                 <span
                   key={ref}
-                  className="rounded bg-muted px-1 py-px font-mono text-[10px] text-muted-foreground"
+                  className="rounded bg-primary/10 px-1 py-px font-mono text-[10px] font-semibold text-primary"
                 >
                   {ref}
                 </span>
               ))}
-              {targetBadge ? (
-                <span className="rounded bg-muted px-1 py-px font-mono text-[10px] text-muted-foreground">
-                  {targetBadge}
+              {showNoTicketFlag ? (
+                <span className="inline-flex items-center gap-0.5 rounded bg-red-500/10 px-1 py-px text-[10px] font-medium text-red-600 dark:text-red-400">
+                  <AlertCircle className="h-2.5 w-2.5" />
+                  No linked ticket
                 </span>
               ) : null}
             </div>
           )}
-          <p className="text-[10px] text-muted-foreground">
+          <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
+            {label}
+          </p>
+          <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
             {requester ? `From ${requester.name} · ` : ""}
             {relativeTime(approval.createdAt)}
+            {targetBadge ? ` · ${targetBadge}` : ""}
           </p>
         </div>
       </Link>
