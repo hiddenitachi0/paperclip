@@ -20,6 +20,7 @@ import {
   COMPANY_ARTIFACTS_MAX_LIMIT,
   companyArtifactsQuerySchema,
   DOCUMENT_MEDIA_CONTENT_TYPES,
+  NO_TASK_ARTIFACT_GROUP_ID,
   SYSTEM_ISSUE_DOCUMENT_KEYS,
   type CompanyArtifact,
   type CompanyArtifactAgentSummary,
@@ -278,8 +279,18 @@ function resolveRootIssueId(issueId: string, issueRows: Map<string, IssueGroupin
   return current.id;
 }
 
-function resolveGroupIssueId(groupBy: ArtifactGroupBy, issueId: string, issueRows: Map<string, IssueGroupingRow>) {
+function resolveGroupIssueId(
+  groupBy: ArtifactGroupBy,
+  issueId: string | null,
+  issueRows: Map<string, IssueGroupingRow>,
+) {
+  if (issueId === null) return NO_TASK_ARTIFACT_GROUP_ID;
   return groupBy === "task" ? issueId : resolveRootIssueId(issueId, issueRows);
+}
+
+/** Where a card for an orphaned (no owning task) artifact links to: its "No task" stack. */
+function buildOrphanArtifactHref(companyPrefix: string, query: CompanyArtifactsQuery, groupBy: ArtifactGroupBy = "task") {
+  return buildArtifactsGroupHref(companyPrefix, query, groupBy, NO_TASK_ARTIFACT_GROUP_ID);
 }
 
 function emptyGroup(input: {
@@ -302,6 +313,27 @@ function emptyGroup(input: {
   };
 }
 
+const NO_TASK_GROUP_TITLE = "No task";
+
+/** The bucket for files whose owning task was deleted (DUR-206, option b: keep_files). */
+function noTaskGroup(input: {
+  companyPrefix: string;
+  query: CompanyArtifactsQuery;
+  groupBy: ArtifactGroupBy;
+}): CompanyArtifactGroup {
+  return {
+    id: `${input.groupBy}:${NO_TASK_ARTIFACT_GROUP_ID}`,
+    groupBy: input.groupBy,
+    issue: null,
+    title: NO_TASK_GROUP_TITLE,
+    count: 0,
+    mediaKinds: [],
+    previewArtifacts: [],
+    updatedAt: new Date(0).toISOString(),
+    href: buildOrphanArtifactHref(input.companyPrefix, input.query, input.groupBy),
+  };
+}
+
 function buildArtifactGroups(input: {
   artifacts: CompanyArtifact[];
   companyPrefix: string;
@@ -312,22 +344,25 @@ function buildArtifactGroups(input: {
   const groups = new Map<string, CompanyArtifactGroup>();
 
   for (const artifact of input.artifacts) {
-    const groupIssueId = resolveGroupIssueId(input.groupBy, artifact.issue.id, input.issueRows);
-    const groupIssue = input.issueRows.get(groupIssueId) ?? {
-      id: artifact.issue.id,
-      parentId: null,
-      identifier: artifact.issue.identifier,
-      title: artifact.issue.title,
-      updatedAt: new Date(artifact.updatedAt),
-    };
+    const groupIssueId = resolveGroupIssueId(input.groupBy, artifact.issue?.id ?? null, input.issueRows);
     const groupId = `${input.groupBy}:${groupIssueId}`;
     const existing = groups.get(groupId);
-    const group = existing ?? emptyGroup({
-      companyPrefix: input.companyPrefix,
-      query: input.query,
-      groupBy: input.groupBy,
-      issue: groupIssue,
-    });
+    const group = existing ?? (
+      groupIssueId === NO_TASK_ARTIFACT_GROUP_ID
+        ? noTaskGroup({ companyPrefix: input.companyPrefix, query: input.query, groupBy: input.groupBy })
+        : emptyGroup({
+          companyPrefix: input.companyPrefix,
+          query: input.query,
+          groupBy: input.groupBy,
+          issue: input.issueRows.get(groupIssueId) ?? {
+            id: artifact.issue!.id,
+            parentId: null,
+            identifier: artifact.issue!.identifier,
+            title: artifact.issue!.title,
+            updatedAt: new Date(artifact.updatedAt),
+          },
+        })
+    );
     if (!existing) groups.set(groupId, group);
 
     group.count += 1;
@@ -465,10 +500,22 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           eq(documents.companyId, companyId),
           or(isNotNull(documents.createdByAgentId), isNotNull(documents.updatedByAgentId))!,
           notInArray(issueDocuments.key, [...SYSTEM_ISSUE_DOCUMENT_KEYS]),
+          // The issues join is now a LEFT JOIN so a genuinely orphaned
+          // (issue_id IS NULL) document surfaces under "No task" (DUR-206).
+          // A non-null issue_id that still fails to match a same-company
+          // issue row is a malformed/dangling reference, not an orphan --
+          // exclude it rather than let it leak in as if it were one.
+          or(isNull(issueDocuments.issueId), isNotNull(issues.id))!,
         ];
         const documentCursor = groupBy ? undefined : cursorCondition(sql<Date>`${documents.updatedAt}`, documentArtifactId, cursor);
         if (documentCursor) documentConditions.push(documentCursor);
-        if (groupBy === "task" && query.groupIssueId) documentConditions.push(eq(issues.id, query.groupIssueId));
+        if (groupBy === "task" && query.groupIssueId) {
+          documentConditions.push(
+            query.groupIssueId === NO_TASK_ARTIFACT_GROUP_ID
+              ? isNull(issueDocuments.issueId)
+              : eq(issues.id, query.groupIssueId),
+          );
+        }
         if (query.projectId) documentConditions.push(eq(issues.projectId, query.projectId));
         if (query.agentId) {
           documentConditions.push(
@@ -521,7 +568,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
               eq(documents.companyId, issueDocuments.companyId),
             ),
           )
-          .innerJoin(
+          .leftJoin(
             issues,
             and(
               eq(issueDocuments.issueId, issues.id),
@@ -554,7 +601,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const documentRows = await documentRowsQuery.limit(sourceFetchLimit);
 
         for (const row of documentRows) {
-          const identifier = row.issueIdentifier ?? row.issueId;
+          const identifier = row.issueId ? (row.issueIdentifier ?? row.issueId) : null;
           artifacts.push({
             id: row.artifactId,
             source: "document",
@@ -567,13 +614,15 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             downloadPath: null,
             byteSize: null,
             originalFilename: null,
-            issue: { id: row.issueId, identifier, title: row.issueTitle },
+            issue: row.issueId && identifier ? { id: row.issueId, identifier, title: row.issueTitle ?? "" } : null,
             project: row.projectId && row.projectName ? { id: row.projectId, name: row.projectName } : null,
             createdByAgent: row.createdByAgentId && row.createdByAgentName
               ? { id: row.createdByAgentId, name: row.createdByAgentName }
               : null,
             updatedAt: row.updatedAt.toISOString(),
-            href: buildIssueHref(company.issuePrefix, identifier, `document-${row.key}`),
+            href: row.issueId && identifier
+              ? buildIssueHref(company.issuePrefix, identifier, `document-${row.key}`)
+              : buildOrphanArtifactHref(company.issuePrefix, query),
           });
         }
       }
@@ -600,7 +649,14 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const workProductKind = contentTypeKindCondition(workProductContentType, query.kind);
         if (workProductCursor) workProductConditions.push(workProductCursor);
         if (groupBy === "task" && query.groupIssueId) {
-          const selectedIssueCondition = eq(issues.id, query.groupIssueId);
+          // issue_work_products.issue_id is NOT NULL (DUR-206 only detaches
+          // issue_attachments/issue_documents), so a work product can never
+          // land in the "No task" bucket -- exclude the source entirely
+          // rather than run `eq(issues.id, "no-task")`, which would throw a
+          // Postgres invalid-uuid error.
+          const selectedIssueCondition = query.groupIssueId === NO_TASK_ARTIFACT_GROUP_ID
+            ? sql`false`
+            : eq(issues.id, query.groupIssueId);
           workProductBaseConditions.push(selectedIssueCondition);
           workProductConditions.push(selectedIssueCondition);
         }
@@ -744,13 +800,24 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const attachmentArtifactId = sql<string>`concat('attachment:', ${issueAttachments.id})`;
         const attachmentConditions: SQL[] = [
           eq(issueAttachments.companyId, companyId),
+          // See the matching comment on documentConditions: only a genuinely
+          // null issue_id counts as orphaned (DUR-206); a dangling non-null
+          // reference that fails the same-company issues join must not leak
+          // in as if it were one.
+          or(isNull(issueAttachments.issueId), isNotNull(issues.id))!,
         ];
         const attachmentCursor = groupBy
           ? undefined
           : cursorCondition(sql<Date>`${issueAttachments.updatedAt}`, attachmentArtifactId, cursor);
         const attachmentKind = contentTypeKindCondition(sql<string>`${assets.contentType}`, query.kind);
         if (attachmentCursor) attachmentConditions.push(attachmentCursor);
-        if (groupBy === "task" && query.groupIssueId) attachmentConditions.push(eq(issues.id, query.groupIssueId));
+        if (groupBy === "task" && query.groupIssueId) {
+          attachmentConditions.push(
+            query.groupIssueId === NO_TASK_ARTIFACT_GROUP_ID
+              ? isNull(issueAttachments.issueId)
+              : eq(issues.id, query.groupIssueId),
+          );
+        }
         if (attachmentKind) attachmentConditions.push(attachmentKind);
         if (query.projectId) attachmentConditions.push(eq(issues.projectId, query.projectId));
         if (query.agentId) {
@@ -802,7 +869,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
               eq(assets.companyId, issueAttachments.companyId),
             ),
           )
-          .innerJoin(
+          .leftJoin(
             issues,
             and(
               eq(issueAttachments.issueId, issues.id),
@@ -831,7 +898,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           if (workProductAttachmentIds.has(row.attachmentId)) return null;
           const mediaKind = classifyMediaKind(row.contentType);
           const contentPath = attachmentContentPath(row.attachmentId);
-          const identifier = row.issueIdentifier ?? row.issueId;
+          const identifier = row.issueId ? (row.issueIdentifier ?? row.issueId) : null;
           return {
             id: row.artifactId,
             source: "attachment",
@@ -850,14 +917,16 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             downloadPath: `${contentPath}?download=1`,
             byteSize: row.byteSize,
             originalFilename: row.originalFilename,
-            issue: { id: row.issueId, identifier, title: row.issueTitle },
+            issue: row.issueId && identifier ? { id: row.issueId, identifier, title: row.issueTitle ?? "" } : null,
             project: row.projectId && row.projectName ? { id: row.projectId, name: row.projectName } : null,
             createdByAgent: row.createdByAgentId && row.createdByAgentName
               ? { id: row.createdByAgentId, name: row.createdByAgentName }
               : null,
             createdByUser: !row.createdByAgentId && !!row.createdByUserId,
             updatedAt: row.updatedAt.toISOString(),
-            href: buildIssueHref(company.issuePrefix, identifier, `attachment-${row.attachmentId}`),
+            href: row.issueId && identifier
+              ? buildIssueHref(company.issuePrefix, identifier, `attachment-${row.attachmentId}`)
+              : buildOrphanArtifactHref(company.issuePrefix, query),
           };
         }));
 
@@ -914,8 +983,14 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         return { artifacts: [], groups: page, nextCursor };
       }
 
-      const issueSeedIds = new Set(artifacts.map((artifact) => artifact.issue.id));
-      if (query.groupIssueId) issueSeedIds.add(query.groupIssueId);
+      const issueSeedIds = new Set(
+        artifacts
+          .map((artifact) => artifact.issue?.id)
+          .filter((id): id is string => !!id),
+      );
+      if (query.groupIssueId && query.groupIssueId !== NO_TASK_ARTIFACT_GROUP_ID) {
+        issueSeedIds.add(query.groupIssueId);
+      }
       const issueRows = await loadIssueGroupingRows(db, companyId, issueSeedIds);
       const groups = buildArtifactGroups({
         artifacts: sorted,
@@ -926,6 +1001,14 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
       });
 
       if (query.groupIssueId) {
+        if (query.groupIssueId === NO_TASK_ARTIFACT_GROUP_ID) {
+          const selectedGroup = groups.find((group) => group.id === `${groupBy}:${NO_TASK_ARTIFACT_GROUP_ID}`)
+            ?? noTaskGroup({ companyPrefix: company.issuePrefix, query, groupBy });
+          const selectedArtifacts = sorted.filter((artifact) => artifact.issue === null);
+          const { page, nextCursor } = pageByCursor(selectedArtifacts, query.limit, cursor);
+          return { artifacts: page, selectedGroup, nextCursor };
+        }
+
         const selectedIssue = issueRows.get(query.groupIssueId);
         if (!selectedIssue) {
           return { artifacts: [], selectedGroup: null, nextCursor: null };
@@ -940,7 +1023,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             issue: issueRows.get(selectedGroupIssueId) ?? selectedIssue,
           });
         const selectedArtifacts = sorted.filter((artifact) =>
-          resolveGroupIssueId(groupBy, artifact.issue.id, issueRows) === selectedGroupIssueId
+          resolveGroupIssueId(groupBy, artifact.issue?.id ?? null, issueRows) === selectedGroupIssueId
         );
         const { page, nextCursor } = pageByCursor(selectedArtifacts, query.limit, cursor);
         return { artifacts: page, selectedGroup, nextCursor };

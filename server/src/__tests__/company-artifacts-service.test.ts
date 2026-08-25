@@ -17,7 +17,7 @@ import {
   issueWorkProducts,
   projects,
 } from "@paperclipai/db";
-import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
+import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY, NO_TASK_ARTIFACT_GROUP_ID } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -1146,6 +1146,104 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
 
     const agentsList = await companyArtifactsService(db, createStorageService()).listAgents(companyId);
     expect(agentsList.some((agent) => agent.name === "Commenter")).toBe(true);
+  });
+
+  it("keeps attachments and documents when the owning task is deleted, surfacing them under a 'No task' group (DUR-206)", async () => {
+    const { companyId } = await seedArtifacts();
+    const agentId = "33333333-3333-4333-8333-333333333333";
+    const orphanIssueId = "70707070-7070-4707-8707-707070707070";
+    const orphanDocumentId = "71717171-7171-4717-8717-717171717171";
+    const orphanAssetId = "72727272-7272-4727-8727-727272727272";
+    const orphanAttachmentId = "73737373-7373-4737-8737-737373737373";
+
+    await db.insert(issues).values({
+      id: orphanIssueId,
+      companyId,
+      identifier: "PAP-99",
+      title: "Doomed task",
+      status: "done",
+      priority: "medium",
+    });
+    await db.insert(documents).values({
+      id: orphanDocumentId,
+      companyId,
+      title: "Doomed Task Notes",
+      latestBody: "This should survive the task's deletion.",
+      createdByAgentId: agentId,
+      updatedAt: new Date("2026-02-10T00:00:00.000Z"),
+    });
+    await db.insert(issueDocuments).values({
+      companyId,
+      issueId: orphanIssueId,
+      documentId: orphanDocumentId,
+      key: "doomed-notes",
+    });
+    await db.insert(assets).values({
+      id: orphanAssetId,
+      companyId,
+      provider: "local_disk",
+      objectKey: "doomed-task-file.png",
+      contentType: "image/png",
+      byteSize: 10,
+      sha256: "sha256-doomed",
+      originalFilename: "doomed-task-file.png",
+      createdByAgentId: agentId,
+    });
+    await db.insert(issueAttachments).values({
+      id: orphanAttachmentId,
+      companyId,
+      issueId: orphanIssueId,
+      assetId: orphanAssetId,
+      updatedAt: new Date("2026-02-10T00:00:00.000Z"),
+    });
+
+    // Delete the task the way DELETE /issues/:id does post-DUR-206: a plain
+    // row delete, relying on issue_attachments/issue_documents' ON DELETE
+    // SET NULL (not the old ON DELETE CASCADE) to detach rather than
+    // destroy the files.
+    await db.delete(issues).where(eq(issues.id, orphanIssueId));
+
+    const [survivingDocument] = await db.select().from(documents).where(eq(documents.id, orphanDocumentId));
+    const [survivingAttachment] = await db
+      .select()
+      .from(issueAttachments)
+      .where(eq(issueAttachments.id, orphanAttachmentId));
+    expect(survivingDocument).toBeTruthy();
+    expect(survivingAttachment).toBeTruthy();
+    expect(survivingAttachment?.issueId).toBeNull();
+
+    const flat = await companyArtifactsService(db, createStorageService()).list(companyId, { limit: 50 });
+    const orphanedDoc = flat.artifacts.find((artifact) => artifact.title === "Doomed Task Notes");
+    const orphanedAttachment = flat.artifacts.find((artifact) => artifact.title === "doomed-task-file.png");
+    expect(orphanedDoc?.issue).toBeNull();
+    expect(orphanedAttachment?.issue).toBeNull();
+    expect(orphanedAttachment?.href).toContain(`groupIssueId=${NO_TASK_ARTIFACT_GROUP_ID}`);
+
+    const grouped = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "task",
+      limit: 50,
+    });
+    const noTaskGroupResult = grouped.groups?.find((group) => group.id === `task:${NO_TASK_ARTIFACT_GROUP_ID}`);
+    expect(noTaskGroupResult).toBeTruthy();
+    expect(noTaskGroupResult?.title).toBe("No task");
+    expect(noTaskGroupResult?.count).toBe(2);
+
+    const selectedNoTask = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "task",
+      groupIssueId: NO_TASK_ARTIFACT_GROUP_ID,
+      limit: 50,
+    });
+    expect(selectedNoTask.selectedGroup?.title).toBe("No task");
+    expect(selectedNoTask.artifacts.map((artifact) => artifact.title).sort()).toEqual(
+      ["Doomed Task Notes", "doomed-task-file.png"].sort(),
+    );
+
+    const parentGrouped = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "parent_task",
+      groupIssueId: NO_TASK_ARTIFACT_GROUP_ID,
+      limit: 50,
+    });
+    expect(parentGrouped.selectedGroup?.title).toBe("No task");
   });
 
   it("serves GET /:companyId/artifacts/agents with the agent roster", async () => {

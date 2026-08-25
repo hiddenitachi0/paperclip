@@ -570,7 +570,11 @@ export function buildWorktreeMergePlan(input: {
 
   const documentPlans: Array<PlannedIssueDocumentInsert | PlannedIssueDocumentMerge | PlannedIssueDocumentSkip> = [];
   for (const document of sortDocumentRows(sourceDocuments)) {
-    if (!issueIdsAvailableAfterImport.has(document.issueId)) {
+    // DUR-206 made issue_documents.issue_id nullable so a deleted task's
+    // documents can be detached instead of destroyed. An orphaned document
+    // has no parent issue to remap during import, so treat null the same
+    // as "parent not available".
+    if (!document.issueId || !issueIdsAvailableAfterImport.has(document.issueId)) {
       documentPlans.push({ source: document, action: "skip_missing_parent" });
       continue;
     }
@@ -697,7 +701,8 @@ export function buildWorktreeMergePlan(input: {
       attachmentPlans.push({ source: attachment, action: "skip_existing" });
       continue;
     }
-    if (!issueIdsAvailableAfterImport.has(attachment.issueId)) {
+    // Same null-issueId handling as documents above (DUR-206).
+    if (!attachment.issueId || !issueIdsAvailableAfterImport.has(attachment.issueId)) {
       attachmentPlans.push({ source: attachment, action: "skip_missing_parent" });
       continue;
     }

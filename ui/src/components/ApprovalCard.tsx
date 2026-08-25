@@ -1,17 +1,18 @@
-import { CheckCircle2, XCircle, Clock } from "lucide-react";
+import { CheckCircle2, XCircle, Clock, AlertTriangle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Identity } from "./Identity";
 import {
   approvalSubject,
+  approvalTechnicalReference,
   typeIcon,
   defaultTypeIcon,
   ApprovalPayloadRenderer,
   typeLabel,
 } from "./ApprovalPayload";
 import { timeAgo } from "../lib/timeAgo";
-import type { Approval, Agent } from "@paperclipai/shared";
+import type { Approval, Agent, Issue } from "@paperclipai/shared";
 import { cn } from "@/lib/utils";
 
 function statusIcon(status: string) {
@@ -31,6 +32,8 @@ export function ApprovalCard({
   detailLink,
   isPending = false,
   pendingAction = null,
+  linkedIssues,
+  companyName = null,
 }: {
   approval: Approval;
   requesterAgent: Agent | null;
@@ -40,11 +43,22 @@ export function ApprovalCard({
   detailLink?: string;
   isPending?: boolean;
   pendingAction?: "approve" | "reject" | null;
+  // Undefined = caller hasn't checked (e.g. embedded on the issue's own
+  // thread, where the ticket is already the surrounding page). An array —
+  // even empty — means the caller resolved the link and an empty result is
+  // a real defect worth flagging (see DUR-211).
+  linkedIssues?: Issue[];
+  companyName?: string | null;
 }) {
   const payload = approval.payload as Record<string, unknown> | null;
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const kindLabel = typeLabel[approval.type] ?? approval.type;
   const subject = approvalSubject(payload);
+  const technicalReference = approvalTechnicalReference(payload);
+  const issueRefs = (linkedIssues ?? [])
+    .map((issue) => issue.identifier)
+    .filter((identifier): identifier is string => Boolean(identifier));
+  const showNoTicketFlag = linkedIssues !== undefined && issueRefs.length === 0;
   const showResolutionButtons =
     Boolean(onApprove && onReject) &&
     approval.type !== "budget_override_required" &&
@@ -67,6 +81,14 @@ export function ApprovalCard({
                 >
                   {kindLabel}
                 </Badge>
+                {companyName && (
+                  <Badge
+                    variant="secondary"
+                    className="px-2 py-0.5 text-[11px] font-medium"
+                  >
+                    {companyName}
+                  </Badge>
+                )}
                 {requesterAgent && (
                   <div className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     <span>Requested by</span>
@@ -75,8 +97,23 @@ export function ApprovalCard({
                 )}
               </div>
               <div className="space-y-1">
-                <h3 className="text-base font-semibold leading-6 text-foreground">
-                  {subject ?? kindLabel}
+                <h3 className="flex flex-wrap items-center gap-1.5 text-base font-semibold leading-6 text-foreground">
+                  {issueRefs.length > 0 &&
+                    issueRefs.map((ref) => (
+                      <span
+                        key={ref}
+                        className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-sm text-primary"
+                      >
+                        {ref}
+                      </span>
+                    ))}
+                  {showNoTicketFlag && (
+                    <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
+                      <AlertTriangle className="h-3 w-3" />
+                      No linked ticket
+                    </span>
+                  )}
+                  <span>{subject ?? kindLabel}</span>
                 </h3>
                 <p className="text-xs leading-5 text-muted-foreground">
                   Approval request created {timeAgo(approval.createdAt)}
@@ -105,6 +142,12 @@ export function ApprovalCard({
         <div className="mt-4 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-3 text-xs leading-5 text-muted-foreground">
           <span className="font-medium text-foreground">Decision note.</span> {approval.decisionNote}
         </div>
+      )}
+
+      {technicalReference && (
+        <p className="mt-3 truncate font-mono text-[10.5px] text-muted-foreground/70" title={technicalReference}>
+          {technicalReference}
+        </p>
       )}
 
       {hasFooter ? (
