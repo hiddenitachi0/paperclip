@@ -38,22 +38,26 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   backfillPrincipalAccessCompatibility,
+  seedDurStarterJobs,
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
   heartbeatService,
   mergeDeployVisibilityService,
+  agentErrorAlertsService,
+  untrackedWriteAlertsService,
   instanceSettingsService,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  logScheduleChainBootstrapVerification,
 } from "./services/index.js";
 import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
 } from "./services/adapter-registry-bootstrap.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
-import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
+import { buildRuntimeApiCandidateUrls, chooseAgentRuntimeApiUrl, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
@@ -534,8 +538,16 @@ export async function startServer(): Promise<StartedServer> {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
   const accessBackfill = await backfillPrincipalAccessCompatibility(db as any);
-  if (accessBackfill.agentMembershipsInserted > 0 || accessBackfill.humanGrantsInserted > 0) {
+  if (
+    accessBackfill.agentMembershipsInserted > 0
+    || accessBackfill.humanGrantsInserted > 0
+    || accessBackfill.agentMergeRequestGrantsInserted > 0
+  ) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
+  }
+  const durStarterJobsSeeded = await seedDurStarterJobs(db as any);
+  if (durStarterJobsSeeded.created.length > 0) {
+    logger.info(durStarterJobsSeeded, "Seeded DUR starter jobs");
   }
   if (config.deploymentMode === "authenticated") {
     const {
@@ -682,13 +694,19 @@ export async function startServer(): Promise<StartedServer> {
   }
   
   const runtimeListenHost = config.host;
-  const runtimeApiUrl = choosePrimaryRuntimeApiUrl({
+  // This is the PUBLIC/operator-facing address (used for webhook URLs shown
+  // to operators and outside services) — it intentionally prefers
+  // authPublicBaseUrl. It must never be handed to an agent process as "the"
+  // API URL: that address is frequently unreachable from inside the
+  // container the server itself runs in (tailnet hostnames, reverse
+  // proxies, etc.), which is what caused DUR-74.
+  const publicApiUrl = choosePrimaryRuntimeApiUrl({
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
     allowedHostnames: config.allowedHostnames,
     bindHost: runtimeListenHost,
     port: listenPort,
   });
-  const configuredApiUrl = process.env.PAPERCLIP_API_URL?.trim() || runtimeApiUrl;
+  const configuredApiUrl = process.env.PAPERCLIP_API_URL?.trim() || publicApiUrl;
   const runtimeApiCandidates = buildRuntimeApiCandidateUrls({
     preferredApiUrl: configuredApiUrl,
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
@@ -696,9 +714,16 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: runtimeListenHost,
     port: listenPort,
   });
+  // This is the address an agent process running alongside the server
+  // (same container/network namespace) should use — always loopback-based,
+  // never derived from the public base URL or allowed hostnames.
+  const agentRuntimeApiUrl = chooseAgentRuntimeApiUrl({
+    bindHost: runtimeListenHost,
+    port: listenPort,
+  });
   process.env.PAPERCLIP_LISTEN_HOST = runtimeListenHost;
   process.env.PAPERCLIP_LISTEN_PORT = String(listenPort);
-  process.env.PAPERCLIP_RUNTIME_API_URL = runtimeApiUrl;
+  process.env.PAPERCLIP_RUNTIME_API_URL = agentRuntimeApiUrl;
   process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = JSON.stringify(runtimeApiCandidates);
   process.env.PAPERCLIP_API_URL = configuredApiUrl;
   
@@ -784,6 +809,8 @@ export async function startServer(): Promise<StartedServer> {
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
+    const agentErrorAlerts = agentErrorAlertsService(db as any);
+    const untrackedWriteAlerts = untrackedWriteAlertsService(db as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery.
@@ -860,6 +887,13 @@ export async function startServer(): Promise<StartedServer> {
       if (setupCleanup.timedOut > 0 || setupCleanup.failed > 0) {
         logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
       }
+
+      // DUR-100: verify every active routine's declared schedule chains actually
+      // have a live, usable trigger row before logging anything as healthy —
+      // logScheduleChainBootstrapVerification logs its own info/error line.
+      await logScheduleChainBootstrapVerification(db as any).catch((err) => {
+        logger.error({ err }, "startup schedule chain bootstrap verification failed to run");
+      });
     })().catch((err) => {
       logger.error({ err }, "startup heartbeat recovery failed");
     });
@@ -906,6 +940,35 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      // DUR-128: an agent left sitting in "error" is invisible until someone
+      // happens to look. Raise it as soon as it crosses the stall threshold
+      // (see agent-error-alerts.ts) instead of waiting to be discovered.
+      void agentErrorAlerts
+        .tick(new Date())
+        .then((result) => {
+          if (result.alerted > 0) {
+            logger.warn({ ...result }, "agent-error alert tick raised stalled-agent alerts");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "agent-error alert tick failed");
+        });
+
+      // DUR-130: the fn_flag_untracked_write trigger (migration 0139) records
+      // any write to a DUR-128-relevant table not made through the service
+      // layer, migration runner, or restore path. Surface each new row as an
+      // operator-visible alert instead of leaving it a quiet DB-only row.
+      void untrackedWriteAlerts
+        .tick(new Date())
+        .then((result) => {
+          if (result.alerted > 0) {
+            logger.warn({ ...result }, "untracked-write alert tick raised out-of-band write alerts");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "untracked-write alert tick failed");
         });
 
       void environmentCustomImages

@@ -29,6 +29,7 @@ import {
   LOW_TRUST_REVIEW_PRESET,
   extractSorteringsreglerBlock,
   parseSorteringsreglerRuleTargetNames,
+  DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -62,7 +63,14 @@ import {
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
-import { assertBoard, assertCanUpdateAgent, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import {
+  assertBoard,
+  assertBoardOrDelegate,
+  assertCanUpdateAgent,
+  assertCompanyAccess,
+  assertInstanceAdmin,
+  getActorInfo,
+} from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectAgentAdapterWorkspaceCommandPaths,
@@ -87,7 +95,7 @@ import {
   refreshAdapterModels,
   requireServerAdapter,
 } from "../adapters/index.js";
-import { redactEventPayload } from "../redaction.js";
+import { redactEventPayload, SECRET_PAYLOAD_KEY_RE } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -570,17 +578,66 @@ export function agentRoutes(
     };
   }
 
+  // DUR-69/DUR-109: "how long since this agent's instructions were last
+  // reviewed", against the one instance-wide threshold an operator can
+  // configure (instance/settings/general, default 60 days). `reviewedAt`
+  // only ever moves via a direct board-authenticated instructions write or
+  // an approved boss proposal (see instructionsReviewedAt updates in this
+  // file and in approvalService.approve) -- never by an agent touching its
+  // own record, so this can't be gamed into looking freshly reviewed.
+  function computeInstructionsStaleness(
+    reviewedAt: Date | string | null | undefined,
+    thresholdDays: number,
+  ) {
+    const reviewedAtDate = reviewedAt instanceof Date ? reviewedAt : new Date(reviewedAt ?? NaN);
+    if (Number.isNaN(reviewedAtDate.getTime())) {
+      // The column is NOT NULL with a defaultNow() backfill, so this should
+      // never happen against a real row -- only against a fixture (test
+      // double, older cached response shape) that predates this field.
+      // Fail open rather than 500ing agent detail/list responses.
+      return { reviewedAt: null, daysSinceReviewed: null, thresholdDays, stale: false };
+    }
+    const daysSinceReviewed = Math.max(
+      0,
+      Math.floor((Date.now() - reviewedAtDate.getTime()) / (24 * 60 * 60 * 1000)),
+    );
+    return {
+      reviewedAt: reviewedAtDate.toISOString(),
+      daysSinceReviewed,
+      thresholdDays,
+      stale: daysSinceReviewed >= thresholdDays,
+    };
+  }
+
+  async function withInstructionsStaleness<T extends { instructionsReviewedAt: Date | string | null | undefined }>(
+    agent: T,
+  ): Promise<T & { instructionsStaleness: ReturnType<typeof computeInstructionsStaleness> }> {
+    const { instructionsStalenessThresholdDays } = await instanceSettings.getGeneral();
+    return {
+      ...agent,
+      instructionsStaleness: computeInstructionsStaleness(
+        agent.instructionsReviewedAt,
+        instructionsStalenessThresholdDays ?? DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+      ),
+    };
+  }
+
   async function buildAgentDetail(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
-    options?: { restricted?: boolean },
+    options?: { restricted?: boolean; maskSecrets?: boolean },
   ) {
-    const [chainOfCommand, accessState] = await Promise.all([
+    const [chainOfCommand, accessState, agentWithStaleness] = await Promise.all([
       svc.getChainOfCommand(agent.id),
       buildAgentAccessState(agent),
+      withInstructionsStaleness(agent),
     ]);
 
     return {
-      ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
+      ...(options?.restricted
+        ? redactForRestrictedAgentView(agentWithStaleness)
+        : options?.maskSecrets
+          ? redactForSecretMaskedAgentView(agentWithStaleness)
+          : agentWithStaleness),
       chainOfCommand,
       access: accessState,
     };
@@ -728,6 +785,24 @@ export function agentRoutes(
     return null;
   }
 
+  // DUR-128: when a recovery action was performed by a delegate token, name
+  // both the delegate and the operator authority it acted under in the
+  // activity log details -- actorId above stays the operator's userId (the
+  // authority), this is the "performed by the delegate" half of the record.
+  function delegateActivityDetails(req: Request): Record<string, unknown> | undefined {
+    if (req.actor.type !== "board_delegate") return undefined;
+    return {
+      performedBy: "delegate",
+      // Named delegateId, not delegateTokenId: logActivity's sanitizeRecord
+      // redacts any details key containing "token" as a secret-shaped field.
+      // This is an opaque row id, not the bearer credential -- redacting it
+      // would defeat the whole point of naming which delegate acted.
+      delegateId: req.actor.delegateTokenId,
+      delegateName: req.actor.delegateName,
+      actingUnderUserId: req.actor.userId,
+    };
+  }
+
   async function getAccessibleAgent(req: Request, res: Response, id: string) {
     const agent = await svc.getById(id);
     if (!agent) {
@@ -737,6 +812,26 @@ export function agentRoutes(
     assertCompanyAccess(req, agent.companyId);
     if (req.actor.type === "board") {
       await assertBoardCanManageAgentsForCompany(req, agent.companyId);
+    } else if (req.actor.type === "board_delegate") {
+      // Same "agents:create" permission decision a genuine board session for
+      // this same user would get -- evaluated for the operator's own
+      // identity, never with isInstanceAdmin escalation, so a delegate token
+      // can never reach more than its granting operator's plain membership
+      // would allow. assertBoardOrDelegate (called by the route handler)
+      // additionally restricts *which* actions the token may reach at all.
+      const decision = await access.decide({
+        actor: {
+          type: "board",
+          userId: req.actor.userId,
+          source: "session",
+          isInstanceAdmin: false,
+          companyIds: req.actor.companyIds,
+          memberships: req.actor.memberships,
+        },
+        action: "agents:create",
+        resource: { type: "company", companyId: agent.companyId },
+      });
+      if (!decision.allowed) throw forbidden(decision.explanation);
     }
     return agent;
   }
@@ -1218,10 +1313,13 @@ export function agentRoutes(
 
   // codex_local agents inherit whatever Codex login is already on the device
   // (the host's ~/.codex or $CODEX_HOME) by default, so a fresh agent needs no
-  // env overrides at all. We only carve out an isolated per-agent CODEX_HOME
-  // when the agent sets its own OPENAI_API_KEY, so that key's api-key auth.json
-  // does not collide with the shared company home other agents use for the host
-  // login. Agents without a key share the host credentials.
+  // env overrides at all. We carve out an isolated per-agent CODEX_HOME when
+  // either: (a) the agent sets its own OPENAI_API_KEY, so that key's api-key
+  // auth.json does not collide with the shared company home other agents use
+  // for the host login, or (b) DUR-132: the agent has any mcpServers
+  // configured, so its MCP server credentials (merged into config.toml at run
+  // dispatch) never land in a CODEX_HOME shared with other agents. Agents with
+  // neither share the host credentials.
   function applyCodexLocalKeyIsolation(
     companyId: string,
     agentId: string,
@@ -1229,9 +1327,10 @@ export function agentRoutes(
     adapterConfig: Record<string, unknown>,
   ): Record<string, unknown> {
     if (adapterType !== "codex_local") return adapterConfig;
-    const existingEnv = asRecord(adapterConfig.env);
-    if (!existingEnv) return adapterConfig;
-    if (!codexLocalEnvKeyConfigured(existingEnv.OPENAI_API_KEY)) return adapterConfig;
+    const existingEnv = asRecord(adapterConfig.env) ?? {};
+    const hasApiKey = codexLocalEnvKeyConfigured(existingEnv.OPENAI_API_KEY);
+    const hasMcpServers = Array.isArray(adapterConfig.mcpServers) && adapterConfig.mcpServers.length > 0;
+    if (!hasApiKey && !hasMcpServers) return adapterConfig;
     if (codexLocalEnvKeyConfigured(existingEnv.CODEX_HOME)) return adapterConfig;
     return {
       ...adapterConfig,
@@ -1402,6 +1501,22 @@ export function agentRoutes(
     return KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) => adapterConfig[key] !== undefined);
   }
 
+  // DUR-61: the two create paths (hire, direct-create) build a brand-new
+  // agent row rather than diffing a patch, so neither goes through
+  // assertAgentSelfUpdateAllowed. An agent that can hire must not be able to
+  // mint a colleague with a self-authored voice — only a board-authenticated
+  // caller may set tone or personality, on hire or on an existing agent
+  // (PATCH path: both are deliberately absent from
+  // AGENT_SELF_UPDATE_ALLOWED_FIELDS in agent-self-update-policy.ts).
+  function assertNoAgentVoiceFieldMutation(req: Request, field: "tone" | "personality", value: unknown) {
+    if (req.actor.type !== "agent") return;
+    if (value === undefined || value === null) return;
+    if (typeof value === "string" && value.trim().length === 0) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot set "${field}" when hiring or creating an agent. Only board-authenticated callers can.`,
+    );
+  }
+
   // DUR-55: an agent-authenticated caller must never be able to add, change, or
   // remove a tool connection (MCP server) on any agent's adapterConfig,
   // including its own — that is a command run on the host or a URL data gets
@@ -1473,10 +1588,13 @@ export function agentRoutes(
 
   // Any change to an agent's job title (role), display title, or tool
   // connections (adapterConfig.mcpServers) must be operator-visible in plain
-  // language regardless of who made it -- an agent-authenticated caller can
-  // no longer touch role or mcpServers at all (see assertNoAgentRoleMutation
-  // / assertNoAgentToolConnectionMutation above), but a board-authenticated
-  // (human) caller still can, and today's `changedTopLevelKeys` /
+  // language regardless of who made it. roleChange is now reachable only
+  // through the config-revision rollback path (PATCH /agents/:id itself
+  // rejects the legacy `role` field outright for every caller, board
+  // included, since DUR-148 — see the route-level hasOwn("role") check
+  // below), so a rollback that restores an earlier org-chart role is the one
+  // remaining place this can fire; titleChange and toolConnectionChange stay
+  // reachable from both PATCH and rollback. Today's `changedTopLevelKeys` /
   // `changedAdapterConfigKeys` summaries only name the fields that changed,
   // not what actually changed. This attaches the old -> new values (and, for
   // tool connections, what each added/removed server can reach) so the
@@ -1616,6 +1734,77 @@ export function agentRoutes(
       adapterConfig: {},
       runtimeConfig: {},
     };
+  }
+
+  // DUR-132 item 7: a peer agent actor (not self, not board) should never see
+  // another agent's live credentials just because it happens to hold
+  // agents:create/agent_config:update. Unlike redactForRestrictedAgentView
+  // (which wipes adapterConfig/runtimeConfig entirely) this keeps every other
+  // field -- icon, capabilities, budgetMonthlyCents, defaultEnvironmentId,
+  // etc. -- intact and only redacts secret-shaped values within
+  // adapterConfig/runtimeConfig via the existing field-name-based
+  // redactEventPayload helper (the same one used for approval payloads and
+  // config revisions elsewhere in this file). redactEventPayload builds a new
+  // object rather than mutating in place, so this never touches the
+  // underlying row -- a board/self read of the same agent is unaffected.
+  function redactForSecretMaskedAgentView(agent: Awaited<ReturnType<typeof svc.getById>>) {
+    if (!agent) return null;
+    return {
+      ...agent,
+      adapterConfig: redactEventPayload(asRecord(agent.adapterConfig)) ?? {},
+      runtimeConfig: redactEventPayload(asRecord(agent.runtimeConfig)) ?? {},
+    };
+  }
+
+  // DUR-132 item 6: mcpServers env/header key names that look like a
+  // credential (SECRET_PAYLOAD_KEY_RE -- the same pattern used to redact
+  // logs) but hold a literal string rather than a secret_ref are not
+  // rejected -- they still save -- but the response carries a plain-language
+  // advisory so a future UI can offer to move the value into a saved
+  // password. No hard-reject in this ticket; there are no persona rows yet.
+  function buildMcpCredentialAdvisories(adapterConfig: unknown): Array<{
+    configPath: string;
+    serverName: string;
+    key: string;
+    message: string;
+    canMoveToSavedPassword: true;
+  }> {
+    const record = asRecord(adapterConfig);
+    const mcpServers = record?.mcpServers;
+    if (!Array.isArray(mcpServers)) return [];
+    const advisories: Array<{
+      configPath: string;
+      serverName: string;
+      key: string;
+      message: string;
+      canMoveToSavedPassword: true;
+    }> = [];
+    for (const rawEntry of mcpServers) {
+      const entry = asRecord(rawEntry);
+      if (!entry) continue;
+      const serverName = typeof entry.name === "string" ? entry.name : "";
+      for (const field of ["env", "headers"] as const) {
+        const fieldValue = asRecord(entry[field]);
+        if (!fieldValue) continue;
+        for (const [key, value] of Object.entries(fieldValue)) {
+          // Only literal strings are candidates -- a secret_ref (or a
+          // {type:"plain",value} wrapper) is either already a saved password
+          // or handled by its own shape; this advisory is specifically about
+          // plaintext values sitting in a credential-shaped field.
+          if (typeof value !== "string") continue;
+          if (!SECRET_PAYLOAD_KEY_RE.test(key)) continue;
+          advisories.push({
+            configPath: `mcpServers[${serverName}].${field}.${key}`,
+            serverName,
+            key,
+            message:
+              "This password is stored as readable text. Save it as a password instead so only this agent can use it.",
+            canMoveToSavedPassword: true,
+          });
+        }
+      }
+    }
+    return advisories;
   }
 
   function redactAgentConfiguration(agent: Awaited<ReturnType<typeof svc.getById>>) {
@@ -1858,6 +2047,17 @@ export function agentRoutes(
         return;
       }
       await assertCanUpdateAgent(req, agent, access);
+      // DUR-148: assertCanUpdateAgent allows a self-agent holding
+      // agent_config:update to reach this route, but skill sync is exactly
+      // the kind of self-grant the role/permissions lockdown is meant to
+      // close — an agent should not be able to expand its own installed
+      // skill set unilaterally. Board-authenticated callers, and peer agents
+      // acting on another agent, are unaffected.
+      if (req.actor.type === "agent" && req.actor.agentId === id) {
+        throw forbidden(
+          "Agent-authenticated callers cannot sync skills onto their own agent record. Only board-authenticated callers, or a peer agent, can.",
+        );
+      }
 
       const requestedSkills = normalizeDesiredSkillSelections(req.body.desiredSkills);
       const {
@@ -1874,6 +2074,12 @@ export function agentRoutes(
       if (!desiredSkills || !desiredSkillEntries || !runtimeSkillEntries) {
         throw unprocessable("Skill sync requires desiredSkills.");
       }
+      // Defense in depth: this route's adapterConfig write bypasses
+      // assertAgentSelfUpdateAllowed (the generic PATCH /agents/:id path's
+      // guard), so if resolveDesiredSkillAssignment ever starts touching
+      // adapterConfig.mcpServers, the DUR-55 tool-connection lockdown must
+      // still apply here too.
+      assertNoAgentToolConnectionMutation(req, nextAdapterConfig, "adapterConfig");
       const actor = getActorInfo(req);
       const updated = await svc.update(agent.id, {
         adapterConfig: nextAdapterConfig,
@@ -1883,6 +2089,11 @@ export function agentRoutes(
           createdByUserId: actor.actorType === "user" ? actor.actorId : null,
           source: "skill-sync",
         },
+        // DUR-132 item 5: forward the actor so the self-only secret_ref
+        // binding gate applies here too, consistent with every other
+        // svc.update call site (this route can't inject new mcpServers
+        // content today, but the gate should hold regardless of that).
+        actor: { actorType: actor.actorType, agentId: actor.agentId },
       });
       if (!updated) {
         res.status(404).json({ error: "Agent not found" });
@@ -1948,9 +2159,28 @@ export function agentRoutes(
       });
       return;
     }
-    const result = await filterAgentsForActor(req, await svc.list(companyId));
+    const filtered = await filterAgentsForActor(req, await svc.list(companyId));
+    const { instructionsStalenessThresholdDays } = await instanceSettings.getGeneral();
+    const threshold = instructionsStalenessThresholdDays ?? DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS;
+    const result = filtered.map((agent) => ({
+      ...agent,
+      instructionsStaleness: computeInstructionsStaleness(agent.instructionsReviewedAt, threshold),
+    }));
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
+      // DUR-132 item 7: the list route grants the same agents:create-based
+      // access as GET /agents/:id, so it must apply the same peer-vs-self
+      // secret masking -- otherwise a peer agent could bypass the detail
+      // route's masking simply by reading the list instead.
+      if (req.actor.type === "agent") {
+        const selfAgentId = req.actor.agentId;
+        res.json(
+          result.map((agent) =>
+            agent.id === selfAgentId ? agent : redactForSecretMaskedAgentView(agent),
+          ),
+        );
+        return;
+      }
       res.json(result);
       return;
     }
@@ -2185,6 +2415,14 @@ export function agentRoutes(
       res.json(await buildAgentDetail(agent, { restricted: true }));
       return;
     }
+    // DUR-132 item 7: a peer agent actor (agents:create/agent_config:update
+    // grant, but not itself the target agent) gets every field except live
+    // credentials -- board callers and an agent reading its own record still
+    // get the real, unmasked config.
+    if (!isSelf && req.actor.type === "agent") {
+      res.json(await buildAgentDetail(agent, { maskSecrets: true }));
+      return;
+    }
     res.json(await buildAgentDetail(agent));
   });
 
@@ -2355,6 +2593,8 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, hireInput.runtimeConfig);
+    assertNoAgentVoiceFieldMutation(req, "tone", hireInput.tone);
+    assertNoAgentVoiceFieldMutation(req, "personality", hireInput.personality);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2404,17 +2644,17 @@ export function agentRoutes(
     // company has configured requireBoardApprovalForNewAgents (DUR-81).
     const requiresApproval = req.actor.type === "agent" || company.requireBoardApprovalForNewAgents;
     const status = requiresApproval ? "pending_approval" : "idle";
+    const actor = getActorInfo(req);
     const createdAgent = await svc.create(companyId, {
       id: hiredAgentId,
       ...normalizedHireInput,
       status,
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
-    });
+    }, { actor: { actorType: actor.actorType, agentId: actor.agentId } });
     const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
 
     let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
-    const actor = getActorInfo(req);
 
     if (requiresApproval) {
       const requestedAdapterType = normalizedHireInput.adapterType ?? agent.adapterType;
@@ -2440,6 +2680,8 @@ export function agentRoutes(
           role: normalizedHireInput.role,
           title: normalizedHireInput.title ?? null,
           icon: normalizedHireInput.icon ?? null,
+          tone: normalizedHireInput.tone ?? null,
+          personality: normalizedHireInput.personality ?? null,
           reportsTo: normalizedHireInput.reportsTo ?? null,
           capabilities: normalizedHireInput.capabilities ?? null,
           adapterType: requestedAdapterType,
@@ -2533,7 +2775,11 @@ export function agentRoutes(
       });
     }
 
-    res.status(201).json({ agent, approval });
+    // DUR-132 item 6: advisory-only, see the matching comment on PATCH /agents/:id.
+    const mcpCredentialAdvisories = buildMcpCredentialAdvisories(agent.adapterConfig);
+    res.status(201).json(
+      mcpCredentialAdvisories.length > 0 ? { agent, approval, mcpCredentialAdvisories } : { agent, approval },
+    );
   });
 
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
@@ -2572,6 +2818,8 @@ export function agentRoutes(
     );
     assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig);
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, createInput.runtimeConfig);
+    assertNoAgentVoiceFieldMutation(req, "tone", createInput.tone);
+    assertNoAgentVoiceFieldMutation(req, "personality", createInput.personality);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2605,6 +2853,7 @@ export function agentRoutes(
       allowedSandboxProviders: allowedSandboxProvidersForAgent(createInput.adapterType),
     });
 
+    const actor = getActorInfo(req);
     const createdAgent = await svc.create(companyId, {
       id: agentId,
       ...createInput,
@@ -2613,10 +2862,8 @@ export function agentRoutes(
       status: "idle",
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
-    });
+    }, { actor: { actorType: actor.actorType, agentId: actor.agentId } });
     const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
-
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -2656,7 +2903,9 @@ export function agentRoutes(
       );
     }
 
-    res.status(201).json(agent);
+    // DUR-132 item 6: advisory-only, see the matching comment on PATCH /agents/:id.
+    const mcpCredentialAdvisories = buildMcpCredentialAdvisories(agent.adapterConfig);
+    res.status(201).json(mcpCredentialAdvisories.length > 0 ? { ...agent, mcpCredentialAdvisories } : agent);
   });
 
   router.patch("/agents/:id/permissions", validate(updateAgentPermissionsSchema), async (req, res) => {
@@ -2739,7 +2988,13 @@ export function agentRoutes(
       },
     });
 
-    res.json(await buildAgentDetail(agent));
+    // DUR-132 item 7: this route is reachable by a peer agent holding
+    // canManageOtherAgentsPermissions, not just board/self -- mask the
+    // returned config the same way GET /agents/:id does.
+    const isSelf = req.actor.type === "agent" && req.actor.agentId === agent.id;
+    res.json(
+      await buildAgentDetail(agent, req.actor.type === "agent" && !isSelf ? { maskSecrets: true } : undefined),
+    );
   });
 
   router.patch("/agents/:id/instructions-path", validate(updateAgentInstructionsPathSchema), async (req, res) => {
@@ -2922,7 +3177,12 @@ export function agentRoutes(
     );
     await svc.update(
       id,
-      { adapterConfig: normalizedAdapterConfig },
+      // Only a board-authenticated caller can ever reach this route
+      // (assertCanManageInstructionsPath above throws for any other actor),
+      // so a direct content write here is exactly as much "someone reviewed
+      // this agent's instructions" as an approved boss proposal -- reset the
+      // staleness clock (DUR-69/DUR-109) the same way approving one does.
+      { adapterConfig: normalizedAdapterConfig, instructionsReviewedAt: new Date() },
       {
         recordRevision: {
           createdByAgentId: actor.agentId,
@@ -2994,8 +3254,28 @@ export function agentRoutes(
     }
     await assertCanUpdateAgent(req, existing, access);
 
-    if (hasOwn(req.body as object, "permissions")) {
-      res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
+    // `permissions` is declared `z.never()` in updateAgentSchema, so validate()
+    // (which ran before this handler) already rejects any body containing it
+    // with a generic 400 — a route-level hasOwn("permissions") check here can
+    // never fire and was dead code (DUR-148). `roleId`/`roleAppliedMcpServerNames`/
+    // `roleAppliedPermissionKeys`/`role` below are different: they're declared
+    // permissively in updateAgentSchema specifically so they survive validate()
+    // and reach this hasOwn check, which returns the intended specific 422.
+    //
+    // DUR-114/DUR-148: role assignment fields are role-endpoint-only. Rejecting
+    // them here ensures no path (including company import) can bypass the
+    // board-only guard. `role` (the legacy organizational-role enum) gets the
+    // same treatment: a caller holding `agent_config:update` on a peer agent
+    // could otherwise PATCH { role: "ceo" } directly, which silently grants
+    // canCreateAgents via the "ceo" default-permissions branch (see
+    // canCreateAgents above) with no board-only/self-assignment check at all.
+    if (
+      hasOwn(req.body as object, "role") ||
+      hasOwn(req.body as object, "roleId") ||
+      hasOwn(req.body as object, "roleAppliedMcpServerNames") ||
+      hasOwn(req.body as object, "roleAppliedPermissionKeys")
+    ) {
+      res.status(422).json({ error: "Use /api/agents/:id/role for role assignment" });
       return;
     }
 
@@ -3114,6 +3394,7 @@ export function agentRoutes(
         createdByUserId: actor.actorType === "user" ? actor.actorId : null,
         source: "patch",
       },
+      actor: { actorType: actor.actorType, agentId: actor.agentId },
     });
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
@@ -3132,7 +3413,21 @@ export function agentRoutes(
       details: appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
     });
 
-    res.json(agent);
+    // DUR-132 item 6: advisory-only -- the save already succeeded above. There
+    // are no persona rows yet (persona work lands in Ticket B/C), so a literal
+    // credential-shaped mcpServers value is never hard-rejected here.
+    const mcpCredentialAdvisories = touchesAdapterConfiguration
+      ? buildMcpCredentialAdvisories(agent.adapterConfig)
+      : [];
+    // DUR-132 item 7: assertCanUpdateAgent allows a peer agent holding
+    // agents:create to reach this route for a non-self target (that grant is
+    // exactly the threat model item 7 masks on GET /agents/:id) -- mask the
+    // same way here so the PATCH response can't be used to read another
+    // agent's live credentials back out.
+    const isSelfUpdate = actor.actorType === "agent" && actor.agentId === agent.id;
+    const responseAgent =
+      actor.actorType === "agent" && !isSelfUpdate ? redactForSecretMaskedAgentView(agent) : agent;
+    res.json(mcpCredentialAdvisories.length > 0 ? { ...responseAgent, mcpCredentialAdvisories } : responseAgent);
   });
 
   router.post("/agents/:id/pause", async (req, res) => {
@@ -3162,7 +3457,7 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/resume", async (req, res) => {
-    assertBoard(req);
+    assertBoardOrDelegate(req, "agent.resume");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
     if (!existing) {
@@ -3187,13 +3482,14 @@ export function agentRoutes(
       action: "agent.resumed",
       entityType: "agent",
       entityId: agent.id,
+      details: delegateActivityDetails(req),
     });
 
     res.json(agent);
   });
 
   router.post("/agents/:id/clear-error", async (req, res) => {
-    assertBoard(req);
+    assertBoardOrDelegate(req, "agent.clear_error");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
     if (!existing) {
@@ -3219,6 +3515,7 @@ export function agentRoutes(
       action: "agent.error_cleared",
       entityType: "agent",
       entityId: agent.id,
+      details: delegateActivityDetails(req),
     });
 
     res.json(agent);

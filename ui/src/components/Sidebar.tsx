@@ -8,7 +8,9 @@ import {
   Search,
   SquarePen,
   Network,
+  Briefcase,
   Boxes,
+  Plug,
   Repeat,
   GitBranch,
   Package,
@@ -19,6 +21,7 @@ import {
   Pin,
   MessagesSquare,
   RadioTower,
+  UserRound,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -182,8 +185,10 @@ export function Sidebar() {
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
           ) : null}
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />
-          <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
+          <SidebarNavItem to="/files" label="Files" icon={Package} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
+          <SidebarNavItem to="/tools" label="Tools" icon={Plug} />
+          <SidebarNavItem to="/personas" label="Personas" icon={UserRound} />
           {showWorkspacesLink ? (
             <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
           ) : null}
@@ -212,6 +217,7 @@ export function Sidebar() {
 
         <SidebarSection label="Company">
           <SidebarNavItem to="/org" label="Org" icon={Network} />
+          <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />

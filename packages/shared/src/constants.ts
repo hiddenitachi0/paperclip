@@ -27,6 +27,13 @@ export const AGENT_STATUSES = [
 ] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+// DUR-133: a persona's own lifecycle, separate from the underlying agent's
+// runtime status (AGENT_STATUSES above). "draft" = being set up, not yet
+// posting-ready. "active" = live. "paused" = disconnected/deleted/paused
+// from the Personas page (item 14) — her routine stops and her queue blocks.
+export const PERSONA_STATUSES = ["draft", "active", "paused"] as const;
+export type PersonaStatus = (typeof PERSONA_STATUSES)[number];
+
 export const AGENT_ADAPTER_TYPES = [
   "process",
   "http",
@@ -878,6 +885,13 @@ export const PERMISSION_KEYS = [
   "tasks:manage_active_checkouts",
   "pipelines:write",
   "joins:approve",
+  // DUR-146 Stage 1: the "ask" half of deploy/merge authority. Neither key
+  // ever approves anything — approving still requires a board actor
+  // (assertBoard) regardless of any grant. A role may carry these; nothing
+  // may ever carry "deploys:approve" or "merges:approve" (see
+  // DEPLOY_APPROVAL_KEYS in server/src/services/agent-roles.ts).
+  "deploys:request",
+  "merges:request",
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 
@@ -1301,6 +1315,7 @@ export const PLUGIN_EVENT_TYPES = [
   "agent.updated",
   "agent.status_changed",
   "agent.error_cleared",
+  "agent.error_stalled",
   "agent.run.started",
   "agent.run.finished",
   "agent.run.failed",

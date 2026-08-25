@@ -132,6 +132,21 @@ describe("prepareCodexRuntimeConfig", () => {
     await expect(fs.access(path.join(home, "config.toml"))).rejects.toThrow();
   });
 
+  // DUR-132 item 8: config.toml can carry per-agent MCP server credentials --
+  // lock it to the owning process user, not the default umask-derived mode.
+  it("writes config.toml with mode 0600", async () => {
+    const home = await makeCodexHome();
+    const prepared = await prepareCodexRuntimeConfig({
+      env: { PAPERCLIP_CODEX_PROVIDERS: JSON.stringify(BIFROST_PROVIDERS) },
+      codexHome: home,
+    });
+
+    const mode = (await fs.stat(path.join(home, "config.toml"))).mode & 0o777;
+    expect(mode).toBe(0o600);
+
+    await prepared.cleanup();
+  });
+
   it("preserves existing config.toml content, keeps model_provider in the root region, and restores on cleanup", async () => {
     const original = [
       'model = "gpt-5.1-codex"',

@@ -36,7 +36,7 @@ import { budgetService } from "../budgets.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
-import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
+import { TERMINAL_HEARTBEAT_RUN_STATUSES, isHeartbeatRunLockStale, issueService } from "../issues.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeIdempotencyKey,
@@ -156,6 +156,12 @@ function readWorkspaceValidationFingerprint(latestRun: LatestIssueRun): string |
 type WatchdogDecisionActor =
   | { type: "board"; userId?: string | null; runId?: string | null }
   | { type: "agent"; agentId?: string | null; runId?: string | null }
+  // recordWatchdogDecision only grants boardActor for type === "board" and
+  // assignedRecoveryOwner for type === "agent" -- board_delegate matches
+  // neither, so it hits the existing "Only the board or the assigned
+  // recovery owner" forbidden the same way "none" already does. Widened here
+  // for type soundness only, not to grant delegates this action.
+  | { type: "board_delegate"; userId?: string | null; runId?: string | null }
   | { type: "none" };
 
 export type RunOutputSilenceSummary = {
@@ -250,6 +256,20 @@ const CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE = "issue_continuation_waiting_on
 const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
+
+// After this many *consecutive* recovery actions with the same cause on the same
+// source issue -- counted across active/resolved/cancelled rows, so a well-meaning
+// agent clearing the lock and reassigning the issue does not quietly reset the
+// counter -- the recovery action is marked "escalated" instead of "active" and its
+// next-action text warns explicitly against just flipping status back to
+// todo/in_progress, which would re-trigger the identical failure. Scoped to the
+// causes that fail before any real work can start (workspace/config), where a bare
+// retry can never succeed without repair.
+const CONSECUTIVE_FAILURE_ESCALATION_THRESHOLD = 3;
+const ESCALATABLE_STRANDED_RECOVERY_CAUSES = new Set<StrandedRecoveryCause>([
+  "workspace_validation_failed",
+  "configuration_incomplete",
+]);
 
 type ContinuationRetryClassification = {
   kind: "transient_infra" | "non_retryable" | "default";
@@ -2402,6 +2422,23 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     };
   }
 
+  // Counts recovery actions immediately preceding a fresh one, most recent first,
+  // that share `cause`. Stops at the first row with a different cause -- this is a
+  // "consecutive" count, not a lifetime total, so an issue that once had an
+  // unrelated recovery cause and has since been failing on this one doesn't take
+  // forever to escalate, but a single unrelated blip in between resets it.
+  function countConsecutiveSameCauseFailures(
+    history: Awaited<ReturnType<typeof recoveryActionsSvc.listRecentForIssue>>,
+    cause: StrandedRecoveryCause,
+  ) {
+    let count = 0;
+    for (const action of history) {
+      if (action.cause !== cause) break;
+      count += 1;
+    }
+    return count;
+  }
+
   async function ensureSourceScopedStrandedRecoveryAction(input: {
     issue: typeof issues.$inferSelect;
     latestRun: LatestIssueRun;
@@ -2416,10 +2453,41 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       input.recoveryOwnerAgentId,
     );
     const now = new Date();
+
+    let consecutiveFailureCount = 1;
+    let escalate = false;
+    if (ESCALATABLE_STRANDED_RECOVERY_CAUSES.has(recoveryCause)) {
+      const history = await recoveryActionsSvc.listRecentForIssue(
+        input.issue.companyId,
+        input.issue.id,
+        CONSECUTIVE_FAILURE_ESCALATION_THRESHOLD + 1,
+      );
+      consecutiveFailureCount = countConsecutiveSameCauseFailures(history, recoveryCause) + 1;
+      escalate = consecutiveFailureCount >= CONSECUTIVE_FAILURE_ESCALATION_THRESHOLD;
+    }
+
+    const baseNextAction = recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
+      ? "Choose and record a valid issue disposition without copying transcript content."
+      : recoveryCause === "workspace_validation_failed"
+        ? readWorkspaceValidationPayload(input.latestRun)?.reason === "git_worktree_branch_incoherence"
+          ? "Repair the source issue git worktree branch incoherence, or choose a new execution workspace, before resuming adapter execution."
+          : "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
+      : recoveryCause === "configuration_incomplete"
+        ? "Bind the missing secret(s) named in the run failure to the agent/project/routine env before resuming adapter execution."
+      : recoveryCause === "execution_review_participant_recovery"
+        ? "Repair the failed review participant path, restore the source issue to in_review with a live reviewer, or record an intentional manual resolution."
+      : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.";
+    const nextAction = escalate
+      ? `ESCALATED: this has now failed the same way ${consecutiveFailureCount} times in a row. ` +
+        "Resetting the issue back to todo/in_progress without fixing the underlying problem will immediately " +
+        `re-trigger the identical failure. ${baseNextAction}`
+      : baseNextAction;
+
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
       sourceIssueId: input.issue.id,
       kind: strandedRecoveryActionKind(recoveryCause),
+      status: escalate ? "escalated" : "active",
       ownerType: ownerAgentId ? "agent" : "board",
       ownerAgentId,
       previousOwnerAgentId: input.issue.assigneeAgentId,
@@ -2430,24 +2498,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         recoveryCause,
         latestRun: input.latestRun,
       }),
-      evidence: buildStrandedRecoveryActionEvidence({
-        issue: input.issue,
-        latestRun: input.latestRun,
-        previousStatus: input.previousStatus,
-        recoveryCause,
-        successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
-      }),
-      nextAction: recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
-        ? "Choose and record a valid issue disposition without copying transcript content."
-        : recoveryCause === "workspace_validation_failed"
-          ? readWorkspaceValidationPayload(input.latestRun)?.reason === "git_worktree_branch_incoherence"
-            ? "Repair the source issue git worktree branch incoherence, or choose a new execution workspace, before resuming adapter execution."
-            : "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
-        : recoveryCause === "configuration_incomplete"
-          ? "Bind the missing secret(s) named in the run failure to the agent/project/routine env before resuming adapter execution."
-        : recoveryCause === "execution_review_participant_recovery"
-          ? "Repair the failed review participant path, restore the source issue to in_review with a live reviewer, or record an intentional manual resolution."
-        : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.",
+      evidence: {
+        ...buildStrandedRecoveryActionEvidence({
+          issue: input.issue,
+          latestRun: input.latestRun,
+          previousStatus: input.previousStatus,
+          recoveryCause,
+          successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+        }),
+        ...(ESCALATABLE_STRANDED_RECOVERY_CAUSES.has(recoveryCause) ? { consecutiveFailureCount } : {}),
+      },
+      nextAction,
       wakePolicy: recoveryCause === "workspace_validation_failed" || recoveryCause === "configuration_incomplete"
         ? {
           type: "manual_repair_required",
@@ -2723,18 +2784,25 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         missingDisposition: input.successfulRunHandoffEvidence.missingDisposition,
       });
     }
+    const escalationWarningLine = recoveryAction.status === "escalated"
+      ? [`- **Escalated:** this exact failure has now recurred consecutively. Do not just reset status back to ` +
+        "todo/in_progress or reassign without fixing the underlying problem first -- that will immediately " +
+        "re-trigger the same failure. See the recovery action's `nextAction` for the specific repair needed."]
+      : [];
     const recoveryLine = recoveryAction.ownerAgentId
       ? [
         "",
         `- Recovery action: \`${recoveryAction.id}\``,
         `- Recovery owner: ${agentUiLink(recoveryOwner, prefix)}`,
         "- Next action: the recovery owner should either restore a live execution path or record the manual resolution on the source issue.",
+        ...escalationWarningLine,
       ].join("\n")
       : [
         "",
         `- Recovery action: \`${recoveryAction.id}\``,
         "- Recovery owner: board escalation, because Paperclip could not find an invokable manager, creator, or executive owner with budget available.",
         "- Next action: a board operator should assign an invokable recovery owner, fix the agent/runtime state, or record an intentional manual resolution.",
+        ...escalationWarningLine,
       ].join("\n");
 
     const shouldPostEscalationComment =
@@ -2743,6 +2811,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       input.recoveryCause === "configuration_incomplete";
     if (shouldPostEscalationComment) {
       const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
+      // A recovery action that just crossed the escalation threshold gets its own
+      // comment even if the same action id already has an earlier (pre-escalation)
+      // comment on the thread -- otherwise the marker-based dedup below would
+      // silently swallow the one comment meant to stop an agent from blindly
+      // resetting status again.
+      const escalatedMarker = "**Escalated:**";
 
       const hasEscalationComment = await db
         .select({ id: issueComments.id, body: issueComments.body, metadata: issueComments.metadata })
@@ -2755,10 +2829,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         )
         .orderBy(desc(issueComments.createdAt))
         .limit(50)
-        .then((rows) => rows.some((row) =>
-          (row.body ?? "").includes(escalationCommentMarker) ||
-          noticeMetadataReferencesRecoveryAction(row.metadata, recoveryAction.id),
-        ));
+        .then((rows) => rows.some((row) => {
+          const body = row.body ?? "";
+          if (recoveryAction.status === "escalated") {
+            return body.includes(escalationCommentMarker) && body.includes(escalatedMarker);
+          }
+          return body.includes(escalationCommentMarker) ||
+            noticeMetadataReferencesRecoveryAction(row.metadata, recoveryAction.id);
+        }));
 
       if (!hasEscalationComment) {
         if (notice) {
@@ -4405,18 +4483,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const runRows =
       referencedRunIds.length > 0
         ? await db
-            .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+            .select({
+              id: heartbeatRuns.id,
+              status: heartbeatRuns.status,
+              scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+            })
             .from(heartbeatRuns)
             .where(inArray(heartbeatRuns.id, referencedRunIds))
         : [];
     const runStatusById = new Map<string, string>();
-    for (const row of runRows) runStatusById.set(row.id, row.status);
+    const runById = new Map<string, { status: string; scheduledRetryAt: Date | string | null }>();
+    for (const row of runRows) {
+      runStatusById.set(row.id, row.status);
+      runById.set(row.id, row);
+    }
 
     const isCleanable = (runId: string | null) => {
       if (!runId) return true;
-      const status = runStatusById.get(runId);
-      if (!status) return true; // missing run row → no real claim
-      return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status);
+      const run = runById.get(runId);
+      if (!run) return true; // missing run row → no real claim
+      return isHeartbeatRunLockStale(run);
     };
 
     for (const issue of candidates) {

@@ -1,9 +1,14 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals } from "@paperclipai/db";
-import { modelBoostRequestPayloadSchema, toolGrantRequestPayloadSchema } from "@paperclipai/shared";
+import { agentInstructionsRevisions, approvalComments, approvals } from "@paperclipai/db";
+import {
+  instructionsChangeRequestPayloadSchema,
+  modelBoostRequestPayloadSchema,
+  toolGrantRequestPayloadSchema,
+} from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
+import { agentInstructionsService } from "./agent-instructions.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { escalationGrantService } from "./escalation-grants.js";
@@ -19,6 +24,22 @@ function isToolGrantApproval(approval: Pick<typeof approvals.$inferSelect, "type
   return approval.type === "request_board_approval" && approval.payload?.kind === "tool_grant";
 }
 
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"instructions_change"`
+ * (DUR-69/DUR-109). Approving one is the ONLY place a boss-proposed instructions
+ * change is ever actually written to disk -- see the branch below in `approve`.
+ */
+function isInstructionsChangeApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "instructions_change";
+}
+
+export interface InstructionsChangeApplyResult {
+  agentId: string;
+  companyId: string;
+  relativePath: string;
+  proposedByAgentId: string | null;
+}
+
 export interface ToolGrantApplyResult {
   agentId: string;
   companyId: string;
@@ -28,6 +49,7 @@ export interface ToolGrantApplyResult {
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
+  const instructionsSvc = agentInstructionsService();
   const budgets = budgetService(db);
   const escalationGrants = escalationGrantService(db);
   const instanceSettings = instanceSettingsService(db);
@@ -157,6 +179,23 @@ export function approvalService(db: Db) {
             sql`${approvals.payload} ->> 'kind' = 'merge_pr'`,
             sql`${approvals.payload} ->> 'repo' = ${repo}`,
             sql`${approvals.payload} ->> 'prNumber' = ${prNumber}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
+    findOpenInstructionsChangeApproval: async (companyId: string, agentId: string, relativePath: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'kind' = 'instructions_change'`,
+            sql`${approvals.payload} ->> 'agentId' = ${agentId}`,
+            sql`${approvals.payload} ->> 'relativePath' = ${relativePath}`,
           ),
         );
       return rows[0] ?? null;
@@ -305,7 +344,49 @@ export function approvalService(db: Db) {
         }
       }
 
-      return { approval: updated, applied, toolGrant };
+      let instructionsChange: InstructionsChangeApplyResult | null = null;
+      if (applied && isInstructionsChangeApproval(updated)) {
+        // This is the ONLY place a boss-proposed instructions change is
+        // actually applied -- proposing never writes anything (OPERATOR
+        // RULING 2/3, DUR-69). Both the proposer and this approver are named
+        // on the agent_instructions_revisions row the operator ruling
+        // requires, distinct from agent_config_revisions which only ever
+        // names a single actor for a given write.
+        const payload = instructionsChangeRequestPayloadSchema.parse(updated.payload);
+        const targetAgent = await agentsSvc.getById(payload.agentId);
+        if (targetAgent) {
+          const written = await instructionsSvc.writeFile(targetAgent, payload.relativePath, payload.afterContent);
+          await agentsSvc.update(
+            targetAgent.id,
+            { adapterConfig: written.adapterConfig, instructionsReviewedAt: now },
+            {
+              recordRevision: {
+                createdByUserId: decidedByUserId,
+                source: "instructions_change_approval",
+              },
+            },
+          );
+          await db.insert(agentInstructionsRevisions).values({
+            companyId: updated.companyId,
+            agentId: targetAgent.id,
+            approvalId: updated.id,
+            proposedByAgentId: updated.requestedByAgentId,
+            approvedByUserId: decidedByUserId,
+            reason: payload.reason,
+            relativePath: payload.relativePath,
+            beforeContent: payload.beforeContent,
+            afterContent: payload.afterContent,
+          });
+          instructionsChange = {
+            agentId: targetAgent.id,
+            companyId: targetAgent.companyId,
+            relativePath: payload.relativePath,
+            proposedByAgentId: updated.requestedByAgentId,
+          };
+        }
+      }
+
+      return { approval: updated, applied, toolGrant, instructionsChange };
     },
 
     reject: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
@@ -368,6 +449,36 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .returning()
         .then((rows) => rows[0]);
+    },
+
+    // DUR-141: the requesting agent's own self-serve way to kill a
+    // not-yet-decided approval it filed (e.g. a duplicate merge_pr request
+    // whose PR was since closed) without needing a board actor to reject it.
+    // Reuses the "cancelled" terminal status, which existed in
+    // APPROVAL_STATUSES but was never actually set anywhere before this.
+    withdraw: async (id: string, decisionNote?: string | null) => {
+      const existing = await getExistingApproval(id);
+      if (!canResolveStatuses.has(existing.status)) {
+        throw unprocessable("Only pending or revision requested approvals can be withdrawn");
+      }
+
+      const now = new Date();
+      const updated = await db
+        .update(approvals)
+        .set({
+          status: "cancelled",
+          decisionNote: decisionNote ?? null,
+          decidedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+
+      if (!updated) {
+        throw unprocessable("Only pending or revision requested approvals can be withdrawn");
+      }
+      return updated;
     },
 
     listComments: async (approvalId: string) => {

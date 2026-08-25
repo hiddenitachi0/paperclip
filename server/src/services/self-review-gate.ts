@@ -284,6 +284,7 @@ export function buildSelfReviewPassInstruction(input: {
   issueIdentifier: string | null;
   alreadyHandedOff: boolean;
   riskySurfaceCategories?: readonly RiskySurfaceCategory[];
+  requestedStatus?: string | null;
 }) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   const lines = [
@@ -304,8 +305,21 @@ export function buildSelfReviewPassInstruction(input: {
       "This issue already shows as handed off. If your review finds nothing wrong, leave the status as-is — no further action is required. If you find a real problem, fix it and leave a short comment describing what you fixed.",
     );
   } else {
+    // DUR-125/DUR-167: this comment is posted immediately when a PATCH gets declined,
+    // attributed to (and visible in real time to) the SOURCE run that just got declined --
+    // not to the distinct future run this instruction is actually meant for, which doesn't
+    // exist yet. A same-run reader wording ("this run", "yourself, right now") reads as
+    // self-addressed and reliably caused the declined run to retry the same PATCH in-run
+    // (confirmed on DUR-132: two separate runs did exactly this, immediately after posting
+    // their own self-review comment, and both got declined again). Naming both possible
+    // audiences explicitly closes that gap instead of assuming the reader is the exempt one.
+    const statusLine = input.requestedStatus
+      ? ` That freshly-started run's own \`PATCH .../${input.requestedStatus}\` will not be gated again — it should call it itself, right away.`
+      : "";
     lines.push(
-      "Once you've done this check (and fixed anything real that came up), continue the normal handoff for this issue.",
+      "One of two things is true about whoever reads this:",
+      "- If you are the run whose PATCH was just declined: stop. Do not retry that PATCH in this run, even after doing the review above and even if you post a self-review comment first — only a separate, freshly-started run is exempt from this gate, and retrying here will be declined again no matter what you post.",
+      `- If you are that freshly-started run (you were woken up specifically for a self-review pass on ${issueLabel}): do the check above, fix anything real, then continue the normal handoff.${statusLine} Do not defer this to "the next self-review-pass run" — you already are that pass, and there is no other one coming.`,
     );
   }
   return lines.join("\n");
@@ -435,7 +449,7 @@ export async function evaluateSelfReviewDoneGate(input: {
   });
 
   const baseMessage =
-    "This task needs one more self-check before it can move to review or done. I've asked the assignee to double-check their own work first, then try again.";
+    "This task needs one more self-check before it can move to review or done. I've scheduled a separate follow-up run to do that check and complete the handoff — retrying this same PATCH again in this run will not succeed, even right after posting a self-review comment yourself. Don't retry here; wait for the follow-up run.";
 
   if (existingWake) return { message: baseMessage };
 
@@ -469,6 +483,7 @@ export async function evaluateSelfReviewDoneGate(input: {
     issueIdentifier: input.issue.identifier,
     alreadyHandedOff: false,
     riskySurfaceCategories,
+    requestedStatus: input.requestedStatus,
   });
 
   try {
@@ -489,6 +504,14 @@ export async function evaluateSelfReviewDoneGate(input: {
         wakeReason: SELF_REVIEW_PASS_REASON,
         [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
         resumeFromRunId: sourceRunId,
+        // DUR-125: the run this scheduling call spawns must be exempt from this same gate
+        // (see isSelfReviewPassRunId above). That only holds if it lands as a genuinely new
+        // heartbeat_runs row -- if the source run is still "running" when this fires, the
+        // generic same-agent/same-issue coalescing in heartbeat.ts's enqueueWakeup would
+        // otherwise merge this contextSnapshot onto the source run's own (already-gated) row
+        // instead of producing a new one. This flag routes it through the defer-and-promote
+        // path so the exemption always lands on a fresh run.
+        requiresDistinctRunBoundary: true,
       },
       idempotencyKey,
       requestedByActorType: "system",

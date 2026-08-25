@@ -983,6 +983,13 @@ export {
 } from "./document-anchors.js";
 
 export {
+  classifyFileKind,
+  DOCUMENT_MEDIA_CONTENT_TYPES,
+  OFFICE_DOCUMENT_CONTENT_TYPES,
+  type FileKindInfo,
+} from "./file-kind.js";
+
+export {
   formatExternalObjectMentionSourceLabel,
   type ExternalObjectCanonicalIdentity,
   type ExternalObjectCanonicalUrl,
@@ -1035,6 +1042,12 @@ export {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+  MIN_GLOBAL_MAX_CONCURRENT_RUNS,
+  MAX_GLOBAL_MAX_CONCURRENT_RUNS,
 } from "./types/instance.js";
 
 export type {
@@ -1156,6 +1169,12 @@ export {
   type ResetAgentSession,
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
+  DELEGATE_TOKEN_SCOPES,
+  isDelegateTokenScope,
+  normalizeDelegateTokenScopes,
+  createDelegateTokenSchema,
+  type DelegateTokenScope,
+  type CreateDelegateToken,
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
@@ -1247,6 +1266,8 @@ export {
   COMPANY_ARTIFACTS_DEFAULT_LIMIT,
   COMPANY_ARTIFACTS_MAX_LIMIT,
   COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
+  companyArtifactAgentSchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactGroupBySchema,
   companyArtifactGroupSchema,
   companyArtifactMediaKindSchema,
@@ -1321,20 +1342,24 @@ export {
   resolveApprovalSchema,
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
+  withdrawApprovalSchema,
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
+  instructionsChangeRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
   type ResolveApproval,
   type RequestApprovalRevision,
   type ResubmitApproval,
+  type WithdrawApproval,
   type AddApprovalComment,
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
+  type InstructionsChangeRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,

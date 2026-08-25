@@ -283,21 +283,21 @@ describe("Sidebar", () => {
     });
   });
 
-  it("shows Skills directly below Artifacts in Work", async () => {
+  it("shows Skills directly below Files in Work", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     const root = await renderSidebar();
 
-    const artifactsLink = [...container.querySelectorAll("a")].find(
-      (anchor) => anchor.textContent === "Artifacts",
+    const filesLink = [...container.querySelectorAll("a")].find(
+      (anchor) => anchor.textContent === "Files",
     );
-    expect(artifactsLink?.getAttribute("href")).toBe("/artifacts");
+    expect(filesLink?.getAttribute("href")).toBe("/files");
 
     const navText = container.querySelector("nav")?.textContent ?? "";
     expect(navText).toContain("Goals");
-    expect(navText).toContain("Artifacts");
+    expect(navText).toContain("Files");
     expect(navText).toContain("Skills");
-    expect(navText.indexOf("Goals")).toBeLessThan(navText.indexOf("Artifacts"));
-    expect(navText.indexOf("Artifacts")).toBeLessThan(navText.indexOf("Skills"));
+    expect(navText.indexOf("Goals")).toBeLessThan(navText.indexOf("Files"));
+    expect(navText.indexOf("Files")).toBeLessThan(navText.indexOf("Skills"));
 
     const sections = [...container.querySelectorAll("nav > div")];
     const workSection = sections.find((section) => section.textContent?.startsWith("Work"));

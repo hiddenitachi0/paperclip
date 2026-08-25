@@ -26,7 +26,8 @@ import {
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
+import { syncAgentAdapterEnvBindings, type AgentSecretBindingActor } from "./agent-secret-bindings.js";
+import { collectMcpToolLibrarySecretRefs } from "./mcp-tool-library.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
@@ -55,6 +56,10 @@ interface RevisionMetadata {
 
 interface UpdateAgentOptions {
   recordRevision?: RevisionMetadata;
+  // DUR-132: identity of the caller saving this agent, forwarded to the
+  // secret-binding sync gate so an agent actor can only ever bind a saved
+  // password (secret_ref) to its own agent record.
+  actor?: AgentSecretBindingActor;
 }
 
 interface AgentShortnameRow {
@@ -94,6 +99,9 @@ function buildConfigSnapshot(
     name: row.name,
     role: row.role,
     title: row.title,
+    icon: row.icon,
+    tone: row.tone,
+    personality: row.personality,
     reportsTo: row.reportsTo,
     capabilities: row.capabilities,
     adapterType: row.adapterType,
@@ -102,6 +110,8 @@ function buildConfigSnapshot(
     defaultEnvironmentId: row.defaultEnvironmentId,
     budgetMonthlyCents: row.budgetMonthlyCents,
     metadata,
+    permissions: row.permissions,
+    roleId: row.roleId,
   };
 }
 
@@ -171,6 +181,54 @@ export function deduplicateAgentName(
     }
   }
   return `${candidateName} ${Date.now()}`;
+}
+
+// DUR-114: role-assignment fields may only be written by assignRoleToAgent
+// (server/src/services/agent-roles.ts), which updates them directly via
+// db.update(agents) and never calls agentService.create/.update. Blocking
+// them here — not just at the PATCH /agents/:id route — closes every other
+// caller of these generic functions, including company import
+// (company-portability.ts), which writes straight through the service layer
+// and bypasses route-level guards (the DUR-56 bypass pattern).
+const ROLE_ASSIGNMENT_FIELDS = [
+  "roleId",
+  "roleAssignedAt",
+  "roleAppliedMcpServerNames",
+  "roleAppliedPermissionKeys",
+  // DUR-149: same reasoning — only assignRoleToAgent / updateAgentRoleOverrides
+  // / resolveAgentRoleProvisioning (services/agent-roles.ts) may write these.
+  "roleOverrides",
+  "roleProvisionedSkillKeys",
+  "roleProvisionedConnectorKeys",
+  "roleProvisionedPermissionKeys",
+  "roleResolvedAt",
+] as const;
+
+function assertNoRoleAssignmentFields(data: Record<string, unknown>) {
+  const present = ROLE_ASSIGNMENT_FIELDS.filter((field) => Object.prototype.hasOwnProperty.call(data, field));
+  if (present.length > 0) {
+    throw unprocessable(
+      `Role-assignment fields (${present.join(", ")}) cannot be set through agentService.create/update. Use the dedicated role-assignment endpoint.`,
+    );
+  }
+}
+
+// DUR-143: mcpToolIds (which tool-library entries this agent is granted) may
+// only be written by syncMcpToolSelection below, which updates it directly
+// via db.update(agents) and always resyncs the matching secret bindings in
+// the same call. Blocking it here closes every other writer of the generic
+// create/update functions, exactly like ROLE_ASSIGNMENT_FIELDS above.
+const TOOL_LIBRARY_ASSIGNMENT_FIELDS = ["mcpToolIds"] as const;
+
+function assertNoToolLibraryAssignmentFields(data: Record<string, unknown>) {
+  const present = TOOL_LIBRARY_ASSIGNMENT_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(data, field),
+  );
+  if (present.length > 0) {
+    throw unprocessable(
+      `Tool-library assignment fields (${present.join(", ")}) cannot be set through agentService.create/update. Use the dedicated tool-assignment endpoint.`,
+    );
+  }
 }
 
 export function agentService(db: Db) {
@@ -330,15 +388,28 @@ export function agentService(db: Db) {
   }
 
   async function syncAgentSecretBindings(
-    agent: { id: string; companyId: string; adapterConfig: unknown },
+    agent: { id: string; companyId: string; adapterConfig: unknown; mcpToolIds?: string[] | null },
     dbClient: Db = db,
+    actor?: AgentSecretBindingActor,
   ) {
     const scopedSecretsSvc = dbClient === db ? secretsSvc : secretService(dbClient);
+    // DUR-143: always resync tool-library-derived refs alongside
+    // adapterConfig-derived ones, on every call site (adapterConfig save,
+    // agent creation, activation, and tool-selection changes) — this is a
+    // full replaceAll sync, so any call that omitted them would silently
+    // wipe out bindings for this agent's granted tools.
+    const toolLibraryRefs = await collectMcpToolLibrarySecretRefs(
+      dbClient,
+      agent.companyId,
+      agent.mcpToolIds ?? [],
+    );
     await syncAgentAdapterEnvBindings({
       secretsSvc: scopedSecretsSvc,
       companyId: agent.companyId,
       agentId: agent.id,
       adapterConfig: agent.adapterConfig,
+      actor,
+      extraRefs: toolLibraryRefs,
     });
   }
 
@@ -347,6 +418,8 @@ export function agentService(db: Db) {
     data: Partial<typeof agents.$inferInsert>,
     options?: UpdateAgentOptions,
   ) {
+    assertNoRoleAssignmentFields(data as Record<string, unknown>);
+    assertNoToolLibraryAssignmentFields(data as Record<string, unknown>);
     const existing = await getById(id);
     if (!existing) return null;
 
@@ -386,9 +459,15 @@ export function agentService(db: Db) {
       Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig") &&
       isPlainRecord(normalizedPatch.adapterConfig)
     ) {
+      // DUR-61: paperclipPersona is resolved server-side from the agent row's
+      // personality column on every run (see heartbeat.ts), never read from a
+      // caller-supplied adapterConfig — strip any smuggled value here so it
+      // can never be persisted, regardless of actor type.
+      const { paperclipPersona: _paperclipPersona, ...adapterConfigWithoutPersona } =
+        normalizedPatch.adapterConfig as Record<string, unknown>;
       normalizedPatch.adapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
         existing.companyId,
-        normalizedPatch.adapterConfig,
+        adapterConfigWithoutPersona,
         { adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string },
       );
     }
@@ -407,7 +486,7 @@ export function agentService(db: Db) {
       if (!updated) return null;
 
       if (Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig")) {
-        await syncAgentSecretBindings(updated, txDb);
+        await syncAgentSecretBindings(updated, txDb, options?.actor);
       }
 
       const normalizedUpdated = await agentService(txDb).getById(updated.id);
@@ -453,7 +532,13 @@ export function agentService(db: Db) {
 
     getById,
 
-    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+    create: async (
+      companyId: string,
+      data: Omit<typeof agents.$inferInsert, "companyId">,
+      options?: { actor?: AgentSecretBindingActor },
+    ) => {
+      assertNoRoleAssignmentFields(data as Record<string, unknown>);
+      assertNoToolLibraryAssignmentFields(data as Record<string, unknown>);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
@@ -469,7 +554,14 @@ export function agentService(db: Db) {
       const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig);
       const adapterType = data.adapterType ?? "process";
       const adapterConfig = isPlainRecord(data.adapterConfig)
-        ? await secretsSvc.normalizeAdapterConfigForPersistence(companyId, data.adapterConfig, { adapterType })
+        ? await secretsSvc.normalizeAdapterConfigForPersistence(
+            companyId,
+            // DUR-61: same paperclipPersona-smuggling guard as updateAgent above.
+            (({ paperclipPersona: _paperclipPersona, ...rest }) => rest)(
+              data.adapterConfig as Record<string, unknown>,
+            ),
+            { adapterType },
+          )
         : {};
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -487,7 +579,7 @@ export function agentService(db: Db) {
           })
           .returning()
           .then((rows) => rows[0]);
-        await syncAgentSecretBindings(created, txDb);
+        await syncAgentSecretBindings(created, txDb, options?.actor);
         const normalizedCreated = await agentService(txDb).getById(created.id);
         if (!normalizedCreated) {
           throw notFound("Agent not found");
@@ -497,6 +589,27 @@ export function agentService(db: Db) {
     },
 
     update: updateAgent,
+
+    // DUR-143: the only writer of agents.mcpToolIds — board-only at the
+    // route layer (see routes/mcp-tool-library.ts), and the only path that
+    // ever changes this column, so it always stays paired with a fresh
+    // secret-binding resync via syncAgentSecretBindings.
+    syncMcpToolSelection: async (agentId: string, desiredToolIds: string[]) => {
+      return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        const updated = await tx
+          .update(agents)
+          .set({ mcpToolIds: desiredToolIds, updatedAt: new Date() })
+          .where(eq(agents.id, agentId))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updated) throw notFound("Agent not found");
+        await syncAgentSecretBindings(updated, txDb);
+        const normalized = await agentService(txDb).getById(updated.id);
+        if (!normalized) throw notFound("Agent not found");
+        return normalized;
+      });
+    },
 
     pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
       const existing = await getById(id);
@@ -510,6 +623,8 @@ export function agentService(db: Db) {
           pauseReason: reason,
           pausedAt: new Date(),
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id))
@@ -533,6 +648,8 @@ export function agentService(db: Db) {
           pauseReason: null,
           pausedAt: null,
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id))
@@ -559,6 +676,8 @@ export function agentService(db: Db) {
           pauseReason: null,
           pausedAt: null,
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(and(eq(agents.id, id), eq(agents.status, "error")))
@@ -582,6 +701,8 @@ export function agentService(db: Db) {
           pauseReason: null,
           pausedAt: null,
           errorReason: null,
+          errorAt: null,
+          errorAlertedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(agents.id, id));

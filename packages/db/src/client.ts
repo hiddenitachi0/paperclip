@@ -10,8 +10,19 @@ const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url)
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
 const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
 
+// DUR-130: every connection the app opens is tagged with an
+// `application_name` naming the code path that opened it, so the
+// `fn_flag_untracked_write` trigger (see migration 0139) can tell a
+// service-layer/migration write apart from a direct out-of-band one (the
+// failure mode behind NOR-180/NOR-181 -- see DUR-128).
+export const UNTRACKED_WRITE_MIGRATION_APPLICATION_NAME = "paperclip-migrate";
+
 function createUtilitySql(url: string) {
-  return postgres(url, { max: 1, onnotice: () => {} });
+  return postgres(url, {
+    max: 1,
+    onnotice: () => {},
+    connection: { application_name: UNTRACKED_WRITE_MIGRATION_APPLICATION_NAME },
+  });
 }
 
 function isSafeIdentifier(value: string): boolean {
@@ -45,8 +56,13 @@ export type MigrationState =
       reason: "no-migration-journal-empty-db" | "no-migration-journal-non-empty-db" | "pending-migrations";
     };
 
+// DUR-130: tags the app's own pool so untracked-write detection (see above)
+// treats every write made through this pool -- i.e. every write made
+// through the service layer -- as legitimate.
+export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
+
 export function createDb(url: string) {
-  const sql = postgres(url);
+  const sql = postgres(url, { connection: { application_name: UNTRACKED_WRITE_APP_APPLICATION_NAME } });
   return drizzlePg(sql, { schema });
 }
 

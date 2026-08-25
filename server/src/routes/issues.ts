@@ -107,7 +107,32 @@ import {
 import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/task-watchdogs.js";
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
+
+async function alertOwningCompanyOfCrossCompanyWriteAttempt(
+  db: Db,
+  req: Request,
+  issue: { id: string; identifier: string | null; title: string; companyId: string },
+  action: string,
+) {
+  if (req.actor.type !== "agent" || req.actor.companyId === issue.companyId) return;
+  await logActivity(db, {
+    companyId: issue.companyId,
+    actorType: "agent",
+    actorId: req.actor.agentId ?? "unknown",
+    agentId: req.actor.agentId ?? null,
+    runId: null,
+    action: "security.cross_company_write_blocked",
+    entityType: "issue",
+    entityId: issue.id,
+    details: {
+      identifier: issue.identifier,
+      issueTitle: issue.title,
+      attemptedAction: action,
+      actorCompanyId: req.actor.companyId,
+    },
+  });
+}
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectIssueWorkspaceCommandPaths,
@@ -117,7 +142,6 @@ import {
   isInlineAttachmentContentType,
   normalizeIssueAttachmentMaxBytes,
   normalizeContentType,
-  SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import {
@@ -128,6 +152,7 @@ import {
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
+import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -5844,7 +5869,7 @@ export function issueRoutes(
   });
 
   router.post("/issues/:id/scheduled-retry/retry-now", async (req, res) => {
-    assertBoard(req);
+    assertBoardOrDelegate(req, "issue.scheduled_retry_retry_now");
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5875,6 +5900,18 @@ export function issueRoutes(
         outcome: result.outcome,
         message: result.message,
         scheduledRetry: result.scheduledRetry,
+        // DUR-128: performed by a delegate token, under the operator
+        // authority named by actorId above -- not the operator's own session.
+        // delegateId (not delegateTokenId): logActivity's sanitizeRecord
+        // redacts any details key containing "token" as secret-shaped.
+        ...(req.actor.type === "board_delegate"
+          ? {
+              performedBy: "delegate",
+              delegateId: req.actor.delegateTokenId,
+              delegateName: req.actor.delegateName,
+              actingUnderUserId: req.actor.userId,
+            }
+          : {}),
       },
     });
 
@@ -5954,6 +5991,21 @@ export function issueRoutes(
     });
     if (goalConditionGateResult) {
       res.status(409).json({ error: goalConditionGateResult.message });
+      return;
+    }
+    // DUR-99: composes with the two gates above -- self-review and the goal-condition judge
+    // both ask "is the WORK actually finished"; this asks a narrower, purely mechanical
+    // question -- "if the only completing action was a merge into the deploy branch, did that
+    // change actually go live" -- so it belongs last, right before the disposition check.
+    const deployCompletionGateResult = await evaluateDeployCompletionDoneGate({
+      db,
+      issue: { id: existing.id, identifier: existing.identifier, companyId: existing.companyId },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+    });
+    if (deployCompletionGateResult) {
+      res.status(409).json({ error: deployCompletionGateResult.message });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =
@@ -7379,6 +7431,7 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    await alertOwningCompanyOfCrossCompanyWriteAttempt(db, req, issue, "create_interaction");
     assertCompanyAccess(req, issue.companyId);
     if (req.actor.type === "agent") {
       if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
@@ -7939,6 +7992,7 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    await alertOwningCompanyOfCrossCompanyWriteAttempt(db, req, issue, "create_comment");
     assertCompanyAccess(req, issue.companyId);
     const commentAccessDecision = await assertAgentIssueCommentAllowed(req, res, issue);
     if (!commentAccessDecision) return;
@@ -8797,13 +8851,18 @@ export function issueRoutes(
     res.setHeader("Content-Type", responseContentType);
     res.setHeader("Cache-Control", "private, max-age=60");
     res.setHeader("X-Content-Type-Options", "nosniff");
-    if (responseContentType === SVG_CONTENT_TYPE) {
+    // Was scoped to SVG only; broadened to every inline content type (PDF,
+    // images, text, video — see isInlineAttachmentContentType) so anything
+    // rendered inline in the browser (not just SVG) gets sandboxed instead
+    // of just the types disposition already treats as "inline" below.
+    const isInlineContent = isInlineAttachmentContentType(responseContentType);
+    if (isInlineContent) {
       res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
     }
     const filename = attachment.originalFilename ?? "attachment";
     const disposition = parseBooleanQuery(req.query.download)
       ? "attachment"
-      : isInlineAttachmentContentType(responseContentType) ? "inline" : "attachment";
+      : isInlineContent ? "inline" : "attachment";
     res.setHeader("Content-Disposition", `${disposition}; filename=\"${filename.replaceAll("\"", "")}\"`);
 
     object.stream.on("error", (err) => {

@@ -35,7 +35,7 @@ export const CUSTOMER_INBOX_HANDOFF_REASON = "customer_inbox.handoff";
 
 const CANDIDATE_LIMIT = 50;
 
-async function touchIssueForCompanyInboxes(
+export async function touchIssueForCompanyInboxes(
   db: Db,
   input: { companyId: string; issueId: string; touchedAt: Date },
 ) {

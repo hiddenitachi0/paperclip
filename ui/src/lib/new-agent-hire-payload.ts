@@ -6,6 +6,8 @@ export function buildNewAgentHirePayload(input: {
   name: string;
   effectiveRole: string;
   title?: string;
+  tone?: string;
+  personality?: string;
   reportsTo?: string | null;
   selectedSkillKeys?: string[];
   configValues: CreateConfigValues;
@@ -16,6 +18,8 @@ export function buildNewAgentHirePayload(input: {
     name,
     effectiveRole,
     title,
+    tone,
+    personality,
     reportsTo,
     selectedSkillKeys = [],
     configValues,
@@ -27,6 +31,8 @@ export function buildNewAgentHirePayload(input: {
     name: name.trim(),
     role: effectiveRole,
     ...(title?.trim() ? { title: title.trim() } : {}),
+    ...(tone?.trim() ? { tone: tone.trim() } : {}),
+    ...(personality?.trim() ? { personality: personality.trim() } : {}),
     ...(reportsTo ? { reportsTo } : {}),
     ...(selectedSkillKeys.length > 0 ? { desiredSkills: selectedSkillKeys } : {}),
     adapterType: configValues.adapterType,

@@ -3,23 +3,21 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useToastActions } from "../context/ToastContext";
 import { agentsApi } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
+import { jobsApi } from "../api/jobs";
 import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
-import { AGENT_ROLES, type AdapterEnvironmentTestResult, type AgentPermissions } from "@paperclipai/shared";
+import {
+  type AdapterEnvironmentTestResult,
+  type AgentPermissions,
+} from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { Shield } from "lucide-react";
 import { cn, agentUrl } from "../lib/utils";
-import { roleLabels } from "../components/agent-config-primitives";
 import {
   AgentConfigForm,
   AdapterEnvironmentResult,
@@ -30,6 +28,7 @@ import { getUIAdapter, listUIAdapters } from "../adapters";
 import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
 import { isValidAdapterType } from "../adapters/metadata";
 import { ReportsToPicker } from "../components/ReportsToPicker";
+import { JobPicker } from "../components/jobs/JobPicker";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
@@ -59,6 +58,7 @@ function createValuesForAdapterType(
 export function NewAgent() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -66,14 +66,15 @@ export function NewAgent() {
 
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
-  const [role, setRole] = useState("general");
+  const [tone, setTone] = useState("");
+  const [personality, setPersonality] = useState("");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
     buildPermissionsForTrustPreset(null, "standard"),
   );
   const [selectedSkillKeys, setSelectedSkillKeys] = useState<string[]>([]);
-  const [roleOpen, setRoleOpen] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [testAgentAction, setTestAgentAction] = useState<(() => void) | null>(null);
   const [testAgentState, setTestAgentState] = useState({ disabled: true, pending: false });
@@ -97,6 +98,13 @@ export function NewAgent() {
     enabled: Boolean(selectedCompanyId),
   });
 
+  const { data: jobs } = useQuery({
+    queryKey: ["jobs", selectedCompanyId ?? "__none__"],
+    queryFn: () => jobsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const selectedJob = (jobs ?? []).find((job) => job.id === jobId) ?? null;
+
   const lowTrustSelected = getTrustPreset(permissions) === "low_trust_review";
 
   const { data: boundaryProjects, isLoading: boundaryProjectsLoading } = useQuery({
@@ -114,7 +122,11 @@ export function NewAgent() {
   });
 
   const isFirstAgent = !agents || agents.length === 0;
-  const effectiveRole = isFirstAgent ? "ceo" : role;
+  // Job (company_agent_roles) replaced the legacy AGENT_ROLES picker in the
+  // hire flow (DUR-146 Stage 1 item 18); this legacy field is still required
+  // by the create schema and always defaults to "general" except for the
+  // very first agent, which the backend requires to be "ceo".
+  const effectiveRole = isFirstAgent ? "ceo" : "general";
 
   useEffect(() => {
     setBreadcrumbs([
@@ -143,9 +155,20 @@ export function NewAgent() {
   const createAgent = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
       agentsApi.hire(selectedCompanyId!, data),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
+      if (jobId) {
+        try {
+          await jobsApi.assignToAgent(result.agent.id, jobId);
+        } catch (error) {
+          pushToast({
+            title: "Agent created, but the job could not be assigned",
+            body: error instanceof Error ? error.message : "Try assigning it from the agent's page.",
+            tone: "error",
+          });
+        }
+      }
       navigate(agentUrl(result.agent));
     },
     onError: (error) => {
@@ -172,6 +195,8 @@ export function NewAgent() {
         name,
         effectiveRole,
         title,
+        tone,
+        personality,
         reportsTo,
         selectedSkillKeys,
         configValues,
@@ -238,44 +263,68 @@ export function NewAgent() {
           />
         </div>
 
-        {/* Property chips: Role + Reports To */}
-        <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
-          <Popover open={roleOpen} onOpenChange={setRoleOpen}>
-            <PopoverTrigger asChild>
-              <button
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors",
-                  isFirstAgent && "opacity-60 cursor-not-allowed"
-                )}
-                disabled={isFirstAgent}
-              >
-                <Shield className="h-3 w-3 text-muted-foreground" />
-                {roleLabels[effectiveRole] ?? effectiveRole}
-              </button>
-            </PopoverTrigger>
-            <PopoverContent className="w-36 p-1" align="start">
-              {AGENT_ROLES.map((r) => (
-                <button
-                  key={r}
-                  className={cn(
-                    "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
-                    r === role && "bg-accent"
-                  )}
-                  onClick={() => { setRole(r); setRoleOpen(false); }}
-                >
-                  {roleLabels[r] ?? r}
-                </button>
-              ))}
-            </PopoverContent>
-          </Popover>
+        {/* Tone — how this agent speaks */}
+        <div className="px-4 pb-2">
+          <textarea
+            className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
+            placeholder="Tone — warm and cheerful. Short sentences, no corporate filler."
+            value={tone}
+            onChange={(e) => setTone(e.target.value.slice(0, 600))}
+            maxLength={600}
+          />
+          <div
+            className={cn(
+              "text-xs mt-1 text-right",
+              tone.length > 600 ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {tone.length}/600
+          </div>
+        </div>
 
+        {/* Personality — who this agent is, only for persona agents */}
+        <div className="px-4 pb-2">
+          <textarea
+            className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
+            placeholder="Personality — backstory, likes and dislikes, how she behaves. Only for persona agents."
+            value={personality}
+            onChange={(e) => setPersonality(e.target.value.slice(0, 20000))}
+            maxLength={20000}
+          />
+          <div
+            className={cn(
+              "text-xs mt-1 text-right",
+              personality.length > 20000 ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {personality.length}/20000
+          </div>
+        </div>
+
+        {/* Property chips: Job + Reports To */}
+        <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
           <ReportsToPicker
             agents={agents ?? []}
             value={reportsTo}
             onChange={setReportsTo}
             disabled={isFirstAgent}
           />
+
+          <JobPicker
+            jobs={jobs ?? []}
+            value={jobId}
+            onChange={setJobId}
+            disabled={isFirstAgent}
+            placeholder="No job"
+          />
         </div>
+
+        {selectedJob ? (
+          <div className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
+            Assigning "{selectedJob.name}" copies its instructions, tools, and rights onto this agent once when it's
+            created. Changing the job later won't change this agent.
+          </div>
+        ) : null}
 
         <div className="border-t border-border px-4 py-4">
           <TrustPresetSection

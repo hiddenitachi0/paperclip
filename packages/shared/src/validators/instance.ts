@@ -8,6 +8,12 @@ import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+  MIN_GLOBAL_MAX_CONCURRENT_RUNS,
+  MAX_GLOBAL_MAX_CONCURRENT_RUNS,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
 
@@ -34,6 +40,21 @@ export const instanceGeneralSettingsSchema = z.object({
   // Execution policy. Absent/"any" = unrestricted; "kubernetes" forces the
   // Kubernetes sandbox provider and denies local/ssh execution (cloud_tenant).
   executionMode: z.enum(["kubernetes", "any"]).optional(),
+  instructionsStalenessThresholdDays: z
+    .number()
+    .int()
+    .min(MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS)
+    .max(MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS)
+    .default(DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS),
+  // Whole-instance ceiling on simultaneously running heartbeat runs, across
+  // every agent/company. Distinct from (and enforced in addition to) each
+  // agent's own maxConcurrentRuns.
+  globalMaxConcurrentRuns: z
+    .number()
+    .int()
+    .min(MIN_GLOBAL_MAX_CONCURRENT_RUNS)
+    .max(MAX_GLOBAL_MAX_CONCURRENT_RUNS)
+    .default(DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();

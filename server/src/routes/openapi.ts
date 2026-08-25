@@ -37,6 +37,7 @@ import {
   updateCompanySchema,
   updateCompanyBrandingSchema,
   companyArtifactsQuerySchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactsResponseSchema,
   // Routine
   createRoutineSchema,
@@ -57,6 +58,7 @@ import {
   resolveApprovalSchema,
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
+  withdrawApprovalSchema,
   addApprovalCommentSchema,
   // Cost / budget
   createCostEventSchema,
@@ -110,6 +112,7 @@ import {
   createCliAuthChallengeSchema,
   resolveCliAuthChallengeSchema,
   createBoardApiKeySchema,
+  createDelegateTokenSchema,
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
@@ -659,6 +662,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/board-api-keys",
   "POST /api/board-api-keys",
   "DELETE /api/board-api-keys/{keyId}",
+  "GET /api/board-delegate-tokens",
+  "POST /api/board-delegate-tokens",
+  "POST /api/board-delegate-tokens/{tokenId}/revoke",
   "POST /api/bootstrap/claim",
   "GET /api/companies/{companyId}/resource-memberships/me",
   "PUT /api/companies/{companyId}/resource-memberships/me/agents/{agentId}",
@@ -709,6 +715,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/agents/{agentId}/avatar",
   "POST /api/cli-auth/challenges",
   "POST /api/board-api-keys",
+  "POST /api/board-delegate-tokens",
   "POST /api/companies",
   "POST /api/companies/{companyId}/invites",
   "POST /api/companies/{companyId}/openclaw/invite-prompt",
@@ -960,6 +967,27 @@ registry.registerPath({
       content: {
         "application/json": {
           schema: companyArtifactsResponseSchema,
+        },
+      },
+    },
+    401: r.unauthorized,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/artifacts/agents",
+  tags: ["companies"],
+  summary: "List agents who have made company artifacts",
+  request: {
+    params: z.object({ companyId: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Agents with at least one artifact, most-recent first",
+      content: {
+        "application/json": {
+          schema: companyArtifactAgentsResponseSchema,
         },
       },
     },
@@ -2422,6 +2450,18 @@ registry.registerPath({
     body: jsonBody(resubmitApprovalSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/withdraw",
+  tags: ["approvals"],
+  summary: "Withdraw an approval",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(withdrawApprovalSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({
@@ -4623,6 +4663,31 @@ registerCurrentRoute({
   path: "/api/board-api-keys/{keyId}",
   tags: ["access"],
   summary: "Revoke a board API key",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/board-delegate-tokens",
+  tags: ["access"],
+  summary: "List an operator's delegated recovery tokens",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/board-delegate-tokens",
+  tags: ["access"],
+  summary: "Create a scoped, revocable delegated operator credential",
+  body: createDelegateTokenSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/board-delegate-tokens/{tokenId}/revoke",
+  tags: ["access"],
+  summary: "Revoke a delegated operator credential",
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
 });
 
 for (const route of [

@@ -48,6 +48,7 @@ vi.mock("@paperclipai/adapter-utils/server-utils", async () => {
 });
 
 import { execute } from "./execute.js";
+import { resolveManagedCodexHomeDir } from "./codex-home.js";
 
 describe("codex local execution — per-agent MCP servers wiring", () => {
   const cleanupDirs: string[] = [];
@@ -103,5 +104,108 @@ describe("codex local execution — per-agent MCP servers wiring", () => {
 
     expect(prepareCodexRuntimeConfig).toHaveBeenCalledTimes(1);
     expect(prepareCodexRuntimeConfig.mock.calls[0][0]).toMatchObject({ mcpServers: undefined });
+  });
+
+  // DUR-132 item 9: an explicit env.CODEX_HOME that still lives under the
+  // Paperclip-managed company tree (e.g. the per-agent home set by the
+  // server-side isolation guard for an agent with mcpServers) must still get
+  // its MCP servers merged into config.toml. Before this fix, execute.ts
+  // treated ANY explicit env.CODEX_HOME as a user-managed override and passed
+  // `codexHome: null` to prepareCodexRuntimeConfig, which skips the merge
+  // entirely -- so an isolated agent's own MCP servers were silently dropped.
+  it("still passes a non-null codexHome to prepareCodexRuntimeConfig when env.CODEX_HOME is an explicit but Paperclip-managed path", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-local-mcp-wiring-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const paperclipHome = path.join(rootDir, "paperclip-home");
+    vi.stubEnv("PAPERCLIP_HOME", paperclipHome);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    const managedHome = path.join(
+      resolveManagedCodexHomeDir({ ...process.env, PAPERCLIP_HOME: paperclipHome, PAPERCLIP_INSTANCE_ID: "default" }, "company-1"),
+      "..",
+      "agents",
+      "agent-1",
+      "codex-home",
+    );
+    const servers = [{ name: "fs", command: "npx", env: { TOKEN: "secret" } }];
+
+    await execute({
+      runId: "run-local-mcp-wiring-managed-home",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: { env: { CODEX_HOME: managedHome }, mcpServers: servers },
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: "codex",
+        cwd: workspaceDir,
+        env: { CODEX_HOME: managedHome },
+        mcpServers: servers,
+      },
+      context: {},
+      onLog: async () => {},
+    });
+
+    expect(prepareCodexRuntimeConfig).toHaveBeenCalledTimes(1);
+    expect(prepareCodexRuntimeConfig.mock.calls[0][0]).toMatchObject({
+      codexHome: managedHome,
+      mcpServers: servers,
+    });
+  });
+
+  // DUR-132 item 8: an MCP server credential must never be synced onto a
+  // remote execution target's CODEX_HOME.
+  it("refuses to run with credential-bearing mcpServers on a remote execution target", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-local-mcp-wiring-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    vi.stubEnv("PAPERCLIP_HOME", path.join(rootDir, "paperclip-home"));
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    const servers = [{ name: "fs", command: "npx", env: { TOKEN: "secret" } }];
+
+    await expect(
+      execute({
+        runId: "run-remote-mcp-refusal",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "CodexCoder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: { command: "codex", cwd: workspaceDir, mcpServers: servers },
+        context: {},
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteWorkspacePath: "/remote/workspace",
+            remoteCwd: "/remote/workspace",
+            privateKey: "PRIVATE KEY",
+            knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+            strictHostKeyChecking: true,
+          },
+        },
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow(/credential/i);
+
+    expect(prepareCodexRuntimeConfig).not.toHaveBeenCalled();
+    expect(runChildProcess).not.toHaveBeenCalled();
+  });
+
+  it("allows credential-bearing mcpServers on a local execution target (no remote target configured)", async () => {
+    const servers = [{ name: "fs", command: "npx", env: { TOKEN: "secret" } }];
+    await runLocal(servers);
+
+    expect(prepareCodexRuntimeConfig).toHaveBeenCalledTimes(1);
+    expect(runChildProcess).toHaveBeenCalledTimes(1);
   });
 });

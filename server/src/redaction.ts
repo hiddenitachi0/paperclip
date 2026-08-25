@@ -3,7 +3,11 @@ import { redactCommandText } from "@paperclipai/adapter-utils";
 const SECRET_FIELD_NAME_PATTERN =
   String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|access[-_]?token|auth(?:_?token)?|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)[A-Za-z0-9_-]*`;
 
-const SECRET_PAYLOAD_KEY_RE = new RegExp(SECRET_FIELD_NAME_PATTERN, "i");
+// Exported so callers outside this module (e.g. the DUR-132 mcpServers
+// credential-shaped-literal-value advisory in server/src/routes/agents.ts)
+// can reuse the exact same "does this field name look like a secret" rule
+// instead of re-declaring a copy that could drift out of sync.
+export const SECRET_PAYLOAD_KEY_RE = new RegExp(SECRET_FIELD_NAME_PATTERN, "i");
 const COMMAND_PAYLOAD_KEY_RE =
   /(^command$|^cmd$|command[-_]?line|resolved[-_]?command|PAPERCLIP_RESOLVED_COMMAND)/i;
 const COMMAND_ARGS_PAYLOAD_KEY_RE = /^(commandArgs|command_?args|argv)$/i;
@@ -131,4 +135,18 @@ export function redactSensitiveText(input: string): string {
       .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`),
     REDACTED_EVENT_VALUE,
   );
+}
+
+// DUR-132: literal-value redaction for credentials that don't have a known
+// process-env variable NAME to key off (e.g. a resolved mcpServers secret_ref
+// -- see resolveMcpServersForRuntime in server/src/services/secrets.ts). Only
+// values of a reasonable minimum length are scrubbed; shorter strings risk
+// mangling unrelated output and are unlikely to be meaningful credentials.
+export function redactKnownSecretValues(input: string, secretValues: Iterable<string>): string {
+  let output = input;
+  for (const value of secretValues) {
+    if (!value || value.length < 6) continue;
+    output = output.split(value).join(REDACTED_EVENT_VALUE);
+  }
+  return output;
 }

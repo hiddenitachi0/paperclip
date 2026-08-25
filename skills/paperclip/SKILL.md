@@ -25,6 +25,8 @@ Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes.
 
 Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli <agent-id-or-shortname> --company-id <company-id>` to install Paperclip skills for Claude/Codex and print/export the required `PAPERCLIP_*` environment variables for that agent identity.
 
+**If a call to `$PAPERCLIP_API_URL` fails or times out:** `$PAPERCLIP_API_URL` is already the address that works from where you run — it is resolved separately from the public URL a human's browser uses, specifically so that agent-side calls do not fail due to a network path only a browser can take. If a request to it still fails, do **not** try to diagnose why: do not probe other hosts, IPs, ports, or the public/webhook URL, and do not conclude the platform is down. Record the exact error and the exact URL you called on the current issue (a comment is enough — if you cannot reach the API to post one, this is the one case where the run should simply stop), then stop for that heartbeat. One failed call is not evidence of an outage; a human or the next scheduled heartbeat will see the report. (Background: DUR-74 — an agent that self-diagnosed "the platform is down" from a single failed probe of the wrong address stayed idle for over an hour while everything was actually healthy.)
+
 **Run audit trail:** You MUST include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on ALL API requests that modify issues (checkout, update, comment, create subtask, release). This links your actions to the current heartbeat run for traceability.
 
 ## The Heartbeat Procedure
@@ -235,6 +237,8 @@ For merge/deploy approvals, put PR number, repo, branch, and commit in dedicated
 
 Bad: `"title": "Merge PR #12 — sub-tasks inherit the model and effort you set on a task"` — leads with a PR number. Good: `"title": "sub-tasks inherit the model and effort you set on a task"` (the server prepends the project/company name for you).
 
+**Tone and personality never apply to what you send the operator (DUR-61).** If your agent has a saved tone (how it speaks) or personality (who it is), those only change the wording of what you write in task comments, drafts, and status updates. They never apply to `request_board_approval` payloads, `request_confirmation`/`ask_user_questions`/`suggest_tasks` prompts, or any `plainSummary` field — write those exactly as this skill specifies, in plain, literal words, with no voice flourish, regardless of what your tone/personality box says. There is no server-side check that rewrites your own summary text for these calls, so this boundary is on you: hold the line yourself.
+
 **One request per decision (required).** Every decision that needs the operator gets exactly one ask. Merge/deploy decisions always go through `request_board_approval` — including the `merge_pr` approval a hook files automatically after `gh pr create` — never *also* raise a `request_confirmation` for the same merge/deploy on top of it. The board approvals list and the in-task interaction list are two different surfaces; the operator answering one does not close the other unless you explicitly link them (see below), so filing both leaves a stale card behind forever once the approval is answered. `request_confirmation`/`ask_user_questions` are for decisions that live in the task thread and have no board-approval equivalent (accepting a plan revision, answering a clarifying question). If you genuinely need both surfaces for one decision — rare — set `linkedApprovalId` on the `request_confirmation`/`request_checkbox_confirmation` to the approval's id; Paperclip then resolves both together no matter which one the operator answers (DUR-29).
 
 **Requesting a temporary model/effort boost (DUR-31).** If you're stuck on your current task because the base model/effort isn't enough — losing track of a wide refactor, needing deeper reasoning — you can ask for a temporary, task-scoped boost instead of grinding on or silently switching models yourself. File `kind:"model_boost"`:
@@ -364,6 +368,7 @@ For commands, response fields, and MCP tools, read:
 
 ## Critical Rules
 
+- **Never diagnose infrastructure.** On a failed `$PAPERCLIP_API_URL` call, report the exact error/URL and stop — do not probe other addresses or conclude an outage. See [Authentication](#authentication).
 - **Never retry a 409.** The task belongs to someone else.
 - **Never look for unassigned work.** No assignments = exit.
 - **Self-assign only for explicit @-mention handoff.** Requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch).
@@ -464,6 +469,7 @@ If `plan` already exists, fetch the current document first and send its latest `
 
 | Action                                | Endpoint                                                                                                                        |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Platform health check                 | `GET /api/health` (unauthenticated; same base URL/path as every other call — see [Authentication](#authentication))            |
 | My identity                           | `GET /api/agents/me`                                                                                                            |
 | My compact inbox                      | `GET /api/agents/me/inbox-lite`                                                                                                 |
 | My assignments                        | `GET /api/companies/:companyId/issues?assigneeAgentId=:id&status=todo,in_progress,in_review,blocked`                            |

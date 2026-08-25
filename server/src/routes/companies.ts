@@ -6,6 +6,7 @@ import type { Db } from "@paperclipai/db";
 import { agents as agentsTable } from "@paperclipai/db";
 import {
   DEFAULT_FEEDBACK_DATA_SHARING_TERMS_VERSION,
+  companyArtifactAgentsResponseSchema,
   companyArtifactsQuerySchema,
   companyPortabilityExportSchema,
   companyPortabilityImportSchema,
@@ -171,6 +172,12 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     assertCompanyAccess(req, companyId);
     const query = companyArtifactsQuerySchema.parse(req.query);
     res.json(await artifacts.list(companyId, query));
+  });
+
+  router.get("/:companyId/artifacts/agents", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(companyArtifactAgentsResponseSchema.parse(await artifacts.listAgents(companyId)));
   });
 
   router.get("/:companyId/timeline", async (req, res) => {

@@ -4,6 +4,7 @@ import {
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
+  withdrawApprovalSchema,
   type Approval,
   type ApprovalComment,
 } from "@paperclipai/shared";
@@ -101,6 +102,22 @@ export function registerApprovalCommands(program: Command): void {
           const ctx = resolveCommandContext(opts);
           const row = await ctx.api.get<Approval>(apiPath`/api/approvals/${approvalId}`);
           printOutput(row, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
+      .command("issues")
+      .description("List issues linked to an approval")
+      .argument("<approvalId>", "Approval ID")
+      .action(async (approvalId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const issues = await ctx.api.get(apiPath`/api/approvals/${approvalId}/issues`);
+          printOutput(issues, { json: ctx.json });
         } catch (err) {
           handleCommandError(err);
         }
@@ -214,6 +231,26 @@ export function registerApprovalCommands(program: Command): void {
             payload: opts.payload ? parseJsonObject(opts.payload, "payload") : undefined,
           });
           const updated = await ctx.api.post<Approval>(apiPath`/api/approvals/${approvalId}/resubmit`, payload);
+          printOutput(updated, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    approval
+      .command("withdraw")
+      .description("Withdraw your own not-yet-decided approval request (e.g. a stale duplicate)")
+      .argument("<approvalId>", "Approval ID")
+      .option("--decision-note <text>", "Decision note")
+      .action(async (approvalId: string, opts: ApprovalDecisionOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const payload = withdrawApprovalSchema.parse({
+            decisionNote: opts.decisionNote,
+          });
+          const updated = await ctx.api.post<Approval>(apiPath`/api/approvals/${approvalId}/withdraw`, payload);
           printOutput(updated, { json: ctx.json });
         } catch (err) {
           handleCommandError(err);

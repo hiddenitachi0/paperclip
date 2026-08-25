@@ -91,6 +91,15 @@ describe("claude local execution — per-agent MCP servers", () => {
     expect(contents).toEqual({
       mcpServers: { fs: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"] } },
     });
+
+    // DUR-132 item 8: mcp-config.json can carry resolved credentials -- both
+    // the file and its containing directory must be locked to the owning
+    // process user (0600 / 0700), not left at default umask-derived perms.
+    const { stat } = await import("node:fs/promises");
+    const fileMode = (await stat(configPath)).mode & 0o777;
+    const dirMode = (await stat(path.dirname(configPath))).mode & 0o777;
+    expect(fileMode).toBe(0o600);
+    expect(dirMode).toBe(0o700);
   });
 
   it("omits --mcp-config and --strict-mcp-config when adapterConfig.mcpServers is unset (no behavior change for existing agents)", async () => {
@@ -113,5 +122,52 @@ describe("claude local execution — per-agent MCP servers", () => {
     const args = call[2];
     expect(args).not.toContain("--mcp-config");
     expect(args).not.toContain("--strict-mcp-config");
+  });
+
+  // DUR-132 item 8: an MCP server credential must never be synced onto a
+  // remote execution target.
+  it("refuses to run with credential-bearing mcpServers on a remote execution target", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-local-remote-mcp-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    originalPaperclipHome = process.env.PAPERCLIP_HOME;
+    process.env.PAPERCLIP_HOME = path.join(rootDir, "paperclip-home");
+
+    await expect(
+      execute({
+        runId: "run-remote-mcp-refusal",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: "claude",
+          mcpServers: [{ name: "fs", command: "npx", env: { TOKEN: "secret" } }],
+        },
+        context: {
+          paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" },
+        },
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteWorkspacePath: "/remote/workspace",
+            remoteCwd: "/remote/workspace",
+            privateKey: "PRIVATE KEY",
+            knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+            strictHostKeyChecking: true,
+          },
+        },
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow(/credential/i);
+
+    expect(runChildProcess).not.toHaveBeenCalled();
   });
 });

@@ -12,6 +12,7 @@ type GrantInput = {
 export type PrincipalAccessCompatibilityBackfillStats = {
   agentMembershipsInserted: number;
   humanGrantsInserted: number;
+  agentMergeRequestGrantsInserted: number;
 };
 
 export async function insertMissingPrincipalGrants(
@@ -134,8 +135,28 @@ export async function backfillPrincipalAccessCompatibility(
     });
   }
 
+  // DUR-146 Stage 1: filing a merge_pr approval now requires merges:request.
+  // Every agent that could file one yesterday must still be able to today,
+  // or this ships as a silent regression of the standing "open the PR
+  // yourself, file the merge approval" delivery rule for every agent already
+  // running. This is deliberately NOT extended to deploys:request: Filip's
+  // 21 Aug ruling on DUR-65 is explicit that the deploy ask-right starts
+  // with nobody holding it ("Start with nobody holding it and let Filip
+  // assign it") — only a job (e.g. a seeded "Boss" role) grants that one.
+  let agentMergeRequestGrantsInserted = 0;
+  for (const agent of nonTerminalAgents) {
+    agentMergeRequestGrantsInserted += await insertMissingPrincipalGrants(db, {
+      companyId: agent.companyId,
+      principalType: "agent",
+      principalId: agent.principalId,
+      grants: [{ permissionKey: "merges:request", scope: null }],
+      grantedByUserId: null,
+    });
+  }
+
   return {
     agentMembershipsInserted,
     humanGrantsInserted,
+    agentMergeRequestGrantsInserted,
   };
 }

@@ -1,6 +1,8 @@
 import type { Request } from "express";
+import type { DelegateTokenScope } from "@paperclipai/shared";
 import { forbidden, unauthorized } from "../errors.js";
 import type { accessService } from "../services/access.js";
+import { logger } from "../middleware/logger.js";
 
 export function assertAuthenticated(req: Request) {
   if (req.actor.type === "none") {
@@ -12,6 +14,20 @@ export function assertBoard(req: Request) {
   if (req.actor.type !== "board") {
     throw forbidden("Board access required");
   }
+}
+
+// DUR-128: recovery-only routes (clear-error, resume, retry-a-stuck-run) may
+// opt into accepting a delegate token scoped for that specific action, in
+// addition to the operator's own "board" session. Nothing else should call
+// this -- approving a merge or a deploy stays assertBoard-only so a delegate
+// token can never reach it, regardless of what scopes it holds.
+export function assertBoardOrDelegate(req: Request, requiredScope: DelegateTokenScope) {
+  if (req.actor.type === "board") return;
+  if (req.actor.type === "board_delegate") {
+    if (req.actor.delegateScopes?.includes(requiredScope)) return;
+    throw forbidden(`Delegate token is not scoped for ${requiredScope}`);
+  }
+  throw forbidden("Board or delegate access required");
 }
 
 export function hasBoardOrgAccess(req: Request) {
@@ -54,9 +70,21 @@ export function assertInstanceAdmin(req: Request) {
 export function assertCompanyAccess(req: Request, companyId: string) {
   assertAuthenticated(req);
   if (req.actor.type === "agent" && req.actor.companyId !== companyId) {
+    logger.error({
+      event: "security.cross_company_write_blocked",
+      actorType: "agent",
+      actorAgentId: req.actor.agentId ?? null,
+      actorCompanyId: req.actor.companyId,
+      targetCompanyId: companyId,
+      method: req.method,
+      path: req.originalUrl ?? req.path,
+    }, "Refused a cross-company write attempt: agent key does not belong to the target company");
     throw forbidden("Agent key cannot access another company");
   }
-  if (req.actor.type === "board" && req.actor.source !== "local_implicit") {
+  if (
+    (req.actor.type === "board" && req.actor.source !== "local_implicit") ||
+    req.actor.type === "board_delegate"
+  ) {
     const allowedCompanies = req.actor.companyIds ?? [];
     if (!allowedCompanies.includes(companyId)) {
       throw forbidden("User does not have access to this company");

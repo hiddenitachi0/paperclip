@@ -23,7 +23,16 @@ import { normalizeAgentPermissions } from "./agent-permissions.js";
 
 export type AuthorizationActor =
   {
-    type: "board" | "agent" | "none";
+    // board_delegate is intentionally NOT given its own branch below: every
+    // permission decision either matches the explicit "board"/"none" checks
+    // or otherwise falls through assuming an agent-shaped actor and derives
+    // actorAgentId from input.actor.agentId. A board_delegate actor has no
+    // agentId, so it hits "deny_unauthenticated" there -- the safe default.
+    // Routes that DO want to grant a delegate token something construct a
+    // synthetic { type: "board", ... } actor from the delegate's own
+    // resolved companyIds/memberships instead of forwarding req.actor
+    // (see getAccessibleAgent's board_delegate branch in routes/agents.ts).
+    type: "board" | "agent" | "board_delegate" | "none";
     userId?: string | null;
     companyIds?: string[];
     memberships?: Array<{ companyId: string; membershipRole?: string | null; status?: string }>;
@@ -40,6 +49,7 @@ export type AuthorizationActor =
       | "agent_key"
       | "agent_jwt"
       | "cloud_tenant"
+      | "board_delegate_key"
       | "none";
   };
 

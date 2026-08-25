@@ -6,7 +6,7 @@ import {
   INBOX_MINE_ISSUE_STATUS_FILTER,
 } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
-import { envConfigSchema } from "./secret.js";
+import { envBindingSchema, envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 
@@ -52,14 +52,21 @@ export type UpsertAgentInstructionsFile = z.infer<typeof upsertAgentInstructions
 // only support a subset — e.g. codex_local's config.toml only has a stdio
 // `[mcp_servers.*]` table, so url-based entries are accepted by this schema
 // but skipped (with a note) at codex_local run dispatch.
+// DUR-132: env/headers values may be a literal string OR a
+// `{type:"secret_ref", secretId, version}` reference (same envBindingSchema
+// used by adapterConfig.env), so a per-agent MCP server credential can be
+// stored as a bound secret instead of readable plaintext. Resolution to a
+// literal value happens server-side at run dispatch (see
+// resolveAdapterConfigForRuntime in server/src/services/secrets.ts); an
+// unresolved secret_ref must never reach the adapter's config parser.
 export const mcpServerConfigSchema = z.object({
   name: z.string().trim().min(1),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   command: z.string().trim().min(1).optional(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string(), z.string()).optional(),
+  env: z.record(z.string(), envBindingSchema).optional(),
   url: z.string().trim().min(1).optional(),
-  headers: z.record(z.string(), z.string()).optional(),
+  headers: z.record(z.string(), envBindingSchema).optional(),
 }).strict().superRefine((value, ctx) => {
   const hasCommand = typeof value.command === "string" && value.command.length > 0;
   const hasUrl = typeof value.url === "string" && value.url.length > 0;
@@ -129,6 +136,23 @@ export const createAgentSchema = z.object({
   role: z.enum(AGENT_ROLES).optional().default("general"),
   title: z.string().optional().nullable(),
   icon: z.enum(AGENT_ICON_NAMES).optional().nullable(),
+  // DUR-61 addendum: TONE and PERSONALITY are two fields with different
+  // purposes, not one field with a length slider. Tone is short and applies
+  // to any agent; personality is long and only persona agents need it.
+  tone: z
+    .string()
+    .trim()
+    .max(600, "Tone is limited to 600 characters — a few sentences on how this agent speaks, not who it is.")
+    .transform((v) => (v && v.trim() ? v.trim() : null))
+    .optional()
+    .nullable(),
+  personality: z
+    .string()
+    .trim()
+    .max(20000, "Personality is limited to 20,000 characters — it describes who this agent is, not what it should do.")
+    .transform((v) => (v && v.trim() ? v.trim() : null))
+    .optional()
+    .nullable(),
   reportsTo: z.string().uuid().optional().nullable(),
   capabilities: z.string().optional().nullable(),
   desiredSkills: z.array(agentDesiredSkillSelectionSchema).optional(),
@@ -161,6 +185,18 @@ export const updateAgentSchema = createAgentSchema
     // routes (POST/DELETE .../agents/:agentId/avatar) may write this
     // column. This does not, by itself, fix DUR-55.
     avatarAssetId: z.never().optional(),
+    // DUR-114: role assignment/override fields are role-endpoint-only
+    // (POST /agents/:id/role). A plain z.never() here would make Zod
+    // throw and short-circuit to a generic 400 in validate() — bypassing
+    // the route-level hasOwn() check below (agents.ts) that returns the
+    // specific 422 "use /agents/:id/role" error. Declaring these as
+    // permissive-but-known keys instead means the (non-strict) object
+    // schema no longer silently strips them as "unrecognized", so they
+    // survive schema.parse() into req.body and the hasOwn() guard can
+    // see and reject them with 422 as intended.
+    roleId: z.unknown().optional(),
+    roleAppliedMcpServerNames: z.unknown().optional(),
+    roleAppliedPermissionKeys: z.unknown().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),

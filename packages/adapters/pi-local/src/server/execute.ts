@@ -45,6 +45,7 @@ import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   runChildProcess,
   resolveCombinedAgentInstructionsContent,
+  composeVoiceText,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
@@ -566,20 +567,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : "";
     const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
 
+    const personaText = composeVoiceText(agent.tone, agent.personality);
     let systemPromptExtension = "";
     let instructionsReadFailed = false;
+    let personaChars = 0;
     if (resolvedInstructionsFilePath) {
       try {
         const rawInstructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
         const instructionsContents = await resolveCombinedAgentInstructionsContent({
           companyId: agent.companyId,
           agentInstructionsContent: rawInstructionsContents,
+          personaText,
         });
         systemPromptExtension =
           `${instructionsContents}\n\n` +
           `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +
           `Resolve any relative file references from ${instructionsFileDir}.\n\n` +
           DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE;
+        if (personaText && personaText.trim().length > 0) personaChars = personaText.length;
       } catch (err) {
         instructionsReadFailed = true;
         const reason = err instanceof Error ? err.message : String(err);
@@ -591,7 +596,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         systemPromptExtension = promptTemplate;
       }
     } else {
-      systemPromptExtension = promptTemplate;
+      // DUR-61: apply the operator's saved voice even when this agent has no
+      // instructions bundle configured — otherwise the box looks saved but
+      // the voice silently never applies.
+      systemPromptExtension =
+        personaText && personaText.trim().length > 0
+          ? await resolveCombinedAgentInstructionsContent({
+              companyId: agent.companyId,
+              agentInstructionsContent: promptTemplate,
+              personaText,
+            })
+          : promptTemplate;
+      if (personaText && personaText.trim().length > 0) personaChars = personaText.length;
     }
 
     const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
@@ -626,11 +642,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       wakePromptChars: wakePrompt.length,
       sessionHandoffChars: sessionHandoffNote.length,
       heartbeatPromptChars: renderedHeartbeatPrompt.length,
+      personaChars,
     };
 
     const commandNotes = (() => {
       const notes = [...preparedRuntimeConfig.notes];
-      if (!resolvedInstructionsFilePath) return notes;
+      if (!resolvedInstructionsFilePath) {
+        if (personaChars > 0) {
+          notes.push(
+            `Applied agent voice (tone/personality, ${personaChars} characters) — no instructions bundle configured for this agent.`,
+          );
+        }
+        return notes;
+      }
       if (instructionsReadFailed) {
         notes.push(
           `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
@@ -641,6 +665,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       notes.push(
         `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`,
       );
+      if (personaChars > 0) {
+        notes.push(`Applied agent voice (tone/personality, ${personaChars} characters).`);
+      }
       return notes;
     })();
 

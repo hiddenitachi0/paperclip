@@ -932,6 +932,90 @@
       "when": 1787030000000,
       "tag": "0132_agent_avatar",
       "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1787040000000,
+      "tag": "0133_customer_inbox_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1787050000000,
+      "tag": "0134_agent_instructions_staleness_and_revisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1787060000000,
+      "tag": "0135_issue_thread_company_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1787070000000,
+      "tag": "0136_company_agent_roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1787080000000,
+      "tag": "0137_board_delegate_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1787090000000,
+      "tag": "0138_agent_personality",
+      "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1787100000000,
+      "tag": "0139_untracked_write_incidents",
+      "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1787110000000,
+      "tag": "0140_mcp_tool_library",
+      "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1787120000000,
+      "tag": "0141_agent_tone",
+      "breakpoints": true
+    },
+    {
+      "idx": 142,
+      "version": "7",
+      "when": 1787130000000,
+      "tag": "0142_personas",
+      "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1787140000000,
+      "tag": "0143_role_registry_provisioning",
+      "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1787150000000,
+      "tag": "0144_persona_daily_generation_cap",
+      "breakpoints": true
     }
   ]
 }

@@ -342,6 +342,72 @@ describeEmbeddedPostgres("secretService", () => {
     expect(resolved.manifest[0]?.bindingId).toBe(binding!.id);
   });
 
+  // DUR-132 item 4: adapterConfig.mcpServers[*].env/.headers secret_refs must
+  // resolve through the same assertBindingContext + recordAccessEvent path as
+  // top-level env.<KEY>, and the resolved literal value must be surfaced via
+  // secretValues (not just secretKeys, which only masks process-env key names
+  // and can't mask a value nested inside mcpServers).
+  it("resolves mcpServers env/headers secret refs through resolveAdapterConfigForRuntime", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `mcp-runtime-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "mcp-runtime-secret-value",
+    });
+    await svc.syncEnvBindingsForTarget(
+      companyId,
+      { targetType: "agent", targetId: "agent-1", pathPrefix: "mcpServers[fs].env" },
+      { TOKEN: { type: "secret_ref" as const, secretId: secret.id, version: "latest" as const } },
+    );
+
+    const { config, secretValues, manifest } = await svc.resolveAdapterConfigForRuntime(
+      companyId,
+      {
+        mcpServers: [
+          { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
+        ],
+      },
+      { consumerType: "agent", consumerId: "agent-1", actorType: "agent", actorId: "agent-1" },
+    );
+
+    const mcpServers = config.mcpServers as Array<Record<string, unknown>>;
+    expect((mcpServers[0]?.env as Record<string, unknown>)?.TOKEN).toBe("mcp-runtime-secret-value");
+    expect(secretValues.has("mcp-runtime-secret-value")).toBe(true);
+    expect(manifest).toEqual([
+      expect.objectContaining({ configPath: "mcpServers[fs].env.TOKEN", secretId: secret.id }),
+    ]);
+
+    const events = await svc.listAccessEvents(companyId, secret.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ configPath: "mcpServers[fs].env.TOKEN", consumerId: "agent-1" });
+  });
+
+  // DUR-132 item 2: at run dispatch, an mcpServers secret_ref that has no
+  // matching binding row must fail loudly instead of resolving to something
+  // silently wrong or empty.
+  it("rejects resolving an mcpServers secret ref with no matching binding", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `mcp-unbound-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "unbound-value",
+    });
+
+    await expect(
+      svc.resolveAdapterConfigForRuntime(
+        companyId,
+        {
+          mcpServers: [
+            { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
+          ],
+        },
+        { consumerType: "agent", consumerId: "agent-1", actorType: "agent", actorId: "agent-1" },
+      ),
+    ).rejects.toMatchObject({ status: 422, details: { code: "binding_missing" } });
+  });
+
   it("resolves routine env secret refs through routine bindings and records value-free access metadata", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

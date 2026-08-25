@@ -906,6 +906,7 @@ Minimum event set:
 - `agent.created`
 - `agent.updated`
 - `agent.status_changed`
+- `agent.error_stalled`
 - `agent.run.started`
 - `agent.run.finished`
 - `agent.run.failed`

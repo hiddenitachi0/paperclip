@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED_EVENT_VALUE, redactEventPayload, redactSensitiveText, sanitizeRecord } from "../redaction.js";
+import {
+  REDACTED_EVENT_VALUE,
+  redactEventPayload,
+  redactKnownSecretValues,
+  redactSensitiveText,
+  sanitizeRecord,
+} from "../redaction.js";
 
 describe("redaction", () => {
   it("redacts sensitive keys and nested secret values", () => {
@@ -134,5 +140,34 @@ describe("redaction", () => {
 
     expect(result?.args).toEqual(["--api-key", "not-a-command-secret"]);
     expect(result?.argv).toEqual(["--api-key", REDACTED_EVENT_VALUE]);
+  });
+});
+
+// DUR-132: a resolved mcpServers secret_ref value has no known process-env
+// variable NAME to key off (it's nested inside adapterConfig.mcpServers[*]
+// .env/.headers), so run output redaction has to scrub it by literal value
+// instead -- this is the mechanism resolveExecutionRunAdapterConfig's
+// secretValues set feeds into for run log output (see heartbeat.ts).
+describe("redactKnownSecretValues", () => {
+  it("scrubs every occurrence of a known secret value", () => {
+    const result = redactKnownSecretValues(
+      "token=sk-live-abc123 and again sk-live-abc123 at the end",
+      ["sk-live-abc123"],
+    );
+    expect(result).toBe(`token=${REDACTED_EVENT_VALUE} and again ${REDACTED_EVENT_VALUE} at the end`);
+  });
+
+  it("scrubs multiple distinct secret values", () => {
+    const result = redactKnownSecretValues("a=first-secret b=second-secret", ["first-secret", "second-secret"]);
+    expect(result).toBe(`a=${REDACTED_EVENT_VALUE} b=${REDACTED_EVENT_VALUE}`);
+  });
+
+  it("ignores empty and too-short values to avoid mangling unrelated output", () => {
+    const result = redactKnownSecretValues("short values like ab or empty should survive", ["", "ab"]);
+    expect(result).toBe("short values like ab or empty should survive");
+  });
+
+  it("is a no-op when no secret values are given", () => {
+    expect(redactKnownSecretValues("nothing to redact here", [])).toBe("nothing to redact here");
   });
 });

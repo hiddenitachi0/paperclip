@@ -19,6 +19,22 @@ export const DEFAULT_BACKUP_RETENTION: BackupRetentionPolicy = {
   monthlyMonths: 1,
 };
 
+// DUR-69/DUR-109: how many days an agent's instructions can go without
+// review before they're flagged stale. One instance-wide number, not
+// per-agent, per Filip's ruling -- changeable later.
+export const DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 60;
+export const MIN_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 1;
+export const MAX_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS = 3650;
+
+// DUR-151: whole-instance cap on simultaneously *running* heartbeat runs,
+// across every agent and company. Per-agent maxConcurrentRuns (default 20)
+// has no ceiling above it, so a fleet of agents can oversubscribe the box
+// and lose runs to the OS killer (process_lost). Default of 4 matches the
+// measured 4-CPU box this was built for; raise it if the box grows.
+export const DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS = 4;
+export const MIN_GLOBAL_MAX_CONCURRENT_RUNS = 1;
+export const MAX_GLOBAL_MAX_CONCURRENT_RUNS = 200;
+
 /**
  * Instance-wide execution policy.
  *
@@ -42,6 +58,10 @@ export interface InstanceGeneralSettings {
    * Kubernetes sandbox provider and denies local/ssh execution.
    */
   executionMode?: InstanceExecutionMode;
+  /** Days since `agents.instructionsReviewedAt` before an agent is flagged stale. */
+  instructionsStalenessThresholdDays: number;
+  /** Whole-instance ceiling on simultaneously running heartbeat runs, across every agent/company. */
+  globalMaxConcurrentRuns: number;
 }
 
 export interface InstanceExperimentalSettings {

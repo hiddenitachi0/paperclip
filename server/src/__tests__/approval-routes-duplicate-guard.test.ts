@@ -9,6 +9,8 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { projects } from "@paperclipai/db";
+import { getTableName } from "drizzle-orm";
 
 // vi.resetModules() + dynamic imports take ~7s in this test environment.
 const TEST_TIMEOUT = 20_000;
@@ -53,6 +55,7 @@ const mockAccessService = vi.hoisted(() => ({ decide: vi.fn() }));
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
+    agentInstructionsService: () => ({ readFile: vi.fn(), writeFile: vi.fn() }),
     agentService: () => mockAgentService,
     approvalService: () => mockApprovalService,
     escalationGrantService: () => mockEscalationGrantService,
@@ -67,9 +70,19 @@ function registerModuleMocks() {
 function createRouteDb() {
   return {
     select: vi.fn(() => ({
-      from: vi.fn(() => ({
+      // DUR-136: the deploy-approval route now checks payload.projectId
+      // resolves to a real project before filing/resubmitting -- match
+      // it here for the `projects` table so the pre-existing 409
+      // duplicate-guard test (which files a deploy payload) still
+      // reaches that check instead of failing earlier on a fake id.
+      from: vi.fn((table: unknown) => ({
         where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
+          then: async (resolve: (rows: unknown[]) => unknown) =>
+            resolve(
+              getTableName(table as any) === getTableName(projects)
+                ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "company-1" }]
+                : [],
+            ),
           limit: vi.fn(() => ({
             then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
           })),
@@ -211,6 +224,42 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     expect(res.status).toBe(409);
     expect(res.body.details?.existingApprovalId).toBe("existing-deploy-1");
     expect(mockApprovalService.create).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT);
+
+  it("allows a legitimate second deploy approval when acknowledgedDuplicateOfApprovalId matches (DUR-138)", async () => {
+    // DUR-138: deployRequestPayloadSchema is .strict(), so before the fix this
+    // 400'd on "Unrecognized key(s): acknowledgedDuplicateOfApprovalId" before
+    // the duplicate-guard logic below ever ran -- the escape hatch was dead
+    // code for this kind specifically.
+    mockApprovalService.findOpenDeployApproval.mockResolvedValue({
+      id: "44444444-4444-4444-8444-444444444444",
+      status: "pending",
+    });
+    mockApprovalService.create.mockResolvedValue({
+      id: "new-deploy-1",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: { kind: "deploy" },
+    });
+
+    const res = await request(await createApp())
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        payload: {
+          kind: "deploy",
+          projectId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          title: "Deploy corrected commit to prod",
+          note: "The existing open approval targets a now-stale commit.",
+          acknowledgedDuplicateOfApprovalId: "44444444-4444-4444-8444-444444444444",
+        },
+      });
+
+    expect(res.status).toBe(201);
+    const createCall = mockApprovalService.create.mock.calls[0];
+    expect(createCall[1].payload.relatedApprovalId).toBe("44444444-4444-4444-8444-444444444444");
   }, TEST_TIMEOUT);
 
   it("allows a legitimate second hire approval when acknowledgedDuplicateOfApprovalId matches", async () => {

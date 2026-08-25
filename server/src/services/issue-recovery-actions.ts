@@ -21,6 +21,7 @@ export type UpsertIssueRecoveryActionInput = {
   sourceIssueId: string;
   recoveryIssueId?: string | null;
   kind: IssueRecoveryActionKind;
+  status?: Extract<IssueRecoveryActionStatus, "active" | "escalated">;
   ownerType?: IssueRecoveryActionOwnerType;
   ownerAgentId?: string | null;
   ownerUserId?: string | null;
@@ -157,6 +158,30 @@ export function issueRecoveryActionService(db: Db) {
     return result;
   }
 
+  // Includes every status (active, escalated, resolved, cancelled), most recent
+  // first, so callers can detect a run of consecutive same-cause failures across
+  // recovery-action lifecycle boundaries -- a prior action being resolved (e.g. an
+  // agent reassigning the issue) must not erase that a fingerprinted problem keeps
+  // recurring.
+  async function listRecentForIssue(
+    companyId: string,
+    sourceIssueId: string,
+    limit: number,
+  ): Promise<IssueRecoveryAction[]> {
+    const rows = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, companyId),
+          eq(issueRecoveryActions.sourceIssueId, sourceIssueId),
+        ),
+      )
+      .orderBy(desc(issueRecoveryActions.createdAt))
+      .limit(limit);
+    return rows.map(toReadModel);
+  }
+
   async function retryUpsertSourceScoped(
     input: UpsertIssueRecoveryActionInput,
     retryCount: number,
@@ -184,7 +209,7 @@ export function issueRecoveryActionService(db: Db) {
         .set({
           recoveryIssueId: input.recoveryIssueId ?? null,
           kind: input.kind,
-          status: "active",
+          status: input.status ?? "active",
           ownerType,
           ownerAgentId: input.ownerAgentId ?? null,
           ownerUserId: input.ownerUserId ?? null,
@@ -226,7 +251,7 @@ export function issueRecoveryActionService(db: Db) {
           sourceIssueId: input.sourceIssueId,
           recoveryIssueId: input.recoveryIssueId ?? null,
           kind: input.kind,
-          status: "active",
+          status: input.status ?? "active",
           ownerType,
           ownerAgentId: input.ownerAgentId ?? null,
           ownerUserId: input.ownerUserId ?? null,
@@ -289,6 +314,7 @@ export function issueRecoveryActionService(db: Db) {
   return {
     getActiveForIssue,
     listActiveForIssues,
+    listRecentForIssue,
     resolveActiveForIssue,
     upsertSourceScoped,
   };

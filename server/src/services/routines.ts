@@ -6,6 +6,7 @@ import {
   companySecretBindings,
   companySecretVersions,
   companySecrets,
+  customerInboxConversations,
   customerInboxDeliveries,
   documentRevisions,
   documents,
@@ -59,12 +60,14 @@ import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
+import { issueReferenceService } from "./issue-references.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
+import { touchIssueForCompanyInboxes } from "./customer-inbox-handoff.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
@@ -573,6 +576,7 @@ export function routineService(
   } = {},
 ) {
   const issueSvc = issueService(db);
+  const issueReferencesSvc = issueReferenceService(db);
   const secretsSvc = secretService(db);
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
@@ -1457,6 +1461,26 @@ export function routineService(
     return { trigger, routine };
   }
 
+  // Shared by `dispatchWebhookTrigger` and the conversation-continuation
+  // short-circuit in `receiveCustomerInboxMessage` (DUR-93) — the latter
+  // skips `dispatchRoutineRun` entirely (it comments on an existing issue
+  // instead of creating one) but must never skip authentication.
+  async function assertWebhookTriggerDispatchable(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: WebhookTriggerAuthInput & { allowCustomerInboxTrigger?: boolean },
+  ) {
+    if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
+    // One door: a trigger owned by the customer-inbox address (DUR-68) is
+    // not reachable through the generic fire route, so the old door stays
+    // shut on the same publicId.
+    if (trigger.customerInboxChannel && !input.allowCustomerInboxTrigger) {
+      throw conflict("This routine only accepts messages at its customer-inbox address.");
+    }
+
+    await verifyWebhookTriggerAuth(trigger, routine, input);
+  }
+
   // Shared by `firePublicTrigger` (the generic door) and
   // `receiveCustomerInboxMessage` (the customer-inbox door, DUR-68). Both
   // authenticate and dispatch the same way; `allowCustomerInboxTrigger`
@@ -1475,15 +1499,7 @@ export function routineService(
       allowCustomerInboxTrigger?: boolean;
     },
   ) {
-    if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
-    // One door: a trigger owned by the customer-inbox address (DUR-68) is
-    // not reachable through the generic fire route, so the old door stays
-    // shut on the same publicId.
-    if (trigger.customerInboxChannel && !input.allowCustomerInboxTrigger) {
-      throw conflict("This routine only accepts messages at its customer-inbox address.");
-    }
-
-    await verifyWebhookTriggerAuth(trigger, routine, input);
+    await assertWebhookTriggerDispatchable(trigger, routine, input);
 
     return dispatchRoutineRun({
       routine,
@@ -1830,6 +1846,250 @@ export function routineService(
     return run;
   }
 
+  // DUR-93: rejected_signature is ledger-only ("that traffic isn't ours").
+  // rejected_shape/failed opens exactly one task per trigger carrying the
+  // excerpt, for the routine's default agent's `reportsTo` (generic --
+  // never hardcode an escalation target here). Further bad deliveries
+  // while that task is open append a comment instead of opening a second
+  // one; the DB-level partial unique index on (companyId, originKind,
+  // originId) is the real backstop against a create-race, mirroring the
+  // harness_liveness_escalation pattern.
+  async function escalateUnreadableCustomerInboxDelivery(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: { outcomeDetail: string | null; excerpt: string },
+  ): Promise<void> {
+    if (!routine.assigneeAgentId) return;
+    const defaultAgent = await db
+      .select({ reportsTo: agents.reportsTo })
+      .from(agents)
+      .where(eq(agents.id, routine.assigneeAgentId))
+      .then((rows) => rows[0] ?? null);
+    const escalationTargetAgentId = defaultAgent?.reportsTo ?? null;
+    if (!escalationTargetAgentId) {
+      logger.warn(
+        { triggerId: trigger.id, routineAssigneeAgentId: routine.assigneeAgentId },
+        "customer-inbox unreadable-message escalation: default agent has no reports_to, cannot escalate",
+      );
+      return;
+    }
+
+    const excerptBlock = ["```", input.excerpt, "```"].join("\n");
+    const findOpenEscalation = () =>
+      db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, trigger.companyId),
+            eq(issues.originKind, "customer_inbox_unreadable"),
+            eq(issues.originId, trigger.id),
+            isNull(issues.hiddenAt),
+            not(inArray(issues.status, ["done", "cancelled"])),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+    const existing = await findOpenEscalation();
+    if (existing) {
+      await issueSvc.addComment(
+        existing.id,
+        [
+          `Enda en melding vi ikke klarte å lese kom inn${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          "",
+          excerptBlock,
+        ].join("\n"),
+        {},
+        undefined,
+        db,
+      );
+      await touchIssueForCompanyInboxes(db, { companyId: trigger.companyId, issueId: existing.id, touchedAt: new Date() });
+      return;
+    }
+
+    let escalation: Awaited<ReturnType<typeof issueSvc.create>>;
+    try {
+      escalation = await issueSvc.create(trigger.companyId, {
+        projectId: routine.projectId,
+        title: "Vi klarte ikke å lese en innkommende kundemelding",
+        description: [
+          `En melding til rutinen "${routine.title}" kunne ikke leses${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          "",
+          excerptBlock,
+        ].join("\n"),
+        status: "todo",
+        priority: "high",
+        assigneeAgentId: escalationTargetAgentId,
+        originKind: "customer_inbox_unreadable",
+        originId: trigger.id,
+      });
+    } catch (error) {
+      const isRaceConflict =
+        !!error &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error as { code?: string }).code === "23505" &&
+        "constraint" in error &&
+        (error as { constraint?: string }).constraint === "issues_active_customer_inbox_unreadable_uq";
+      if (!isRaceConflict) throw error;
+      const raced = await findOpenEscalation();
+      if (!raced) throw error;
+      await issueSvc.addComment(
+        raced.id,
+        [
+          `Enda en melding vi ikke klarte å lese kom inn${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          "",
+          excerptBlock,
+        ].join("\n"),
+        {},
+        undefined,
+        db,
+      );
+      await touchIssueForCompanyInboxes(db, { companyId: trigger.companyId, issueId: raced.id, touchedAt: new Date() });
+      return;
+    }
+
+    await touchIssueForCompanyInboxes(db, { companyId: trigger.companyId, issueId: escalation.id, touchedAt: new Date() });
+    queueIssueAssignmentWakeup({
+      heartbeat,
+      issue: escalation,
+      reason: "customer_inbox.unreadable_message",
+      mutation: "create",
+      contextSource: "customer_inbox.unreadable_escalation",
+      requestedByActorType: "system",
+    });
+  }
+
+  // Ledger + escalation bookkeeping shared by every place `receiveCustomerInboxMessage`
+  // can fail to accept a delivery. Escalation failures are logged, not thrown --
+  // the caller's own error (the actual reason the delivery failed) is what
+  // the HTTP response reports.
+  async function recordFailedCustomerInboxDelivery(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    error: unknown,
+    ctx: {
+      updateLedger: (fields: Partial<typeof customerInboxDeliveries.$inferInsert>) => Promise<unknown>;
+      rawBody?: Buffer | null;
+      payload: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    const outcome: CustomerInboxDeliveryOutcome =
+      error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
+    const outcomeDetail = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+    const rawPayloadExcerpt = outcome === "failed" ? truncateCustomerInboxExcerpt(ctx.rawBody, ctx.payload) : null;
+    await ctx.updateLedger({
+      outcome,
+      outcomeDetail,
+      ...(rawPayloadExcerpt !== null ? { rawPayloadExcerpt } : {}),
+    });
+    if (outcome === "failed") {
+      await escalateUnreadableCustomerInboxDelivery(trigger, routine, {
+        outcomeDetail,
+        excerpt: rawPayloadExcerpt ?? "",
+      }).catch((err) => {
+        logger.error({ err, triggerId: trigger.id }, "customer-inbox unreadable-message escalation failed");
+      });
+    }
+  }
+
+  type CustomerInboxConversationMapping = {
+    linkedIssueId: string;
+    issueStatus: string;
+    issueIdentifier: string | null;
+  };
+
+  async function findCustomerInboxConversationMapping(
+    triggerId: string,
+    conversationId: string,
+  ): Promise<CustomerInboxConversationMapping | null> {
+    return db
+      .select({
+        linkedIssueId: customerInboxConversations.linkedIssueId,
+        issueStatus: issues.status,
+        issueIdentifier: issues.identifier,
+      })
+      .from(customerInboxConversations)
+      .innerJoin(issues, eq(issues.id, customerInboxConversations.linkedIssueId))
+      .where(
+        and(
+          eq(customerInboxConversations.routineTriggerId, triggerId),
+          eq(customerInboxConversations.conversationId, conversationId),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  // DUR-93: "a reply must not become a second task." A message whose
+  // conversationId already maps to a still-open task attaches to that task
+  // instead of going through the normal create-a-new-issue dispatch. A task
+  // that was already closed is never reopened by this path (DUR-94: a new
+  // task is opened and linked back to it instead) -- callers only reach this
+  // function once they've established the mapped task is still open.
+  async function attachCustomerInboxMessageToConversation(
+    mapping: CustomerInboxConversationMapping,
+    input: { fromAddress: string | null; fromName: string | null; subject: string | null; body: string | null },
+  ): Promise<void> {
+    const senderLine = input.fromName
+      ? `${input.fromName} <${input.fromAddress ?? "ukjent adresse"}>`
+      : input.fromAddress ?? "ukjent avsender";
+    const messageBlock = [
+      `Fra: ${senderLine}`,
+      `Emne: ${input.subject ?? "(ingen emnelinje)"}`,
+      "",
+      "```",
+      input.body ?? "(ingen tekst)",
+      "```",
+    ].join("\n");
+
+    await issueSvc.addComment(
+      mapping.linkedIssueId,
+      `Ny melding i samme samtale.\n\n${messageBlock}`,
+      {},
+      undefined,
+      db,
+    );
+
+    const refreshed = await db
+      .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, mapping.linkedIssueId))
+      .then((rows) => rows[0]);
+    queueIssueAssignmentWakeup({
+      heartbeat,
+      issue: refreshed,
+      reason: "customer_inbox.conversation_continued",
+      mutation: "customer_inbox_conversation_comment",
+      contextSource: "customer_inbox.conversation",
+      requestedByActorType: "system",
+    });
+  }
+
+  // DUR-94: the "pick one and state which" decision DUR-93 left open -- a
+  // closed task is never reopened by a later reply. Instead the normal
+  // create-a-new-issue path runs (same as a brand-new conversation) and the
+  // new task gets a system comment naming the closed predecessor, synced
+  // through the same issue-reference-mention mechanism the UI already uses
+  // for "DUR-123"-style mentions, so the two tasks show up as related work.
+  async function linkNewIssueToClosedPredecessor(
+    newIssueId: string,
+    predecessor: { id: string; identifier: string | null },
+  ): Promise<void> {
+    const label = predecessor.identifier ?? predecessor.id;
+    const comment = await issueSvc.addComment(
+      newIssueId,
+      `This conversation continues from ${label}, which was already closed.`,
+      {},
+      undefined,
+      db,
+    );
+    if (predecessor.identifier) {
+      await issueReferencesSvc.syncComment(comment.id, db);
+    }
+  }
+
   // The customer-inbox door (DUR-68): a company points any message source
   // (email, contact form, ...) at this address. A ledger row is written
   // for every delivery before any signature/shape validation, so nothing
@@ -1847,6 +2107,7 @@ export function routineService(
     const payload = isPlainRecord(input.payload) ? input.payload : {};
     const readString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
     const externalMessageId = readString(payload.messageId);
+    const conversationId = readString(payload.conversationId);
     const channel = readString(payload.channel);
     const fromAddress = readString(payload.fromAddress);
     const fromName = readString(payload.fromName);
@@ -1863,6 +2124,7 @@ export function routineService(
         companyId: null,
         routineTriggerId: null,
         externalMessageId,
+        conversationId,
         channel,
         fromAddress,
         fromName,
@@ -1881,6 +2143,7 @@ export function routineService(
         companyId: trigger.companyId,
         routineTriggerId: trigger.id,
         externalMessageId,
+        conversationId,
         channel: channel ?? trigger.customerInboxChannel,
         fromAddress,
         fromName,
@@ -1898,10 +2161,17 @@ export function routineService(
     // fingerprint unique per message — not the auth mechanism itself, but a
     // message we cannot tell apart from any other is unreadable all the same.
     if (!externalMessageId) {
+      const excerpt = truncateCustomerInboxExcerpt(input.rawBody, payload);
       await updateLedger({
         outcome: "rejected_shape",
         outcomeDetail: "messageId missing",
-        rawPayloadExcerpt: truncateCustomerInboxExcerpt(input.rawBody, payload),
+        rawPayloadExcerpt: excerpt,
+      });
+      await escalateUnreadableCustomerInboxDelivery(trigger, routine, {
+        outcomeDetail: "messageId missing",
+        excerpt,
+      }).catch((err) => {
+        logger.error({ err, triggerId: trigger.id }, "customer-inbox unreadable-message escalation failed");
       });
       throw unprocessable("messageId is required");
     }
@@ -1909,6 +2179,75 @@ export function routineService(
     const idempotencyKey = input.idempotencyKeyHeader?.trim() || externalMessageId;
     const subjectShort = subject ? subject.slice(0, 120) : undefined;
     const dispatchPayload = subjectShort !== undefined ? { ...payload, subjectShort } : payload;
+
+    // DUR-93: a message in a conversation that already maps to a still-open
+    // task attaches to that task instead of creating a second one. Auth
+    // still runs first here -- this is a routing decision AFTER
+    // authentication, never a bypass of it.
+    let closedPredecessor: { id: string; identifier: string | null } | null = null;
+    if (conversationId) {
+      try {
+        await assertWebhookTriggerDispatchable(trigger, routine, {
+          authorizationHeader: input.authorizationHeader,
+          signatureHeader: input.signatureHeader,
+          hubSignatureHeader: input.hubSignatureHeader,
+          timestampHeader: input.timestampHeader,
+          rawBody: input.rawBody,
+          payload: dispatchPayload,
+          allowCustomerInboxTrigger: true,
+        });
+      } catch (error) {
+        await recordFailedCustomerInboxDelivery(trigger, routine, error, {
+          updateLedger,
+          rawBody: input.rawBody,
+          payload,
+        });
+        throw error;
+      }
+
+      const mapping = await findCustomerInboxConversationMapping(trigger.id, conversationId);
+      if (mapping && TERMINAL_ISSUE_STATUSES.has(mapping.issueStatus)) {
+        // DUR-94: the mapped task is closed -- fall through to the normal
+        // create-a-new-issue path below instead of reopening it, then link
+        // the new task back to this one.
+        closedPredecessor = { id: mapping.linkedIssueId, identifier: mapping.issueIdentifier };
+      } else if (mapping) {
+        // Same idempotency guarantee the normal path gets from routineRuns:
+        // a message already recorded `accepted` under this messageId is a
+        // replay, not a second event, and must not comment twice.
+        const alreadyAccepted = await db
+          .select({ linkedIssueId: customerInboxDeliveries.linkedIssueId })
+          .from(customerInboxDeliveries)
+          .where(
+            and(
+              eq(customerInboxDeliveries.companyId, trigger.companyId),
+              eq(customerInboxDeliveries.routineTriggerId, trigger.id),
+              eq(customerInboxDeliveries.externalMessageId, externalMessageId),
+              eq(customerInboxDeliveries.outcome, "accepted"),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
+        if (alreadyAccepted) {
+          const issueId = alreadyAccepted.linkedIssueId ?? mapping.linkedIssueId;
+          await updateLedger({ outcome: "duplicate", linkedIssueId: issueId });
+          return { outcome: "duplicate" as CustomerInboxDeliveryOutcome, routineRunId: null, issueId };
+        }
+
+        await attachCustomerInboxMessageToConversation(mapping, {
+          fromAddress,
+          fromName,
+          subject,
+          body: readString(payload.body),
+        });
+        await updateLedger({ outcome: "accepted", linkedIssueId: mapping.linkedIssueId });
+        return { outcome: "accepted" as CustomerInboxDeliveryOutcome, routineRunId: null, issueId: mapping.linkedIssueId };
+      }
+      // No mapping yet, or the mapped task is closed -- fall through to the
+      // normal create-a-new-issue path below, then remember the mapping so
+      // the NEXT message in this conversation attaches to this new task.
+    }
 
     try {
       const run = await dispatchWebhookTrigger(trigger, routine, {
@@ -1938,6 +2277,27 @@ export function routineService(
         .then((rows) => rows.length > 0);
       const outcome: CustomerInboxDeliveryOutcome = alreadyAccepted ? "duplicate" : "accepted";
 
+      if (outcome === "accepted" && conversationId && run.linkedIssueId) {
+        // DUR-94: onConflictDoUpdate, not onConflictDoNothing -- a closed
+        // predecessor's mapping row already exists for this conversation and
+        // must now point at the new task, so the next reply threads here.
+        await db
+          .insert(customerInboxConversations)
+          .values({
+            companyId: trigger.companyId,
+            routineTriggerId: trigger.id,
+            conversationId,
+            linkedIssueId: run.linkedIssueId,
+          })
+          .onConflictDoUpdate({
+            target: [customerInboxConversations.routineTriggerId, customerInboxConversations.conversationId],
+            set: { linkedIssueId: run.linkedIssueId, updatedAt: new Date() },
+          });
+        if (closedPredecessor) {
+          await linkNewIssueToClosedPredecessor(run.linkedIssueId, closedPredecessor);
+        }
+      }
+
       await updateLedger({
         outcome,
         linkedRoutineRunId: run.id,
@@ -1945,11 +2305,10 @@ export function routineService(
       });
       return { outcome, routineRunId: run.id, issueId: run.linkedIssueId ?? null };
     } catch (error) {
-      const outcome: CustomerInboxDeliveryOutcome =
-        error instanceof HttpError && error.status === 401 ? "rejected_signature" : "failed";
-      await updateLedger({
-        outcome,
-        outcomeDetail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      await recordFailedCustomerInboxDelivery(trigger, routine, error, {
+        updateLedger,
+        rawBody: input.rawBody,
+        payload,
       });
       throw error;
     }
@@ -3038,4 +3397,217 @@ export function routineService(
       return null;
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Schedule chain bootstrap verification (DUR-100)
+//
+// Incident this exists to catch: on 22 August the server boot routine logged
+// "9/9 chain bootstraps ran" / "already scheduled" for nine schedule chains
+// while four had a live `routineTriggers` row with no usable cron/timezone/
+// nextRunAt data (orphaned) and five had no live trigger row at all
+// (missing), even though each routine's own saved configuration
+// (`routines.latestRevisionId` -> `routineRevisions.snapshot`) still declared
+// a schedule trigger for it. The bootstrap never checked — it only recorded
+// that a bootstrap function had been invoked without throwing. This is
+// DUR-98's "kill the false-positive health report" item, applied here as the
+// concrete case that motivated it.
+//
+// `routineRevisions.snapshot` is the durable record of what each routine's
+// config declares ("registry entry"); the live `routineTriggers` row is what
+// the scheduler (`tickScheduledTriggers` above) actually reads ("job data").
+// A declared schedule trigger with no live row, or a live row missing
+// cron/timezone/nextRunAt, cannot possibly fire — no matter what a boot log
+// claims.
+// ---------------------------------------------------------------------------
+
+export interface ScheduleChainRef {
+  routineId: string;
+  triggerId: string;
+}
+
+export interface OrphanedScheduleChain extends ScheduleChainRef {
+  reason: string;
+}
+
+export interface IndeterminateScheduleRoutine {
+  routineId: string;
+  reason: string;
+}
+
+export interface ScheduleChainBootstrapVerification {
+  verifiedAt: Date;
+  /** Number of schedule chains declared by an active routine's latest saved config. */
+  totalDeclaredChains: number;
+  /** Live trigger row present, enabled, with cron/timezone/nextRunAt all set. */
+  verifiedChains: ScheduleChainRef[];
+  /** Live trigger row present but missing usable schedule data ("registry entry with no matching schedule"). */
+  orphanedChains: OrphanedScheduleChain[];
+  /** No live trigger row at all for a declared chain ("no job data at all, no registry entry"). */
+  missingChains: ScheduleChainRef[];
+  /** A routine whose own declared chain set could not be loaded — never counted as verified. */
+  indeterminateRoutines: IndeterminateScheduleRoutine[];
+}
+
+/**
+ * Verifies, for every active routine, that each schedule trigger its own
+ * latest saved config declares actually exists in the live scheduler table
+ * with usable job data — rather than trusting that a bootstrap step ran
+ * without throwing. See the block comment above for the incident this
+ * reproduces.
+ */
+export async function verifyScheduleChainBootstrap(
+  db: Db,
+  opts: { now?: Date } = {},
+): Promise<ScheduleChainBootstrapVerification> {
+  const now = opts.now ?? new Date();
+
+  const activeRoutines = await db
+    .select({ id: routines.id, latestRevisionId: routines.latestRevisionId })
+    .from(routines)
+    .where(eq(routines.status, "active"));
+
+  const indeterminateRoutines: IndeterminateScheduleRoutine[] = [];
+  const declared: ScheduleChainRef[] = [];
+
+  const revisionIds = [...new Set(activeRoutines.map((r) => r.latestRevisionId).filter((id): id is string => !!id))];
+  const revisionRows = revisionIds.length
+    ? await db
+      .select({ id: routineRevisions.id, snapshot: routineRevisions.snapshot })
+      .from(routineRevisions)
+      .where(inArray(routineRevisions.id, revisionIds))
+    : [];
+  const snapshotByRevisionId = new Map(revisionRows.map((r) => [r.id, r.snapshot]));
+
+  for (const routine of activeRoutines) {
+    if (!routine.latestRevisionId) {
+      indeterminateRoutines.push({
+        routineId: routine.id,
+        reason: "active routine has no latestRevisionId — cannot determine its declared schedule chains",
+      });
+      continue;
+    }
+    const snapshot = snapshotByRevisionId.get(routine.latestRevisionId);
+    if (!snapshot) {
+      indeterminateRoutines.push({
+        routineId: routine.id,
+        reason: `latest revision snapshot ${routine.latestRevisionId} could not be loaded`,
+      });
+      continue;
+    }
+    for (const trigger of snapshot.triggers ?? []) {
+      if (trigger.kind === "schedule" && trigger.enabled) {
+        declared.push({ routineId: routine.id, triggerId: trigger.id });
+      }
+    }
+  }
+
+  const triggerIds = declared.map((d) => d.triggerId);
+  const liveRows = triggerIds.length
+    ? await db.select().from(routineTriggers).where(inArray(routineTriggers.id, triggerIds))
+    : [];
+  const liveById = new Map(liveRows.map((r) => [r.id, r]));
+
+  const verifiedChains: ScheduleChainRef[] = [];
+  const orphanedChains: OrphanedScheduleChain[] = [];
+  const missingChains: ScheduleChainRef[] = [];
+
+  for (const chain of declared) {
+    const live = liveById.get(chain.triggerId);
+    if (!live) {
+      missingChains.push(chain);
+      continue;
+    }
+    if (!live.enabled) {
+      orphanedChains.push({ ...chain, reason: "live trigger row is disabled" });
+      continue;
+    }
+    if (!live.cronExpression || !live.timezone) {
+      orphanedChains.push({ ...chain, reason: "live trigger row has no cron expression or timezone" });
+      continue;
+    }
+    if (!live.nextRunAt) {
+      orphanedChains.push({ ...chain, reason: "live trigger row has no nextRunAt — it will never be picked up by tickScheduledTriggers" });
+      continue;
+    }
+    verifiedChains.push(chain);
+  }
+
+  return {
+    verifiedAt: now,
+    totalDeclaredChains: declared.length,
+    verifiedChains,
+    orphanedChains,
+    missingChains,
+    indeterminateRoutines,
+  };
+}
+
+/**
+ * Renders a verification result as a plain-language summary and a healthy
+ * flag. `healthy` is true only when every declared chain was positively
+ * confirmed present with usable job data — a chain that could not be
+ * determined is never reported as healthy (DUR-98's "verified present" vs.
+ * "could not determine" rule).
+ */
+export function formatScheduleChainBootstrapReport(result: ScheduleChainBootstrapVerification): {
+  healthy: boolean;
+  summary: string;
+} {
+  const { totalDeclaredChains, verifiedChains, orphanedChains, missingChains, indeterminateRoutines } = result;
+  const healthy =
+    verifiedChains.length === totalDeclaredChains
+    && orphanedChains.length === 0
+    && missingChains.length === 0
+    && indeterminateRoutines.length === 0;
+
+  const parts = [`${verifiedChains.length}/${totalDeclaredChains} scheduled chains verified healthy`];
+  if (orphanedChains.length > 0) {
+    parts.push(`${orphanedChains.length} orphaned (registry entry present, no matching schedule data)`);
+  }
+  if (missingChains.length > 0) {
+    parts.push(`${missingChains.length} missing (no registry entry)`);
+  }
+  if (indeterminateRoutines.length > 0) {
+    parts.push(`${indeterminateRoutines.length} could not be determined`);
+  }
+
+  return { healthy, summary: parts.join("; ") };
+}
+
+/**
+ * Runs the verification and logs it — never as a bare "ran" / "already
+ * scheduled" claim. Logs `info` only when every declared chain was verified
+ * healthy; otherwise logs `error` with the specific orphaned/missing/
+ * indeterminate chains so the operator does not have to read the database by
+ * hand to find them (DUR-98). Call this from server startup, alongside the
+ * other boot-time reconciliation steps.
+ */
+export async function logScheduleChainBootstrapVerification(
+  db: Db,
+  opts: { now?: Date; log?: typeof logger } = {},
+): Promise<ScheduleChainBootstrapVerification> {
+  const log = opts.log ?? logger;
+  const result = await verifyScheduleChainBootstrap(db, { now: opts.now });
+  const report = formatScheduleChainBootstrapReport(result);
+
+  if (report.healthy) {
+    log.info(
+      { verifiedCount: result.verifiedChains.length, total: result.totalDeclaredChains },
+      `startup schedule chain bootstrap verification: ${report.summary}`,
+    );
+  } else {
+    log.error(
+      {
+        total: result.totalDeclaredChains,
+        verifiedCount: result.verifiedChains.length,
+        orphanedChains: result.orphanedChains,
+        missingChains: result.missingChains,
+        indeterminateRoutines: result.indeterminateRoutines,
+      },
+      `startup schedule chain bootstrap verification found unhealthy chains: ${report.summary}`,
+    );
+  }
+
+  return result;
 }

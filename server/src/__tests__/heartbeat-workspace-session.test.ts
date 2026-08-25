@@ -15,6 +15,7 @@ import {
   buildEffectiveRunSessionConfigMetadata,
   buildEffectiveRunWorkspaceConfigMetadata,
   buildWorkspaceConfigFreshnessOperation,
+  buildWorkspaceLockAdoptionWarning,
   deriveTaskKeyWithHeartbeatFallback,
   extractWakeCommentIds,
   formatRuntimeWorkspaceWarningLog,
@@ -1479,6 +1480,66 @@ describe("shouldDeferFollowupWakeForSameIssue", () => {
         forceFreshSession: false,
       }),
     ).toBe(false);
+  });
+
+  // DUR-125: a self-review-pass (or similar bounded gate) wake scheduled while the source
+  // run is still "running" must defer to a new run instead of coalescing into that
+  // still-executing run's own row -- otherwise the exemption marker lands on a run whose
+  // gate check for this very wake already evaluated (and correctly found not-exempt), and
+  // the bounded "exactly one extra pass" guarantee is defeated.
+  it("defers a same-agent follow-up when the wake requires a distinct run boundary", () => {
+    expect(
+      shouldDeferFollowupWakeForSameIssue({
+        activeRunStatus: "running",
+        isSameExecutionAgent: true,
+        wakeCommentId: null,
+        forceFreshSession: false,
+        requiresDistinctRunBoundary: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not defer when requiresDistinctRunBoundary is false and nothing else asks for it", () => {
+    expect(
+      shouldDeferFollowupWakeForSameIssue({
+        activeRunStatus: "running",
+        isSameExecutionAgent: true,
+        wakeCommentId: null,
+        forceFreshSession: false,
+        requiresDistinctRunBoundary: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("buildWorkspaceLockAdoptionWarning", () => {
+  it("returns null when there was no prior execution run", () => {
+    expect(
+      buildWorkspaceLockAdoptionWarning({
+        actorRunId: "run-b",
+        previousExecutionRunId: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when the run already owned the lock", () => {
+    expect(
+      buildWorkspaceLockAdoptionWarning({
+        actorRunId: "run-a",
+        previousExecutionRunId: "run-a",
+      }),
+    ).toBeNull();
+  });
+
+  it("warns when this run just took over the lock from a different run", () => {
+    const warning = buildWorkspaceLockAdoptionWarning({
+      actorRunId: "run-b",
+      previousExecutionRunId: "run-a",
+    });
+    expect(warning).toContain("run-b");
+    expect(warning).toContain("run-a");
+    expect(warning).toContain("git reset --hard");
+    expect(warning).toContain("ListAgents");
   });
 });
 

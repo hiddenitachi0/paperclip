@@ -8,6 +8,7 @@ import {
   type AgentPermissionUpdate,
 } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
+import { mcpToolLibraryApi, type AgentMcpToolListItem } from "../api/mcpToolLibrary";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -23,6 +24,8 @@ import { useToastActions } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
+import { AgentJobSection } from "../components/jobs/AgentJobSection";
+import { jobsApi } from "../api/jobs";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PageTabBar } from "../components/PageTabBar";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
@@ -39,6 +42,7 @@ import { EntityRow } from "../components/EntityRow";
 import { MembershipAction } from "../components/MembershipAction";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { EmptyState } from "../components/EmptyState";
 import { AgentActionButtons } from "../components/AgentActionButtons";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
@@ -55,6 +59,7 @@ import { describeRunRetryState } from "../lib/runRetryState";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   CheckCircle2,
@@ -75,6 +80,7 @@ import {
   HelpCircle,
   FolderOpen,
   AlertTriangle,
+  Plug,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -251,12 +257,13 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "runs" | "budget";
+type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "instructions" || value === "prompts") return "instructions";
   if (value === "configure" || value === "configuration") return "configuration";
   if (value === "skills") return "skills";
+  if (value === "tools") return "tools";
   if (value === "budget") return "budget";
   if (value === "runs") return value;
   return "dashboard";
@@ -718,6 +725,14 @@ export function AgentDetail() {
     enabled: Boolean(resolvedAgentId) && needsDashboardData,
   });
 
+  // DUR-146 Stage 1 item 17: shared query key with AgentJobSection further
+  // down this page, so assigning a job invalidates both at once.
+  const { data: headerRoleState } = useQuery({
+    queryKey: ["agents", "role-state", resolvedAgentId ?? routeAgentRef] as const,
+    queryFn: () => jobsApi.getAgentRoleState(resolvedAgentId!),
+    enabled: Boolean(resolvedAgentId),
+  });
+
   const { data: heartbeats } = useQuery({
     queryKey: queryKeys.heartbeats(resolvedCompanyId!, agent?.id ?? undefined),
     queryFn: () => heartbeatsApi.list(resolvedCompanyId!, agent?.id ?? undefined),
@@ -799,6 +814,8 @@ export function AgentDetail() {
           ? "configuration"
           : activeView === "skills"
             ? "skills"
+            : activeView === "tools"
+              ? "tools"
             : activeView === "runs"
               ? "runs"
               : activeView === "budget"
@@ -1060,7 +1077,7 @@ export function AgentDetail() {
           <div className="min-w-0">
             <h2 className="text-2xl font-bold truncate">{agent.name}</h2>
             <p className="text-sm text-muted-foreground truncate">
-              {roleLabels[agent.role] ?? agent.role}
+              {headerRoleState?.job?.name ?? roleLabels[agent.role] ?? agent.role}
               {agent.title ? ` - ${agent.title}` : ""}
             </p>
           </div>
@@ -1100,6 +1117,7 @@ export function AgentDetail() {
               { value: "dashboard", label: "Dashboard" },
               { value: "instructions", label: "Instructions" },
               { value: "skills", label: "Skills" },
+              { value: "tools", label: "Tools" },
               { value: "configuration", label: "Configuration" },
               { value: "runs", label: "Runs" },
               { value: "budget", label: "Budget" },
@@ -1216,6 +1234,13 @@ export function AgentDetail() {
 
       {activeView === "skills" && (
         <AgentSkillsTab
+          agent={agent}
+          companyId={resolvedCompanyId ?? undefined}
+        />
+      )}
+
+      {activeView === "tools" && (
+        <AgentToolsTab
           agent={agent}
           companyId={resolvedCompanyId ?? undefined}
         />
@@ -1821,6 +1846,8 @@ function ConfigurationTab({
           </div>
         </div>
       </div>
+
+      <AgentJobSection agentId={agent.id} companyId={companyId} />
     </div>
   );
 }
@@ -3029,6 +3056,95 @@ export function AgentSkillsTab({
             )}
           </section>
         </>
+      )}
+    </div>
+  );
+}
+
+/* ---- Tools Tab ---- */
+
+// DUR-143: the checkbox side of the tool library — tick a tool on, it's
+// merged into this agent's mcpServers at every dispatch (with its credential
+// resolved from the secret it was created with); untick to revoke. No JSON,
+// no server name to remember — just the tools this agent has, in words.
+export function AgentToolsTab({
+  agent,
+  companyId,
+}: {
+  agent: Agent;
+  companyId?: string;
+}) {
+  const queryClient = useQueryClient();
+  const [pendingToolId, setPendingToolId] = useState<string | null>(null);
+
+  const { data: tools, isLoading, error } = useQuery({
+    queryKey: queryKeys.mcpTools.forAgent(agent.id),
+    queryFn: () => mcpToolLibraryApi.listForAgent(agent.id),
+    enabled: Boolean(companyId),
+  });
+
+  const syncTools = useMutation({
+    mutationFn: (desiredToolIds: string[]) => mcpToolLibraryApi.syncAgentSelection(agent.id, desiredToolIds),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.mcpTools.forAgent(agent.id) });
+    },
+    onSettled: () => setPendingToolId(null),
+  });
+
+  function toggleTool(tool: AgentMcpToolListItem, checked: boolean) {
+    if (!tools) return;
+    const current = tools.filter((t) => t.enabled).map((t) => t.id);
+    const next = checked ? [...current, tool.id] : current.filter((id) => id !== tool.id);
+    setPendingToolId(tool.id);
+    syncTools.mutate(next);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-sm text-muted-foreground">
+          Tick a tool to give this agent access to it — connected in{" "}
+          <Link to="/tools" className="underline underline-offset-2">
+            Tools
+          </Link>
+          , picked here. Untick to remove it.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <Skeleton className="h-32 w-full" />
+      ) : error ? (
+        <p className="text-sm text-destructive">Could not load tools.</p>
+      ) : !tools || tools.length === 0 ? (
+        <EmptyState
+          icon={Plug}
+          message="No tools in the library yet. Add one in Tools, then come back here to give it to this agent."
+          action="Go to Tools"
+          onAction={() => window.location.assign("/tools")}
+        />
+      ) : (
+        <ul className="divide-y divide-border border border-border rounded-lg">
+          {tools.map((tool) => (
+            <li key={tool.id} className="flex items-start gap-3 px-4 py-3">
+              <Checkbox
+                checked={tool.enabled}
+                disabled={syncTools.isPending && pendingToolId === tool.id}
+                onCheckedChange={(checked) => toggleTool(tool, checked === true)}
+                className="mt-0.5"
+              />
+              <div className="min-w-0">
+                <div className="font-medium">{tool.name}</div>
+                <p className="text-sm text-muted-foreground">{tool.description}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {syncTools.isError && (
+        <p className="text-xs text-destructive">
+          {syncTools.error instanceof Error ? syncTools.error.message : "Failed to update tools"}
+        </p>
       )}
     </div>
   );

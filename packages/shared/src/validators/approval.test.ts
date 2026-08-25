@@ -48,6 +48,20 @@ describe("approval validators", () => {
     expect(() => deployRequestPayloadSchema.parse(missingTitle)).toThrow();
   });
 
+  it("accepts acknowledgedDuplicateOfApprovalId on the deploy payload (DUR-138)", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      title: "Deploy dashboard main",
+      note: "Corrected re-deploy after a stale approval was left open.",
+      acknowledgedDuplicateOfApprovalId: "33333333-3333-4333-8333-333333333333",
+    };
+    expect(deployRequestPayloadSchema.parse(payload).acknowledgedDuplicateOfApprovalId).toBe(
+      payload.acknowledgedDuplicateOfApprovalId,
+    );
+  });
+
   it("validates the tool-grant request approval payload convention", () => {
     const payload = {
       kind: "tool_grant" as const,

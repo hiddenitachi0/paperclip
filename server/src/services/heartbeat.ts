@@ -148,6 +148,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import {
   evaluateExecutionAllowlist,
   isExecutionForcedToKubernetes,
@@ -209,7 +210,7 @@ import {
 import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
-import { withAgentStartLock } from "./agent-start-lock.js";
+import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -226,7 +227,7 @@ import {
   redactCurrentUserValue,
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
-import { redactEventPayload, redactSensitiveText } from "../redaction.js";
+import { redactEventPayload, redactKnownSecretValues, redactSensitiveText } from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -743,7 +744,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
           : undefined,
       )
     : { env: {}, secretKeys: new Set<string>(), manifest: [] };
-  const { config: resolvedConfig, secretKeys, manifest } = await input.secretsSvc.resolveAdapterConfigForRuntime(
+  const { config: resolvedConfig, secretKeys, secretValues, manifest } = await input.secretsSvc.resolveAdapterConfigForRuntime(
     input.companyId,
     executionRunConfig,
     input.agentId
@@ -823,6 +824,11 @@ export async function resolveExecutionRunAdapterConfig(input: {
   return {
     resolvedConfig,
     secretKeys,
+    // DUR-132: literal resolved secret values (currently only ever
+    // populated from adapterConfig.mcpServers[*].env/.headers -- see
+    // resolveMcpServersForRuntime in secrets.ts) for output redaction that
+    // can't key off a known process-env variable name.
+    secretValues: secretValues ?? new Set<string>(),
     secretManifest: [
       ...(environmentEnvResolution.manifest ?? []),
       ...(manifest ?? []),
@@ -2704,12 +2710,21 @@ export function shouldDeferFollowupWakeForSameIssue(input: {
   isSameExecutionAgent: boolean;
   wakeCommentId: string | null | undefined;
   forceFreshSession: boolean;
+  requiresDistinctRunBoundary?: boolean;
 }) {
   // A comment follow-up or explicit fresh-session wake needs a new run boundary.
   if (!input.isSameExecutionAgent) return false;
   if (input.activeRunStatus !== "running") return false;
   if (input.wakeCommentId) return true;
   if (input.forceFreshSession) return true;
+  // DUR-125: a bounded gate pass (self-review, goal-condition judge, ...) must land on a
+  // genuinely new run so isSelfReviewPassRunId/isGoalConditionJudgeRunId can exempt it from
+  // the gate that scheduled it. Coalescing it into the still-running run that triggered the
+  // gate instead merges the exemption marker onto that run's own row -- a row whose gate
+  // check for THIS wake already evaluated (and correctly found not-exempt) before the merge
+  // landed, and whose retry may never come if that run ends without attempting the PATCH
+  // again. See DUR-125.
+  if (input.requiresDistinctRunBoundary) return true;
   return false;
 }
 
@@ -3747,6 +3762,28 @@ function shouldQueueFollowupForRunningIssueWake(input: {
 
 function isCheckoutConflictError(error: unknown): boolean {
   return error instanceof HttpError && error.status === 409 && error.message === "Issue checkout conflict";
+}
+
+// A checkout call can silently reclaim the issue's execution lock from a
+// *different* prior run whenever that run's heartbeat status looks terminal
+// (see clearExecutionRunIfTerminal / clearCheckoutRunIfTerminal / stale-run
+// adoption in issues.ts). That status can be wrong -- e.g. a process-lost
+// false negative -- while the prior run's process is still alive and
+// mutating the shared git worktree (DUR-120). Surface it loudly instead of
+// silently proceeding as if this run were always the sole owner.
+export function buildWorkspaceLockAdoptionWarning(input: {
+  actorRunId: string;
+  previousExecutionRunId: string | null;
+}): string | null {
+  if (!input.previousExecutionRunId) return null;
+  if (input.previousExecutionRunId === input.actorRunId) return null;
+  return (
+    `This run (${input.actorRunId}) just took over the execution lock for this issue from a different run ` +
+    `(${input.previousExecutionRunId}) whose heartbeat status already looked terminal. If that determination was wrong ` +
+    `and the prior run's process is still alive, it may still be mutating this worktree concurrently. Before running ` +
+    "any destructive git command (`git reset --hard`, `git checkout .`, `git clean -f`, `git stash`), check `git status`, " +
+    "`git reflog`, and `git stash list` for unexpected changes, and check ListAgents for a live peer session before discarding anything."
+  );
 }
 
 function deriveCommentId(
@@ -5058,6 +5095,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         originKind: issues.originKind,
         originId: issues.originId,
         originRunId: issues.originRunId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
         updatedAt: issues.updatedAt,
       })
       .from(issues)
@@ -9230,6 +9269,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  // DUR-151: whole-instance running-run count, across every agent/company —
+  // the counterpart to countRunningRunsForAgent with no agentId filter.
+  async function countRunningRunsInstanceWide() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+    return Number(count ?? 0);
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -9670,6 +9719,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           ? "idle"
           : "error";
 
+    const enteringError = nextStatus === "error" && existing.status !== "error";
     const updated = await db
       .update(agents)
       .set({
@@ -9678,6 +9728,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // error so operators see it on the agent page without digging into run
         // events; clear it whenever the agent leaves error.
         errorReason: nextStatus === "error" ? truncateAgentErrorReason(failureReason) : null,
+        // DUR-128: errorAt marks the start of this error episode so the
+        // stall sweep can measure how long it's been unattended. Only stamped
+        // on the *first* transition into error -- repeated failed heartbeats
+        // while already in error must not keep pushing this timestamp
+        // forward, or a stuck agent would never cross the alert threshold.
+        ...(nextStatus === "error"
+          ? { errorAt: enteringError ? new Date() : undefined }
+          : { errorAt: null, errorAlertedAt: null }),
         lastHeartbeatAt: new Date(),
         updatedAt: new Date(),
       })
@@ -10194,66 +10252,85 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
 
-      const queuedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt));
-      if (queuedRuns.length === 0) return [];
-
-      const dependencyReadiness = await listQueuedRunDependencyReadiness(agent.companyId, queuedRuns);
-      const queuedIssueIds = [...new Set(
-        queuedRuns
-          .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
-          .filter((issueId): issueId is string => Boolean(issueId)),
-      )];
-      const issueRows = await db
-        .select({
-          id: issues.id,
-          status: issues.status,
-          priority: issues.priority,
-        })
-        .from(issues)
-        .where(
-          queuedIssueIds.length > 0
-            ? and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds))
-            : sql`false`,
-        );
-      const issueById = new Map(issueRows.map((row) => [row.id, row]));
-      const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
-      const prioritizedRuns = [...queuedRuns].sort((left, right) => {
-        const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
-        const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
-        const leftReadiness = leftIssueId ? dependencyReadiness.get(leftIssueId) : null;
-        const rightReadiness = rightIssueId ? dependencyReadiness.get(rightIssueId) : null;
-        const leftReady = leftIssueId ? (leftReadiness?.isDependencyReady ?? true) : true;
-        const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
-        const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
-        const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-        const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-        const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-        if (leftRank !== rightRank) return leftRank - rightRank;
-        const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
-        const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
-        if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
-        return left.createdAt.getTime() - right.createdAt.getTime();
+      // DUR-151: whole-instance ceiling, on top of the per-agent one above.
+      // Serialized via a single in-process lock (safe because run dispatch
+      // is single-process — see agent-start-lock.ts) so two agents can't
+      // both read stale headroom and jointly overshoot the global cap.
+      return withGlobalRunStartLock(async () => {
+        const globalMaxConcurrentRuns = (await instanceSettings.getGeneral()).globalMaxConcurrentRuns;
+        const globalRunningCount = await countRunningRunsInstanceWide();
+        const globalAvailableSlots = Math.max(0, globalMaxConcurrentRuns - globalRunningCount);
+        const effectiveAvailableSlots = Math.min(availableSlots, globalAvailableSlots);
+        if (effectiveAvailableSlots <= 0) return [];
+        return startNextQueuedRunForAgentWithinSlots(agent, effectiveAvailableSlots);
       });
-
-      const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of prioritizedRuns) {
-        if (claimedRuns.length >= availableSlots) break;
-        const claimed = await claimQueuedRun(queuedRun, companyAgents);
-        if (claimed) claimedRuns.push(claimed);
-      }
-      if (claimedRuns.length === 0) return [];
-
-      for (const claimedRun of claimedRuns) {
-        void executeRun(claimedRun.id).catch((err) => {
-          logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
-        });
-      }
-      return claimedRuns;
     });
+  }
+
+  async function startNextQueuedRunForAgentWithinSlots(
+    agent: NonNullable<Awaited<ReturnType<typeof getAgent>>>,
+    availableSlots: number,
+  ) {
+    const agentId = agent.id;
+    const queuedRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
+      .orderBy(asc(heartbeatRuns.createdAt));
+    if (queuedRuns.length === 0) return [];
+
+    const dependencyReadiness = await listQueuedRunDependencyReadiness(agent.companyId, queuedRuns);
+    const queuedIssueIds = [...new Set(
+      queuedRuns
+        .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
+        .filter((issueId): issueId is string => Boolean(issueId)),
+    )];
+    const issueRows = await db
+      .select({
+        id: issues.id,
+        status: issues.status,
+        priority: issues.priority,
+      })
+      .from(issues)
+      .where(
+        queuedIssueIds.length > 0
+          ? and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds))
+          : sql`false`,
+      );
+    const issueById = new Map(issueRows.map((row) => [row.id, row]));
+    const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
+    const prioritizedRuns = [...queuedRuns].sort((left, right) => {
+      const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
+      const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
+      const leftReadiness = leftIssueId ? dependencyReadiness.get(leftIssueId) : null;
+      const rightReadiness = rightIssueId ? dependencyReadiness.get(rightIssueId) : null;
+      const leftReady = leftIssueId ? (leftReadiness?.isDependencyReady ?? true) : true;
+      const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
+      const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
+      const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
+      const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+      const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
+      const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
+      if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
+      return left.createdAt.getTime() - right.createdAt.getTime();
+    });
+
+    const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+    for (const queuedRun of prioritizedRuns) {
+      if (claimedRuns.length >= availableSlots) break;
+      const claimed = await claimQueuedRun(queuedRun, companyAgents);
+      if (claimed) claimedRuns.push(claimed);
+    }
+    if (claimedRuns.length === 0) return [];
+
+    for (const claimedRun of claimedRuns) {
+      void executeRun(claimedRun.id).catch((err) => {
+        logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
+      });
+    }
+    return claimedRuns;
   }
 
   async function executeRun(runId: string) {
@@ -10298,6 +10375,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const issueDependencyReadiness = issueId
       ? await issuesSvc.listDependencyReadiness(agent.companyId, [issueId]).then((rows) => rows.get(issueId) ?? null)
       : null;
+    let workspaceLockAdoptionWarning: string | null = null;
     if (
       issueId &&
       issueContext &&
@@ -10309,9 +10387,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         agentId: agent.id,
       })
     ) {
+      const previousExecutionRunId = issueContext.executionRunId ?? null;
       try {
         await issuesSvc.checkout(issueId, agent.id, ["todo", "backlog", "blocked"], run.id);
         context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = true;
+        workspaceLockAdoptionWarning = buildWorkspaceLockAdoptionWarning({
+          actorRunId: run.id,
+          previousExecutionRunId,
+        });
       } catch (error) {
         if (!isCheckoutConflictError(error)) throw error;
         context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
@@ -10661,6 +10744,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueSettings: issueExecutionWorkspaceSettings,
       mode: requestedExecutionWorkspaceMode,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
+      issueProjectId: issueRef?.projectId ?? null,
+      issueProjectWorkspaceId: issueRef?.projectWorkspaceId ?? null,
     });
     let adapterModelProfiles: AdapterModelProfileDefinition[] = [];
     let profileResolutionFallbackReason: string | null = null;
@@ -10722,6 +10807,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       grantAdapterConfig: escalationGrantAdapterConfig,
       issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
     });
+    // DUR-143: fold in this agent's checkbox-granted tool-library servers.
+    // mergeModelProfileAdapterConfig above is a plain object-spread — whoever
+    // sets mcpServers last wins wholesale — so this must concatenate onto
+    // whatever mergedConfig.mcpServers already resolved to, not replace it.
+    // The agent's own explicit servers always win on a name collision.
+    {
+      const existingMcpServers = Array.isArray(mergedConfig.mcpServers)
+        ? (mergedConfig.mcpServers as Array<Record<string, unknown>>)
+        : [];
+      const existingNames = new Set(existingMcpServers.map((s) => String(s.name ?? "")));
+      const grantedToolServers = await resolveAgentMcpToolLibraryServers(
+        db,
+        agent.companyId,
+        (agent.mcpToolIds as string[] | null) ?? [],
+        existingNames,
+      );
+      if (grantedToolServers.length > 0) {
+        mergedConfig.mcpServers = [...existingMcpServers, ...grantedToolServers];
+      }
+    }
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
     const selectedEnvironmentForConfig = selectedEnvironmentId === localEnvironment.id
@@ -10739,7 +10844,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
-    const { resolvedConfig, secretKeys, secretManifest } = await resolveExecutionRunAdapterConfig({
+    const { resolvedConfig, secretKeys, secretValues, secretManifest } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
       adapterType: agent.adapterType,
@@ -11312,6 +11417,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const runtimeWorkspaceWarnings = [
       ...resolvedWorkspace.warnings,
       ...executionWorkspace.warnings,
+      ...(workspaceLockAdoptionWarning ? [workspaceLockAdoptionWarning] : []),
       ...(runtimeSessionResolution.warning ? [runtimeSessionResolution.warning] : []),
       ...(requestedShouldReuseExisting && workspaceConfigFreshness.reasons.length > 0
         ? [
@@ -11573,8 +11679,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
       const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const secretScrubbedChunk = secretValues.size > 0
+          ? redactKnownSecretValues(chunk, secretValues)
+          : chunk;
         const sanitizedChunk = compactRunLogChunk(
-          redactCurrentUserText(chunk, currentUserRedactionOptions),
+          redactCurrentUserText(secretScrubbedChunk, currentUserRedactionOptions),
         );
         if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
         if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
@@ -12558,7 +12667,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           });
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           activeRunExecutions.delete(run.id);
-          await startNextQueuedRunForAgent(run.agentId);
+          // DUR-151: this run finishing may have freed a whole-instance
+          // concurrency slot, not just this agent's own — drain every
+          // agent's queue, not only run.agentId's.
+          await resumeQueuedRuns();
         }
   }
 
@@ -13320,7 +13432,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       },
     });
 
-    await startNextQueuedRunForAgent(promotedRun.agentId);
+    // DUR-151: this can run nested inside another agent's in-flight
+    // startNextQueuedRunForAgent call (e.g. a daily-cap cancellation
+    // promoting a peer's deferred wake from inside claimQueuedRun, which is
+    // itself inside withGlobalRunStartLock). Awaiting here would re-enter
+    // the same global lock before the outer call releases it and deadlock
+    // for up to AGENT_START_LOCK_STALE_MS. Fire-and-forget, same as the
+    // claimed-run dispatch below — the promoted run already exists as
+    // "queued" from the transaction above, so callers observing that row
+    // don't need this call to have completed.
+    void startNextQueuedRunForAgent(promotedRun.agentId).catch((err) => {
+      logger.error({ err, agentId: promotedRun.agentId }, "failed to start promoted queued run");
+    });
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
@@ -13860,6 +13983,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             isSameExecutionAgent,
             wakeCommentId,
             forceFreshSession: enrichedContextSnapshot.forceFreshSession === true,
+            requiresDistinctRunBoundary: enrichedContextSnapshot.requiresDistinctRunBoundary === true,
           });
           const shouldQueueFollowupForRunningWake =
             shouldQueueFollowupForRunningIssueWake({ contextSnapshot: enrichedContextSnapshot, wakeCommentId }) &&
@@ -14412,7 +14536,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     await finalizeAgentStatus(run.agentId, "cancelled");
-    await startNextQueuedRunForAgent(run.agentId);
+    // DUR-151: cancelling a running run can free a whole-instance slot for a
+    // different agent's queued run, not just this agent's own. Fire-and-forget:
+    // claimQueuedRun calls cancelRunInternal for several reject reasons (agent
+    // missing/not invokable, budget block, pause hold) from inside its own
+    // startNextQueuedRunForAgent call, which already holds the global run-start
+    // lock — awaiting resumeQueuedRuns() here would re-enter that same lock
+    // before the outer call releases it and deadlock for up to
+    // AGENT_START_LOCK_STALE_MS.
+    void resumeQueuedRuns().catch((err) => {
+      logger.error({ err, runId: run.id }, "failed to resume queued runs after cancellation");
+    });
     return cancelled;
   }
 

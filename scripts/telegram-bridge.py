@@ -271,6 +271,53 @@ def notify_waiting(state, bots):
         save_state(state)
 
 
+def notify_stalled_agents(state, bots):
+    """DUR-128: page the operator when an agent has sat in 'error' past the
+    server's stall threshold. Server-side agent-error-alerts.ts already marks
+    errorAlertedAt in the DB once per error episode -- this just has to
+    surface that same signal in Telegram instead of leaving it to be found in
+    an activity log nobody is looking at. Keyed on id:errorAt so a later
+    episode for the same agent (a fresh errorAt) re-notifies."""
+    by_company = defaultdict(list)
+    for b in bots:
+        by_company[b["companyId"]].append(b)
+    with LOCK:
+        seen = set(state.get("notified_stalled_agents", []))
+    for company_id, cbots in by_company.items():
+        data = cli("agent", "list", "-C", company_id)
+        if data is None:
+            continue
+        reports_to, names = fetch_org(company_id)
+        bots_by_agent = {b["agentId"]: b for b in cbots}
+        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        for a in data:
+            if a.get("status") != "error" or not a.get("errorAlertedAt"):
+                continue
+            aid = a.get("id")
+            key = f"{aid}:{a.get('errorAt')}"
+            if not aid or key in seen:
+                continue
+            bot, escalated = resolve_bot(aid, bots_by_agent, reports_to, default_bot)
+            reason = (a.get("errorReason") or "no reason recorded")[:300]
+            text = f"🛑 *{a.get('name') or aid} has been stuck in error*\n{reason}"
+            text += "\nNo one has cleared it yet. It needs `clear-error` + `resume`, or someone to look."
+            text += f"\n\n[Open in Paperclip]({bot['uiBase']}/agents/{aid})"
+            sent = False
+            for chat in bots_state(state, bot["token"])["chats"]:
+                res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
+                         parse_mode="Markdown", disable_web_page_preview=True)
+                if res is None:
+                    res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
+                             disable_web_page_preview=True)
+                if res is not None:
+                    sent = True
+            if sent:
+                seen.add(key)
+    with LOCK:
+        state["notified_stalled_agents"] = list(seen)[-800:]
+        save_state(state)
+
+
 def interaction_question(it):
     """Plain-language question text — the prompt an agent halted on, not a
     generic status label. Mirrors ui/src/pages/DashboardNow.tsx's
@@ -480,6 +527,10 @@ def main():
             notify_waiting(state, bots)
         except Exception as e:
             print(f"waiting-notify error: {e}", flush=True)
+        try:
+            notify_stalled_agents(state, bots)
+        except Exception as e:
+            print(f"stalled-agent-notify error: {e}", flush=True)
         time.sleep(12)
 
 

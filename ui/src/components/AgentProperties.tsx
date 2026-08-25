@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@/lib/router";
 import { AGENT_ROLE_LABELS, type Agent, type AgentRuntimeState } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
+import { jobsApi } from "../api/jobs";
 import { useCompany } from "../context/CompanyContext";
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 import { queryKeys } from "../lib/queryKeys";
@@ -38,6 +39,16 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
 
   const reportsToAgent = agent.reportsTo ? agents?.find((a) => a.id === agent.reportsTo) : null;
 
+  // DUR-146 Stage 1 item 17: a job name (company_agent_roles) is what an
+  // operator actually assigned, and is the plain-language label they'd
+  // recognize — the legacy `agent.role` enum (still authorization-compatible
+  // under the hood) is a fallback only for agents nobody has given a job yet.
+  const { data: roleState } = useQuery({
+    queryKey: ["agents", "role-state", agent.id] as const,
+    queryFn: () => jobsApi.getAgentRoleState(agent.id),
+  });
+  const roleDisplayLabel = roleState?.job?.name ?? roleLabels[agent.role] ?? agent.role;
+
   return (
     <div className="space-y-4">
       <div className="space-y-1">
@@ -51,8 +62,8 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
             </span>
           </PropertyRow>
         )}
-        <PropertyRow label="Role">
-          <span className="text-sm">{roleLabels[agent.role] ?? agent.role}</span>
+        <PropertyRow label={roleState?.job ? "Job" : "Role"}>
+          <span className="text-sm">{roleDisplayLabel}</span>
         </PropertyRow>
         {agent.title && (
           <PropertyRow label="Title">

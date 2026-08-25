@@ -7,17 +7,21 @@ import {
   deployRequestPayloadSchema,
   formatApprovalTechnicalReference,
   formatApprovalTitle,
+  type InstructionsChangeRequestPayload,
+  instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
   toolGrantRequestPayloadSchema,
+  withdrawApprovalSchema,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
 import {
   approvalService,
   accessService,
+  agentInstructionsService,
   agentService,
   escalationGrantService,
   heartbeatService,
@@ -52,6 +56,41 @@ function isDeployRequestApproval(type: unknown, payload: Record<string, unknown>
 }
 
 /**
+ * DUR-136: `deployRequestPayloadSchema` only checks that `projectId` is *a*
+ * UUID, not that it names a real project -- an agent that copy-pastes
+ * `PAPERCLIP_WORKSPACE_ID` into both fields (a workspace id is a UUID too)
+ * produces a payload that parses cleanly, gets approved, and only fails
+ * hours later when scripts/deploy-runner.sh tries to fetch a project by
+ * that id and can't. Catch that class of mistake at filing time instead,
+ * the same way isToolGrantRequestApproval/isInstructionsChangeRequestApproval
+ * already verify their target ids resolve to something real in this company.
+ */
+async function assertDeployRequestProjectExists(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string },
+) {
+  const projectRow = await db
+    .select({ id: projects.id, companyId: projects.companyId })
+    .from(projects)
+    .where(eq(projects.id, payload.projectId))
+    .then((rows) => rows[0] ?? null);
+  if (!projectRow) {
+    throw unprocessable(
+      `Deploy approval payload.projectId "${payload.projectId}" does not match any project. ` +
+        "Double-check it's the project id, not the workspace id -- they're both UUIDs but not interchangeable.",
+      { projectId: payload.projectId },
+    );
+  }
+  if (projectRow.companyId !== companyId) {
+    throw unprocessable(
+      `Deploy approval payload.projectId "${payload.projectId}" belongs to a different company.`,
+      { projectId: payload.projectId },
+    );
+  }
+}
+
+/**
  * `request_board_approval` approvals whose payload carries `kind:"model_boost"`
  * follow the temporary model/effort escalation convention (DUR-31) and must
  * validate against modelBoostRequestPayloadSchema before an operator sees them.
@@ -82,6 +121,63 @@ function isMergePrRequestApproval(type: unknown, payload: Record<string, unknown
  */
 function isToolGrantRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "tool_grant";
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"instructions_change"`
+ * are how a boss proposes replacement instructions for a direct report (DUR-69/DUR-109).
+ * An agent can never edit its own or another agent's instructions directly --
+ * `assertNoAgentInstructionsConfigMutation` and `assertCanManageInstructionsPath` in
+ * server/src/routes/agents.ts refuse every direct route unconditionally, including
+ * for board-level file writes by a non-board caller. This approval is the only path,
+ * and nothing is written to disk until an operator approves it (see the
+ * `instructions_change` branch of approvalService.approve).
+ */
+function isInstructionsChangeRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "instructions_change";
+}
+
+/**
+ * Recomputes `beforeContent` from the target agent's current instructions file
+ * on disk. Called both when a proposal is first filed and whenever it is
+ * resubmitted after "send back for changes" -- the proposing boss can never
+ * supply this value itself (see the schema doc comment), and re-reading it
+ * fresh on resubmit also means a Reject/Send-back cycle can't leave a stale
+ * "before" snapshot if something else touched the file in the meantime.
+ */
+async function resolveInstructionsChangeBeforeContent(
+  instructions: ReturnType<typeof agentInstructionsService>,
+  targetAgent: Parameters<ReturnType<typeof agentInstructionsService>["readFile"]>[0],
+  relativePath: string,
+): Promise<string> {
+  const current = await instructions.readFile(targetAgent, relativePath).catch(() => null);
+  return current?.content ?? "";
+}
+
+/**
+ * DUR-109 follow-up: `summary` on instructionsChangeRequestPayloadSchema is an
+ * optional, caller-supplied field. Trusting it would let a proposing boss
+ * write whatever it wants into the text an operator reads to decide -- the
+ * one field this ticket most needs to be honest is exactly the one a
+ * self-interested proposer controls. Always overwrite it here with a
+ * before/after built straight from the same beforeContent/afterContent that
+ * get applied, so the approval text can never diverge from the actual change.
+ */
+function composeInstructionsChangeSummary(
+  payload: Pick<InstructionsChangeRequestPayload, "beforeContent" | "afterContent" | "reason">,
+  targetAgentName: string,
+): string {
+  const truncate = (content: string) =>
+    content.length > 1500 ? `${content.slice(0, 1500)}\n…(truncated)` : content;
+  const before = payload.beforeContent.trim().length > 0 ? truncate(payload.beforeContent) : "(no existing instructions)";
+  return (
+    `**Agent:** ${targetAgentName}\n\n` +
+    `**Why:** ${payload.reason}\n\n` +
+    `**Before:**\n\`\`\`\n${before}\n\`\`\`\n\n` +
+    `**After:**\n\`\`\`\n${truncate(payload.afterContent)}\n\`\`\`\n\n` +
+    `Approving applies these instructions immediately and records the change as a revision naming both the ` +
+    `proposing boss and the approver. "Send back for changes" returns it to the boss with a note instead of applying anything.`
+  );
 }
 
 /**
@@ -119,6 +215,15 @@ async function findDuplicateOpenApproval(
     if (!projectId || !workspaceId) return null;
     const existing = await svc.findOpenDeployApproval(companyId, projectId, workspaceId);
     return existing ? { id: existing.id, targetDescription: "a deploy request for this project/workspace" } : null;
+  }
+  if (isInstructionsChangeRequestApproval(type, payload)) {
+    const agentId = typeof payload.agentId === "string" ? payload.agentId : "";
+    const relativePath = typeof payload.relativePath === "string" ? payload.relativePath : "";
+    if (!agentId || !relativePath) return null;
+    const existing = await svc.findOpenInstructionsChangeApproval(companyId, agentId, relativePath);
+    return existing
+      ? { id: existing.id, targetDescription: "an instructions change proposal for this agent" }
+      : null;
   }
   return null;
 }
@@ -275,6 +380,7 @@ export function approvalRoutes(
   const svc = approvalService(db);
   const access = accessService(db);
   const agentsSvc = agentService(db);
+  const instructionsSvc = agentInstructionsService();
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -301,6 +407,34 @@ export function approvalRoutes(
     });
     if (decision.allowed) return true;
     res.status(403).json({ error: "Approvals are outside this actor's authorization boundary" });
+    return false;
+  }
+
+  // DUR-146 Stage 1: filing a deploy or merge request approval requires the
+  // "ask" right (deploys:request / merges:request) — company_scope:read alone
+  // (assertApprovalAccessAllowed above) is not enough. This never touches who
+  // may APPROVE — assertBoard on /approvals/:id/approve is unchanged and no
+  // grant here ever satisfies it (see DEPLOY_APPROVAL_KEYS in
+  // services/agent-roles.ts, which refuses to let a role carry
+  // "deploys:approve"/"merges:approve" in the first place).
+  async function assertApprovalRequestPermissionAllowed(
+    req: Request,
+    res: any,
+    companyId: string,
+    permissionKey: "deploys:request" | "merges:request",
+  ): Promise<boolean> {
+    const decision = await access.decide({
+      actor: req.actor,
+      action: permissionKey,
+      resource: { type: "company", companyId },
+    });
+    if (decision.allowed) return true;
+    res.status(403).json({
+      error:
+        permissionKey === "deploys:request"
+          ? "This actor does not hold the right to ask for a deploy."
+          : "This actor does not hold the right to ask for a merge.",
+    });
     return false;
   }
 
@@ -399,7 +533,12 @@ export function approvalRoutes(
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
-      deployRequestPayloadSchema.parse(approvalInput.payload);
+      if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
+      const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
+      await assertDeployRequestProjectExists(db, companyId, deployPayload);
+    }
+    if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
+      if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
     }
     if (isModelBoostRequestApproval(approvalInput.type, approvalInput.payload)) {
       const boostPayload = modelBoostRequestPayloadSchema.parse(approvalInput.payload);
@@ -431,6 +570,44 @@ export function approvalRoutes(
         res.status(422).json({ error: "Tool connection request must target an agent in this company" });
         return;
       }
+    }
+    if (isInstructionsChangeRequestApproval(approvalInput.type, approvalInput.payload)) {
+      // OPERATOR RULING (DUR-69): only a boss may propose, and never for itself.
+      // An agent-authenticated caller with no direct reports can never satisfy
+      // the reportsTo check below for any target, so "an agent cannot propose
+      // at all" falls out of the same check as "a boss cannot propose for a
+      // non-report" -- there is no separate case to gate.
+      if (actor.actorType !== "agent") {
+        res.status(403).json({ error: "Only a boss agent can propose an instructions change for a direct report" });
+        return;
+      }
+      const instructionsPayload = instructionsChangeRequestPayloadSchema.parse(approvalInput.payload);
+      if (instructionsPayload.agentId === actor.actorId) {
+        res.status(403).json({ error: "A boss cannot propose an instructions change for itself" });
+        return;
+      }
+      const targetAgent = await agentsSvc.getById(instructionsPayload.agentId);
+      if (!targetAgent || targetAgent.companyId !== companyId) {
+        res.status(422).json({ error: "Instructions change must target an agent in this company" });
+        return;
+      }
+      if (targetAgent.reportsTo !== actor.actorId) {
+        res.status(403).json({ error: "An agent can only propose instructions changes for its direct reports" });
+        return;
+      }
+      const beforeContent = await resolveInstructionsChangeBeforeContent(
+        instructionsSvc,
+        targetAgent,
+        instructionsPayload.relativePath,
+      );
+      approvalInput.payload = instructionsChangeRequestPayloadSchema.parse({
+        ...instructionsPayload,
+        beforeContent,
+        summary: composeInstructionsChangeSummary(
+          { beforeContent, afterContent: instructionsPayload.afterContent, reason: instructionsPayload.reason },
+          targetAgent.name || targetAgent.id,
+        ),
+      });
     }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
@@ -537,7 +714,11 @@ export function approvalRoutes(
       return;
     }
     const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied, toolGrant } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
+    const { approval, applied, toolGrant, instructionsChange } = await svc.approve(
+      id,
+      decidedByUserId,
+      req.body.decisionNote,
+    );
 
     if (applied) {
       // DUR-29: an agent may have raised a request_confirmation for the same decision as
@@ -592,6 +773,27 @@ export function approvalRoutes(
             capability: toolGrant.capability,
             approvalId: approval.id,
             requestedByAgentId: approval.requestedByAgentId,
+          },
+        });
+      }
+
+      // Applying a boss-proposed instructions change is exactly when an
+      // agent's actual instructions on disk change as a result of an
+      // approval -- operator-visible against the target agent (per the
+      // audit trail requirement in DUR-69's OPERATOR RULINGs), separate from
+      // the agent_instructions_revisions row which is queried structurally.
+      if (instructionsChange) {
+        await logActivity(db, {
+          companyId: instructionsChange.companyId,
+          actorType: "user",
+          actorId: req.actor.userId ?? "board",
+          action: "agent.instructions_change_approved",
+          entityType: "agent",
+          entityId: instructionsChange.agentId,
+          details: {
+            relativePath: instructionsChange.relativePath,
+            approvalId: approval.id,
+            proposedByAgentId: instructionsChange.proposedByAgentId,
           },
         });
       }
@@ -742,9 +944,10 @@ export function approvalRoutes(
     }
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
-      deployRequestPayloadSchema.parse(req.body.payload);
+      const deployPayload = deployRequestPayloadSchema.parse(req.body.payload);
+      await assertDeployRequestProjectExists(db, existing.companyId, deployPayload);
     }
-    const normalizedPayload = req.body.payload
+    let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
             existing.companyId,
@@ -753,6 +956,52 @@ export function approvalRoutes(
           )
         : req.body.payload
       : undefined;
+    if (normalizedPayload) {
+      // DUR-112: a resubmit body is caller-controlled, so the requesting boss
+      // could otherwise strip/mutate payload.kind to dodge the instructions_change
+      // safety branch below (forced beforeContent/summary recompute) while still
+      // landing whatever forged title/summary text it wants as a "pending" approval
+      // again. Key the kind check off what's already persisted on this approval --
+      // resubmit can update the rest of the payload, but never what kind it is.
+      const existingKind = (existing.payload as Record<string, unknown> | null)?.kind;
+      if (typeof existingKind === "string" && normalizedPayload.kind !== existingKind) {
+        res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
+        return;
+      }
+    }
+    if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
+      // Re-verify the boss/report relationship still holds -- it may have
+      // changed since the original proposal was filed -- and recompute
+      // beforeContent fresh rather than trusting whatever the resubmit body
+      // carried (same reasoning as the create route above).
+      const instructionsPayload = instructionsChangeRequestPayloadSchema.parse(normalizedPayload);
+      if (req.actor.type === "agent" && instructionsPayload.agentId === req.actor.agentId) {
+        res.status(403).json({ error: "A boss cannot propose an instructions change for itself" });
+        return;
+      }
+      const targetAgent = await agentsSvc.getById(instructionsPayload.agentId);
+      if (!targetAgent || targetAgent.companyId !== existing.companyId) {
+        res.status(422).json({ error: "Instructions change must target an agent in this company" });
+        return;
+      }
+      if (req.actor.type === "agent" && targetAgent.reportsTo !== req.actor.agentId) {
+        res.status(403).json({ error: "An agent can only propose instructions changes for its direct reports" });
+        return;
+      }
+      const beforeContent = await resolveInstructionsChangeBeforeContent(
+        instructionsSvc,
+        targetAgent,
+        instructionsPayload.relativePath,
+      );
+      normalizedPayload = instructionsChangeRequestPayloadSchema.parse({
+        ...instructionsPayload,
+        beforeContent,
+        summary: composeInstructionsChangeSummary(
+          { beforeContent, afterContent: instructionsPayload.afterContent, reason: instructionsPayload.reason },
+          targetAgent.name || targetAgent.id,
+        ),
+      });
+    }
     const approval = await svc.resubmit(id, normalizedPayload);
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -765,6 +1014,53 @@ export function approvalRoutes(
       entityId: approval.id,
       details: { type: approval.type },
     });
+    res.json(redactApprovalPayload(approval));
+  });
+
+  // DUR-141: agent-only self-serve withdraw. Unlike approve/reject/request-
+  // revision (assertBoard), this is deliberately NOT a board action -- it
+  // lets the requesting agent kill its own stale/duplicate approval (e.g. a
+  // merge_pr request whose PR was closed) instead of leaving a dead entry in
+  // the board's pending queue indefinitely with only a "please ignore this"
+  // comment as mitigation.
+  router.post("/approvals/:id/withdraw", validate(withdrawApprovalSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Approval not found" });
+      return;
+    }
+    assertCompanyAccess(req, existing.companyId);
+    if (
+      !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
+        describeBlockedAction: () => "withdraw an approval",
+        resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, existing.id),
+      }))
+    ) return;
+
+    if (req.actor.type !== "agent" || req.actor.agentId !== existing.requestedByAgentId) {
+      res.status(403).json({ error: "Only the requesting agent can withdraw this approval" });
+      return;
+    }
+
+    const approval = await svc.withdraw(id, req.body.decisionNote);
+
+    await interactionsSvc.resolveInteractionsLinkedToApproval(approval, {
+      agentId: req.actor.agentId ?? null,
+      userId: null,
+    });
+
+    await logActivity(db, {
+      companyId: approval.companyId,
+      actorType: "agent",
+      actorId: req.actor.agentId ?? "unknown",
+      agentId: req.actor.agentId ?? undefined,
+      action: "approval.withdrawn",
+      entityType: "approval",
+      entityId: approval.id,
+      details: { type: approval.type },
+    });
+
     res.json(redactApprovalPayload(approval));
   });
 

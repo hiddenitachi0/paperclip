@@ -121,6 +121,34 @@ describe("buildSelfReviewPassInstruction", () => {
     expect(instruction).toContain("this issue");
   });
 
+  it("names the concrete PATCH call and forbids deferring to a future pass when not already handed off", () => {
+    const instruction = buildSelfReviewPassInstruction({
+      issueIdentifier: "PAP-1",
+      alreadyHandedOff: false,
+      requestedStatus: "done",
+    });
+    expect(instruction).toContain("PATCH .../done");
+    expect(instruction).toContain('Do not defer this to "the next self-review-pass run"');
+  });
+
+  it("omits the concrete-PATCH line when no requestedStatus is given, but still forbids deferring", () => {
+    const instruction = buildSelfReviewPassInstruction({ issueIdentifier: "PAP-1", alreadyHandedOff: false });
+    expect(instruction).not.toContain("PATCH .../");
+    expect(instruction).toContain('Do not defer this to "the next self-review-pass run"');
+  });
+
+  it("DUR-167: explicitly tells a same-run reader (the just-declined run) to stop and not retry", () => {
+    const instruction = buildSelfReviewPassInstruction({
+      issueIdentifier: "PAP-1",
+      alreadyHandedOff: false,
+      requestedStatus: "done",
+    });
+    expect(instruction).toContain("If you are the run whose PATCH was just declined: stop");
+    expect(instruction).toContain("Do not retry that PATCH in this run");
+    expect(instruction).toContain("even if you post a self-review comment first");
+    expect(instruction).toContain("If you are that freshly-started run");
+  });
+
   it("is byte-for-byte unchanged for an ordinary change with no risky surface", () => {
     const withoutCategories = buildSelfReviewPassInstruction({ issueIdentifier: "PAP-1", alreadyHandedOff: false });
     const withEmptyCategories = buildSelfReviewPassInstruction({
@@ -438,6 +466,15 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     // Plain-language, non-technical instruction (matches buildSelfReviewPassInstruction).
     expect(comments[0]?.body).toContain("Review your diff/changes against the task description");
     expect(comments[0]?.body).not.toContain("self_review_pass");
+    // DUR-125: names the concrete PATCH call so the exempt run acts on its own exemption
+    // instead of deferring to "the next self-review-pass run" (which never comes).
+    expect(comments[0]?.body).toContain("PATCH .../done");
+    expect(comments[0]?.body).toContain('Do not defer this to "the next self-review-pass run"');
+
+    // DUR-125: the scheduled wake must ask heartbeat.ts's coalescing logic for a genuinely
+    // new run rather than letting it merge onto the source run's own (still-running, already
+    // gated) row -- see shouldDeferFollowupWakeForSameIssue's requiresDistinctRunBoundary.
+    expect(calls[0]?.opts.contextSnapshot?.requiresDistinctRunBoundary).toBe(true);
   });
 
   it("does not double-post the comment when a self-review wake already exists for this run chain", async () => {

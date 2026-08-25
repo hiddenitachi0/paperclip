@@ -30,6 +30,18 @@ export const resubmitApprovalSchema = z.object({
 
 export type ResubmitApproval = z.infer<typeof resubmitApprovalSchema>;
 
+/**
+ * DUR-141: lets the requesting agent withdraw its own not-yet-decided
+ * approval (e.g. a duplicate merge_pr request whose PR was closed) without
+ * needing a board actor to reject it. See `withdraw` in
+ * server/src/services/approvals.ts.
+ */
+export const withdrawApprovalSchema = z.object({
+  decisionNote: multilineTextSchema.optional().nullable(),
+});
+
+export type WithdrawApproval = z.infer<typeof withdrawApprovalSchema>;
+
 export const addApprovalCommentSchema = z.object({
   body: multilineTextSchema.pipe(z.string().min(1)),
 });
@@ -49,6 +61,13 @@ export const deployRequestPayloadSchema = z
     commit: z.string().optional(),
     title: z.string().min(1),
     note: multilineTextSchema,
+    // DUR-138: lets a caller explicitly acknowledge an already-open duplicate
+    // (see findDuplicateOpenApproval / the acknowledgedDuplicateOfApprovalId
+    // check in server/src/routes/approvals.ts) and file a genuine second
+    // approval anyway. Without this field, the .strict() parse below threw
+    // before that check ever ran, making the documented escape hatch dead
+    // code for this kind.
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -73,6 +92,7 @@ export const modelBoostRequestPayloadSchema = z
     durationMinutes: z.number().int().positive().max(ESCALATION_GRANT_MAX_DURATION_MINUTES).optional(),
     title: z.string().min(1),
     summary: multilineTextSchema,
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict()
   .refine((data) => Boolean(data.requestedModel || data.requestedEffort), {
@@ -104,7 +124,46 @@ export const toolGrantRequestPayloadSchema = z
     summary: multilineTextSchema.optional(),
     capabilitySummary: z.string().optional(),
     risks: z.array(z.string()).optional(),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
   })
   .strict();
 
 export type ToolGrantRequestPayload = z.infer<typeof toolGrantRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for a boss-proposed instructions
+ * change (DUR-69/DUR-109). An agent can never edit its own or anyone else's
+ * instructions directly -- `assertNoAgentInstructionsConfigMutation` and
+ * `assertCanManageInstructionsPath` in server/src/routes/agents.ts refuse
+ * every direct route unconditionally. This is the only path: a boss proposes
+ * replacement content for a direct report, and nothing is written to disk
+ * until an operator approves it (see the `instructions_change` branch of
+ * approvalService.approve in server/src/services/approvals.ts).
+ *
+ * `beforeContent` is always recomputed server-side from the agent's current
+ * instructions file at filing time (see server/src/routes/approvals.ts) and
+ * never trusted from the requester -- exactly like `capabilitySummary` above,
+ * this is the part of the readable diff a proposer can't be trusted to
+ * characterize fairly. It defaults to "" here (rather than being required)
+ * precisely because the proposing caller is never the one who sets it; the
+ * route always overwrites whatever it receives before persisting.
+ */
+export const instructionsChangeRequestPayloadSchema = z
+  .object({
+    kind: z.literal("instructions_change"),
+    agentId: z.string().uuid(),
+    relativePath: z.string().trim().min(1),
+    beforeContent: z.string().default(""),
+    afterContent: z.string().min(1),
+    reason: multilineTextSchema.pipe(z.string().trim().min(1)),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
+  })
+  .strict()
+  .refine((data) => data.beforeContent !== data.afterContent, {
+    message: "Proposed instructions must differ from the agent's current instructions",
+    path: ["afterContent"],
+  });
+
+export type InstructionsChangeRequestPayload = z.infer<typeof instructionsChangeRequestPayloadSchema>;

@@ -234,12 +234,19 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
   };
 
   describe("role", () => {
+    // DUR-148: the legacy `role` enum field is now rejected on PATCH /agents/:id
+    // for every caller, board included — `role: "ceo"` silently grants
+    // canCreateAgents via the "ceo" default-permissions branch with no
+    // board-only/self-assignment check of its own, so it gets the same
+    // route-level 422 treatment as roleId/roleOverrides rather than the
+    // narrower agent-only 403 this used to expect. See the equivalent
+    // board-actor coverage in agent-permissions-routes.test.ts.
     it("rejects an agent-authenticated caller changing its own role", { timeout: 20000 }, async () => {
       const app = await createApp(agentActor);
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).patch(`/api/agents/${agentId}`).send({ role: "ceo" }),
       );
-      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.status, JSON.stringify(res.body)).toBe(422);
       expect(mockAgentService.update).not.toHaveBeenCalled();
     });
 
@@ -248,21 +255,17 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).patch(`/api/agents/${peerAgentId}`).send({ role: "ceo" }),
       );
-      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.status, JSON.stringify(res.body)).toBe(422);
       expect(mockAgentService.update).not.toHaveBeenCalled();
     });
 
-    it("still allows a board-authenticated caller to change an agent's role", async () => {
+    it("rejects a board-authenticated caller changing an agent's role too", async () => {
       const app = await createApp(boardActor);
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).patch(`/api/agents/${agentId}`).send({ role: "ceo" }),
       );
-      expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockAgentService.update).toHaveBeenCalledWith(
-        agentId,
-        expect.objectContaining({ role: "ceo" }),
-        expect.anything(),
-      );
+      expect(res.status, JSON.stringify(res.body)).toBe(422);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
     });
 
     it("still allows an agent to update unrelated fields on itself", async () => {
@@ -403,6 +406,50 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
       expect(res.status, JSON.stringify(res.body)).toBe(403);
       expect(mockAgentService.update).not.toHaveBeenCalled();
     });
+
+    it("rejects an agent-authenticated caller setting its own personality (DUR-61)", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ personality: "Sassy and fun." }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+
+    it("allows a board-authenticated caller to set personality (DUR-61)", async () => {
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ personality: "Sassy and fun." }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalledWith(
+        agentId,
+        expect.objectContaining({ personality: "Sassy and fun." }),
+        expect.anything(),
+      );
+    });
+
+    it("rejects an agent-authenticated caller setting its own tone (DUR-61 addendum)", async () => {
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ tone: "Warm and cheerful." }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+
+    it("allows a board-authenticated caller to set tone (DUR-61 addendum)", async () => {
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).patch(`/api/agents/${agentId}`).send({ tone: "Warm and cheerful." }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.update).toHaveBeenCalledWith(
+        agentId,
+        expect.objectContaining({ tone: "Warm and cheerful." }),
+        expect.anything(),
+      );
+    });
   });
 
   describe("config-revision rollback", () => {
@@ -445,6 +492,45 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
         ...baseAgent,
         role: "ceo",
         adapterConfig: { mcpServers: [{ name: "shell", command: "bash", args: ["-c", "whoami"] }] },
+      });
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    // DUR-109: DUR-69's "MEASURED" section flagged this rollback route as an
+    // open gap for the instructions-bundle keys specifically -- closed by
+    // DUR-57 (assertAgentSelfUpdateRollbackAllowed reduces the rollback to
+    // the same assertAgentSelfUpdateAllowed the PATCH path uses), but nothing
+    // proved that for these five keys before this test. Mirrors the
+    // mcpServers rollback test above, for adapterConfig.instructionsFilePath
+    // and .instructionsBundleMode instead.
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different instructions bundle path", async () => {
+      mockRevision({
+        ...baseAgent,
+        adapterConfig: {
+          instructionsBundleMode: "external",
+          instructionsFilePath: "/etc/passwd",
+        },
+      });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("still allows a board-authenticated caller to roll back to a revision that restores an instructions bundle path", async () => {
+      mockRevision({
+        ...baseAgent,
+        adapterConfig: {
+          instructionsBundleMode: "external",
+          instructionsFilePath: "/etc/passwd",
+        },
       });
       const app = await createApp(boardActor);
       const res = await requestApp(app, (baseUrl) =>
@@ -507,6 +593,46 @@ describe("agent self-update guard (DUR-55 / DUR-56)", () => {
     it("still allows an agent to roll back to a revision that leaves role and tool connections unchanged", async () => {
       mockRevision({ ...baseAgent, capabilities: "writes tests" });
       const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different personality (DUR-61)", async () => {
+      mockRevision({ ...baseAgent, personality: "Sassy and fun." });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("allows a board-authenticated caller to roll back to a revision that restores a personality (DUR-61)", async () => {
+      mockRevision({ ...baseAgent, personality: "Sassy and fun." });
+      const app = await createApp(boardActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+    });
+
+    it("rejects an agent-authenticated caller rolling back to a revision that restores a different tone (DUR-61 addendum)", async () => {
+      mockRevision({ ...baseAgent, tone: "Warm and cheerful." });
+      const app = await createApp(agentActor);
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    });
+
+    it("allows a board-authenticated caller to roll back to a revision that restores a tone (DUR-61 addendum)", async () => {
+      mockRevision({ ...baseAgent, tone: "Warm and cheerful." });
+      const app = await createApp(boardActor);
       const res = await requestApp(app, (baseUrl) =>
         request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
       );

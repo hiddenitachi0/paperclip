@@ -136,6 +136,41 @@ describe("approvalService resolution idempotency", () => {
   });
 });
 
+describe("approvalService.withdraw", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("cancels a pending approval", async () => {
+    const cancelled = createApproval("cancelled");
+    const dbStub = createDbStub([[createApproval("pending")]], [cancelled]);
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.withdraw("approval-1", "stale duplicate");
+
+    expect(result.status).toBe("cancelled");
+  });
+
+  it("cancels a revision-requested approval", async () => {
+    const cancelled = createApproval("cancelled");
+    const dbStub = createDbStub([[createApproval("revision_requested")]], [cancelled]);
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.withdraw("approval-1");
+
+    expect(result.status).toBe("cancelled");
+  });
+
+  it("refuses to withdraw an already-decided approval", async () => {
+    const dbStub = createDbStub([[createApproval("approved")]], []);
+
+    const svc = approvalService(dbStub.db as any);
+    await expect(svc.withdraw("approval-1")).rejects.toThrow(
+      "Only pending or revision requested approvals can be withdrawn",
+    );
+  });
+});
+
 describe("approvalService.findOpenHireApprovalForAgent", () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -26,6 +26,8 @@ describe("agentSelfUpdateDisallowedFields", () => {
       name: "Renamed",
       title: "New Title",
       icon: "crown",
+      tone: "Sassy and fun.",
+      personality: "Chaotic-good, loves puns.",
       adapterType: "codex_local",
       defaultEnvironmentId: "env-id",
       metadata: { anything: true },
@@ -44,6 +46,8 @@ describe("agentSelfUpdateDisallowedFields", () => {
       "defaultEnvironmentId",
       "icon",
       "metadata",
+      "tone",
+      "personality",
       "name",
       "reportsTo",
       "role",
@@ -96,6 +100,33 @@ describe("computeChangedConfigFields", () => {
   it("reports nothing when the patch matches the existing row", () => {
     const patch = configPatchFromSnapshot({ ...existing });
     expect(computeChangedConfigFields(existing, patch)).toEqual({});
+  });
+
+  it("does not include icon, tone, or personality in the patch when the snapshot predates those columns (DUR-61 legacy guard)", () => {
+    // A snapshot row written before icon/tone/personality existed will have none of these keys.
+    // configPatchFromSnapshot must not emit `icon: undefined`, `tone: undefined`, or
+    // `personality: undefined`, which would NULL-wipe those columns on the first
+    // rollback of any pre-existing revision.
+    const legacySnapshot = { ...existing };
+    const patch = configPatchFromSnapshot(legacySnapshot as Parameters<typeof configPatchFromSnapshot>[0]);
+    expect(Object.prototype.hasOwnProperty.call(patch, "icon")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(patch, "tone")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(patch, "personality")).toBe(false);
+  });
+
+  it("includes icon, tone, and personality in the patch when the snapshot has those keys", () => {
+    const modernSnapshot = { ...existing, icon: "crown" as const, tone: "Warm.", personality: "Chaotic-good." };
+    const patch = configPatchFromSnapshot(modernSnapshot as Parameters<typeof configPatchFromSnapshot>[0]);
+    expect(patch).toMatchObject({ icon: "crown", tone: "Warm.", personality: "Chaotic-good." });
+  });
+
+  it("includes only tone (not personality) when the snapshot predates personality but has tone", () => {
+    // Covers an agent revised between the personality column landing and the
+    // tone column landing — a real intermediate state, not a hypothetical.
+    const partialSnapshot = { ...existing, tone: "Warm." };
+    const patch = configPatchFromSnapshot(partialSnapshot as Parameters<typeof configPatchFromSnapshot>[0]);
+    expect(Object.prototype.hasOwnProperty.call(patch, "tone")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(patch, "personality")).toBe(false);
   });
 
   it("reports reportsTo and budgetMonthlyCents when a rollback snapshot changes them", () => {

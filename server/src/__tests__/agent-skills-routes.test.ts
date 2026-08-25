@@ -183,6 +183,30 @@ async function createApp(db: Record<string, unknown> = createDb()) {
   return app;
 }
 
+// DUR-148: an agent-authenticated caller acting on its OWN agent id — used to
+// prove /skills/sync refuses self-sync even when assertCanUpdateAgent (mocked
+// to always allow in this file's beforeEach) would otherwise let it through.
+async function createSelfAgentActorApp(agentId: string, db: Record<string, unknown> = createDb()) {
+  const [{ agentRoutes }, { errorHandler }] = await Promise.all([
+    vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
+    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+  ]);
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor = {
+      type: "agent",
+      agentId,
+      companyId: "company-1",
+      source: "agent_key",
+    };
+    next();
+  });
+  app.use("/api", agentRoutes(db as any));
+  app.use(errorHandler);
+  return app;
+}
+
 async function requestApp(
   app: express.Express,
   buildRequest: (baseUrl: string) => request.Test,
@@ -528,6 +552,20 @@ describe.sequential("agent skill routes", () => {
     expect(mockAdapter.syncSkills).toHaveBeenCalled();
   });
 
+  it("rejects an agent-authenticated caller syncing skills onto its own agent record (DUR-148)", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
+
+    const res = await requestApp(
+      await createSelfAgentActorApp("11111111-1111-4111-8111-111111111111"),
+      (baseUrl) => request(baseUrl)
+        .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+        .send({ desiredSkills: ["paperclipai/paperclip/paperclip"] }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("canonicalizes desired skill references before syncing", async () => {
     mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
 
@@ -571,6 +609,7 @@ describe.sequential("agent skill routes", () => {
           }),
         }),
       }),
+      expect.anything(),
     );
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
@@ -601,6 +640,7 @@ describe.sequential("agent skill routes", () => {
       expect.objectContaining({
         role: "security",
       }),
+      expect.anything(),
     );
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
@@ -796,6 +836,7 @@ describe.sequential("agent skill routes", () => {
           }),
         }),
       }),
+      expect.anything(),
     );
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       "company-1",

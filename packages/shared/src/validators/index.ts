@@ -221,6 +221,15 @@ export {
 } from "./trust-policy.js";
 
 export {
+  DELEGATE_TOKEN_SCOPES,
+  isDelegateTokenScope,
+  normalizeDelegateTokenScopes,
+  createDelegateTokenSchema,
+  type DelegateTokenScope,
+  type CreateDelegateToken,
+} from "./board-delegate.js";
+
+export {
   createAgentSchema,
   createAgentHireSchema,
   updateAgentSchema,
@@ -258,6 +267,25 @@ export {
   type UpdateAgentPermissions,
   type McpServerConfig,
 } from "./agent.js";
+
+export {
+  personaStatusSchema,
+  createPersonaSchema,
+  updatePersonaSchema,
+  type CreatePersonaInput,
+  type UpdatePersonaInput,
+} from "./persona.js";
+
+export {
+  mcpToolLibraryConnectionSchema,
+  mcpToolLibraryEntryBodySchema,
+  mcpToolLibraryEntryUpdateSchema,
+  agentMcpToolSelectionSchema,
+  type McpToolLibraryConnection,
+  type McpToolLibraryEntryBody,
+  type McpToolLibraryEntryUpdate,
+  type AgentMcpToolSelection,
+} from "./mcp-tool-library.js";
 
 export {
   createProjectSchema,
@@ -409,6 +437,8 @@ export {
   COMPANY_ARTIFACTS_DEFAULT_LIMIT,
   COMPANY_ARTIFACTS_MAX_LIMIT,
   COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
+  companyArtifactAgentSchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactGroupBySchema,
   companyArtifactGroupSchema,
   companyArtifactMediaKindSchema,
@@ -461,18 +491,22 @@ export {
   resolveApprovalSchema,
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
+  withdrawApprovalSchema,
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
+  instructionsChangeRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
   type ResubmitApproval,
+  type WithdrawApproval,
   type AddApprovalComment,
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
+  type InstructionsChangeRequestPayload,
 } from "./approval.js";
 
 export {

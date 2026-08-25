@@ -58,11 +58,24 @@ export { approvalService } from "./approvals.js";
 export { escalationGrantService } from "./escalation-grants.js";
 export { budgetService } from "./budgets.js";
 export { secretService } from "./secrets.js";
-export { routineService } from "./routines.js";
+export {
+  routineService,
+  verifyScheduleChainBootstrap,
+  formatScheduleChainBootstrapReport,
+  logScheduleChainBootstrapVerification,
+} from "./routines.js";
+export type {
+  ScheduleChainBootstrapVerification,
+  ScheduleChainRef,
+  OrphanedScheduleChain,
+  IndeterminateScheduleRoutine,
+} from "./routines.js";
 export { costService } from "./costs.js";
 export { financeService } from "./finance.js";
 export { heartbeatService } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";
+export { agentErrorAlertsService, DEFAULT_AGENT_ERROR_STALL_THRESHOLD_MS } from "./agent-error-alerts.js";
+export { untrackedWriteAlertsService } from "./untracked-write-alerts.js";
 export { resolveProjectDeployBranches, type ProjectDeployBranches } from "./deploy-branches.js";
 export {
   productivityReviewService,
@@ -81,6 +94,12 @@ export {
   insertMissingPrincipalGrants,
   type PrincipalAccessCompatibilityBackfillStats,
 } from "./principal-access-compatibility.js";
+export { seedDurStarterJobs, DUR_COMPANY_ID } from "./agent-role-seed.js";
+export {
+  resolveAgentRoleProvisioning,
+  addAgentCatalogOverride,
+  removeAgentCatalogOverride,
+} from "./agent-roles.js";
 export { authorizationService } from "./authorization.js";
 export type {
   AuthorizationAction,
