@@ -13,6 +13,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentJobSection } from "./AgentJobSection";
 import { jobsApi } from "../../api/jobs";
+import { agentsApi } from "../../api/agents";
+import { companySkillsApi } from "../../api/companySkills";
 
 vi.mock("../../context/ToastContext", () => ({
   useToastActions: () => ({ pushToast: vi.fn() }),
@@ -26,9 +28,18 @@ vi.mock("../../api/jobs", async (importOriginal) => {
       ...actual.jobsApi,
       getAgentRoleState: vi.fn(),
       list: vi.fn().mockResolvedValue([]),
+      get: vi.fn(),
     },
   };
 });
+
+vi.mock("../../api/agents", () => ({
+  agentsApi: { get: vi.fn().mockResolvedValue({ id: "agent-1", roleOverrides: {} }) },
+}));
+
+vi.mock("../../api/companySkills", () => ({
+  companySkillsApi: { list: vi.fn().mockResolvedValue([]) },
+}));
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -120,6 +131,51 @@ describe("AgentJobSection", () => {
 
     await waitForAssertion(() => {
       expect(container.textContent).toContain("Could not load this agent's job");
+    });
+  });
+
+  // DUR-146 Stage 1 item 19(b): the skills bucket combines the assigned
+  // job's skillKeys (fromJob) with this agent's own roleOverrides.skills
+  // (added/removed) — two separate endpoints, since GET /agents/:id/role
+  // doesn't return skill state.
+  it("renders from-job, added, and removed skills from the job and the agent's overrides", async () => {
+    vi.mocked(jobsApi.getAgentRoleState).mockResolvedValue({
+      job: { id: "job-1", name: "Support agent", description: "" },
+      assignedAt: null,
+      tools: { fromJob: [], added: [], removed: [] },
+      rights: { fromJob: [], added: [], removed: [] },
+    });
+    vi.mocked(jobsApi.get).mockResolvedValue({
+      id: "job-1",
+      companyId: "company-1",
+      name: "Support agent",
+      description: "",
+      instructions: "",
+      defaultTools: [],
+      defaultRights: [],
+      skillKeys: ["triage", "refunds"],
+      connectorKeys: [],
+      createdAt: "",
+      updatedAt: "",
+    });
+    vi.mocked(agentsApi.get).mockResolvedValue({
+      id: "agent-1",
+      roleOverrides: { skills: { add: ["custom-macro"], remove: ["refunds"] } },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    vi.mocked(companySkillsApi.list).mockResolvedValue([
+      { key: "triage", name: "Triage tickets" },
+      { key: "refunds", name: "Process refunds" },
+      { key: "custom-macro", name: "Custom macro" },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ] as any);
+
+    await render();
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Triage tickets");
+      expect(container.textContent).toContain("Custom macro");
+      expect(container.textContent).toContain("Process refunds");
     });
   });
 });

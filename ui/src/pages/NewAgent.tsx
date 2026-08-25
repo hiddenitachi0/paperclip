@@ -12,20 +12,12 @@ import { jobsApi } from "../api/jobs";
 import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import {
-  AGENT_ROLES,
   type AdapterEnvironmentTestResult,
   type AgentPermissions,
 } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { Shield } from "lucide-react";
 import { cn, agentUrl } from "../lib/utils";
-import { roleLabels } from "../components/agent-config-primitives";
 import {
   AgentConfigForm,
   AdapterEnvironmentResult,
@@ -76,7 +68,6 @@ export function NewAgent() {
   const [title, setTitle] = useState("");
   const [tone, setTone] = useState("");
   const [personality, setPersonality] = useState("");
-  const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
@@ -84,7 +75,6 @@ export function NewAgent() {
   );
   const [selectedSkillKeys, setSelectedSkillKeys] = useState<string[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [roleOpen, setRoleOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [testAgentAction, setTestAgentAction] = useState<(() => void) | null>(null);
   const [testAgentState, setTestAgentState] = useState({ disabled: true, pending: false });
@@ -132,7 +122,11 @@ export function NewAgent() {
   });
 
   const isFirstAgent = !agents || agents.length === 0;
-  const effectiveRole = isFirstAgent ? "ceo" : role;
+  // Job (company_agent_roles) replaced the legacy AGENT_ROLES picker in the
+  // hire flow (DUR-146 Stage 1 item 18); this legacy field is still required
+  // by the create schema and always defaults to "general" except for the
+  // very first agent, which the backend requires to be "ceo".
+  const effectiveRole = isFirstAgent ? "ceo" : "general";
 
   useEffect(() => {
     setBreadcrumbs([
@@ -307,37 +301,8 @@ export function NewAgent() {
           </div>
         </div>
 
-        {/* Property chips: Role + Reports To */}
+        {/* Property chips: Job + Reports To */}
         <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
-          <Popover open={roleOpen} onOpenChange={setRoleOpen}>
-            <PopoverTrigger asChild>
-              <button
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors",
-                  isFirstAgent && "opacity-60 cursor-not-allowed"
-                )}
-                disabled={isFirstAgent}
-              >
-                <Shield className="h-3 w-3 text-muted-foreground" />
-                {roleLabels[effectiveRole] ?? effectiveRole}
-              </button>
-            </PopoverTrigger>
-            <PopoverContent className="w-36 p-1" align="start">
-              {AGENT_ROLES.map((r) => (
-                <button
-                  key={r}
-                  className={cn(
-                    "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
-                    r === role && "bg-accent"
-                  )}
-                  onClick={() => { setRole(r); setRoleOpen(false); }}
-                >
-                  {roleLabels[r] ?? r}
-                </button>
-              ))}
-            </PopoverContent>
-          </Popover>
-
           <ReportsToPicker
             agents={agents ?? []}
             value={reportsTo}
