@@ -88,6 +88,27 @@ ARGS='--api-base http://127.0.0.1:3100 --data-dir /paperclip/cli-state --json'
 # (60 * 3s) so a slow-but-healthy boot doesn't get killed and rolled back.
 HEALTH_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES:-60}"
 HEALTH_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP:-3}"
+# DUR-163: a `docker build` for a large batch of commits saturates this same
+# box (measured load average 13+ on 4 CPUs) right before the health check
+# starts probing it — at that load, curl can fail to even complete a TCP
+# connect within a couple of seconds, which used to be indistinguishable from
+# the server actually refusing/being down. These are separate per-PROBE
+# budgets (well under HEALTH_SLEEP_SECONDS) so one stuck probe doesn't eat
+# into the next one's turn.
+HEALTH_CONNECT_TIMEOUT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_CONNECT_TIMEOUT:-5}"
+HEALTH_MAX_TIME_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_MAX_TIME:-10}"
+# How long to wait for the target port to accept a bare TCP connection before
+# starting to spend the timed HEALTH_RETRIES budget on it at all — a
+# container that hasn't opened its port yet is still booting, not unhealthy,
+# and shouldn't burn through retries meant for a slow-to-become-healthy
+# process.
+PORT_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS:-30}"
+# Durable, on-host location for the failing container's logs, captured just
+# before a rollback recreates it and destroys them — see maybe_rollback()
+# and capture_failure_diagnostics() (DUR-163's evidence gap). Deliberately
+# NOT under deployTargetPath (a git checkout that gets reset --hard) or
+# inside any container (which is exactly what's being replaced).
+FAILURE_LOG_DIR="${PAPERCLIP_DEPLOY_RUNNER_FAILURE_LOG_DIR:-$REPO_DIR/deploy-failure-logs}"
 # How hard to try to actually deliver the outcome comment before giving up
 # and leaving the approval unprocessed for the next poll cycle. Sized to
 # outlast a `docker exec` blip while the server container itself is being
@@ -276,11 +297,76 @@ for key, value in fields.items():
 PY
 }
 
+load_average() { # -> 1-minute load average, or "unknown" if /proc/loadavg isn't available
+  awk '{print $1}' /proc/loadavg 2>/dev/null || echo unknown
+}
+
+# Classifies one curl(1) exit status + http_code pair (DUR-163). A refused
+# connection (curl exit 7) or one that never completed within the per-probe
+# budget (exit 28) means the box never actually answered — that is NOT the
+# same finding as a real HTTP response that just isn't 200, and must not be
+# reported identically. Anything else that kept curl from getting a response
+# (DNS, TLS, etc.) is bucketed separately as "unreachable" rather than folded
+# into either specific case.
+probe_verdict() { # curl_exit_status, http_code -> ok | http_error | refused | timeout | unreachable
+  local curl_status="$1" code="$2"
+  if [ "$curl_status" -eq 0 ]; then
+    if [ "$code" = "200" ]; then echo ok; else echo http_error; fi
+    return
+  fi
+  case "$curl_status" in
+    7) echo refused ;;
+    28) echo timeout ;;
+    *) echo unreachable ;;
+  esac
+}
+
+# Waits up to $timeout seconds for a bare TCP connect to the health-check
+# URL's host:port to succeed — no HTTP request sent, just "has the container
+# opened its port at all". Returns as soon as a connect succeeds (or the URL
+# has no discernible host, in which case there's nothing to wait on); returns
+# 1 if the timeout elapses with the port never accepting a connection.
+wait_for_port() { # url, timeout_seconds
+  local url="$1" timeout="$2"
+  python3 - "$url" "$timeout" <<'PY' 2>/dev/null
+import socket, sys, time
+from urllib.parse import urlparse
+
+url, timeout = sys.argv[1], float(sys.argv[2])
+parsed = urlparse(url)
+host = parsed.hostname
+if not host:
+    sys.exit(0)
+port = parsed.port or (443 if parsed.scheme == "https" else 80)
+deadline = time.time() + timeout
+while True:
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            sys.exit(0)
+    except OSError:
+        if time.time() >= deadline:
+            sys.exit(1)
+        time.sleep(1)
+PY
+}
+
 health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
-  local url="$1" code
-  for _ in $(seq 1 "$HEALTH_RETRIES"); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' "$url" || true)"
-    [ "$code" = "200" ] && return 0
+  local url="$1" code curl_status verdict load attempt
+
+  if ! wait_for_port "$url" "$PORT_WAIT_SECONDS"; then
+    log "runner: health check: $url never accepted a TCP connection within ${PORT_WAIT_SECONDS}s (load $(load_average)) — the container may never have opened its port"
+  fi
+
+  for attempt in $(seq 1 "$HEALTH_RETRIES"); do
+    load="$(load_average)"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time "$HEALTH_MAX_TIME_SECONDS" "$url")"
+    curl_status=$?
+    verdict="$(probe_verdict "$curl_status" "$code")"
+    if [ "$verdict" = ok ]; then
+      log "runner: health probe $attempt/$HEALTH_RETRIES ok (http_code=200 load=$load)"
+      return 0
+    fi
+    log "runner: health probe $attempt/$HEALTH_RETRIES $verdict (curl_status=$curl_status http_code=${code:-000} load=$load)"
     sleep "$HEALTH_SLEEP_SECONDS"
   done
   return 1
@@ -468,17 +554,19 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   local recipe_status=$?
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
-    maybe_rollback "$aid" "$before_commit"
+    local diag_path
+    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
-    comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" ) Check deploy-runner.log."
+    comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
   fi
 
   if ! health_check "$DV_HEALTH_CHECK_URL"; then
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
-    maybe_rollback "$aid" "$before_commit"
-    comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." ) Check deploy-runner.log."
+    local diag_path
+    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
   fi
 
@@ -486,10 +574,48 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)."
 }
 
-maybe_rollback() { # approval_id, before_commit
-  local aid="$1" before="$2"
+# DUR-163: docker logs for the container being replaced only exist as long as
+# that specific container does — `docker compose up --force-recreate` (or the
+# swap half of compose_build_swap) throws the old one away, so a rollback
+# that re-runs the recipe destroys the only evidence of why the just-deployed
+# version failed unless it's captured first. Written to FAILURE_LOG_DIR
+# (on-host, outside deployTargetPath and outside any container) so it
+# survives both the git reset --hard and the container recreate. Best
+# effort: a failure here is logged and swallowed, never blocks the rollback.
+capture_failure_diagnostics() { # approval_id, commit -> stdout: path written (empty if nothing could be captured)
+  local aid="$1" commit="$2" dir ts out
+  dir="$FAILURE_LOG_DIR"
+  mkdir -p "$dir" 2>>"$LOG" || { log "runner: $aid could not create $dir for failure diagnostics"; return 0; }
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  out="$dir/${ts}-${aid}-${commit}.log"
+  (
+    echo "# deploy failure diagnostics: approval=$aid commit=$commit kind=$DV_DEPLOY_KIND captured=$ts load=$(load_average)"
+    if [ "$DV_DEPLOY_KIND" = "compose_recreate" ] || [ "$DV_DEPLOY_KIND" = "compose_build_swap" ]; then
+      cd "$DV_DEPLOY_TARGET_PATH" 2>/dev/null || { echo "(could not cd to $DV_DEPLOY_TARGET_PATH)"; exit 0; }
+      local compose_args=() f
+      [ -n "$DV_ENV_FILE" ] && compose_args+=(--env-file "$DV_ENV_FILE")
+      for f in $DV_COMPOSE_FILES; do compose_args+=(-f "$f"); done
+      echo "## docker compose logs --no-color --tail 500 ${DV_DEPLOY_SERVICES:-<all services>}"
+      # shellcheck disable=SC2086
+      docker compose "${compose_args[@]}" logs --no-color --tail 500 $DV_DEPLOY_SERVICES 2>&1
+    else
+      echo "## docker logs --tail 500 $DOCKER_SERVER_CONTAINER"
+      docker logs --tail 500 "$DOCKER_SERVER_CONTAINER" 2>&1
+    fi
+  ) >"$out" 2>>"$LOG"
+  log "runner: $aid captured pre-rollback failure diagnostics to $out"
+  printf '%s' "$out"
+}
+
+maybe_rollback() { # approval_id, before_commit, after_commit -> stdout: failure-diagnostics log path (empty if rollback isn't configured or nothing could be captured)
+  local aid="$1" before="$2" after="${3:-unknown}"
   [ "$DV_ROLLBACK" = "git_previous" ] || return 0
-  [ "$before" = "unknown" ] && return 0
+  local diag_path
+  diag_path="$(capture_failure_diagnostics "$aid" "$after")"
+  if [ "$before" = "unknown" ]; then
+    printf '%s' "$diag_path"
+    return 0
+  fi
   log "runner: $aid rolling back $DV_DEPLOY_TARGET_PATH to $before"
   git -C "$DV_DEPLOY_TARGET_PATH" reset --hard --quiet "$before" 2>>"$LOG"
   run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
@@ -499,6 +625,7 @@ maybe_rollback() { # approval_id, before_commit
   elif [ "$rollback_status" -ne 0 ]; then
     log "runner: $aid rollback recipe also failed — manual intervention needed"
   fi
+  printf '%s' "$diag_path"
 }
 
 # EXIT trap safety net for run_one_approval/run_superseded_approval's
