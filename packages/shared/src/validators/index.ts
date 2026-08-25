@@ -257,6 +257,11 @@ export {
 } from "./agent.js";
 
 export {
+  sendLaneAMessageSchema,
+  type SendLaneAMessage,
+} from "./lane-a.js";
+
+export {
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,

@@ -4,6 +4,7 @@ import {
   uuid,
   text,
   integer,
+  boolean,
   timestamp,
   jsonb,
   index,
@@ -33,6 +34,10 @@ export const agents = pgTable(
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     errorReason: text("error_reason"),
     permissions: jsonb("permissions").$type<Record<string, unknown>>().notNull().default({}),
+    // Lane A (DUR-217): direct-model-call text endpoint, no agent runtime. Off
+    // by default and board-settable only — see assertCanManageLaneAFlag in
+    // server/src/routes/agents.ts, which mirrors the instructions-path guard.
+    laneAEnabled: boolean("lane_a_enabled").notNull().default(false),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
