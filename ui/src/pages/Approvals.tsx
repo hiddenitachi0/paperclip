@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "@/lib/router";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Issue } from "@paperclipai/shared";
 import { approvalsApi } from "../api/approvals";
 import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
@@ -16,7 +17,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 type StatusFilter = "pending" | "all";
 
 export function Approvals() {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -69,6 +70,24 @@ export function Approvals() {
       (a) => statusFilter === "all" || a.status === "pending" || a.status === "revision_requested",
     )
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  // Fetch the issue(s) each approval is linked to so its card can lead with
+  // the ticket identifier the operator already tracks on the board, instead
+  // of only the commit/PR trail buried in the payload (DUR-211).
+  const approvalIssueQueries = useQueries({
+    queries: filtered.map((approval) => ({
+      queryKey: [...queryKeys.approvals.list(selectedCompanyId ?? ""), approval.id, "issues"],
+      queryFn: () => approvalsApi.listIssues(approval.id),
+      enabled: !!selectedCompanyId,
+      staleTime: 30_000,
+      retry: false,
+    })),
+  });
+  const issuesByApprovalId = new Map<string, Issue[]>();
+  filtered.forEach((approval, index) => {
+    const result = approvalIssueQueries[index]?.data;
+    if (result) issuesByApprovalId.set(approval.id, result);
+  });
 
   const pendingCount = (data ?? []).filter(
     (a) => a.status === "pending" || a.status === "revision_requested",
@@ -126,6 +145,8 @@ export function Approvals() {
               pendingAction={
                 approveMutation.isPending ? "approve" : rejectMutation.isPending ? "reject" : null
               }
+              linkedIssues={issuesByApprovalId.get(approval.id)}
+              companyName={selectedCompany?.name ?? null}
             />
           ))}
         </div>
