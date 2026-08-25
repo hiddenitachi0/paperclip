@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -31,6 +32,25 @@ function assertSuccess(result, label) {
   assert.equal(result.status, 0, `${label} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
 }
 
+// spawnSync blocks this whole process's event loop until the child exits.
+// That's fine for every other test here (the child only ever talks to files
+// on disk via the fake `docker`), but the health_check HTTP-error test below
+// runs a real HTTP server IN this same process for curl to hit — with
+// spawnSync, the event loop that server needs to accept/answer the
+// connection is exactly what's frozen waiting for curl, deadlocking both
+// sides. Use a real (async) child process there instead so the server can
+// still run while curl is in flight.
+function runAsync(command, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd: repoRoot, ...options });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
 // Fake `docker` that intercepts `docker exec [-e K=V ...] <container> sh -lc "<cmd>"`.
 // Dispatches on substrings of <cmd> against canned JSON fixtures in
 // $SCENARIO_DIR, and can be told to fail specific `approval comment <id>`
@@ -38,9 +58,45 @@ function assertSuccess(result, label) {
 // Built from plain (non-template) strings, not a template literal — the
 // script is full of bash `${...}` expansions that a JS template literal
 // would try to interpolate itself.
+// DUR-163: `docker compose ...` invocations (run_recipe()/capture_failure_logs(),
+// the true I/O boundary for the recipe and pre-rollback log-capture code paths)
+// are dispatched separately from `docker exec` below, keyed off canned exit
+// codes/output in $SCENARIO_DIR (compose-{build,up,logs}-exit,
+// compose-logs-output.txt) so a test can force a recipe failure and control
+// what "docker compose logs" returns for it, without needing a real docker.
 const FAKE_DOCKER = [
   '#!/usr/bin/env bash',
   'set -uo pipefail',
+  '',
+  'if [ "${1:-}" = "compose" ]; then',
+  '  shift',
+  '  # Skip any leading --env-file/-f flag pairs run_recipe()/capture_failure_logs()',
+  '  # build ahead of the actual subcommand, so this still finds `logs`/`build`/`up`',
+  '  # regardless of whether a test configures composeFiles/envFile.',
+  '  while [ "$#" -gt 0 ]; do',
+  '    case "$1" in',
+  '      --env-file|-f) shift 2 ;;',
+  '      *) break ;;',
+  '    esac',
+  '  done',
+  '  sub="${1:-}"',
+  '  case "$sub" in',
+  '    logs)',
+  '      cat "$SCENARIO_DIR/compose-logs-output.txt" 2>/dev/null',
+  '      exit "$(cat "$SCENARIO_DIR/compose-logs-exit" 2>/dev/null || echo 0)"',
+  '      ;;',
+  '    build)',
+  '      exit "$(cat "$SCENARIO_DIR/compose-build-exit" 2>/dev/null || echo 0)"',
+  '      ;;',
+  '    up)',
+  '      exit "$(cat "$SCENARIO_DIR/compose-up-exit" 2>/dev/null || echo 0)"',
+  '      ;;',
+  '    *)',
+  '      exit 0',
+  '      ;;',
+  '  esac',
+  'fi',
+  '',
   '[ "${1:-}" = "exec" ] || exit 1',
   'shift',
   '',
@@ -775,5 +831,229 @@ test("run_one_approval's crash-fallback comment does not double-comment when the
     assert.deepEqual(scenario.processedIds(), ["aid-1"]);
   } finally {
     scenario.cleanup();
+  }
+});
+
+// DUR-163: on an overloaded host, health probes can intermittently come back
+// as a curl connect failure/timeout ("000") even though the server is
+// healthy -- e.g. mid `docker build` -- and the old health_check() logged
+// nothing per-probe, so there was no way to tell that apart after the fact
+// from an actual HTTP error response. This proves the two are now logged
+// distinctly (never conflated) and that each probe line carries the host
+// load average when it's cheaply available (/proc/loadavg, present on any
+// Linux CI box).
+test("health_check logs each probe with its HTTP code and load average, and distinguishes a connect failure from an HTTP error response", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-health-test-"));
+  try {
+    const log = path.join(dir, "log");
+    const healthEnv = {
+      ...process.env,
+      PAPERCLIP_DEPLOY_RUNNER_LOG: log,
+      PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES: "1",
+      PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "0",
+    };
+
+    // Connect-refused probe: nothing listens on 127.0.0.1:1 (a privileged
+    // port), so curl fails to connect at all -- no HTTP response was ever
+    // received.
+    const refusedScript = `set -uo pipefail\nsource "${SCRIPT}"\nhealth_check "http://127.0.0.1:1/health"`;
+    const refusedResult = run("bash", ["-c", refusedScript], { env: healthEnv });
+    assert.equal(refusedResult.status, 1, "a connect failure must still count as an unhealthy probe");
+
+    const refusedLines = readFileSync(log, "utf8").split("\n").filter(Boolean);
+    const refusedLine = refusedLines.at(-1);
+    assert.match(
+      refusedLine,
+      /health probe 1\/1 http:\/\/127\.0\.0\.1:1\/health -> connect failed\/timed out \(curl exit \d+\)/,
+    );
+    assert.doesNotMatch(refusedLine, /-> HTTP/, "a connect failure must never be logged as if an HTTP response came back");
+
+    // HTTP-error probe: a real server that deliberately answers 500, so the
+    // distinction being asserted is against an actual response, not just
+    // another way to fail to connect.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(500);
+      res.end();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    try {
+      const errorScript = `set -uo pipefail\nsource "${SCRIPT}"\nhealth_check "http://127.0.0.1:${port}/health"`;
+      // Async spawn, not spawnSync -- the server above lives in this same
+      // process, so a synchronous spawn would freeze the event loop it needs
+      // to answer curl's request (see runAsync's comment).
+      const errorResult = await runAsync("bash", ["-c", errorScript], { env: healthEnv });
+      assert.equal(errorResult.status, 1, "a 500 response must not count as healthy");
+
+      const errorLines = readFileSync(log, "utf8").split("\n").filter(Boolean);
+      const errorLine = errorLines.at(-1);
+      assert.match(errorLine, new RegExp(`health probe 1/1 http://127\\.0\\.0\\.1:${port}/health -> HTTP 500`));
+      assert.doesNotMatch(errorLine, /connect failed/, "an actual HTTP error response must never be conflated with a connect failure");
+      assert.match(errorLine, /\(load avg: [0-9.]+\)/, "each probe should carry the host load average when it's cheaply available");
+    } finally {
+      server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-163: before a rollback swaps out a failed container, its logs must be
+// captured somewhere that survives the swap. capture_failure_logs() is the
+// unit under test here in isolation; format_log_excerpt() is the piece that
+// turns a (potentially large) capture into the bounded excerpt the failure
+// comment actually carries.
+test("capture_failure_logs writes the failing container's docker compose logs to a durable file, and format_log_excerpt returns a bounded tail", () => {
+  const scenario = makeScenario();
+  try {
+    const targetDir = path.join(scenario.dir, "target-repo");
+    mkdirSync(targetDir, { recursive: true });
+    const lines = Array.from({ length: 250 }, (_, i) => `log line ${i + 1}`);
+    writeFileSync(path.join(scenario.dir, "compose-logs-output.txt"), `${lines.join("\n")}\n`);
+
+    const script = `set -uo pipefail\nsource "${SCRIPT}"\ncapture_failure_logs "${targetDir}" "compose_recreate" "" "" "" "aid-1"`;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "capture_failure_logs");
+    const capturePath = result.stdout.trim();
+    assert.ok(capturePath, "capture_failure_logs must print the capture file path on success");
+    assert.ok(existsSync(capturePath), `capture file ${capturePath} must exist on disk`);
+
+    const captured = readFileSync(capturePath, "utf8");
+    assert.match(captured, /^log line 1$/m, "the full capture must include the earliest lines");
+    assert.match(captured, /^log line 250$/m, "the full capture must include the latest lines");
+
+    const excerptScript = `set -uo pipefail\nsource "${SCRIPT}"\nformat_log_excerpt "${capturePath}"`;
+    const excerptResult = run("bash", ["-c", excerptScript], { env: process.env });
+    assertSuccess(excerptResult, "format_log_excerpt");
+    assert.doesNotMatch(excerptResult.stdout, /^log line 50$/m, "the comment excerpt must be bounded to the last 200 lines, not the full capture");
+    assert.match(excerptResult.stdout, /^log line 51$/m, "tail -200 of 250 lines should start at line 51");
+    assert.match(excerptResult.stdout, /^log line 250$/m);
+    assert.match(
+      excerptResult.stdout,
+      new RegExp(capturePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "the excerpt should point at the full capture file for anyone who needs more than the tail",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("capture_failure_logs captures nothing for a custom recipe kind, since there is no defined container identity to target", () => {
+  const scenario = makeScenario();
+  try {
+    const script = `set -uo pipefail\nsource "${SCRIPT}"\ncapture_failure_logs "/tmp" "custom" "" "" "" "aid-1"`;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assert.equal(result.status, 1, "a custom recipe has no defined container identity, so nothing should be captured");
+    assert.equal(result.stdout, "");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-163 end-to-end: a real compose_recreate recipe failure, through
+// process_approval(), must capture the failing container's logs BEFORE
+// maybe_rollback() resets the checkout and re-runs the recipe (which is
+// exactly what destroys the evidence), and the resulting failure comment
+// must carry a bounded excerpt of that capture rather than only a pointer
+// to deploy-runner.log.
+test("process_approval captures pre-rollback container logs before maybe_rollback runs, and includes a bounded excerpt in the failure comment", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-capture-integration-"));
+  try {
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetDir, { recursive: true });
+    g(targetDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetDir, "f.txt"), "A");
+    g(targetDir, ["add", "f.txt"]);
+    g(targetDir, ["commit", "--quiet", "-m", "A"]);
+
+    const lines = Array.from({ length: 250 }, (_, i) => `container log ${i + 1}`);
+    writeFileSync(path.join(scenario.dir, "compose-logs-output.txt"), `${lines.join("\n")}\n`);
+    // The recipe's `up -d --force-recreate` fails -- this is the "failed
+    // deploy" whose evidence must not be destroyed by the rollback that follows.
+    writeFileSync(path.join(scenario.dir, "compose-up-exit"), "1");
+
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "compose_recreate",
+        deployTargetPath: targetDir,
+        healthCheckUrl: "http://example.invalid/health",
+        rollback: "git_previous",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", kind: "deploy" },
+    });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    // Not scenario.commentsFor() here: that helper splits the delivered
+    // comment log on "\n" on the assumption a comment body is single-line,
+    // which every OTHER test's body is -- this one's body deliberately isn't
+    // (it embeds a multi-line log excerpt), so read the raw file instead.
+    const commentPath = path.join(scenario.dir, "comment-aid-1.log");
+    assert.ok(existsSync(commentPath), "expected a delivered comment for aid-1");
+    const commentBody = readFileSync(commentPath, "utf8");
+    assert.equal(commentBody.split("Deploy failed").length - 1, 1, "expected exactly one delivered comment for aid-1");
+    assert.match(commentBody, /Rolled back to/);
+    assert.match(commentBody, /Last 200 lines of container logs captured just before rollback/);
+    assert.match(commentBody, /container log 250/);
+    assert.doesNotMatch(commentBody, /container log 1\n/, "the comment must carry a bounded tail, not the entire capture");
+
+    const runnerLog = scenario.readLog();
+    const capturedAt = runnerLog.indexOf("captured pre-rollback container logs to");
+    const rollingBackAt = runnerLog.indexOf("rolling back");
+    assert.ok(capturedAt !== -1, "expected a log line recording the capture");
+    assert.ok(rollingBackAt !== -1, "expected a log line recording the rollback");
+    assert.ok(capturedAt < rollingBackAt, "the capture must happen BEFORE the rollback, or the evidence would already be destroyed by it");
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

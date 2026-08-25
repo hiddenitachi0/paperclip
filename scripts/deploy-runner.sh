@@ -65,6 +65,18 @@
 # an agent without host/docker access can see recent runner activity via the
 # API instead of needing a human to read deploy-runner.log by hand.
 #
+# DUR-163: health_check() logs every probe attempt (HTTP code + host load
+# average), and distinguishes a curl connect failure/timeout ("000") from an
+# actual HTTP error response instead of conflating both into one
+# undifferentiated "non-200" — an overloaded host (e.g. mid `docker build`)
+# can make probes intermittently unreachable even though the server itself
+# is fine, and that used to look identical in the log to the server actually
+# being down. Separately, before maybe_rollback() swaps a failed container
+# out, capture_failure_logs() captures its `docker compose logs` to a file
+# alongside $LOG (so the rollback that's about to recreate/replace it can't
+# destroy that evidence first) and format_log_excerpt() puts a bounded tail
+# of that capture directly into the failure comment.
+#
 # Auth: uses the CLI's stored board credential inside the server container,
 # same as deploy-poller.sh — must be an instance admin (required for the
 # cross-company approval list and the GitHub-token endpoint).
@@ -276,10 +288,40 @@ for key, value in fields.items():
 PY
 }
 
+# DUR-163: best-effort, cheap host load average to attach to each health
+# probe log line. `/proc/loadavg` is preferred (no subprocess); falls back to
+# parsing `uptime` on boxes/containers where /proc isn't mounted the usual
+# way. Never fails the caller — prints nothing if neither is available.
+load_avg() {
+  if [ -r /proc/loadavg ]; then
+    awk '{print $1}' /proc/loadavg 2>/dev/null
+  elif command -v uptime >/dev/null 2>&1; then
+    uptime 2>/dev/null | sed -n 's/.*load average[s]*: *\([0-9.]*\).*/\1/p'
+  fi
+}
+
+# DUR-163: every probe attempt is logged (code + host load average at the
+# time of that probe), and a connect failure/timeout is distinguished from an
+# HTTP error response instead of being conflated into one undifferentiated
+# "non-200". `curl -w '%{http_code}'` alone can't tell these apart on its
+# own: it prints "000" for both "couldn't connect at all" AND certain early
+# failures, so the curl exit status is the authoritative signal for "did we
+# even get a response" — "000" is used only as a secondary check, matching
+# what curl documents it emits when no HTTP response was received. This is
+# purely about honest evidence/logging — it does NOT change health_check's
+# pass/fail behavior: only code "200" ever counts as healthy, same as before.
 health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
-  local url="$1" code
-  for _ in $(seq 1 "$HEALTH_RETRIES"); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' "$url" || true)"
+  local url="$1" code curl_status attempt load probe_desc
+  for attempt in $(seq 1 "$HEALTH_RETRIES"); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "$url")"
+    curl_status=$?
+    load="$(load_avg)"
+    if [ "$curl_status" -ne 0 ] || [ "$code" = "000" ]; then
+      probe_desc="connect failed/timed out (curl exit $curl_status)"
+    else
+      probe_desc="HTTP $code"
+    fi
+    log "runner: health probe $attempt/$HEALTH_RETRIES $url -> $probe_desc${load:+ (load avg: $load)}"
     [ "$code" = "200" ] && return 0
     sleep "$HEALTH_SLEEP_SECONDS"
   done
@@ -352,6 +394,22 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_b
   )
 }
 
+# Shared by run_recipe() and capture_failure_logs() so the two `docker
+# compose` invocations always agree on how -f/--env-file get built from the
+# same DV_COMPOSE_FILES/DV_ENV_FILE policy fields. Sets the global array
+# COMPOSE_ARGS instead of returning it (bash has no array return values) —
+# callers read it immediately after calling, inside the same subshell.
+compose_args_from() { # compose_files, env_file -> sets global COMPOSE_ARGS
+  local compose_files="$1" env_file="$2" f
+  COMPOSE_ARGS=()
+  [ -n "$env_file" ] && COMPOSE_ARGS+=(--env-file "$env_file")
+  if [ -n "$compose_files" ]; then
+    for f in $compose_files; do
+      COMPOSE_ARGS+=(-f "$f")
+    done
+  fi
+}
+
 run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   # Exit status: 0 = ok; 3 = compose_build_swap's `build` step failed before
   # anything was swapped (the `&&` short-circuits `up --no-build`), so the
@@ -361,14 +419,8 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   local target_dir="$1" kind="$2" services="$3" command="$4" compose_files="$5" env_file="$6"
   (
     cd "$target_dir" || exit 1
-    local compose_args=()
-    [ -n "$env_file" ] && compose_args+=(--env-file "$env_file")
-    if [ -n "$compose_files" ]; then
-      local f
-      for f in $compose_files; do
-        compose_args+=(-f "$f")
-      done
-    fi
+    compose_args_from "$compose_files" "$env_file"
+    local compose_args=("${COMPOSE_ARGS[@]}")
     case "$kind" in
       compose_recreate)
         # shellcheck disable=SC2086
@@ -390,6 +442,58 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
         ;;
     esac
   )
+}
+
+# DUR-163: capture the failing container's `docker compose logs` BEFORE
+# maybe_rollback() resets the checkout and re-runs the recipe — that reset +
+# recreate is exactly what destroys the failing container (and with it, the
+# only evidence of what actually broke). Only compose_recreate/
+# compose_build_swap have a well-defined container identity to target here
+# (via the same DV_DEPLOY_SERVICES/DV_COMPOSE_FILES/DV_ENV_FILE policy
+# fields run_recipe() itself uses, through the shared compose_args_from()
+# helper) — a `custom` recipe's deployCommand is an arbitrary operator
+# script with nothing for us to safely target, so there is nothing captured
+# for that kind.
+#
+# Written to a file alongside $LOG rather than inside the container/volume
+# that's about to be recreated, so it survives the rollback regardless of
+# whether it's a compose_recreate/build_swap that's about to happen. Prints
+# the capture file's path on success (also logged) so a caller can pull a
+# bounded tail of it into the failure comment via format_log_excerpt();
+# best-effort only — a capture failure is never fatal to the deploy/rollback
+# itself.
+capture_failure_logs() { # target_dir, kind, services, compose_files, env_file, approval_id -> stdout: capture file path; 0 captured, 1 nothing captured
+  local target_dir="$1" kind="$2" services="$3" compose_files="$4" env_file="$5" aid="$6"
+  case "$kind" in
+    compose_recreate | compose_build_swap) ;;
+    *) return 1 ;;
+  esac
+  local capture_dir="${PAPERCLIP_DEPLOY_RUNNER_CAPTURE_DIR:-$(dirname "$LOG")/deploy-runner-captures}"
+  mkdir -p "$capture_dir" 2>/dev/null || return 1
+  local capture_file="$capture_dir/$aid-$(ts | tr -d ':').log"
+  (
+    cd "$target_dir" || exit 1
+    compose_args_from "$compose_files" "$env_file"
+    # shellcheck disable=SC2086
+    docker compose "${COMPOSE_ARGS[@]}" logs --no-color --tail 500 $services
+  ) >"$capture_file" 2>&1
+  if [ -s "$capture_file" ]; then
+    printf '%s' "$capture_file"
+    return 0
+  fi
+  rm -f "$capture_file"
+  return 1
+}
+
+# Formats a bounded excerpt of a capture_failure_logs() file for direct
+# inclusion in the failure comment, so whoever is watching the approval/issue
+# sees the evidence immediately instead of having to go find the capture file
+# on the box. Prints nothing (not an error) when there's no capture file.
+format_log_excerpt() { # capture_file -> stdout: comment-ready excerpt block, or empty
+  local capture_file="$1"
+  [ -n "$capture_file" ] && [ -s "$capture_file" ] || return 0
+  printf '\n\nLast 200 lines of container logs captured just before rollback (full capture on-box: %s):\n```\n%s\n```' \
+    "$capture_file" "$(tail -n 200 "$capture_file")"
 }
 
 process_approval() { # approval_id, company_id -> exit status is comment()'s delivery status
@@ -468,17 +572,43 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   local recipe_status=$?
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
+    # DUR-163: capture evidence of the failing container BEFORE
+    # maybe_rollback() resets + re-runs the recipe and destroys it — except
+    # for status 3 (compose_build_swap's build failed before anything was
+    # swapped), where the previously running container was never touched and
+    # so isn't "failing" — its own build-step output is already in $LOG.
+    local capture_file=""
+    if [ "$recipe_status" -ne 3 ]; then
+      capture_file="$(capture_failure_logs "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_COMPOSE_FILES" "$DV_ENV_FILE" "$aid")"
+      if [ -n "$capture_file" ]; then
+        log "runner: $aid captured pre-rollback container logs to $capture_file"
+      else
+        log "runner: $aid could not capture pre-rollback container logs (non-fatal)"
+      fi
+    fi
     maybe_rollback "$aid" "$before_commit"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
-    comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" ) Check deploy-runner.log."
+    comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" ) Check deploy-runner.log.$(format_log_excerpt "$capture_file")"
     return
   fi
 
   if ! health_check "$DV_HEALTH_CHECK_URL"; then
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
+    # DUR-163: same evidence-before-rollback capture as the recipe-failure
+    # branch above — the container is up but unhealthy here, so its logs are
+    # exactly the evidence a "server is dead" vs "server was just slow"
+    # follow-up investigation needs, and maybe_rollback() is about to
+    # recreate it out from under us.
+    local capture_file
+    capture_file="$(capture_failure_logs "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_COMPOSE_FILES" "$DV_ENV_FILE" "$aid")"
+    if [ -n "$capture_file" ]; then
+      log "runner: $aid captured pre-rollback container logs to $capture_file"
+    else
+      log "runner: $aid could not capture pre-rollback container logs (non-fatal)"
+    fi
     maybe_rollback "$aid" "$before_commit"
-    comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." ) Check deploy-runner.log."
+    comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." ) Check deploy-runner.log.$(format_log_excerpt "$capture_file")"
     return
   fi
 
