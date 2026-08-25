@@ -74,6 +74,7 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Fal.ai API key (secret ref)",
         description: "A Paperclip secret reference resolved at call time to the FAL key.",
+        format: "secret-ref",
         default: "",
       },
       falModel: {

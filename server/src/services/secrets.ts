@@ -799,6 +799,33 @@ export function secretService(db: Db) {
   }
 
   /**
+   * Resolve a secret VALUE for a plugin worker's `ctx.secrets.resolve(secretRef)`
+   * call (see plugin-secrets-handler.ts). `companyId` must come from a
+   * server-verified invocation scope (the plugin runtime's executeTool
+   * invocation, which itself only carries a companyId once the calling
+   * agent's identity has been validated) — never from a value the plugin
+   * process supplies itself. Unlike runtime env-binding resolution this does
+   * NOT assert a `company_secret_bindings` row (plugin config today has no
+   * per-binding UI); the company-match check on the secret itself is what
+   * keeps one company's plugin invocation from reaching another company's
+   * secret. Still records an access event for audit via
+   * resolveSecretValueInternal.
+   */
+  async function resolveSecretValueForPlugin(
+    companyId: string,
+    secretId: string,
+    version: number | "latest",
+    context: SecretConsumerContext,
+  ): Promise<string> {
+    if (context.actorType !== "plugin" || !context.pluginId?.trim()) {
+      throw forbidden("Plugin secret resolution requires a plugin actor context");
+    }
+    return (await resolveSecretValueInternal(companyId, secretId, version, {
+      accessContext: context,
+    })).value;
+  }
+
+  /**
    * Resolve the company's GitHub token by the same secret-name convention as
    * managed workspace clones (see heartbeat.ts's resolveManagedCloneGitHubToken)
    * — first bound+resolvable secret named GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN
@@ -2008,6 +2035,7 @@ export function secretService(db: Db) {
     resolveSecretValue,
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForExport,
+    resolveSecretValueForPlugin,
     resolveGitHubToken,
 
     create: async (
