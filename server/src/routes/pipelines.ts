@@ -1744,9 +1744,12 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     });
 
     if (!result.created) {
-      await Promise.all(result.linkedIssueDocuments.map((link) =>
+      // DUR-206 made issue_documents.issue_id nullable; a pipeline case
+      // document is always issue-scoped in practice, but filter defensively
+      // rather than assume it here.
+      await Promise.all(result.linkedIssueDocuments.filter((link) => link.issueId !== null).map((link) =>
         documentAnnotationsSvc.remapOpenThreadsForDocument({
-          issueId: link.issueId,
+          issueId: link.issueId as string,
           key: link.key,
           documentId: result.document.id,
           nextRevisionId: result.document.latestRevisionId,
@@ -1858,9 +1861,9 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
       };
     });
 
-    await Promise.all(result.linkedIssueDocuments.map((link) =>
+    await Promise.all(result.linkedIssueDocuments.filter((link) => link.issueId !== null).map((link) =>
       documentAnnotationsSvc.remapOpenThreadsForDocument({
-        issueId: link.issueId,
+        issueId: link.issueId as string,
         key: link.key,
         documentId: result.document.id,
         nextRevisionId: result.document.latestRevisionId,

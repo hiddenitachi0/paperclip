@@ -369,6 +369,64 @@ describe("Artifacts page", () => {
     });
   });
 
+  it("renders the 'No task' group card without crashing when the owning task was deleted (DUR-206)", async () => {
+    artifactsApiMock.list.mockResolvedValue({
+      artifacts: [],
+      groups: [
+        sampleGroup({
+          id: "task:no-task",
+          issue: null,
+          title: "No task",
+          href: "/PAP/artifacts?groupBy=task&groupIssueId=no-task",
+        }),
+      ],
+      nextCursor: null,
+    });
+
+    const { root } = renderArtifacts(container, ["/artifacts?groupBy=task"]);
+
+    await waitForAssertion(() => {
+      const card = container.querySelector('[data-testid="artifact-group-card"]') as HTMLElement;
+      expect(card).not.toBeNull();
+      expect(card.getAttribute("href")).toBe("/artifacts?groupIssueId=no-task");
+      expect(card.textContent).toContain("No task");
+    });
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("opens the 'No task' stack from the URL without crashing (DUR-206)", async () => {
+    artifactsApiMock.list.mockResolvedValue({
+      artifacts: [sampleArtifact({ title: "Orphaned Artifact", issue: null })],
+      selectedGroup: sampleGroup({ id: "task:no-task", issue: null, title: "No task" }),
+      nextCursor: null,
+    });
+
+    const { root } = renderArtifacts(container, [
+      "/artifacts?groupBy=task&groupIssueId=no-task",
+    ]);
+
+    await waitForAssertion(() => {
+      expect(artifactsApiMock.list).toHaveBeenCalledWith("company-1", {
+        kind: "all",
+        q: undefined,
+        groupBy: "task",
+        groupIssueId: "no-task",
+        limit: 30,
+        cursor: undefined,
+      });
+      expect(container.querySelector('[data-testid="artifact-stack-back"]')).not.toBeNull();
+      expect(container.textContent).toContain("Orphaned Artifact");
+      expect(container.textContent).toContain("No task");
+    });
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
   it("opens a stack from the URL and shows the back affordance and artifacts", async () => {
     artifactsApiMock.list.mockResolvedValue({
       artifacts: [sampleArtifact({ title: "Stacked Artifact" })],

@@ -348,7 +348,10 @@ export function pipelineCaseOutputsService(db: Db) {
           ));
 
         for (const row of documentRows) {
-          const source = sourceByIssueId.get(row.issueId);
+          // The query filters issueId IN sourceIssueIds (all non-null), so
+          // row.issueId can never actually be null here even though
+          // DUR-206 made the column nullable at the schema level.
+          const source = sourceByIssueId.get(row.issueId as string);
           if (!source) continue;
           const sourceTrust = row.sourceTrust ?? source.sourceTrust ?? null;
           const title = row.title ?? row.key;
@@ -466,7 +469,10 @@ export function pipelineCaseOutputsService(db: Db) {
           ));
 
         for (const row of attachmentRows) {
-          const source = sourceByIssueId.get(row.issueId);
+          // The query filters issueId IN sourceIssueIds (all non-null), so
+          // row.issueId can never actually be null here even though
+          // DUR-206 made the column nullable at the schema level.
+          const source = sourceByIssueId.get(row.issueId as string);
           if (!source) continue;
           const path = contentPath(row.attachmentId);
           items.push({
