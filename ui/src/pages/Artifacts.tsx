@@ -4,13 +4,14 @@
 // Output tab stays a short summary, not a full browser. Keep new file-browsing
 // features on this page rather than growing the other two into it.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
-import { ArrowLeft, Check, Layers, Package, Search, X } from "lucide-react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { ArrowLeft, Check, Layers, Package, Search, User, X } from "lucide-react";
 import type { To } from "react-router-dom";
 import {
   artifactsApi,
   type ArtifactGroupBy,
   type ArtifactKindFilter,
+  type ArtifactMaker,
 } from "../api/artifacts";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -75,6 +76,8 @@ export function Artifacts() {
   const query = searchParams.get("q") ?? "";
   const groupBy = parseGroupBy(searchParams.get("groupBy"));
   const groupIssueId = searchParams.get("groupIssueId") ?? undefined;
+  const noAgent = searchParams.get("noAgent") === "true";
+  const agentId = noAgent ? undefined : searchParams.get("agentId") ?? undefined;
 
   const [draftQuery, setDraftQuery] = useState(query);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -141,6 +144,31 @@ export function Artifacts() {
     [updateParams],
   );
 
+  // Maker (agent) picker: stored in the URL so it's shareable, matching the
+  // other filters on this page. `noAgent=true` and `agentId=<id>` are
+  // mutually exclusive; picking one clears the other.
+  const selectMaker = useCallback(
+    (value: { agentId: string } | { noAgent: true } | null) => {
+      updateParams((next) => {
+        next.delete("agentId");
+        next.delete("noAgent");
+        if (value && "agentId" in value) next.set("agentId", value.agentId);
+        else if (value && "noAgent" in value) next.set("noAgent", "true");
+      });
+    },
+    [updateParams],
+  );
+
+  const { data: makers } = useQuery({
+    queryKey: queryKeys.artifacts.agents(selectedCompanyId ?? ""),
+    queryFn: () => artifactsApi.listAgents(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    staleTime: 60_000,
+  });
+
+  const selectedMaker: ArtifactMaker | undefined = makers?.find((maker) => maker.id === agentId);
+  const makerLabel = noAgent ? "No owner recorded" : selectedMaker ? selectedMaker.name : "Anyone";
+
   // Build a relative `To` that preserves the active filters/search while
   // changing only the grouping selection. A bare query string keeps the current
   // pathname (the company-prefixed /artifacts route) and stays linkable.
@@ -182,13 +210,15 @@ export function Artifacts() {
     fetchNextPage,
     error,
   } = useInfiniteQuery({
-    queryKey: queryKeys.artifacts.list(selectedCompanyId!, kind, query, groupBy, groupIssueId),
+    queryKey: queryKeys.artifacts.list(selectedCompanyId!, kind, query, groupBy, groupIssueId, agentId, noAgent),
     queryFn: ({ pageParam }) =>
       artifactsApi.list(selectedCompanyId!, {
         kind,
         q: query || undefined,
         groupBy,
         groupIssueId,
+        ...(agentId ? { agentId } : {}),
+        ...(noAgent ? { noAgent } : {}),
         limit: ARTIFACTS_PAGE_SIZE,
         cursor: pageParam,
       }),
@@ -211,7 +241,8 @@ export function Artifacts() {
 
   const artifacts = useMemo(() => data?.pages.flatMap((page) => page.artifacts) ?? [], [data]);
   const groups = useMemo(
-    () => data?.pages.flatMap((page) => page.groups ?? []) ?? [],
+    // Only render groups that actually have files in them.
+    () => (data?.pages.flatMap((page) => page.groups ?? []) ?? []).filter((group) => group.count > 0),
     [data],
   );
   const selectedGroup = useMemo(
@@ -307,6 +338,57 @@ export function Artifacts() {
                   {groupBy === option.value ? <Check className="h-3.5 w-3.5" /> : null}
                 </DropdownMenuItem>
               ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-label={`Filter by who made the file (currently ${makerLabel})`}
+                title="Filter by who made the file"
+                data-testid="artifact-maker-control"
+                data-maker-id={agentId ?? (noAgent ? "no-agent" : "")}
+                className={cn("h-8 shrink-0 gap-1.5 px-2 text-xs", (agentId || noAgent) && "bg-accent")}
+              >
+                <User className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="max-w-28 truncate">{makerLabel}</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel>Made by</DropdownMenuLabel>
+              <DropdownMenuItem
+                data-testid="artifact-maker-option-any"
+                aria-selected={!agentId && !noAgent}
+                onSelect={() => selectMaker(null)}
+                className="justify-between"
+              >
+                Anyone
+                {!agentId && !noAgent ? <Check className="h-3.5 w-3.5" /> : null}
+              </DropdownMenuItem>
+              {(makers ?? []).map((maker) => (
+                <DropdownMenuItem
+                  key={maker.id}
+                  data-testid={`artifact-maker-option-${maker.id}`}
+                  aria-selected={agentId === maker.id}
+                  onSelect={() => selectMaker({ agentId: maker.id })}
+                  className="justify-between"
+                >
+                  <span className="truncate">{maker.name}</span>
+                  {agentId === maker.id ? <Check className="h-3.5 w-3.5 shrink-0" /> : null}
+                </DropdownMenuItem>
+              ))}
+              <DropdownMenuItem
+                data-testid="artifact-maker-option-none"
+                aria-selected={noAgent}
+                onSelect={() => selectMaker({ noAgent: true })}
+                className="justify-between"
+              >
+                No owner recorded
+                {noAgent ? <Check className="h-3.5 w-3.5" /> : null}
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
 

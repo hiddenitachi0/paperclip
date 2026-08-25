@@ -97,7 +97,9 @@ describe("getOutputFileGlyph", () => {
     expect(getOutputFileGlyph("video/quicktime")).toEqual({ label: "MOV", tone: "video" });
     expect(getOutputFileGlyph("application/pdf")).toEqual({ label: "PDF", tone: "pdf" });
     expect(getOutputFileGlyph("application/zip")).toEqual({ label: "ZIP", tone: "zip" });
-    expect(getOutputFileGlyph("image/png")).toEqual({ label: "IMG", tone: "image" });
+    // Label now comes from the shared file-kind module (DUR-64), which uses
+    // the real image subtype rather than a generic "IMG" placeholder.
+    expect(getOutputFileGlyph("image/png")).toEqual({ label: "PNG", tone: "image" });
   });
 
   it("falls back to BIN for unknown types", () => {
