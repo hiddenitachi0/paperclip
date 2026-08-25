@@ -840,8 +840,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     if (!parsed) {
       const fallbackErrorMessage = parseFallbackErrorMessage(proc);
+      // Quota/rate-limit wording is checked before auth so a shared-credential
+      // quota stop never gets mislabeled as a logout. See DUR-222.
       const transientUpstream =
-        !loginMeta.requiresLogin &&
         (proc.exitCode ?? 0) !== 0 &&
         isClaudeTransientUpstreamError({
           parsed: null,
@@ -857,10 +858,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             errorMessage: fallbackErrorMessage,
           })
         : null;
-      const errorCode = loginMeta.requiresLogin
-        ? "claude_auth_required"
-        : transientUpstream
+      const errorCode = transientUpstream
         ? "claude_transient_upstream"
+        : loginMeta.requiresLogin
+        ? "claude_auth_required"
         : null;
       return {
         exitCode: proc.exitCode,
@@ -935,9 +936,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const errorMessage = failed
       ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
       : null;
+    // Quota/rate-limit wording is checked before auth so a shared-credential
+    // quota stop never gets mislabeled as a logout. See DUR-222.
     const transientUpstream =
       failed &&
-      !loginMeta.requiresLogin &&
       !clearSessionForMaxTurns &&
       !poisonedPreviousMessageId &&
       isClaudeTransientUpstreamError({
@@ -954,14 +956,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorMessage,
         })
       : null;
-    const resolvedErrorCode = loginMeta.requiresLogin
-      ? "claude_auth_required"
-      : failed && clearSessionForMaxTurns
+    const resolvedErrorCode = failed && clearSessionForMaxTurns
       ? "max_turns_exhausted"
       : failed && poisonedPreviousMessageId
       ? "claude_poisoned_previous_message_id"
       : transientUpstream
       ? "claude_transient_upstream"
+      : loginMeta.requiresLogin
+      ? "claude_auth_required"
       : claudeRefusal
       ? "claude_refusal"
       : null;

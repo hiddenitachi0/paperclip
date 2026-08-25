@@ -29,6 +29,26 @@ describe("detectClaudeLoginRequired", () => {
       }).requiresLogin,
     ).toBe(false);
   });
+
+  it("does not classify a bare 'unauthorized' with no login context as requiring login (DUR-222)", () => {
+    expect(
+      detectClaudeLoginRequired({
+        parsed: null,
+        stdout: "",
+        stderr: "Error: request failed: 401 unauthorized",
+      }).requiresLogin,
+    ).toBe(false);
+  });
+
+  it("still classifies 'unauthorized' paired with explicit login context as requiring login", () => {
+    expect(
+      detectClaudeLoginRequired({
+        parsed: null,
+        stdout: "",
+        stderr: "401 unauthorized · please run /login",
+      }).requiresLogin,
+    ).toBe(true);
+  });
 });
 
 describe("isClaudeTransientUpstreamError", () => {
@@ -95,6 +115,25 @@ describe("isClaudeTransientUpstreamError", () => {
       isClaudeTransientUpstreamError({
         stderr: "Please log in. Run `claude login` first.",
       }),
+    ).toBe(false);
+  });
+
+  it("classifies a quota stop as transient even when the message also contains 'unauthorized' (DUR-222)", () => {
+    // Regression for the reported incident: a quota/rate-limit message that
+    // happens to also contain the word "unauthorized" (e.g. wrapped 401
+    // shape) must still win as transient_upstream, not claude_auth_required,
+    // since the same shared credential succeeds again seconds later.
+    expect(
+      isClaudeTransientUpstreamError({
+        errorMessage: "401 unauthorized: claude usage limit reached, resets 4pm (America/Chicago)",
+      }),
+    ).toBe(true);
+    expect(
+      detectClaudeLoginRequired({
+        parsed: null,
+        stdout: "",
+        stderr: "401 unauthorized: claude usage limit reached, resets 4pm (America/Chicago)",
+      }).requiresLogin,
     ).toBe(false);
   });
 

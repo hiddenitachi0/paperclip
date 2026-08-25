@@ -1448,6 +1448,59 @@ describe("claude execute", () => {
     }
   });
 
+  it("classifies a quota stop as transient even when it also contains 'unauthorized' (DUR-222)", async () => {
+    // Regression for the reported incident: a shared credential cannot flip
+    // between valid and invalid within one second, but it can flip between
+    // "over quota" and "quota reset" — a quota message that happens to also
+    // contain the word "unauthorized" must still classify (and retry) as
+    // claude_transient_upstream, not the terminal claude_auth_required.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-quota-unauthorized-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "claude");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeTextFailingClaudeCommand(commandPath, {
+      stderr: "Error: request failed: 401 unauthorized: claude usage limit reached, resets 4pm (America/Chicago)",
+    });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-claude-quota-unauthorized",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("claude_transient_upstream");
+      expect(result.errorFamily).toBe("transient_upstream");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("auto-rotates session on previous_message_id 400 (synthetic-msg poisoning) and succeeds on retry", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-poisoned-msgid-"));
     const { workspace, commandPath, capturePath, statePath, restore } = await setupExecuteEnv(root, {
