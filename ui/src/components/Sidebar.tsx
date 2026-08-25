@@ -18,6 +18,7 @@ import {
   PanelLeftOpen,
   Pin,
   MessagesSquare,
+  Sparkles,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -158,6 +159,7 @@ export function Sidebar() {
               newTaskButton
             );
           })()}
+          <SidebarNavItem to="/simple" label="Ask Paperclip" icon={Sparkles} />
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
           <SidebarNavItem
             to="/inbox"
