@@ -340,12 +340,16 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
 
     expect(result.nextCursor).toBeNull();
     expect(result.artifacts.map((artifact) => artifact.title)).toEqual([
+      "comment-screenshot.png",
+      "operator-screenshot.png",
       "Review Notes",
       "direct-video.mp4",
       "Primary Cut",
       "notes.txt",
     ]);
     expect(result.artifacts.map((artifact) => artifact.source)).toEqual([
+      "attachment",
+      "attachment",
       "document",
       "attachment",
       "work_product",
@@ -355,8 +359,19 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       .toBe("Text file preview from an agent output.");
     expect(result.artifacts.some((artifact) => artifact.title === "primary-cut.mp4")).toBe(false);
     expect(result.artifacts.some((artifact) => artifact.title === "Continuation Summary")).toBe(false);
-    expect(result.artifacts.some((artifact) => artifact.title === "operator-screenshot.png")).toBe(false);
-    expect(result.artifacts.some((artifact) => artifact.title === "comment-screenshot.png")).toBe(false);
+
+    // A file an agent posts inside a task comment is now included, still
+    // attributed to that agent.
+    const commentUpload = result.artifacts.find((artifact) => artifact.title === "comment-screenshot.png");
+    expect(commentUpload?.createdByAgent).toEqual({ id: expect.any(String), name: "Coder" });
+    expect(commentUpload?.createdByUser).toBeFalsy();
+
+    // A file a human operator uploads directly is now included, labeled
+    // distinctly from an agent maker.
+    const humanUpload = result.artifacts.find((artifact) => artifact.title === "operator-screenshot.png");
+    expect(humanUpload?.createdByAgent).toBeNull();
+    expect(humanUpload?.createdByUser).toBe(true);
+
     expect(result.artifacts.some((artifact) => artifact.issue.identifier === "OTH-1")).toBe(false);
   });
 
@@ -378,27 +393,39 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     expect(search.artifacts.map((artifact) => artifact.title)).toEqual(["Review Notes"]);
 
     const firstPage = await companyArtifactsService(db, storage).list(companyId, { limit: 2 });
-    expect(firstPage.artifacts.map((artifact) => artifact.title)).toEqual(["Review Notes", "direct-video.mp4"]);
+    expect(firstPage.artifacts.map((artifact) => artifact.title)).toEqual([
+      "comment-screenshot.png",
+      "operator-screenshot.png",
+    ]);
     expect(firstPage.nextCursor).toEqual(expect.any(String));
 
     const secondPage = await companyArtifactsService(db, storage).list(companyId, {
       limit: 10,
       cursor: firstPage.nextCursor ?? undefined,
     });
-    expect(secondPage.artifacts.map((artifact) => artifact.title)).toEqual(["Primary Cut", "notes.txt"]);
-
-    const pageAfterPrimaryWorkProduct = await companyArtifactsService(db, storage).list(companyId, { limit: 3 });
-    expect(pageAfterPrimaryWorkProduct.artifacts.map((artifact) => artifact.title)).toEqual([
+    expect(secondPage.artifacts.map((artifact) => artifact.title)).toEqual([
       "Review Notes",
       "direct-video.mp4",
       "Primary Cut",
+      "notes.txt",
+    ]);
+
+    const pageAfterPrimaryWorkProduct = await companyArtifactsService(db, storage).list(companyId, { limit: 3 });
+    expect(pageAfterPrimaryWorkProduct.artifacts.map((artifact) => artifact.title)).toEqual([
+      "comment-screenshot.png",
+      "operator-screenshot.png",
+      "Review Notes",
     ]);
 
     const afterPrimaryCursor = await companyArtifactsService(db, storage).list(companyId, {
       limit: 10,
       cursor: pageAfterPrimaryWorkProduct.nextCursor ?? undefined,
     });
-    expect(afterPrimaryCursor.artifacts.map((artifact) => artifact.title)).toEqual(["notes.txt"]);
+    expect(afterPrimaryCursor.artifacts.map((artifact) => artifact.title)).toEqual([
+      "direct-video.mp4",
+      "Primary Cut",
+      "notes.txt",
+    ]);
   });
 
   it("deduplicates work product attachments beyond the work product fetch window", async () => {
@@ -611,13 +638,13 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       },
       {
         issue: "PAP-1",
-        count: 3,
-        mediaKinds: ["video", "text"],
+        count: 5,
+        mediaKinds: ["image", "video", "text"],
         href: "/PAP/artifacts?groupBy=task&groupIssueId=66666666-6666-4666-8666-666666666666",
       },
     ]);
     expect(grouped.groups?.find((group) => group.issue.id === issueId)?.previewArtifacts.map((artifact) => artifact.title))
-      .toEqual(["direct-video.mp4", "Primary Cut", "notes.txt"]);
+      .toEqual(["comment-screenshot.png", "operator-screenshot.png", "direct-video.mp4"]);
 
     const projectVideos = await companyArtifactsService(db, storage).list(companyId, {
       groupBy: "task",
@@ -714,8 +741,8 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     }))).toEqual([
       {
         issue: "PAP-1",
-        count: 5,
-        previewTitles: ["grandchild.txt", "Review Notes", "direct-video.mp4"],
+        count: 7,
+        previewTitles: ["comment-screenshot.png", "operator-screenshot.png", "grandchild.txt"],
       },
     ]);
   });
@@ -733,9 +760,12 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       id: `task:${issueId}`,
       groupBy: "task",
       issue: { identifier: "PAP-1" },
-      count: 3,
+      count: 5,
     });
-    expect(selected.artifacts.map((artifact) => artifact.title)).toEqual(["direct-video.mp4", "Primary Cut"]);
+    expect(selected.artifacts.map((artifact) => artifact.title)).toEqual([
+      "comment-screenshot.png",
+      "operator-screenshot.png",
+    ]);
     expect(selected.nextCursor).toEqual(expect.any(String));
 
     const selectedSecondPage = await companyArtifactsService(db, createStorageService()).list(companyId, {
@@ -744,7 +774,11 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       limit: 10,
       cursor: selected.nextCursor ?? undefined,
     });
-    expect(selectedSecondPage.artifacts.map((artifact) => artifact.title)).toEqual(["notes.txt"]);
+    expect(selectedSecondPage.artifacts.map((artifact) => artifact.title)).toEqual([
+      "direct-video.mp4",
+      "Primary Cut",
+      "notes.txt",
+    ]);
 
     const selectedEmptyByFilter = await companyArtifactsService(db, createStorageService()).list(companyId, {
       groupBy: "task",
@@ -957,6 +991,41 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     expect(foreignAgent).toEqual({ artifacts: [], selectedGroup: null, nextCursor: null });
   });
 
+  it("gives human uploads their own 'Uploaded by you' bucket, distinct from the no-idea-who-made-this bucket", async () => {
+    const { companyId } = await seedArtifacts();
+
+    const grouped = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      limit: 20,
+    });
+    const humanGroup = grouped.groups?.find((group) => group.id === "agent:human");
+    expect(humanGroup).toMatchObject({
+      groupBy: "agent",
+      agent: null,
+      isUserUploadGroup: true,
+      title: "Uploaded by you",
+      count: 1,
+    });
+    expect(humanGroup?.previewArtifacts.map((artifact) => artifact.title)).toEqual(["operator-screenshot.png"]);
+    const noneGroup = grouped.groups?.find((group) => group.id === "agent:none");
+    expect(noneGroup).toBeUndefined();
+
+    const selectedHuman = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      uploadedByUser: true,
+      limit: 20,
+    });
+    expect(selectedHuman.selectedGroup).toMatchObject({ id: "agent:human", agent: null, isUserUploadGroup: true });
+    expect(selectedHuman.artifacts.map((artifact) => artifact.title)).toEqual(["operator-screenshot.png"]);
+
+    const selectedNoAgent = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      groupBy: "agent",
+      noAgent: true,
+      limit: 20,
+    });
+    expect(selectedNoAgent.artifacts.some((artifact) => artifact.title === "operator-screenshot.png")).toBe(false);
+  });
+
   it("only matches filenames (not the parent task's identifier/title) when qScope=filename", async () => {
     const { companyId } = await seedArtifacts();
     const storage = createStorageService();
@@ -1041,6 +1110,42 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     const agentsList = await companyArtifactsService(db, createStorageService()).listAgents(companyId);
     expect(agentsList.map((agent) => agent.name)).toEqual(["Newcomer", "Coder"]);
     expect(agentsList.every((agent) => agent.id !== "44444444-4444-4444-8444-444444444444")).toBe(true);
+  });
+
+  it("counts an agent as a maker even when their only file was posted inside a comment", async () => {
+    const { companyId, issueId } = await seedArtifacts();
+
+    const commentOnlyAgentId = "64646464-6464-4646-8646-646464646464";
+    await db.insert(agents).values({ id: commentOnlyAgentId, companyId, name: "Commenter", role: "engineer" });
+    await db.insert(issueComments).values({
+      id: "65656565-6565-4656-8656-656565656565",
+      companyId,
+      issueId,
+      authorType: "agent",
+      authorAgentId: commentOnlyAgentId,
+      body: "comment-only upload",
+    });
+    await db.insert(assets).values({
+      id: "66666666-6666-4666-8666-666666666667",
+      companyId,
+      provider: "local_disk",
+      objectKey: "comment-only.png",
+      contentType: "image/png",
+      byteSize: 50,
+      sha256: "sha256-comment-only",
+      originalFilename: "comment-only.png",
+      createdByAgentId: commentOnlyAgentId,
+    });
+    await db.insert(issueAttachments).values({
+      companyId,
+      issueId,
+      assetId: "66666666-6666-4666-8666-666666666667",
+      issueCommentId: "65656565-6565-4656-8656-656565656565",
+      updatedAt: new Date("2026-01-31T00:00:00.000Z"),
+    });
+
+    const agentsList = await companyArtifactsService(db, createStorageService()).listAgents(companyId);
+    expect(agentsList.some((agent) => agent.name === "Commenter")).toBe(true);
   });
 
   it("serves GET /:companyId/artifacts/agents with the agent roster", async () => {
