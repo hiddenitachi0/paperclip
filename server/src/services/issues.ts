@@ -6029,34 +6029,19 @@ export function issueService(db: Db) {
       return cleared;
     },
 
+    // DUR-206: deleting a task keeps the files it produced (Filip's answer
+    // to DUR-64's Step-0 question). issue_attachments.issue_id and
+    // issue_documents.issue_id are ON DELETE SET NULL, so the delete below
+    // detaches those rows (and their underlying assets/documents) rather
+    // than destroying them; they resurface under the "No task" group on the
+    // Files page (see company-artifacts.ts).
     remove: (id: string) =>
       db.transaction(async (tx) => {
-        const attachmentAssetIds = await tx
-          .select({ assetId: issueAttachments.assetId })
-          .from(issueAttachments)
-          .where(eq(issueAttachments.issueId, id));
-        const issueDocumentIds = await tx
-          .select({ documentId: issueDocuments.documentId })
-          .from(issueDocuments)
-          .where(eq(issueDocuments.issueId, id));
-
         const removedIssue = await tx
           .delete(issues)
           .where(eq(issues.id, id))
           .returning()
           .then((rows) => rows[0] ?? null);
-
-        if (removedIssue && attachmentAssetIds.length > 0) {
-          await tx
-            .delete(assets)
-            .where(inArray(assets.id, attachmentAssetIds.map((row) => row.assetId)));
-        }
-
-        if (removedIssue && issueDocumentIds.length > 0) {
-          await tx
-            .delete(documents)
-            .where(inArray(documents.id, issueDocumentIds.map((row) => row.documentId)));
-        }
 
         if (!removedIssue) return null;
         const [enriched] = await withIssueLabels(tx, [removedIssue]);

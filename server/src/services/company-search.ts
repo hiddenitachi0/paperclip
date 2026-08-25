@@ -307,9 +307,11 @@ function artifactResult(artifact: CompanyArtifact, normalizedQuery: string, toke
     id: artifact.id,
     source: artifact.source,
     mediaKind: artifact.mediaKind,
-    issueId: artifact.issue.id,
-    issueIdentifier: artifact.issue.identifier,
-    issueTitle: artifact.issue.title,
+    // Null when the owning task was deleted (DUR-206) -- the file is kept,
+    // not destroyed.
+    issueId: artifact.issue?.id ?? null,
+    issueIdentifier: artifact.issue?.identifier ?? null,
+    issueTitle: artifact.issue?.title ?? null,
     projectId: artifact.project?.id ?? null,
     projectName: artifact.project?.name ?? null,
     updatedAt: artifact.updatedAt,
@@ -317,7 +319,7 @@ function artifactResult(artifact: CompanyArtifact, normalizedQuery: string, toke
   const score = scoreSimpleRow({
     id: artifact.id,
     title: artifact.title,
-    description: [artifact.previewText, artifact.issue.identifier, artifact.issue.title, artifact.project?.name]
+    description: [artifact.previewText, artifact.issue?.identifier, artifact.issue?.title, artifact.project?.name]
       .filter(Boolean)
       .join(" "),
     updatedAt: new Date(artifact.updatedAt),
