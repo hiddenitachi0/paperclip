@@ -1331,6 +1331,23 @@ export function agentRoutes(
     await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
   }
 
+  // DUR-217: laneAEnabled opts an agent into Lane A (direct-model-call text
+  // endpoint). Board-settable only, same shape as assertCanManageInstructionsPath.
+  async function assertCanManageLaneAFlag(req: Request, targetAgent: { id: string; companyId: string }) {
+    assertCompanyAccess(req, targetAgent.companyId);
+    if (req.actor.type !== "board") {
+      throw forbidden("Only board-authenticated callers can enable Lane A for an agent");
+    }
+    await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
+  }
+
+  // Mirrors assertNoAgentInstructionsConfigMutation: an agent PATCHing its own
+  // config cannot flip its own laneAEnabled flag, even to false.
+  function assertNoAgentLaneAFlagMutation(req: Request, patchData: Record<string, unknown>) {
+    if (req.actor.type !== "agent" || !hasOwn(patchData, "laneAEnabled")) return;
+    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled");
+  }
+
   function assertNoAgentInstructionsConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown> | null | undefined,
@@ -2814,6 +2831,10 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    assertNoAgentLaneAFlagMutation(req, patchData);
+    if (hasOwn(patchData, "laneAEnabled")) {
+      await assertCanManageLaneAFlag(req, existing);
+    }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
     if (hasOwn(patchData, "adapterConfig")) {

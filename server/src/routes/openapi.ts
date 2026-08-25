@@ -138,6 +138,7 @@ import {
   remoteSecretImportSchema,
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
+  sendLaneAMessageSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -2679,6 +2680,28 @@ registry.registerPath({
     ),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+// ─── Lane A (direct-model-call text primitive) ────────────────────────────────
+
+registry.registerPath({
+  method: "post",
+  path: "/api/lane-a/{agentId}/messages",
+  tags: ["agents"],
+  summary: "Send a message to a Lane A-enabled agent (direct model call, no tools, no runtime)",
+  request: {
+    params: z.object({ agentId: z.string() }),
+    body: jsonBody(sendLaneAMessageSchema),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    429: r.tooManyRequests,
+  },
 });
 
 // ─── Access / invites / members ───────────────────────────────────────────────

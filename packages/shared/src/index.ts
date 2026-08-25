@@ -1114,6 +1114,8 @@ export {
   type ResetAgentSession,
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
+  sendLaneAMessageSchema,
+  type SendLaneAMessage,
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
