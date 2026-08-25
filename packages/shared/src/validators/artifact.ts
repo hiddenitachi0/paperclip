@@ -8,14 +8,18 @@ export const companyArtifactSourceSchema = z.enum(["document", "attachment", "wo
 
 export const companyArtifactMediaKindSchema = z.enum(["image", "video", "text", "document", "file", "empty"]);
 
-export const companyArtifactGroupBySchema = z.enum(["none", "task", "parent_task"]);
+export const companyArtifactGroupBySchema = z.enum(["none", "task", "parent_task", "agent"]);
 
 export const companyArtifactsQuerySchema = z.object({
   kind: z.enum(["image", "video", "text", "document", "file", "all"]).optional().default("all"),
   projectId: z.string().uuid().optional(),
   q: z.string().trim().max(COMPANY_ARTIFACTS_MAX_QUERY_LENGTH).optional(),
+  qScope: z.enum(["all", "filename"]).optional().default("all"),
   groupBy: companyArtifactGroupBySchema.optional().default("none"),
   groupIssueId: z.string().uuid().optional(),
+  groupAgentId: z.string().uuid().optional(),
+  agentId: z.string().uuid().optional(),
+  noAgent: z.coerce.boolean().optional(),
   limit: z.coerce
     .number()
     .int()
@@ -36,6 +40,8 @@ export const companyArtifactSchema = z.object({
   contentPath: z.string().nullable(),
   openPath: z.string().nullable(),
   downloadPath: z.string().nullable(),
+  byteSize: z.number().int().nullable(),
+  originalFilename: z.string().nullable(),
   issue: z.object({
     id: z.string().uuid(),
     identifier: z.string(),
@@ -53,6 +59,11 @@ export const companyArtifactSchema = z.object({
   href: z.string().min(1),
 });
 
+const companyArtifactAgentSummarySchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+});
+
 export const companyArtifactGroupSchema = z.object({
   id: z.string().min(1),
   groupBy: companyArtifactGroupBySchema.exclude(["none"]),
@@ -60,7 +71,8 @@ export const companyArtifactGroupSchema = z.object({
     id: z.string().uuid(),
     identifier: z.string(),
     title: z.string(),
-  }),
+  }).nullable().optional(),
+  agent: companyArtifactAgentSummarySchema.nullable().optional(),
   title: z.string(),
   count: z.number().int().min(0),
   mediaKinds: z.array(companyArtifactMediaKindSchema),
@@ -75,5 +87,9 @@ export const companyArtifactsResponseSchema = z.object({
   selectedGroup: companyArtifactGroupSchema.nullable().optional(),
   nextCursor: z.string().nullable(),
 });
+
+export const companyArtifactAgentSchema = companyArtifactAgentSummarySchema;
+
+export const companyArtifactAgentsResponseSchema = z.array(companyArtifactAgentSchema);
 
 export type CompanyArtifactsQuery = z.infer<typeof companyArtifactsQuerySchema>;

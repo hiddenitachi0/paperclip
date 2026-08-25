@@ -219,7 +219,10 @@ export function Artifacts() {
     if (viewingSelectedStack && selectedGroup) {
       setBreadcrumbs([
         { label: "Artifacts", href: "/artifacts" },
-        { label: `${selectedGroup.issue.identifier} · ${selectedGroup.title}` },
+        {
+          // This page only ever requests groupBy "task"/"parent_task", where `issue` is always set.
+          label: `${selectedGroup.issue!.identifier} · ${selectedGroup.title}`,
+        },
       ]);
     } else {
       setBreadcrumbs([{ label: "Artifacts" }]);
@@ -336,7 +339,7 @@ export function Artifacts() {
           </Link>
           {selectedGroup ? (
             <span className="truncate text-muted-foreground">
-              <span className="text-foreground/80">{selectedGroup.issue.identifier}</span>{" "}
+              <span className="text-foreground/80">{selectedGroup.issue!.identifier}</span>{" "}
               {selectedGroup.title}
             </span>
           ) : null}
@@ -354,7 +357,7 @@ export function Artifacts() {
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
             {showGroupCards
               ? groups.map((group) => (
-                  <ArtifactGroupCard key={group.id} group={group} to={stackTo(group.issue.id)} />
+                  <ArtifactGroupCard key={group.id} group={group} to={stackTo(group.issue!.id)} />
                 ))
               : artifacts.map((artifact) => (
                   <ArtifactCard key={`${artifact.source}:${artifact.id}`} artifact={artifact} />

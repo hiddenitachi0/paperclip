@@ -437,6 +437,8 @@ export {
   COMPANY_ARTIFACTS_DEFAULT_LIMIT,
   COMPANY_ARTIFACTS_MAX_LIMIT,
   COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
+  companyArtifactAgentSchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactGroupBySchema,
   companyArtifactGroupSchema,
   companyArtifactMediaKindSchema,
