@@ -22,6 +22,7 @@ import {
   MessagesSquare,
   RadioTower,
   UserRound,
+  Sparkles,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -162,6 +163,7 @@ export function Sidebar() {
               newTaskButton
             );
           })()}
+          <SidebarNavItem to="/simple" label="Ask Paperclip" icon={Sparkles} />
           <SidebarNavItem to="/dashboard/now" label="Now" icon={RadioTower} liveCount={liveRunCount} />
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} end />
           <SidebarNavItem
