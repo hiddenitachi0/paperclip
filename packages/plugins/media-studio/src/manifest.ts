@@ -28,6 +28,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "http.outbound",
     "secrets.read-ref",
     "issue.attachments.create",
+    "personas.generation_cap.enforce",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -38,7 +39,7 @@ const manifest: PaperclipPluginManifestV1 = {
       name: TOOL_GENERATE,
       displayName: "Generate image",
       description:
-        "Generate an image from a text prompt using the configured provider and attach it to the given issue as a Paperclip attachment. A human still approves before it is posted.",
+        "Generate an image from a text prompt using the configured provider and attach it to the given issue as a Paperclip attachment. A human still approves before it is posted. If the calling persona has a daily generation cap, this fails once that cap is reached for the day (resets at UTC midnight).",
       parametersSchema: {
         type: "object",
         properties: {
