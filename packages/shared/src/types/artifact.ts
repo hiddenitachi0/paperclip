@@ -2,7 +2,7 @@ export type CompanyArtifactSource = "document" | "attachment" | "work_product";
 
 export type CompanyArtifactMediaKind = "image" | "video" | "text" | "document" | "file" | "empty";
 
-export type CompanyArtifactGroupBy = "none" | "task" | "parent_task";
+export type CompanyArtifactGroupBy = "none" | "task" | "parent_task" | "agent";
 
 export interface CompanyArtifactIssueSummary {
   id: string;
@@ -30,6 +30,8 @@ export interface CompanyArtifact {
   contentPath: string | null;
   openPath: string | null;
   downloadPath: string | null;
+  byteSize?: number | null;
+  originalFilename?: string | null;
   issue: CompanyArtifactIssueSummary;
   project: CompanyArtifactProjectSummary | null;
   createdByAgent: CompanyArtifactAgentSummary | null;
@@ -40,7 +42,13 @@ export interface CompanyArtifact {
 export interface CompanyArtifactGroup {
   id: string;
   groupBy: Exclude<CompanyArtifactGroupBy, "none">;
-  issue: CompanyArtifactIssueSummary;
+  /**
+   * Set for `groupBy: "task" | "parent_task"`. Null/absent for
+   * `groupBy: "agent"`, which groups by `agent` instead (see below).
+   */
+  issue?: CompanyArtifactIssueSummary | null;
+  /** Set for `groupBy: "agent"` — the person who made the files in this group, or null for the maker-less bucket. */
+  agent?: CompanyArtifactAgentSummary | null;
   title: string;
   count: number;
   mediaKinds: CompanyArtifactMediaKind[];

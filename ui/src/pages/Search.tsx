@@ -35,7 +35,7 @@ const SCOPE_LABELS: Record<CompanySearchScope, string> = {
   issues: "Tasks",
   comments: "Comments",
   documents: "Documents",
-  artifacts: "Artifacts",
+  artifacts: "Files",
   agents: "Agents",
   projects: "Projects",
 };
@@ -48,7 +48,7 @@ const SUBGROUP_LABELS: Record<SubGroupKey, string> = {
   issues: "Tasks",
   comments: "Comments",
   documents: "Documents",
-  artifacts: "Artifacts",
+  artifacts: "Files",
   agents: "Agents",
   projects: "Projects",
 };
@@ -346,7 +346,7 @@ export function Search() {
                 }
               }
             }}
-            placeholder="Search tasks, comments, documents, artifacts, agents, projects…"
+            placeholder="Search tasks, comments, documents, files, agents, projects…"
             aria-label="Search query"
             className="h-10 pl-9 pr-20 text-sm"
           />
@@ -456,7 +456,7 @@ function SearchTabContent({
         <div>
           <h2 className="text-lg font-semibold">Type to search company memory.</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Tasks, comments, plan documents, artifacts, agents, projects — same surface, ranked by relevance.
+            Tasks, comments, plan documents, files, agents, projects — same surface, ranked by relevance.
           </p>
         </div>
         {recentSearches.length > 0 ? (

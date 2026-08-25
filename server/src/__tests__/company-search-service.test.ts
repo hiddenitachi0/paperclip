@@ -233,7 +233,10 @@ describeEmbeddedPostgres("companySearchService", () => {
       title: "Launch Artifact Brief",
       href: expect.stringContaining("#document-brief"),
       artifact: expect.objectContaining({
-        mediaKind: "document",
+        // Issue documents are markdown notes, not real document files, so
+        // they classify as mediaKind "text" (DUR-64/DUR-203) — see
+        // company-artifacts.ts's classifyMediaKind and file-kind.ts.
+        mediaKind: "text",
         issueIdentifier: "TST-88",
       }),
     });

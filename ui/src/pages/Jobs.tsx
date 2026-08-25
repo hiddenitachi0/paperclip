@@ -46,7 +46,7 @@ const queryKeysJobs = {
 };
 
 function emptyDraft(): JobDraft {
-  return { name: "", description: "", instructions: "", defaultTools: [], defaultRights: [] };
+  return { name: "", description: "", instructions: "", defaultTools: [], defaultRights: [], skillKeys: [], connectorKeys: [] };
 }
 
 function draftFromJob(job: Job): JobDraft {
@@ -56,6 +56,8 @@ function draftFromJob(job: Job): JobDraft {
     instructions: job.instructions,
     defaultTools: job.defaultTools,
     defaultRights: job.defaultRights,
+    skillKeys: job.skillKeys,
+    connectorKeys: job.connectorKeys,
   };
 }
 

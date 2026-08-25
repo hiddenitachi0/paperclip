@@ -26,6 +26,8 @@ export interface Job {
   instructions: string;
   defaultTools: McpServerConfig[];
   defaultRights: RightGrant[];
+  skillKeys: string[];
+  connectorKeys: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -36,6 +38,8 @@ export interface JobDraft {
   instructions: string;
   defaultTools: McpServerConfig[];
   defaultRights: RightGrant[];
+  skillKeys: string[];
+  connectorKeys: string[];
 }
 
 /** What a specific agent currently holds vs. what its assigned job would have given it. */
@@ -63,6 +67,8 @@ interface AgentRoleDto {
   defaultInstructions: string | null;
   defaultMcpServers: McpServerConfig[];
   defaultGrants: RightGrant[];
+  skillKeys: string[] | null;
+  connectorKeys: string[] | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -76,6 +82,8 @@ function fromDto(dto: AgentRoleDto): Job {
     instructions: dto.defaultInstructions ?? "",
     defaultTools: dto.defaultMcpServers,
     defaultRights: dto.defaultGrants,
+    skillKeys: dto.skillKeys ?? [],
+    connectorKeys: dto.connectorKeys ?? [],
     createdAt: dto.createdAt,
     updatedAt: dto.updatedAt,
   };
@@ -88,6 +96,8 @@ function toDto(draft: Partial<JobDraft>): Record<string, unknown> {
   if (draft.instructions !== undefined) dto.defaultInstructions = draft.instructions;
   if (draft.defaultTools !== undefined) dto.defaultMcpServers = draft.defaultTools;
   if (draft.defaultRights !== undefined) dto.defaultGrants = draft.defaultRights;
+  if (draft.skillKeys !== undefined) dto.skillKeys = draft.skillKeys;
+  if (draft.connectorKeys !== undefined) dto.connectorKeys = draft.connectorKeys;
   return dto;
 }
 
@@ -128,4 +138,13 @@ export const jobsApi = {
     api.delete<AgentRoleState>(
       `/agents/${encodeURIComponent(agentId)}/role/rights/${encodeURIComponent(permissionKey)}`,
     ),
+
+  // DUR-149: per-agent skill_key override on top of the assigned job. Unlike
+  // tools/rights, this endpoint returns the raw agent row (not an
+  // AgentRoleState DTO) — the caller re-reads the skills bucket from the
+  // agent's roleOverrides/roleProvisionedSkillKeys fields instead.
+  addAgentSkillOverride: (agentId: string, key: string) =>
+    api.post<void>(`/agents/${encodeURIComponent(agentId)}/role/skills`, { key }),
+  removeAgentSkillOverride: (agentId: string, key: string) =>
+    api.delete<void>(`/agents/${encodeURIComponent(agentId)}/role/skills/${encodeURIComponent(key)}`),
 };
