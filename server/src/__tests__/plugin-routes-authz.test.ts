@@ -34,6 +34,14 @@ vi.mock("../services/live-events.js", () => ({
   publishGlobalLiveEvent: vi.fn(),
 }));
 
+const mockAgentsSvc = vi.hoisted(() => ({
+  syncPluginToolGrants: vi.fn(),
+}));
+
+vi.mock("../services/agents.js", () => ({
+  agentService: () => mockAgentsSvc,
+}));
+
 async function createApp(
   actor: Record<string, unknown>,
   loaderOverrides: Record<string, unknown> = {},
@@ -1186,5 +1194,153 @@ describe.sequential("plugin tool and bridge authz", () => {
 
     expect(res.status).toBe(403);
     expect(executeTool).not.toHaveBeenCalled();
+  });
+});
+
+describe("DUR-189 plugin tool grants", () => {
+  beforeEach(() => {
+    mockAgentsSvc.syncPluginToolGrants.mockReset();
+  });
+
+  it("blocks tool execution when the agent's grant list does not include the tool", async () => {
+    const executeTool = vi.fn();
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, pluginToolGrants: ["paperclip.other:tool"] }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("not granted");
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("allows tool execution when the agent's grant list includes the tool", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, pluginToolGrants: ["paperclip.example:search"] }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+  });
+
+  it("allows tool execution when the agent's grant list is empty (unrestricted, matches pre-DUR-189 behavior)", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, pluginToolGrants: [] }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+  });
+
+  it("rejects an agent actor trying to sync its own plugin-tool grants (board-only)", async () => {
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([[{ id: agentA, companyId: companyA }]]),
+    });
+
+    const res = await request(app)
+      .post(`/api/agents/${agentA}/plugin-tool-grants/sync`)
+      .send({ desiredToolNames: ["paperclip.example:search"] });
+
+    expect(res.status).toBe(403);
+    expect(mockAgentsSvc.syncPluginToolGrants).not.toHaveBeenCalled();
+  });
+
+  it("lets a board actor sync an agent's plugin-tool grants when the tool is registered", async () => {
+    mockAgentsSvc.syncPluginToolGrants.mockResolvedValue({ id: agentA, pluginToolGrants: ["paperclip.example:search"] });
+    const { app } = await createApp(boardActor(), {}, {
+      db: createSelectQueueDb([[{ id: agentA, companyId: companyA }]]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool: vi.fn(),
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/agents/${agentA}/plugin-tool-grants/sync`)
+      .send({ desiredToolNames: ["paperclip.example:search"] });
+
+    expect(res.status).toBe(200);
+    expect(mockAgentsSvc.syncPluginToolGrants).toHaveBeenCalledWith(agentA, ["paperclip.example:search"]);
+  });
+
+  it("rejects syncing a plugin-tool grant for a name that isn't a registered tool", async () => {
+    const { app } = await createApp(boardActor(), {}, {
+      db: createSelectQueueDb([[{ id: agentA, companyId: companyA }]]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => null),
+          executeTool: vi.fn(),
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/agents/${agentA}/plugin-tool-grants/sync`)
+      .send({ desiredToolNames: ["paperclip.nonexistent:tool"] });
+
+    expect(res.status).toBe(422);
+    expect(mockAgentsSvc.syncPluginToolGrants).not.toHaveBeenCalled();
   });
 });

@@ -231,6 +231,23 @@ function assertNoToolLibraryAssignmentFields(data: Record<string, unknown>) {
   }
 }
 
+// DUR-189: pluginToolGrants (which namespaced plugin tools this agent may
+// call) may only be written by syncPluginToolGrants below — same posture as
+// TOOL_LIBRARY_ASSIGNMENT_FIELDS above, so an agent can never grant itself
+// broader tool access through its own adapterConfig/self-update path.
+const PLUGIN_TOOL_ASSIGNMENT_FIELDS = ["pluginToolGrants"] as const;
+
+function assertNoPluginToolAssignmentFields(data: Record<string, unknown>) {
+  const present = PLUGIN_TOOL_ASSIGNMENT_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(data, field),
+  );
+  if (present.length > 0) {
+    throw unprocessable(
+      `Plugin-tool assignment fields (${present.join(", ")}) cannot be set through agentService.create/update. Use the dedicated plugin-tool-assignment endpoint.`,
+    );
+  }
+}
+
 export function agentService(db: Db) {
   const secretsSvc = secretService(db);
 
@@ -420,6 +437,7 @@ export function agentService(db: Db) {
   ) {
     assertNoRoleAssignmentFields(data as Record<string, unknown>);
     assertNoToolLibraryAssignmentFields(data as Record<string, unknown>);
+    assertNoPluginToolAssignmentFields(data as Record<string, unknown>);
     const existing = await getById(id);
     if (!existing) return null;
 
@@ -539,6 +557,7 @@ export function agentService(db: Db) {
     ) => {
       assertNoRoleAssignmentFields(data as Record<string, unknown>);
       assertNoToolLibraryAssignmentFields(data as Record<string, unknown>);
+      assertNoPluginToolAssignmentFields(data as Record<string, unknown>);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
@@ -609,6 +628,24 @@ export function agentService(db: Db) {
         if (!normalized) throw notFound("Agent not found");
         return normalized;
       });
+    },
+
+    // DUR-189: the only writer of agents.pluginToolGrants — board-only at
+    // the route layer (see routes/plugin-tool-grants.ts), and the only path
+    // that ever changes this column. Unlike syncMcpToolSelection, there is
+    // no secret-binding resync here — plugin tool grants are a plain
+    // namespaced-tool-name allow-list, not MCP server connection config.
+    syncPluginToolGrants: async (agentId: string, desiredToolNames: string[]) => {
+      const updated = await db
+        .update(agents)
+        .set({ pluginToolGrants: desiredToolNames, updatedAt: new Date() })
+        .where(eq(agents.id, agentId))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!updated) throw notFound("Agent not found");
+      const normalized = await getById(updated.id);
+      if (!normalized) throw notFound("Agent not found");
+      return normalized;
     },
 
     pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
