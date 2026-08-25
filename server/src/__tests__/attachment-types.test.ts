@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { OFFICE_DOCUMENT_MIME_TYPES } from "@paperclipai/shared";
 import {
   DEFAULT_ALLOWED_TYPES,
   INLINE_ATTACHMENT_TYPES,
@@ -121,5 +122,24 @@ describe("isInlineAttachmentContentType", () => {
     expect(INLINE_ATTACHMENT_TYPES).not.toContain("text/html");
     expect(isInlineAttachmentContentType("text/html")).toBe(false);
     expect(isInlineAttachmentContentType("application/zip")).toBe(false);
+  });
+});
+
+describe("office document types stay out of the default/inline allowlists", () => {
+  // application/pdf predates the Office-document classification work and is
+  // intentionally allowed/inline; every other Office MIME type must not be added
+  // to either list without an explicit decision to change upload/preview behavior.
+  const nonPdfOfficeTypes = [...OFFICE_DOCUMENT_MIME_TYPES].filter((t) => t !== "application/pdf");
+
+  it("keeps non-PDF office types out of DEFAULT_ALLOWED_TYPES", () => {
+    for (const contentType of nonPdfOfficeTypes) {
+      expect(DEFAULT_ALLOWED_TYPES).not.toContain(contentType);
+    }
+  });
+
+  it("keeps non-PDF office types out of INLINE_ATTACHMENT_TYPES", () => {
+    for (const contentType of nonPdfOfficeTypes) {
+      expect(INLINE_ATTACHMENT_TYPES).not.toContain(contentType);
+    }
   });
 });

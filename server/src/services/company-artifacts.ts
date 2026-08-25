@@ -346,10 +346,19 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         .then((rows) => rows[0] ?? null);
       if (!company) throw notFound("Company not found");
 
+      const agentId = query.agentId ?? null;
+      if (agentId) {
+        const filterAgent = await db
+          .select({ id: agents.id, companyId: agents.companyId })
+          .from(agents)
+          .where(eq(agents.id, agentId))
+          .then((rows) => rows[0] ?? null);
+        if (!filterAgent || filterAgent.companyId !== companyId) throw notFound("Agent not found");
+      }
+
       const fetchLimit = Math.min(query.limit + 1, COMPANY_ARTIFACTS_MAX_LIMIT + 1);
       const sourceFetchLimit = groupBy ? GROUPED_ARTIFACT_FETCH_LIMIT : fetchLimit;
       const q = query.q ? `%${escapeLikePattern(query.q)}%` : null;
-      const agentId = query.agentId ?? null;
       const noAgent = query.noAgent ?? false;
       const artifacts: CompanyArtifact[] = [];
       const workProductAttachmentIds = new Set<string>();
