@@ -683,6 +683,9 @@ importers:
 
   server:
     dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.81.0
+        version: 0.81.0(zod@3.25.76)
       '@aws-sdk/client-s3':
         specifier: ^3.1075.0
         version: 3.1075.0
@@ -8288,6 +8291,12 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.191
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.191
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.191
+
+  '@anthropic-ai/sdk@0.81.0(zod@3.25.76)':
+    dependencies:
+      json-schema-to-ts: 3.1.1
+    optionalDependencies:
+      zod: 3.25.76
 
   '@anthropic-ai/sdk@0.81.0(zod@4.4.3)':
     dependencies:
