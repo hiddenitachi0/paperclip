@@ -3175,6 +3175,25 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
+registerCurrentRoute({
+  method: "post",
+  path: "/api/lane-b/{agentId}/messages",
+  tags: ["issues"],
+  summary: "Submit a plain-text request as a background task (Lane B front door)",
+  body: z.object({
+    text: z.string().trim().min(1).max(20_000),
+  }),
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/lane-b/messages/{issueId}",
+  tags: ["issues"],
+  summary: "Poll status and result summary for a Lane B background task",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
 registry.registerPath({
   method: "post",
   path: "/api/issues/{id}/admin/force-release",
