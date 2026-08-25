@@ -423,6 +423,32 @@ describe("issue attachment routes", () => {
     ]).toContain(res.headers["content-disposition"]);
   });
 
+  it("applies the sandbox CSP to every inline content type, not just SVG (e.g. PDF)", async () => {
+    const storage = createStorageService();
+    mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("application/pdf", "report.pdf"));
+
+    const app = await createApp(storage);
+    const res = await request(app).get("/api/attachments/attachment-1/content");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toBe('inline; filename="report.pdf"');
+    expect(res.headers["content-security-policy"]).toBe(
+      "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+    );
+  });
+
+  it("does not set a Content-Security-Policy header for non-inline (download-only) content types", async () => {
+    const storage = createStorageService();
+    mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("application/x-msdownload", "payload.exe"));
+
+    const app = await createApp(storage);
+    const res = await request(app).get("/api/attachments/attachment-1/content");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toBe('attachment; filename="payload.exe"');
+    expect(res.headers["content-security-policy"]).toBeUndefined();
+  });
+
   it("serves video attachments inline with byte-range support", async () => {
     const storage = createStorageService(Buffer.from("abcdef"));
     mockIssueService.getAttachmentById.mockResolvedValue({

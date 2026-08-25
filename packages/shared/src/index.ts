@@ -983,6 +983,13 @@ export {
 } from "./document-anchors.js";
 
 export {
+  classifyFileKind,
+  DOCUMENT_MEDIA_CONTENT_TYPES,
+  OFFICE_DOCUMENT_CONTENT_TYPES,
+  type FileKindInfo,
+} from "./file-kind.js";
+
+export {
   formatExternalObjectMentionSourceLabel,
   type ExternalObjectCanonicalIdentity,
   type ExternalObjectCanonicalUrl,
@@ -1259,6 +1266,8 @@ export {
   COMPANY_ARTIFACTS_DEFAULT_LIMIT,
   COMPANY_ARTIFACTS_MAX_LIMIT,
   COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
+  companyArtifactAgentSchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactGroupBySchema,
   companyArtifactGroupSchema,
   companyArtifactMediaKindSchema,
