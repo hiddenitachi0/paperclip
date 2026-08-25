@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
   addIssueCommentSchema,
+  askUserQuestionsPayloadSchema,
   createIssueSchema,
   issueBlockedInboxAttentionSchema,
+  requestCheckboxConfirmationPayloadSchema,
+  requestConfirmationPayloadSchema,
   resolveIssueRecoveryActionSchema,
   respondIssueThreadInteractionSchema,
   suggestedTaskDraftSchema,
@@ -387,5 +390,65 @@ describe("issue validators", () => {
     });
 
     expect(parsed.success).toBe(false);
+  });
+
+  it("rejects a request_confirmation payload with a placeholder prompt (DUR-162)", () => {
+    const parsed = requestConfirmationPayloadSchema.safeParse({
+      version: 1,
+      prompt: "test",
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts a request_confirmation payload with a real, if short, prompt", () => {
+    const parsed = requestConfirmationPayloadSchema.safeParse({
+      version: 1,
+      prompt: "Scope?",
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it("rejects a request_checkbox_confirmation payload with a placeholder prompt (DUR-162)", () => {
+    const parsed = requestCheckboxConfirmationPayloadSchema.safeParse({
+      version: 1,
+      prompt: "x",
+      options: [{ id: "a", label: "Option A" }],
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("rejects an ask_user_questions payload where a question's prompt is a placeholder (DUR-162)", () => {
+    const parsed = askUserQuestionsPayloadSchema.safeParse({
+      version: 1,
+      questions: [
+        {
+          id: "q1",
+          prompt: "asdf",
+          selectionMode: "single",
+          options: [{ id: "a", label: "Option A" }],
+        },
+      ],
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts an ask_user_questions payload with a real question prompt", () => {
+    const parsed = askUserQuestionsPayloadSchema.safeParse({
+      version: 1,
+      questions: [
+        {
+          id: "q1",
+          prompt: "Which environment should this deploy to?",
+          selectionMode: "single",
+          options: [{ id: "a", label: "Staging" }, { id: "b", label: "Production" }],
+        },
+      ],
+    });
+
+    expect(parsed.success).toBe(true);
   });
 });

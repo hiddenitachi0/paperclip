@@ -29,6 +29,7 @@ import {
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
   GOAL_CONDITION_VERDICTS,
 } from "../constants.js";
+import { isPlaceholderPromptText } from "./placeholder-prompt.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -666,6 +667,19 @@ export const askUserQuestionsQuestionSchema = z.object({
   selectionMode: z.enum(["single", "multi"]),
   required: z.boolean().optional(),
   options: z.array(askUserQuestionsQuestionOptionSchema).min(1).max(10),
+}).superRefine((value, ctx) => {
+  // DUR-162: refuse placeholder/test prompts at creation so they never reach
+  // the operator's live decision queue. Use dryRun:true on the interaction
+  // create call to exercise this code path instead.
+  if (isPlaceholderPromptText(value.prompt)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "prompt looks like placeholder/test content, not a real question. " +
+        "Use dryRun:true to verify this API without creating a live card.",
+      path: ["prompt"],
+    });
+  }
 });
 
 export const askUserQuestionsPayloadSchema = z.object({
@@ -760,6 +774,17 @@ export const requestConfirmationPayloadSchema = z.object({
   detailsMarkdown: z.string().max(20000).nullable().optional(),
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
+}).superRefine((value, ctx) => {
+  // DUR-162: see askUserQuestionsQuestionSchema's superRefine for rationale.
+  if (isPlaceholderPromptText(value.prompt)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "prompt looks like placeholder/test content, not a real confirmation request. " +
+        "Use dryRun:true to verify this API without creating a live card.",
+      path: ["prompt"],
+    });
+  }
 });
 
 export const requestCheckboxConfirmationOptionSchema = z.object({
@@ -790,6 +815,17 @@ export const requestCheckboxConfirmationPayloadSchema = z.object({
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
 }).superRefine((value, ctx) => {
+  // DUR-162: see askUserQuestionsQuestionSchema's superRefine for rationale.
+  if (isPlaceholderPromptText(value.prompt)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "prompt looks like placeholder/test content, not a real confirmation request. " +
+        "Use dryRun:true to verify this API without creating a live card.",
+      path: ["prompt"],
+    });
+  }
+
   const optionIds = new Set<string>();
   for (const [index, option] of value.options.entries()) {
     if (optionIds.has(option.id)) {

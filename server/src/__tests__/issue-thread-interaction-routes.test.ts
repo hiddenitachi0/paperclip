@@ -1049,11 +1049,31 @@ describe.sequential("issue thread interaction routes", () => {
       .send({
         kind: "request_confirmation",
         dryRun: true,
-        payload: { version: 1, prompt: "test" },
+        payload: { version: 1, prompt: "Deploy the release now?" },
       });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ dryRun: true, wouldSucceed: true });
+    expect(mockInteractionService.create).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it("refuses a placeholder prompt even under dryRun (DUR-162)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: CREATED_AGENT_ID,
+      companyId: "company-1",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions")
+      .send({
+        kind: "request_confirmation",
+        dryRun: true,
+        payload: { version: 1, prompt: "test" },
+      });
+
+    expect(res.status).toBe(400);
     expect(mockInteractionService.create).not.toHaveBeenCalled();
   }, 20_000);
 });
