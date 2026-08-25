@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -41,6 +42,20 @@ function assertSuccess(result, label) {
 const FAKE_DOCKER = [
   '#!/usr/bin/env bash',
   'set -uo pipefail',
+  '',
+  // DUR-163: capture_failure_diagnostics() calls `docker logs --tail N
+  // <container>` directly (this runner runs on-box, outside any container,
+  // so it talks to the host docker daemon here — unlike everything else in
+  // this fake, which intercepts `docker exec` into the server container).
+  // Serves canned output from $SCENARIO_DIR/docker-logs-<container>.txt.
+  'if [ "${1:-}" = "logs" ]; then',
+  '  shift',
+  '  container="${@: -1}"',
+  '  fixture="$SCENARIO_DIR/docker-logs-$container.txt"',
+  '  if [ -f "$fixture" ]; then cat "$fixture"; else echo "fake docker: no logs fixture for $container" >&2; exit 1; fi',
+  '  exit 0',
+  'fi',
+  '',
   '[ "${1:-}" = "exec" ] || exit 1',
   'shift',
   '',
@@ -732,6 +747,11 @@ test("DUR-152: a same-cycle superseded approval whose commit already shipped via
       PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
       PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES: "1",
       PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "0",
+      // The health check here is deliberately pointed at a refused port to
+      // fail fast (rollback: none — only the checkout advancing matters) —
+      // without this the DUR-163 port-open pre-wait would burn its full
+      // default budget treating "refused" as "maybe still booting".
+      PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS: "0",
     });
     assertSuccess(result, "main()");
 
@@ -773,6 +793,215 @@ test("run_one_approval's crash-fallback comment does not double-comment when the
     const comments = readFileSync(path.join(scenario.dir, "comments.log"), "utf8").split("\n").filter(Boolean);
     assert.deepEqual(comments, ["handled normally"], "the EXIT trap fallback must not post a second comment");
     assert.deepEqual(scenario.processedIds(), ["aid-1"]);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-163 regression coverage: a failed deploy used to destroy its own
+// evidence (rollback recreates the container before anyone reads its logs)
+// and a health check under load couldn't tell "server refused/timed out"
+// from "server responded and just isn't healthy yet" — both read identically
+// as "not 200" and both silently ate into the same 22-commit-batch deploy
+// that got blamed on a startup bug it never had.
+
+test("probe_verdict distinguishes a real HTTP response from a refused connection and a timeout", () => {
+  const script = `
+    source "${SCRIPT}"
+    probe_verdict 0 200
+    probe_verdict 0 503
+    probe_verdict 7 000
+    probe_verdict 28 000
+    probe_verdict 6 000
+  `;
+  const result = run("bash", ["-c", script]);
+  assertSuccess(result, "probe_verdict");
+  assert.deepEqual(
+    result.stdout.trim().split("\n"),
+    ["ok", "http_error", "refused", "timeout", "unreachable"],
+    "curl exit 7 (refused) and 28 (timeout) must not collapse into the same verdict as each other or as a real HTTP response",
+  );
+});
+
+function withListener(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer(handler);
+    server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+// health_check shells out to `curl` via spawnSync, which BLOCKS this test
+// process's event loop until curl exits. An in-process http.createServer()
+// listener can accept the TCP connection (handled by the OS) but can never
+// run its own JS request handler to write a response while this process is
+// itself blocked waiting on that same curl call — a self-deadlock, broken
+// only by curl's own --max-time. So the "server actually answers 200" half
+// of these tests needs a REAL separate process — a tiny stdlib-only Python
+// HTTP server — not an in-process Node listener.
+function startPythonHttpServer(dir) {
+  return new Promise((resolve, reject) => {
+    const script = [
+      "import http.server, socketserver, sys",
+      "class H(http.server.SimpleHTTPRequestHandler):",
+      "    def __init__(self, *a, **kw): super().__init__(*a, directory=sys.argv[1], **kw)",
+      "    def log_message(self, *a): pass",
+      "with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:",
+      "    print(httpd.server_address[1], flush=True)",
+      "    httpd.serve_forever()",
+    ].join("\n");
+    const child = spawn("python3", ["-c", script, dir], { stdio: ["ignore", "pipe", "pipe"] });
+    let buf = "";
+    let settled = false;
+    child.stdout.on("data", (chunk) => {
+      if (settled) return;
+      buf += chunk.toString();
+      const match = /^(\d+)/.exec(buf);
+      if (match) {
+        settled = true;
+        resolve({ child, port: Number(match[1]) });
+      }
+    });
+    child.on("error", (err) => {
+      if (!settled) { settled = true; reject(err); }
+    });
+    child.on("exit", (code) => {
+      if (!settled) { settled = true; reject(new Error(`python3 http server exited early (code ${code})`)); }
+    });
+  });
+}
+
+test("health_check logs every probe's http code and load average, and succeeds as soon as a 200 arrives", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-health-root-"));
+  writeFileSync(path.join(webRoot, "health"), "ok");
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  try {
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      health_check "http://127.0.0.1:${port}/health"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES: "3",
+        PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "0",
+        PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS: "5",
+      },
+    });
+    assertSuccess(result, "health_check");
+    assert.match(
+      scenario.readLog(),
+      /health probe 1\/3 ok \(http_code=200 load=\S+\)/,
+      "a successful probe must record its own http code and the load average at the time",
+    );
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
+test("health_check reports a refused connection as its own verdict, distinct from a real HTTP error, and fails once retries are exhausted", async () => {
+  // Bind then immediately release a port so nothing is listening on it —
+  // the connection is actively refused, not merely slow. No response body
+  // is ever needed for a refusal, so the event-loop deadlock above doesn't
+  // apply here — a plain in-process listener is fine.
+  const probe = await withListener((_req, res) => res.end());
+  const port = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const scenario = makeScenario();
+  try {
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      health_check "http://127.0.0.1:${port}/health"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES: "2",
+        PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "0",
+        PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS: "1",
+      },
+    });
+    assert.equal(result.status, 1, "health_check must fail once every probe is refused and retries are exhausted");
+    const log = scenario.readLog();
+    assert.match(log, /never accepted a TCP connection within 1s/, "a port that never opens must be called out separately from a probe that connected");
+    assert.match(log, /health probe 1\/2 refused \(curl_status=7 http_code=000 load=\S+\)/);
+    assert.match(log, /health probe 2\/2 refused \(curl_status=7 http_code=000 load=\S+\)/);
+    assert.doesNotMatch(log, /health probe \d+\/2 ok/, "a refused connection must never be logged as if it were a real (if unhealthy) HTTP response");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("maybe_rollback captures the failing container's logs to a durable file before the rollback would recreate it", () => {
+  const scenario = makeScenario();
+  try {
+    writeFileSync(path.join(scenario.dir, "docker-logs-docker-server-1.txt"), "FATAL: crashed during boot\n");
+    const failureLogDir = path.join(scenario.dir, "failure-logs");
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      DV_ROLLBACK=git_previous
+      DV_DEPLOY_KIND=custom
+      DV_DEPLOY_TARGET_PATH=/nonexistent
+      DV_DEPLOY_SERVICES=
+      DV_DEPLOY_COMMAND=true
+      DV_COMPOSE_FILES=
+      DV_ENV_FILE=
+      maybe_rollback "aid-1" "unknown" "deadbeef"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_FAILURE_LOG_DIR: failureLogDir,
+      },
+    });
+    assertSuccess(result, "maybe_rollback");
+
+    const diagPath = result.stdout.trim();
+    assert.ok(diagPath, "maybe_rollback must print the diagnostics file path it captured");
+    assert.ok(existsSync(diagPath), `expected the captured diagnostics file to exist at ${diagPath}`);
+    const contents = readFileSync(diagPath, "utf8");
+    assert.match(contents, /FATAL: crashed during boot/, "the failing container's actual log output must be captured, not just a marker that capture ran");
+    assert.match(scenario.readLog(), /captured pre-rollback failure diagnostics to/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("maybe_rollback is a no-op — no diagnostics captured, nothing printed — when rollback isn't configured", () => {
+  const scenario = makeScenario();
+  try {
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      DV_ROLLBACK=none
+      DV_DEPLOY_KIND=custom
+      DV_DEPLOY_TARGET_PATH=/nonexistent
+      maybe_rollback "aid-1" "before123" "after456"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_FAILURE_LOG_DIR: path.join(scenario.dir, "failure-logs"),
+      },
+    });
+    assertSuccess(result, "maybe_rollback");
+    assert.equal(result.stdout.trim(), "", "no rollback configured means no diagnostics path to report");
+    assert.ok(!existsSync(path.join(scenario.dir, "failure-logs")), "capture_failure_diagnostics must never run when DV_ROLLBACK isn't git_previous");
   } finally {
     scenario.cleanup();
   }

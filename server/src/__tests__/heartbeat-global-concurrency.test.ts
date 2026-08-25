@@ -9,11 +9,14 @@ import {
   companies,
   companySkills,
   createDb,
+  documents,
   environmentLeases,
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueAttachments,
   issueComments,
+  issueDocuments,
   issues,
   workspaceOperations,
 } from "@paperclipai/db";
@@ -106,6 +109,9 @@ describeEmbeddedPostgres("heartbeat whole-instance concurrency ceiling (DUR-151)
     await db.delete(environmentLeases);
     await db.delete(activityLog);
     await db.delete(companySkills);
+    await db.delete(issueDocuments);
+    await db.delete(issueAttachments);
+    await db.delete(documents);
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);

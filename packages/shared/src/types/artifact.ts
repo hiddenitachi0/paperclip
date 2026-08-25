@@ -32,7 +32,11 @@ export interface CompanyArtifact {
   downloadPath: string | null;
   byteSize?: number | null;
   originalFilename?: string | null;
-  issue: CompanyArtifactIssueSummary;
+  /**
+   * Null when the owning task was deleted (DUR-206) -- the file is kept, not
+   * destroyed, and surfaces under the "No task" group instead.
+   */
+  issue: CompanyArtifactIssueSummary | null;
   project: CompanyArtifactProjectSummary | null;
   createdByAgent: CompanyArtifactAgentSummary | null;
   /**

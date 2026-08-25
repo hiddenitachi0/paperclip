@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Check, Layers, Package, Search, User, X } from "lucide-react";
 import type { To } from "react-router-dom";
+import { NO_TASK_ARTIFACT_GROUP_ID } from "@paperclipai/shared";
 import {
   artifactsApi,
   type ArtifactGroupBy,
@@ -256,8 +257,12 @@ export function Artifacts() {
       setBreadcrumbs([
         { label: "Files", href: "/files" },
         {
-          // This page only ever requests groupBy "task"/"parent_task", where `issue` is always set.
-          label: `${selectedGroup.issue!.identifier} · ${selectedGroup.title}`,
+          // `issue` is unset for the "No task" group (DUR-206: files kept
+          // after their owning task was deleted) -- fall back to the group
+          // title alone in that case.
+          label: selectedGroup.issue
+            ? `${selectedGroup.issue.identifier} · ${selectedGroup.title}`
+            : selectedGroup.title,
         },
       ]);
     } else {
@@ -426,8 +431,14 @@ export function Artifacts() {
           </Link>
           {selectedGroup ? (
             <span className="truncate text-muted-foreground">
-              <span className="text-foreground/80">{selectedGroup.issue!.identifier}</span>{" "}
-              {selectedGroup.title}
+              {selectedGroup.issue ? (
+                <>
+                  <span className="text-foreground/80">{selectedGroup.issue.identifier}</span>{" "}
+                  {selectedGroup.title}
+                </>
+              ) : (
+                selectedGroup.title
+              )}
             </span>
           ) : null}
         </div>
@@ -444,7 +455,7 @@ export function Artifacts() {
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
             {showGroupCards
               ? groups.map((group) => (
-                  <ArtifactGroupCard key={group.id} group={group} to={stackTo(group.issue!.id)} />
+                  <ArtifactGroupCard key={group.id} group={group} to={stackTo(group.issue?.id ?? NO_TASK_ARTIFACT_GROUP_ID)} />
                 ))
               : artifacts.map((artifact) => (
                   <ArtifactCard key={`${artifact.source}:${artifact.id}`} artifact={artifact} />
