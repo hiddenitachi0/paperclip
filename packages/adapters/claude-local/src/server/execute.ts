@@ -138,9 +138,36 @@ function isBedrockAuth(env: Record<string, string>): boolean {
   );
 }
 
-function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscription" | "metered_api" {
+// DUR-210: the Claude CLI never reports when a subscription's included quota
+// has run out and spend has moved to paid overage/credits - every run under
+// subscription auth is reported as plain "subscription" forever, which the
+// ledger then bills at $0. Since the CLI has no way to detect or report this
+// itself, the operator declares the boundary via
+// adapterConfig.subscriptionQuotaExhaustedAt; runs at/after that time are
+// stamped with the operator-chosen billing type instead, so the CLI's own
+// notional total_cost_usd (computed regardless of auth mode) flows through
+// as real spend rather than being zeroed out.
+export function resolveClaudeBillingType(
+  env: Record<string, string>,
+  subscriptionOverage?: { exhaustedAt: Date; billingType: "subscription_overage" | "credits" } | null,
+): "api" | "subscription" | "metered_api" | "subscription_overage" | "credits" {
   if (isBedrockAuth(env)) return "metered_api";
-  return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
+  if (hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY")) return "api";
+  if (subscriptionOverage && Date.now() >= subscriptionOverage.exhaustedAt.getTime()) {
+    return subscriptionOverage.billingType;
+  }
+  return "subscription";
+}
+
+export function resolveClaudeSubscriptionOverage(
+  config: Record<string, unknown>,
+): { exhaustedAt: Date; billingType: "subscription_overage" | "credits" } | null {
+  const raw = config.subscriptionQuotaExhaustedAt;
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  const exhaustedAt = new Date(raw);
+  if (Number.isNaN(exhaustedAt.getTime())) return null;
+  const billingType = config.subscriptionQuotaExhaustedBillingType === "credits" ? "credits" : "subscription_overage";
+  return { exhaustedAt, billingType };
 }
 
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
@@ -712,7 +739,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
-  const billingType = resolveClaudeBillingType(effectiveEnv);
+  const billingType = resolveClaudeBillingType(effectiveEnv, resolveClaudeSubscriptionOverage(config));
   const claudeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = new Set(resolveClaudeDesiredSkillNames(config, claudeSkillEntries));
   // When instructionsFilePath is configured, build a stable content-addressed

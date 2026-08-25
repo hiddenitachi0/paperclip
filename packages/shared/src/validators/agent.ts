@@ -106,6 +106,32 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
       });
     }
   }
+  // DUR-210: operator-declared boundary for when this agent's Claude subscription
+  // quota ran out and spend moved to paid overage/credits. The CLI itself never
+  // reports this, so runs at/after this timestamp are stamped with
+  // subscriptionQuotaExhaustedBillingType instead of subscription_included.
+  const exhaustedAtValue = value.subscriptionQuotaExhaustedAt;
+  if (exhaustedAtValue !== undefined && exhaustedAtValue !== null) {
+    const parsed = z.string().datetime({ offset: true }).safeParse(exhaustedAtValue);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.subscriptionQuotaExhaustedAt must be an ISO 8601 datetime string",
+        path: ["subscriptionQuotaExhaustedAt"],
+      });
+    }
+  }
+  const exhaustedBillingTypeValue = value.subscriptionQuotaExhaustedBillingType;
+  if (exhaustedBillingTypeValue !== undefined && exhaustedBillingTypeValue !== null) {
+    const parsed = z.enum(["subscription_overage", "credits"]).safeParse(exhaustedBillingTypeValue);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.subscriptionQuotaExhaustedBillingType must be \"subscription_overage\" or \"credits\"",
+        path: ["subscriptionQuotaExhaustedBillingType"],
+      });
+    }
+  }
 });
 
 export const createAgentInstructionsBundleSchema = z.object({
