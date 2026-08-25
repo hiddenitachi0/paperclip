@@ -93,6 +93,25 @@ describe("task watchdog subtree classifier", () => {
     });
   });
 
+  it("keeps the same fingerprint when only updatedAt changes on an otherwise-identical blocked issue", () => {
+    // Regression for DUR-191: checkout's blocked->in_progress->blocked round trip bumps
+    // updatedAt without changing anything substantive. The fingerprint must not move,
+    // or the watchdog re-fires forever on a stable human blocker.
+    const stopped = classify({
+      issues: [issue({ status: "blocked", updatedAt: new Date("2026-06-17T20:00:00.000Z") })],
+    });
+    expect(stopped.state).toBe("stopped");
+    if (stopped.state !== "stopped") return;
+
+    const later = classify({
+      issues: [issue({ status: "blocked", updatedAt: new Date("2026-06-17T20:05:00.000Z") })],
+    });
+    expect(later.state).toBe("stopped");
+    if (later.state !== "stopped") return;
+
+    expect(later.stopFingerprint).toBe(stopped.stopFingerprint);
+  });
+
   it("excludes task-watchdog issues and their descendants from watched subtree scans", () => {
     const result = classify({
       issues: [
