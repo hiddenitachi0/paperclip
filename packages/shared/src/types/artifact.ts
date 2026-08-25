@@ -30,8 +30,8 @@ export interface CompanyArtifact {
   contentPath: string | null;
   openPath: string | null;
   downloadPath: string | null;
-  byteSize: number | null;
-  originalFilename: string | null;
+  byteSize?: number | null;
+  originalFilename?: string | null;
   issue: CompanyArtifactIssueSummary;
   project: CompanyArtifactProjectSummary | null;
   createdByAgent: CompanyArtifactAgentSummary | null;
