@@ -1016,6 +1016,13 @@
       "when": 1787150000000,
       "tag": "0144_persona_daily_generation_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1787160000000,
+      "tag": "0145_agent_plugin_tool_grants",
+      "breakpoints": true
     }
   ]
 }

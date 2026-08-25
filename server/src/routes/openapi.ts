@@ -37,6 +37,7 @@ import {
   updateCompanySchema,
   updateCompanyBrandingSchema,
   companyArtifactsQuerySchema,
+  companyArtifactAgentsResponseSchema,
   companyArtifactsResponseSchema,
   // Routine
   createRoutineSchema,
@@ -966,6 +967,27 @@ registry.registerPath({
       content: {
         "application/json": {
           schema: companyArtifactsResponseSchema,
+        },
+      },
+    },
+    401: r.unauthorized,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/artifacts/agents",
+  tags: ["companies"],
+  summary: "List agents who have made company artifacts",
+  request: {
+    params: z.object({ companyId: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Agents with at least one artifact, most-recent first",
+      content: {
+        "application/json": {
+          schema: companyArtifactAgentsResponseSchema,
         },
       },
     },
@@ -4121,6 +4143,27 @@ registry.registerPath({
     body: jsonBody(z.object({ configJson: z.record(z.unknown()) })),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{agentId}/plugin-tool-grants",
+  tags: ["plugins"],
+  summary: "Get an agent's plugin tool grants",
+  request: { params: z.object({ agentId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{agentId}/plugin-tool-grants/sync",
+  tags: ["plugins"],
+  summary: "Replace an agent's plugin tool grants",
+  request: {
+    params: z.object({ agentId: z.string() }),
+    body: jsonBody(z.object({ desiredToolNames: z.array(z.string()).max(200) })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
 });
 
 registry.registerPath({

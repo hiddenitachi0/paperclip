@@ -142,7 +142,6 @@ import {
   isInlineAttachmentContentType,
   normalizeIssueAttachmentMaxBytes,
   normalizeContentType,
-  SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import {
@@ -8852,13 +8851,18 @@ export function issueRoutes(
     res.setHeader("Content-Type", responseContentType);
     res.setHeader("Cache-Control", "private, max-age=60");
     res.setHeader("X-Content-Type-Options", "nosniff");
-    if (responseContentType === SVG_CONTENT_TYPE) {
+    // Was scoped to SVG only; broadened to every inline content type (PDF,
+    // images, text, video — see isInlineAttachmentContentType) so anything
+    // rendered inline in the browser (not just SVG) gets sandboxed instead
+    // of just the types disposition already treats as "inline" below.
+    const isInlineContent = isInlineAttachmentContentType(responseContentType);
+    if (isInlineContent) {
       res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
     }
     const filename = attachment.originalFilename ?? "attachment";
     const disposition = parseBooleanQuery(req.query.download)
       ? "attachment"
-      : isInlineAttachmentContentType(responseContentType) ? "inline" : "attachment";
+      : isInlineContent ? "inline" : "attachment";
     res.setHeader("Content-Disposition", `${disposition}; filename=\"${filename.replaceAll("\"", "")}\"`);
 
     object.stream.on("error", (err) => {

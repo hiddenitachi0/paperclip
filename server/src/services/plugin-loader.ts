@@ -49,6 +49,7 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
 import { pluginDatabaseService } from "./plugin-database.js";
+import { SECRET_REF_ENABLED_PLUGIN_KEYS } from "./plugin-secrets-handler.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2159,6 +2160,10 @@ export function pluginLoader(
         hostHandlers,
         autoRestart: true,
         env: buildPluginWorkerEnv({ manifest, instanceInfo }),
+        // Only plugins that can actually resolve secrets from an invocation
+        // scope need cross-company invocations serialized — see DUR-188/
+        // DUR-193 and the doc comment on serializeInvocationScope.
+        serializeInvocationScope: SECRET_REF_ENABLED_PLUGIN_KEYS.has(manifest.id),
       };
 
       // Repo-local plugin installs can resolve workspace TS sources at runtime

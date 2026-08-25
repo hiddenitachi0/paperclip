@@ -147,7 +147,10 @@ export interface HostServices {
 
   /** Provides `secrets.resolve`. */
   secrets: {
-    resolve(params: WorkerToHostMethods["secrets.resolve"][0]): Promise<string>;
+    resolve(
+      params: WorkerToHostMethods["secrets.resolve"][0],
+      context?: WorkerHostCallContext,
+    ): Promise<string>;
   };
 
   /** Provides `activity.log`. */
@@ -233,6 +236,7 @@ export interface HostServices {
     listComments(params: WorkerToHostMethods["issues.listComments"][0]): Promise<WorkerToHostMethods["issues.listComments"][1]>;
     createComment(params: WorkerToHostMethods["issues.createComment"][0]): Promise<WorkerToHostMethods["issues.createComment"][1]>;
     createInteraction(params: WorkerToHostMethods["issues.createInteraction"][0]): Promise<WorkerToHostMethods["issues.createInteraction"][1]>;
+    createAttachment(params: WorkerToHostMethods["issues.createAttachment"][0]): Promise<WorkerToHostMethods["issues.createAttachment"][1]>;
   };
 
   /** Provides `issues.documents.list`, `issues.documents.get`, `issues.documents.upsert`, `issues.documents.delete`. */
@@ -439,6 +443,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "issues.listComments": "issue.comments.read",
   "issues.createComment": "issue.comments.create",
   "issues.createInteraction": "issue.interactions.create",
+  "issues.createAttachment": "issue.attachments.create",
 
   // Issue Documents
   "issues.documents.list": "issue.documents.read",
@@ -696,8 +701,8 @@ export function createHostClientHandlers(
     }),
 
     // Secrets
-    "secrets.resolve": gated("secrets.resolve", async (params) => {
-      return services.secrets.resolve(params);
+    "secrets.resolve": gated("secrets.resolve", async (params, context) => {
+      return services.secrets.resolve(params, context);
     }),
 
     // Activity
@@ -838,6 +843,9 @@ export function createHostClientHandlers(
     }),
     "issues.createInteraction": gated("issues.createInteraction", async (params) => {
       return services.issues.createInteraction(params);
+    }),
+    "issues.createAttachment": gated("issues.createAttachment", async (params) => {
+      return services.issues.createAttachment(params);
     }),
 
     // Issue Documents

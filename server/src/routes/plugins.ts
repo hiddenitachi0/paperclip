@@ -47,6 +47,9 @@ import {
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
+import { agentService } from "../services/agents.js";
+import { agentPluginToolSelectionSchema } from "@paperclipai/shared/validators/plugin-tool-grants";
+import { validate } from "../middleware/validate.js";
 import {
   getPluginUiContributionMetadata,
   listMissingDeclaredPluginEntrypoints,
@@ -515,6 +518,7 @@ export function pluginRoutes(
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
   const issuesSvc = issueService(db);
+  const agentsSvc = agentService(db);
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -747,10 +751,20 @@ export function pluginRoutes(
     return companyId === undefined ? base : { ...base, companyId };
   }
 
+  interface ToolRunContextScopeResult {
+    error: string | null;
+    // DUR-189: piggybacked off the same agent-row select this function
+    // already does for the companyId check, so adding grant enforcement
+    // doesn't cost an extra DB round trip. Absent/empty means unrestricted.
+    pluginToolGrants: string[];
+  }
+
   async function validateToolRunContextScope(
     runContext: ToolRunContext,
     actor: Request["actor"],
-  ): Promise<string | null> {
+  ): Promise<ToolRunContextScopeResult> {
+    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [] };
+
     // DUR-174: an agent-authenticated caller must be the same agent named in
     // runContext.agentId, so two agents (e.g. two personas) in one company
     // cannot reach each other's plugin tool config/secrets by supplying a
@@ -758,17 +772,18 @@ export function pluginRoutes(
     // the same-agent-id guard pattern used in issues.ts checkout and
     // costs.ts cost-event reporting.
     if (actor.type === "agent" && actor.agentId !== runContext.agentId) {
-      return '"runContext.agentId" does not match the authenticated agent';
+      return { ...noGrants, error: '"runContext.agentId" does not match the authenticated agent' };
     }
 
     const [agent] = await db
-      .select({ companyId: agents.companyId })
+      .select({ companyId: agents.companyId, pluginToolGrants: agents.pluginToolGrants })
       .from(agents)
       .where(eq(agents.id, runContext.agentId))
       .limit(1);
     if (!agent || agent.companyId !== runContext.companyId) {
-      return '"runContext.agentId" does not belong to "runContext.companyId"';
+      return { ...noGrants, error: '"runContext.agentId" does not belong to "runContext.companyId"' };
     }
+    const pluginToolGrants = (agent.pluginToolGrants as string[] | null) ?? [];
 
     const [run] = await db
       .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
@@ -776,10 +791,10 @@ export function pluginRoutes(
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
     if (!run || run.companyId !== runContext.companyId) {
-      return '"runContext.runId" does not belong to "runContext.companyId"';
+      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants };
     }
     if (run.agentId !== runContext.agentId) {
-      return '"runContext.runId" does not belong to "runContext.agentId"';
+      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants };
     }
 
     const [project] = await db
@@ -788,10 +803,37 @@ export function pluginRoutes(
       .where(eq(projects.id, runContext.projectId))
       .limit(1);
     if (!project || project.companyId !== runContext.companyId) {
-      return '"runContext.projectId" does not belong to "runContext.companyId"';
+      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants };
     }
 
+    return { error: null, pluginToolGrants };
+  }
+
+  // DUR-189: an empty/absent grants list means unrestricted — this matches
+  // every agent's behavior before agents.pluginToolGrants existed (there was
+  // no per-agent scoping at all), so treating "no grants set" as "no
+  // restriction" is not a regression. A non-empty list narrows the agent to
+  // exactly those namespaced tool names. Board/human callers get an empty
+  // grants list from validateToolRunContextScope (agent-only lookup skipped
+  // isn't relevant here — board callers aren't restricted by this check at
+  // the route layer, see the actor.type guard at the call site).
+  function checkPluginToolGrant(pluginToolGrants: string[], namespacedToolName: string): string | null {
+    if (pluginToolGrants.length > 0 && !pluginToolGrants.includes(namespacedToolName)) {
+      return `Agent is not granted the "${namespacedToolName}" plugin tool`;
+    }
     return null;
+  }
+
+  /**
+   * DUR-195: a company can disable a plugin for itself via
+   * `plugin_company_settings.enabled` while the plugin stays `ready`
+   * instance-wide. Absence of a settings row means the plugin has never been
+   * toggled for that company and defaults to enabled (matches the column's
+   * `DEFAULT true` and `upsertCompanySettings`' own default).
+   */
+  async function isPluginEnabledForCompany(pluginDbId: string, companyId: string): Promise<boolean> {
+    const settings = await registry.getCompanySettings(pluginDbId, companyId);
+    return settings ? settings.enabled : true;
   }
 
   /**
@@ -915,6 +957,11 @@ export function pluginRoutes(
    *
    * Query params:
    * - `pluginId` (optional): Filter to tools from a specific plugin
+   * - `companyId` (optional, board callers only): Scope the listing to a
+   *   company the caller has access to, excluding tools from plugins that
+   *   company has disabled via `plugin_company_settings.enabled`. Agent
+   *   callers are always scoped to their own company. Board callers who
+   *   omit this get the unfiltered, instance-wide listing (unchanged).
    *
    * Response: `AgentToolDescriptor[]`
    * Errors: 501 if tool dispatcher is not configured
@@ -930,7 +977,35 @@ export function pluginRoutes(
     const pluginId = req.query.pluginId as string | undefined;
     const filter = pluginId ? { pluginId } : undefined;
     const tools = toolDeps.toolDispatcher.listToolsForAgent(filter);
-    res.json(tools);
+
+    // DUR-195: scope the listing to plugins enabled for the caller's
+    // company. Agents are always scoped to their own company. Board callers
+    // may pass ?companyId= to scope the listing to a specific company;
+    // without it the listing stays instance-wide, matching prior admin/CLI
+    // discovery behavior.
+    let companyId: string | undefined;
+    if (req.actor.type === "agent") {
+      companyId = req.actor.companyId;
+    } else {
+      const rawCompanyId = req.query.companyId;
+      if (typeof rawCompanyId === "string" && rawCompanyId.trim().length > 0) {
+        assertCompanyAccess(req, rawCompanyId);
+        companyId = rawCompanyId;
+      }
+    }
+
+    if (!companyId) {
+      res.json(tools);
+      return;
+    }
+
+    const uniquePluginDbIds = [...new Set(tools.map((tool) => tool.pluginId))];
+    const enabledByPluginDbId = new Map(
+      await Promise.all(
+        uniquePluginDbIds.map(async (dbId) => [dbId, await isPluginEnabledForCompany(dbId, companyId!)] as const),
+      ),
+    );
+    res.json(tools.filter((tool) => enabledByPluginDbId.get(tool.pluginId) !== false));
   });
 
   /**
@@ -949,6 +1024,8 @@ export function pluginRoutes(
    * Response: `ToolExecutionResult`
    * Errors:
    * - 400 if request validation fails
+   * - 403 if `runContext.companyId` has disabled the tool's plugin via
+   *   `plugin_company_settings.enabled`
    * - 404 if tool is not found
    * - 501 if tool dispatcher is not configured
    * - 502 if the plugin worker is unavailable or the RPC call fails
@@ -988,9 +1065,9 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, runContext.companyId);
-    const scopeError = await validateToolRunContextScope(runContext, req.actor);
-    if (scopeError) {
-      res.status(403).json({ error: scopeError });
+    const scope = await validateToolRunContextScope(runContext, req.actor);
+    if (scope.error) {
+      res.status(403).json({ error: scope.error });
       return;
     }
 
@@ -998,6 +1075,23 @@ export function pluginRoutes(
     const registeredTool = toolDeps.toolDispatcher.getTool(tool);
     if (!registeredTool) {
       res.status(404).json({ error: `Tool "${tool}" not found` });
+      return;
+    }
+
+    // DUR-195: the target company may have disabled this tool's plugin
+    // (`plugin_company_settings.enabled = false`) even though the plugin is
+    // `ready` instance-wide. Enforce that gate here, not just at listing.
+    const pluginEnabled = await isPluginEnabledForCompany(registeredTool.pluginDbId, runContext.companyId);
+    if (!pluginEnabled) {
+      res.status(403).json({
+        error: `Plugin "${registeredTool.pluginId}" is disabled for this company`,
+      });
+      return;
+    }
+
+    const grantError = checkPluginToolGrant(scope.pluginToolGrants, tool);
+    if (grantError) {
+      res.status(403).json({ error: grantError });
       return;
     }
 
@@ -1019,6 +1113,82 @@ export function pluginRoutes(
       }
     }
   });
+
+  /**
+   * GET /api/agents/:agentId/plugin-tool-grants
+   *
+   * DUR-189: read this agent's plugin-tool allow-list (namespaced tool
+   * names) plus the full catalog of currently registered plugin tools, each
+   * flagged with whether this agent is granted it today. An empty
+   * `grantedToolNames` means unrestricted (every registered tool), matching
+   * the enforcement semantics in POST /plugins/tools/execute. Board-only —
+   * same posture as GET /agents/:agentId/mcp-tools.
+   */
+  router.get("/agents/:agentId/plugin-tool-grants", async (req, res) => {
+    assertBoard(req);
+    const [agent] = await db
+      .select({ id: agents.id, companyId: agents.companyId, pluginToolGrants: agents.pluginToolGrants })
+      .from(agents)
+      .where(eq(agents.id, req.params.agentId!))
+      .limit(1);
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCompanyAccess(req, agent.companyId);
+    const grantedToolNames = (agent.pluginToolGrants as string[] | null) ?? [];
+    const allTools = toolDeps ? toolDeps.toolDispatcher.listToolsForAgent() : [];
+    res.json({
+      grantedToolNames,
+      unrestricted: grantedToolNames.length === 0,
+      availableTools: allTools,
+    });
+  });
+
+  /**
+   * POST /api/agents/:agentId/plugin-tool-grants/sync
+   *
+   * DUR-189: replace this agent's plugin-tool allow-list wholesale (same
+   * desired-set-replace contract as POST /agents/:agentId/mcp-tools/sync).
+   * Board-only — an agent can never reach this route to grant itself a
+   * broader tool set (see assertNoPluginToolAssignmentFields in
+   * services/agents.ts, which blocks every other writer of this column).
+   * Requested names are validated against the live tool registry when the
+   * dispatcher is configured, so a typo 404s here instead of silently
+   * granting a name nothing will ever match.
+   */
+  router.post(
+    "/agents/:agentId/plugin-tool-grants/sync",
+    validate(agentPluginToolSelectionSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const agentId = req.params.agentId as string;
+      const { desiredToolNames } = req.body as { desiredToolNames: string[] };
+
+      const [agent] = await db
+        .select({ id: agents.id, companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, agentId))
+        .limit(1);
+      if (!agent) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCompanyAccess(req, agent.companyId);
+
+      const uniqueNames = [...new Set(desiredToolNames)];
+      if (toolDeps) {
+        for (const toolName of uniqueNames) {
+          if (!toolDeps.toolDispatcher.getTool(toolName)) {
+            throw unprocessable(`Tool "${toolName}" is not a registered plugin tool`);
+          }
+        }
+      }
+
+      const updated = await agentsSvc.syncPluginToolGrants(agentId, uniqueNames);
+      res.json(updated);
+    },
+  );
 
   /**
    * POST /api/plugins/install

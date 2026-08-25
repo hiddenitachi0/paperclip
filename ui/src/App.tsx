@@ -190,7 +190,8 @@ function boardRoutes() {
       <Route path="execution-workspaces/:workspaceId/routines" element={<ExecutionWorkspaceDetail />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />
-      <Route path="artifacts" element={<Artifacts />} />
+      <Route path="files" element={<Artifacts />} />
+      <Route path="artifacts" element={<LegacyArtifactsRedirect />} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />
       <Route path="approvals/pending" element={<Approvals />} />
       <Route path="approvals/all" element={<Approvals />} />
@@ -204,7 +205,8 @@ function boardRoutes() {
           `/artifacts` in both modes. */}
       <Route element={<ConferenceRoomChatGate />}>
         <Route path="board-chat" element={<BoardChat />} />
-        <Route path="artifacts" element={<Artifacts />} />
+        <Route path="files" element={<Artifacts />} />
+        <Route path="artifacts" element={<LegacyArtifactsRedirect />} />
       </Route>
       <Route path="inbox" element={<InboxRootRedirect />} />
       <Route path="inbox/mine" element={<Inbox />} />
@@ -371,6 +373,15 @@ function UnprefixedBoardRedirect() {
   );
 }
 
+// Permanent redirect for the old /artifacts path (renamed to /files) — keeps
+// bookmarks and shared links working, preserving the active filters/search.
+function LegacyArtifactsRedirect() {
+  const location = useLocation();
+  return (
+    <Navigate to={`/files${location.search}${location.hash}`} replace />
+  );
+}
+
 function NoCompaniesStartPage() {
   const { openOnboarding } = useDialogActions();
   const { t } = useTranslation();
@@ -425,6 +436,7 @@ export function App() {
           <Route path="pipelines/:pipelineId/settings" element={<UnprefixedBoardRedirect />} />
           <Route path="pipelines/:pipelineId/items/:caseId" element={<UnprefixedBoardRedirect />} />
           <Route path="pipelines/:pipelineId/cases/:caseId" element={<UnprefixedBoardRedirect />} />
+          <Route path="files" element={<UnprefixedBoardRedirect />} />
           <Route path="artifacts" element={<UnprefixedBoardRedirect />} />
           <Route path="u/:userSlug" element={<UnprefixedBoardRedirect />} />
           <Route path="skills/*" element={<UnprefixedBoardRedirect />} />
