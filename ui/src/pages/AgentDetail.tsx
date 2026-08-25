@@ -15,6 +15,8 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { ApiError } from "../api/client";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { activityApi } from "../api/activity";
+import { artifactsApi } from "../api/artifacts";
+import { ArtifactCard } from "../components/artifacts/ArtifactCard";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
 import { usePanel } from "../context/PanelContext";
@@ -81,6 +83,7 @@ import {
   FolderOpen,
   AlertTriangle,
   Plug,
+  Package,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -257,13 +260,14 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "budget";
+type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "tools" | "runs" | "files" | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "instructions" || value === "prompts") return "instructions";
   if (value === "configure" || value === "configuration") return "configuration";
   if (value === "skills") return "skills";
   if (value === "tools") return "tools";
+  if (value === "files") return "files";
   if (value === "budget") return "budget";
   if (value === "runs") return value;
   return "dashboard";
@@ -1120,6 +1124,7 @@ export function AgentDetail() {
               { value: "tools", label: "Tools" },
               { value: "configuration", label: "Configuration" },
               { value: "runs", label: "Runs" },
+              { value: "files", label: "Files" },
               { value: "budget", label: "Budget" },
             ]}
             value={activeView}
@@ -1256,6 +1261,10 @@ export function AgentDetail() {
           adapterType={agent.adapterType}
           adapterConfig={agent.adapterConfig}
         />
+      )}
+
+      {activeView === "files" && resolvedCompanyId && (
+        <AgentFilesTab agent={agent} companyId={resolvedCompanyId} />
       )}
 
       {activeView === "budget" && resolvedCompanyId ? (
@@ -2636,6 +2645,51 @@ function PromptsTabSkeleton() {
           </div>
           <PromptEditorSkeleton />
         </div>
+      </div>
+    </div>
+  );
+}
+
+const AGENT_FILES_TAB_LIMIT = 12;
+
+/**
+ * Pre-filtered grid of files this agent has made, with a link out to the
+ * full Files page carrying the same maker filter through (DUR-204 Shape 1
+ * part 2).
+ */
+export function AgentFilesTab({ agent, companyId }: { agent: Agent; companyId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: queryKeys.artifacts.list(companyId, "all", "", "none", undefined, agent.id, false),
+    queryFn: () =>
+      artifactsApi.list(companyId, {
+        agentId: agent.id,
+        limit: AGENT_FILES_TAB_LIMIT,
+      }),
+    enabled: Boolean(companyId && agent.id),
+  });
+
+  const files = data?.artifacts ?? [];
+  const seeAllTo = `/files?agentId=${encodeURIComponent(agent.id)}`;
+
+  if (isLoading) {
+    return <PageSkeleton variant="list" />;
+  }
+
+  if (files.length === 0) {
+    return <EmptyState icon={Package} message="No files from this agent yet." />;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
+        {files.map((artifact) => (
+          <ArtifactCard key={`${artifact.source}:${artifact.id}`} artifact={artifact} />
+        ))}
+      </div>
+      <div className="flex justify-end">
+        <Link to={seeAllTo} className="text-sm font-medium text-primary hover:underline">
+          See all files
+        </Link>
       </div>
     </div>
   );

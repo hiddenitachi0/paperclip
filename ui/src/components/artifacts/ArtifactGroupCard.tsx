@@ -20,7 +20,11 @@ interface ArtifactGroupCardProps {
 export function ArtifactGroupCard({ group, to }: ArtifactGroupCardProps) {
   const stacked = group.count > 1;
   const preview = group.previewArtifacts[0];
-  const countLabel = `${group.count} artifact${group.count === 1 ? "" : "s"}`;
+  const countLabel = `${group.count} file${group.count === 1 ? "" : "s"}`;
+  // For maker (agent) grouping there is no ticket-style identifier to show —
+  // show the person/agent's name instead, or a plain-language label when no
+  // maker was recorded. Task grouping keeps the task identifier.
+  const leadingLabel = group.issue?.identifier ?? group.agent?.name ?? "No owner recorded";
 
   return (
     <div className="relative">
@@ -65,7 +69,7 @@ export function ArtifactGroupCard({ group, to }: ArtifactGroupCardProps) {
         <div className="flex flex-1 flex-col gap-1 p-3">
           <div className="flex h-7 items-center gap-2">
             <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-              {group.issue?.identifier ?? group.agent?.name ?? "Unassigned"}
+              {leadingLabel}
             </span>
             <h3
               className="min-w-0 flex-1 truncate text-sm font-medium leading-7 text-foreground/85"

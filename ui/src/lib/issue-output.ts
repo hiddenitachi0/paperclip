@@ -1,5 +1,6 @@
 import {
   attachmentArtifactWorkProductMetadataSchema,
+  classifyFileKind,
   type AttachmentArtifactWorkProductMetadata,
   type IssueWorkProduct,
 } from "@paperclipai/shared";
@@ -178,32 +179,22 @@ export function isOutputEligibleContentType(
 }
 
 /**
- * Map a MIME type to a short label + tone for the 32×32 file-type tile.
+ * Map a content type to a short label + tone for the 32×32 file-type tile.
+ *
+ * The label comes from the shared `classifyFileKind` module (DUR-64) so the
+ * server and UI can never drift on how a file type is labeled; only the
+ * `tone` (a UI-only color grouping) is decided locally here.
  */
 export function getOutputFileGlyph(contentType: string | null | undefined): OutputFileGlyph {
   const type = normalizeOutputContentType(contentType);
-  if (type.startsWith("video/")) {
-    const subtype = type.slice("video/".length);
-    if (subtype === "quicktime") return { label: "MOV", tone: "video" };
-    return { label: (subtype || "vid").toUpperCase().slice(0, 4), tone: "video" };
-  }
-  if (type === "application/pdf") return { label: "PDF", tone: "pdf" };
-  if (isZipContentType(type)) {
-    return { label: "ZIP", tone: "zip" };
-  }
-  if (type.startsWith("image/")) return { label: "IMG", tone: "image" };
-  if (MARKDOWN_CONTENT_TYPES.has(type)) return { label: "MD", tone: "bin" };
-  if (type === "text/plain") return { label: "TXT", tone: "bin" };
-  if (type === "text/csv" || type === "application/csv") return { label: "CSV", tone: "bin" };
-  if (type === "text/html" || type === "application/html" || type === "application/xhtml+xml") {
-    return { label: "HTML", tone: "bin" };
-  }
-  if (type === "application/json" || type.endsWith("+json")) return { label: "JSON", tone: "bin" };
-  if (type === "application/xml" || type === "text/xml" || type.endsWith("+xml")) {
-    return { label: "XML", tone: "bin" };
-  }
-  if (type === "application/wasm") return { label: "WASM", tone: "bin" };
-  return { label: "BIN", tone: "bin" };
+  const kind = classifyFileKind({ contentType: type });
+  let tone: OutputFileTone;
+  if (kind.mediaKind === "video") tone = "video";
+  else if (kind.mediaKind === "image") tone = "image";
+  else if (type === "application/pdf") tone = "pdf";
+  else if (isZipContentType(type)) tone = "zip";
+  else tone = "bin";
+  return { label: kind.tileLabel, tone };
 }
 
 export function isVideoContentType(contentType: string | null | undefined): boolean {
