@@ -20,6 +20,7 @@ export const companyArtifactsQuerySchema = z.object({
   groupAgentId: z.string().uuid().optional(),
   agentId: z.string().uuid().optional(),
   noAgent: z.coerce.boolean().optional(),
+  uploadedByUser: z.coerce.boolean().optional(),
   limit: z.coerce
     .number()
     .int()
@@ -55,6 +56,7 @@ export const companyArtifactSchema = z.object({
     id: z.string().uuid(),
     name: z.string(),
   }).nullable(),
+  createdByUser: z.boolean().optional(),
   updatedAt: z.string().datetime(),
   href: z.string().min(1),
 });
@@ -73,6 +75,7 @@ export const companyArtifactGroupSchema = z.object({
     title: z.string(),
   }).nullable().optional(),
   agent: companyArtifactAgentSummarySchema.nullable().optional(),
+  isUserUploadGroup: z.boolean().optional(),
   title: z.string(),
   count: z.number().int().min(0),
   mediaKinds: z.array(companyArtifactMediaKindSchema),

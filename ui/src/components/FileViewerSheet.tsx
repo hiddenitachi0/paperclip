@@ -46,6 +46,7 @@ import {
 } from "@/context/FileViewerContext";
 import { WorkspaceFileBrowser } from "@/components/WorkspaceFileBrowser";
 import { WorkspaceFileMarkdownBody } from "@/components/WorkspaceFileMarkdownBody";
+import { classifyFileKind } from "@paperclipai/shared";
 import type {
   ResolvedWorkspaceResource,
   WorkspaceFileContent,
@@ -84,6 +85,17 @@ function formatBytes(size: number | null | undefined): string | null {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Per-type, plain-language copy for a file that can't be previewed here.
+ * Uses the shared file-kind module (DUR-64) so the wording never leaks a raw
+ * MIME string, and stays a single source of truth with the server/UI card
+ * labels.
+ */
+function describeUnsupportedPreviewCopy(resource: ResolvedWorkspaceResource): string {
+  const kind = classifyFileKind({ contentType: resource.contentType, filename: resource.title });
+  return `${kind.plainName}s can't be previewed here — download to view.`;
 }
 
 function splitContentIntoLines(data: string): string[] {
@@ -148,22 +160,22 @@ export function describeDenial(code: string, fallback: string): { title: string;
   if (lower.includes("outside") || lower.includes("traversal")) {
     return {
       icon: <Ban aria-hidden="true" className="h-6 w-6 text-red-500" />,
-      title: "Path is outside the workspace",
-      body: "The viewer can only open files that live under the issue's workspace.",
+      title: "Path is outside the task's files",
+      body: "The viewer can only open files that belong to this task.",
     };
   }
   if (lower.includes("archive") || lower.includes("cleaned")) {
     return {
       icon: <FolderOpen aria-hidden="true" className="h-6 w-6 text-muted-foreground" />,
-      title: "Workspace is no longer available",
-      body: "The isolated worktree for this issue has been cleaned up, so files cannot be previewed.",
+      title: "Files are no longer available",
+      body: "This task's isolated file area has been cleaned up, so files cannot be previewed.",
     };
   }
   if (lower.includes("remote")) {
     return {
       icon: <AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-500" />,
-      title: "Remote workspace preview not supported",
-      body: "This workspace is hosted remotely and is not available for inline preview yet.",
+      title: "Remote file preview not supported",
+      body: "These files are hosted remotely and are not available for inline preview yet.",
     };
   }
   if (lower.includes("too_large") || lower.includes("size")) {
@@ -226,12 +238,8 @@ export function FileViewerMetadataRow({
     <div className="flex min-h-[18px] flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
       {resolvedResource ? (
         <>
-          {resolvedResource.previewKind ? <span className="capitalize">{resolvedResource.previewKind}</span> : null}
           {formatBytes(resolvedResource.byteSize) ? (
-            <>
-              <span aria-hidden="true" className="opacity-50">·</span>
-              <span>{formatBytes(resolvedResource.byteSize)}</span>
-            </>
+            <span>{formatBytes(resolvedResource.byteSize)}</span>
           ) : null}
           {state?.line ? (
             <>
@@ -254,11 +262,108 @@ interface FileContentViewerProps {
   content: WorkspaceFileContent;
   highlightedLine: number | null;
   onLoaded?: (summary: string) => void;
+  /** Download link for the current file, when the viewer allows downloads. */
+  downloadUrl?: string | null;
 }
 
 type MarkdownPreviewMode = "raw" | "rendered";
 
-export function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentViewerProps) {
+/**
+ * Renders base64-inlined PDF content in a sandboxed iframe.
+ *
+ * A `blob:` URL is required here — a `data:` URL does not render reliably as
+ * a PDF inside an `<iframe>` across browsers. The blob URL is revoked on
+ * unmount/content change to avoid leaking memory.
+ *
+ * `sandbox="allow-same-origin"` only: no `allow-scripts`. This screen is
+ * security-adjacent (it renders operator-uploaded files), so the sandbox
+ * intentionally never grants script execution.
+ */
+function PdfPreview({ resource, base64Data }: { resource: ResolvedWorkspaceResource; base64Data: string }) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let url: string | null = null;
+    try {
+      const binary = atob(base64Data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      url = URL.createObjectURL(blob);
+      setBlobUrl(url);
+    } catch {
+      setBlobUrl(null);
+    }
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [base64Data]);
+
+  if (!blobUrl) {
+    return (
+      <FileViewerStateView
+        icon={<AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-500" />}
+        title="File preview unavailable"
+      />
+    );
+  }
+
+  return (
+    <iframe
+      src={blobUrl}
+      title={`File preview: ${resource.title}`}
+      sandbox="allow-same-origin"
+      className="h-full min-h-[480px] w-full flex-1 border-0 bg-white"
+    />
+  );
+}
+
+/**
+ * Honest fallback card for a file that has no inline preview. Shows the
+ * file's real type, filename, and size, plus a visible download control, in
+ * place of a bare grey placeholder.
+ */
+function UnsupportedFileCard({
+  resource,
+  downloadUrl,
+}: {
+  resource: ResolvedWorkspaceResource;
+  downloadUrl?: string | null;
+}) {
+  const kind = classifyFileKind({ contentType: resource.contentType, filename: resource.title });
+  const size = formatBytes(resource.byteSize);
+  return (
+    <div className="flex flex-1 items-center justify-center overflow-auto p-6">
+      <div className="flex w-full max-w-sm flex-col items-center gap-3 rounded-lg border border-border bg-card p-6 text-center">
+        <span
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-semibold tabular-nums text-muted-foreground"
+          aria-hidden="true"
+        >
+          {kind.tileLabel}
+        </span>
+        <div className="min-w-0 space-y-1">
+          <p className="truncate text-sm font-medium text-foreground" title={resource.title}>
+            {resource.title}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {[size].filter(Boolean).join(" · ")}
+          </p>
+        </div>
+        <p className="text-sm text-muted-foreground">{describeUnsupportedPreviewCopy(resource)}</p>
+        {downloadUrl ? (
+          <Button asChild size="sm" className="gap-1.5">
+            <a href={downloadUrl} download={resource.title}>
+              <Download className="h-3.5 w-3.5" />
+              Download
+            </a>
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function FileContentViewer({ content, highlightedLine, onLoaded, downloadUrl }: FileContentViewerProps) {
   const { resource } = content;
   const isMarkdown = resource.previewKind === "text" && content.content.encoding === "utf8" && isMarkdownResource(resource);
   const [markdownMode, setMarkdownMode] = useState<MarkdownPreviewMode>("rendered");
@@ -336,14 +441,20 @@ export function FileContentViewer({ content, highlightedLine, onLoaded }: FileCo
     );
   }
 
+  if (resource.previewKind === "pdf") {
+    if (content.content.encoding !== "base64") {
+      return (
+        <FileViewerStateView
+          icon={<AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-500" />}
+          title="File preview unavailable"
+        />
+      );
+    }
+    return <PdfPreview resource={resource} base64Data={content.content.data} />;
+  }
+
   if (resource.previewKind === "unsupported" || !lines) {
-    return (
-      <FileViewerStateView
-        icon={<AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-500" />}
-        title="Preview not supported for this file type"
-        body={resource.contentType ? `Content type: ${resource.contentType}` : undefined}
-      />
-    );
+    return <UnsupportedFileCard resource={resource} downloadUrl={downloadUrl} />;
   }
 
   const gutterWidth = `calc(${Math.max(4, String(lines.length).length)}ch + 2rem)`;
@@ -724,10 +835,10 @@ export function FileViewerSheet({
     });
   }, []);
 
-  const title = state ? basename(state.path) : "Browse workspace";
+  const title = state ? basename(state.path) : "Browse files";
   const description = state
     ? middleTruncatePath(state.path)
-    : "Search and preview files from this issue's workspace.";
+    : "Search and preview files from this task.";
   const showDescription = state ? description !== title : true;
 
   return (
@@ -902,6 +1013,7 @@ export function FileViewerSheet({
                   contentQuery={contentQuery}
                   elapsedMs={elapsedMs}
                   canPreview={canPreview}
+                  downloadUrl={downloadUrl}
                   highlightedLine={state.line ?? null}
                   onRetry={handleRetry}
                   onSetAnnouncement={setAnnouncement}
@@ -945,6 +1057,7 @@ interface FileViewerBodyProps {
   contentQuery: UseQueryResult<WorkspaceFileContent, unknown>;
   elapsedMs: number;
   canPreview: boolean;
+  downloadUrl?: string | null;
   highlightedLine: number | null;
   onRetry: () => void;
   onSetAnnouncement: (message: string) => void;
@@ -956,6 +1069,7 @@ function FileViewerBody({
   contentQuery,
   elapsedMs,
   canPreview,
+  downloadUrl,
   highlightedLine,
   onRetry,
   onSetAnnouncement,
@@ -972,12 +1086,12 @@ function FileViewerBody({
         <FileViewerStateView
           icon={<FileSearch aria-hidden="true" className="h-6 w-6 text-muted-foreground" />}
           title="File not found"
-          body="That file was not found in the active workspace."
+          body="That file was not found in the current file area."
           actions={
             <>
               {onFallbackToProject ? (
                 <Button type="button" variant="secondary" size="sm" onClick={onFallbackToProject}>
-                  Try project workspace
+                  Try the project's files
                 </Button>
               ) : null}
               <Button type="button" variant="ghost" size="sm" onClick={onRetry}>
@@ -992,8 +1106,8 @@ function FileViewerBody({
       return (
         <FileViewerStateView
           icon={<FolderOpen aria-hidden="true" className="h-6 w-6 text-muted-foreground" />}
-          title="No workspace available"
-          body="This issue does not have a workspace that supports preview yet."
+          title="No files available"
+          body="This task does not have a file area that supports preview yet."
         />
       );
     }
@@ -1019,8 +1133,8 @@ function FileViewerBody({
     return (
       <FileViewerStateView
         icon={<Cloud aria-hidden="true" className="h-6 w-6 text-muted-foreground" />}
-        title="Remote workspace preview coming soon"
-        body="This workspace is hosted remotely; inline previews are not supported yet."
+        title="Remote file preview coming soon"
+        body="These files are hosted remotely; inline previews are not supported yet."
       />
     );
   }
@@ -1058,6 +1172,7 @@ function FileViewerBody({
       content={contentQuery.data}
       highlightedLine={highlightedLine}
       onLoaded={onSetAnnouncement}
+      downloadUrl={downloadUrl}
     />
   );
 }

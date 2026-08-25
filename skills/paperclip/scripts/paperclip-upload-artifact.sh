@@ -370,7 +370,7 @@ download_path="$(jq -r '.downloadPath // (if .contentPath then (.contentPath + "
 attachment_id="$(jq -r '.id // empty' <<<"$attachment")"
 work_product_id="$(jq -r '.id // empty' <<<"$work_product")"
 
-printf 'Uploaded artifact\n\n'
+printf 'Uploaded file\n\n'
 printf -- '- Attachment: [%s](%s)\n' "$title" "$content_path"
 printf -- '- Download: [%s](%s)\n' "$title" "$download_path"
 printf -- '- Attachment ID: `%s`\n' "$attachment_id"
@@ -378,4 +378,4 @@ if [[ -n "$work_product_id" ]]; then
   printf -- '- Work product ID: `%s`\n' "$work_product_id"
 fi
 printf '\nFinal comment snippet:\n\n'
-printf -- '- Artifact: [%s](%s)\n' "$title" "$content_path"
+printf -- '- File: [%s](%s)\n' "$title" "$content_path"

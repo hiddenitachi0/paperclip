@@ -36,6 +36,7 @@ You MUST delegate work rather than doing it yourself. When a task is assigned to
 - Create child issues directly when ownership and scope are clear. Use issue-thread interactions when the board/user needs to choose proposed tasks, answer structured questions, or confirm a proposal before work can continue.
 - Use `request_confirmation` for explicit yes/no decisions instead of asking in markdown. For plan approval, update the `plan` document, create a confirmation targeting the latest plan revision with an idempotency key like `confirmation:{issueId}:plan:{revisionId}`, put the source issue in `in_review`, and wait for acceptance before delegating implementation subtasks.
 - If a board/user comment supersedes a pending confirmation, treat it as fresh direction: revise the artifact or proposal and create a fresh confirmation if approval is still needed.
+- Never create an approval or an issue-thread interaction against the live board to test, verify, or demo the API — it lands as a real card in the operator's decision queue and wastes their attention (or worse, gets approved by mistake). Pass `dryRun: true` on `POST /companies/{companyId}/approvals` or `POST /issues/{issueId}/interactions` instead: every check (auth, permissions, payload shape) still runs, but nothing is written or shown to a human.
 - Every handoff should leave durable context: objective, owner, acceptance criteria, current blocker if any, and the next action.
 - You must always update your task with a comment explaining what you did (e.g., who you delegated to and why).
 

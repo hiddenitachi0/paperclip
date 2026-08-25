@@ -81,6 +81,15 @@ describe("ArtifactCard", () => {
     expect(markup).not.toContain(">PAP-10370<");
   });
 
+  it("labels a human upload as 'Uploaded by you' instead of an agent name", () => {
+    const markup = renderToStaticMarkup(
+      <ArtifactCard artifact={makeArtifact({ createdByAgent: null, createdByUser: true })} />,
+    );
+
+    expect(markup).toContain("Uploaded by you");
+    expect(markup).not.toContain("ClaudeCoder");
+  });
+
   it("renders a video preview with a video element and play glyph", () => {
     const markup = renderToStaticMarkup(
       <ArtifactCard
@@ -241,5 +250,49 @@ describe("ArtifactCard", () => {
     expect(markup).toContain("Last edited Jun 1, 2026");
     expect(markup).not.toContain('aria-label="Download file"');
     expect(markup).not.toContain('aria-label="Open file in new tab"');
+  });
+
+  it("always shows the open/download controls, not just on hover", () => {
+    const markup = renderToStaticMarkup(<ArtifactCard artifact={makeArtifact()} />);
+    expect(markup).not.toContain("opacity-0");
+  });
+
+  // Filip (the non-developer operator) must never see internal jargon or raw
+  // MIME strings in a rendered card, regardless of file type.
+  const BANNED_SUBSTRINGS = [
+    "artifact",
+    "work product",
+    "workspace",
+    "attachment",
+    "media kind",
+    "object key",
+    "previewKind",
+    "execution",
+  ];
+  const BANNED_MIME_PATTERN = /\b(application|text|image|video|audio)\/[a-z0-9.+-]+/i;
+
+  it.each([
+    { mediaKind: "image" as const, contentType: "image/png" },
+    { mediaKind: "video" as const, contentType: "video/mp4" },
+    { mediaKind: "document" as const, contentType: "application/pdf" },
+    {
+      mediaKind: "document" as const,
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    { mediaKind: "text" as const, contentType: "text/csv" },
+    { mediaKind: "file" as const, contentType: "application/zip" },
+    { mediaKind: "file" as const, contentType: "application/octet-stream" },
+    { mediaKind: "empty" as const, contentType: null },
+  ])("never leaks internal terms or raw MIME strings for mediaKind=$mediaKind", ({ mediaKind, contentType }) => {
+    const markup = renderToStaticMarkup(
+      <ArtifactCard artifact={makeArtifact({ mediaKind, contentType, previewText: null, contentPath: null })} />,
+    );
+    // Strip every attribute value (href/src/download/etc. carry internal ids
+    // and query params, which are exempt) before checking the visible text.
+    const withoutAttributes = markup.replace(/\s[a-zA-Z-]+="[^"]*"/g, "");
+    for (const banned of BANNED_SUBSTRINGS) {
+      expect(withoutAttributes.toLowerCase()).not.toContain(banned.toLowerCase());
+    }
+    expect(withoutAttributes).not.toMatch(BANNED_MIME_PATTERN);
   });
 });

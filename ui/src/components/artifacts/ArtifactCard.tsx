@@ -1,8 +1,17 @@
 import { type SyntheticEvent, useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, Paperclip, Play } from "lucide-react";
+import { classifyFileKind } from "@paperclipai/shared";
 import type { CompanyArtifact } from "@/api/artifacts";
 import { Link } from "@/lib/router";
 import { cn, formatDate } from "@/lib/utils";
+
+/** The plain-language label to show on a card's placeholder preview. */
+function placeholderLabel(artifact: CompanyArtifact): string {
+  return classifyFileKind({
+    contentType: artifact.contentType,
+    filename: artifact.originalFilename,
+  }).plainName;
+}
 
 interface ArtifactCardProps {
   artifact: CompanyArtifact;
@@ -134,7 +143,7 @@ function VideoPreview({ artifact }: { artifact: CompanyArtifact }) {
 function TextPreview({ artifact }: { artifact: CompanyArtifact }) {
   const preview = artifact.previewText?.trim();
   if (!preview) {
-    return <PlaceholderPreview label={artifact.source === "document" ? "Document" : "Text"} />;
+    return <PlaceholderPreview label={placeholderLabel(artifact)} />;
   }
   return (
     <PreviewFrame className="bg-card">
@@ -158,7 +167,7 @@ export function ArtifactPreview({ artifact }: { artifact: CompanyArtifact }) {
     case "document":
       return <TextPreview artifact={artifact} />;
     case "file":
-      return <PlaceholderPreview label="File" />;
+      return <PlaceholderPreview label={placeholderLabel(artifact)} />;
     case "empty":
     default:
       return <PlaceholderPreview />;
@@ -209,7 +218,7 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
           >
             {artifact.title}
           </h3>
-          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <div className="flex shrink-0 items-center gap-0.5">
             {artifact.openPath ? (
               <SecondaryAction href={artifact.openPath} title="Open file in new tab">
                 <ExternalLink className="h-3.5 w-3.5" />
@@ -229,6 +238,11 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
             <>
               <span className="text-muted-foreground/50">·</span>
               <span className="truncate">{artifact.createdByAgent.name}</span>
+            </>
+          ) : artifact.createdByUser ? (
+            <>
+              <span className="text-muted-foreground/50">·</span>
+              <span className="truncate">Uploaded by you</span>
             </>
           ) : null}
         </div>

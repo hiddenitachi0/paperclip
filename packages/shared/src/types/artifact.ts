@@ -35,6 +35,12 @@ export interface CompanyArtifact {
   issue: CompanyArtifactIssueSummary;
   project: CompanyArtifactProjectSummary | null;
   createdByAgent: CompanyArtifactAgentSummary | null;
+  /**
+   * True when a human operator uploaded this file directly (not an agent).
+   * Mutually exclusive with `createdByAgent`; render as "Uploaded by you"
+   * rather than treating the artifact as maker-less.
+   */
+  createdByUser?: boolean;
   updatedAt: string;
   href: string;
 }
@@ -47,8 +53,14 @@ export interface CompanyArtifactGroup {
    * `groupBy: "agent"`, which groups by `agent` instead (see below).
    */
   issue?: CompanyArtifactIssueSummary | null;
-  /** Set for `groupBy: "agent"` — the person who made the files in this group, or null for the maker-less bucket. */
+  /** Set for `groupBy: "agent"` — the person who made the files in this group, or null for the maker-less/human-upload buckets. */
   agent?: CompanyArtifactAgentSummary | null;
+  /**
+   * Set for `groupBy: "agent"` when this group represents files uploaded
+   * directly by a human operator, distinct from the maker-less bucket
+   * (`agent: null, isUserUploadGroup: falsy`) which means "no idea who made this".
+   */
+  isUserUploadGroup?: boolean;
   title: string;
   count: number;
   mediaKinds: CompanyArtifactMediaKind[];

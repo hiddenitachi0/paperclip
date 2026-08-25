@@ -46,6 +46,7 @@ import {
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   instanceSettingsService,
+  issueThreadInteractionService,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
@@ -811,6 +812,7 @@ export async function startServer(): Promise<StartedServer> {
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
     const agentErrorAlerts = agentErrorAlertsService(db as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(db as any);
+    const issueThreadInteractions = issueThreadInteractionService(db as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery.
@@ -969,6 +971,23 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "untracked-write alert tick failed");
+        });
+
+      // DUR-162: close pending operator-queue cards nobody has answered within
+      // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them
+      // to pile up in the live decision queue forever.
+      void issueThreadInteractions
+        .expireAbandonedPending(new Date())
+        .then((expired) => {
+          if (expired.length > 0) {
+            logger.info(
+              { expired: expired.length },
+              "issue-thread-interaction abandonment tick closed unanswered operator cards",
+            );
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "issue-thread-interaction abandonment tick failed");
         });
 
       void environmentCustomImages

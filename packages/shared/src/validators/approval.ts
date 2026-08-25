@@ -8,6 +8,11 @@ export const createApprovalSchema = z.object({
   requestedByAgentId: z.string().uuid().optional().nullable(),
   payload: z.record(z.string(), z.unknown()),
   issueIds: z.array(z.string().uuid()).optional(),
+  // DUR-162: lets an agent verify a request would pass auth/permission/shape
+  // checks (e.g. "do I hold deploys:request?") without writing a live,
+  // operator-visible approval. All checks still run; only the final DB write
+  // and its side effects (activity log, linked issues) are skipped.
+  dryRun: z.boolean().optional(),
 });
 
 export type CreateApproval = z.infer<typeof createApprovalSchema>;
