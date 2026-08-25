@@ -1,5 +1,5 @@
 import { buffer } from "node:stream/consumers";
-import { and, desc, eq, inArray, isNotNull, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, count as countFn, desc, eq, inArray, isNotNull, isNull, max, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
@@ -18,6 +18,7 @@ import {
   attachmentArtifactWorkProductMetadataSchema,
   COMPANY_ARTIFACTS_MAX_LIMIT,
   companyArtifactsQuerySchema,
+  OFFICE_DOCUMENT_MIME_TYPES,
   SYSTEM_ISSUE_DOCUMENT_KEYS,
   type CompanyArtifact,
   type CompanyArtifactGroup,
@@ -101,11 +102,12 @@ function normalizePreviewText(input: string | null | undefined) {
     : stripped;
 }
 
-function classifyMediaKind(contentType: string | null | undefined, fallback: CompanyArtifactMediaKind = "file") {
-  const normalized = (contentType ?? "").toLowerCase();
+function classifyMediaKind(contentType: string | null | undefined, fallback: CompanyArtifactMediaKind = "file"): CompanyArtifactMediaKind {
+  const normalized = (contentType ?? "").toLowerCase().split(";")[0]?.trim() ?? "";
   if (!normalized) return fallback;
   if (normalized.startsWith("image/")) return "image";
   if (normalized.startsWith("video/")) return "video";
+  if (OFFICE_DOCUMENT_MIME_TYPES.has(normalized)) return "document";
   if (
     normalized.startsWith("text/") ||
     normalized === "application/json" ||
@@ -124,10 +126,28 @@ function contentTypeKindCondition(contentTypeExpression: SQL<string>, kind: Comp
   if (kind === "image") return sql`${contentTypeExpression} ILIKE 'image/%'`;
   if (kind === "video") return sql`${contentTypeExpression} ILIKE 'video/%'`;
   if (kind === "text") {
-    return sql`(${contentTypeExpression} ILIKE 'text/%' OR ${contentTypeExpression} IN ('application/json', 'application/xml', 'application/markdown') OR ${contentTypeExpression} ILIKE '%+json' OR ${contentTypeExpression} ILIKE '%+xml')`;
+    return sql`(
+      (${contentTypeExpression} ILIKE 'text/%' AND ${contentTypeExpression} NOT IN ('text/rtf'))
+      OR ${contentTypeExpression} IN ('application/json', 'application/xml', 'application/markdown')
+      OR ${contentTypeExpression} ILIKE '%+json'
+      OR ${contentTypeExpression} ILIKE '%+xml'
+    )`;
+  }
+  if (kind === "document") {
+    const officeList = [...OFFICE_DOCUMENT_MIME_TYPES].map((m) => sql`${m}`);
+    return sql`${contentTypeExpression} IN (${sql.join(officeList, sql`, `)})`;
   }
   if (kind === "file") {
-    return sql`NOT (${contentTypeExpression} ILIKE 'image/%' OR ${contentTypeExpression} ILIKE 'video/%' OR ${contentTypeExpression} ILIKE 'text/%' OR ${contentTypeExpression} IN ('application/json', 'application/xml', 'application/markdown') OR ${contentTypeExpression} ILIKE '%+json' OR ${contentTypeExpression} ILIKE '%+xml')`;
+    const officeList = [...OFFICE_DOCUMENT_MIME_TYPES].map((m) => sql`${m}`);
+    return sql`NOT (
+      ${contentTypeExpression} ILIKE 'image/%'
+      OR ${contentTypeExpression} ILIKE 'video/%'
+      OR (${contentTypeExpression} ILIKE 'text/%' AND ${contentTypeExpression} NOT IN ('text/rtf'))
+      OR ${contentTypeExpression} IN ('application/json', 'application/xml', 'application/markdown')
+      OR ${contentTypeExpression} ILIKE '%+json'
+      OR ${contentTypeExpression} ILIKE '%+xml'
+      OR ${contentTypeExpression} IN (${sql.join(officeList, sql`, `)})
+    )`;
   }
   return undefined;
 }
@@ -329,10 +349,12 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
       const fetchLimit = Math.min(query.limit + 1, COMPANY_ARTIFACTS_MAX_LIMIT + 1);
       const sourceFetchLimit = groupBy ? GROUPED_ARTIFACT_FETCH_LIMIT : fetchLimit;
       const q = query.q ? `%${escapeLikePattern(query.q)}%` : null;
+      const agentId = query.agentId ?? null;
+      const noAgent = query.noAgent ?? false;
       const artifacts: CompanyArtifact[] = [];
       const workProductAttachmentIds = new Set<string>();
 
-      if (query.kind === "all" || query.kind === "document") {
+      if (!query.kind || query.kind === "all" || query.kind === "text") {
         const createdAgent = alias(agents, "document_created_agent");
         const updatedAgent = alias(agents, "document_updated_agent");
         const documentArtifactId = sql<string>`concat('document:', ${documents.id})`;
@@ -346,13 +368,29 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         if (documentCursor) documentConditions.push(documentCursor);
         if (groupBy === "task" && query.groupIssueId) documentConditions.push(eq(issues.id, query.groupIssueId));
         if (query.projectId) documentConditions.push(eq(issues.projectId, query.projectId));
+        if (agentId) {
+          documentConditions.push(
+            or(
+              eq(documents.createdByAgentId, agentId),
+              eq(documents.updatedByAgentId, agentId),
+            )!,
+          );
+        } else if (noAgent) {
+          documentConditions.push(
+            and(isNull(documents.createdByAgentId), isNull(documents.updatedByAgentId))!,
+          );
+        }
         if (q) {
-          documentConditions.push(sql`(
-            coalesce(${documents.title}, '') ILIKE ${q} ESCAPE '\\'
-            OR ${documents.latestBody} ILIKE ${q} ESCAPE '\\'
-            OR coalesce(${issues.identifier}, '') ILIKE ${q} ESCAPE '\\'
-            OR ${issues.title} ILIKE ${q} ESCAPE '\\'
-          )`);
+          if (query.searchMode === "filename") {
+            documentConditions.push(sql`coalesce(${documents.title}, '') ILIKE ${q} ESCAPE '\\'`);
+          } else {
+            documentConditions.push(sql`(
+              coalesce(${documents.title}, '') ILIKE ${q} ESCAPE '\\'
+              OR ${documents.latestBody} ILIKE ${q} ESCAPE '\\'
+              OR coalesce(${issues.identifier}, '') ILIKE ${q} ESCAPE '\\'
+              OR ${issues.title} ILIKE ${q} ESCAPE '\\'
+            )`);
+          }
         }
 
         const documentRowsQuery = db
@@ -416,13 +454,15 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           artifacts.push({
             id: row.artifactId,
             source: "document",
-            mediaKind: "document",
+            mediaKind: "text",
             title: row.title ?? row.key,
             previewText: normalizePreviewText(row.latestBody),
             contentType: "text/markdown",
             contentPath: null,
             openPath: null,
             downloadPath: null,
+            byteSize: null,
+            originalFilename: null,
             issue: { id: row.issueId, identifier, title: row.issueTitle },
             project: row.projectId && row.projectName ? { id: row.projectId, name: row.projectName } : null,
             createdByAgent: row.createdByAgentId && row.createdByAgentName
@@ -434,7 +474,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         }
       }
 
-      if (query.kind !== "document") {
+      {
         const workProductAgent = alias(agents, "work_product_agent");
         const workProductArtifactId = sql<string>`concat('work_product:', ${issueWorkProducts.id})`;
         const workProductContentType = sql<string>`coalesce(${issueWorkProducts.metadata}->>'contentType', '')`;
@@ -463,15 +503,28 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           workProductBaseConditions.push(projectCondition);
           workProductConditions.push(projectCondition);
         }
+        if (agentId) {
+          workProductConditions.push(eq(workProductAgent.id, agentId));
+          workProductBaseConditions.push(eq(workProductAgent.id, agentId));
+        } else if (noAgent) {
+          workProductConditions.push(isNull(workProductAgent.id));
+          workProductBaseConditions.push(isNull(workProductAgent.id));
+        }
         if (q) {
-          const searchCondition = sql`(
-            ${issueWorkProducts.title} ILIKE ${q} ESCAPE '\\'
-            OR coalesce(${issueWorkProducts.summary}, '') ILIKE ${q} ESCAPE '\\'
-            OR coalesce(${issues.identifier}, '') ILIKE ${q} ESCAPE '\\'
-            OR ${issues.title} ILIKE ${q} ESCAPE '\\'
-          )`;
-          workProductBaseConditions.push(searchCondition);
-          workProductConditions.push(searchCondition);
+          if (query.searchMode === "filename") {
+            const searchCondition = sql`${issueWorkProducts.title} ILIKE ${q} ESCAPE '\\'`;
+            workProductBaseConditions.push(searchCondition);
+            workProductConditions.push(searchCondition);
+          } else {
+            const searchCondition = sql`(
+              ${issueWorkProducts.title} ILIKE ${q} ESCAPE '\\'
+              OR coalesce(${issueWorkProducts.summary}, '') ILIKE ${q} ESCAPE '\\'
+              OR coalesce(${issues.identifier}, '') ILIKE ${q} ESCAPE '\\'
+              OR ${issues.title} ILIKE ${q} ESCAPE '\\'
+            )`;
+            workProductBaseConditions.push(searchCondition);
+            workProductConditions.push(searchCondition);
+          }
         }
 
         const workProductRowsQuery = db
@@ -562,6 +615,8 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             contentPath: attachmentMetadata?.contentPath ?? null,
             openPath: attachmentMetadata?.openPath ?? (typeof row.metadata?.openPath === "string" ? row.metadata.openPath : null),
             downloadPath: attachmentMetadata?.downloadPath ?? null,
+            byteSize: attachmentMetadata?.byteSize ?? null,
+            originalFilename: attachmentMetadata?.originalFilename ?? null,
             issue: { id: row.issueId, identifier, title: row.issueTitle },
             project: row.projectId && row.projectName ? { id: row.projectId, name: row.projectName } : null,
             createdByAgent: row.createdByAgentId && row.createdByAgentName
@@ -587,12 +642,21 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         if (groupBy === "task" && query.groupIssueId) attachmentConditions.push(eq(issues.id, query.groupIssueId));
         if (attachmentKind) attachmentConditions.push(attachmentKind);
         if (query.projectId) attachmentConditions.push(eq(issues.projectId, query.projectId));
+        if (agentId) {
+          attachmentConditions.push(eq(attachmentAgent.id, agentId));
+        } else if (noAgent) {
+          attachmentConditions.push(isNull(attachmentAgent.id));
+        }
         if (q) {
-          attachmentConditions.push(sql`(
-            coalesce(${assets.originalFilename}, '') ILIKE ${q} ESCAPE '\\'
-            OR coalesce(${issues.identifier}, '') ILIKE ${q} ESCAPE '\\'
-            OR ${issues.title} ILIKE ${q} ESCAPE '\\'
-          )`);
+          if (query.searchMode === "filename") {
+            attachmentConditions.push(sql`coalesce(${assets.originalFilename}, '') ILIKE ${q} ESCAPE '\\'`);
+          } else {
+            attachmentConditions.push(sql`(
+              coalesce(${assets.originalFilename}, '') ILIKE ${q} ESCAPE '\\'
+              OR coalesce(${issues.identifier}, '') ILIKE ${q} ESCAPE '\\'
+              OR ${issues.title} ILIKE ${q} ESCAPE '\\'
+            )`);
+          }
         }
 
         const attachmentRowsQuery = db
@@ -667,6 +731,8 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             contentPath,
             openPath: contentPath,
             downloadPath: `${contentPath}?download=1`,
+            byteSize: row.byteSize,
+            originalFilename: row.originalFilename,
             issue: { id: row.issueId, identifier, title: row.issueTitle },
             project: row.projectId && row.projectName ? { id: row.projectId, name: row.projectName } : null,
             createdByAgent: row.createdByAgentId && row.createdByAgentName
@@ -708,7 +774,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         }
 
         const selectedGroupIssueId = resolveGroupIssueId(groupBy, selectedIssue.id, issueRows);
-        const selectedGroup = groups.find((group) => group.issue.id === selectedGroupIssueId)
+        const selectedGroup = groups.find((group) => group.issue?.id === selectedGroupIssueId)
           ?? emptyGroup({
             companyPrefix: company.issuePrefix,
             query,
@@ -724,6 +790,57 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
 
       const { page, nextCursor } = pageByCursor(groups, query.limit, cursor);
       return { artifacts: [], groups: page, nextCursor };
+    },
+
+    listAgents: async (companyId: string) => {
+      // Collect agents who created attachments (via assets.createdByAgentId)
+      const attachmentAgentRows = await db
+        .select({
+          agentId: agents.id,
+          agentName: agents.name,
+          fileCount: countFn(issueAttachments.id),
+          lastFileAt: max(issueAttachments.updatedAt),
+        })
+        .from(issueAttachments)
+        .innerJoin(
+          assets,
+          and(
+            eq(issueAttachments.assetId, assets.id),
+            eq(assets.companyId, issueAttachments.companyId),
+          ),
+        )
+        .innerJoin(
+          agents,
+          and(
+            eq(assets.createdByAgentId, agents.id),
+            eq(agents.companyId, assets.companyId),
+          ),
+        )
+        .where(
+          and(
+            eq(issueAttachments.companyId, companyId),
+            isNull(issueAttachments.issueCommentId),
+            isNotNull(assets.createdByAgentId),
+          ),
+        )
+        .groupBy(agents.id, agents.name);
+
+      const agentMap = new Map<string, { id: string; name: string; fileCount: number; lastFileAt: Date }>();
+      for (const row of attachmentAgentRows) {
+        if (!row.agentId || !row.lastFileAt) continue;
+        agentMap.set(row.agentId, {
+          id: row.agentId,
+          name: row.agentName,
+          fileCount: Number(row.fileCount),
+          lastFileAt: row.lastFileAt,
+        });
+      }
+
+      const result = [...agentMap.values()]
+        .sort((a, b) => b.lastFileAt.getTime() - a.lastFileAt.getTime())
+        .map((a) => ({ id: a.id, name: a.name, fileCount: a.fileCount, lastFileAt: a.lastFileAt.toISOString() }));
+
+      return { agents: result };
     },
   };
 }

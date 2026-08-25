@@ -166,6 +166,12 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     });
   });
 
+  router.get("/:companyId/artifacts/agents", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await artifacts.listAgents(companyId));
+  });
+
   router.get("/:companyId/artifacts", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);

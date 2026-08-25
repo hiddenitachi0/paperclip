@@ -1,4 +1,6 @@
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
+export { getFileKindInfo, OFFICE_DOCUMENT_MIME_TYPES } from "./file-kind.js";
+export type { FileKindInfo, FileMediaKind } from "./file-kind.js";
 export {
   SORTERINGSREGLER_START_MARKER,
   SORTERINGSREGLER_END_MARKER,
