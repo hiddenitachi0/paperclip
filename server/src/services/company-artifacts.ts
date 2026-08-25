@@ -793,7 +793,78 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
     },
 
     listAgents: async (companyId: string) => {
-      // Collect agents who created attachments (via assets.createdByAgentId)
+      const documentCreatedAgent = alias(agents, "list_document_created_agent");
+      const documentUpdatedAgent = alias(agents, "list_document_updated_agent");
+      const documentAgentRows = await db
+        .select({
+          agentId: sql<string>`coalesce(${documentCreatedAgent.id}, ${documentUpdatedAgent.id})`,
+          agentName: sql<string>`coalesce(${documentCreatedAgent.name}, ${documentUpdatedAgent.name})`,
+          fileCount: countFn(documents.id),
+          lastFileAt: max(documents.updatedAt),
+        })
+        .from(issueDocuments)
+        .innerJoin(
+          documents,
+          and(
+            eq(issueDocuments.documentId, documents.id),
+            eq(documents.companyId, issueDocuments.companyId),
+          ),
+        )
+        .leftJoin(
+          documentCreatedAgent,
+          and(
+            eq(documents.createdByAgentId, documentCreatedAgent.id),
+            eq(documentCreatedAgent.companyId, documents.companyId),
+          ),
+        )
+        .leftJoin(
+          documentUpdatedAgent,
+          and(
+            eq(documents.updatedByAgentId, documentUpdatedAgent.id),
+            eq(documentUpdatedAgent.companyId, documents.companyId),
+          ),
+        )
+        .where(
+          and(
+            eq(issueDocuments.companyId, companyId),
+            or(isNotNull(documents.createdByAgentId), isNotNull(documents.updatedByAgentId))!,
+            notInArray(issueDocuments.key, [...SYSTEM_ISSUE_DOCUMENT_KEYS]),
+          ),
+        )
+        .groupBy(sql`coalesce(${documentCreatedAgent.id}, ${documentUpdatedAgent.id})`, sql`coalesce(${documentCreatedAgent.name}, ${documentUpdatedAgent.name})`);
+
+      const workProductAgent = alias(agents, "list_work_product_agent");
+      const workProductAgentRows = await db
+        .select({
+          agentId: workProductAgent.id,
+          agentName: workProductAgent.name,
+          fileCount: countFn(issueWorkProducts.id),
+          lastFileAt: max(issueWorkProducts.updatedAt),
+        })
+        .from(issueWorkProducts)
+        .innerJoin(
+          heartbeatRuns,
+          and(
+            eq(issueWorkProducts.createdByRunId, heartbeatRuns.id),
+            eq(heartbeatRuns.companyId, issueWorkProducts.companyId),
+          ),
+        )
+        .innerJoin(
+          workProductAgent,
+          and(
+            eq(heartbeatRuns.agentId, workProductAgent.id),
+            eq(workProductAgent.companyId, issueWorkProducts.companyId),
+          ),
+        )
+        .where(
+          and(
+            eq(issueWorkProducts.companyId, companyId),
+            eq(issueWorkProducts.type, "artifact"),
+            eq(issueWorkProducts.provider, "paperclip"),
+          ),
+        )
+        .groupBy(workProductAgent.id, workProductAgent.name);
+
       const attachmentAgentRows = await db
         .select({
           agentId: agents.id,
@@ -826,14 +897,22 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         .groupBy(agents.id, agents.name);
 
       const agentMap = new Map<string, { id: string; name: string; fileCount: number; lastFileAt: Date }>();
-      for (const row of attachmentAgentRows) {
-        if (!row.agentId || !row.lastFileAt) continue;
-        agentMap.set(row.agentId, {
-          id: row.agentId,
-          name: row.agentName,
-          fileCount: Number(row.fileCount),
-          lastFileAt: row.lastFileAt,
-        });
+      for (const rows of [documentAgentRows, workProductAgentRows, attachmentAgentRows]) {
+        for (const row of rows) {
+          if (!row.agentId || !row.lastFileAt) continue;
+          const existing = agentMap.get(row.agentId);
+          if (existing) {
+            existing.fileCount += Number(row.fileCount);
+            if (row.lastFileAt > existing.lastFileAt) existing.lastFileAt = row.lastFileAt;
+          } else {
+            agentMap.set(row.agentId, {
+              id: row.agentId,
+              name: row.agentName,
+              fileCount: Number(row.fileCount),
+              lastFileAt: row.lastFileAt,
+            });
+          }
+        }
       }
 
       const result = [...agentMap.values()]

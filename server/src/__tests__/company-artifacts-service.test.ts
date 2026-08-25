@@ -606,7 +606,7 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       {
         issue: "PAP-2",
         count: 1,
-        mediaKinds: ["document"],
+        mediaKinds: ["text"],
         href: "/PAP/artifacts?groupBy=task&groupIssueId=77777777-7777-4777-8777-777777777777",
       },
       {
@@ -768,6 +768,56 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
       selectedGroup: null,
       nextCursor: null,
     });
+  });
+  it("lists agent makers across documents, attachments, and work products, scoped per company", async () => {
+    const { companyId } = await seedArtifacts();
+
+    const result = await companyArtifactsService(db, createStorageService()).listAgents(companyId);
+
+    expect(result.agents).toEqual([
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        name: "Coder",
+        fileCount: 5,
+        lastFileAt: "2026-01-04T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("includes a maker whose only file is a work product, not just attachment or document creators", async () => {
+    const { companyId, projectId, issueId } = await seedArtifacts();
+    const workProductOnlyAgentId = "25252525-2525-4252-8252-252525252525";
+    const workProductOnlyRunId = "26262626-2626-4262-8262-262626262626";
+
+    await db.insert(agents).values({ id: workProductOnlyAgentId, companyId, name: "Renderer", role: "engineer" });
+    await db.insert(heartbeatRuns).values({
+      id: workProductOnlyRunId,
+      companyId,
+      agentId: workProductOnlyAgentId,
+      status: "completed",
+    });
+    await db.insert(issueWorkProducts).values({
+      id: "27272727-2727-4272-8272-272727272727",
+      companyId,
+      projectId,
+      issueId,
+      type: "artifact",
+      provider: "paperclip",
+      title: "Render Only Output",
+      status: "ready_for_review",
+      summary: "Solo work product from an agent with no attachments or documents",
+      metadata: { contentType: "text/plain" },
+      createdByRunId: workProductOnlyRunId,
+      updatedAt: new Date("2026-02-01T00:00:00.000Z"),
+    });
+
+    const result = await companyArtifactsService(db, createStorageService()).listAgents(companyId);
+
+    expect(result.agents.map((agent) => agent.id)).toEqual([
+      workProductOnlyAgentId,
+      "33333333-3333-4333-8333-333333333333",
+    ]);
+    expect(result.agents[0]).toMatchObject({ name: "Renderer", fileCount: 1 });
   });
 });
 

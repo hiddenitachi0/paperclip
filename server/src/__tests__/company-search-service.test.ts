@@ -233,7 +233,7 @@ describeEmbeddedPostgres("companySearchService", () => {
       title: "Launch Artifact Brief",
       href: expect.stringContaining("#document-brief"),
       artifact: expect.objectContaining({
-        mediaKind: "document",
+        mediaKind: "text",
         issueIdentifier: "TST-88",
       }),
     });
