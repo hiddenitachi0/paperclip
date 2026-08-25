@@ -1,3 +1,8 @@
+// Three-surface decision: this page is the general-purpose file browser (every
+// file an agent produced, browsable by person/task/type). WorkspaceFileBrowser
+// stays task-scoped (files inside one running task's workspace). A task's
+// Output tab stays a short summary, not a full browser. Keep new file-browsing
+// features on this page rather than growing the other two into it.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ArrowLeft, Check, Layers, Package, Search, X } from "lucide-react";
@@ -31,11 +36,11 @@ const SEARCH_DEBOUNCE_MS = 250;
 
 export const ARTIFACT_KIND_FILTERS: { value: ArtifactKindFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "image", label: "Images" },
+  { value: "image", label: "Pictures" },
   { value: "video", label: "Videos" },
   { value: "document", label: "Documents" },
-  { value: "text", label: "Text" },
-  { value: "file", label: "Files" },
+  { value: "text", label: "Notes & data" },
+  { value: "file", label: "Other" },
 ];
 
 export const ARTIFACT_GROUP_OPTIONS: { value: ArtifactGroupBy; label: string }[] = [
@@ -218,19 +223,19 @@ export function Artifacts() {
   useEffect(() => {
     if (viewingSelectedStack && selectedGroup) {
       setBreadcrumbs([
-        { label: "Artifacts", href: "/artifacts" },
+        { label: "Files", href: "/files" },
         {
           // This page only ever requests groupBy "task"/"parent_task", where `issue` is always set.
           label: `${selectedGroup.issue!.identifier} · ${selectedGroup.title}`,
         },
       ]);
     } else {
-      setBreadcrumbs([{ label: "Artifacts" }]);
+      setBreadcrumbs([{ label: "Files" }]);
     }
   }, [setBreadcrumbs, viewingSelectedStack, selectedGroup]);
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Package} message="Select a company to view artifacts." />;
+    return <EmptyState icon={Package} message="Select a company to view files." />;
   }
 
   const showGroupCards = viewingStackList;
@@ -238,15 +243,15 @@ export function Artifacts() {
 
   const emptyMessage = showGroupCards
     ? searching
-      ? "No artifact stacks match this search."
-      : "No artifact stacks yet."
+      ? "No file groups match this search."
+      : "No file groups yet."
     : searching
-      ? "No artifacts match this search."
+      ? "No files match this search."
       : viewingSelectedStack
-        ? "No artifacts in this stack match the current filters."
+        ? "No files in this group match the current filters."
         : kind === "all"
-          ? "No artifacts yet. Outputs attached to issues will appear here."
-          : "No artifacts of this type yet.";
+          ? "No files yet. Files agents produce for tasks will appear here."
+          : "No files of this type yet.";
 
   return (
     <div className="w-full max-w-6xl space-y-5">
@@ -256,15 +261,15 @@ export function Artifacts() {
           <Input
             value={draftQuery}
             onChange={(event) => setDraftQuery(event.currentTarget.value)}
-            placeholder="Search artifacts..."
-            aria-label="Search artifacts"
+            placeholder="Search files..."
+            aria-label="Search files"
             className="h-9 pl-9 pr-9 text-sm"
           />
           {draftQuery.length > 0 ? (
             <button
               type="button"
               onClick={() => setDraftQuery("")}
-              aria-label="Clear artifact search"
+              aria-label="Clear file search"
               className="absolute right-2 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
             >
               <X className="h-3.5 w-3.5" />
@@ -279,8 +284,8 @@ export function Artifacts() {
                 type="button"
                 variant="outline"
                 size="icon"
-                aria-label={`Group artifacts (currently ${artifactGroupByLabel(groupBy)})`}
-                title="Group artifacts"
+                aria-label={`Group files (currently ${artifactGroupByLabel(groupBy)})`}
+                title="Group files"
                 data-testid="artifact-group-control"
                 data-group-by={groupBy}
                 className={cn("h-8 w-8 shrink-0", grouping && "bg-accent")}
@@ -305,7 +310,7 @@ export function Artifacts() {
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Filter artifacts by type">
+          <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Filter files by type">
             {ARTIFACT_KIND_FILTERS.map((filter) => (
               <button
                 key={filter.value}
@@ -335,7 +340,7 @@ export function Artifacts() {
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
           >
             <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-            All stacks
+            All groups
           </Link>
           {selectedGroup ? (
             <span className="truncate text-muted-foreground">
