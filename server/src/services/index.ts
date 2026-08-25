@@ -71,6 +71,7 @@ export type {
   IndeterminateScheduleRoutine,
 } from "./routines.js";
 export { costService } from "./costs.js";
+export { laneAService } from "./lane-a.js";
 export { financeService } from "./finance.js";
 export { heartbeatService } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";

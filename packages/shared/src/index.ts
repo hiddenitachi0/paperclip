@@ -1176,6 +1176,8 @@ export {
   createDelegateTokenSchema,
   type DelegateTokenScope,
   type CreateDelegateToken,
+  sendLaneAMessageSchema,
+  type SendLaneAMessage,
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
