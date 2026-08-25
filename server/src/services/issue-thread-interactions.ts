@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, lte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -53,6 +53,16 @@ type InteractionActor = {
 
 const ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT =
   "issue_thread_interactions_company_issue_idempotency_uq";
+
+/**
+ * DUR-162: how long a pending card sits in the operator's live decision queue
+ * unanswered before it closes itself. Two placeholder cards sat for about an
+ * hour and a third sat overnight before a human noticed and cancelled them by
+ * hand — this bounds that window instead of leaving abandoned cards to pile up
+ * forever. 24h gives an operator a normal working day to get to it before the
+ * platform assumes nobody is coming.
+ */
+export const ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 type IssueWakeTarget = {
   id: string;
@@ -1902,6 +1912,74 @@ export function issueThreadInteractionService(db: Db) {
 
       if (resolved.length > 0) {
         await emitResolvedInteractionsTelemetry(dbOrTx, resolved);
+      }
+      return resolved;
+    },
+
+    // DUR-162: a card nobody answers should not sit in the operator's live
+    // decision queue forever — close it after ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS
+    // and say why, both on the interaction's own result (same per-kind shape
+    // resolveAllPendingForIssueClosed above already uses) and as a comment on
+    // the issue, so the closure is visible where a human would actually look.
+    // Company-agnostic periodic tick, called from the same setInterval loop as
+    // mergeDeployVisibility.tick / heartbeat.tickTimers in server/src/index.ts.
+    expireAbandonedPending: async (
+      now: Date = new Date(),
+    ): Promise<IssueThreadInteraction[]> => {
+      const cutoff = new Date(now.getTime() - ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS);
+      const rows: IssueThreadInteractionRow[] = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.status, "pending"),
+          lte(issueThreadInteractions.createdAt, cutoff),
+        ))
+        .limit(50);
+      if (rows.length === 0) return [];
+
+      const hours = Math.round(ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS / (60 * 60 * 1000));
+      const reason = `Automatically closed: nobody answered this in the operator queue within ${hours} hours.`;
+      const resolvedAt = new Date();
+      const issuesSvc = issueService(db);
+      const resolved: IssueThreadInteraction[] = [];
+
+      for (const row of rows) {
+        let patch: { status: string; result: unknown } | null = null;
+        if (row.kind === "suggest_tasks") {
+          patch = { status: "rejected", result: { version: 1, rejectionReason: reason } };
+        } else if (row.kind === "ask_user_questions") {
+          patch = {
+            status: "cancelled",
+            result: { version: 1, answers: [], cancelled: true, cancellationReason: reason, summaryMarkdown: null },
+          };
+        } else if (isRequestConfirmationLikeKind(row.kind)) {
+          patch = { status: "expired", result: { version: 1, outcome: "auto_resolved", reason } };
+        }
+        if (!patch) continue;
+
+        const [updated] = await (db as any)
+          .update(issueThreadInteractions)
+          .set({ ...patch, resolvedAt, updatedAt: resolvedAt })
+          .where(and(
+            eq(issueThreadInteractions.id, row.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ))
+          .returning();
+        if (!updated) continue;
+
+        await touchIssue(db, row.issueId);
+        await issuesSvc.addComment(
+          row.issueId,
+          `A pending "${row.title?.trim() || row.kind}" request to the operator went unanswered for over ` +
+            `${hours} hours and was closed automatically. Nobody needs to act on it.`,
+          {},
+          { authorType: "system" },
+        );
+        resolved.push(hydrateInteraction(updated));
+      }
+
+      if (resolved.length > 0) {
+        await emitResolvedInteractionsTelemetry(db, resolved);
       }
       return resolved;
     },
