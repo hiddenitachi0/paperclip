@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Briefcase, Wrench, ShieldCheck, X } from "lucide-react";
+import { Briefcase, Wrench, ShieldCheck, GraduationCap, X } from "lucide-react";
 import { jobsApi, type RightGrant } from "../../api/jobs";
+import { agentsApi } from "../../api/agents";
+import { companySkillsApi } from "../../api/companySkills";
 import { ApiError } from "../../api/client";
 import { useToastActions } from "../../context/ToastContext";
 import { Button } from "@/components/ui/button";
@@ -17,6 +19,19 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+// DUR-149's per-agent skill/connector overrides live in `agents.role_overrides`
+// (a jsonb column), which the server includes on the raw agent row it returns
+// from GET /agents/:id — but @paperclipai/shared's `Agent`/`AgentDetail` types
+// don't declare it yet (server/src/routes/agents.ts spreads the full row;
+// nothing in ui/src or packages/shared names these fields). Scoped locally
+// here rather than widening the shared type, which is out of this ticket's
+// scope (packages/shared is the Backend Engineer's seat).
+interface AgentRoleOverridesFields {
+  roleOverrides?: {
+    skills?: { add?: string[]; remove?: string[] };
+  } | null;
+}
+
 /**
  * Shows an agent's job assignment plus, for tools and rights, which entries
  * came from the job vs. which were added/removed specifically on this agent.
@@ -30,8 +45,11 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
   const [pickingJob, setPickingJob] = useState(false);
   const [addingToolOverride, setAddingToolOverride] = useState(false);
   const [addingRightOverride, setAddingRightOverride] = useState(false);
+  const [addingSkillOverride, setAddingSkillOverride] = useState(false);
+  const [draftSkillKey, setDraftSkillKey] = useState("");
 
   const roleStateKey = ["agents", "role-state", agentId] as const;
+  const roleOverridesKey = ["agents", "role-overrides", agentId] as const;
   const jobsListKey = ["jobs", companyId ?? "__none__"] as const;
 
   const { data: roleState, isLoading, error } = useQuery({
@@ -45,7 +63,28 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
     enabled: Boolean(companyId) && pickingJob,
   });
 
+  // Full job record (for its skillKeys) — roleState.job only carries id/name/description.
+  const { data: jobDetail } = useQuery({
+    queryKey: ["jobs", "detail", roleState?.job?.id ?? "__none__"] as const,
+    queryFn: () => jobsApi.get(roleState!.job!.id),
+    enabled: Boolean(roleState?.job),
+  });
+
+  // This agent's own skill overrides, sourced from the raw agent row (see
+  // AgentRoleOverridesFields above) — not returned by getAgentRoleState.
+  const { data: agentDetail } = useQuery({
+    queryKey: roleOverridesKey,
+    queryFn: () => agentsApi.get(agentId, companyId),
+  });
+
+  const { data: companySkills } = useQuery({
+    queryKey: ["companySkills", companyId ?? "__none__"] as const,
+    queryFn: () => companySkillsApi.list(companyId!),
+    enabled: Boolean(companyId),
+  });
+
   const invalidate = () => queryClient.invalidateQueries({ queryKey: roleStateKey });
+  const invalidateOverrides = () => queryClient.invalidateQueries({ queryKey: roleOverridesKey });
 
   const assignJob = useMutation({
     mutationFn: (jobId: string) => jobsApi.assignToAgent(agentId, jobId),
@@ -95,6 +134,22 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
     onError: (error) => pushToast({ title: "Could not remove right", body: errorMessage(error, ""), tone: "error" }),
   });
 
+  const addSkill = useMutation({
+    mutationFn: (key: string) => jobsApi.addAgentSkillOverride(agentId, key),
+    onSuccess: () => {
+      invalidateOverrides();
+      setAddingSkillOverride(false);
+      setDraftSkillKey("");
+    },
+    onError: (error) => pushToast({ title: "Could not add skill", body: errorMessage(error, ""), tone: "error" }),
+  });
+
+  const removeSkill = useMutation({
+    mutationFn: (key: string) => jobsApi.removeAgentSkillOverride(agentId, key),
+    onSuccess: invalidateOverrides,
+    onError: (error) => pushToast({ title: "Could not remove skill", body: errorMessage(error, ""), tone: "error" }),
+  });
+
   if (isLoading) {
     return <p className="text-xs text-muted-foreground">Loading job…</p>;
   }
@@ -120,6 +175,22 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
     ...rights.fromJob.map((g) => g.permissionKey),
     ...rights.added.map((g) => g.permissionKey),
   ]);
+
+  const skillLabelByKey = new Map((companySkills ?? []).map((s) => [s.key, s.name]));
+  const skillLabel = (key: string) => skillLabelByKey.get(key) ?? key;
+
+  const skillOverrides = (agentDetail as (typeof agentDetail & AgentRoleOverridesFields) | undefined)?.roleOverrides
+    ?.skills ?? {};
+  const jobSkillKeys = jobDetail?.skillKeys ?? [];
+  const skillsAdd = skillOverrides.add ?? [];
+  const skillsRemove = new Set(skillOverrides.remove ?? []);
+  const skills = {
+    fromJob: jobSkillKeys.filter((key) => !skillsRemove.has(key)),
+    added: skillsAdd,
+    removed: jobSkillKeys.filter((key) => skillsRemove.has(key)),
+  };
+  const currentSkillKeys = new Set([...skills.fromJob, ...skills.added]);
+  const availableSkillsToAdd = (companySkills ?? []).filter((s) => !currentSkillKeys.has(s.key));
 
   return (
     <div>
@@ -249,6 +320,72 @@ export function AgentJobSection({ agentId, companyId }: { agentId: string; compa
           ) : (
             <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingRightOverride(true)}>
               Add a right
+            </Button>
+          )}
+        </div>
+
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <GraduationCap className="h-3.5 w-3.5" />
+            Skills
+          </div>
+          <ul className="mt-1.5 space-y-1">
+            {skills.fromJob.map((key) => (
+              <OverrideRow key={`from-job-${key}`} label={skillLabel(key)} tag="From job" />
+            ))}
+            {skills.added.map((key) => (
+              <OverrideRow
+                key={`added-${key}`}
+                label={skillLabel(key)}
+                tag="Added"
+                onRemove={() => removeSkill.mutate(key)}
+                removing={removeSkill.isPending}
+              />
+            ))}
+            {skills.removed.map((key) => (
+              <OverrideRow key={`removed-${key}`} label={skillLabel(key)} tag="Removed" muted />
+            ))}
+            {currentSkillKeys.size === 0 && skills.removed.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No skills.</p>
+            ) : null}
+          </ul>
+          {addingSkillOverride ? (
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                className="flex-1 min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+                value={draftSkillKey}
+                onChange={(e) => setDraftSkillKey(e.target.value)}
+                disabled={addSkill.isPending}
+              >
+                <option value="">Choose a skill…</option>
+                {availableSkillsToAdd.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                onClick={() => draftSkillKey && addSkill.mutate(draftSkillKey)}
+                disabled={!draftSkillKey || addSkill.isPending}
+              >
+                Add
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setAddingSkillOverride(false);
+                  setDraftSkillKey("");
+                }}
+                disabled={addSkill.isPending}
+              >
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button size="sm" variant="ghost" className="mt-1.5" onClick={() => setAddingSkillOverride(true)}>
+              Add a skill
             </Button>
           )}
         </div>
