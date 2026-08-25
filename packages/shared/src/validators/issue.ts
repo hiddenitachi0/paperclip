@@ -901,6 +901,8 @@ export const requestCheckboxConfirmationResultSchema = requestConfirmationResult
 export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("suggest_tasks"),
+    // DUR-162: verify-only mode, see createApprovalSchema.dryRun for the rationale.
+    dryRun: z.boolean().optional(),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
     sourceCommentId: z.string().uuid().nullable().optional(),
     sourceRunId: z.string().uuid().nullable().optional(),
@@ -911,6 +913,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("ask_user_questions"),
+    dryRun: z.boolean().optional(),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
     sourceCommentId: z.string().uuid().nullable().optional(),
     sourceRunId: z.string().uuid().nullable().optional(),
@@ -921,6 +924,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("request_confirmation"),
+    dryRun: z.boolean().optional(),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
     sourceCommentId: z.string().uuid().nullable().optional(),
     sourceRunId: z.string().uuid().nullable().optional(),
@@ -935,6 +939,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("request_checkbox_confirmation"),
+    dryRun: z.boolean().optional(),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
     sourceCommentId: z.string().uuid().nullable().optional(),
     sourceRunId: z.string().uuid().nullable().optional(),

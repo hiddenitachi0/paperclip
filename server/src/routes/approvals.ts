@@ -530,7 +530,7 @@ export function approvalRoutes(
       ? rawIssueIds.filter((value: unknown): value is string => typeof value === "string")
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
-    const { issueIds: _issueIds, ...approvalInput } = req.body;
+    const { issueIds: _issueIds, dryRun, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
@@ -657,6 +657,14 @@ export function approvalRoutes(
       // A legitimate second approval was explicitly acknowledged: keep it linked
       // to the earlier one rather than letting it exist independently and silently.
       normalizedPayload = { ...normalizedPayload, relatedApprovalId: duplicate.id };
+    }
+
+    if (dryRun) {
+      // Every check above (permissions, target existence, duplicate-open-approval)
+      // has already run — this confirms the request would succeed without
+      // actually writing a live, operator-visible approval. See DUR-162.
+      res.status(200).json({ dryRun: true, wouldSucceed: true });
+      return;
     }
 
     const approval = await svc.create(companyId, {

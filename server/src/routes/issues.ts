@@ -7444,6 +7444,14 @@ export function issueRoutes(
     const agentSourceRunId = req.actor.type === "agent" ? requireAgentRunId(req, res) : null;
     if (req.actor.type === "agent" && !agentSourceRunId) return;
 
+    if (req.body.dryRun) {
+      // DUR-162: every access/permission check above has already run — this
+      // confirms the request would succeed without creating a live,
+      // operator-visible card in the decision queue.
+      res.status(200).json({ dryRun: true, wouldSucceed: true });
+      return;
+    }
+
     const interaction = await issueThreadInteractionService(db).create(issue, {
       ...req.body,
       sourceRunId: req.actor.type === "agent" ? agentSourceRunId : req.body.sourceRunId ?? null,

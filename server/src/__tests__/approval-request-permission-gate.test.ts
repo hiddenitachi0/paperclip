@@ -203,6 +203,53 @@ describe("approval-request permission gate (DUR-146)", () => {
     expect(mockApprovalService.create).toHaveBeenCalledOnce();
   }, TEST_TIMEOUT);
 
+  it("dryRun still refuses with 403 when the actor lacks deploys:request, and does not create anything", async () => {
+    mockAccessService.decide.mockImplementation(async ({ action }: { action: string }) => ({
+      allowed: action === "company_scope:read",
+      action,
+      reason: action === "company_scope:read" ? "allow_test" : "deny_missing_grant",
+      explanation: "test",
+    }));
+
+    const res = await request(await createApp(agentActor))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        dryRun: true,
+        payload: {
+          kind: "deploy",
+          projectId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          title: "Deploy to prod",
+          note: "Deploying the latest build.",
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT);
+
+  it("dryRun returns 200 without creating a live approval when the actor holds merges:request (DUR-162)", async () => {
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      action: "merges:request",
+      reason: "allow_test",
+      explanation: "test",
+    });
+
+    const res = await request(await createApp(agentActor))
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "request_board_approval",
+        dryRun: true,
+        payload: { kind: "merge_pr", repo: "org/repo", prNumber: 42, title: "Merge PR #42" },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ dryRun: true, wouldSucceed: true });
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT);
+
   it("does not gate a hire_agent request on deploys:request/merges:request", async () => {
     mockAccessService.decide.mockImplementation(async ({ action }: { action: string }) => ({
       allowed: action === "company_scope:read",
