@@ -23,8 +23,12 @@ export function ArtifactGroupCard({ group, to }: ArtifactGroupCardProps) {
   const countLabel = `${group.count} file${group.count === 1 ? "" : "s"}`;
   // For maker (agent) grouping there is no ticket-style identifier to show —
   // show the person/agent's name instead, or a plain-language label when no
-  // maker was recorded. Task grouping keeps the task identifier.
-  const leadingLabel = group.issue?.identifier ?? group.agent?.name ?? "No owner recorded";
+  // maker was recorded. Task grouping keeps the task identifier, except for
+  // the "No task" bucket (DUR-206: files kept after their owning task was
+  // deleted), which has neither an issue nor an agent to show here.
+  const leadingLabel = group.issue?.identifier
+    ?? group.agent?.name
+    ?? (group.groupBy === "agent" ? "No owner recorded" : "No task");
 
   return (
     <div className="relative">

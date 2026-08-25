@@ -2778,17 +2778,22 @@ async function applyMergePlan(input: {
     let mergedDocuments = 0;
     let insertedDocumentRevisions = 0;
     for (const documentPlan of documentCandidates) {
+      // DUR-206 made issue_documents.issue_id nullable, but documentCandidates
+      // only ever contains plans built from documents that already passed the
+      // "parent issue available" check in worktree-merge-history-lib.ts, so
+      // issueId is always non-null here.
+      const documentPlanIssueId = documentPlan.source.issueId as string;
       const parentExists = await tx
         .select({ id: issues.id })
         .from(issues)
-        .where(and(eq(issues.id, documentPlan.source.issueId), eq(issues.companyId, companyId)))
+        .where(and(eq(issues.id, documentPlanIssueId), eq(issues.companyId, companyId)))
         .then((rows) => rows[0] ?? null);
       if (!parentExists) continue;
 
       const conflictingKeyDocument = await tx
         .select({ documentId: issueDocuments.documentId })
         .from(issueDocuments)
-        .where(and(eq(issueDocuments.issueId, documentPlan.source.issueId), eq(issueDocuments.key, documentPlan.source.key)))
+        .where(and(eq(issueDocuments.issueId, documentPlanIssueId), eq(issueDocuments.key, documentPlan.source.key)))
         .then((rows) => rows[0] ?? null);
       if (
         conflictingKeyDocument
@@ -2912,10 +2917,13 @@ async function applyMergePlan(input: {
     let skippedMissingAttachmentObjects = 0;
     for (const attachment of attachmentCandidates) {
       if (existingAttachmentIds.has(attachment.source.id)) continue;
+      // Same reasoning as the document loop above: attachmentCandidates only
+      // contains plans that already passed the parent-issue-available check.
+      const attachmentIssueId = attachment.source.issueId as string;
       const parentExists = await tx
         .select({ id: issues.id })
         .from(issues)
-        .where(and(eq(issues.id, attachment.source.issueId), eq(issues.companyId, companyId)))
+        .where(and(eq(issues.id, attachmentIssueId), eq(issues.companyId, companyId)))
         .then((rows) => rows[0] ?? null);
       if (!parentExists) continue;
 

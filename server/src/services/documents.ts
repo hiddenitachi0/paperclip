@@ -43,7 +43,13 @@ function mapIssueDocumentRow(
   row: {
     id: string;
     companyId: string;
-    issueId: string;
+    // DUR-206 made issue_documents.issue_id nullable at the schema level so
+    // a deleted task's documents can be detached instead of destroyed, but
+    // every caller here queries by a specific, known issueId (`eq(issueDocuments.issueId, issueId)`),
+    // so the value is always non-null in practice. Only the company-wide
+    // artifacts projection (company-artifacts.ts) surfaces genuinely
+    // orphaned rows.
+    issueId: string | null;
     key: string;
     title: string | null;
     format: string;
@@ -66,7 +72,7 @@ function mapIssueDocumentRow(
   return {
     id: row.id,
     companyId: row.companyId,
-    issueId: row.issueId,
+    issueId: row.issueId as string,
     key: row.key,
     title: row.title,
     format: row.format,
