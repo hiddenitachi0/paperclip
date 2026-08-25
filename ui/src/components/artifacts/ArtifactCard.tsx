@@ -239,6 +239,11 @@ export function ArtifactCard({ artifact }: ArtifactCardProps) {
               <span className="text-muted-foreground/50">·</span>
               <span className="truncate">{artifact.createdByAgent.name}</span>
             </>
+          ) : artifact.createdByUser ? (
+            <>
+              <span className="text-muted-foreground/50">·</span>
+              <span className="truncate">Uploaded by you</span>
+            </>
           ) : null}
         </div>
       </div>

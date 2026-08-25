@@ -149,6 +149,7 @@ function appendCommonArtifactsGroupHrefParams(params: URLSearchParams, query: Co
   if (query.qScope !== "all") params.set("qScope", query.qScope);
   if (query.agentId) params.set("agentId", query.agentId);
   if (query.noAgent) params.set("noAgent", "true");
+  if (query.uploadedByUser) params.set("uploadedByUser", "true");
 }
 
 function buildArtifactsGroupHref(
@@ -168,11 +169,14 @@ function buildAgentArtifactsGroupHref(
   companyPrefix: string,
   query: CompanyArtifactsQuery,
   groupAgentId: string | null,
+  isHumanUpload = false,
 ) {
   const params = new URLSearchParams();
   params.set("groupBy", "agent");
   if (groupAgentId) {
     params.set("groupAgentId", groupAgentId);
+  } else if (isHumanUpload) {
+    params.set("uploadedByUser", "true");
   } else {
     params.set("noAgent", "true");
   }
@@ -346,27 +350,32 @@ function buildArtifactGroups(input: {
 }
 
 const NO_AGENT_GROUP_TITLE = "No agent";
+const HUMAN_UPLOAD_GROUP_ID = "agent:human";
+const HUMAN_UPLOAD_GROUP_TITLE = "Uploaded by you";
 
-function agentGroupId(agentId: string | null) {
-  return agentId ? `agent:${agentId}` : "agent:none";
+function agentGroupId(agentId: string | null, isHumanUpload = false) {
+  if (agentId) return `agent:${agentId}`;
+  return isHumanUpload ? HUMAN_UPLOAD_GROUP_ID : "agent:none";
 }
 
 function emptyAgentGroup(input: {
   companyPrefix: string;
   query: CompanyArtifactsQuery;
   agent: CompanyArtifactAgentSummary | null;
+  isHumanUpload?: boolean;
 }): CompanyArtifactGroup {
   return {
-    id: agentGroupId(input.agent?.id ?? null),
+    id: agentGroupId(input.agent?.id ?? null, input.isHumanUpload),
     groupBy: "agent",
     issue: null,
     agent: input.agent,
-    title: input.agent?.name ?? NO_AGENT_GROUP_TITLE,
+    isUserUploadGroup: input.isHumanUpload || undefined,
+    title: input.isHumanUpload ? HUMAN_UPLOAD_GROUP_TITLE : (input.agent?.name ?? NO_AGENT_GROUP_TITLE),
     count: 0,
     mediaKinds: [],
     previewArtifacts: [],
     updatedAt: new Date(0).toISOString(),
-    href: buildAgentArtifactsGroupHref(input.companyPrefix, input.query, input.agent?.id ?? null),
+    href: buildAgentArtifactsGroupHref(input.companyPrefix, input.query, input.agent?.id ?? null, input.isHumanUpload),
   };
 }
 
@@ -375,8 +384,10 @@ function emptyAgentGroup(input: {
  * Unlike task/parent_task grouping, this never falls back to a synthetic
  * empty-issue row: a group only exists here when at least one artifact maps
  * to it, so the maker-less `agent:none` bucket only appears when non-empty
- * (which today only happens for work-product rows — documents/attachments
- * always require a resolvable maker).
+ * (which today only happens for work-product rows — documents always
+ * require a resolvable agent maker, and attachments require either a
+ * resolvable agent maker or a human upload, which gets its own
+ * `agent:human` bucket titled "Uploaded by you").
  */
 function buildAgentArtifactGroups(input: {
   artifacts: CompanyArtifact[];
@@ -387,12 +398,14 @@ function buildAgentArtifactGroups(input: {
 
   for (const artifact of input.artifacts) {
     const agent = artifact.createdByAgent;
-    const groupId = agentGroupId(agent?.id ?? null);
+    const isHumanUpload = !agent && !!artifact.createdByUser;
+    const groupId = agentGroupId(agent?.id ?? null, isHumanUpload);
     const existing = groups.get(groupId);
     const group = existing ?? emptyAgentGroup({
       companyPrefix: input.companyPrefix,
       query: input.query,
       agent,
+      isHumanUpload,
     });
     if (!existing) groups.set(groupId, group);
 
@@ -465,6 +478,11 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           documentConditions.push(
             sql`(${documents.createdByAgentId} IS NULL AND ${documents.updatedByAgentId} IS NULL)`,
           );
+        } else if (query.uploadedByUser) {
+          // Documents always require a resolvable agent maker (see the base
+          // `documentConditions` above), so none can belong to the human-
+          // upload bucket; exclude the source entirely for that selection.
+          documentConditions.push(sql`false`);
         }
         if (q) {
           documentConditions.push(
@@ -606,6 +624,10 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           workProductConditions.push(eq(workProductAgent.id, query.agentId));
         } else if (query.noAgent) {
           workProductConditions.push(isNull(workProductAgent.id));
+        } else if (query.uploadedByUser) {
+          // Work products are never human-uploaded; exclude the source
+          // entirely for the human-upload group selection.
+          workProductConditions.push(sql`false`);
         }
         if (q) {
           const searchCondition = sql`(
@@ -722,8 +744,6 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         const attachmentArtifactId = sql<string>`concat('attachment:', ${issueAttachments.id})`;
         const attachmentConditions: SQL[] = [
           eq(issueAttachments.companyId, companyId),
-          isNull(issueAttachments.issueCommentId),
-          isNotNull(assets.createdByAgentId),
         ];
         const attachmentCursor = groupBy
           ? undefined
@@ -736,7 +756,12 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         if (query.agentId) {
           attachmentConditions.push(eq(attachmentAgent.id, query.agentId));
         } else if (query.noAgent) {
-          attachmentConditions.push(isNull(attachmentAgent.id));
+          // "No agent" means "we have no idea who made this" — a human
+          // upload has a known maker (see uploadedByUser below) and must not
+          // land in this bucket even though it also has no agent maker.
+          attachmentConditions.push(and(isNull(attachmentAgent.id), isNull(assets.createdByUserId))!);
+        } else if (query.uploadedByUser) {
+          attachmentConditions.push(and(isNull(attachmentAgent.id), isNotNull(assets.createdByUserId))!);
         }
         if (q) {
           attachmentConditions.push(
@@ -766,6 +791,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             originalFilename: assets.originalFilename,
             createdByAgentId: attachmentAgent.id,
             createdByAgentName: attachmentAgent.name,
+            createdByUserId: assets.createdByUserId,
             updatedAt: issueAttachments.updatedAt,
           })
           .from(issueAttachments)
@@ -829,6 +855,7 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
             createdByAgent: row.createdByAgentId && row.createdByAgentName
               ? { id: row.createdByAgentId, name: row.createdByAgentName }
               : null,
+            createdByUser: !row.createdByAgentId && !!row.createdByUserId,
             updatedAt: row.updatedAt.toISOString(),
             href: buildIssueHref(company.issuePrefix, identifier, `attachment-${row.attachmentId}`),
           };
@@ -866,17 +893,19 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           query,
         });
 
-        if (query.groupAgentId || query.noAgent) {
-          const selectedGroupId = agentGroupId(query.groupAgentId ?? null);
+        if (query.groupAgentId || query.noAgent || query.uploadedByUser) {
+          const selectedGroupId = agentGroupId(query.groupAgentId ?? null, query.uploadedByUser);
           const selectedGroup = agentGroups.find((group) => group.id === selectedGroupId)
             ?? emptyAgentGroup({
               companyPrefix: company.issuePrefix,
               query,
               agent: selectedAgent,
+              isHumanUpload: query.uploadedByUser,
             });
-          const selectedArtifacts = sorted.filter(
-            (artifact) => agentGroupId(artifact.createdByAgent?.id ?? null) === selectedGroupId,
-          );
+          const selectedArtifacts = sorted.filter((artifact) => {
+            const isHumanUpload = !artifact.createdByAgent && !!artifact.createdByUser;
+            return agentGroupId(artifact.createdByAgent?.id ?? null, isHumanUpload) === selectedGroupId;
+          });
           const { page, nextCursor } = pageByCursor(selectedArtifacts, query.limit, cursor);
           return { artifacts: page, selectedGroup, nextCursor };
         }
@@ -926,9 +955,12 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
      * (documents, attachments, work products), most-recently-active first.
      * Backs the `kind=document`-independent agent filter/group dropdown
      * (DUR-64), so it applies the same source-eligibility gates as `list`
-     * (system document keys excluded, comment attachments excluded, only
-     * "artifact"-type paperclip work products) but no kind/project/search
-     * filtering — this is a full, unfiltered roster of makers.
+     * (system document keys excluded, only "artifact"-type paperclip work
+     * products) but no kind/project/search filtering — this is a full,
+     * unfiltered roster of makers. Comment-posted and human-uploaded
+     * attachments are included (an agent who only posted via a comment
+     * still counts as a maker); human uploads never appear here since the
+     * inner join to `agents` requires a resolvable `createdByAgentId`.
      */
     listAgents: async (companyId: string): Promise<CompanyArtifactAgentSummary[]> => {
       const company = await db
@@ -1047,8 +1079,6 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
         )
         .where(and(
           eq(issueAttachments.companyId, companyId),
-          isNull(issueAttachments.issueCommentId),
-          isNotNull(assets.createdByAgentId),
           isNotNull(listAgentsAttachmentAgent.id),
         ));
       for (const row of attachmentRows) {

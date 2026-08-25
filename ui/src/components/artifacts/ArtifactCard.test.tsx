@@ -81,6 +81,15 @@ describe("ArtifactCard", () => {
     expect(markup).not.toContain(">PAP-10370<");
   });
 
+  it("labels a human upload as 'Uploaded by you' instead of an agent name", () => {
+    const markup = renderToStaticMarkup(
+      <ArtifactCard artifact={makeArtifact({ createdByAgent: null, createdByUser: true })} />,
+    );
+
+    expect(markup).toContain("Uploaded by you");
+    expect(markup).not.toContain("ClaudeCoder");
+  });
+
   it("renders a video preview with a video element and play glyph", () => {
     const markup = renderToStaticMarkup(
       <ArtifactCard

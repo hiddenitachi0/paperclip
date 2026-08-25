@@ -27,6 +27,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "ui.detailTab.register",
     "http.outbound",
     "secrets.read-ref",
+    "issue.attachments.create",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -37,15 +38,16 @@ const manifest: PaperclipPluginManifestV1 = {
       name: TOOL_GENERATE,
       displayName: "Generate image",
       description:
-        "Generate an image from a text prompt using the configured provider. Returns a preview URL; a human still approves before it is posted.",
+        "Generate an image from a text prompt using the configured provider and attach it to the given issue as a Paperclip attachment. A human still approves before it is posted.",
       parametersSchema: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "What to generate." },
+          issueId: { type: "string", description: "The issue to attach the generated image to. Must be the issue you are currently working." },
           imageSize: { type: "string", description: "Provider size hint, e.g. landscape_4_3." },
           model: { type: "string", description: "Optional provider model override." },
         },
-        required: ["prompt"],
+        required: ["prompt", "issueId"],
       },
     },
   ],
