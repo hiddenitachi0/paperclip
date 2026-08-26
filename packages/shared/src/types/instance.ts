@@ -48,6 +48,46 @@ export const MAX_GLOBAL_MAX_CONCURRENT_RUNS = 200;
  */
 export type InstanceExecutionMode = "kubernetes" | "any";
 
+// DUR-224: "Rolig ned-bryter" -- one switch that stops every agent from
+// starting new work (both the timer-wake policy.enabled and the
+// event-driven policy.wakeOnDemand flags in heartbeat.ts) without touching
+// runs already in flight, unlike Pause which cancels active runs. The
+// snapshot lets deactivation restore each agent's exact prior flags instead
+// of blanket re-enabling agents that were deliberately asleep beforehand.
+export interface QuietModeActor {
+  actorType: string;
+  actorId: string | null;
+  agentId: string | null;
+}
+
+export interface QuietModeAgentSnapshotEntry {
+  agentId: string;
+  companyId: string;
+  enabled: boolean;
+  wakeOnDemand: boolean;
+}
+
+export interface QuietModeState {
+  active: boolean;
+  activatedAt: string | null;
+  activatedBy: QuietModeActor | null;
+  deactivatedAt: string | null;
+  snapshot: QuietModeAgentSnapshotEntry[] | null;
+}
+
+export const DEFAULT_QUIET_MODE_STATE: QuietModeState = {
+  active: false,
+  activatedAt: null,
+  activatedBy: null,
+  deactivatedAt: null,
+  snapshot: null,
+};
+
+// How long Quiet Mode can stay active before the UI warns that it may have
+// been left on by mistake. Sized above the normal overnight-quota-reset use
+// case (~22h) so that expected usage never trips the warning.
+export const QUIET_MODE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   keyboardShortcuts: boolean;
@@ -62,6 +102,8 @@ export interface InstanceGeneralSettings {
   instructionsStalenessThresholdDays: number;
   /** Whole-instance ceiling on simultaneously running heartbeat runs, across every agent/company. */
   globalMaxConcurrentRuns: number;
+  /** DUR-224 quiet-mode state; not settable via the general-settings patch route. */
+  quietMode: QuietModeState;
 }
 
 export interface InstanceExperimentalSettings {
