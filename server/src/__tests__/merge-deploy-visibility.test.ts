@@ -201,6 +201,32 @@ describe("mergeDeployVisibilityService.tick (DUR-40 / DUR-46)", () => {
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
+  it("DUR-237: persists the verified merge commit sha onto the approval payload so the done-gate can later match it against any project deploy", async () => {
+    const { mergeDeployVisibilityService } = await import("../services/merge-deploy-visibility.js");
+    const dueApproval = {
+      id: "approval-1b",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "approved",
+      payload: { kind: "merge_pr", base: "custom", prNumber: 78, repo: "acme/paperclip" },
+      decidedAt: new Date("2026-08-19T00:00:00Z"),
+    };
+    const { db, updateCalls } = makeFakeDb([dueApproval]);
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1b" }]);
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      { type: "request_board_approval", status: "approved", payload: { kind: "deploy" } },
+    ]);
+    const verifyMerge = vi.fn().mockResolvedValue({ status: "merged", mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789" });
+
+    const svc = mergeDeployVisibilityService(db as any, { verifyMerge });
+    await svc.tick(new Date("2026-08-19T01:00:00Z"));
+
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload.mergeCommitSha).toBe("9a3a7e7abcdef0123456789abcdef0123456789");
+    expect(updateCalls[0].payload.deployVisibilityNoted).toBe(true);
+  });
+
   it("does not post a note when a deploy approval already exists for the issue", async () => {
     const { mergeDeployVisibilityService } = await import("../services/merge-deploy-visibility.js");
     const dueApproval = {
