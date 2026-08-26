@@ -319,6 +319,21 @@ function appendToolGrantCapabilitySummary(payload: Record<string, unknown>) {
   payload.risks = existingRisks.includes(capability) ? existingRisks : [...existingRisks, capability];
 }
 
+/**
+ * DUR-237: `payload.mergeCommitSha` on a `kind:"merge_pr"` approval is read by
+ * deploy-completion-gate.ts as proof the underlying PR merged as a specific commit --
+ * ground truth that's only trustworthy when merge-deploy-visibility.ts wrote it after
+ * independently verifying the merge via GitHub's API (see that file's markNoted). The
+ * create/resubmit payload is otherwise caller-controlled, so without this, a requester
+ * could hand-write any sha it likes -- including one already known to be live from an
+ * unrelated deploy -- and short-circuit the completion gate without this approval's PR
+ * ever merging. Always strip it on the way in; the backfill job's own `db.update` is the
+ * only writer allowed to set it.
+ */
+function stripUntrustedMergeCommitSha(payload: Record<string, unknown>) {
+  if (payload.kind === "merge_pr") delete payload.mergeCommitSha;
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
@@ -328,6 +343,7 @@ async function normalizeRequestBoardApprovalPayload(
 ) {
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   appendToolGrantCapabilitySummary(payload);
+  stripUntrustedMergeCommitSha(payload);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
   payload.title = formatApprovalTitle(projectLabel, payload.title);
@@ -976,6 +992,9 @@ export function approvalRoutes(
         res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
         return;
       }
+      // DUR-237: resubmit's payload is just as caller-controlled as create's -- see
+      // stripUntrustedMergeCommitSha's docblock for why this can never come from the request body.
+      stripUntrustedMergeCommitSha(normalizedPayload);
     }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
       // Re-verify the boss/report relationship still holds -- it may have
