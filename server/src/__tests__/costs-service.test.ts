@@ -854,4 +854,77 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byKindRow?.debitCents).toBe(4_000_000_000);
     expect(byKindRow?.netCents).toBe(4_000_000_000);
   });
+
+  describe("runTokenAnomalyThreshold (DUR-215)", () => {
+    async function seedAgentRuns(totalTokensPerRun: number[]) {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Cost Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "claude_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      let occurredAt = new Date("2026-04-01T00:00:00.000Z").getTime();
+      for (const totalTokens of totalTokensPerRun) {
+        const heartbeatRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: heartbeatRunId,
+          companyId,
+          agentId,
+          status: "succeeded",
+        });
+        await db.insert(costEvents).values({
+          companyId,
+          agentId,
+          heartbeatRunId,
+          provider: "anthropic",
+          biller: "anthropic",
+          billingType: "subscription_included",
+          model: "claude-sonnet-5",
+          inputTokens: totalTokens,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          costCents: 1,
+          occurredAt: new Date(occurredAt),
+        });
+        occurredAt += 60_000;
+      }
+
+      return agentId;
+    }
+
+    it("flags a threshold at median + 3 stddev above an agent's own run history", async () => {
+      const agentId = await seedAgentRuns([10, 10, 10, 10, 90]);
+
+      const result = await costs.runTokenAnomalyThreshold(agentId);
+
+      expect(result).toEqual({ median: 10, stddev: 32, threshold: 106, sampleSize: 5 });
+    });
+
+    it("returns null when the agent has fewer than the minimum sample size", async () => {
+      const agentId = await seedAgentRuns([10, 10, 10, 90]);
+
+      expect(await costs.runTokenAnomalyThreshold(agentId)).toBeNull();
+    });
+
+    it("returns null when the agent's run history has no spread to define an anomaly against", async () => {
+      const agentId = await seedAgentRuns([50, 50, 50, 50, 50]);
+
+      expect(await costs.runTokenAnomalyThreshold(agentId)).toBeNull();
+    });
+  });
 });

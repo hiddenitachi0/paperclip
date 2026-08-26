@@ -57,6 +57,7 @@ import {
   isClaudeUnknownSessionError,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeImageProcessingError,
+  createClaudeLiveUsageTracker,
 } from "./parse.js";
 import {
   materializeRemoteClaudeConfig,
@@ -670,7 +671,21 @@ export function resolveClaudeAdapterResult(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog: rawOnLog, onMeta, onSpawn, authToken } = ctx;
+  // DUR-215: report live running token totals to the caller (opt-in via
+  // onUsageProgress) so an in-progress run can be flagged as abnormally
+  // expensive before it finishes. No-op, zero extra parsing, when unset.
+  const onUsageProgress = ctx.onUsageProgress;
+  const liveUsageTracker = onUsageProgress ? createClaudeLiveUsageTracker() : null;
+  const onLog = liveUsageTracker
+    ? async (stream: "stdout" | "stderr", chunk: string) => {
+        await rawOnLog(stream, chunk);
+        if (stream === "stdout") {
+          const usage = liveUsageTracker.onChunk(chunk);
+          if (usage) await onUsageProgress!(usage);
+        }
+      }
+    : rawOnLog;
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
