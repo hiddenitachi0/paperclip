@@ -1350,7 +1350,19 @@ export function buildWorkspaceCommandEnv(input: {
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
 }) {
-  const env: NodeJS.ProcessEnv = sanitizeRuntimeServiceBaseEnv(process.env);
+  // Unlike sanitizeRuntimeServiceBaseEnv (used for independent long-running
+  // runtime services, which get an intentionally minimal env), workspace
+  // provision/setup commands legitimately need to inherit the ambient
+  // PAPERCLIP_HOME / PAPERCLIP_WORKTREES_DIR / PAPERCLIP_INSTANCE_ID /
+  // PAPERCLIP_CONFIG this process was started with -- stripping every
+  // PAPERCLIP_* var here (as sanitizeRuntimeServiceBaseEnv does) broke
+  // provisioning scripts that resolve their config/worktree paths from
+  // those. Only DATABASE_URL (and the two npm auth flags, for consistency
+  // with the other spawn sites) needs to be kept out.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.DATABASE_URL;
+  delete env.npm_config_tailscale_auth;
+  delete env.npm_config_authenticated_private;
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
