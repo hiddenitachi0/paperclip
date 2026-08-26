@@ -110,7 +110,6 @@ export type TaskWatchdogStoppedLeaf = {
   blockerIssueIds: string[];
   pendingInteractionIds: string[];
   pendingApprovalIds: string[];
-  updatedAt: string;
   latestCommentAt: string | null;
   latestDocumentAt: string | null;
   latestWorkProductAt: string | null;
@@ -225,12 +224,6 @@ function toIssueWatchdog(row: IssueWatchdogRow): IssueWatchdog {
     updatedByUserId: row.updatedByUserId,
     updatedByRunId: row.updatedByRunId,
   };
-}
-
-function issueUpdatedAtIso(issue: Pick<TaskWatchdogClassifierIssue, "updatedAt">) {
-  return issue.updatedAt instanceof Date
-    ? issue.updatedAt.toISOString()
-    : new Date(String(issue.updatedAt)).toISOString();
 }
 
 function optionalIso(value: Date | string | null | undefined): string | null {
@@ -392,7 +385,6 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
       blockerIssueIds: [...new Set(blockersByIssueId.get(issue.id) ?? [])].sort(),
       pendingInteractionIds: waitingPathIds(input.pendingInteractions, input.watchdog.companyId, issue.id),
       pendingApprovalIds: waitingPathIds(input.pendingApprovals, input.watchdog.companyId, issue.id),
-      updatedAt: issueUpdatedAtIso(issue),
       latestCommentAt: optionalIso(issue.latestCommentAt),
       latestDocumentAt: optionalIso(issue.latestDocumentAt),
       latestWorkProductAt: optionalIso(issue.latestWorkProductAt),
@@ -503,7 +495,7 @@ function buildStoppedFingerprintComment(input: {
   resumed: boolean;
 }) {
   const leafLines = input.stoppedLeaves.slice(0, 12).map((leaf) =>
-    `- ${leaf.identifier ?? leaf.issueId}: ${leaf.status} (updated ${leaf.updatedAt})`
+    `- ${leaf.identifier ?? leaf.issueId}: ${leaf.status}`
   );
   const more = input.stoppedLeaves.length > leafLines.length
     ? `\n- ...and ${input.stoppedLeaves.length - leafLines.length} more stopped leaves`

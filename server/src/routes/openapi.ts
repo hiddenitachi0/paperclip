@@ -141,6 +141,7 @@ import {
   remoteSecretImportSchema,
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
+  sendLaneAMessageSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -2795,6 +2796,30 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/instance/settings/quiet-mode",
+  tags: ["instance"],
+  summary: "Get quiet mode status (DUR-224)",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/settings/quiet-mode/activate",
+  tags: ["instance"],
+  summary: "Stop every agent in every company from starting new work, without cancelling active runs (DUR-224)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/settings/quiet-mode/deactivate",
+  tags: ["instance"],
+  summary: "Restore exactly the agents that were active before quiet mode was turned on (DUR-224)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── Board chat (Conference Room Chat, experimental) ──────────────────────────
 
 registry.registerPath({
@@ -2812,6 +2837,28 @@ registry.registerPath({
     ),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+// ─── Lane A (direct-model-call text primitive) ────────────────────────────────
+
+registry.registerPath({
+  method: "post",
+  path: "/api/lane-a/{agentId}/messages",
+  tags: ["agents"],
+  summary: "Send a message to a Lane A-enabled agent (direct model call, no tools, no runtime)",
+  request: {
+    params: z.object({ agentId: z.string() }),
+    body: jsonBody(sendLaneAMessageSchema),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    429: r.tooManyRequests,
+  },
 });
 
 // ─── Access / invites / members ───────────────────────────────────────────────
@@ -3318,6 +3365,25 @@ registry.registerPath({
   summary: "Create child issues",
   request: { params: z.object({ id: z.string() }), body: jsonBody(createChildIssueSchema) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/lane-b/{agentId}/messages",
+  tags: ["issues"],
+  summary: "Submit a plain-text request as a background task (Lane B front door)",
+  body: z.object({
+    text: z.string().trim().min(1).max(20_000),
+  }),
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/lane-b/messages/{issueId}",
+  tags: ["issues"],
+  summary: "Poll status and result summary for a Lane B background task",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({

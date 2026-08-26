@@ -4,6 +4,7 @@ import {
   uuid,
   text,
   integer,
+  boolean,
   timestamp,
   jsonb,
   index,
@@ -53,6 +54,10 @@ export const agents = pgTable(
     // The FK constraint (assets(id) ON DELETE SET NULL) is declared by hand
     // in the migration SQL instead (see 0132_agent_avatar.sql).
     avatarAssetId: uuid("avatar_asset_id"),
+    // Lane A (DUR-217): direct-model-call text endpoint, no agent runtime. Off
+    // by default and board-settable only — see assertCanManageLaneAFlag in
+    // server/src/routes/agents.ts, which mirrors the instructions-path guard.
+    laneAEnabled: boolean("lane_a_enabled").notNull().default(false),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // DUR-109: last time a human (direct bundle/file edit) or an approved

@@ -288,6 +288,11 @@ export {
 } from "./mcp-tool-library.js";
 
 export {
+  sendLaneAMessageSchema,
+  type SendLaneAMessage,
+} from "./lane-a.js";
+
+export {
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
