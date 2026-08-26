@@ -29,6 +29,9 @@ import {
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
+import { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
+
+export { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
 
 export function resolveShell(): string {
   const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
@@ -293,19 +296,6 @@ export async function ensureServerWorkspaceLinksCurrent(
   throw new Error(
     `Workspace relink did not repair all server package links: ${remainingMismatches.map((item) => item.packageName).join(", ")}`,
   );
-}
-
-export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
-      delete env[key];
-    }
-  }
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
-  return env;
 }
 
 function stableRuntimeServiceId(input: {
