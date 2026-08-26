@@ -61,7 +61,18 @@ FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
 WORKDIR /app
-COPY --chown=node:node --from=build /app /app
+
+# DUR-235: these steps fetch from npm/ghcr.io over the network and used to run
+# AFTER `COPY --from=build /app /app`, which changes on every commit — so
+# Docker's build cache invalidated this whole RUN on every single deploy,
+# meaning every deploy re-hit the network for globally-@latest-pinned CLI
+# tools with no retry. A transient registry hiccup (timeout/5xx/rate limit)
+# here fails `docker compose build` outright, which surfaces as a generic
+# compose_build_swap failure unrelated to the deployed commit's own code —
+# this reproduced on two unrelated commits (4e2dfddf, 1fa28856) back to back.
+# Keeping these steps ahead of the per-commit app COPY lets Docker cache-hit
+# them on ordinary deploys (base image / tool list unchanged) instead of
+# re-fetching over the network every time.
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
@@ -89,6 +100,11 @@ RUN chmod +x /usr/local/bin/paperclip-git-credential \
 # from the official static uv image (no pip needed). Pin a version tag here if
 # reproducible builds become a requirement.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# Deliberately last: this is the only layer that changes on every commit, so
+# putting it after the network-fetching steps above keeps their cache valid
+# across ordinary deploys.
+COPY --chown=node:node --from=build /app /app
 
 ENV NODE_ENV=production \
   HOME=/paperclip \
