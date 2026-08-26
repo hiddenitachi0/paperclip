@@ -207,6 +207,26 @@ const promoteLowTrustOutputSchema = z.object({
   summary: z.string().trim().min(1).max(8_000),
 });
 
+// Lane B (DUR-219): "submit a plain-text request, it becomes a background
+// task" front door. The submission endpoint is a thin wrapper over the same
+// issue-creation path as POST /companies/:companyId/issues; the status
+// endpoint adds one thing that route doesn't provide — a computed result
+// summary (the latest agent reply) once the issue has settled, so a caller
+// outside the board UI doesn't need to separately fetch and filter comments.
+const laneBSubmitMessageSchema = z.object({
+  text: z.string().trim().min(1, "text is required").max(20_000, "text is too long"),
+}).strict();
+const LANE_B_TITLE_MAX_LENGTH = 80;
+function buildLaneBMessageTitle(text: string): string {
+  const firstLine = text.split("\n")[0]?.trim() ?? "";
+  const source = firstLine || text;
+  if (source.length <= LANE_B_TITLE_MAX_LENGTH) return source;
+  return `${source.slice(0, LANE_B_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
+}
+// Statuses past which the requester's plain-text reply is considered final —
+// matches the polling cutoff DUR-212's simple mode UI already uses client-side.
+const LANE_B_SETTLED_STATUSES = new Set(["done", "cancelled", "blocked", "in_review"]);
+
 async function listIssueLinkedCases(db: Db, companyId: string, issueId: string) {
   const rows = await db
     .select({
@@ -5478,6 +5498,100 @@ export function issueRoutes(
       ...issue,
       relatedWork: referenceSummary,
       referencedIssueIdentifiers: referenceSummary.outbound.map((item) => item.issue.identifier ?? item.issue.id),
+    });
+  });
+
+  router.post("/lane-b/:agentId/messages", validate(laneBSubmitMessageSchema), async (req, res) => {
+    const agentId = req.params.agentId as string;
+    const agent = await agentsSvc.getById(agentId);
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    const companyId = agent.companyId;
+    assertCompanyAccess(req, companyId);
+    const assignmentScope: TaskAssignmentAuthorizationScope = {
+      projectId: null,
+      parentIssueId: null,
+      assigneeAgentId: agentId,
+      assigneeUserId: null,
+    };
+    await assertCanAssignTasks(req, companyId, assignmentScope);
+
+    const text = (req.body.text as string).trim();
+    const actor = getActorInfo(req);
+    const issueId = randomUUID();
+    const issue = await svc.create(companyId, {
+      id: issueId,
+      title: buildLaneBMessageTitle(text),
+      description: text,
+      assigneeAgentId: agentId,
+      status: "todo",
+      priority: "medium",
+      createdByAgentId: actor.agentId,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+    });
+
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.created",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        title: issue.title,
+        identifier: issue.identifier,
+        source: "lane_b_message",
+      },
+    });
+
+    void queueIssueAssignmentWakeup({
+      heartbeat,
+      issue,
+      reason: "issue_assigned",
+      mutation: "create",
+      contextSource: "lane_b.submit",
+      requestedByActorType: actor.actorType,
+      requestedByActorId: actor.actorId,
+    });
+
+    res.status(201).json({
+      issueId: issue.id,
+      identifier: issue.identifier,
+      status: issue.status,
+      assigneeAgentId: issue.assigneeAgentId,
+    });
+  });
+
+  router.get("/lane-b/messages/:issueId", async (req, res) => {
+    const id = req.params.issueId as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+
+    const settled = LANE_B_SETTLED_STATUSES.has(issue.status);
+    let resultSummary: string | null = null;
+    if (settled) {
+      const comments = await svc.listComments(id, { order: "desc", limit: 20 });
+      const latestAgentReply = comments.find(
+        (comment) => comment.authorType === "agent" && !comment.deletedAt,
+      );
+      resultSummary = latestAgentReply?.body ?? null;
+    }
+
+    res.json({
+      issueId: issue.id,
+      identifier: issue.identifier,
+      status: issue.status,
+      settled,
+      resultSummary,
     });
   });
 

@@ -59,10 +59,12 @@ describe("adapter model listing", () => {
 
     expect(models).toEqual(claudeFallbackModels);
     expect(models.some((model) => model.id === "claude-opus-4-8")).toBe(true);
-    // Newer flagship models are offered, but Opus 4.8 stays the default (first) option.
-    expect(models[0]?.id).toBe("claude-opus-4-8");
+    // Opus 5 is the current flagship and stays the default (first) option.
+    expect(models[0]?.id).toBe("claude-opus-5");
+    expect(models.some((model) => model.id === "claude-sonnet-5")).toBe(true);
     expect(models.some((model) => model.id === "claude-fable-5")).toBe(true);
     expect(models.some((model) => model.id === "claude-mythos-5")).toBe(true);
+    expect(models.some((model) => model.id === "claude-haiku-4-5-20251001")).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

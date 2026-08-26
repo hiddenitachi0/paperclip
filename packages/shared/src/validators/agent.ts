@@ -226,6 +226,9 @@ export const updateAgentSchema = createAgentSchema
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
+    // Lane A (DUR-217) opt-in — board-settable only, enforced in
+    // server/src/routes/agents.ts (assertCanManageLaneAFlag), not here.
+    laneAEnabled: z.boolean().optional(),
   });
 
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;
