@@ -146,6 +146,68 @@ export function instanceSettingsRoutes(db: Db) {
     },
   );
 
+  router.get("/instance/settings/quiet-mode", async (req, res) => {
+    // Readable by any org member so a non-admin can see "quiet -- nothing
+    // running" without needing instance-admin; only activate/deactivate
+    // (below) are admin-gated.
+    assertBoardOrgAccess(req);
+    res.json(await svc.getQuietMode());
+  });
+
+  router.post("/instance/settings/quiet-mode/activate", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const actor = getActorInfo(req);
+    const result = await svc.activateQuietMode({
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+    });
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.settings.quiet_mode_activated",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: { agentCount: result.snapshot?.length ?? 0 },
+        }),
+      ),
+    );
+    res.json(result);
+  });
+
+  router.post("/instance/settings/quiet-mode/deactivate", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const actor = getActorInfo(req);
+    const result = await svc.deactivateQuietMode({
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+    });
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.settings.quiet_mode_deactivated",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: {},
+        }),
+      ),
+    );
+    res.json(result);
+  });
+
   router.post(
     "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",
     validate(issueGraphLivenessAutoRecoveryRequestSchema),

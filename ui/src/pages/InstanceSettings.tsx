@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clock3, ExternalLink, Settings } from "lucide-react";
+import { AlertTriangle, Clock3, ExternalLink, Moon, Settings } from "lucide-react";
 import type { InstanceSchedulerHeartbeatAgent } from "@paperclipai/shared";
+import { QUIET_MODE_STALE_AFTER_MS } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { heartbeatsApi } from "../api/heartbeats";
 import { agentsApi } from "../api/agents";
+import { instanceSettingsApi } from "../api/instanceSettings";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { EmptyState } from "../components/EmptyState";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +14,124 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDateTime, relativeTime } from "../lib/utils";
+
+function QuietModeCard() {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const statusQuery = useQuery({
+    queryKey: queryKeys.instance.quietMode,
+    queryFn: () => instanceSettingsApi.getQuietMode(),
+    refetchInterval: 10_000,
+  });
+
+  const invalidateAfterToggle = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.instance.quietMode }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.instance.schedulerHeartbeats }),
+    ]);
+
+  const activateMutation = useMutation({
+    mutationFn: () => instanceSettingsApi.activateQuietMode(),
+    onSuccess: async () => {
+      setError(null);
+      await invalidateAfterToggle();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Failed to turn on quiet mode."),
+  });
+
+  const deactivateMutation = useMutation({
+    mutationFn: () => instanceSettingsApi.deactivateQuietMode(),
+    onSuccess: async () => {
+      setError(null);
+      await invalidateAfterToggle();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Failed to turn off quiet mode."),
+  });
+
+  const status = statusQuery.data;
+  const isStale = Boolean(
+    status?.active && status.activatedAt && Date.now() - new Date(status.activatedAt).getTime() > QUIET_MODE_STALE_AFTER_MS,
+  );
+  const pending = activateMutation.isPending || deactivateMutation.isPending;
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <Moon className="mt-0.5 h-5 w-5 text-muted-foreground" />
+            <div>
+              <h2 className="text-sm font-semibold">Quiet mode</h2>
+              <p className="text-sm text-muted-foreground">
+                Stops every agent in every company from starting new work -- both scheduled timer wakes and
+                event-driven wakes. Work already running is left alone to finish; this is not Pause, which cancels
+                active runs. Turning it back off restores exactly the agents that were active before, not more.
+              </p>
+            </div>
+          </div>
+          {!statusQuery.isLoading && status && (
+            <Button
+              variant={status.active ? "default" : "secondary"}
+              size="sm"
+              className="shrink-0"
+              disabled={pending || statusQuery.isLoading}
+              onClick={() => {
+                if (status.active) {
+                  deactivateMutation.mutate();
+                  return;
+                }
+                if (!window.confirm("Turn on quiet mode? No new work will start in any company until you turn it back off.")) {
+                  return;
+                }
+                activateMutation.mutate();
+              }}
+            >
+              {pending ? "..." : status.active ? "Turn off" : "Turn on"}
+            </Button>
+          )}
+        </div>
+
+        {statusQuery.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading quiet mode status...</p>
+        ) : status ? (
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            {status.active ? (
+              status.activeRunCount > 0 ? (
+                <Badge variant="outline">Winding down -- {status.activeRunCount} {status.activeRunCount === 1 ? "run" : "runs"} finishing</Badge>
+              ) : (
+                <Badge variant="outline">Quiet -- nothing is running</Badge>
+              )
+            ) : (
+              <Badge variant="outline">Off -- agents run normally</Badge>
+            )}
+            {status.active && status.activatedAt && (
+              <span className="text-muted-foreground" title={formatDateTime(status.activatedAt)}>
+                on since {relativeTime(status.activatedAt)}
+              </span>
+            )}
+          </div>
+        ) : null}
+
+        {isStale && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Quiet mode has been on for more than a day. If this wasn't intentional, turn it back off so agents can
+              pick up work they're sitting on.
+            </span>
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -175,6 +295,8 @@ export function InstanceSettings() {
           Agents with a timer heartbeat enabled across all of your companies.
         </p>
       </div>
+
+      <QuietModeCard />
 
       <div className="flex items-center gap-4 text-sm text-muted-foreground">
         <span><span className="font-semibold text-foreground">{activeCount}</span> active</span>
