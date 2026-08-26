@@ -486,6 +486,17 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
 // Routes and the scheduler construct separate heartbeatService instances, but
 // they must agree on in-process adapter executions when reaping stale runs.
 const activeRunExecutions = new Set<string>();
+
+// DUR-240: shared in-process liveness check, usable by any module (not just
+// this one) that constructs its own issueService(db) and needs to know
+// whether a run this server instance still has a handle for is actually
+// alive -- even when heartbeatRuns.status looks terminal because of a
+// process-lost false negative (see DUR-114/DUR-120). Exported at module
+// scope for the same reason activeRunExecutions is: routes and the
+// scheduler build separate service instances but share this process.
+export function isHeartbeatRunLiveInThisProcess(runId: string): boolean {
+  return runningProcesses.has(runId) || activeRunExecutions.has(runId);
+}
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
 
 type RuntimeConfigSecretResolver = Pick<
@@ -4926,7 +4937,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
-  const issuesSvc = issueService(db);
+  const liveRunExecutions = {
+    has(id: string) {
+      return runningProcesses.has(id) || activeRunExecutions.has(id);
+    },
+  };
+  // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
+  // run this server instance still has an in-memory process handle for is
+  // actually alive, even when heartbeatRuns.status looks terminal (a
+  // process-lost false negative -- see DUR-114/DUR-120). Without this, a
+  // second dispatch can silently reclaim a still-live run's checkout lock
+  // and start mutating the same worktree concurrently.
+  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
   const escalationGrants = escalationGrantService(db);
   const approvalsSvc = approvalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
@@ -4958,7 +4980,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
-  const recovery = recoveryService(db, { enqueueWakeup });
+  const recovery = recoveryService(db, {
+    enqueueWakeup,
+    isRunLive: isHeartbeatRunLiveInThisProcess,
+  });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
