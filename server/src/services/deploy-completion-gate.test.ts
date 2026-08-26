@@ -39,6 +39,18 @@ const deployApproval = (overrides: Partial<Record<string, unknown>> = {}) => ({
   ...overrides,
 });
 
+// DUR-237: mirrors listApprovedProjectDeployApprovalIds' drizzle chain
+// (db.select({id}).from(approvals).where(...)) with a plain array of rows.
+function fakeDbWithProjectDeployApprovalIds(ids: string[]) {
+  return {
+    select: () => ({
+      from: () => ({
+        where: () => Promise.resolve(ids.map((id) => ({ id }))),
+      }),
+    }),
+  } as any;
+}
+
 describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
   beforeEach(() => {
     mockIssueApprovalService.listApprovalsForIssue.mockReset();
@@ -311,5 +323,83 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  describe("DUR-237: recognizes a commit deployed under a DIFFERENT issue's approval", () => {
+    it("allows done when this issue has no deploy approval of its own, but its merge commit already shipped under another approval for the same project", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({ payload: { kind: "merge_pr", base: "custom", mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789" } }),
+      ]);
+      const readStatusLog = vi.fn().mockReturnValue([
+        {
+          ts: "t",
+          approvalId: "some-other-issues-deploy-approval",
+          companyId: "company-1",
+          commentDelivered: true,
+          body: "Deployed to /root/paperclip -- commit 9a3a7e7 is live and healthy (health check: http://x).",
+        },
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: fakeDbWithProjectDeployApprovalIds(["some-other-issues-deploy-approval"]),
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+        readStatusLog,
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it("still blocks done when no project deploy approval's shipped commit matches this issue's merge commit", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({ payload: { kind: "merge_pr", base: "custom", mergeCommitSha: "deadbeef00000000000000000000000000000000" } }),
+      ]);
+      const readStatusLog = vi.fn().mockReturnValue([
+        {
+          ts: "t",
+          approvalId: "some-other-issues-deploy-approval",
+          companyId: "company-1",
+          commentDelivered: true,
+          body: "Deployed to /root/paperclip -- commit 9a3a7e7 is live and healthy (health check: http://x).",
+        },
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: fakeDbWithProjectDeployApprovalIds(["some-other-issues-deploy-approval"]),
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+        readStatusLog,
+      });
+
+      expect(result).not.toBeNull();
+      expect(result?.message).toContain("no deploy approval has been filed");
+    });
+
+    it("does not run the broader project-wide check at all when the merge approval has no mergeCommitSha yet (merge-deploy-visibility hasn't ticked)", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval()]);
+      const db = fakeDbWithProjectDeployApprovalIds(["irrelevant"]);
+      const selectSpy = vi.spyOn(db, "select");
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+      });
+
+      expect(result).not.toBeNull();
+      expect(selectSpy).not.toHaveBeenCalled();
+    });
   });
 });

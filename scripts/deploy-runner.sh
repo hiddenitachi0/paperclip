@@ -571,7 +571,10 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   fi
 
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
-  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)."
+  # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
+  # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only
+  # the issue this approval happens to be linked to — without parsing prose.
+  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)." "" "$after_commit"
 }
 
 # DUR-163: docker logs for the container being replaced only exist as long as
