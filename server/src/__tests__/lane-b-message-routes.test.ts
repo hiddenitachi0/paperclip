@@ -144,6 +144,7 @@ function registerRouteMocks() {
     companyService: () => ({ getById: vi.fn() }),
     documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
     documentService: () => ({ upsertIssueDocument: vi.fn() }),
+    escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     executionWorkspaceService: () => ({}),
     feedbackService: () => ({
       listIssueVotesForUser: vi.fn(async () => []),
