@@ -193,12 +193,49 @@ async function assertDeployCommitIsAncestorOfDeployBranch(
   const status = typeof body?.status === "string" ? body.status : null;
   if (status !== "behind" && status !== "diverged") return;
 
+  const actualBranches = await lookupBranchesForCommitHead(fetchImpl, headers, repo, commit);
+  const locationClause =
+    actualBranches.length > 0
+      ? `it is on ${actualBranches.map((b) => `"${b}"`).join(", ")} instead`
+      : "confirm which branch this commit actually lives on before filing the approval";
+
   throw unprocessable(
     `Deploy approval targets commit ${commit}, which is not reachable from "${deployBranch}", the branch ` +
-      `${repo.owner}/${repo.name} deploys from. Confirm which branch this commit actually lives on before ` +
-      "filing the approval -- deploying it would not ship what production expects.",
-    { commit, deployBranch, repo: `${repo.owner}/${repo.name}`, compareStatus: status },
+      `${repo.owner}/${repo.name} deploys from -- ${locationClause}. Deploying it would not ship what ` +
+      "production expects.",
+    { commit, deployBranch, repo: `${repo.owner}/${repo.name}`, compareStatus: status, actualBranches },
   );
+}
+
+/**
+ * Best-effort lookup of which branch(es) `commit` is the tip of, so the rejection error can
+ * name where the commit actually lives, not just where it doesn't. Uses GitHub's
+ * "branches-where-head" endpoint, which only reports branches where `commit` is the current
+ * HEAD -- it won't find every branch that merely contains the commit as an ancestor, but it
+ * reliably catches the DUR-221 shape (a deploy approval filed right after the commit landed
+ * as the tip of the wrong branch). Never throws; returns [] on any failure so this stays a
+ * pure error-message enhancement and never affects whether filing is blocked.
+ */
+async function lookupBranchesForCommitHead(
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+  headers: Record<string, string>,
+  repo: { owner: string; name: string },
+  commit: string,
+): Promise<string[]> {
+  try {
+    const response = await fetchImpl(
+      `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits/${encodeURIComponent(commit)}/branches-where-head`,
+      { headers },
+    );
+    if (!response.ok) return [];
+    const body = (await response.json()) as unknown;
+    if (!Array.isArray(body)) return [];
+    return body
+      .map((entry) => (entry && typeof entry === "object" ? (entry as Record<string, unknown>).name : null))
+      .filter((name): name is string => typeof name === "string");
+  } catch {
+    return [];
+  }
 }
 
 /**

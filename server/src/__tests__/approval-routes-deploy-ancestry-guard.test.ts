@@ -217,6 +217,29 @@ describe("DUR-227: deploy approval ancestry guard", () => {
   );
 
   it(
+    "names the branch the commit actually lives on, when GitHub's branches-where-head resolves it",
+    async () => {
+      mockGhFetch
+        .mockResolvedValueOnce(new Response(JSON.stringify({ status: "diverged" }), { status: 200 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify([{ name: "master", commit: { sha: "d55e5704" } }]), { status: 200 }),
+        );
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app)
+        .post("/api/companies/company-1/approvals")
+        .send(deployBody("d55e5704"));
+
+      expect(res.status).toBe(422);
+      const message = res.body.message ?? res.body.error ?? "";
+      expect(message).toMatch(/"master"/);
+      expect(res.body.details?.actualBranches ?? res.body.actualBranches).toEqual(["master"]);
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     "refuses on resubmit too, when GitHub confirms the new commit is behind the deploy branch",
     async () => {
       mockGhFetch.mockResolvedValue(new Response(JSON.stringify({ status: "behind" }), { status: 200 }));
