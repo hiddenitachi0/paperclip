@@ -6,6 +6,7 @@ import { Identity } from "./Identity";
 import {
   approvalSubject,
   approvalTechnicalReference,
+  approvalDeployBranchInfo,
   typeIcon,
   defaultTypeIcon,
   ApprovalPayloadRenderer,
@@ -55,6 +56,7 @@ export function ApprovalCard({
   const kindLabel = typeLabel[approval.type] ?? approval.type;
   const subject = approvalSubject(payload);
   const technicalReference = approvalTechnicalReference(payload);
+  const branchInfo = approvalDeployBranchInfo(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -89,6 +91,14 @@ export function ApprovalCard({
                     {companyName}
                   </Badge>
                 )}
+                {branchInfo && !branchInfo.mismatch && (
+                  <Badge
+                    variant="outline"
+                    className="border-border/70 bg-background/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+                  >
+                    Deploys from {branchInfo.sourceBranch}
+                  </Badge>
+                )}
                 {requesterAgent && (
                   <div className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     <span>Requested by</span>
@@ -111,6 +121,12 @@ export function ApprovalCard({
                     <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
                       <AlertTriangle className="h-3 w-3" />
                       No linked ticket
+                    </span>
+                  )}
+                  {branchInfo?.mismatch && (
+                    <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
+                      <AlertTriangle className="h-3 w-3" />
+                      Not on {branchInfo.deployBranch} — this commit is on {branchInfo.sourceBranch}
                     </span>
                   )}
                   <span>{subject ?? kindLabel}</span>
