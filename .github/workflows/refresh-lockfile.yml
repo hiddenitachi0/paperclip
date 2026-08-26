@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - master
+      - custom
   workflow_dispatch:
 
 concurrency:
-  group: refresh-lockfile-master
+  group: refresh-lockfile-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -62,7 +63,8 @@ jobs:
             exit 0
           fi
 
-          BRANCH="chore/refresh-lockfile"
+          TARGET="${{ github.ref_name }}"
+          BRANCH="chore/refresh-lockfile-${TARGET}"
           git config user.name "lockfile-bot"
           git config user.email "lockfile-bot@users.noreply.github.com"
 
@@ -72,16 +74,19 @@ jobs:
           git push --force origin "$BRANCH"
 
           # Only reuse an open PR from this repository owner, not a fork with the same branch name.
+          # --base pins the PR to the branch that actually drifted (DUR-228: gh pr create without
+          # --base silently targets the repo's default branch, which is master, not custom).
           pr_url="$(
-            gh pr list --state open --head "$BRANCH" --json url,headRepositoryOwner \
+            gh pr list --state open --head "$BRANCH" --base "$TARGET" --json url,headRepositoryOwner \
               --jq ".[] | select(.headRepositoryOwner.login == \"$REPO_OWNER\") | .url" |
             head -n 1
           )"
           if [ -z "$pr_url" ]; then
             pr_url="$(gh pr create \
               --head "$BRANCH" \
-              --title "chore(lockfile): refresh pnpm-lock.yaml" \
-              --body "Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.")"
+              --base "$TARGET" \
+              --title "chore(lockfile): refresh pnpm-lock.yaml ($TARGET)" \
+              --body "Auto-generated lockfile refresh after dependencies changed on $TARGET. This PR only updates pnpm-lock.yaml.")"
             echo "Created new PR: $pr_url"
           else
             echo "PR already exists: $pr_url"
