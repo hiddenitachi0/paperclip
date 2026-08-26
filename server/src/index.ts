@@ -43,6 +43,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   mergeDeployVisibilityService,
+  deployCarriedIssuesService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   instanceSettingsService,
@@ -833,6 +834,7 @@ export async function startServer(): Promise<StartedServer> {
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
+    const deployCarriedIssues = deployCarriedIssuesService(db as any);
     const agentErrorAlerts = agentErrorAlertsService(db as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(db as any);
     const issueThreadInteractions = issueThreadInteractionService(db as any);
@@ -971,6 +973,21 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
+      // issue in the same project whose merge commit shipped as part of it (exact match or a
+      // confirmed git ancestor) instead of leaving each to wait for its own agent to retry the
+      // done PATCH (see deploy-carried-issues.ts).
+      void deployCarriedIssues
+        .tick()
+        .then((result) => {
+          if (result.closed > 0) {
+            logger.info({ ...result }, "deploy-carried-issues tick auto-closed issues carried by a completed deploy");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "deploy-carried-issues tick failed");
         });
 
       // DUR-128: an agent left sitting in "error" is invisible until someone

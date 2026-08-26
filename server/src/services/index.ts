@@ -75,9 +75,14 @@ export { laneAService } from "./lane-a.js";
 export { financeService } from "./finance.js";
 export { heartbeatService } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";
+export { deployCarriedIssuesService } from "./deploy-carried-issues.js";
 export { agentErrorAlertsService, DEFAULT_AGENT_ERROR_STALL_THRESHOLD_MS } from "./agent-error-alerts.js";
 export { untrackedWriteAlertsService } from "./untracked-write-alerts.js";
-export { resolveProjectDeployBranches, type ProjectDeployBranches } from "./deploy-branches.js";
+export {
+  resolveProjectDeployBranches,
+  resolveProjectDeployBranchesByProjectId,
+  type ProjectDeployBranches,
+} from "./deploy-branches.js";
 export {
   productivityReviewService,
   PRODUCTIVITY_REVIEW_ORIGIN_KIND,

@@ -42,21 +42,24 @@ import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-r
  * an `external_service` monitor watching deploy-runner) until a deploy completes.
  */
 
-const DEPLOY_SUCCESS_MARKER = "is live and healthy";
+// Exported for deploy-carried-issues.ts (DUR-238), which needs the same "did deploy-runner
+// record this commit as live" primitives to sweep every OTHER issue a completed deploy carries,
+// not just answer the narrower "is THIS issue's own gate satisfied" question below.
+export const DEPLOY_SUCCESS_MARKER = "is live and healthy";
 
-function approvalPayloadKind(payload: unknown): string | null {
+export function approvalPayloadKind(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const kind = (payload as Record<string, unknown>).kind;
   return typeof kind === "string" ? kind : null;
 }
 
-function approvalPayloadBase(payload: unknown): string | null {
+export function approvalPayloadBase(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const base = (payload as Record<string, unknown>).base;
   return typeof base === "string" ? base : null;
 }
 
-function approvalPayloadProjectId(payload: unknown): string | null {
+export function approvalPayloadProjectId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const projectId = (payload as Record<string, unknown>).projectId;
   return typeof projectId === "string" ? projectId : null;
@@ -65,7 +68,7 @@ function approvalPayloadProjectId(payload: unknown): string | null {
 // DUR-237: the merge_pr approval's own merge commit sha, backfilled asynchronously onto
 // `payload.mergeCommitSha` by merge-deploy-visibility.ts once it confirms via GitHub that the PR
 // actually merged. Undefined until that check has run (or if it never resolved to a merge).
-function approvalPayloadMergeCommitSha(payload: unknown): string | null {
+export function approvalPayloadMergeCommitSha(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const sha = (payload as Record<string, unknown>).mergeCommitSha;
   return typeof sha === "string" && sha.length >= 7 ? sha : null;
@@ -77,7 +80,7 @@ const COMMIT_IN_BODY = /\bcommit ([0-9a-f]{7,40})\b/i;
 // outcome (DUR-152) or, after DUR-237's deploy-runner.sh change, a fresh success. Older success
 // entries only ever wrote the commit into the free-text body ("... commit abc1234 is live and
 // healthy ...") -- fall back to parsing that so this doesn't only work going forward.
-function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | null {
+export function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | null {
   if (entry.commit) return entry.commit;
   const match = entry.body.match(COMMIT_IN_BODY);
   return match ? match[1] : null;
@@ -87,7 +90,7 @@ function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | null {
 // GitHub's API returns the full 40-char sha) -- treat them as the same commit when one is a
 // prefix of the other, requiring at least 7 hex chars so this can't degrade into a near-empty-
 // string match.
-function commitsMatch(a: string | null, b: string | null): boolean {
+export function commitsMatch(a: string | null, b: string | null): boolean {
   if (!a || !b || a.length < 7 || b.length < 7) return false;
   const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
   return longer.toLowerCase().startsWith(shorter.toLowerCase());
