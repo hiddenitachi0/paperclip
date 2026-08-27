@@ -418,19 +418,24 @@ export async function findExistingSelfReviewPassWake(
  * DUR-270 (security review of DUR-245): a stable fingerprint of what a self-review pass
  * actually reviewed, so a completed pass on an OLD diff can't silently vouch for a NEW,
  * unreviewed diff on the same issue -- see the reviewedDiffFingerprint comment on
- * evaluateSelfReviewDoneGate below. null (not e.g. a hash of two nulls) when the diff
- * genuinely couldn't be read, matching the null-vs-empty-string contract used elsewhere in
- * this file -- callers must treat "unknown" as "unknown", not as a fingerprint of its own.
+ * evaluateSelfReviewDoneGate below. null when EITHER read couldn't be produced, not just
+ * when both are null (DUR-276): changedFilePaths and diffContent come from two independent
+ * git invocations with different maxBuffer caps, so a diff can routinely blow the content
+ * buffer while staying under the path-only buffer. If content silently degraded to null
+ * while paths stayed non-null, the old both-null check let the fingerprint collapse to a
+ * pure function of the file-path set -- two different diffs touching the same path(s) would
+ * hash identically and a stale pass could vouch for content it never actually saw. Callers
+ * must treat "either read unknown" as "fingerprint unknown", not as a fingerprint of its own.
  */
 export function computeReviewedDiffFingerprint(
   changedFilePaths: readonly string[] | null,
   diffContent: string | null,
 ): string | null {
-  if (changedFilePaths === null && diffContent === null) return null;
+  if (changedFilePaths === null || diffContent === null) return null;
   const hash = createHash("sha256");
-  hash.update(JSON.stringify([...(changedFilePaths ?? [])].sort()));
+  hash.update(JSON.stringify([...changedFilePaths].sort()));
   hash.update(" ");
-  hash.update(diffContent ?? "");
+  hash.update(diffContent);
   return hash.digest("hex");
 }
 

@@ -278,6 +278,40 @@ describe("detectRiskySurfaceFromDiffContent", () => {
   });
 });
 
+describe("computeReviewedDiffFingerprint", () => {
+  it("returns null only when both reads are null", () => {
+    expect(computeReviewedDiffFingerprint(null, null)).toBeNull();
+  });
+
+  // DUR-276: getChangedFilePathsForIssueWorkspace (1MB, --name-only) and
+  // getChangedDiffContentForIssueWorkspace (4MB, full hunks) are independent git invocations
+  // that can fail independently on maxBuffer overflow. If either comes back null, the
+  // fingerprint must be null too -- otherwise it silently degrades to a pure function of the
+  // file-path set, and two different diffs touching the same path(s) hash identically.
+  it("returns null when diffContent is null but changedFilePaths is not (content buffer overflow)", () => {
+    expect(computeReviewedDiffFingerprint(["server/src/adapters/agent-runtime-helpers.ts"], null)).toBeNull();
+  });
+
+  it("returns null when changedFilePaths is null but diffContent is not (path buffer overflow)", () => {
+    expect(computeReviewedDiffFingerprint(null, "+some content")).toBeNull();
+  });
+
+  it("does not collapse to path-only when two different diffs touch the same path", () => {
+    const path = ["server/src/adapters/agent-runtime-helpers.ts"];
+    const first = computeReviewedDiffFingerprint(path, "+benign change");
+    const second = computeReviewedDiffFingerprint(path, "+strip mcp_servers secret block");
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first).not.toEqual(second);
+  });
+
+  it("is stable for identical inputs regardless of path ordering", () => {
+    const a = computeReviewedDiffFingerprint(["b.ts", "a.ts"], "+content");
+    const b = computeReviewedDiffFingerprint(["a.ts", "b.ts"], "+content");
+    expect(a).toEqual(b);
+  });
+});
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
