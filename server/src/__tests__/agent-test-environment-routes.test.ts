@@ -54,6 +54,7 @@ vi.mock("../services/index.js", () => ({
     wakeup: vi.fn(),
     cancelActiveForAgent: vi.fn(),
   }),
+  isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   ISSUE_LIST_DEFAULT_LIMIT: 50,
   issueApprovalService: () => ({}),
   issueService: () => ({}),
