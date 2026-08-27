@@ -58,6 +58,7 @@ const ACTION_TIER: Record<string, EventTier> = {
   "agent.paused": 2,
   "agent.resumed": 2,
   "agent.updated": 2,
+  "run.cost_anomaly_detected": 2,
 
   // Tier 3 — Hidden
   "issue.read_marked": 3,
