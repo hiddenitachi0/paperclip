@@ -636,6 +636,16 @@ export async function startServer(): Promise<StartedServer> {
         finishedAt: finishedAt.toISOString(),
         durationMs: Date.now() - startedAtMs,
       };
+      if (result.engine === "javascript") {
+        // DUR-271: this fallback silently degrades every backup to a much
+        // slower, more DB-load-intensive path (row-streaming through Node
+        // instead of native pg_dump) -- surfaced loudly here so a future
+        // pg_dump regression doesn't take hours to notice again.
+        logger.warn(
+          { pgDumpFailureReason: result.pgDumpFailureReason, trigger },
+          `${label} database backup fell back to the slow JS engine -- pg_dump was unavailable or failed`,
+        );
+      }
       logger.info(
         {
           backupFile: result.backupFile,
