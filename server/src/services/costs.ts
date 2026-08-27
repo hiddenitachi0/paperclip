@@ -503,5 +503,54 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .groupBy(effectiveProjectId, projects.name)
         .orderBy(desc(costCentsExpr));
     },
+
+    /**
+     * DUR-215: per-agent live-run cost anomaly threshold, so an in-progress
+     * run can be flagged as abnormally expensive relative to that agent's
+     * own history instead of one global cutoff ("abnormally expensive" is
+     * context-dependent per agent/task). Returns null when there isn't
+     * enough history (minSampleSize) or the history has no spread
+     * (stddev <= 0) to define "abnormal" against.
+     */
+    runTokenAnomalyThreshold: async (
+      agentId: string,
+      options: { minSampleSize?: number; stddevMultiplier?: number; historyLimit?: number } = {},
+    ): Promise<{ threshold: number; median: number; stddev: number; sampleSize: number } | null> => {
+      const minSampleSize = options.minSampleSize ?? 5;
+      const stddevMultiplier = options.stddevMultiplier ?? 3;
+      const historyLimit = options.historyLimit ?? 200;
+
+      const rows = await db
+        .select({
+          heartbeatRunId: costEvents.heartbeatRunId,
+          totalTokens: sql<number>`sum(${costEvents.inputTokens} + ${costEvents.cachedInputTokens} + ${costEvents.outputTokens})::double precision`,
+        })
+        .from(costEvents)
+        .where(and(eq(costEvents.agentId, agentId), isNotNull(costEvents.heartbeatRunId)))
+        .groupBy(costEvents.heartbeatRunId)
+        .orderBy(desc(sql`max(${costEvents.occurredAt})`))
+        .limit(historyLimit);
+
+      const totals = rows
+        .map((row) => Number(row.totalTokens))
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      if (totals.length < minSampleSize) return null;
+
+      const sorted = [...totals].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+
+      const mean = totals.reduce((sum, value) => sum + value, 0) / totals.length;
+      const variance = totals.reduce((sum, value) => sum + (value - mean) ** 2, 0) / totals.length;
+      const stddev = Math.sqrt(variance);
+      if (stddev <= 0) return null;
+
+      return {
+        threshold: median + stddevMultiplier * stddev,
+        median,
+        stddev,
+        sampleSize: totals.length,
+      };
+    },
   };
 }
