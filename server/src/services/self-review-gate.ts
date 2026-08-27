@@ -486,6 +486,16 @@ export async function findCompletedSelfReviewPassForIssue(
   );
 }
 
+// DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /
+// enqueueWakeup) has many legitimate no-throw skip paths -- company inactive, heartbeat
+// disabled, an unresolved dependency blocker, etc -- that just write a "skipped" wakeup
+// row and resolve to `null`, indistinguishable from a real schedule by return value alone.
+// Passing onNotScheduled lets the gate observe which of those actually happened instead of
+// assuming every non-throwing call means a corrective run was scheduled.
+export type SelfReviewGateWakeupNotScheduledInfo =
+  | { kind: "skipped"; reason: string; unresolvedBlockerIssueIds?: string[] }
+  | { kind: "deferred"; reason: string };
+
 export type SelfReviewGateWakeup = (
   agentId: string,
   opts: {
@@ -497,6 +507,7 @@ export type SelfReviewGateWakeup = (
     requestedByActorType?: "user" | "agent" | "system";
     requestedByActorId?: string | null;
     contextSnapshot?: Record<string, unknown>;
+    onNotScheduled?: (info: SelfReviewGateWakeupNotScheduledInfo) => void;
   },
 ) => Promise<unknown>;
 
@@ -612,6 +623,14 @@ export async function evaluateSelfReviewDoneGate(input: {
     requestedStatus: input.requestedStatus,
   });
 
+  // DUR-293: input.wakeup resolving without throwing does NOT mean a corrective run was
+  // actually scheduled -- enqueueWakeup has many legitimate no-throw skip paths (company
+  // inactive, heartbeat disabled, an unresolved dependency blocker, ...) that just record a
+  // "skipped" wakeup row and resolve to null, indistinguishable from a real schedule by
+  // return value alone. onNotScheduled reports which (if either) actually happened so this
+  // gate can respond honestly instead of always claiming "I've scheduled a follow-up run".
+  let notScheduled: SelfReviewGateWakeupNotScheduledInfo | undefined;
+
   try {
     await input.wakeup(input.actor.agentId, {
       source: "automation",
@@ -645,11 +664,40 @@ export async function evaluateSelfReviewDoneGate(input: {
       idempotencyKey,
       requestedByActorType: "system",
       requestedByActorId: "issue_self_review_gate",
+      onNotScheduled: (info) => {
+        notScheduled = info;
+      },
     });
   } catch {
     // Scheduling the extra pass failed (e.g. the agent is paused or the company is over
     // budget). Don't let a self-review scheduling failure block a real disposition — let
     // the transition through as requested instead.
+    return null;
+  }
+
+  // "deferred" means the wake is genuinely queued behind the caller's own still-active
+  // execution run and will fire once that run finishes -- that's a real scheduled follow-up,
+  // just like "queued"/"coalesced", so it falls through to the normal blocking message below.
+  if (notScheduled?.kind === "skipped") {
+    if (notScheduled.reason === "issue_dependencies_blocked") {
+      // Honest version of the standard "blocked by unresolved blockers" shape used elsewhere
+      // (see server/src/routes/issues.ts) instead of the false "I've scheduled a follow-up
+      // run" claim -- no run was, or ever will be, dispatched by this skipped wake.
+      const blockerNote =
+        notScheduled.unresolvedBlockerIssueIds && notScheduled.unresolvedBlockerIssueIds.length > 0
+          ? ` (${notScheduled.unresolvedBlockerIssueIds.join(", ")})`
+          : "";
+      return {
+        message:
+          `This task is blocked by unresolved blocker issue(s)${blockerNote} and can't move to review or ` +
+          "done until they're resolved. No follow-up self-review run was scheduled for this attempt " +
+          "because the issue is dependency-blocked, not because a check is pending.",
+      };
+    }
+    // Every other no-throw skip reason (company inactive, heartbeat disabled on this agent,
+    // an active tree-control pause hold, the agent's daily heartbeat cap, ...) means nothing
+    // was, or ever will be, scheduled either -- treat it the same as the catch block above and
+    // let the transition through rather than block forever on a promise that can't be kept.
     return null;
   }
 
