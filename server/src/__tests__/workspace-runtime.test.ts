@@ -260,6 +260,17 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
     expect(sanitized.HOST).toBe("0.0.0.0");
   });
+
+  it("DUR-294: also strips DATABASE_MIGRATION_URL, not just DATABASE_URL", () => {
+    const sanitized = sanitizeRuntimeServiceBaseEnv({
+      PATH: process.env.PATH,
+      DATABASE_URL: "postgres://example.test/paperclip",
+      DATABASE_MIGRATION_URL: "postgres://migrator-owner.test/paperclip",
+    });
+
+    expect(sanitized.DATABASE_URL).toBeUndefined();
+    expect(sanitized.DATABASE_MIGRATION_URL).toBeUndefined();
+  });
 });
 
 describe("buildWorkspaceCommandEnv", () => {
@@ -290,6 +301,34 @@ describe("buildWorkspaceCommandEnv", () => {
       expect(env.PAPERCLIP_COMPANY_ID).toBe("company-1");
     } finally {
       delete process.env.DATABASE_URL;
+    }
+  });
+
+  it("DUR-294: never forwards the host DATABASE_MIGRATION_URL into a spawned workspace command", () => {
+    process.env.DATABASE_MIGRATION_URL = "postgres://migrator-owner.test/paperclip";
+    try {
+      const env = buildWorkspaceCommandEnv({
+        base: {
+          baseCwd: "/tmp/base",
+          source: "worktree",
+          repoRef: null,
+          repoUrl: null,
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+        } as unknown as Parameters<typeof buildWorkspaceCommandEnv>[0]["base"],
+        repoRoot: "/tmp/repo",
+        worktreePath: "/tmp/repo/worktree",
+        branchName: "some-branch",
+        issue: null,
+        agent: { id: "agent-1", name: "Agent", companyId: "company-1" } as unknown as Parameters<
+          typeof buildWorkspaceCommandEnv
+        >[0]["agent"],
+        created: false,
+      });
+
+      expect(env.DATABASE_MIGRATION_URL).toBeUndefined();
+    } finally {
+      delete process.env.DATABASE_MIGRATION_URL;
     }
   });
 });
