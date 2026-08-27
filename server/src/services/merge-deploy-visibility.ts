@@ -19,6 +19,13 @@ export type MergeVerificationStatus = "merged" | "unmerged" | "unknown";
 export interface MergeVerificationResult {
   status: MergeVerificationStatus;
   reason?: string;
+  // DUR-237: GitHub's own merge commit sha for a `merged` result. Persisted onto the approval's
+  // payload so deploy-completion-gate.ts can later recognize this issue as deployed by matching
+  // this commit against ANY project deploy that shipped it — not only a deploy approval that
+  // happens to be linked to this specific issue (the root cause of NOR-217-style false blocks:
+  // the exact commit went live under a sibling issue's deploy approval, but the gate only ever
+  // looked at approvals linked to the issue asking to close).
+  mergeCommitSha?: string;
 }
 
 function parseRepo(repo: unknown): { owner: string; name: string } | null {
@@ -75,7 +82,9 @@ async function verifyPullRequestMerged(
   if (!body) return { status: "unknown", reason: "github_invalid_response" };
 
   const merged = body.merged === true || Boolean(body.merged_at);
-  return merged ? { status: "merged" } : { status: "unmerged" };
+  if (!merged) return { status: "unmerged" };
+  const mergeCommitSha = typeof body.merge_commit_sha === "string" ? body.merge_commit_sha : undefined;
+  return { status: "merged", mergeCommitSha };
 }
 
 /**
@@ -141,10 +150,14 @@ export function mergeDeployVisibilityService(
       return verifyPullRequestMerged(payload, { fetchImpl, token });
     });
 
-  async function markNoted(approvalId: string, payload: Record<string, unknown>) {
+  async function markNoted(
+    approvalId: string,
+    payload: Record<string, unknown>,
+    extra: Record<string, unknown> = {},
+  ) {
     await db
       .update(approvals)
-      .set({ payload: { ...payload, deployVisibilityNoted: true }, updatedAt: new Date() })
+      .set({ payload: { ...payload, ...extra, deployVisibilityNoted: true }, updatedAt: new Date() })
       .where(eq(approvals.id, approvalId));
   }
 
@@ -191,6 +204,7 @@ export function mergeDeployVisibilityService(
         ? await issueApprovalsSvc.listIssuesForApproval(approval.id)
         : [];
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      let mergeCommitSha: string | undefined;
 
       if (base && linkedIssueIds.length > 0) {
         const branches = await resolveProjectDeployBranches(db, linkedIssueIds);
@@ -198,6 +212,7 @@ export function mergeDeployVisibilityService(
           const verification = await verifyMerge(payload, approval.companyId);
 
           if (verification.status === "merged") {
+            mergeCommitSha = verification.mergeCommitSha;
             const alreadyDeployed = await hasFollowingDeployApproval(linkedIssueIds);
             if (!alreadyDeployed) {
               flagged += 1;
@@ -234,7 +249,7 @@ export function mergeDeployVisibilityService(
         }
       }
 
-      await markNoted(approval.id, payload);
+      await markNoted(approval.id, payload, mergeCommitSha ? { mergeCommitSha } : {});
     }
 
     return { checked, flagged };

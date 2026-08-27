@@ -1,11 +1,12 @@
 import type { Db } from "@paperclipai/db";
-import { companies, instanceSettings } from "@paperclipai/db";
+import { agents, companies, heartbeatRuns, instanceSettings } from "@paperclipai/db";
 import {
   DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
   DEFAULT_BACKUP_RETENTION,
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_QUIET_MODE_STATE,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
   instanceExperimentalSettingsSchema,
@@ -14,8 +15,25 @@ import {
   type InstanceSettings,
   type PatchInstanceSettings,
   type PatchInstanceExperimentalSettings,
+  type QuietModeActor,
+  type QuietModeAgentSnapshotEntry,
+  type QuietModeState,
 } from "@paperclipai/shared";
-import { eq } from "drizzle-orm";
+import { eq, inArray, count } from "drizzle-orm";
+import { parseObject, asBoolean } from "@paperclipai/adapter-utils/server-utils";
+
+const ACTIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"] as const;
+
+function heartbeatFlagsFromRuntimeConfig(runtimeConfig: Record<string, unknown>) {
+  const heartbeat = parseObject(runtimeConfig.heartbeat);
+  return {
+    enabled: asBoolean(heartbeat.enabled, false),
+    wakeOnDemand: asBoolean(
+      heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation,
+      true,
+    ),
+  };
+}
 
 const DEFAULT_SINGLETON_KEY = "default";
 const instanceGeneralSettingsStorageSchema = instanceGeneralSettingsSchema.strip();
@@ -36,6 +54,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
         parsed.data.instructionsStalenessThresholdDays ?? DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
       globalMaxConcurrentRuns:
         parsed.data.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+      quietMode: parsed.data.quietMode ?? DEFAULT_QUIET_MODE_STATE,
     };
   }
   return {
@@ -45,6 +64,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     backupRetention: DEFAULT_BACKUP_RETENTION,
     instructionsStalenessThresholdDays: DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
     globalMaxConcurrentRuns: DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+    quietMode: DEFAULT_QUIET_MODE_STATE,
   };
 }
 
@@ -209,5 +229,102 @@ export function instanceSettingsService(db: Db) {
         .select({ id: companies.id })
         .from(companies)
         .then((rows) => rows.map((row) => row.id)),
+
+    getQuietMode: async (): Promise<QuietModeState & { activeRunCount: number }> => {
+      const row = await getOrCreateRow();
+      const quietMode = normalizeGeneralSettings(row.general).quietMode;
+      const activeRunCount = await db
+        .select({ count: count() })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, ACTIVE_HEARTBEAT_RUN_STATUSES))
+        .then((rows) => Number(rows[0]?.count ?? 0));
+      return { ...quietMode, activeRunCount };
+    },
+
+    // DUR-224: freezes every agent (both timer and on-demand wakes) across
+    // every company without touching runs already in flight -- deliberately
+    // NOT the same as Pause, which cancels active runs. Snapshots each
+    // agent's exact prior flags first so deactivateQuietMode can restore
+    // them precisely instead of blanket re-enabling agents that were
+    // deliberately asleep beforehand.
+    activateQuietMode: async (actor: QuietModeActor): Promise<QuietModeState> => {
+      const current = await getOrCreateRow();
+      const existing = normalizeGeneralSettings(current.general).quietMode;
+      if (existing.active) return existing;
+
+      const allAgents = await db
+        .select({ id: agents.id, companyId: agents.companyId, runtimeConfig: agents.runtimeConfig })
+        .from(agents);
+
+      const snapshot: QuietModeAgentSnapshotEntry[] = [];
+      for (const row of allAgents) {
+        const runtimeConfig = parseObject(row.runtimeConfig);
+        const flags = heartbeatFlagsFromRuntimeConfig(runtimeConfig);
+        snapshot.push({ agentId: row.id, companyId: row.companyId, ...flags });
+        if (!flags.enabled && !flags.wakeOnDemand) continue;
+        const heartbeat = parseObject(runtimeConfig.heartbeat);
+        await db
+          .update(agents)
+          .set({
+            runtimeConfig: { ...runtimeConfig, heartbeat: { ...heartbeat, enabled: false, wakeOnDemand: false } },
+            updatedAt: new Date(),
+          })
+          .where(eq(agents.id, row.id));
+      }
+
+      const nextQuietMode: QuietModeState = {
+        active: true,
+        activatedAt: new Date().toISOString(),
+        activatedBy: actor,
+        deactivatedAt: null,
+        snapshot,
+      };
+      const nextGeneral = { ...normalizeGeneralSettings(current.general), quietMode: nextQuietMode };
+      await db
+        .update(instanceSettings)
+        .set({ general: { ...nextGeneral }, updatedAt: new Date() })
+        .where(eq(instanceSettings.id, current.id));
+      return nextQuietMode;
+    },
+
+    deactivateQuietMode: async (_actor: QuietModeActor): Promise<QuietModeState> => {
+      const current = await getOrCreateRow();
+      const quietMode = normalizeGeneralSettings(current.general).quietMode;
+      if (!quietMode.active) return quietMode;
+
+      for (const entry of quietMode.snapshot ?? []) {
+        const [row] = await db
+          .select({ runtimeConfig: agents.runtimeConfig })
+          .from(agents)
+          .where(eq(agents.id, entry.agentId));
+        if (!row) continue; // agent deleted since the snapshot was taken
+        const runtimeConfig = parseObject(row.runtimeConfig);
+        const heartbeat = parseObject(runtimeConfig.heartbeat);
+        await db
+          .update(agents)
+          .set({
+            runtimeConfig: {
+              ...runtimeConfig,
+              heartbeat: { ...heartbeat, enabled: entry.enabled, wakeOnDemand: entry.wakeOnDemand },
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(agents.id, entry.agentId));
+      }
+
+      const nextQuietMode: QuietModeState = {
+        active: false,
+        activatedAt: quietMode.activatedAt,
+        activatedBy: quietMode.activatedBy,
+        deactivatedAt: new Date().toISOString(),
+        snapshot: null,
+      };
+      const nextGeneral = { ...normalizeGeneralSettings(current.general), quietMode: nextQuietMode };
+      await db
+        .update(instanceSettings)
+        .set({ general: { ...nextGeneral }, updatedAt: new Date() })
+        .where(eq(instanceSettings.id, current.id));
+      return nextQuietMode;
+    },
   };
 }

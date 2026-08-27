@@ -6,7 +6,11 @@ import {
   parseJson,
 } from "@paperclipai/adapter-utils/server-utils";
 
-const CLAUDE_AUTH_REQUIRED_RE = /(?:not\s+logged\s+in|please\s+log\s+in|please\s+run\s+(?:`?claude\s+login`?|\/login)|login\s+required|requires\s+login|unauthorized|authentication\s+required|invalid\s+api\s+key[\s\S]{0,120}(?:\/login|claude\s+login|log\s+in))/i;
+// "unauthorized" alone is deliberately excluded: Anthropic's usage-limit/quota
+// responses sometimes wrap a 401-shaped upstream error, so a bare "unauthorized"
+// substring is not reliable evidence of a real logout. Only count it when it's
+// paired with something that actually points at the login flow.
+const CLAUDE_AUTH_REQUIRED_RE = /(?:not\s+logged\s+in|please\s+log\s+in|please\s+run\s+(?:`?claude\s+login`?|\/login)|login\s+required|requires\s+login|authentication\s+required|(?:unauthorized|invalid\s+api\s+key)[\s\S]{0,120}(?:\/login|claude\s+login|log\s+in))/i;
 const URL_RE = /(https?:\/\/[^\s'"`<>()[\]{};,!?]+[^\s'"`<>()[\]{};,!.?:]+)/gi;
 
 const CLAUDE_TRANSIENT_UPSTREAM_RE =
@@ -420,13 +424,11 @@ export function isClaudeTransientUpstreamError(input: {
   if (parsed && (isClaudeMaxTurnsResult(parsed) || isClaudeUnknownSessionError(parsed) || isClaudePoisonedPreviousMessageIdError(parsed) || isClaudeImageProcessingError(parsed))) {
     return false;
   }
-  const loginMeta = detectClaudeLoginRequired({
-    parsed,
-    stdout: input.stdout ?? "",
-    stderr: input.stderr ?? "",
-  });
-  if (loginMeta.requiresLogin) return false;
 
+  // Quota/rate-limit wording wins over an incidental "unauthorized" match — a
+  // shared-credential quota stop is not a logout, and mislabeling it as one
+  // drops retry-with-backoff for a run that would have succeeded once the
+  // quota resets. See DUR-222.
   const haystack = buildClaudeTransientHaystack(input);
   if (!haystack) return false;
   return CLAUDE_TRANSIENT_UPSTREAM_RE.test(haystack);

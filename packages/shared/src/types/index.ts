@@ -31,6 +31,9 @@ export type {
   BackupRetentionPolicy,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
+  QuietModeActor,
+  QuietModeAgentSnapshotEntry,
+  QuietModeState,
 } from "./instance.js";
 export {
   DAILY_RETENTION_PRESETS,
@@ -40,6 +43,8 @@ export {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_QUIET_MODE_STATE,
+  QUIET_MODE_STALE_AFTER_MS,
 } from "./instance.js";
 export {
   TRUST_PRESETS,

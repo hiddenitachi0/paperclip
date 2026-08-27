@@ -534,6 +534,9 @@ export type {
   InstanceSettings,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
+  QuietModeActor,
+  QuietModeAgentSnapshotEntry,
+  QuietModeState,
   BackupRetentionPolicy,
   Agent,
   AgentAccessState,
@@ -1049,6 +1052,8 @@ export {
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   MIN_GLOBAL_MAX_CONCURRENT_RUNS,
   MAX_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_QUIET_MODE_STATE,
+  QUIET_MODE_STALE_AFTER_MS,
 } from "./types/instance.js";
 
 export type {

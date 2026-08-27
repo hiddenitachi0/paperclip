@@ -372,17 +372,21 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
-git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward, dry_run -> stdout: resolved target commit (refusal path only); 0 ok, 1 fetch/resolve failed, 2 refused (would move backward)
-  local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}" dry_run="${6:-}"
+git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward, dry_run, deploy_branch_ref -> stdout: resolved target commit (refusal path only); 0 ok, 1 fetch/resolve failed, 2 refused (would move backward), 3 refused (not reachable from deploy branch)
+  local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}" dry_run="${6:-}" deploy_branch_ref="${7:-}"
   (
     cd "$target_dir" || exit 1
     if [ -n "$token" ]; then
       export GITHUB_TOKEN="$token"
     fi
+    local fetch_refs=("$ref")
+    if [ -n "$deploy_branch_ref" ] && [ "$deploy_branch_ref" != "$ref" ]; then
+      fetch_refs+=("$deploy_branch_ref")
+    fi
     git -c credential.helper= \
         -c "credential.https://github.com.helper=$GIT_CREDENTIAL_HELPER" \
         -c "credential.https://github.com.useHttpPath=false" \
-        fetch --quiet origin "$ref" 2>>"$LOG" || \
+        fetch --quiet origin "${fetch_refs[@]}" 2>>"$LOG" || \
       git -c credential.helper= \
           -c "credential.https://github.com.helper=$GIT_CREDENTIAL_HELPER" \
           -c "credential.https://github.com.useHttpPath=false" \
@@ -427,6 +431,30 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_b
         # it was refused.
         printf '%s' "$target_commit"
         exit 2
+      fi
+    fi
+
+    # DUR-229: the backward guard above only protects against moving
+    # backward *on the same lineage* — it compares target_commit against
+    # whatever is currently checked out, so a commit that only exists on an
+    # unrelated branch (e.g. master, when this project deploys custom) is
+    # never an ancestor of the current HEAD and sails through untouched, even
+    # though resetting to it would silently discard everything the deploy
+    # branch has that the other branch doesn't (see DUR-221). Independently
+    # confirm target_commit is actually reachable from the *configured*
+    # deploy branch's remote tip before ever resetting to it — not "isn't
+    # behind HEAD", but "is actually on the branch we're supposed to be
+    # deploying at all". No allow_backward-style override: unlike a genuine
+    # rollback, there is no legitimate reason a deploy approval should point
+    # off the configured deploy branch. Skipped (fails open) only when the
+    # caller didn't pass a deploy_branch_ref or that ref doesn't resolve.
+    if [ -n "$deploy_branch_ref" ]; then
+      local deploy_branch_commit
+      deploy_branch_commit="$(git rev-parse --verify --quiet "origin/$deploy_branch_ref^{commit}" 2>/dev/null)" || deploy_branch_commit=""
+      if [ -n "$deploy_branch_commit" ] && [ "$target_commit" != "$deploy_branch_commit" ] && \
+         ! git merge-base --is-ancestor "$target_commit" "$deploy_branch_commit" 2>/dev/null; then
+        printf '%s' "$target_commit"
+        exit 3
       fi
     fi
 
@@ -528,7 +556,7 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
   local carried_commit
-  carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY")"
+  carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY" "" "$DV_REPO_REF")"
   local fetch_reset_status=$?
   if [ "$fetch_reset_status" -eq 2 ]; then
     log "runner: $aid refused — $target_ref is already reachable from the live commit $before_commit; deploying it would move production backward"
@@ -541,6 +569,17 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     # this script never actually re-ran the health check against THIS
     # approval's target, only against what an earlier deploy already proved.
     comment "$aid" "$company_id" "Deploy skipped — approval target ($target_ref, commit ${carried_commit:-unknown}) is an ancestor of the currently live commit ($before_commit): its change has already shipped as part of an earlier or concurrent deploy, so applying this approval directly would only reset production backward and silently discard whatever has shipped since (DUR-137 guard). If a rollback is genuinely intended, re-file the deploy approval with payload.allowBackwardDeploy: true to confirm that explicitly." "carried" "$carried_commit"
+    return
+  elif [ "$fetch_reset_status" -eq 3 ]; then
+    log "runner: $aid refused — $target_ref (commit ${carried_commit:-unknown}) is not reachable from $DV_REPO_REF, this project's configured deploy branch"
+    # DUR-229: target_commit isn't an ancestor of the current live commit
+    # (so DUR-137's guard above doesn't fire) but it also isn't reachable
+    # from the deploy branch at all — it lives on a different, unrelated
+    # branch. Resetting to it would silently switch production onto that
+    # branch's lineage, discarding whatever the deploy branch has that the
+    # other branch doesn't (the DUR-221 incident). Hard fail; there is no
+    # allowBackwardDeploy-style override for this one.
+    comment "$aid" "$company_id" "Deploy failed — approval target ($target_ref, commit ${carried_commit:-unknown}) is not reachable from \"$DV_REPO_REF\", the branch this project deploys from. It looks like it lives on a different branch entirely. Resetting to it would discard whatever \"$DV_REPO_REF\" has that the other branch doesn't (DUR-229 guard). Re-file the deploy approval against a commit that's actually on \"$DV_REPO_REF\"."
     return
   elif [ "$fetch_reset_status" -ne 0 ]; then
     log "runner: $aid git fetch/reset failed"
@@ -571,7 +610,10 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   fi
 
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
-  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)."
+  # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
+  # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only
+  # the issue this approval happens to be linked to — without parsing prose.
+  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)." "" "$after_commit"
 }
 
 # DUR-163: docker logs for the container being replaced only exist as long as
@@ -687,7 +729,7 @@ check_commit_already_live() { # approval_id, company_id
   token="$(cli_json secrets deploy-github-token -C "$company_id" | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("token") or "")' 2>/dev/null)" || token=""
   local target_ref="${DV_COMMIT:-$DV_REPO_REF}"
   local out status
-  out="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "" "1")"
+  out="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "" "1" "$DV_REPO_REF")"
   status=$?
   [ "$status" -eq 2 ] || return 1
   printf '%s' "$out"

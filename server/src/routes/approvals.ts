@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { companies, heartbeatRuns, issues, projects, type Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { companies, heartbeatRuns, issues, projectWorkspaces, projects, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -30,7 +30,11 @@ import {
   logActivity,
   secretService,
 } from "../services/index.js";
-import { resolveProjectDeployBranches, type ProjectDeployBranches } from "../services/deploy-branches.js";
+import {
+  resolveProjectDeployBranches,
+  resolveProjectDeployBranchesByProjectId,
+  type ProjectDeployBranches,
+} from "../services/deploy-branches.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { conflict, unprocessable } from "../errors.js";
@@ -38,6 +42,7 @@ import { describeToolCapability, summarizeMcpServer } from "../services/agent-to
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
+import { ghFetch, gitHubApiBase } from "../services/github-fetch.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -87,6 +92,149 @@ async function assertDeployRequestProjectExists(
       `Deploy approval payload.projectId "${payload.projectId}" belongs to a different company.`,
       { projectId: payload.projectId },
     );
+  }
+}
+
+function parseGitHubRepoFromUrl(repoUrl: string | null | undefined): { owner: string; name: string } | null {
+  if (!repoUrl) return null;
+  try {
+    const parsed = new URL(repoUrl);
+    if (parsed.protocol !== "https:") return null;
+    const host = parsed.host.toLowerCase();
+    if (host !== "github.com" && host !== "www.github.com") return null;
+    const [owner, rawName] = parsed.pathname.replace(/^\/+/, "").split("/");
+    if (!owner || !rawName) return null;
+    return { owner, name: rawName.replace(/\.git$/i, "") };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * DUR-227: DUR-221 near-miss -- a deploy approval was filed for commit d55e5704, which
+ * lived on master, while the project's declared deploy branch was custom. Nothing checked
+ * that the commit was even reachable from the deploy branch before it reached the
+ * operator's approval queue; the card looked identical to a normal, safe deploy. Confirms
+ * via GitHub's compare API (the same mechanism merge-deploy-visibility.ts already uses to
+ * check merge status) that `payload.commit` is actually `git merge-base --is-ancestor
+ * <commit> <deployBranch>` before the approval can be filed.
+ *
+ * base=commit, head=deployBranch: deployBranch's compare `status` is "ahead" or
+ * "identical" exactly when commit is an ancestor of (or equal to) deployBranch --
+ * "behind"/"diverged" mean the branch does not contain that commit.
+ *
+ * Deliberately fails OPEN whenever ancestry can't be determined at all (no pinned commit
+ * on the payload, project declares no deploy branch, the workspace isn't a github.com repo,
+ * GitHub is unreachable, or the response can't be parsed) -- mirrors the "unknown must
+ * never be treated as evidence" rule merge-deploy-visibility.ts already established for the
+ * same GitHub-availability tradeoff. Only a GitHub-confirmed "behind"/"diverged" ever
+ * blocks filing.
+ */
+async function assertDeployCommitIsAncestorOfDeployBranch(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string },
+  deps: {
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+  } = {},
+) {
+  const commit = payload.commit?.trim();
+  if (!commit) return;
+
+  const branches = await resolveProjectDeployBranchesByProjectId(db, payload.projectId);
+  const deployBranch = branches?.deployBranch;
+  if (!deployBranch) return;
+
+  const workspaceRow = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(
+      and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)),
+    )
+    .then((rows) => rows[0] ?? null);
+  const repo = parseGitHubRepoFromUrl(workspaceRow?.repoUrl);
+  if (!repo) return;
+
+  const fetchImpl = deps.fetchImpl ?? ghFetch;
+  const resolveGitHubToken =
+    deps.resolveGitHubToken ??
+    ((cid: string) =>
+      secretService(db).resolveGitHubToken(cid, {
+        consumerType: "system",
+        consumerId: "deploy-approval-ancestry-precheck",
+      }));
+  const token = await resolveGitHubToken(companyId).catch(() => null);
+
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "paperclip-deploy-approval-ancestry-precheck",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(
+      `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/compare/${encodeURIComponent(commit)}...${encodeURIComponent(deployBranch)}`,
+      { headers },
+    );
+  } catch {
+    return;
+  }
+  if (!response.ok) return;
+
+  let body: Record<string, unknown> | null = null;
+  try {
+    body = (await response.json()) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const status = typeof body?.status === "string" ? body.status : null;
+  if (status !== "behind" && status !== "diverged") return;
+
+  const actualBranches = await lookupBranchesForCommitHead(fetchImpl, headers, repo, commit);
+  const locationClause =
+    actualBranches.length > 0
+      ? `it is on ${actualBranches.map((b) => `"${b}"`).join(", ")} instead`
+      : "confirm which branch this commit actually lives on before filing the approval";
+
+  throw unprocessable(
+    `Deploy approval targets commit ${commit}, which is not reachable from "${deployBranch}", the branch ` +
+      `${repo.owner}/${repo.name} deploys from -- ${locationClause}. Deploying it would not ship what ` +
+      "production expects.",
+    { commit, deployBranch, repo: `${repo.owner}/${repo.name}`, compareStatus: status, actualBranches },
+  );
+}
+
+/**
+ * Best-effort lookup of which branch(es) `commit` is the tip of, so the rejection error can
+ * name where the commit actually lives, not just where it doesn't. Uses GitHub's
+ * "branches-where-head" endpoint, which only reports branches where `commit` is the current
+ * HEAD -- it won't find every branch that merely contains the commit as an ancestor, but it
+ * reliably catches the DUR-221 shape (a deploy approval filed right after the commit landed
+ * as the tip of the wrong branch). Never throws; returns [] on any failure so this stays a
+ * pure error-message enhancement and never affects whether filing is blocked.
+ */
+async function lookupBranchesForCommitHead(
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+  headers: Record<string, string>,
+  repo: { owner: string; name: string },
+  commit: string,
+): Promise<string[]> {
+  try {
+    const response = await fetchImpl(
+      `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits/${encodeURIComponent(commit)}/branches-where-head`,
+      { headers },
+    );
+    if (!response.ok) return [];
+    const body = (await response.json()) as unknown;
+    if (!Array.isArray(body)) return [];
+    return body
+      .map((entry) => (entry && typeof entry === "object" ? (entry as Record<string, unknown>).name : null))
+      .filter((name): name is string => typeof name === "string");
+  } catch {
+    return [];
   }
 }
 
@@ -319,6 +467,21 @@ function appendToolGrantCapabilitySummary(payload: Record<string, unknown>) {
   payload.risks = existingRisks.includes(capability) ? existingRisks : [...existingRisks, capability];
 }
 
+/**
+ * DUR-237: `payload.mergeCommitSha` on a `kind:"merge_pr"` approval is read by
+ * deploy-completion-gate.ts as proof the underlying PR merged as a specific commit --
+ * ground truth that's only trustworthy when merge-deploy-visibility.ts wrote it after
+ * independently verifying the merge via GitHub's API (see that file's markNoted). The
+ * create/resubmit payload is otherwise caller-controlled, so without this, a requester
+ * could hand-write any sha it likes -- including one already known to be live from an
+ * unrelated deploy -- and short-circuit the completion gate without this approval's PR
+ * ever merging. Always strip it on the way in; the backfill job's own `db.update` is the
+ * only writer allowed to set it.
+ */
+function stripUntrustedMergeCommitSha(payload: Record<string, unknown>) {
+  if (payload.kind === "merge_pr") delete payload.mergeCommitSha;
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
@@ -328,6 +491,7 @@ async function normalizeRequestBoardApprovalPayload(
 ) {
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   appendToolGrantCapabilitySummary(payload);
+  stripUntrustedMergeCommitSha(payload);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
   payload.title = formatApprovalTitle(projectLabel, payload.title);
@@ -536,6 +700,7 @@ export function approvalRoutes(
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
       const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
       await assertDeployRequestProjectExists(db, companyId, deployPayload);
+      await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
@@ -954,6 +1119,7 @@ export function approvalRoutes(
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
       const deployPayload = deployRequestPayloadSchema.parse(req.body.payload);
       await assertDeployRequestProjectExists(db, existing.companyId, deployPayload);
+      await assertDeployCommitIsAncestorOfDeployBranch(db, existing.companyId, deployPayload);
     }
     let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
@@ -976,6 +1142,9 @@ export function approvalRoutes(
         res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
         return;
       }
+      // DUR-237: resubmit's payload is just as caller-controlled as create's -- see
+      // stripUntrustedMergeCommitSha's docblock for why this can never come from the request body.
+      stripUntrustedMergeCommitSha(normalizedPayload);
     }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
       // Re-verify the boss/report relationship still holds -- it may have

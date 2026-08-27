@@ -17,7 +17,10 @@ vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueService,
 }));
 
-vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, spawn: mockSpawn };
+});
 
 vi.mock("../routes/authz.js", () => ({
   getActorInfo: () => ({ actorId: "user-1", agentId: null, runId: null }),

@@ -24,7 +24,7 @@ import { EmptyState } from "../components/EmptyState";
 import { Identity } from "../components/Identity";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { describeRunActivity } from "../lib/run-activity";
-import { classifyTaskWaiting } from "../lib/task-waiting";
+import { classifyTaskWaiting, type TaskWaiting } from "../lib/task-waiting";
 import { Button } from "@/components/ui/button";
 import {
   approvalLabel,
@@ -32,6 +32,7 @@ import {
   defaultTypeIcon,
   approvalTargetBadge,
   approvalDuplicateKey,
+  approvalDeployBranchInfo,
 } from "../components/ApprovalPayload";
 
 // Live board polling cadence. Fast enough to feel live, slow enough to stay cheap
@@ -43,6 +44,10 @@ const NOW_POLL_INTERVAL_MS = 5_000;
 const NOW_RUN_FETCH_LIMIT = 60;
 const NOW_RUN_MIN_COUNT = 40;
 const LANE_ROW_LIMIT = 12;
+// Every open, non-terminal status — used only to count what this page is
+// *not* showing, so "Needs you" being quiet never reads as "nothing to do".
+const OPEN_ISSUE_STATUSES = "backlog,todo,in_progress,in_review,blocked";
+const OPEN_ISSUES_COUNT_LIMIT = 300;
 // Live-transcript polling for the "what's it doing now" glimpse on active runs.
 const NOW_LOG_POLL_INTERVAL_MS = 5_000;
 const NOW_LOG_READ_LIMIT_BYTES = 48_000;
@@ -175,6 +180,23 @@ export function DashboardNow() {
     refetchInterval: NOW_POLL_INTERVAL_MS,
   });
 
+  // Total open issues across every status that isn't done/cancelled, purely
+  // to tell the operator how much this page is *not* showing (DUR-249): the
+  // Needs-you lane only ever surfaces items Paperclip can attribute to a
+  // human, so a board can have many more open tasks than the lane implies.
+  const { data: openIssuesForCount } = useQuery({
+    queryKey: [...queryKeys.issues.list(selectedCompanyId!), "now-open-count"],
+    queryFn: () =>
+      issuesApi.list(selectedCompanyId!, {
+        status: OPEN_ISSUE_STATUSES,
+        limit: OPEN_ISSUES_COUNT_LIMIT,
+      }),
+    enabled: !!selectedCompanyId,
+    staleTime: 15_000,
+  });
+  const totalOpenCount = openIssuesForCount?.length ?? null;
+  const totalOpenCountIsFloor = totalOpenCount !== null && totalOpenCount >= OPEN_ISSUES_COUNT_LIMIT;
+
   const runs = useMemo(() => liveRuns ?? [], [liveRuns]);
 
   // Fetch issue titles for every run that references one, so rows can show the
@@ -300,6 +322,19 @@ export function DashboardNow() {
     [blockedTasks],
   );
 
+  // Blocked tasks Paperclip can't attribute to anyone (DUR-249): not wrong to
+  // keep out of Needs-you, but they used to vanish from the page entirely —
+  // give them a visible place instead.
+  const parkedTasks = useMemo(
+    () =>
+      (blockedTasks ?? [])
+        .map((issue) => ({ issue, waiting: classifyTaskWaiting(issue) }))
+        .filter((t) => t.waiting.waitingOn === "unknown"),
+    [blockedTasks],
+  );
+
+  const issuesBoardPath = selectedCompany?.issuePrefix ? `/${selectedCompany.issuePrefix}/issues` : "/issues";
+
   if (!selectedCompanyId) {
     return (
       <EmptyState
@@ -318,6 +353,12 @@ export function DashboardNow() {
     + actionableApprovals.length
     + needsYouTasks.length
     + (pendingInteractions ?? []).length;
+
+  // Rows the lane's own LANE_ROW_LIMIT silently drops (DUR-249 item 3) —
+  // approvals and interactions above are never sliced, only these two are.
+  const needsYouOverflow =
+    Math.max(0, runsByLane.needs_you.length - LANE_ROW_LIMIT)
+    + Math.max(0, needsYouTasks.length - LANE_ROW_LIMIT);
 
   return (
     <div className="space-y-5">
@@ -388,6 +429,26 @@ export function DashboardNow() {
                     <BlockedTaskRow key={`task-${issue.id}`} issue={issue} label={waiting.label} />
                   ))}
                   {needsYouCount === 0 ? <LaneEmpty label="Nothing needs you right now." /> : null}
+                  {needsYouOverflow > 0 ? (
+                    <p className="px-1 pt-1 text-[11px] text-muted-foreground">
+                      +{needsYouOverflow} more
+                    </p>
+                  ) : null}
+                  {totalOpenCount !== null ? (
+                    <Link
+                      to={issuesBoardPath}
+                      className="mt-1 flex items-center justify-between gap-1 rounded-lg border border-dashed border-border/60 px-2.5 py-1.5 text-[11px] text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+                    >
+                      <span>
+                        Showing {needsYouCount} of {totalOpenCountIsFloor ? `${totalOpenCount}+` : totalOpenCount}{" "}
+                        open
+                      </span>
+                      <span className="inline-flex shrink-0 items-center gap-1 font-medium">
+                        See all
+                        <ArrowRight className="h-3 w-3" />
+                      </span>
+                    </Link>
+                  ) : null}
                 </>
               ) : (
                 <>
@@ -414,6 +475,8 @@ export function DashboardNow() {
           );
         })}
       </div>
+
+      <ParkedPanel tasks={parkedTasks} issuesBoardPath={issuesBoardPath} />
     </div>
   );
 }
@@ -575,25 +638,95 @@ function RunRow({
   );
 }
 
-function BlockedTaskRow({ issue, label }: { issue: Issue; label: string }) {
+function BlockedTaskRow({
+  issue,
+  label,
+  tone = "needs_you",
+}: {
+  issue: Issue;
+  label: string;
+  /** "parked" = blocked but not attributed to anyone yet (DUR-249) — same
+   * shape as a needs-you row, muted instead of amber so it doesn't read as
+   * a decision waiting on the operator. */
+  tone?: "needs_you" | "parked";
+}) {
+  const isParked = tone === "parked";
   return (
     <Link
       to={`/issues/${issue.identifier ?? issue.id}`}
-      className="group flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2"
+      className={cn(
+        "group flex items-start gap-1.5 rounded-lg border px-2.5 py-2",
+        isParked ? "border-border bg-muted/30" : "border-amber-500/40 bg-amber-500/[0.04]",
+      )}
       title="Open the task"
     >
-      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <AlertCircle
+        className={cn(
+          "mt-0.5 h-3.5 w-3.5 shrink-0",
+          isParked ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400",
+        )}
+      />
       <div className="min-w-0">
         <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
           {issue.identifier ? `${issue.identifier} · ` : ""}
           {issue.title}
         </p>
         <p className="text-[10px] text-muted-foreground">
-          <span className="font-medium text-amber-600 dark:text-amber-400">Waiting on you</span>
-          {label ? ` · ${label}` : ""}
+          <span
+            className={cn(
+              "font-medium",
+              isParked ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400",
+            )}
+          >
+            {isParked ? "Parked" : "Waiting on you"}
+          </span>
+          {label && label !== "Parked" ? ` · ${label}` : ""}
         </p>
       </div>
     </Link>
+  );
+}
+
+function ParkedPanel({
+  tasks,
+  issuesBoardPath,
+}: {
+  tasks: { issue: Issue; waiting: TaskWaiting }[];
+  issuesBoardPath: string;
+}) {
+  const visible = tasks.slice(0, LANE_ROW_LIMIT);
+  const overflow = tasks.length - visible.length;
+  return (
+    <section className="flex flex-col rounded-xl border border-border bg-background/60">
+      <header className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-slate-400" />
+          <span className="text-sm font-semibold text-foreground">Parked</span>
+        </div>
+        <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
+          {tasks.length}
+        </span>
+      </header>
+      <p className="px-3 pt-2 text-[11px] text-muted-foreground">
+        Blocked, but not waiting on you specifically — an agent still owns getting these moving again.
+      </p>
+      <div className="flex flex-col gap-1.5 p-2">
+        {visible.map(({ issue, waiting }) => (
+          <BlockedTaskRow key={`parked-${issue.id}`} issue={issue} label={waiting.label} tone="parked" />
+        ))}
+        {tasks.length === 0 ? <LaneEmpty label="Nothing parked." /> : null}
+        {overflow > 0 ? (
+          <p className="px-1 pt-1 text-[11px] text-muted-foreground">+{overflow} more</p>
+        ) : null}
+        <Link
+          to={issuesBoardPath}
+          className="mt-1 inline-flex items-center gap-1 self-start px-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        >
+          See full board
+          <ArrowRight className="h-3 w-3" />
+        </Link>
+      </div>
+    </section>
   );
 }
 
@@ -619,6 +752,7 @@ function ApprovalRow({
   const payload = approval.payload as Record<string, unknown>;
   const label = approvalLabel(approval.type, payload);
   const targetBadge = approvalTargetBadge(payload);
+  const branchInfo = approvalDeployBranchInfo(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -645,11 +779,17 @@ function ApprovalRow({
     <div
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-2.5 py-2",
-        isDuplicate
+        isDuplicate || branchInfo?.mismatch
           ? "border-red-500/50 bg-red-500/[0.06]"
           : "border-amber-500/40 bg-amber-500/[0.04]",
       )}
     >
+      {branchInfo?.mismatch ? (
+        <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          Not on {branchInfo.deployBranch} — this commit is on {branchInfo.sourceBranch}
+        </p>
+      ) : null}
       {isDuplicate ? (
         <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
           <AlertCircle className="h-3 w-3 shrink-0" />

@@ -470,8 +470,9 @@ export function resolveClaudeAdapterResult(
 
   if (!parsed) {
     const fallbackErrorMessage = parseFallbackErrorMessage(proc);
+    // Quota/rate-limit wording is checked before auth so a shared-credential
+    // quota stop never gets mislabeled as a logout. See DUR-222.
     const transientUpstream =
-      !loginMeta.requiresLogin &&
       (proc.exitCode ?? 0) !== 0 &&
       isClaudeTransientUpstreamError({
         parsed: null,
@@ -487,10 +488,10 @@ export function resolveClaudeAdapterResult(
           errorMessage: fallbackErrorMessage,
         })
       : null;
-    const errorCode = loginMeta.requiresLogin
-      ? "claude_auth_required"
-      : transientUpstream
+    const errorCode = transientUpstream
       ? "claude_transient_upstream"
+      : loginMeta.requiresLogin
+      ? "claude_auth_required"
       : null;
     return {
       exitCode: proc.exitCode,
@@ -581,9 +582,10 @@ export function resolveClaudeAdapterResult(
   const errorMessage = failed
     ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
     : null;
+  // Quota/rate-limit wording is checked before auth so a shared-credential
+  // quota stop never gets mislabeled as a logout. See DUR-222.
   const transientUpstream =
     failed &&
-    !loginMeta.requiresLogin &&
     !clearSessionForMaxTurns &&
     !poisonedPreviousMessageId &&
     isClaudeTransientUpstreamError({
@@ -610,14 +612,14 @@ export function resolveClaudeAdapterResult(
   // DUR-41. `claudeRefusal` is the one intentional exception — it's a
   // clean-exit outcome by design (see the comment on `claudeRefusal`
   // above), so it stays evaluated independently of `failed`.
-  const resolvedErrorCode = failed && loginMeta.requiresLogin
-    ? "claude_auth_required"
-    : failed && clearSessionForMaxTurns
+  const resolvedErrorCode = failed && clearSessionForMaxTurns
     ? "max_turns_exhausted"
     : failed && poisonedPreviousMessageId
     ? "claude_poisoned_previous_message_id"
     : transientUpstream
     ? "claude_transient_upstream"
+    : failed && loginMeta.requiresLogin
+    ? "claude_auth_required"
     : claudeRefusal
     ? "claude_refusal"
     : null;

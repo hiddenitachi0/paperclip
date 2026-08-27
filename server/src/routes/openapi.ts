@@ -2796,6 +2796,30 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/instance/settings/quiet-mode",
+  tags: ["instance"],
+  summary: "Get quiet mode status (DUR-224)",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/settings/quiet-mode/activate",
+  tags: ["instance"],
+  summary: "Stop every agent in every company from starting new work, without cancelling active runs (DUR-224)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/settings/quiet-mode/deactivate",
+  tags: ["instance"],
+  summary: "Restore exactly the agents that were active before quiet mode was turned on (DUR-224)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── Board chat (Conference Room Chat, experimental) ──────────────────────────
 
 registry.registerPath({

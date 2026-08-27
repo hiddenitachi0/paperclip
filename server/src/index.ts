@@ -65,6 +65,7 @@ import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
+import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -636,6 +637,16 @@ export async function startServer(): Promise<StartedServer> {
         finishedAt: finishedAt.toISOString(),
         durationMs: Date.now() - startedAtMs,
       };
+      if (result.engine === "javascript") {
+        // DUR-271: this fallback silently degrades every backup to a much
+        // slower, more DB-load-intensive path (row-streaming through Node
+        // instead of native pg_dump) -- surfaced loudly here so a future
+        // pg_dump regression doesn't take hours to notice again.
+        logger.warn(
+          { pgDumpFailureReason: result.pgDumpFailureReason, trigger },
+          `${label} database backup fell back to the slow JS engine -- pg_dump was unavailable or failed`,
+        );
+      }
       logger.info(
         {
           backupFile: result.backupFile,
@@ -805,8 +816,20 @@ export async function startServer(): Promise<StartedServer> {
     throw err;
   }
 
+  // DUR-257: shared between the heartbeat scheduler tick and the shutdown handler
+  // below (which is defined much later in this function, outside the
+  // heartbeatSchedulerEnabled block) so a SIGTERM/SIGINT can (a) stop the periodic
+  // tick from dispatching any more work and (b) wait for whatever's already running
+  // to actually finish before the process exits, instead of the deploy runner's
+  // container recreate yanking it out from under an in-flight run.
+  let heartbeatDrainState: { isDraining: boolean; getInFlightRunCount: () => number } | null = null;
+
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
+    heartbeatDrainState = {
+      isDraining: false,
+      getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
+    };
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
@@ -901,6 +924,12 @@ export async function startServer(): Promise<StartedServer> {
     });
 
     setInterval(() => {
+      // DUR-257: once shutdown() has started draining, stop dispatching new work --
+      // anything the tick starts now would just get orphaned by the imminent
+      // container kill. Runs already in flight are left alone; shutdown() waits for
+      // those separately.
+      if (heartbeatDrainState?.isDraining) return;
+
       const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
       if (sweptRuntimeStatuses > 0) {
         logger.info(
@@ -1158,6 +1187,14 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      if (heartbeatDrainState) {
+        heartbeatDrainState.isDraining = true;
+        await waitForInFlightRunsToDrain(signal, config.shutdownDrainTimeoutMs, {
+          getInFlightRunCount: heartbeatDrainState.getInFlightRunCount,
+          logger,
+        });
+      }
+
       const telemetryClient = getTelemetryClient();
       if (telemetryClient) {
         telemetryClient.stop();

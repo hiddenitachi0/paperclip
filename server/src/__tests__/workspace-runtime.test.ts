@@ -20,6 +20,7 @@ import {
 } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import {
+  buildWorkspaceCommandEnv,
   buildWorkspaceRuntimeDesiredStatePatch,
   cleanupExecutionWorkspaceArtifacts,
   ensurePersistedExecutionWorkspaceAvailable,
@@ -258,6 +259,38 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
     expect(sanitized.npm_config_tailscale_auth).toBeUndefined();
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
     expect(sanitized.HOST).toBe("0.0.0.0");
+  });
+});
+
+describe("buildWorkspaceCommandEnv", () => {
+  it("DUR-247: never forwards the host DATABASE_URL into a spawned workspace command", () => {
+    process.env.DATABASE_URL = "postgres://example.test/paperclip";
+    try {
+      const env = buildWorkspaceCommandEnv({
+        base: {
+          baseCwd: "/tmp/base",
+          source: "worktree",
+          repoRef: null,
+          repoUrl: null,
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+        } as unknown as Parameters<typeof buildWorkspaceCommandEnv>[0]["base"],
+        repoRoot: "/tmp/repo",
+        worktreePath: "/tmp/repo/worktree",
+        branchName: "some-branch",
+        issue: null,
+        agent: { id: "agent-1", name: "Agent", companyId: "company-1" } as unknown as Parameters<
+          typeof buildWorkspaceCommandEnv
+        >[0]["agent"],
+        created: false,
+      });
+
+      expect(env.DATABASE_URL).toBeUndefined();
+      expect(env.PAPERCLIP_WORKSPACE_CWD).toBe("/tmp/repo/worktree");
+      expect(env.PAPERCLIP_COMPANY_ID).toBe("company-1");
+    } finally {
+      delete process.env.DATABASE_URL;
+    }
   });
 });
 

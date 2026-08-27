@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ApprovalPayloadRenderer,
+  approvalDeployBranchInfo,
   approvalDuplicateKey,
   approvalLabel,
   approvalTargetBadge,
@@ -76,6 +77,29 @@ describe("approvalDuplicateKey", () => {
     expect(approvalDuplicateKey({ kind: "deploy" })).toBeNull();
     expect(approvalDuplicateKey({ kind: "hire_agent" })).toBeNull();
     expect(approvalDuplicateKey(null)).toBeNull();
+  });
+});
+
+describe("approvalDeployBranchInfo", () => {
+  it("flags a mismatch when the commit's branch differs from the deploy branch (DUR-221/DUR-226)", () => {
+    expect(
+      approvalDeployBranchInfo({ kind: "deploy", commit: "d55e5704", sourceBranch: "master", deployBranch: "custom" }),
+    ).toEqual({ sourceBranch: "master", deployBranch: "custom", mismatch: true });
+  });
+
+  it("reports no mismatch when the commit's branch matches the deploy branch", () => {
+    expect(
+      approvalDeployBranchInfo({ kind: "deploy", commit: "abc123", sourceBranch: "custom", deployBranch: "custom" }),
+    ).toEqual({ sourceBranch: "custom", deployBranch: "custom", mismatch: false });
+  });
+
+  it("returns null when the backend hasn't resolved a source branch yet", () => {
+    expect(approvalDeployBranchInfo({ kind: "deploy", commit: "abc123" })).toBeNull();
+  });
+
+  it("returns null for non-deploy approvals", () => {
+    expect(approvalDeployBranchInfo({ kind: "merge_pr", sourceBranch: "master" })).toBeNull();
+    expect(approvalDeployBranchInfo(null)).toBeNull();
   });
 });
 

@@ -3129,6 +3129,7 @@ export function AgentToolsTab({
   companyId?: string;
 }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [pendingToolId, setPendingToolId] = useState<string | null>(null);
 
   const { data: tools, isLoading, error } = useQuery({
@@ -3174,7 +3175,7 @@ export function AgentToolsTab({
           icon={Plug}
           message="No tools in the library yet. Add one in Tools, then come back here to give it to this agent."
           action="Go to Tools"
-          onAction={() => window.location.assign("/tools")}
+          onAction={() => navigate("/tools")}
         />
       ) : (
         <ul className="divide-y divide-border border border-border rounded-lg">

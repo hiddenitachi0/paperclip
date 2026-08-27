@@ -1,4 +1,5 @@
-import type { Db } from "@paperclipai/db";
+import { and, eq, sql } from "drizzle-orm";
+import { approvals, type Db } from "@paperclipai/db";
 import { resolveProjectDeployBranches } from "./deploy-branches.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
@@ -59,6 +60,66 @@ function approvalPayloadProjectId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const projectId = (payload as Record<string, unknown>).projectId;
   return typeof projectId === "string" ? projectId : null;
+}
+
+// DUR-237: the merge_pr approval's own merge commit sha, backfilled asynchronously onto
+// `payload.mergeCommitSha` by merge-deploy-visibility.ts once it confirms via GitHub that the PR
+// actually merged. Undefined until that check has run (or if it never resolved to a merge).
+function approvalPayloadMergeCommitSha(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const sha = (payload as Record<string, unknown>).mergeCommitSha;
+  return typeof sha === "string" && sha.length >= 7 ? sha : null;
+}
+
+const COMMIT_IN_BODY = /\bcommit ([0-9a-f]{7,40})\b/i;
+
+// A runner-log entry's own `commit` structured field is only reliably populated for a "carried"
+// outcome (DUR-152) or, after DUR-237's deploy-runner.sh change, a fresh success. Older success
+// entries only ever wrote the commit into the free-text body ("... commit abc1234 is live and
+// healthy ...") -- fall back to parsing that so this doesn't only work going forward.
+function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | null {
+  if (entry.commit) return entry.commit;
+  const match = entry.body.match(COMMIT_IN_BODY);
+  return match ? match[1] : null;
+}
+
+// Both sides may be a short or full sha (deploy-runner.sh logs `git rev-parse --short HEAD`;
+// GitHub's API returns the full 40-char sha) -- treat them as the same commit when one is a
+// prefix of the other, requiring at least 7 hex chars so this can't degrade into a near-empty-
+// string match.
+function commitsMatch(a: string | null, b: string | null): boolean {
+  if (!a || !b || a.length < 7 || b.length < 7) return false;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return longer.toLowerCase().startsWith(shorter.toLowerCase());
+}
+
+/**
+ * DUR-237: every OTHER approved `deploy` approval filed for this same project, regardless of
+ * which issue (if any) it happens to be linked to. The narrow per-issue check above only ever
+ * sees approvals linked to THIS issue -- but the same commit routinely ships as a side effect of
+ * a sibling issue's deploy (or a deploy filed with no issue link at all), and this issue's own
+ * merge is then left waiting on a deploy approval that will never come because the code is
+ * already live. Widening the search to "approved for this project" (not "linked to this issue")
+ * is what lets the gate recognize that.
+ */
+async function listApprovedProjectDeployApprovalIds(
+  db: Db,
+  companyId: string,
+  projectId: string,
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.companyId, companyId),
+        eq(approvals.type, "request_board_approval"),
+        eq(approvals.status, "approved"),
+        sql`${approvals.payload} ->> 'kind' = 'deploy'`,
+        sql`${approvals.payload} ->> 'projectId' = ${projectId}`,
+      ),
+    );
+  return rows.map((row) => row.id);
 }
 
 /**
@@ -132,12 +193,44 @@ export async function evaluateDeployCompletionDoneGate(
   );
 
   const readStatusLog = input.readStatusLog ?? ((companyId: string) => readDeployRunnerStatus(companyId));
-  const statusEntries = deployApprovals.length > 0 ? readStatusLog(input.issue.companyId) : [];
-  const completed = deployApprovalCompletedInStatusLog(
-    deployApprovals.map((approval) => approval.id),
-    statusEntries,
-  );
+  let statusEntries: DeployRunnerStatusEntry[] | null = null;
+  const getStatusEntries = () => {
+    if (statusEntries === null) statusEntries = readStatusLog(input.issue.companyId);
+    return statusEntries;
+  };
+
+  const completed =
+    deployApprovals.length > 0 &&
+    deployApprovalCompletedInStatusLog(
+      deployApprovals.map((approval) => approval.id),
+      getStatusEntries(),
+    );
   if (completed) return null;
+
+  // DUR-237: this issue has no completed deploy approval OF ITS OWN, but its merge commit may
+  // already be live because it shipped as part of a DIFFERENT issue's deploy (or a deploy filed
+  // with no issue link at all) -- the actual NOR-217 failure mode. Only reachable once
+  // merge-deploy-visibility.ts has backfilled the merge commit sha; until then this is a no-op
+  // and the existing narrow behavior above is unchanged.
+  const mergeCommitSha = mergeApprovals
+    .map((approval) => approvalPayloadMergeCommitSha(approval.payload))
+    .find((sha): sha is string => sha !== null);
+  if (mergeCommitSha) {
+    const projectDeployApprovalIds = await listApprovedProjectDeployApprovalIds(
+      input.db,
+      input.issue.companyId,
+      branches.projectId,
+    );
+    const shippedUnderAnotherApproval = projectDeployApprovalIds.some((approvalId) => {
+      const entry = getStatusEntries().find(
+        (candidate) =>
+          candidate.approvalId === approvalId &&
+          (candidate.body.includes(DEPLOY_SUCCESS_MARKER) || candidate.outcome === "carried"),
+      );
+      return entry ? commitsMatch(mergeCommitSha, extractDeployedCommit(entry)) : false;
+    });
+    if (shippedUnderAnotherApproval) return null;
+  }
 
   const issueLabel = input.issue.identifier ?? "This issue";
   const message =
