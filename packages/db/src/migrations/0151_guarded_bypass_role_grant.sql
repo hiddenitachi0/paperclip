@@ -21,6 +21,16 @@
 -- the deploy) loudly instead of ever issuing that grant. This is safe to run
 -- today regardless of which Phase 2 cutover option is eventually chosen --
 -- see the DUR-275 design review decision for the full reasoning.
+--
+-- Deliberate deviation, acknowledged: DUR-269's own issue description said
+-- this grant "needs to land in the same change as the first real bypass
+-- call-site, not before." This migration ships ahead of DUR-277 (which adds
+-- the actual withCompanyScopeBypass call-sites), not with it. That's a
+-- conscious tradeoff, not an oversight -- flagged non-blocking by security
+-- review because table ownership (Phase 1, migration 0149) bypasses RLS
+-- unconditionally today, so this grant is inert until Phase 2 changes table
+-- ownership. If DUR-277 is delayed after a Phase 2 ownership cutover lands,
+-- re-review this grant before relying on the "currently inert" reasoning.
 DO $$
 BEGIN
   IF CURRENT_USER = 'paperclip_app_scoped' THEN
