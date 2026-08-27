@@ -1041,8 +1041,15 @@
     {
       "idx": 148,
       "version": "7",
-      "when": 1787160030000,
+      "when": 1787160040000,
       "tag": "0148_heartbeat_runs_company_created_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1787160030000,
+      "tag": "0149_rls_company_isolation",
       "breakpoints": true
     }
   ]
