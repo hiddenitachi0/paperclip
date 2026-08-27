@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { createDb } from "./client.js";
 import { companies, issues } from "./schema/index.js";
@@ -61,14 +62,11 @@ describeEmbeddedPostgres("DUR-247: RLS company_id isolation (paperclip_app_scope
   }
 
   /** Opens a fresh, disposable connection as the scoped role -- exactly what a raw `psql "$DATABASE_URL"` session run by that role would do. */
-  async function openScopedConnection(claims: { companyId?: string; bypass?: boolean }) {
+  async function openScopedConnection(claims: { companyId?: string }) {
     const sql = postgres(connectionString, { max: 1 });
     await sql`SET ROLE paperclip_app_scoped`;
     if (claims.companyId) {
       await sql`select set_config('app.current_company_id', ${claims.companyId}, false)`;
-    }
-    if (claims.bypass) {
-      await sql`select set_config('app.rls_bypass', 'true', false)`;
     }
     return sql;
   }
@@ -132,18 +130,77 @@ describeEmbeddedPostgres("DUR-247: RLS company_id isolation (paperclip_app_scope
     }
   });
 
-  it("app.rls_bypass is a real, explicit escape hatch across companies (for the trusted first-party paths that need it)", async () => {
+  it("a plain paperclip_app_scoped connection cannot self-grant the bypass via the old session-GUC path", async () => {
+    // This is the exact mechanism a prior revision of this migration used
+    // (`current_setting('app.rls_bypass', true) = 'true'`) and it was a real
+    // hole: any SQL statement on this connection -- including one reached
+    // via an unrelated SQL-injection-shaped bug -- could set this GUC on
+    // itself with zero privilege check. Setting it must now be a complete
+    // no-op: the policy no longer reads this GUC at all.
     const companyA = await seedCompany("A");
     const companyB = await seedCompany("B");
     await seedIssue(companyA.id, `${companyA.issuePrefix}-1`);
     await seedIssue(companyB.id, `${companyB.issuePrefix}-1`);
 
-    const bypassed = await openScopedConnection({ bypass: true });
+    const scoped = await openScopedConnection({ companyId: companyA.id });
     try {
-      const rows = await bypassed`SELECT id FROM issues`;
-      expect(rows).toHaveLength(2);
+      await scoped`select set_config('app.rls_bypass', 'true', false)`;
+      const rows = await scoped`SELECT id FROM issues`;
+      expect(rows).toHaveLength(1);
     } finally {
-      await bypassed.end();
+      await scoped.end();
+    }
+  });
+
+  it("paperclip_app_scoped is never a member of the paperclip_app_bypass escape hatch", async () => {
+    // The RLS bypass is now keyed off Postgres role membership
+    // (pg_has_role), not a session claim -- see migration 0148's header
+    // comment. This is the security-critical invariant that makes the
+    // bypass non-self-grantable: it must be asserted directly against the
+    // role catalog, because unlike a GUC, no SQL executed on a
+    // paperclip_app_scoped connection can ever make this true.
+    const rows = (await db.execute(
+      sql`SELECT pg_has_role('paperclip_app_scoped', 'paperclip_app_bypass', 'member') AS has_bypass`,
+    )) as unknown as { has_bypass: boolean }[];
+    expect(rows[0]?.has_bypass).toBe(false);
+  });
+
+  it("a role granted paperclip_app_bypass membership genuinely bypasses company scoping", async () => {
+    const companyA = await seedCompany("A");
+    const companyB = await seedCompany("B");
+    await seedIssue(companyA.id, `${companyA.issuePrefix}-1`);
+    await seedIssue(companyB.id, `${companyB.issuePrefix}-1`);
+
+    const setupSql = postgres(connectionString, { max: 1 });
+    try {
+      // Membership in paperclip_app_scoped supplies the ordinary table
+      // GRANTs (SELECT/INSERT/UPDATE/DELETE); membership in
+      // paperclip_app_bypass is what satisfies the RLS policy's bypass
+      // check. Both are needed -- RLS and table-level GRANTs are
+      // independent gates in Postgres.
+      await setupSql.unsafe(
+        "CREATE ROLE paperclip_test_bypass_holder NOLOGIN IN ROLE paperclip_app_scoped, paperclip_app_bypass",
+      );
+    } finally {
+      await setupSql.end();
+    }
+
+    try {
+      const bypassed = postgres(connectionString, { max: 1 });
+      try {
+        await bypassed`SET ROLE paperclip_test_bypass_holder`;
+        const rows = await bypassed`SELECT id FROM issues`;
+        expect(rows).toHaveLength(2);
+      } finally {
+        await bypassed.end();
+      }
+    } finally {
+      const cleanupSql = postgres(connectionString, { max: 1 });
+      try {
+        await cleanupSql.unsafe("DROP ROLE IF EXISTS paperclip_test_bypass_holder");
+      } finally {
+        await cleanupSql.end();
+      }
     }
   });
 

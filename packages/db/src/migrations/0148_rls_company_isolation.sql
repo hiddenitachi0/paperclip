@@ -8,21 +8,42 @@
 --
 -- Design
 -- ------
--- Every tenant table gets a Postgres Row-Level Security policy keyed on two
--- session-local claims that a connection must explicitly set before it can
--- see any row:
---   - app.current_company_id  -- the single company this connection/request
---     is scoped to (see packages/db/src/company-scope.ts, withCompanyScope).
---   - app.rls_bypass          -- an explicit escape hatch for trusted
---     first-party code that is legitimately instance-wide (migrations,
---     backups, background schedulers that fan out across every company,
---     board/admin views spanning multiple company memberships) -- see
---     withCompanyScopeBypass() in the same module, which logs every use to
---     the new cross_company_access_log table for transition visibility.
+-- Every tenant table gets a Postgres Row-Level Security policy keyed on:
+--   - app.current_company_id  -- a session-local claim naming the single
+--     company this connection/request is scoped to (see
+--     packages/db/src/company-scope.ts, withCompanyScope).
+--   - membership in the paperclip_app_bypass role -- an explicit escape
+--     hatch for trusted first-party code that is legitimately
+--     instance-wide (migrations, backups, background schedulers that fan
+--     out across every company, board/admin views spanning multiple
+--     company memberships) -- see withCompanyScopeBypass() in
+--     company-scope.ts, which logs every use to the cross_company_access_log
+--     table for transition visibility.
+--
+-- The bypass is deliberately NOT a session GUC (e.g. `SET app.rls_bypass`):
+-- a plain custom GUC is PGC_USERSET, so any SQL statement executed on a
+-- connection -- including one reached via an unrelated SQL-injection-shaped
+-- bug -- could set it on itself with no privilege check at all, silently
+-- defeating this entire boundary. Role membership is a real Postgres
+-- privilege check instead: `pg_has_role(current_user, 'paperclip_app_bypass',
+-- 'member')` can only be true if some administrator has already run
+-- `GRANT paperclip_app_bypass TO <role>` ahead of time. A connection cannot
+-- grant this to itself no matter what SQL it runs.
+--
+-- SECURITY-CRITICAL INVARIANT: paperclip_app_scoped (created below, the
+-- role Phase 2 plans to make the app's live, request-serving credential)
+-- must NEVER be granted membership in paperclip_app_bypass. If it ever is,
+-- every connection using that credential -- including one driving a
+-- tainted/injected query -- regains the same self-service bypass this
+-- migration removes. Any trusted, instance-wide code path (migrations,
+-- backups, cross-company fan-out schedulers) that legitimately needs the
+-- bypass must run under a distinct, separately-provisioned role that holds
+-- paperclip_app_bypass membership -- never under paperclip_app_scoped.
+--
 -- A connection with NEITHER claim set (the exact shape of a stray script or
--- a raw `psql "$DATABASE_URL"` session) resolves both current_setting(...)
--- calls to NULL/false and the policy denies every row -- default-deny, not
--- default-allow.
+-- a raw `psql "$DATABASE_URL"` session) resolves current_setting(...) to
+-- NULL and has no paperclip_app_bypass membership, so the policy denies
+-- every row -- default-deny, not default-allow.
 --
 -- Rollout is staged over two phases, because this repo's entire app today
 -- runs as ONE shared, long-lived Postgres role that also OWNS every table
@@ -60,6 +81,14 @@ DECLARE
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_scoped') THEN
     CREATE ROLE paperclip_app_scoped NOLOGIN NOBYPASSRLS;
+  END IF;
+
+  -- Pure membership marker for the bypass escape hatch -- see the header
+  -- comment above. Nothing is ever granted table access through this role
+  -- directly; policies check membership in it via pg_has_role(). It is
+  -- intentionally never granted to paperclip_app_scoped.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'paperclip_app_bypass') THEN
+    CREATE ROLE paperclip_app_bypass NOLOGIN NOBYPASSRLS;
   END IF;
 
   -- Tables with a NOT NULL company_id: every row belongs to exactly one
@@ -163,7 +192,7 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I TO paperclip_app_scoped', tbl);
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
     EXECUTE format(
-      'CREATE POLICY paperclip_company_scope ON %I USING (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR current_setting(''app.rls_bypass'', true) = ''true'') WITH CHECK (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR current_setting(''app.rls_bypass'', true) = ''true'')',
+      'CREATE POLICY paperclip_company_scope ON %I USING (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member'')) WITH CHECK (company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member''))',
       tbl
     );
   END LOOP;
@@ -185,7 +214,7 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I TO paperclip_app_scoped', tbl);
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
     EXECUTE format(
-      'CREATE POLICY paperclip_company_scope ON %I USING (company_id IS NULL OR company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR current_setting(''app.rls_bypass'', true) = ''true'') WITH CHECK (company_id IS NULL OR company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR current_setting(''app.rls_bypass'', true) = ''true'')',
+      'CREATE POLICY paperclip_company_scope ON %I USING (company_id IS NULL OR company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member'')) WITH CHECK (company_id IS NULL OR company_id = NULLIF(current_setting(''app.current_company_id'', true), '''')::uuid OR pg_has_role(current_user, ''paperclip_app_bypass'', ''member''))',
       tbl
     );
   END LOOP;
@@ -198,10 +227,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE companies TO paperclip_app_scoped;
 ALTER TABLE companies ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 CREATE POLICY paperclip_company_scope ON companies
-  USING (id = NULLIF(current_setting('app.current_company_id', true), '')::uuid OR current_setting('app.rls_bypass', true) = 'true')
-  WITH CHECK (id = NULLIF(current_setting('app.current_company_id', true), '')::uuid OR current_setting('app.rls_bypass', true) = 'true');
+  USING (id = NULLIF(current_setting('app.current_company_id', true), '')::uuid OR pg_has_role(current_user, 'paperclip_app_bypass', 'member'))
+  WITH CHECK (id = NULLIF(current_setting('app.current_company_id', true), '')::uuid OR pg_has_role(current_user, 'paperclip_app_bypass', 'member'));
 --> statement-breakpoint
--- Transition visibility (scope item 4): every use of the app.rls_bypass
+-- Transition visibility (scope item 4): every use of the paperclip_app_bypass
 -- escape hatch is recorded here so a genuinely cross-company legitimate use
 -- surfaces before enforcement is flipped on for the app's own role in
 -- Phase 2, instead of being discovered after the fact as a silent gap.
