@@ -9,17 +9,46 @@ export const typeLabel: Record<string, string> = {
   credential_request: "Credential Request",
 };
 
-/** Read the requested-credential fields an agent puts on a credential_request payload. */
+/**
+ * Read the requested-credential fields an agent puts on a credential_request
+ * payload. `isPersonaRequest`/`personaDisplayName` come from the server
+ * (see withPersonaMetadata in server/src/routes/approvals.ts, DUR-177) —
+ * they are never client-guessed, so a non-persona request never picks up
+ * persona phrasing by accident.
+ */
 export function credentialRequestFields(payload?: Record<string, unknown> | null): {
   label: string;
   envKey: string | null;
   description: string | null;
+  isPersonaRequest: boolean;
+  personaDisplayName: string | null;
 } {
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
   const envKey = str(payload?.envKey) ?? str(payload?.key);
   const label = str(payload?.name) ?? str(payload?.title) ?? envKey ?? "Credential";
   const description = str(payload?.description) ?? str(payload?.summary) ?? str(payload?.reason);
-  return { label, envKey, description };
+  const personaDisplayName = str(payload?.personaDisplayName);
+  return {
+    label,
+    envKey,
+    description,
+    isPersonaRequest: Boolean(payload?.isPersonaRequest) && !!personaDisplayName,
+    personaDisplayName,
+  };
+}
+
+/**
+ * Plain-language name for a credential request (DUR-177 item 16) — e.g.
+ * "Maja's Instagram access token" instead of exposing the raw `envKey`
+ * ("Value for META_IG_TOKEN") to a non-technical operator. Falls back to
+ * the existing envKey-based phrasing for non-persona requests, unchanged.
+ */
+export function credentialRequestFriendlyName(payload?: Record<string, unknown> | null): string {
+  const { label, envKey, isPersonaRequest, personaDisplayName } = credentialRequestFields(payload);
+  if (isPersonaRequest && personaDisplayName) {
+    return `${personaDisplayName}'s ${label}`;
+  }
+  return envKey ? `Value for ${envKey}` : "Credential value";
 }
 
 function firstNonEmptyString(...values: unknown[]): string | null {
@@ -47,6 +76,19 @@ export function approvalSubject(payload?: Record<string, unknown> | null): strin
  */
 export function approvalTechnicalReference(payload?: Record<string, unknown> | null): string | null {
   return firstNonEmptyString(payload?.technicalReference);
+}
+
+/**
+ * True when this approval was requested by an agent with a `personas` row
+ * (see withPersonaMetadata in server/src/routes/approvals.ts, DUR-177) —
+ * server-derived, not guessed client-side. Used to keep a non-technical
+ * operator reviewing a persona's request (a generated caption/image, a
+ * credential ask) away from internal plumbing like the approval UUID or
+ * raw JSON payload (item 17) without changing anything for ordinary,
+ * non-persona approvals.
+ */
+export function approvalIsPersonaRequest(payload?: Record<string, unknown> | null): boolean {
+  return Boolean(payload?.isPersonaRequest);
 }
 
 /**
@@ -343,11 +385,16 @@ export function ApprovalPayloadRenderer({
 }
 
 function CredentialRequestPayload({ payload }: { payload: Record<string, unknown> }) {
-  const { label, envKey, description } = credentialRequestFields(payload);
+  const { label, envKey, description, isPersonaRequest, personaDisplayName } = credentialRequestFields(payload);
   return (
     <div className="space-y-3">
-      <PayloadField label="Credential" value={label} />
-      {envKey ? <PayloadField label="Environment variable" value={envKey} /> : null}
+      <PayloadField
+        label="Credential"
+        value={isPersonaRequest && personaDisplayName ? `${personaDisplayName}'s ${label}` : label}
+      />
+      {/* DUR-177 item 16: the raw envKey is internal plumbing an agent chose for
+          itself -- never render it for a persona-related request. */}
+      {envKey && !isPersonaRequest ? <PayloadField label="Environment variable" value={envKey} /> : null}
       {description ? <PayloadField label="Why it's needed" value={description} /> : null}
       <p className="text-xs text-muted-foreground">
         Provide the value below — it is stored as an encrypted company secret, and the requesting

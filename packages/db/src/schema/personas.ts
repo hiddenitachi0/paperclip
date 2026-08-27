@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, date, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -21,9 +21,15 @@ export const personas = pgTable(
     status: text("status").notNull().default("draft"),
     // DUR-63 operator decision: no global default cap -- null means
     // unlimited until the operator sets one for this persona at creation.
-    // Enforcement (blocking generation once hit) is separate follow-up work
-    // in the routine that briefs her; this column is storage only.
     dailyGenerationCap: integer("daily_generation_cap"),
+    // DUR-177 item 18: how many image generations this persona has used
+    // "today" (generationCountDate, UTC) -- enforced atomically by
+    // personaGenerationGuard in server/src/services/persona-generation-guard.ts,
+    // gating POST /plugins/tools/execute for the media-studio generate-image
+    // tool. Lazily reset: a write on a new UTC day resets the counter to 1
+    // instead of a scheduled job zeroing every persona out at midnight.
+    generationCountToday: integer("generation_count_today").notNull().default(0),
+    generationCountDate: date("generation_count_date"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
