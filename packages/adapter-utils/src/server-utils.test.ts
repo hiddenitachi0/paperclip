@@ -411,6 +411,53 @@ describe("runChildProcess", () => {
     expect(result.stdout).toBe("done");
   });
 
+  it("DUR-294: never inherits the server's own DATABASE_URL into a spawned agent process", async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+    const originalMigrationUrl = process.env.DATABASE_MIGRATION_URL;
+    process.env.DATABASE_URL = "postgres://owner:secret@db:5432/paperclip";
+    process.env.DATABASE_MIGRATION_URL = "postgres://migrator:secret@db:5432/paperclip";
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        ["-e", "process.stdout.write(JSON.stringify({DATABASE_URL: process.env.DATABASE_URL ?? null, DATABASE_MIGRATION_URL: process.env.DATABASE_MIGRATION_URL ?? null}))"],
+        {
+          cwd: process.cwd(),
+          env: {},
+          timeoutSec: 5,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ DATABASE_URL: null, DATABASE_MIGRATION_URL: null });
+    } finally {
+      if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDatabaseUrl;
+      if (originalMigrationUrl === undefined) delete process.env.DATABASE_MIGRATION_URL;
+      else process.env.DATABASE_MIGRATION_URL = originalMigrationUrl;
+    }
+  });
+
+  it("DUR-294: still honors an explicitly configured DATABASE_URL in opts.env", async () => {
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", "process.stdout.write(process.env.DATABASE_URL ?? '')"],
+      {
+        cwd: process.cwd(),
+        env: { DATABASE_URL: "postgres://scoped:secret@db:5432/paperclip" },
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => {},
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("postgres://scoped:secret@db:5432/paperclip");
+  });
+
   it("waits for onSpawn before sending stdin to the child", async () => {
     const spawnDelayMs = 150;
     const startedAt = Date.now();

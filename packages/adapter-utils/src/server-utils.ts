@@ -2968,8 +2968,19 @@ export async function runChildProcess(
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
+    // DUR-294: sanitizeInheritedPaperclipEnv only strips PAPERCLIP_-prefixed
+    // vars, so without this the Paperclip server's own DATABASE_URL (and
+    // DATABASE_MIGRATION_URL, when set) -- the table-owning, RLS-bypassing
+    // credential implicated in DUR-244 -- was silently inherited by every
+    // spawned agent process, in every company, regardless of adapter_config.
+    // Stripped from the *inherited* base only, before merging in opts.env,
+    // so a call site that deliberately wants to hand a specific process an
+    // explicit DB credential via its own env config still can.
+    const sanitizedInherited = sanitizeInheritedPaperclipEnv(process.env);
+    delete sanitizedInherited.DATABASE_URL;
+    delete sanitizedInherited.DATABASE_MIGRATION_URL;
     const rawMerged: NodeJS.ProcessEnv = {
-      ...sanitizeInheritedPaperclipEnv(process.env),
+      ...sanitizedInherited,
       ...opts.env,
     };
 
