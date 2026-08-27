@@ -1,4 +1,4 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Approval, Agent, Issue } from "@paperclipai/shared";
 import {
@@ -22,6 +22,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { EmptyState } from "../components/EmptyState";
 import { Identity } from "../components/Identity";
+import { DecisionReasonDialog } from "../components/DecisionReasonDialog";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { describeRunActivity } from "../lib/run-activity";
 import { classifyTaskWaiting, type TaskWaiting } from "../lib/task-waiting";
@@ -747,6 +748,7 @@ function ApprovalRow({
   companyName?: string | null;
   isDuplicate: boolean;
 }) {
+  const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const queryClient = useQueryClient();
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const payload = approval.payload as Record<string, unknown>;
@@ -765,7 +767,7 @@ function ApprovalRow({
     },
   });
   const rejectMutation = useMutation({
-    mutationFn: () => approvalsApi.reject(approval.id),
+    mutationFn: (note: string) => approvalsApi.reject(approval.id, note),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
     },
@@ -857,12 +859,22 @@ function ApprovalRow({
             variant="destructive"
             className="h-6 flex-1 px-2 text-[11px]"
             disabled={busy}
-            onClick={() => rejectMutation.mutate()}
+            onClick={() => setRejectDialogOpen(true)}
           >
             {rejectMutation.isPending ? "…" : "Reject"}
           </Button>
         </div>
       )}
+      <DecisionReasonDialog
+        open={rejectDialogOpen}
+        onOpenChange={setRejectDialogOpen}
+        action="reject"
+        isPending={rejectMutation.isPending}
+        onSubmit={(note) => {
+          setRejectDialogOpen(false);
+          rejectMutation.mutate(note);
+        }}
+      />
     </div>
   );
 }

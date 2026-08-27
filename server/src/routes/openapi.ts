@@ -2861,6 +2861,31 @@ registry.registerPath({
   },
 });
 
+// ─── Chat router (unified front door between Lane A and Lane B) ───────────────
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/chat/{agentId}/messages",
+  tags: ["agents"],
+  summary: "Route a chat message to Lane A (direct call) or Lane B (background task) and normalize the response",
+  body: z.object({
+    companyId: z.string().uuid(),
+    message: z.string().trim().min(1).max(20_000),
+    context: z.string().max(16_000).optional(),
+    conversationId: z.string().uuid().optional(),
+    laneHint: z.enum(["a", "b"]).optional(),
+  }),
+  responses: {
+    200: r.ok(),
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    429: r.tooManyRequests,
+  },
+});
+
 // ─── Access / invites / members ───────────────────────────────────────────────
 
 registry.registerPath({

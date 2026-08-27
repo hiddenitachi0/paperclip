@@ -29,6 +29,7 @@ import {
   SELF_REVIEW_PASS_REASON,
   buildSelfReviewPassIdempotencyKey,
   buildSelfReviewPassInstruction,
+  computeReviewedDiffFingerprint,
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
   evaluateSelfReviewDoneGate,
@@ -274,6 +275,40 @@ describe("detectRiskySurfaceFromDiffContent", () => {
       "\n",
     );
     expect(detectRiskySurfaceFromDiffContent(diff)).toEqual([]);
+  });
+});
+
+describe("computeReviewedDiffFingerprint", () => {
+  it("returns null only when both reads are null", () => {
+    expect(computeReviewedDiffFingerprint(null, null)).toBeNull();
+  });
+
+  // DUR-276: getChangedFilePathsForIssueWorkspace (1MB, --name-only) and
+  // getChangedDiffContentForIssueWorkspace (4MB, full hunks) are independent git invocations
+  // that can fail independently on maxBuffer overflow. If either comes back null, the
+  // fingerprint must be null too -- otherwise it silently degrades to a pure function of the
+  // file-path set, and two different diffs touching the same path(s) hash identically.
+  it("returns null when diffContent is null but changedFilePaths is not (content buffer overflow)", () => {
+    expect(computeReviewedDiffFingerprint(["server/src/adapters/agent-runtime-helpers.ts"], null)).toBeNull();
+  });
+
+  it("returns null when changedFilePaths is null but diffContent is not (path buffer overflow)", () => {
+    expect(computeReviewedDiffFingerprint(null, "+some content")).toBeNull();
+  });
+
+  it("does not collapse to path-only when two different diffs touch the same path", () => {
+    const path = ["server/src/adapters/agent-runtime-helpers.ts"];
+    const first = computeReviewedDiffFingerprint(path, "+benign change");
+    const second = computeReviewedDiffFingerprint(path, "+strip mcp_servers secret block");
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first).not.toEqual(second);
+  });
+
+  it("is stable for identical inputs regardless of path ordering", () => {
+    const a = computeReviewedDiffFingerprint(["b.ts", "a.ts"], "+content");
+    const b = computeReviewedDiffFingerprint(["a.ts", "b.ts"], "+content");
+    expect(a).toEqual(b);
   });
 });
 
@@ -869,6 +904,128 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
       expect(comments).toHaveLength(1);
       expect(comments[0]?.body).not.toContain("risky surface");
+    });
+
+    it("DUR-270: still schedules a fresh pass when a later commit on the same issue adds a risky-surface change, even though an earlier (non-risky) diff already completed its one pass", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+
+      // Fingerprint the diff exactly as evaluateSelfReviewDoneGate would have at the time the
+      // earlier pass was scheduled, and record it as a completed pass under a different run --
+      // simulating that pass reaching a terminal state without landing the handoff.
+      const earlierFingerprint = computeReviewedDiffFingerprint(
+        await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId }),
+        await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId }),
+      );
+      const earlierSourceRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: earlierSourceRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "completed",
+      });
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: SELF_REVIEW_PASS_REASON,
+        payload: { reviewedDiffFingerprint: earlierFingerprint },
+        status: "completed",
+        idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: earlierSourceRunId }),
+        requestedByActorType: "system",
+        requestedByActorId: "issue_self_review_gate",
+      });
+
+      // The issue continues and a NEW commit lands a real risky-surface change.
+      await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+      const riskyPath = path.join(repoRoot, "server/src/services/authorization.ts");
+      await fs.mkdir(path.dirname(riskyPath), { recursive: true });
+      await fs.writeFile(riskyPath, "// later risky change\n", "utf8");
+      await runGit(repoRoot, ["add", "server/src/services/authorization.ts"]);
+      await runGit(repoRoot, ["commit", "-m", "Later risky change"]);
+
+      const laterRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: laterRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: laterRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      // Must NOT silently bypass -- the new commit is risky and was never reviewed.
+      expect(result?.message).toContain("authorization or permissions");
+      expect(calls).toHaveLength(1);
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("risky surface");
+      expect(comments[0]?.body).toContain("If a dishonest agent wanted to abuse this change");
+    });
+
+    it("DUR-270: still lets a later run through without scheduling a second pass when the diff is unchanged since the completed pass (no DUR-245 regression)", async () => {
+      const { companyId, projectId, agentId, issueId } = await seedIssueWithWorkspace({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+
+      const fingerprint = computeReviewedDiffFingerprint(
+        await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId }),
+        await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId }),
+      );
+      const earlierSourceRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: earlierSourceRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "completed",
+      });
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: SELF_REVIEW_PASS_REASON,
+        payload: { reviewedDiffFingerprint: fingerprint },
+        status: "completed",
+        idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: earlierSourceRunId }),
+        requestedByActorType: "system",
+        requestedByActorId: "issue_self_review_gate",
+      });
+
+      const laterRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: laterRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: laterRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(result).toBeNull();
+      expect(calls).toHaveLength(0);
     });
   });
 

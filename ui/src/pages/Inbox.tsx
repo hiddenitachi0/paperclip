@@ -72,6 +72,7 @@ import { StatusIcon } from "../components/StatusIcon";
 import { cn } from "../lib/utils";
 import { StatusBadge } from "../components/StatusBadge";
 import { approvalLabel, defaultTypeIcon, typeIcon } from "../components/ApprovalPayload";
+import { DecisionReasonDialog } from "../components/DecisionReasonDialog";
 import { timeAgo } from "../lib/timeAgo";
 import { Button } from "@/components/ui/button";
 import {
@@ -415,7 +416,7 @@ function ApprovalInboxRow({
   approval: Approval;
   requesterName: string | null;
   onApprove: () => void;
-  onReject: () => void;
+  onReject: (note: string) => void;
   isPending: boolean;
   unreadState?: NonIssueUnreadState;
   onMarkRead?: () => void;
@@ -424,6 +425,7 @@ function ApprovalInboxRow({
   selected?: boolean;
   className?: string;
 }) {
+  const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const label = approvalLabel(approval.type, approval.payload as Record<string, unknown> | null);
   const showResolutionButtons =
@@ -511,7 +513,7 @@ function ApprovalInboxRow({
               variant="destructive"
               size="sm"
               className="h-8 px-3"
-              onClick={onReject}
+              onClick={() => setRejectDialogOpen(true)}
               disabled={isPending}
             >
               Reject
@@ -533,13 +535,25 @@ function ApprovalInboxRow({
             variant="destructive"
             size="sm"
             className="h-8 px-3"
-            onClick={onReject}
+            onClick={() => setRejectDialogOpen(true)}
             disabled={isPending}
           >
             Reject
           </Button>
         </div>
       ) : null}
+      {showResolutionButtons && (
+        <DecisionReasonDialog
+          open={rejectDialogOpen}
+          onOpenChange={setRejectDialogOpen}
+          action="reject"
+          isPending={isPending}
+          onSubmit={(note) => {
+            setRejectDialogOpen(false);
+            onReject(note);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1444,7 +1458,7 @@ export function Inbox() {
   });
 
   const rejectMutation = useMutation({
-    mutationFn: (id: string) => approvalsApi.reject(id),
+    mutationFn: ({ id, note }: { id: string; note: string }) => approvalsApi.reject(id, note),
     onSuccess: () => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
@@ -2611,7 +2625,7 @@ export function Inbox() {
                           selected={isSelected}
                           requesterName={agentName(item.approval.requestedByAgentId)}
                           onApprove={() => approveMutation.mutate(item.approval.id)}
-                          onReject={() => rejectMutation.mutate(item.approval.id)}
+                          onReject={(note) => rejectMutation.mutate({ id: item.approval.id, note })}
                           isPending={approveMutation.isPending || rejectMutation.isPending}
                           unreadState={nonIssueUnreadState(approvalKey)}
                           onMarkRead={() => handleMarkNonIssueRead(approvalKey)}
