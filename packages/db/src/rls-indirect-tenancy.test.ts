@@ -13,12 +13,12 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 type Db = ReturnType<typeof createDb>;
 
-// DUR-250: proves migration 0149's indirect-tenancy RLS policies for
+// DUR-250: proves migration 0150's indirect-tenancy RLS policies for
 // company_secret_versions (tenanted via secret_id -> company_secrets.company_id)
 // and cli_auth_challenges (tenanted via its own nullable requested_company_id)
 // hold against a real Postgres instance, connecting as paperclip_app_scoped --
 // the same shape of connection a leaked DATABASE_URL or a stray script would
-// make. See 0149's header comment and migration 0148's "Deliberately
+// make. See 0150's header comment and migration 0149's "Deliberately
 // excluded" list for why these two tables needed their own migration.
 describeEmbeddedPostgres("DUR-250: RLS indirect-tenancy coverage (paperclip_app_scoped)", () => {
   let db!: Db;

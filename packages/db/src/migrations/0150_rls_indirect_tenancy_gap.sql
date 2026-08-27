@@ -1,9 +1,9 @@
 -- DUR-250 (Phase 2 of DUR-247): closes the `company_secret_versions` /
 -- `cli_auth_challenges` table-coverage gap flagged in Security Reviewer 2's
--- review of PR #166 -- see migration 0148's header comment, "Deliberately
+-- review of PR #166 -- see migration 0149's header comment, "Deliberately
 -- excluded from the table lists below", for the full description of why
 -- these two were left out of Phase 1. Both are added here as their own
--- migration (rather than editing 0148) because 0148 already shipped with
+-- migration (rather than editing 0149) because 0149 already shipped with
 -- explicit sign-off from two independent security reviews; changing its
 -- content would re-open that review rather than extend it.
 --
@@ -15,20 +15,20 @@
 -- (those remain out of scope for this migration; they are not security
 -- material the way company_secret_versions is, and are left for a future
 -- pass). company_secrets itself already carries the same paperclip_app_scope
--- policy (added in 0148), so the subquery is itself correctly company-scoped
+-- policy (added in 0149), so the subquery is itself correctly company-scoped
 -- when this role runs it.
 --
 -- cli_auth_challenges holds requested_company_id directly (nullable, since
 -- pre-auth CLI device-auth rows haven't picked a company yet) plus
 -- secret_hash/pending_key_hash for in-flight device auth -- same
--- nullable-column policy shape as the second table list in 0148.
+-- nullable-column policy shape as the second table list in 0149.
 --
 -- Neither table was previously granted to paperclip_app_scoped at all
 -- (company_secret_versions failed closed with a permission-denied error
 -- rather than open; cli_auth_challenges was simply unreachable through this
 -- role), so this migration is additive-only: it grants access for the first
 -- time and immediately gates that new access behind RLS in the same
--- statement group, matching 0148's convention of never having grant-without-
+-- statement group, matching 0149's convention of never having grant-without-
 -- policy exist as an intermediate state within a migration.
 DO $$
 BEGIN

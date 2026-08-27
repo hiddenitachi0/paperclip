@@ -14,7 +14,7 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 type Db = ReturnType<typeof createDb>;
 
-// DUR-247: proves the Row-Level Security policies added in migration 0148
+// DUR-247: proves the Row-Level Security policies added in migration 0149
 // actually hold against a real Postgres instance, connecting directly to the
 // database (never through the app's Express routes/API) as the
 // `paperclip_app_scoped` role -- the same shape of connection a leaked
@@ -154,7 +154,7 @@ describeEmbeddedPostgres("DUR-247: RLS company_id isolation (paperclip_app_scope
 
   it("paperclip_app_scoped is never a member of the paperclip_app_bypass escape hatch", async () => {
     // The RLS bypass is now keyed off Postgres role membership
-    // (pg_has_role), not a session claim -- see migration 0148's header
+    // (pg_has_role), not a session claim -- see migration 0149's header
     // comment. This is the security-critical invariant that makes the
     // bypass non-self-grantable: it must be asserted directly against the
     // role catalog, because unlike a GUC, no SQL executed on a

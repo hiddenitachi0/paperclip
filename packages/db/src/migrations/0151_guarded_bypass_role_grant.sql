@@ -2,7 +2,7 @@
 -- reserved-connection bypass path (packages/db/src/company-scope.ts,
 -- runInCompanyScopeBypass/withCompanyScopeBypass) can be wired into
 -- board/board_delegate/none-actor request handling and background
--- schedulers without throwing on every call -- see migration 0148's header
+-- schedulers without throwing on every call -- see migration 0149's header
 -- for why the bypass is a role-membership check, not a settable session GUC.
 --
 -- Guarded, not a plain `GRANT paperclip_app_bypass TO CURRENT_USER`: this
@@ -13,7 +13,7 @@
 -- DATABASE_URL role to paperclip_app_scoped, replaying this migration
 -- unguarded against an environment bootstrapped *after* that cutover would
 -- grant paperclip_app_bypass to paperclip_app_scoped -- directly violating
--- migration 0148's SECURITY-CRITICAL INVARIANT ("paperclip_app_scoped must
+-- migration 0149's SECURITY-CRITICAL INVARIANT ("paperclip_app_scoped must
 -- NEVER be granted paperclip_app_bypass membership"), silently, with no code
 -- change and no review trigger to catch it.
 --
@@ -24,7 +24,7 @@
 DO $$
 BEGIN
   IF CURRENT_USER = 'paperclip_app_scoped' THEN
-    RAISE EXCEPTION 'refusing to grant paperclip_app_bypass to paperclip_app_scoped -- see migration 0148 SECURITY-CRITICAL INVARIANT';
+    RAISE EXCEPTION 'refusing to grant paperclip_app_bypass to paperclip_app_scoped -- see migration 0149 SECURITY-CRITICAL INVARIANT';
   END IF;
 
   EXECUTE format('GRANT paperclip_app_bypass TO %I', CURRENT_USER);

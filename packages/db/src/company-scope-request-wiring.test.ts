@@ -127,7 +127,7 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
   it("runInCompanyScopeBypass throws when the connection's role is not a member of paperclip_app_bypass", async () => {
     // pg_has_role() always returns true for the migration-running superuser
     // regardless of actual grants, so the negative case has to run as a real
-    // non-superuser role -- paperclip_app_scoped (created by migration 0148)
+    // non-superuser role -- paperclip_app_scoped (created by migration 0149)
     // is never granted paperclip_app_bypass, by design.
     const sql = postgres(connectionString, { max: 1 });
     await sql.unsafe("SET ROLE paperclip_app_scoped");

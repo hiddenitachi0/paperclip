@@ -9,7 +9,7 @@ import * as schema from "./schema/index.js";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // DUR-247: the supported way to interact with the Postgres Row-Level
-// Security policies added in migration 0148 (see that migration's header
+// Security policies added in migration 0149 (see that migration's header
 // comment for the full design).
 //
 // withCompanyScope sets the `app.current_company_id` session claim via
