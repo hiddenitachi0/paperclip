@@ -1849,6 +1849,18 @@ function normalizeMaxConcurrentRuns(value: unknown) {
   return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_MIN, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
 }
 
+// DUR-293: enqueueWakeup collapses every non-throwing no-op (a genuine "skipped, nothing
+// will ever run" outcome as well as "deferred, will run once the active run finishes") to
+// a plain `null` return, indistinguishable from each other or from a real throw. Most
+// callers only care that the call didn't throw, so that collapse is preserved for the
+// default `run | null` return. Callers that need to tell a true no-op apart from a real
+// (even if delayed) schedule -- e.g. the self-review gate deciding whether it's honest to
+// tell the agent "a follow-up run is scheduled" -- can pass onNotScheduled to observe the
+// actual outcome without changing what enqueueWakeup returns to everyone else.
+type WakeupNotScheduledInfo =
+  | { kind: "skipped"; reason: string; unresolvedBlockerIssueIds?: string[] }
+  | { kind: "deferred"; reason: string };
+
 interface WakeupOptions {
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
@@ -1858,6 +1870,7 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  onNotScheduled?: (info: WakeupNotScheduledInfo) => void;
 }
 
 type UsageTotals = {
@@ -13558,6 +13571,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await writeSkippedRequest("company.inactive", {
         error: `Wake suppressed because company status is ${companyStatus}`,
       });
+      opts.onNotScheduled?.({ kind: "skipped", reason: "company.inactive" });
       return null;
     }
 
@@ -13649,10 +13663,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     if (source === "timer" && !policy.enabled) {
       await writeSkippedRequest("heartbeat.disabled");
+      opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.disabled" });
       return null;
     }
     if (source !== "timer" && !policy.wakeOnDemand) {
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled");
+      opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.wakeOnDemand.disabled" });
       return null;
     }
 
@@ -13667,6 +13683,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         reason: "No assigned todo or in_progress issue requires this agent before timer adapter invocation.",
       });
       await markTimerHeartbeatChecked(agentId, source);
+      opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.timer.no_actionable_work" });
       return null;
     }
 
@@ -13702,6 +13719,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               securityPrinciples: ["Complete Mediation", "Fail Securely", "Secure Defaults"],
             },
           });
+          opts.onNotScheduled?.({ kind: "skipped", reason: "issue_tree_hold_active" });
           return null;
         }
 
@@ -13755,7 +13773,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             idempotencyKey: opts.idempotencyKey ?? null,
             finishedAt: new Date(),
           });
-          return { kind: "skipped" as const };
+          return { kind: "skipped" as const, reason: "issue_execution_issue_not_found" };
         }
 
         const cancelStaleScheduledRetry = async (scheduledRun: typeof heartbeatRuns.$inferSelect) => {
@@ -14011,7 +14029,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             idempotencyKey: opts.idempotencyKey ?? null,
             finishedAt: new Date(),
           });
-          return { kind: "skipped" as const };
+          return {
+            kind: "skipped" as const,
+            reason: "issue_dependencies_blocked",
+            unresolvedBlockerIssueIds: dependencyReadiness.unresolvedBlockerIssueIds,
+          };
         }
 
         if (activeExecutionRun) {
@@ -14124,7 +14146,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 })
                 .where(eq(agentWakeupRequests.id, existingDeferred.id));
 
-              return { kind: "deferred" as const };
+              return { kind: "deferred" as const, reason: "issue_execution_deferred" };
             }
 
             await tx.insert(agentWakeupRequests).values({
@@ -14140,7 +14162,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               idempotencyKey: opts.idempotencyKey ?? null,
             });
 
-            return { kind: "deferred" as const };
+            return { kind: "deferred" as const, reason: "issue_execution_deferred" };
           }
         }
 
@@ -14176,7 +14198,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               })
               .where(eq(agents.id, agentId));
           }
-          return { kind: "skipped" as const };
+          return { kind: "skipped" as const, reason: dailyCapBlock.reason };
         }
 
         const wakeupRequest = await tx
@@ -14227,7 +14249,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "queued" as const, run: newRun };
       });
 
-      if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
+      if (outcome.kind === "deferred") {
+        opts.onNotScheduled?.({ kind: "deferred", reason: outcome.reason });
+        return null;
+      }
+      if (outcome.kind === "skipped") {
+        opts.onNotScheduled?.({
+          kind: "skipped",
+          reason: outcome.reason,
+          ...(outcome.unresolvedBlockerIssueIds ? { unresolvedBlockerIssueIds: outcome.unresolvedBlockerIssueIds } : {}),
+        });
+        return null;
+      }
       if (outcome.kind === "coalesced") {
         await startNextQueuedRunForAgent(agent.id);
         return outcome.run;
@@ -14350,7 +14383,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             })
             .where(eq(agents.id, agentId));
         }
-        return { kind: "skipped" as const };
+        return { kind: "skipped" as const, reason: dailyCapBlock.reason };
       }
 
       const wakeupRequest = await tx
@@ -14397,7 +14430,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { kind: "queued" as const, run: newRun };
     });
 
-    if (queueOutcome.kind === "skipped") return null;
+    if (queueOutcome.kind === "skipped") {
+      opts.onNotScheduled?.({ kind: "skipped", reason: queueOutcome.reason });
+      return null;
+    }
     const newRun = queueOutcome.run;
 
     publishLiveEvent({

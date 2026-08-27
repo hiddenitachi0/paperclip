@@ -486,6 +486,16 @@ export async function findCompletedSelfReviewPassForIssue(
   );
 }
 
+// DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /
+// enqueueWakeup) has many legitimate no-throw skip paths -- company inactive, heartbeat
+// disabled, an unresolved dependency blocker, etc -- that just write a "skipped" wakeup
+// row and resolve to `null`, indistinguishable from a real schedule by return value alone.
+// Passing onNotScheduled lets the gate observe which of those actually happened instead of
+// assuming every non-throwing call means a corrective run was scheduled.
+export type SelfReviewGateWakeupNotScheduledInfo =
+  | { kind: "skipped"; reason: string; unresolvedBlockerIssueIds?: string[] }
+  | { kind: "deferred"; reason: string };
+
 export type SelfReviewGateWakeup = (
   agentId: string,
   opts: {
@@ -497,6 +507,7 @@ export type SelfReviewGateWakeup = (
     requestedByActorType?: "user" | "agent" | "system";
     requestedByActorId?: string | null;
     contextSnapshot?: Record<string, unknown>;
+    onNotScheduled?: (info: SelfReviewGateWakeupNotScheduledInfo) => void;
   },
 ) => Promise<unknown>;
 
@@ -612,6 +623,14 @@ export async function evaluateSelfReviewDoneGate(input: {
     requestedStatus: input.requestedStatus,
   });
 
+  // DUR-293: input.wakeup resolving without throwing does NOT mean a corrective run was
+  // actually scheduled -- enqueueWakeup has many legitimate no-throw skip paths (company
+  // inactive, heartbeat disabled, an unresolved dependency blocker, ...) that just record a
+  // "skipped" wakeup row and resolve to null, indistinguishable from a real schedule by
+  // return value alone. onNotScheduled reports which (if either) actually happened so this
+  // gate can respond honestly instead of always claiming "I've scheduled a follow-up run".
+  let notScheduled: SelfReviewGateWakeupNotScheduledInfo | undefined;
+
   try {
     await input.wakeup(input.actor.agentId, {
       source: "automation",
@@ -645,11 +664,61 @@ export async function evaluateSelfReviewDoneGate(input: {
       idempotencyKey,
       requestedByActorType: "system",
       requestedByActorId: "issue_self_review_gate",
+      onNotScheduled: (info) => {
+        notScheduled = info;
+      },
     });
   } catch {
     // Scheduling the extra pass failed (e.g. the agent is paused or the company is over
     // budget). Don't let a self-review scheduling failure block a real disposition — let
     // the transition through as requested instead.
+    return null;
+  }
+
+  // "deferred" means the wake is genuinely queued behind the caller's own still-active
+  // execution run and will fire once that run finishes -- that's a real scheduled follow-up,
+  // just like "queued"/"coalesced", so it falls through to the normal blocking message below.
+  if (notScheduled?.kind === "skipped") {
+    if (notScheduled.reason === "issue_dependencies_blocked") {
+      // Honest version of the standard "blocked by unresolved blockers" shape used elsewhere
+      // (see server/src/routes/issues.ts) instead of the false "I've scheduled a follow-up
+      // run" claim -- no run was, or ever will be, dispatched by this skipped wake.
+      const blockerNote =
+        notScheduled.unresolvedBlockerIssueIds && notScheduled.unresolvedBlockerIssueIds.length > 0
+          ? ` (${notScheduled.unresolvedBlockerIssueIds.join(", ")})`
+          : "";
+      return {
+        message:
+          `This task is blocked by unresolved blocker issue(s)${blockerNote} and can't move to review or ` +
+          "done until they're resolved. No follow-up self-review run was scheduled for this attempt " +
+          "because the issue is dependency-blocked, not because a check is pending.",
+      };
+    }
+    // DUR-295 (security review of DUR-293): the agent's own daily heartbeat run/cost cap
+    // (getHeartbeatDailyCapBlock in heartbeat.ts) is keyed on THIS agent's own usage for the
+    // current UTC day -- unlike the other skip reasons below, an agent can land here through
+    // its own ordinary wakeup volume (no operator action, no special permission needed), and
+    // then have this exact PATCH -- the one the self-review pass exists to check -- sail
+    // through with the adversarial risky-surface review never run. Letting the transition
+    // through here would turn "I happened to be busy today" into a silent bypass of the one
+    // review this gate is supposed to guarantee. Block honestly instead: the cap resets at
+    // the next UTC day boundary, so this is a real, bounded wait, not a permanent stall.
+    if (notScheduled.reason === "heartbeat.daily_run_limit" || notScheduled.reason === "heartbeat.daily_cost_limit") {
+      return {
+        message:
+          "This task needs one more self-check before it can move to review or done, but I couldn't " +
+          "schedule that follow-up run because this agent has already hit its own daily heartbeat cap " +
+          "for today. No follow-up run was, or will be, scheduled for this attempt -- retrying this PATCH " +
+          "won't help. The cap resets at the next UTC day boundary; retry after that, or ask an operator " +
+          "to raise it sooner.",
+      };
+    }
+    // Every other no-throw skip reason (company inactive, heartbeat disabled on this agent,
+    // wakeOnDemand disabled, an active tree-control pause hold, ...) is operator-controlled
+    // configuration or state, not something this agent's own request volume can land it in --
+    // nothing was, or ever will be, scheduled either way, so treat it the same as the
+    // catch block above and let the transition through rather than block forever on a promise
+    // that can't be kept.
     return null;
   }
 

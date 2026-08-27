@@ -42,6 +42,7 @@ import {
   issueExecutionPolicyOptsOutOfSelfReview,
   postSelfReviewPassNoticeComment,
   type SelfReviewGateWakeup,
+  type SelfReviewGateWakeupNotScheduledInfo,
 } from "./self-review-gate.js";
 
 const execFileAsync = promisify(execFile);
@@ -512,6 +513,157 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     // gated) row -- see shouldDeferFollowupWakeForSameIssue's requiresDistinctRunBoundary.
     expect(calls[0]?.opts.contextSnapshot?.requiresDistinctRunBoundary).toBe(true);
   });
+
+  // DUR-293: input.wakeup (heartbeat.wakeup / enqueueWakeup) resolving without throwing does
+  // NOT mean a corrective run was actually scheduled -- many of its skip paths just write a
+  // "skipped" wakeup row and resolve to null. A mock that reports one of those skip outcomes
+  // via onNotScheduled (exactly like the real enqueueWakeup now does) simulates that gap.
+  function makeSkippedWakeup(info: SelfReviewGateWakeupNotScheduledInfo) {
+    const calls: Array<{ agentId: string; opts: Parameters<SelfReviewGateWakeup>[1] }> = [];
+    const wakeup: SelfReviewGateWakeup = async (agentId, opts) => {
+      calls.push({ agentId, opts });
+      opts.onNotScheduled?.(info);
+      return null;
+    };
+    return { wakeup, calls };
+  }
+
+  it("returns an honest blocked-by-dependency message instead of a false 'scheduled' claim when the wake is silently skipped for an unresolved blocker", async () => {
+    const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+    const blockerIssueId = randomUUID();
+    const { wakeup, calls } = makeSkippedWakeup({
+      kind: "skipped",
+      reason: "issue_dependencies_blocked",
+      unresolvedBlockerIssueIds: [blockerIssueId],
+    });
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    expect(calls).toHaveLength(1);
+    // Still blocks the transition (the dependency really is unresolved)...
+    expect(result).not.toBeNull();
+    // ...but the message must be honest: no follow-up run exists or ever will.
+    expect(result?.message).not.toContain("scheduled a separate follow-up run");
+    expect(result?.message.toLowerCase()).toContain("blocked");
+    expect(result?.message).toContain(blockerIssueId);
+
+    // No misleading "please self-review" comment should be posted for a run that was never
+    // actually scheduled.
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+  });
+
+  it("lets the transition through when the wake is silently skipped for a reason unrelated to the issue's own dependency state", async () => {
+    const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+    const { wakeup, calls } = makeSkippedWakeup({
+      kind: "skipped",
+      reason: "heartbeat.wakeOnDemand.disabled",
+    });
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    expect(calls).toHaveLength(1);
+    // No corrective run was, or ever will be, scheduled -- and nothing about the issue
+    // itself is blocking the transition, so it must be allowed through rather than stuck
+    // behind a promise that can't be kept.
+    expect(result).toBeNull();
+  });
+
+  it("still blocks with the normal follow-up message when the wake is genuinely deferred (queued behind the caller's own active run)", async () => {
+    const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+    const { wakeup, calls } = makeSkippedWakeup({ kind: "deferred", reason: "issue_execution_deferred" });
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    expect(calls).toHaveLength(1);
+    // A deferred wake is a real (if delayed) schedule -- it will fire once the active run
+    // finishes -- so this is the same "wait for the follow-up run" outcome as a fresh schedule.
+    expect(result).not.toBeNull();
+    expect(result?.message).toContain("scheduled a separate follow-up run");
+  });
+
+  // DUR-295 (security review of DUR-293): unlike the other no-throw skip reasons, the agent's
+  // own daily heartbeat run/cost cap is keyed on this SAME agent's own usage for the current
+  // UTC day -- an agent can land here through ordinary wakeup volume with no special
+  // permission or operator action, so letting the transition through here (like the other
+  // skip reasons) would let a busy day silently bypass the one adversarial review this gate
+  // exists to guarantee. It must block honestly instead, same shape as the dependency-blocked
+  // case above.
+  it.each(["heartbeat.daily_run_limit", "heartbeat.daily_cost_limit"] as const)(
+    "returns an honest blocked message instead of letting the transition through when the wake is silently skipped for %s",
+    async (reason) => {
+      const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+      const { wakeup, calls } = makeSkippedWakeup({ kind: "skipped", reason });
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: {
+          id: issueId,
+          identifier: `T-1`,
+          companyId,
+          projectId,
+          executionPolicy: null,
+        },
+        actor: { actorType: "agent", agentId, runId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(calls).toHaveLength(1);
+      // Still blocks the transition -- letting it through would bypass the review this
+      // agent's own usage, not an operator decision, made unschedulable.
+      expect(result).not.toBeNull();
+      // ...but the message must be honest: no follow-up run exists or ever will for this
+      // attempt, unlike the false "scheduled a separate follow-up run" claim this PR fixes.
+      expect(result?.message).not.toContain("scheduled a separate follow-up run");
+      expect(result?.message.toLowerCase()).toContain("daily heartbeat cap");
+
+      // No misleading "please self-review" comment should be posted for a run that was never
+      // actually scheduled.
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(0);
+    },
+  );
 
   it("does not double-post the comment when a self-review wake already exists for this run chain", async () => {
     const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
