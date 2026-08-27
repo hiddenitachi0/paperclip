@@ -1051,6 +1051,13 @@
       "when": 1787160040000,
       "tag": "0149_rls_indirect_tenancy_gap",
       "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1787160050000,
+      "tag": "0150_guarded_bypass_role_grant",
+      "breakpoints": true
     }
   ]
 }
