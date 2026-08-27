@@ -5,7 +5,7 @@
 // row: handle + lifecycle status) and renders that identity into a
 // PERSONA.md file inside the agent's managed instructions bundle, which
 // AGENTS.md references with exactly one line.
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, personas } from "@paperclipai/db";
 import type { CreatePersonaInput, UpdatePersonaInput } from "@paperclipai/shared/validators/persona";
@@ -197,6 +197,24 @@ export function personaService(db: Db) {
     await db.delete(personas).where(eq(personas.id, personaId));
   }
 
+  // DUR-177: batched agentId -> persona display name lookup. Used by the
+  // approvals route to tag a credential/approval request as persona-related
+  // (an operator-facing surface, not the persona CRUD API above) without an
+  // N+1 query per row when rendering an approvals list. Only agents that
+  // actually have a `personas` row come back -- a plain (non-persona) agent
+  // requesting an approval is absent from the returned map, which callers
+  // should read as "not persona-related".
+  async function getPersonaDisplayNamesByAgentIds(agentIds: string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(agentIds)];
+    if (unique.length === 0) return new Map();
+    const rows = await db
+      .select({ agentId: personas.agentId, displayName: agents.name })
+      .from(personas)
+      .innerJoin(agents, eq(agents.id, personas.agentId))
+      .where(inArray(personas.agentId, unique));
+    return new Map(rows.map((row) => [row.agentId, row.displayName]));
+  }
+
   return {
     createPersona,
     getPersonaByAgentId,
@@ -205,5 +223,6 @@ export function personaService(db: Db) {
     updatePersona,
     updatePersonaById,
     deletePersonaById,
+    getPersonaDisplayNamesByAgentIds,
   };
 }

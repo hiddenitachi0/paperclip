@@ -42,6 +42,18 @@ vi.mock("../services/agents.js", () => ({
   agentService: () => mockAgentsSvc,
 }));
 
+const GENERATE_IMAGE_TOOL_NAME = "paperclip.media-studio:generate-image";
+
+const mockGenerationGuard = vi.hoisted(() => ({
+  reserve: vi.fn(async () => ({ allowed: true, personaId: null, countToday: 0, cap: null })),
+  release: vi.fn(),
+}));
+
+vi.mock("../services/persona-generation-guard.js", () => ({
+  personaGenerationGuard: () => mockGenerationGuard,
+  GENERATE_IMAGE_TOOL_NAME: "paperclip.media-studio:generate-image",
+}));
+
 async function createApp(
   actor: Record<string, unknown>,
   loaderOverrides: Record<string, unknown> = {},
@@ -1342,5 +1354,160 @@ describe("DUR-189 plugin tool grants", () => {
 
     expect(res.status).toBe(422);
     expect(mockAgentsSvc.syncPluginToolGrants).not.toHaveBeenCalled();
+  });
+});
+
+describe("DUR-177 item 18: persona daily image-generation cap", () => {
+  beforeEach(() => {
+    mockGenerationGuard.reserve.mockReset();
+    mockGenerationGuard.release.mockReset();
+    mockGenerationGuard.reserve.mockResolvedValue({ allowed: true, personaId: null, countToday: 0, cap: null });
+  });
+
+  function toolExecuteApp(executeTool = vi.fn().mockResolvedValue({ result: { content: "ok" } })) {
+    return createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: GENERATE_IMAGE_TOOL_NAME })),
+          executeTool,
+        },
+      },
+    });
+  }
+
+  it("does not consult the generation guard for tools other than generate-image", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ result: { content: "ok" } });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA }],
+        [{ companyId: companyA, agentId: agentA }],
+        [{ companyId: companyA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockGenerationGuard.reserve).not.toHaveBeenCalled();
+    expect(executeTool).toHaveBeenCalled();
+  });
+
+  it("blocks generate-image once the persona has hit her daily cap, without calling executeTool", async () => {
+    mockGenerationGuard.reserve.mockResolvedValue({
+      allowed: false,
+      personaId: "persona-1",
+      countToday: 5,
+      cap: 5,
+    });
+    const executeTool = vi.fn();
+    const { app } = await toolExecuteApp(executeTool);
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: GENERATE_IMAGE_TOOL_NAME,
+        parameters: { prompt: "a cat" },
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/daily image-generation cap/i);
+    expect(res.body.error).toContain("5/5");
+    expect(mockGenerationGuard.reserve).toHaveBeenCalledWith(agentA);
+    expect(executeTool).not.toHaveBeenCalled();
+    expect(mockGenerationGuard.release).not.toHaveBeenCalled();
+  });
+
+  it("reserves a slot and executes generate-image when the persona is under her cap", async () => {
+    mockGenerationGuard.reserve.mockResolvedValue({
+      allowed: true,
+      personaId: "persona-1",
+      countToday: 3,
+      cap: 5,
+    });
+    const executeTool = vi.fn().mockResolvedValue({ result: { content: "generated" } });
+    const { app } = await toolExecuteApp(executeTool);
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: GENERATE_IMAGE_TOOL_NAME,
+        parameters: { prompt: "a cat" },
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+    expect(mockGenerationGuard.release).not.toHaveBeenCalled();
+  });
+
+  it("does not enforce a cap for a persona with no dailyGenerationCap set (DUR-63: opt-in, no global default)", async () => {
+    mockGenerationGuard.reserve.mockResolvedValue({ allowed: true, personaId: "persona-1", countToday: 0, cap: null });
+    const executeTool = vi.fn().mockResolvedValue({ result: { content: "generated" } });
+    const { app } = await toolExecuteApp(executeTool);
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: GENERATE_IMAGE_TOOL_NAME,
+        parameters: { prompt: "a cat" },
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalled();
+  });
+
+  it("releases the reservation when the generation itself reports an error, so a failed attempt doesn't burn the cap", async () => {
+    mockGenerationGuard.reserve.mockResolvedValue({ allowed: true, personaId: "persona-1", countToday: 3, cap: 5 });
+    const executeTool = vi.fn().mockResolvedValue({ result: { error: "provider unavailable" } });
+    const { app } = await toolExecuteApp(executeTool);
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: GENERATE_IMAGE_TOOL_NAME,
+        parameters: { prompt: "a cat" },
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockGenerationGuard.release).toHaveBeenCalledWith("persona-1");
+  });
+
+  it("releases the reservation when the tool dispatcher throws", async () => {
+    mockGenerationGuard.reserve.mockResolvedValue({ allowed: true, personaId: "persona-1", countToday: 3, cap: 5 });
+    const executeTool = vi.fn().mockRejectedValue(new Error("worker crashed"));
+    const { app } = await toolExecuteApp(executeTool);
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: GENERATE_IMAGE_TOOL_NAME,
+        parameters: { prompt: "a cat" },
+        runContext: { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(502);
+    expect(mockGenerationGuard.release).toHaveBeenCalledWith("persona-1");
   });
 });

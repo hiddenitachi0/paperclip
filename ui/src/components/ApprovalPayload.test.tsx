@@ -7,9 +7,12 @@ import {
   ApprovalPayloadRenderer,
   approvalDeployBranchInfo,
   approvalDuplicateKey,
+  approvalIsPersonaRequest,
   approvalLabel,
   approvalTargetBadge,
   approvalTechnicalReference,
+  credentialRequestFields,
+  credentialRequestFriendlyName,
 } from "./ApprovalPayload";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -103,6 +106,49 @@ describe("approvalDeployBranchInfo", () => {
   });
 });
 
+describe("approvalIsPersonaRequest", () => {
+  it("is true only when the server tagged the payload as persona-related", () => {
+    expect(approvalIsPersonaRequest({ isPersonaRequest: true, personaDisplayName: "Maja" })).toBe(true);
+    expect(approvalIsPersonaRequest({ envKey: "META_IG_TOKEN" })).toBe(false);
+    expect(approvalIsPersonaRequest(null)).toBe(false);
+  });
+});
+
+describe("credentialRequestFields / credentialRequestFriendlyName (DUR-177 item 16)", () => {
+  it("never surfaces the raw envKey for a persona-tagged request", () => {
+    const payload = {
+      envKey: "META_IG_TOKEN",
+      name: "Instagram access token, from the Meta app you set up",
+      isPersonaRequest: true,
+      personaDisplayName: "Maja",
+    };
+    const fields = credentialRequestFields(payload);
+    expect(fields.isPersonaRequest).toBe(true);
+    expect(fields.personaDisplayName).toBe("Maja");
+    expect(credentialRequestFriendlyName(payload)).toBe(
+      "Maja's Instagram access token, from the Meta app you set up",
+    );
+  });
+
+  it("keeps the existing envKey-based label for a non-persona request", () => {
+    const payload = { envKey: "GITHUB_TOKEN" };
+    expect(credentialRequestFields(payload).isPersonaRequest).toBe(false);
+    expect(credentialRequestFriendlyName(payload)).toBe("Value for GITHUB_TOKEN");
+  });
+
+  it("falls back to a generic label when there is no envKey and no persona tag", () => {
+    expect(credentialRequestFriendlyName({})).toBe("Credential value");
+  });
+
+  it("does not treat isPersonaRequest as sufficient without a persona display name", () => {
+    // Defensive: the server always pairs these two fields, but the client
+    // helper should not invent persona phrasing from a half-populated payload.
+    const payload = { envKey: "META_IG_TOKEN", isPersonaRequest: true };
+    expect(credentialRequestFields(payload).isPersonaRequest).toBe(false);
+    expect(credentialRequestFriendlyName(payload)).toBe("Value for META_IG_TOKEN");
+  });
+});
+
 describe("ApprovalPayloadRenderer", () => {
   let container: HTMLDivElement;
 
@@ -165,6 +211,52 @@ describe("ApprovalPayloadRenderer", () => {
 
     expect(container.textContent).toContain("Board asked for approval before posting the frog.");
     expect(container.textContent).not.toContain("TitleReply with an ASCII frog");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("hides the raw environment variable name for a persona-tagged credential_request (DUR-177 item 16)", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="credential_request"
+          payload={{
+            envKey: "META_IG_TOKEN",
+            name: "Instagram access token, from the Meta app you set up",
+            isPersonaRequest: true,
+            personaDisplayName: "Maja",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Maja's Instagram access token, from the Meta app you set up");
+    expect(container.textContent).not.toContain("META_IG_TOKEN");
+    expect(container.textContent).not.toContain("Environment variable");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("still shows the environment variable name for a non-persona credential_request", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="credential_request"
+          payload={{ envKey: "GITHUB_TOKEN", name: "GitHub token" }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("GITHUB_TOKEN");
+    expect(container.textContent).toContain("Environment variable");
 
     act(() => {
       root.unmount();

@@ -48,6 +48,7 @@ import {
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { agentService } from "../services/agents.js";
+import { personaGenerationGuard, GENERATE_IMAGE_TOOL_NAME } from "../services/persona-generation-guard.js";
 import { agentPluginToolSelectionSchema } from "@paperclipai/shared/validators/plugin-tool-grants";
 import { validate } from "../middleware/validate.js";
 import {
@@ -519,6 +520,7 @@ export function pluginRoutes(
   });
   const issuesSvc = issueService(db);
   const agentsSvc = agentService(db);
+  const generationGuard = personaGenerationGuard(db);
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -1095,14 +1097,39 @@ export function pluginRoutes(
       return;
     }
 
+    // DUR-177 item 18: cap image generations per persona per day, enforced
+    // here (not as prompt guidance) since this is the single choke point
+    // every "generate an image" call passes through regardless of which
+    // routine/run triggered it. A no-op for non-persona agents and for
+    // personas with no cap set (DUR-63: opt-in, no global default).
+    let generationReservation: string | null = null;
+    if (tool === GENERATE_IMAGE_TOOL_NAME) {
+      const reservation = await generationGuard.reserve(runContext.agentId);
+      if (!reservation.allowed) {
+        res.status(403).json({
+          error: `Daily image-generation cap reached for this persona (${reservation.countToday}/${reservation.cap} today). It resets at midnight UTC.`,
+        });
+        return;
+      }
+      generationReservation = reservation.personaId;
+    }
+
     try {
       const result = await toolDeps.toolDispatcher.executeTool(
         tool,
         parameters ?? {},
         runContext,
       );
+      if (generationReservation && result?.result?.error) {
+        // The reserved slot was never actually used -- give it back so a
+        // failed generation doesn't burn the persona's daily budget.
+        await generationGuard.release(generationReservation);
+      }
       res.json(result);
     } catch (err) {
+      if (generationReservation) {
+        await generationGuard.release(generationReservation);
+      }
       const message = err instanceof Error ? err.message : String(err);
 
       // Distinguish between "worker not running" (502) and other errors (500)
