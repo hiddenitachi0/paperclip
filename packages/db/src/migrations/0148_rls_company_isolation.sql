@@ -74,6 +74,30 @@
 -- `ALTER TABLE ... FORCE ROW LEVEL SECURITY` for every table listed below
 -- against the existing owner role. Only after Phase 2 does this boundary
 -- bind the credential that was actually implicated in DUR-244.
+--
+-- Deliberately excluded from the table lists below (flagged in Security
+-- Reviewer 2's review of PR #166 -- tracked to be closed by name in DUR-250,
+-- Phase 2's ticket, not silently dropped):
+--   - pipeline_stages, pipeline_transitions: tenanted only indirectly via
+--     pipeline_id -> pipelines.company_id. A correct policy here needs a
+--     subquery against pipelines, not a plain column check like every table
+--     above -- left for Phase 2 to design and test alongside the other
+--     indirect-tenancy cases below rather than rushed into this migration.
+--   - plugin_jobs, plugin_job_runs (the latter IS in the nullable-company_id
+--     list above via its own column, but plugin_jobs itself is not): the
+--     parent plugin_jobs table has no company scope at all today.
+--   - company_secret_versions: holds the actual secret material
+--     (`material` jsonb, `value_sha256`, `fingerprint_sha256`) and is
+--     tenanted only indirectly via secret_id -> company_secrets.company_id.
+--     Not granted to paperclip_app_scoped at all, so it fails closed
+--     (permission denied) rather than open under this role today -- no
+--     active leak from this migration -- but it is exactly the table a
+--     repeat of DUR-244 would want to reach, so Phase 2 must not forget it.
+--   - cli_auth_challenges: holds requested_company_id (nullable) plus
+--     secret_hash/pending_key_hash for in-flight CLI device auth. Lower
+--     severity than company_secret_versions since this is pre-auth
+--     bootstrap data rather than steady-state tenant data, but the same
+--     shape of gap (indirect/nullable tenancy, not yet covered).
 
 DO $$
 DECLARE
