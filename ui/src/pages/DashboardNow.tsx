@@ -32,6 +32,7 @@ import {
   defaultTypeIcon,
   approvalTargetBadge,
   approvalDuplicateKey,
+  approvalDeployBranchInfo,
 } from "../components/ApprovalPayload";
 
 // Live board polling cadence. Fast enough to feel live, slow enough to stay cheap
@@ -751,6 +752,7 @@ function ApprovalRow({
   const payload = approval.payload as Record<string, unknown>;
   const label = approvalLabel(approval.type, payload);
   const targetBadge = approvalTargetBadge(payload);
+  const branchInfo = approvalDeployBranchInfo(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -777,11 +779,17 @@ function ApprovalRow({
     <div
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-2.5 py-2",
-        isDuplicate
+        isDuplicate || branchInfo?.mismatch
           ? "border-red-500/50 bg-red-500/[0.06]"
           : "border-amber-500/40 bg-amber-500/[0.04]",
       )}
     >
+      {branchInfo?.mismatch ? (
+        <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          Not on {branchInfo.deployBranch} — this commit is on {branchInfo.sourceBranch}
+        </p>
+      ) : null}
       {isDuplicate ? (
         <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
           <AlertCircle className="h-3 w-3 shrink-0" />
