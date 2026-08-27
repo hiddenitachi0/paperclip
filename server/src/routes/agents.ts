@@ -3971,7 +3971,11 @@ export function agentRoutes(
     assertCompanyAccess(req, companyId);
     const agentId = req.query.agentId as string | undefined;
     const limitParam = req.query.limit as string | undefined;
-    const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : undefined;
+    // Always bound this query: callers that omit `limit` (e.g. AgentDetail's
+    // history view) would otherwise pull and sort an agent's/company's entire
+    // heartbeat_runs history on every load, which is the query pattern behind
+    // the DUR-271 thundering-herd incident.
+    const limit = Math.max(1, Math.min(1000, parseInt(limitParam ?? "", 10) || 200));
     const summary = req.query.summary === "true" || req.query.summary === "1";
     const runs = await heartbeat.list(companyId, agentId, limit, { summary });
     res.json(runs);
