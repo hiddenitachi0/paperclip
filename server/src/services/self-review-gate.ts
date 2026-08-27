@@ -694,10 +694,31 @@ export async function evaluateSelfReviewDoneGate(input: {
           "because the issue is dependency-blocked, not because a check is pending.",
       };
     }
+    // DUR-295 (security review of DUR-293): the agent's own daily heartbeat run/cost cap
+    // (getHeartbeatDailyCapBlock in heartbeat.ts) is keyed on THIS agent's own usage for the
+    // current UTC day -- unlike the other skip reasons below, an agent can land here through
+    // its own ordinary wakeup volume (no operator action, no special permission needed), and
+    // then have this exact PATCH -- the one the self-review pass exists to check -- sail
+    // through with the adversarial risky-surface review never run. Letting the transition
+    // through here would turn "I happened to be busy today" into a silent bypass of the one
+    // review this gate is supposed to guarantee. Block honestly instead: the cap resets at
+    // the next UTC day boundary, so this is a real, bounded wait, not a permanent stall.
+    if (notScheduled.reason === "heartbeat.daily_run_limit" || notScheduled.reason === "heartbeat.daily_cost_limit") {
+      return {
+        message:
+          "This task needs one more self-check before it can move to review or done, but I couldn't " +
+          "schedule that follow-up run because this agent has already hit its own daily heartbeat cap " +
+          "for today. No follow-up run was, or will be, scheduled for this attempt -- retrying this PATCH " +
+          "won't help. The cap resets at the next UTC day boundary; retry after that, or ask an operator " +
+          "to raise it sooner.",
+      };
+    }
     // Every other no-throw skip reason (company inactive, heartbeat disabled on this agent,
-    // an active tree-control pause hold, the agent's daily heartbeat cap, ...) means nothing
-    // was, or ever will be, scheduled either -- treat it the same as the catch block above and
-    // let the transition through rather than block forever on a promise that can't be kept.
+    // wakeOnDemand disabled, an active tree-control pause hold, ...) is operator-controlled
+    // configuration or state, not something this agent's own request volume can land it in --
+    // nothing was, or ever will be, scheduled either way, so treat it the same as the
+    // catch block above and let the transition through rather than block forever on a promise
+    // that can't be kept.
     return null;
   }
 

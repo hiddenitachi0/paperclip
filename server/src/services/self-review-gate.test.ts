@@ -621,6 +621,50 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(result?.message).toContain("scheduled a separate follow-up run");
   });
 
+  // DUR-295 (security review of DUR-293): unlike the other no-throw skip reasons, the agent's
+  // own daily heartbeat run/cost cap is keyed on this SAME agent's own usage for the current
+  // UTC day -- an agent can land here through ordinary wakeup volume with no special
+  // permission or operator action, so letting the transition through here (like the other
+  // skip reasons) would let a busy day silently bypass the one adversarial review this gate
+  // exists to guarantee. It must block honestly instead, same shape as the dependency-blocked
+  // case above.
+  it.each(["heartbeat.daily_run_limit", "heartbeat.daily_cost_limit"] as const)(
+    "returns an honest blocked message instead of letting the transition through when the wake is silently skipped for %s",
+    async (reason) => {
+      const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
+      const { wakeup, calls } = makeSkippedWakeup({ kind: "skipped", reason });
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: {
+          id: issueId,
+          identifier: `T-1`,
+          companyId,
+          projectId,
+          executionPolicy: null,
+        },
+        actor: { actorType: "agent", agentId, runId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(calls).toHaveLength(1);
+      // Still blocks the transition -- letting it through would bypass the review this
+      // agent's own usage, not an operator decision, made unschedulable.
+      expect(result).not.toBeNull();
+      // ...but the message must be honest: no follow-up run exists or ever will for this
+      // attempt, unlike the false "scheduled a separate follow-up run" claim this PR fixes.
+      expect(result?.message).not.toContain("scheduled a separate follow-up run");
+      expect(result?.message.toLowerCase()).toContain("daily heartbeat cap");
+
+      // No misleading "please self-review" comment should be posted for a run that was never
+      // actually scheduled.
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(0);
+    },
+  );
+
   it("does not double-post the comment when a self-review wake already exists for this run chain", async () => {
     const { companyId, agentId, projectId, issueId, runId } = await seedCodeIssueFixture();
     const { wakeup } = makeRecordingWakeup(db, companyId);
