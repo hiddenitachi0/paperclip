@@ -675,6 +675,31 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(await findCompletedSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
   });
 
+  it("DUR-286: matchingDiffFingerprint null never matches, even against a completed pass whose own stored fingerprint is also null", async () => {
+    const { companyId, agentId, issueId } = await seedCodeIssueFixture();
+
+    // A completed pass that was itself scheduled with an unreadable diff (e.g. a totally
+    // unrelated earlier commit that also overflowed the content buffer) stores `null` too.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: { reviewedDiffFingerprint: null },
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+
+    // undefined still means "no diff to compare at all" -- lenient, matches any completed pass.
+    expect(await findCompletedSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
+
+    // null means "a diff exists but couldn't be fully read" -- must never match, even a stored
+    // null, or an unrelated earlier partial-read-failure pass could vouch for this one.
+    expect(
+      await findCompletedSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: null }),
+    ).toBeNull();
+  });
+
   it("skips the gate (and posts no comment) when the issue's project has no git workspace", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -1026,6 +1051,80 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
 
       expect(result).toBeNull();
       expect(calls).toHaveLength(0);
+    });
+
+    it("DUR-286: a completed pass on an earlier, unrelated diff must not vouch for a later diff whose content buffer overflowed -- schedules a fresh pass instead", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+
+      // An earlier, unrelated diff on this issue already completed its one bounded pass.
+      const earlierFingerprint = computeReviewedDiffFingerprint(
+        await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId }),
+        await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId }),
+      );
+      const earlierSourceRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: earlierSourceRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "completed",
+      });
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: SELF_REVIEW_PASS_REASON,
+        payload: { reviewedDiffFingerprint: earlierFingerprint },
+        status: "completed",
+        idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: earlierSourceRunId }),
+        requestedByActorType: "system",
+        requestedByActorId: "issue_self_review_gate",
+      });
+
+      // A later commit touches a single file, but with a diff hunk large enough to overflow
+      // RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES (4MB) while the path-only read
+      // (--name-only, RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1MB) stays trivially small --
+      // exactly the "big generated/vendored file" scenario from DUR-286, not an attacker
+      // needing to defeat git itself.
+      await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+      const bigPath = path.join(repoRoot, "server/src/services/authorization.ts");
+      await fs.mkdir(path.dirname(bigPath), { recursive: true });
+      await fs.writeFile(bigPath, "line of generated fixture content padding text\n".repeat(150_000), "utf8");
+      await runGit(repoRoot, ["add", "server/src/services/authorization.ts"]);
+      await runGit(repoRoot, ["commit", "-m", "Large generated fixture update"]);
+
+      // Confirm the premise: paths are readable, content overflowed to null.
+      const changedFilePaths = await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId });
+      const diffContent = await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId });
+      expect(changedFilePaths).not.toBeNull();
+      expect(diffContent).toBeNull();
+
+      const laterRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: laterRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: laterRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      // Must NOT silently ride on the earlier, unrelated pass -- this diff was never seen by
+      // any pass, so a fresh one must be scheduled.
+      expect(result).not.toBeNull();
+      expect(calls).toHaveLength(1);
     });
   });
 
