@@ -12043,6 +12043,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterFinalizeOutcome = status;
       };
 
+      // DUR-215: warn the operator while a run is already unusually expensive,
+      // instead of only after it finishes. Threshold is loaded lazily (only
+      // once, on the first usage tick) so runs that never accumulate much
+      // usage never pay for the history query. Fires at most once per run.
+      let costAnomalyThreshold:
+        | Awaited<ReturnType<ReturnType<typeof costService>["runTokenAnomalyThreshold"]>>
+        | undefined;
+      let costAnomalyNotified = false;
+
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
         adapterResult = await adapter.execute({
@@ -12060,6 +12069,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           onMeta: onAdapterMeta,
           onRuntimeProgress: async (progress) => {
             await recordCurrentHeartbeatRunRuntimeProgress(run, progress, issueId);
+          },
+          onUsageProgress: async (usage) => {
+            if (costAnomalyNotified) return;
+            if (costAnomalyThreshold === undefined) {
+              costAnomalyThreshold = await costService(db, budgetHooks).runTokenAnomalyThreshold(agent.id);
+            }
+            if (!costAnomalyThreshold) return;
+            const totalTokens = usage.inputTokens + (usage.cachedInputTokens ?? 0) + usage.outputTokens;
+            if (totalTokens < costAnomalyThreshold.threshold) return;
+            costAnomalyNotified = true;
+            await logActivity(db, {
+              companyId: agent.companyId,
+              actorType: "system",
+              actorId: "cost_anomaly_monitor",
+              action: "run.cost_anomaly_detected",
+              entityType: "heartbeat_run",
+              entityId: run.id,
+              agentId: agent.id,
+              runId: run.id,
+              details: {
+                issueId,
+                tokensObserved: totalTokens,
+                threshold: costAnomalyThreshold.threshold,
+                median: costAnomalyThreshold.median,
+                stddev: costAnomalyThreshold.stddev,
+                sampleSize: costAnomalyThreshold.sampleSize,
+              },
+            });
           },
           onSpawn: async (meta) => {
             await persistRunProcessMetadata(run.id, {

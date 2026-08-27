@@ -7,7 +7,57 @@ import {
   isClaudeRefusalResult,
   isClaudeUnknownSessionError,
   isClaudeImageProcessingError,
+  createClaudeLiveUsageTracker,
 } from "./parse.js";
+
+function assistantEvent(usage: Record<string, number>) {
+  return `${JSON.stringify({ type: "assistant", message: { usage } })}\n`;
+}
+
+describe("createClaudeLiveUsageTracker", () => {
+  it("returns null until a full assistant event line has arrived", () => {
+    const tracker = createClaudeLiveUsageTracker();
+    const line = assistantEvent({ input_tokens: 10, output_tokens: 5 });
+    expect(tracker.onChunk(line.slice(0, -1))).toBeNull();
+  });
+
+  it("accumulates input/output/cache tokens across multiple streamed events", () => {
+    const tracker = createClaudeLiveUsageTracker();
+    expect(
+      tracker.onChunk(
+        assistantEvent({
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_read_input_tokens: 5,
+          cache_creation_input_tokens: 3,
+        }),
+      ),
+    ).toEqual({ inputTokens: 100, cachedInputTokens: 8, outputTokens: 20 });
+
+    expect(tracker.onChunk(assistantEvent({ input_tokens: 50, output_tokens: 10 }))).toEqual({
+      inputTokens: 150,
+      cachedInputTokens: 8,
+      outputTokens: 30,
+    });
+  });
+
+  it("handles a chunk split mid-line, only counting usage once the line completes", () => {
+    const tracker = createClaudeLiveUsageTracker();
+    const line = assistantEvent({ input_tokens: 40, output_tokens: 4 });
+    const splitAt = Math.floor(line.length / 2);
+    expect(tracker.onChunk(line.slice(0, splitAt))).toBeNull();
+    expect(tracker.onChunk(line.slice(splitAt))).toEqual({
+      inputTokens: 40,
+      cachedInputTokens: 0,
+      outputTokens: 4,
+    });
+  });
+
+  it("ignores non-assistant lines and malformed JSON", () => {
+    const tracker = createClaudeLiveUsageTracker();
+    expect(tracker.onChunk(`${JSON.stringify({ type: "system", subtype: "init" })}\nnot json\n`)).toBeNull();
+  });
+});
 
 describe("detectClaudeLoginRequired", () => {
   it("classifies Claude's invalid API key login prompt as auth required", () => {
