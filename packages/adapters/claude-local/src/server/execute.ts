@@ -50,6 +50,7 @@ import {
   parseClaudeStreamJson,
   describeClaudeFailure,
   detectClaudeLoginRequired,
+  extractClaudeLoginUrl,
   extractClaudeRetryNotBefore,
   isClaudeMaxTurnsResult,
   isClaudeRefusalResult,
@@ -387,15 +388,13 @@ export async function runClaudeLogin(input: {
     onLog,
   });
 
-  const loginMeta = detectClaudeLoginRequired({
-    parsed: null,
-    stdout: proc.stdout,
-    stderr: proc.stderr,
-  });
-
+  // This is the dedicated `claude login` command's own output (not an agent
+  // work transcript), so extracting a URL from it directly is fine — the
+  // DUR-258 transcript-scan concern is about run classification, not this
+  // purpose-built login probe.
   return buildLoginResult({
     proc,
-    loginUrl: loginMeta.loginUrl,
+    loginUrl: extractClaudeLoginUrl([proc.stdout, proc.stderr].join("\n")),
   });
 }
 
@@ -444,17 +443,6 @@ export function resolveClaudeAdapterResult(
   },
 ): AdapterExecutionResult {
   const { proc, parsedStream, parsed } = attempt;
-  const loginMeta = detectClaudeLoginRequired({
-    parsed,
-    stdout: proc.stdout,
-    stderr: proc.stderr,
-  });
-  const errorMeta =
-    loginMeta.loginUrl != null
-      ? {
-          loginUrl: loginMeta.loginUrl,
-        }
-      : undefined;
 
   if (proc.timedOut) {
     return {
@@ -463,27 +451,32 @@ export function resolveClaudeAdapterResult(
       timedOut: true,
       errorMessage: `Timed out after ${env.timeoutSec}s`,
       errorCode: "timeout",
-      errorMeta,
       clearSession: Boolean(opts.clearSessionOnMissingSession),
     };
   }
 
   if (!parsed) {
     const fallbackErrorMessage = parseFallbackErrorMessage(proc);
+    // DUR-258: word-search only over the extracted single-line fallback
+    // message, never the raw stdout/stderr transcript.
+    const loginMeta = detectClaudeLoginRequired({
+      parsed: null,
+      stderr: proc.stderr,
+      errorMessage: fallbackErrorMessage,
+    });
+    const errorMeta = loginMeta.loginUrl != null ? { loginUrl: loginMeta.loginUrl } : undefined;
     // Quota/rate-limit wording is checked before auth so a shared-credential
     // quota stop never gets mislabeled as a logout. See DUR-222.
     const transientUpstream =
       (proc.exitCode ?? 0) !== 0 &&
       isClaudeTransientUpstreamError({
         parsed: null,
-        stdout: proc.stdout,
         stderr: proc.stderr,
         errorMessage: fallbackErrorMessage,
       });
     const transientRetryNotBefore = transientUpstream
       ? extractClaudeRetryNotBefore({
           parsed: null,
-          stdout: proc.stdout,
           stderr: proc.stderr,
           errorMessage: fallbackErrorMessage,
         })
@@ -590,14 +583,12 @@ export function resolveClaudeAdapterResult(
     !poisonedPreviousMessageId &&
     isClaudeTransientUpstreamError({
       parsed,
-      stdout: proc.stdout,
       stderr: proc.stderr,
       errorMessage,
     });
   const transientRetryNotBefore = transientUpstream
     ? extractClaudeRetryNotBefore({
         parsed,
-        stdout: proc.stdout,
         stderr: proc.stderr,
         errorMessage,
       })
@@ -612,6 +603,18 @@ export function resolveClaudeAdapterResult(
   // DUR-41. `claudeRefusal` is the one intentional exception — it's a
   // clean-exit outcome by design (see the comment on `claudeRefusal`
   // above), so it stays evaluated independently of `failed`.
+  //
+  // DUR-258: `detectClaudeLoginRequired` itself now only ever searches the
+  // structured `errorMessage` extracted above (never the raw multi-turn
+  // stdout/stderr transcript), so even a *failed* run for an unrelated
+  // reason can no longer be mislabeled just because the transcript happens
+  // to mention login/auth words in passing.
+  const loginMeta = detectClaudeLoginRequired({
+    parsed,
+    stderr: proc.stderr,
+    errorMessage,
+  });
+  const errorMeta = loginMeta.loginUrl != null ? { loginUrl: loginMeta.loginUrl } : undefined;
   const resolvedErrorCode = failed && clearSessionForMaxTurns
     ? "max_turns_exhausted"
     : failed && poisonedPreviousMessageId

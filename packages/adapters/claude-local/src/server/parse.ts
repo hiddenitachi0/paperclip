@@ -133,13 +133,26 @@ export function extractClaudeLoginUrl(text: string): string | null {
   return match[0]?.replace(/[\])}.!,?;:'\"]+$/g, "") ?? null;
 }
 
+// DUR-258: word-search only runs over the CLI's own error-shaped text —
+// the structured `result`/`errors` fields, a caller-supplied single-line
+// fallback message, and stderr (a genuinely crashed/rejected process's own
+// error text, e.g. "Invalid API key"). It deliberately excludes `stdout`:
+// in `--output-format stream-json` mode, stdout is the full multi-turn
+// transcript, and an agent merely *discussing* a login/auth topic (e.g.
+// while hardening our own auth code) was enough to mislabel a successful
+// or unrelated-failure run as a real logout.
 export function detectClaudeLoginRequired(input: {
   parsed: Record<string, unknown> | null;
-  stdout: string;
   stderr: string;
+  errorMessage?: string | null;
 }): { requiresLogin: boolean; loginUrl: string | null } {
   const resultText = asString(input.parsed?.result, "").trim();
-  const messages = [resultText, ...extractClaudeErrorMessages(input.parsed ?? {}), input.stdout, input.stderr]
+  const messages = [
+    resultText,
+    ...extractClaudeErrorMessages(input.parsed ?? {}),
+    input.errorMessage ?? "",
+    input.stderr,
+  ]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -148,7 +161,9 @@ export function detectClaudeLoginRequired(input: {
   const requiresLogin = messages.some((line) => CLAUDE_AUTH_REQUIRED_RE.test(line));
   return {
     requiresLogin,
-    loginUrl: extractClaudeLoginUrl([input.stdout, input.stderr].join("\n")),
+    // Only look up a login URL once a login is already confirmed required
+    // from the CLI's own error text — never derived from the transcript.
+    loginUrl: requiresLogin ? extractClaudeLoginUrl(input.stderr) : null,
   };
 }
 
@@ -242,9 +257,12 @@ export function isClaudeImageProcessingError(parsed: Record<string, unknown>): b
   );
 }
 
+// DUR-258: see the comment on detectClaudeLoginRequired above — this
+// deliberately excludes `stdout` (the full multi-turn transcript in
+// stream-json mode) while still allowing `stderr` (a crashed/rejected
+// process's own short error text).
 function buildClaudeTransientHaystack(input: {
   parsed?: Record<string, unknown> | null;
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): string {
@@ -255,7 +273,6 @@ function buildClaudeTransientHaystack(input: {
     input.errorMessage ?? "",
     resultText,
     ...parsedErrors,
-    input.stdout ?? "",
     input.stderr ?? "",
   ]
     .join("\n")
@@ -401,7 +418,6 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
 export function extractClaudeRetryNotBefore(
   input: {
     parsed?: Record<string, unknown> | null;
-    stdout?: string | null;
     stderr?: string | null;
     errorMessage?: string | null;
   },
@@ -413,9 +429,11 @@ export function extractClaudeRetryNotBefore(
   return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
 }
 
+// DUR-258: word-search only runs over the CLI's own error-shaped text — see
+// the comment on detectClaudeLoginRequired above for why `stdout` (the full
+// transcript) is never part of the haystack, while `stderr` still is.
 export function isClaudeTransientUpstreamError(input: {
   parsed?: Record<string, unknown> | null;
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): boolean {
