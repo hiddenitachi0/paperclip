@@ -4930,6 +4930,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     has(id: string) {
       return runningProcesses.has(id) || activeRunExecutions.has(id);
     },
+    // DUR-257: union size of both in-memory "this run is actually executing right
+    // now" registries. Used by shutdown()'s drain wait -- 0 means it's safe to let
+    // the process exit without anything getting booked as process_lost on next boot.
+    count() {
+      const ids = new Set<string>(activeRunExecutions);
+      for (const id of runningProcesses.keys()) ids.add(id);
+      return ids.size;
+    },
   };
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
@@ -15056,5 +15064,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .limit(1);
       return run ?? null;
     },
+
+    // DUR-257: count of runs this process is actually executing right now (per
+    // liveRunExecutions above). Graceful shutdown polls this to wait for in-flight
+    // runs to finish before exiting, instead of letting a deploy's container kill
+    // orphan them into process_lost failures.
+    getInFlightRunCount: () => liveRunExecutions.count(),
   };
 }
