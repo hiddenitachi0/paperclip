@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@/lib/router";
+import { Link, useNavigate } from "@/lib/router";
 import { Plug } from "lucide-react";
 import { mcpToolLibraryApi, type AgentMcpToolListItem } from "../api/mcpToolLibrary";
 import { queryKeys } from "../lib/queryKeys";
@@ -22,6 +22,7 @@ export function PersonaMcpToolsPanel({
   readOnly?: boolean;
 }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [pendingToolId, setPendingToolId] = useState<string | null>(null);
 
   const { data: tools, isLoading, error } = useQuery({
@@ -61,7 +62,7 @@ export function PersonaMcpToolsPanel({
         icon={Plug}
         message="No tools in the library yet. Add an image tool (like an image generator) in Tools, then come back here to give it to her."
         action={readOnly ? undefined : "Go to Tools"}
-        onAction={readOnly ? undefined : () => window.location.assign("/tools")}
+        onAction={readOnly ? undefined : () => navigate("/tools")}
       />
     );
   }
