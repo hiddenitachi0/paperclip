@@ -231,8 +231,15 @@ function isTerminalIssueRun(latestRun: LatestIssueRun) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(latestRun.status);
 }
 
+// DUR-257: "adapter_failed" is the catch-all for "we don't know what happened" (see
+// heartbeat-stop-metadata.ts). Auto-retrying an unknown cause 3x on a 60s backoff, per
+// case, per agent, is exactly what turned one full-disk incident into a platform-wide
+// outage on 2026-08-25 -- the same root cause surfaced under several codes across many
+// runs/agents, and the platform retried each one three times, multiplying log writes
+// onto a disk that was already full. Not knowing the cause should never mean "do it
+// three more times" -- it falls through to the "default" branch below (1 attempt, no
+// backoff) instead.
 const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
-  "adapter_failed",
   "codex_transient_upstream",
   "claude_transient_upstream",
   "timeout",

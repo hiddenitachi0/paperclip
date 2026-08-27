@@ -2257,8 +2257,10 @@ function resolveLedgerBiller(result: AdapterExecutionResult): string {
   return readNonEmptyString(result.biller) ?? readNonEmptyString(result.provider) ?? "unknown";
 }
 
-function normalizeBilledCostCents(costUsd: number | null | undefined, billingType: BillingType): number {
-  if (billingType === "subscription_included") return 0;
+function normalizeBilledCostCents(costUsd: number | null | undefined): number {
+  // The Claude CLI reports a real notional cost (total_cost_usd) for every run
+  // regardless of billing type; forcing it to 0 for subscription_included hid
+  // actual spend once the included quota was exhausted (DUR-210).
   if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
   return Math.max(0, Math.round(costUsd * 100));
 }
@@ -4929,6 +4931,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const liveRunExecutions = {
     has(id: string) {
       return runningProcesses.has(id) || activeRunExecutions.has(id);
+    },
+    // DUR-257: union size of both in-memory "this run is actually executing right
+    // now" registries. Used by shutdown()'s drain wait -- 0 means it's safe to let
+    // the process exit without anything getting booked as process_lost on next boot.
+    count() {
+      const ids = new Set<string>(activeRunExecutions);
+      for (const id of runningProcesses.keys()) ids.add(id);
+      return ids.size;
     },
   };
   const budgetHooks = {
@@ -10194,7 +10204,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const outputTokens = usage?.outputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
-    const additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType);
+    const additionalCostCents = normalizeBilledCostCents(result.costUsd);
     const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
@@ -15093,5 +15103,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .limit(1);
       return run ?? null;
     },
+
+    // DUR-257: count of runs this process is actually executing right now (per
+    // liveRunExecutions above). Graceful shutdown polls this to wait for in-flight
+    // runs to finish before exiting, instead of letting a deploy's container kill
+    // orphan them into process_lost failures.
+    getInFlightRunCount: () => liveRunExecutions.count(),
   };
 }

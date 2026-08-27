@@ -32,6 +32,7 @@ import {
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
   evaluateSelfReviewDoneGate,
+  findCompletedSelfReviewPassForIssue,
   findExistingSelfReviewPassNoticeCommentForRun,
   getChangedDiffContentForIssueWorkspace,
   getChangedFilePathsForIssueWorkspace,
@@ -535,6 +536,108 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(calls).toHaveLength(0);
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(0);
+  });
+
+  it("DUR-245: lets a later run's PATCH through once an earlier self-review pass for this issue has already completed, instead of scheduling another one forever", async () => {
+    const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+
+    // Simulate the earlier declined run's scheduled pass reaching a terminal "completed"
+    // state without ever landing the handoff (e.g. it burned its turn budget).
+    const earlierSourceRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: earlierSourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "completed",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: earlierSourceRunId }),
+      requestedByActorType: "system",
+      requestedByActorId: "issue_self_review_gate",
+    });
+
+    // A brand-new run (different runId, so it doesn't match the completed wake's idempotency
+    // key) now attempts the same PATCH.
+    const laterRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: laterRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "running",
+    });
+    const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+    const result = await evaluateSelfReviewDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        projectId,
+        executionPolicy: null,
+      },
+      actor: { actorType: "agent", agentId, runId: laterRunId },
+      requestedStatus: "done",
+      currentStatus: "in_progress",
+    });
+
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+  });
+
+  it("findCompletedSelfReviewPassForIssue only matches a terminal completed wake for this exact issue", async () => {
+    const { companyId, agentId, issueId } = await seedCodeIssueFixture();
+    const otherIssueId = randomUUID();
+
+    expect(await findCompletedSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A queued (still in-flight) wake for this issue must not count as a completed pass.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "queued",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findCompletedSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A completed wake for a DIFFERENT issue must not count either.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId: otherIssueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findCompletedSelfReviewPassForIssue(db, { companyId, issueId })).toBeNull();
+
+    // A completed wake for THIS issue counts.
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: SELF_REVIEW_PASS_REASON,
+      payload: {},
+      status: "completed",
+      idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: randomUUID() }),
+    });
+    expect(await findCompletedSelfReviewPassForIssue(db, { companyId, issueId })).not.toBeNull();
   });
 
   it("skips the gate (and posts no comment) when the issue's project has no git workspace", async () => {

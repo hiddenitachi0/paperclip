@@ -9,7 +9,7 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
-import { approvalLabel, approvalTechnicalReference, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
+import { approvalLabel, approvalTechnicalReference, approvalDeployBranchInfo, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -179,6 +179,7 @@ export function ApprovalDetail() {
   const isCredentialRequest = approval.type === "credential_request";
   const credentialFields = isCredentialRequest ? credentialRequestFields(payload) : null;
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
+  const branchInfo = approvalDeployBranchInfo(payload);
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
   const primaryLinkedIssue = linkedIssues?.[0] ?? null;
   const resolvedCta =
@@ -238,6 +239,19 @@ export function ApprovalDetail() {
               {approvalTechnicalReference(approval.payload as Record<string, unknown> | null) && (
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {approvalTechnicalReference(approval.payload as Record<string, unknown> | null)}
+                </p>
+              )}
+              {branchInfo && (
+                <p
+                  className={
+                    branchInfo.mismatch
+                      ? "mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400"
+                      : "text-xs text-muted-foreground mt-0.5"
+                  }
+                >
+                  {branchInfo.mismatch
+                    ? `Not on ${branchInfo.deployBranch} — this commit is on ${branchInfo.sourceBranch}`
+                    : `Deploys from ${branchInfo.sourceBranch}`}
                 </p>
               )}
             </div>
