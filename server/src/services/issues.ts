@@ -3058,6 +3058,11 @@ async function listIssueBlockedInboxAttentionMap(
     if (!approvalByIssueId.has(row.issueId)) approvalByIssueId.set(row.issueId, row);
   }
 
+  // Computed once for the whole page rather than per-row inside the loop below:
+  // per-row calls here previously re-ran the full chunked blocker-graph BFS once
+  // per blocked issue, turning an N-issue list into N sequential query batches.
+  const blockerAttentionMap = await listIssueBlockerAttentionMap(dbOrTx, companyId, issueRows);
+
   for (const row of issueRows) {
     if (row.companyId !== companyId || BLOCKED_INBOX_TERMINAL_STATUSES.includes(row.status as typeof BLOCKED_INBOX_TERMINAL_STATUSES[number]) || row.hiddenAt) {
       continue;
@@ -3243,8 +3248,7 @@ async function listIssueBlockedInboxAttentionMap(
       continue;
     }
 
-    const blockerAttention = await listIssueBlockerAttentionMap(dbOrTx, companyId, [row]);
-    const blockerState = blockerAttention.get(row.id);
+    const blockerState = blockerAttentionMap.get(row.id);
     if (row.status === "blocked" && (blockerState?.state === "needs_attention" || blockerState?.state === "stalled")) {
       result.set(row.id, attentionBase({
         state: "needs_attention",

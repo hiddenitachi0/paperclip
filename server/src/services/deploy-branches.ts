@@ -16,6 +16,19 @@ export type ProjectDeployBranches = { deployBranch?: string; mirrorBranch?: stri
  * the DUR-40 guard/visibility check is a no-op for that project — the branch
  * distinction was never a promise the platform made for it.
  */
+async function readProjectDeployBranches(db: Db, projectId: string): Promise<ProjectDeployBranches | null> {
+  const projectRow = await db
+    .select({ deployPolicy: projects.deployPolicy })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .then((rows) => rows[0] ?? null);
+  const policy = (projectRow?.deployPolicy ?? null) as Record<string, unknown> | null;
+  const mirrorBranch = typeof policy?.mirrorBranch === "string" ? policy.mirrorBranch : undefined;
+  const deployBranch = typeof policy?.deployBranch === "string" ? policy.deployBranch : undefined;
+  if (mirrorBranch || deployBranch) return { mirrorBranch, deployBranch, projectId };
+  return null;
+}
+
 export async function resolveProjectDeployBranches(
   db: Db,
   issueIds: string[],
@@ -27,15 +40,21 @@ export async function resolveProjectDeployBranches(
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     if (!issueRow?.projectId) continue;
-    const projectRow = await db
-      .select({ deployPolicy: projects.deployPolicy })
-      .from(projects)
-      .where(eq(projects.id, issueRow.projectId))
-      .then((rows) => rows[0] ?? null);
-    const policy = (projectRow?.deployPolicy ?? null) as Record<string, unknown> | null;
-    const mirrorBranch = typeof policy?.mirrorBranch === "string" ? policy.mirrorBranch : undefined;
-    const deployBranch = typeof policy?.deployBranch === "string" ? policy.deployBranch : undefined;
-    if (mirrorBranch || deployBranch) return { mirrorBranch, deployBranch, projectId: issueRow.projectId };
+    const result = await readProjectDeployBranches(db, issueRow.projectId);
+    if (result) return result;
   }
   return null;
+}
+
+/**
+ * DUR-227: same lookup as `resolveProjectDeployBranches`, but keyed directly
+ * off a project id instead of walking issue links -- the deploy-approval
+ * filing path (routes/approvals.ts) only ever has `payload.projectId`, not
+ * an issue to resolve through.
+ */
+export async function resolveProjectDeployBranchesByProjectId(
+  db: Db,
+  projectId: string,
+): Promise<ProjectDeployBranches | null> {
+  return readProjectDeployBranches(db, projectId);
 }
