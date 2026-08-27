@@ -443,16 +443,28 @@ export function computeReviewedDiffFingerprint(
  * DUR-270: `matchingDiffFingerprint` narrows "has this issue used its one bounded pass" to
  * "...for THIS diff". Passing it undefined preserves the original DUR-245 semantics (any
  * completed pass for the issue counts, regardless of diff) for callers that don't have a
- * diff to compare against. Passing null (diff unreadable) also matches any completed pass,
- * since risky-surface detection can't distinguish diffs it can't read either. Passing a real
- * fingerprint only matches a pass that reviewed that exact diff, so a later, different diff
- * on the same issue -- e.g. a new commit adding a risky-surface change -- doesn't get waved
- * through on an older, unrelated pass's coattails.
+ * diff to compare against at all -- e.g. the issue's git workspace itself can't be resolved,
+ * so there is genuinely nothing to compare. Passing a real fingerprint only matches a pass
+ * that reviewed that exact diff, so a later, different diff on the same issue -- e.g. a new
+ * commit adding a risky-surface change -- doesn't get waved through on an older, unrelated
+ * pass's coattails.
+ *
+ * DUR-286: `null` is intentionally NOT treated the same as `undefined` here. `null` means a
+ * diff exists but couldn't be fully read (e.g. computeReviewedDiffFingerprint nulled out
+ * because the diff-content buffer overflowed while the path-only read succeeded -- an
+ * ordinary occurrence, not a workspace-resolution failure). A stored `reviewedDiffFingerprint`
+ * of `null` on some OTHER completed pass could come from a completely different diff that
+ * happened to hit the same partial-read failure, so matching null-to-null here would silently
+ * let a stale, unrelated pass vouch for content it never saw -- the exact class of gap DUR-270
+ * closed for the false-hash-match case. `null` therefore always misses, forcing the caller to
+ * schedule a fresh pass for that diff.
  */
 export async function findCompletedSelfReviewPassForIssue(
   db: Db,
   input: { companyId: string; issueId: string; matchingDiffFingerprint?: string | null },
 ) {
+  if (input.matchingDiffFingerprint === null) return null;
+
   const rows = await db
     .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
     .from(agentWakeupRequests)
@@ -464,7 +476,7 @@ export async function findCompletedSelfReviewPassForIssue(
         eq(agentWakeupRequests.status, "completed"),
       ),
     );
-  if (input.matchingDiffFingerprint === undefined || input.matchingDiffFingerprint === null) {
+  if (input.matchingDiffFingerprint === undefined) {
     return rows[0] ?? null;
   }
   const fingerprint = input.matchingDiffFingerprint;
@@ -560,6 +572,18 @@ export async function evaluateSelfReviewDoneGate(input: {
   ];
   const reviewedDiffFingerprint = computeReviewedDiffFingerprint(changedFilePaths, diffContent);
 
+  // DUR-286: computeReviewedDiffFingerprint nulls the fingerprint whenever EITHER read failed
+  // (DUR-276), but only a workspace that's genuinely unresolvable (BOTH reads null -- no diff
+  // exists to compare against at all, e.g. the workspace hasn't been realized yet) should fall
+  // back to findCompletedSelfReviewPassForIssue's lenient "any completed pass counts" mode. A
+  // partial failure (one read succeeded) means a real diff exists but couldn't be fully read
+  // -- routinely just the diff-content buffer overflowing on a large generated/vendored file
+  // while the path-only read stays under its own, separate cap -- and must be treated like a
+  // new, unreviewed diff instead: passing the real (null) fingerprint here makes the lookup
+  // below always miss, so this attempt falls through to scheduling a fresh pass rather than
+  // letting an unrelated older pass on this issue silently vouch for content it never saw.
+  const workspaceFullyUnresolvable = changedFilePaths === null && diffContent === null;
+
   // DUR-245: this issue already used its one bounded extra pass under a different run, and
   // that pass reached a terminal state without landing the handoff (otherwise currentStatus
   // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
@@ -571,7 +595,7 @@ export async function evaluateSelfReviewDoneGate(input: {
   const priorPass = await findCompletedSelfReviewPassForIssue(input.db, {
     companyId: input.issue.companyId,
     issueId: input.issue.id,
-    matchingDiffFingerprint: reviewedDiffFingerprint,
+    matchingDiffFingerprint: workspaceFullyUnresolvable ? undefined : reviewedDiffFingerprint,
   });
   if (priorPass) return null;
 
