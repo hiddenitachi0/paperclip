@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
@@ -212,5 +213,48 @@ describeEmbeddedPostgres("DUR-247: RLS company_id isolation (paperclip_app_scope
 
     const rows = await db.select().from(issues);
     expect(rows).toHaveLength(2);
+  });
+
+  it("migration 0151's guard blocks the bypass grant for a non-superuser role that is only an INDIRECT member of paperclip_app_scoped", async () => {
+    // DUR-275 follow-up (Security Reviewer 2's should-fix): the guard must
+    // catch real Postgres role membership, not just an exact `CURRENT_USER
+    // = 'paperclip_app_scoped'` name match -- e.g. a future login role that
+    // joins paperclip_app_scoped as a group role without being named that
+    // literally. This replays the migration's exact DO block against a
+    // fresh, non-superuser role in that shape and asserts it still refuses.
+    const migrationPath = new URL("./migrations/0151_guarded_bypass_role_grant.sql", import.meta.url);
+    const migrationSql = await readFile(migrationPath, "utf8");
+
+    const setupSql = postgres(connectionString, { max: 1 });
+    try {
+      await setupSql.unsafe(
+        "CREATE ROLE paperclip_test_indirect_scoped_member NOLOGIN NOSUPERUSER IN ROLE paperclip_app_scoped",
+      );
+    } finally {
+      await setupSql.end();
+    }
+
+    try {
+      // SET ROLE (not a separate login) -- same pattern as
+      // openScopedConnection above: the superuser connection switches its
+      // effective role, so CURRENT_USER inside the migration DO block is the
+      // indirect member, not the superuser.
+      const asIndirectMember = postgres(connectionString, { max: 1 });
+      try {
+        await asIndirectMember`SET ROLE paperclip_test_indirect_scoped_member`;
+        await expect(asIndirectMember.unsafe(migrationSql)).rejects.toThrow(
+          /refusing to grant paperclip_app_bypass to a role that holds paperclip_app_scoped membership/,
+        );
+      } finally {
+        await asIndirectMember.end();
+      }
+    } finally {
+      const cleanupSql = postgres(connectionString, { max: 1 });
+      try {
+        await cleanupSql.unsafe("DROP ROLE IF EXISTS paperclip_test_indirect_scoped_member");
+      } finally {
+        await cleanupSql.end();
+      }
+    }
   });
 });

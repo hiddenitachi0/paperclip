@@ -31,10 +31,26 @@
 -- unconditionally today, so this grant is inert until Phase 2 changes table
 -- ownership. If DUR-277 is delayed after a Phase 2 ownership cutover lands,
 -- re-review this grant before relying on the "currently inert" reasoning.
+--
+-- Membership check, not name equality -- with a superuser carve-out: DUR-275's
+-- design review flagged that a bare `CURRENT_USER = 'paperclip_app_scoped'`
+-- check misses indirect membership (e.g. a future login role joining
+-- paperclip_app_scoped as a group role without being named that literally),
+-- so the guard below checks real Postgres role membership via pg_has_role()
+-- instead. That alone is not sufficient, though: pg_has_role() unconditionally
+-- returns true for a superuser regardless of actual membership (verified
+-- against this exact migration -- the table-owning role that replays every
+-- migration on a fresh bootstrap is a superuser in this repo's deployment
+-- shape), which would make the guard misfire and block this grant for the
+-- ordinary, intended case. A superuser already bypasses RLS entirely with or
+-- without paperclip_app_bypass membership (same as the table-owner bypass
+-- migration 0149's header describes), so exempting a superuser from this
+-- check does not reopen the invariant it protects.
 DO $$
 BEGIN
-  IF CURRENT_USER = 'paperclip_app_scoped' THEN
-    RAISE EXCEPTION 'refusing to grant paperclip_app_bypass to paperclip_app_scoped -- see migration 0149 SECURITY-CRITICAL INVARIANT';
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = CURRENT_USER)
+     AND pg_has_role(CURRENT_USER, 'paperclip_app_scoped', 'member') THEN
+    RAISE EXCEPTION 'refusing to grant paperclip_app_bypass to a role that holds paperclip_app_scoped membership -- see migration 0149 SECURITY-CRITICAL INVARIANT';
   END IF;
 
   EXECUTE format('GRANT paperclip_app_bypass TO %I', CURRENT_USER);
