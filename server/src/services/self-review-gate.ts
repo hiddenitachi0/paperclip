@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
 import { and, desc, eq, inArray, isNotNull, like } from "drizzle-orm";
@@ -413,12 +414,42 @@ export async function findExistingSelfReviewPassWake(
  * which run originally triggered it, so a second (or third, ...) run doesn't pay for another
  * pass that was already used up.
  */
+/**
+ * DUR-270 (security review of DUR-245): a stable fingerprint of what a self-review pass
+ * actually reviewed, so a completed pass on an OLD diff can't silently vouch for a NEW,
+ * unreviewed diff on the same issue -- see the reviewedDiffFingerprint comment on
+ * evaluateSelfReviewDoneGate below. null (not e.g. a hash of two nulls) when the diff
+ * genuinely couldn't be read, matching the null-vs-empty-string contract used elsewhere in
+ * this file -- callers must treat "unknown" as "unknown", not as a fingerprint of its own.
+ */
+export function computeReviewedDiffFingerprint(
+  changedFilePaths: readonly string[] | null,
+  diffContent: string | null,
+): string | null {
+  if (changedFilePaths === null && diffContent === null) return null;
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify([...(changedFilePaths ?? [])].sort()));
+  hash.update(" ");
+  hash.update(diffContent ?? "");
+  return hash.digest("hex");
+}
+
+/**
+ * DUR-270: `matchingDiffFingerprint` narrows "has this issue used its one bounded pass" to
+ * "...for THIS diff". Passing it undefined preserves the original DUR-245 semantics (any
+ * completed pass for the issue counts, regardless of diff) for callers that don't have a
+ * diff to compare against. Passing null (diff unreadable) also matches any completed pass,
+ * since risky-surface detection can't distinguish diffs it can't read either. Passing a real
+ * fingerprint only matches a pass that reviewed that exact diff, so a later, different diff
+ * on the same issue -- e.g. a new commit adding a risky-surface change -- doesn't get waved
+ * through on an older, unrelated pass's coattails.
+ */
 export async function findCompletedSelfReviewPassForIssue(
   db: Db,
-  input: { companyId: string; issueId: string },
+  input: { companyId: string; issueId: string; matchingDiffFingerprint?: string | null },
 ) {
-  return db
-    .select({ id: agentWakeupRequests.id })
+  const rows = await db
+    .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
     .from(agentWakeupRequests)
     .where(
       and(
@@ -427,9 +458,15 @@ export async function findCompletedSelfReviewPassForIssue(
         like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
         eq(agentWakeupRequests.status, "completed"),
       ),
-    )
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
+    );
+  if (input.matchingDiffFingerprint === undefined || input.matchingDiffFingerprint === null) {
+    return rows[0] ?? null;
+  }
+  const fingerprint = input.matchingDiffFingerprint;
+  return (
+    rows.find((row) => (row.payload as { reviewedDiffFingerprint?: string } | null)?.reviewedDiffFingerprint === fingerprint) ??
+    null
+  );
 }
 
 export type SelfReviewGateWakeup = (
@@ -484,18 +521,6 @@ export async function evaluateSelfReviewDoneGate(input: {
     idempotencyKey,
   });
 
-  // DUR-245: this issue already used its one bounded extra pass under a different run, and
-  // that pass reached a terminal state without landing the handoff (otherwise currentStatus
-  // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
-  // would just repeat the same failure mode indefinitely; let this attempt through instead.
-  if (!existingWake) {
-    const priorPass = await findCompletedSelfReviewPassForIssue(input.db, {
-      companyId: input.issue.companyId,
-      issueId: input.issue.id,
-    });
-    if (priorPass) return null;
-  }
-
   const baseMessage =
     "This task needs one more self-check before it can move to review or done. I've scheduled a separate follow-up run to do that check and complete the handoff — retrying this same PATCH again in this run will not succeed, even right after posting a self-review comment yourself. Don't retry here; wait for the follow-up run.";
 
@@ -504,13 +529,20 @@ export async function evaluateSelfReviewDoneGate(input: {
   // DUR-71: detection is driven by the actual changed file paths, not by asking the agent
   // whether its own work is risky. changedFilePaths is null (not []) when the diff genuinely
   // couldn't be read (e.g. a non-local workspace) -- that degrades to the ordinary-only
-  // prompt rather than guessing at risk. Only computed here (once we know we're actually
-  // about to schedule a new pass), not on every duplicate/retry hit of this gate.
+  // prompt rather than guessing at risk.
   //
   // DUR-91: path-only detection misses risky content in a generically-named file (e.g.
   // DUR-67's codex-home.ts, which strips `mcp_servers` blocks carrying secrets but matches
   // no filename pattern). getChangedDiffContentForIssueWorkspace/detectRiskySurfaceFromDiffContent
   // supplement the path check with the same patterns run against added diff lines.
+  //
+  // DUR-270 (security review of DUR-245): this now has to run BEFORE the "already used its
+  // one pass" check below, not after -- DUR-245's fix let a later run through as soon as ANY
+  // prior pass had completed for this issue, without ever looking at whether the diff had
+  // changed since. That silently skipped risky-surface detection for a genuinely new, risky
+  // commit landed under an issue that had already burned its one pass on an earlier, boring
+  // diff. Reading the diff on every retry (not just when actually scheduling) is the price of
+  // closing that gap.
   const [changedFilePaths, diffContent] = await Promise.all([
     getChangedFilePathsForIssueWorkspace(input.db, { companyId: input.issue.companyId, issueId: input.issue.id }),
     getChangedDiffContentForIssueWorkspace(input.db, { companyId: input.issue.companyId, issueId: input.issue.id }),
@@ -521,6 +553,23 @@ export async function evaluateSelfReviewDoneGate(input: {
       ...(diffContent ? detectRiskySurfaceFromDiffContent(diffContent) : []),
     ]),
   ];
+  const reviewedDiffFingerprint = computeReviewedDiffFingerprint(changedFilePaths, diffContent);
+
+  // DUR-245: this issue already used its one bounded extra pass under a different run, and
+  // that pass reached a terminal state without landing the handoff (otherwise currentStatus
+  // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
+  // for the SAME diff would just repeat the same failure mode indefinitely; let this attempt
+  // through instead. DUR-270: scoped to the current diff's fingerprint so this only bypasses
+  // re-review of a diff that was actually reviewed -- a later, different (possibly risky) diff
+  // on the same issue still gets its own pass, matching detectRiskySurfaceFromDiff(Content)'s
+  // fresh-per-diff design intent.
+  const priorPass = await findCompletedSelfReviewPassForIssue(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+    matchingDiffFingerprint: reviewedDiffFingerprint,
+  });
+  if (priorPass) return null;
+
   const riskySurfaceNote =
     riskySurfaceCategories.length > 0
       ? ` This one also touches ${riskySurfaceCategories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ")}, so I've included some adversarial questions on top of the usual check.`
@@ -546,6 +595,9 @@ export async function evaluateSelfReviewDoneGate(input: {
         resumeFromRunId: sourceRunId,
         [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
         instruction,
+        // DUR-270: recorded so a later findCompletedSelfReviewPassForIssue lookup can tell
+        // whether THIS pass actually reviewed the diff a later attempt is asking to bypass.
+        reviewedDiffFingerprint,
       },
       contextSnapshot: {
         issueId: input.issue.id,
