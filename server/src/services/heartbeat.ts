@@ -4937,11 +4937,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
-  const liveRunExecutions = {
-    has(id: string) {
-      return runningProcesses.has(id) || activeRunExecutions.has(id);
-    },
-  };
   // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
   // run this server instance still has an in-memory process handle for is
   // actually alive, even when heartbeatRuns.status looks terminal (a
