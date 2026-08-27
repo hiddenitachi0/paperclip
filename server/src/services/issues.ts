@@ -839,8 +839,11 @@ async function listPendingFinalizeBlockerIssueIds(
       phase: workspaceOperations.phase,
       status: workspaceOperations.status,
       startedAt: workspaceOperations.startedAt,
+      heartbeatRunId: workspaceOperations.heartbeatRunId,
+      heartbeatRunStatus: heartbeatRuns.status,
     })
     .from(workspaceOperations)
+    .leftJoin(heartbeatRuns, eq(workspaceOperations.heartbeatRunId, heartbeatRuns.id))
     .where(
       and(
         eq(workspaceOperations.companyId, companyId),
@@ -849,8 +852,9 @@ async function listPendingFinalizeBlockerIssueIds(
       ),
     );
 
-  const latestAttributedByBlockerWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
-  const latestUnattributedByWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
+  type LatestOp = { phase: string; status: string; startedAt: Date; heartbeatRunId: string | null; heartbeatRunStatus: string | null };
+  const latestAttributedByBlockerWorkspace = new Map<string, LatestOp>();
+  const latestUnattributedByWorkspace = new Map<string, LatestOp>();
   for (const row of rows) {
     if (!row.executionWorkspaceId) continue;
     if (row.issueId) {
@@ -864,6 +868,8 @@ async function listPendingFinalizeBlockerIssueIds(
             phase: row.phase,
             status: row.status,
             startedAt: row.startedAt,
+            heartbeatRunId: row.heartbeatRunId,
+            heartbeatRunStatus: row.heartbeatRunStatus,
           });
         }
       }
@@ -876,6 +882,8 @@ async function listPendingFinalizeBlockerIssueIds(
         phase: row.phase,
         status: row.status,
         startedAt: row.startedAt,
+        heartbeatRunId: row.heartbeatRunId,
+        heartbeatRunStatus: row.heartbeatRunStatus,
       });
     }
   }
@@ -885,6 +893,19 @@ async function listPendingFinalizeBlockerIssueIds(
       ?? latestUnattributedByWorkspace.get(pair.executionWorkspaceId);
     if (!latest) continue; // no ops recorded -> nothing to finalize for this blocker
     if (latest.phase === "workspace_finalize" && latest.status === "succeeded") continue;
+    // The op holding the barrier belongs to a run that has already reached a
+    // terminal status (e.g. it crashed/failed during workspace setup, before
+    // ever reaching its own finalize-recording step). That run will never
+    // record a workspace_finalize row, so waiting for one would gate the
+    // dependent forever even though the blocker issue itself is done — only
+    // hold the barrier while the run that produced this op is still live.
+    if (
+      latest.heartbeatRunId
+      && latest.heartbeatRunStatus
+      && !BLOCKER_ATTENTION_ACTIVE_RUN_STATUSES.includes(latest.heartbeatRunStatus)
+    ) {
+      continue;
+    }
     pending.add(pair.blockerIssueId);
   }
 
