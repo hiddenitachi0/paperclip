@@ -6,6 +6,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/scripts/pr-base-branch-guard-hook.sh\"",
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/scripts/pr-open-merge-approval-hook.sh\"",
             "timeout": 20
           },
