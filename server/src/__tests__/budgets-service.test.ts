@@ -219,6 +219,117 @@ describe("budgetService", () => {
     });
   });
 
+  it("pauses an agent when a calendar-day token budget is exceeded, independent of billed_cents", async () => {
+    const tokenPolicy = {
+      id: "policy-tokens-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "total_tokens",
+      windowKind: "calendar_day_utc",
+      amount: 1_000_000,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: false,
+      isActive: true,
+    };
+
+    const dbStub = createDbStub([
+      [tokenPolicy],
+      [{ total: 1_500_000 }],
+      [],
+      [{
+        companyId: "company-1",
+        name: "Budget Agent",
+        status: "running",
+        pauseReason: null,
+      }],
+    ]);
+
+    dbStub.queueInsert([{
+      id: "approval-1",
+      companyId: "company-1",
+      status: "pending",
+    }]);
+    dbStub.queueInsert([{
+      id: "incident-1",
+      companyId: "company-1",
+      policyId: "policy-tokens-1",
+      approvalId: "approval-1",
+    }]);
+    dbStub.queueUpdate([]);
+    const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+
+    const service = budgetService(dbStub.db as any, { cancelWorkForScope });
+    await service.evaluateCostEvent({
+      companyId: "company-1",
+      agentId: "agent-1",
+      projectId: null,
+    } as any);
+
+    expect(dbStub.insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        policyId: "policy-tokens-1",
+        metric: "total_tokens",
+        windowKind: "calendar_day_utc",
+        thresholdType: "hard",
+        amountLimit: 1_000_000,
+        amountObserved: 1_500_000,
+      }),
+    );
+    expect(dbStub.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "paused",
+        pauseReason: "budget",
+      }),
+    );
+    expect(cancelWorkForScope).toHaveBeenCalledWith({
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+    });
+  });
+
+  it("blocks new runs for an agent that already exceeded its daily token cap", async () => {
+    const dbStub = createDbStub([
+      [{
+        status: "idle",
+        pauseReason: null,
+        companyId: "company-1",
+        name: "Budget Agent",
+      }],
+      [{
+        status: "active",
+        name: "Paperclip",
+      }],
+      [],
+      [{
+        id: "policy-tokens-1",
+        companyId: "company-1",
+        scopeType: "agent",
+        scopeId: "agent-1",
+        metric: "total_tokens",
+        windowKind: "calendar_day_utc",
+        amount: 1_000_000,
+        warnPercent: 80,
+        hardStopEnabled: true,
+        isActive: true,
+      }],
+      [{ total: 2_000_000 }],
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1");
+
+    expect(block).toEqual({
+      scopeType: "agent",
+      scopeId: "agent-1",
+      scopeName: "Budget Agent",
+      reason: "Agent cannot start because its budget hard-stop is still exceeded.",
+    });
+  });
+
   it("uses live observed spend when raising a budget incident", async () => {
     const dbStub = createDbStub([
       [{
