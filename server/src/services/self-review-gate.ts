@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
@@ -396,6 +396,42 @@ export async function findExistingSelfReviewPassWake(
     .then((rows) => rows[0] ?? null);
 }
 
+/**
+ * DUR-245: findExistingSelfReviewPassWake only matches the exact (issueId, sourceRunId) pair,
+ * so it only protects against the SAME run retrying its own declined PATCH. It does nothing
+ * for a DIFFERENT run (a later heartbeat, after the scheduled pass finished without actually
+ * completing the handoff -- e.g. the corrective run burned its turn budget re-investigating
+ * instead of just reviewing and re-PATCHing) attempting the transition later: that run gets
+ * its own fresh idempotency key, sails past findExistingSelfReviewPassWake, and this gate
+ * schedules yet another "one extra pass" for it. If that pass also fails to land the handoff,
+ * the cycle repeats indefinitely -- silently, with no operator-visible signal beyond the issue
+ * sitting in `blocked`/`todo` forever (see DUR-245).
+ *
+ * The gate's own design intent (see isSelfReviewPassRunId above) is to bound this to exactly
+ * one extra pass per issue, not one per attempting run. This checks whether ANY self-review
+ * pass wake has already reached a terminal `completed` state for this issue, regardless of
+ * which run originally triggered it, so a second (or third, ...) run doesn't pay for another
+ * pass that was already used up.
+ */
+export async function findCompletedSelfReviewPassForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string },
+) {
+  return db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+        eq(agentWakeupRequests.status, "completed"),
+      ),
+    )
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
 export type SelfReviewGateWakeup = (
   agentId: string,
   opts: {
@@ -447,6 +483,18 @@ export async function evaluateSelfReviewDoneGate(input: {
     companyId: input.issue.companyId,
     idempotencyKey,
   });
+
+  // DUR-245: this issue already used its one bounded extra pass under a different run, and
+  // that pass reached a terminal state without landing the handoff (otherwise currentStatus
+  // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
+  // would just repeat the same failure mode indefinitely; let this attempt through instead.
+  if (!existingWake) {
+    const priorPass = await findCompletedSelfReviewPassForIssue(input.db, {
+      companyId: input.issue.companyId,
+      issueId: input.issue.id,
+    });
+    if (priorPass) return null;
+  }
 
   const baseMessage =
     "This task needs one more self-check before it can move to review or done. I've scheduled a separate follow-up run to do that check and complete the handoff — retrying this same PATCH again in this run will not succeed, even right after posting a self-review comment yourself. Don't retry here; wait for the follow-up run.";

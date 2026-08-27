@@ -34,6 +34,16 @@ export type RunDatabaseBackupResult = {
   backupFile: string;
   sizeBytes: number;
   prunedCount: number;
+  /**
+   * Which engine actually produced this backup. "javascript" means pg_dump
+   * was unavailable or failed and the slower, more DB-load-intensive
+   * row-streaming fallback ran instead -- see DUR-271: a missing pg_dump
+   * binary silently degraded every scheduled backup to this path, which was
+   * enough concurrent load on hot tables to make the API appear to hang.
+   */
+  engine: "pg_dump" | "javascript";
+  /** Set only when engine is "javascript" and pg_dump was attempted first but failed. */
+  pgDumpFailureReason?: string;
 };
 
 export type RunDatabaseRestoreOptions = {
@@ -544,6 +554,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const sqlFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql`);
   const backupFile = `${sqlFile}.gz`;
   const writer = createBufferedTextFileWriter(sqlFile);
+  let pgDumpFailureReason: string | undefined;
 
   try {
     if (backupEngine === "pg_dump" || (backupEngine === "auto" && canUsePgDump)) {
@@ -562,6 +573,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
           backupFile,
           sizeBytes,
           prunedCount,
+          engine: "pg_dump",
         };
       } catch (error) {
         if (existsSync(backupFile)) {
@@ -570,6 +582,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         if (backupEngine === "pg_dump") {
           throw error;
         }
+        pgDumpFailureReason = sanitizeRestoreErrorMessage(error);
         sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
         sqlClosed = false;
       }
@@ -975,6 +988,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       backupFile,
       sizeBytes,
       prunedCount,
+      engine: "javascript",
+      pgDumpFailureReason,
     };
   } catch (error) {
     await writer.abort();
