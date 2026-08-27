@@ -8,6 +8,7 @@ import {
   isClaudeUnknownSessionError,
   isClaudeImageProcessingError,
   createClaudeLiveUsageTracker,
+  createClaudeUsageCapTracker,
 } from "./parse.js";
 
 function assistantEvent(usage: Record<string, number>) {
@@ -56,6 +57,50 @@ describe("createClaudeLiveUsageTracker", () => {
   it("ignores non-assistant lines and malformed JSON", () => {
     const tracker = createClaudeLiveUsageTracker();
     expect(tracker.onChunk(`${JSON.stringify({ type: "system", subtype: "init" })}\nnot json\n`)).toBeNull();
+  });
+});
+
+function assistantLine(usage: Record<string, number>): string {
+  return `${JSON.stringify({ type: "assistant", message: { usage } })}\n`;
+}
+
+// DUR-213: verifies the live token accountant that lets a run be killed
+// mid-flight instead of only discovering the cost after it finishes.
+describe("createClaudeUsageCapTracker", () => {
+  it("never reports exceeded when the cap is 0 (disabled)", () => {
+    const tracker = createClaudeUsageCapTracker(0);
+    const exceeded = tracker.onChunk(
+      assistantLine({ input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 }),
+    );
+    expect(exceeded).toBe(false);
+  });
+
+  it("sums input, output, and both cache token fields across turns", () => {
+    const tracker = createClaudeUsageCapTracker(0);
+    tracker.onChunk(assistantLine({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }));
+    tracker.onChunk(assistantLine({ input_tokens: 20, output_tokens: 7, cache_creation_input_tokens: 200 }));
+    expect(tracker.getUsage()).toEqual({ inputTokens: 30, cachedInputTokens: 300, outputTokens: 12 });
+    expect(tracker.getTotalTokens()).toBe(342);
+  });
+
+  it("reports exceeded once the running total reaches the cap", () => {
+    const tracker = createClaudeUsageCapTracker(150);
+    expect(tracker.onChunk(assistantLine({ input_tokens: 100 }))).toBe(false);
+    expect(tracker.onChunk(assistantLine({ input_tokens: 60 }))).toBe(true);
+  });
+
+  it("buffers a line split across multiple chunks instead of dropping it", () => {
+    const tracker = createClaudeUsageCapTracker(50);
+    const line = assistantLine({ input_tokens: 100 });
+    const splitAt = Math.floor(line.length / 2);
+    expect(tracker.onChunk(line.slice(0, splitAt))).toBe(false);
+    expect(tracker.onChunk(line.slice(splitAt))).toBe(true);
+  });
+
+  it("ignores non-assistant events and unparseable lines", () => {
+    const tracker = createClaudeUsageCapTracker(10);
+    tracker.onChunk(`${JSON.stringify({ type: "result", usage: { input_tokens: 999 } })}\nnot json\n`);
+    expect(tracker.getTotalTokens()).toBe(0);
   });
 });
 

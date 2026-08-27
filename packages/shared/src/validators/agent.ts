@@ -132,6 +132,19 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
       });
     }
   }
+  // DUR-213: per-run spend cap, counted in total tokens (input + output +
+  // cache) across every model call in the run. 0/unset means uncapped.
+  const maxTokensPerRunValue = value.maxTokensPerRun;
+  if (maxTokensPerRunValue !== undefined) {
+    const parsedCap = z.number().int().nonnegative().safeParse(maxTokensPerRunValue);
+    if (!parsedCap.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.maxTokensPerRun must be a non-negative integer",
+        path: ["maxTokensPerRun"],
+      });
+    }
+  }
 });
 
 export const createAgentInstructionsBundleSchema = z.object({
