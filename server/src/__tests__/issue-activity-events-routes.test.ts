@@ -3,6 +3,9 @@ import request from "supertest";
 import { getTableName } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.ts";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const TEST_COMPANY_ID = "66666666-6666-4666-8666-666666666666";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -39,7 +42,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
       feedbackDataSharingPreference: "prompt",
     },
   })),
-  listCompanyIds: vi.fn(async () => ["company-1"]),
+  listCompanyIds: vi.fn(async () => [TEST_COMPANY_ID]),
 }));
 const mockRoutineService = vi.hoisted(() => ({
   syncRunStatusForIssue: vi.fn(async () => undefined),
@@ -78,7 +81,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: TEST_COMPANY_ID, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => ({
@@ -122,7 +125,7 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp(db: unknown = {}) {
+async function createApp(db: unknown = withFakeCompanyScopeReserve({})) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -133,7 +136,7 @@ async function createApp(db: unknown = {}) {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: [TEST_COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -147,7 +150,7 @@ async function createApp(db: unknown = {}) {
 function makeIssue() {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "company-1",
+    companyId: TEST_COMPANY_ID,
     status: "todo",
     assigneeAgentId: "22222222-2222-4222-8222-222222222222",
     assigneeUserId: null,
@@ -200,7 +203,7 @@ describe("issue activity event routes", () => {
         feedbackDataSharingPreference: "prompt",
       },
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue([TEST_COMPANY_ID]);
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
   });
 
@@ -314,7 +317,7 @@ describe("issue activity event routes", () => {
       })),
     };
 
-    const res = await request(await createApp(dbMock))
+    const res = await request(await createApp(withFakeCompanyScopeReserve(dbMock)))
       .patch(`/api/issues/${issue.id}`)
       .send({ executionWorkspaceId: nextExecutionWorkspaceId });
 
@@ -379,7 +382,7 @@ describe("issue activity event routes", () => {
       }),
     };
 
-    const res = await request(await createApp(dbMock))
+    const res = await request(await createApp(withFakeCompanyScopeReserve(dbMock)))
       .patch(`/api/issues/${issue.id}`)
       .send({ status: "done" });
 
@@ -420,7 +423,7 @@ describe("issue activity event routes", () => {
       }),
     };
 
-    const res = await request(await createApp(dbMock))
+    const res = await request(await createApp(withFakeCompanyScopeReserve(dbMock)))
       .patch(`/api/issues/${issue.id}`)
       .send({ title: "Updated title" });
 
