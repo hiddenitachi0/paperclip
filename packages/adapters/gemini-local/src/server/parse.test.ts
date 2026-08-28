@@ -139,7 +139,6 @@ describe("parseGeminiJsonl", () => {
   it("classifies non-interactive manual authorization failures as auth required", () => {
     const result = detectGeminiAuthRequired({
       parsed: null,
-      stdout: "",
       stderr:
         "Error authenticating: FatalAuthenticationError: Manual authorization is required but the current session is non-interactive.",
     });

@@ -72,8 +72,13 @@ export function parseCodexJsonl(stdout: string) {
   };
 }
 
-export function isCodexUnknownSessionError(stdout: string, stderr: string): boolean {
-  const haystack = `${stdout}\n${stderr}`
+// DUR-258: word-search only over the CLI's own error-shaped text — `stderr`
+// (a crashed/rejected process's own short error text) and a caller-supplied
+// single-line `errorMessage`, never the raw multi-turn `stdout` transcript.
+// An agent merely *discussing* a session/thread topic in its own work was
+// otherwise enough to mislabel an unrelated failure as a stale session.
+export function isCodexUnknownSessionError(stderr: string): boolean {
+  const haystack = stderr
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
@@ -83,14 +88,15 @@ export function isCodexUnknownSessionError(stdout: string, stderr: string): bool
   );
 }
 
+// DUR-258: see the comment on isCodexUnknownSessionError above — this
+// deliberately excludes `stdout` (the full multi-turn transcript) from the
+// haystack, while still allowing `stderr` and the extracted `errorMessage`.
 function buildCodexErrorHaystack(input: {
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): string {
   return [
     input.errorMessage ?? "",
-    input.stdout ?? "",
     input.stderr ?? "",
   ]
     .join("\n")
@@ -235,7 +241,6 @@ function parseLocalClockTime(clockText: string, now: Date): Date | null {
 }
 
 export function extractCodexRetryNotBefore(input: {
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }, now = new Date()): Date | null {
@@ -246,7 +251,6 @@ export function extractCodexRetryNotBefore(input: {
 }
 
 export function isCodexTransientUpstreamError(input: {
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): boolean {

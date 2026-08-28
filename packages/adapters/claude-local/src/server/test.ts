@@ -357,7 +357,6 @@ export async function testEnvironment(
       const parsed = parsedStream.resultJson;
       const loginMeta = detectClaudeLoginRequired({
         parsed,
-        stdout: probe.stdout,
         stderr: probe.stderr,
       });
       const detail = summarizeProbeDetail(probe.stdout, probe.stderr);
@@ -412,7 +411,6 @@ export async function testEnvironment(
           "";
         const transient = isClaudeTransientUpstreamError({
           parsed,
-          stdout: probe.stdout,
           stderr: probe.stderr,
         });
         checks.push(
