@@ -29,7 +29,7 @@ describe("codex_local stale session detection", () => {
     const stderr =
       "2026-02-19T19:58:53.281939Z ERROR codex_core::rollout::list: state db missing rollout path for thread 019c775d-967c-7ef1-acc7-e396dc2c87cc";
 
-    expect(isCodexUnknownSessionError("", stderr)).toBe(true);
+    expect(isCodexUnknownSessionError(stderr)).toBe(true);
   });
 });
 
