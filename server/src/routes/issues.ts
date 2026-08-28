@@ -2849,6 +2849,32 @@ export function issueRoutes(
     return false;
   }
 
+  // DUR-312 follow-up: issue creation (POST /companies/:companyId/issues and
+  // POST /issues/:id/children) never runs a new issue through the
+  // self-review/goal-condition/deploy-completion done-gates -- those only fire on a
+  // PATCH transition of an *existing* issue into "done". A create call that sets
+  // status: "done" directly would otherwise let an agent mint a pre-"done" issue and
+  // attach an unreviewed changeLogVisible/changeLogSummary to it, bypassing
+  // assertChangeLogFieldsAllowed entirely. So at creation these fields are
+  // board-only, full stop -- an agent must always go through the gated PATCH path.
+  function assertChangeLogFieldsAllowedOnCreate(
+    req: Request,
+    res: Response,
+    createBody: { changeLogVisible?: unknown; changeLogSummary?: unknown },
+  ) {
+    const hasChangeLogFields =
+      createBody.changeLogVisible !== undefined || createBody.changeLogSummary !== undefined;
+    if (!hasChangeLogFields) return true;
+    if (req.actor.type === "board") return true;
+    res.status(403).json({
+      error: "changeLogVisible/changeLogSummary may only be set by a board user at issue creation",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
   async function assertExplicitResumeIntentAllowed(
     req: Request,
     res: Response,
@@ -5316,6 +5342,7 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (await assertLowTrustControlPlaneDenied(req, res, companyId, null)) return;
+    if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
@@ -5636,6 +5663,7 @@ export function issueRoutes(
     if (!isTaskBridgeKeyActor(req) && !(await assertIssueReadAllowed(req, res, parent))) return;
     if (!(await assertTaskWatchdogCreateIssueAllowed(req, res, parent.companyId, parent))) return;
     if (await assertLowTrustControlPlaneDenied(req, res, parent.companyId, parent)) return;
+    if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
@@ -5819,6 +5847,7 @@ export function issueRoutes(
         ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
       };
       requestedChildren.push(childBody);
+      if (!assertChangeLogFieldsAllowedOnCreate(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       if (childBody.assigneeAgentId || childBody.assigneeUserId) {
