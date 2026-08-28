@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/db";
 import {
   deriveProjectUrlKey,
+  hasEmbeddedGitCredential,
   hasNonAsciiContent,
   isUuidLike,
   normalizeProjectUrlKey,
@@ -904,6 +905,7 @@ export function projectService(db: Db) {
 
       const cwd = normalizeWorkspaceCwd(data.cwd);
       const repoUrl = readNonEmptyString(data.repoUrl);
+      if (repoUrl && hasEmbeddedGitCredential(repoUrl)) return null;
       const sourceType = readNonEmptyString(data.sourceType) ?? (repoUrl ? "git_repo" : cwd ? "local_path" : "remote_managed");
       const remoteWorkspaceRef = readNonEmptyString(data.remoteWorkspaceRef);
       if (sourceType === "remote_managed") {
@@ -997,6 +999,7 @@ export function projectService(db: Db) {
         data.repoUrl !== undefined
           ? readNonEmptyString(data.repoUrl)
           : readNonEmptyString(existing.repoUrl);
+      if (data.repoUrl !== undefined && nextRepoUrl && hasEmbeddedGitCredential(nextRepoUrl)) return null;
       const nextSourceType =
         data.sourceType !== undefined
           ? readNonEmptyString(data.sourceType)
