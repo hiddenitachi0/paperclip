@@ -1,8 +1,19 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getTableColumns } from "drizzle-orm";
+import { agents as agentsTable } from "@paperclipai/db";
 import { MAX_AGENT_AVATAR_BYTES } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// DUR-349: this file's first real HTTP round trip (multer + a real
+// listening server + JSDOM/dompurify's first-load cost from assets.ts) has
+// been observed to occasionally exceed vitest's 5000ms default under
+// sandbox CPU/disk contention -- not a logic bug in the route (see
+// assets.test.ts / agent-roles.test.ts for the same reasoning). Raise the
+// timeout for this file rather than let it flake CI.
+vi.setConfig({ testTimeout: 20_000 });
 
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
@@ -16,6 +27,19 @@ function agentRow(overrides: Record<string, unknown> = {}) {
     avatarAssetId: null,
     ...overrides,
   };
+}
+
+// The route's own agent lookup (`loadAgentRowForAvatar`) runs a plain
+// `db.select().from(agentsTable)...` through the real drizzle instance
+// wrapping the fake reserved connection (see fake-scoped-db.ts) -- not
+// through the `select` mock below, which only backs the pre-scope access
+// check's `rawDb.select`. drizzle maps `unsafeRows` positionally against
+// the table's columns in declaration order (see mapResultRow in
+// drizzle-orm/utils.js), so build the tuple from the schema itself rather
+// than hand-counting column positions.
+function agentUnsafeRow(row: Record<string, unknown>): unknown[] {
+  const columns = getTableColumns(agentsTable);
+  return Object.keys(columns).map((key) => (key in row ? row[key] : null));
 }
 
 const {
@@ -51,6 +75,7 @@ function registerModuleMocks() {
 type TxSpy = {
   update: ReturnType<typeof vi.fn>;
   delete: ReturnType<typeof vi.fn>;
+  execute: ReturnType<typeof vi.fn>;
   updateCalls: Array<{ set: Record<string, unknown> }>;
   deleteCalls: Array<{ id: unknown }>;
 };
@@ -70,7 +95,12 @@ function createTxSpy(): TxSpy {
       return Promise.resolve();
     }),
   }));
-  return { update, delete: del, updateCalls, deleteCalls };
+  // withCompanyScope (used by the avatar create/delete routes for the
+  // real update+delete transaction, distinct from the request-scoped
+  // proxy -- see assets.ts) does `await tx.execute(sql\`SELECT
+  // set_config(...)\`)` before invoking the route's own callback.
+  const execute = vi.fn(() => Promise.resolve(undefined));
+  return { update, delete: del, execute, updateCalls, deleteCalls };
 }
 
 function createDbStub(existingAgent: Record<string, unknown> | null) {
@@ -81,7 +111,10 @@ function createDbStub(existingAgent: Record<string, unknown> | null) {
       where: vi.fn(() => Promise.resolve(existingAgent ? [existingAgent] : [])),
     })),
   }));
-  return { select, transaction, tx };
+  return withFakeCompanyScopeReserve(
+    { select, transaction, tx },
+    { unsafeRows: existingAgent ? [agentUnsafeRow(existingAgent)] : [] },
+  );
 }
 
 function createStorage(): StorageService & { deleteObjectMock: ReturnType<typeof vi.fn> } {

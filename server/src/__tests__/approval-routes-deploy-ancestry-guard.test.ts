@@ -18,6 +18,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projects, projectWorkspaces } from "@paperclipai/db";
 import { getTableName } from "drizzle-orm";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_TIMEOUT = 20_000;
 
@@ -91,15 +92,16 @@ function registerModuleMocks() {
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
+const COMPANY_ID = "33333333-3333-4333-8333-333333333333";
 
 function createRouteDb(workspaceRepoUrl: string | null | undefined = "https://github.com/acme/widgets") {
-  return {
+  return withFakeCompanyScopeReserve({
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => ({
         where: vi.fn(() => ({
           then: async (resolve: (rows: unknown[]) => unknown) => {
             if (getTableName(table as any) === getTableName(projects)) {
-              return resolve([{ id: PROJECT_ID, companyId: "company-1" }]);
+              return resolve([{ id: PROJECT_ID, companyId: COMPANY_ID }]);
             }
             if (getTableName(table as any) === getTableName(projectWorkspaces)) {
               return resolve(workspaceRepoUrl === undefined ? [] : [{ repoUrl: workspaceRepoUrl }]);
@@ -113,7 +115,7 @@ function createRouteDb(workspaceRepoUrl: string | null | undefined = "https://gi
       })),
     })),
     insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
-  } as any;
+  } as any);
 }
 
 async function createAgentApp(db: any) {
@@ -127,7 +129,7 @@ async function createAgentApp(db: any) {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
@@ -186,7 +188,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: COMPANY_ID,
     });
     mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({
       deployBranch: "custom",
@@ -204,7 +206,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody("d55e5704"));
 
       expect(res.status).toBe(422);
@@ -227,7 +229,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody("d55e5704"));
 
       expect(res.status).toBe(422);
@@ -248,7 +250,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
         type: "request_board_approval",
         status: "revision_requested",
         payload: { kind: "deploy", projectId: PROJECT_ID, workspaceId: WORKSPACE_ID },
-        companyId: "company-1",
+        companyId: COMPANY_ID,
         requestedByAgentId: "agent-1",
       });
       const app = await createAgentApp(createRouteDb());
@@ -270,7 +272,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody("abc1234"));
 
       expect(res.status).toBe(201);
@@ -285,7 +287,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody());
 
       expect(res.status).toBe(201);
@@ -302,7 +304,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody("d55e5704"));
 
       expect(res.status).toBe(201);
@@ -318,7 +320,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb(null));
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody("d55e5704"));
 
       expect(res.status).toBe(201);
@@ -335,7 +337,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody("d55e5704"));
 
       expect(res.status).toBe(201);

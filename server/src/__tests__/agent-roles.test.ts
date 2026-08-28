@@ -11,6 +11,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/error-handler.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const agentId   = "11111111-1111-4111-8111-111111111111";
@@ -173,7 +174,14 @@ describe("agent roles — security", () => {
         where: vi.fn().mockResolvedValue([{ id: agentId, companyId }]),
       }),
     });
-    const fakeDb = { select: mockSelect } as any;
+    // The route's post-scope match-check (`db.select({ companyId })...`)
+    // runs through the real drizzle instance wrapping the fake reserved
+    // connection, not through `mockSelect` (that only backs the pre-scope
+    // resolver's `rawDb.select`) — so it needs a real positional-tuple row
+    // via `unsafeRows` to find the agent's companyId.
+    const fakeDb = withFakeCompanyScopeReserve({ select: mockSelect } as any, {
+      unsafeRows: [[companyId]],
+    });
 
     const app = express();
     app.use(express.json());
@@ -190,10 +198,11 @@ describe("agent roles — security", () => {
 
     expect(res.status).toBe(200);
     expect(mockAgentRolesService.assignRoleToAgent).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       roleId,
-      expect.objectContaining({ actor: expect.objectContaining({ type: "board" }) })
+      expect.objectContaining({ actor: expect.objectContaining({ type: "board" }) }),
+      fakeDb
     );
   });
 
@@ -233,7 +242,7 @@ describe("agent roles — security", () => {
         where: vi.fn().mockResolvedValue([{ companyId }]),
       }),
     });
-    const fakeDb = { select: mockSelect } as any;
+    const fakeDb = withFakeCompanyScopeReserve({ select: mockSelect } as any);
 
     const app = express();
     app.use(express.json());
@@ -250,7 +259,7 @@ describe("agent roles — security", () => {
 
     expect(res.status).toBe(200);
     expect(mockAgentRolesService.addAgentToolOverride).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       { name: "github-mcp", command: "github-mcp" },
       expect.objectContaining({ type: "board" })
@@ -340,7 +349,7 @@ describe("agent roles — security", () => {
     const mockSelect = vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([{ id: agentId, companyId }]) }),
     });
-    const fakeDb = { select: mockSelect } as any;
+    const fakeDb = withFakeCompanyScopeReserve({ select: mockSelect } as any);
     mockAgentRolesService.addAgentCatalogOverride.mockResolvedValue({ ...baseAgent });
     mockAgentRolesService.removeAgentCatalogOverride.mockResolvedValue({ ...baseAgent });
 
@@ -358,21 +367,23 @@ describe("agent roles — security", () => {
       .send({ key: "zendesk" });
     expect(addRes.status).toBe(200);
     expect(mockAgentRolesService.addAgentCatalogOverride).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       "connectors",
       "zendesk",
       expect.objectContaining({ type: "board" }),
+      fakeDb,
     );
 
     const removeRes = await request(app).delete(`/api/agents/${agentId}/role/connectors/zendesk`);
     expect(removeRes.status).toBe(200);
     expect(mockAgentRolesService.removeAgentCatalogOverride).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       "connectors",
       "zendesk",
       expect.objectContaining({ type: "board" }),
+      fakeDb,
     );
   });
 
@@ -418,7 +429,7 @@ describe("agent roles — role body validation rejects deploy-approval grants", 
     const mockSelect2 = vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }),
     });
-    app.use("/api", agentRoleRoutes({ select: mockSelect2 } as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({ select: mockSelect2 } as any)));
     app.use(errorHandler);
 
     const res = await request(app)
@@ -461,7 +472,7 @@ describe("GET /agents/:agentId/role — routes to the shared role-state service 
     const mockSelect = vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([{ companyId }]) }),
     });
-    const fakeDb = { select: mockSelect } as any;
+    const fakeDb = withFakeCompanyScopeReserve({ select: mockSelect } as any);
 
     const app = express();
     app.use(express.json());
@@ -472,7 +483,7 @@ describe("GET /agents/:agentId/role — routes to the shared role-state service 
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(state);
-    expect(mockAgentRolesService.getAgentRoleState).toHaveBeenCalledWith(fakeDb, agentId);
+    expect(mockAgentRolesService.getAgentRoleState).toHaveBeenCalledWith(expect.anything(), agentId);
   });
 
   it("404s when the agent does not exist, without calling the service", async () => {

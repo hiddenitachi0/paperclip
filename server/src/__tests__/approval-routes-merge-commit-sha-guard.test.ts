@@ -18,6 +18,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -117,20 +118,21 @@ async function createAgentApp() {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(createMinimalDb()));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve(createMinimalDb())));
   app.use(errorHandler);
   return app;
 }
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const FORGED_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const TEST_COMPANY_ID = "99999999-9999-4999-8999-999999999999";
 
 describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
   beforeEach(() => {
@@ -164,7 +166,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
     });
   });
 
@@ -172,7 +174,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -194,7 +196,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -214,7 +216,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
   it("strips a caller-supplied mergeCommitSha on resubmit", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
       requestedByAgentId: "agent-1",
       type: "request_board_approval",
       status: "pending",
@@ -225,7 +227,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
     });
     const app = await createAgentApp();
 

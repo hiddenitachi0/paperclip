@@ -12,6 +12,9 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const TEST_TIMEOUT = 20_000;
 
 // --- service mocks ---
 
@@ -115,19 +118,20 @@ async function createAgentApp() {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(createMinimalDb()));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve(createMinimalDb())));
   app.use(errorHandler);
   return app;
 }
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
+const COMPANY_ID = "55555555-5555-4555-8555-555555555555";
 
 function mergePrBody(base: string, plainSummary = "Ships the feature.") {
   return {
@@ -175,7 +179,7 @@ describe("DUR-40: merge_pr mirror-branch guard", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: COMPANY_ID,
     });
   });
 
@@ -187,14 +191,14 @@ describe("DUR-40: merge_pr mirror-branch guard", () => {
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send(mergePrBody("master"));
 
     expect(res.status).toBe(422);
     expect(res.body.message ?? res.body.error ?? "").toMatch(/mirror/i);
     expect(res.body.message ?? res.body.error ?? "").toMatch(/custom/);
     expect(mockApprovalService.create).not.toHaveBeenCalled();
-  });
+  }, TEST_TIMEOUT);
 
   it("allows a merge_pr approval targeting the deploy branch (no guard fires)", async () => {
     mockResolveProjectDeployBranches.mockResolvedValue({
@@ -204,12 +208,12 @@ describe("DUR-40: merge_pr mirror-branch guard", () => {
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send(mergePrBody("custom"));
 
     expect(res.status).toBe(201);
     expect(mockApprovalService.create).toHaveBeenCalled();
-  });
+  }, TEST_TIMEOUT);
 
   it("appends a consequence sentence to plainSummary when base is the deploy branch", async () => {
     mockResolveProjectDeployBranches.mockResolvedValue({
@@ -219,7 +223,7 @@ describe("DUR-40: merge_pr mirror-branch guard", () => {
     const app = await createAgentApp();
 
     await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send(mergePrBody("custom", "Ships the login page."));
 
     const createCall = mockApprovalService.create.mock.calls[0];
@@ -227,17 +231,17 @@ describe("DUR-40: merge_pr mirror-branch guard", () => {
     expect(typeof savedPayload.plainSummary).toBe("string");
     expect(savedPayload.plainSummary as string).toContain("custom");
     expect(savedPayload.plainSummary as string).toMatch(/deploy/i);
-  });
+  }, TEST_TIMEOUT);
 
   it("is a no-op when the project declares no deploy or mirror branches", async () => {
     mockResolveProjectDeployBranches.mockResolvedValue(null);
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send(mergePrBody("master"));
 
     expect(res.status).toBe(201);
     expect(mockApprovalService.create).toHaveBeenCalled();
-  });
+  }, TEST_TIMEOUT);
 });

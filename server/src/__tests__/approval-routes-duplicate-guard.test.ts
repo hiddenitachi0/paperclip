@@ -11,9 +11,12 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projects } from "@paperclipai/db";
 import { getTableName } from "drizzle-orm";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 // vi.resetModules() + dynamic imports take ~7s in this test environment.
 const TEST_TIMEOUT = 20_000;
+
+const TEST_COMPANY_ID = "66666666-6666-4666-8666-666666666666";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -80,7 +83,7 @@ function createRouteDb() {
           then: async (resolve: (rows: unknown[]) => unknown) =>
             resolve(
               getTableName(table as any) === getTableName(projects)
-                ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "company-1" }]
+                ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: TEST_COMPANY_ID }]
                 : [],
             ),
           limit: vi.fn(() => ({
@@ -91,6 +94,10 @@ function createRouteDb() {
     })),
     insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
   } as any;
+}
+
+function createScopedRouteDb() {
+  return withFakeCompanyScopeReserve(createRouteDb());
 }
 
 async function createApp() {
@@ -104,13 +111,13 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "user-1",
-      companyIds: ["company-1"],
+      companyIds: [TEST_COMPANY_ID],
       source: "session",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb()));
+  app.use("/api", approvalRoutes(createScopedRouteDb()));
   app.use(errorHandler);
   return app;
 }
@@ -146,7 +153,7 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     mockApprovalService.findOpenDeployApproval.mockResolvedValue(null);
     mockApprovalService.create.mockResolvedValue({
       id: "new-approval-1",
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
       type: "hire_agent",
       status: "pending",
       payload: {},
@@ -161,7 +168,7 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     });
 
     const res = await request(await createApp())
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "hire_agent",
         payload: { role: "engineer", title: "Hire engineer" },
@@ -174,7 +181,7 @@ describe("approval routes duplicate guard (DUR-101)", () => {
 
   it("allows a hire approval when no open approval for that role exists", async () => {
     const res = await request(await createApp())
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "hire_agent",
         payload: { role: "designer", title: "Hire designer" },
@@ -191,7 +198,7 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     });
 
     const res = await request(await createApp())
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         payload: { kind: "merge_pr", repo: "org/repo", prNumber: 42, title: "Merge PR #42" },
@@ -209,7 +216,7 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     });
 
     const res = await request(await createApp())
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         payload: {
@@ -237,14 +244,14 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     });
     mockApprovalService.create.mockResolvedValue({
       id: "new-deploy-1",
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
       type: "request_board_approval",
       status: "pending",
       payload: { kind: "deploy" },
     });
 
     const res = await request(await createApp())
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         payload: {
@@ -269,7 +276,7 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     });
 
     const res = await request(await createApp())
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${TEST_COMPANY_ID}/approvals`)
       .send({
         type: "hire_agent",
         payload: {

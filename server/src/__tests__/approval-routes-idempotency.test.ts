@@ -1,6 +1,16 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// DUR-349: each test here does a fresh `await import("../routes/approvals.js")`
+// (module-graph transform isn't free the first time it happens in a worker)
+// plus a real supertest round-trip. Under sandbox CPU/disk contention that
+// combination has been observed to occasionally exceed vitest's 5000ms
+// default before either even starts — not a logic bug in the route (the
+// same assertions pass reliably once given headroom). Raise the timeout for
+// this file rather than let it flake CI.
+vi.setConfig({ testTimeout: 20_000 });
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -77,14 +87,14 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
     (req as any).actor = {
       type: "board",
       userId: "user-1",
-      companyIds: ["company-1"],
+      companyIds: ["77777777-7777-4777-8777-777777777777"],
       source: "session",
       isInstanceAdmin: false,
       ...actorOverrides,
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb()));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve(createRouteDb())));
   app.use(errorHandler);
   return app;
 }
@@ -92,7 +102,7 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
 function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "run-1", agentId = "agent-1") {
   const runRows = [{
     id: runId,
-    companyId: "company-1",
+    companyId: "77777777-7777-4777-8777-777777777777",
     agentId,
     contextSnapshot,
   }];
@@ -100,7 +110,7 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
   // `select({ id: projects.id, companyId: projects.companyId })` before
   // filing/resubmitting -- match that exact projection here so the
   // pre-existing well-formed-deploy-payload tests still resolve to a real
-  // project in company-1 instead of failing earlier on a fake id.
+  // project in the test company instead of failing earlier on a fake id.
   const projectExistenceKeys = ["companyId", "id"].sort().join(",");
   return {
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
@@ -110,7 +120,7 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
           const rows = Object.keys(selection).includes("contextSnapshot")
             ? runRows
             : selectionKeys === projectExistenceKeys
-              ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "company-1" }]
+              ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "77777777-7777-4777-8777-777777777777" }]
               : [];
           const resolvable = {
             then: async (resolve: (rows: unknown[]) => unknown) => resolve(rows),
@@ -139,52 +149,46 @@ async function createAgentApp(options: { runId?: string; contextSnapshot?: Recor
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       runId: options.runId ?? "run-1",
       source: "api_key",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb(options.contextSnapshot, options.runId ?? "run-1")));
+  app.use(
+    "/api",
+    approvalRoutes(withFakeCompanyScopeReserve(createRouteDb(options.contextSnapshot, options.runId ?? "run-1"))),
+  );
   app.use(errorHandler);
   return app;
 }
 
-// Distinguishes issues/projects/companies lookups by the actual table object
-// passed to `.from(...)`, mirroring how routes/approvals.ts resolves the
-// project label an approval title should lead with. Imports `@paperclipai/db`
-// dynamically so it resolves the same fresh module instance `vi.resetModules()`
-// forces on the (also dynamically imported) route module under test.
-async function createTitleResolutionDb(opts: {
-  issueProjectId?: string | null;
-  projectName?: string | null;
-  companyName?: string | null;
-}) {
-  const { companies, issues, projects } = await import("@paperclipai/db");
+// Backs the pre-scope heartbeatRuns run-context lookup only (see
+// assertApprovalMutationAllowedByRunContext in routes/approvals.ts, which
+// deliberately queries via the raw, unwrapped db before company scope is
+// ever established) -- returning no row for every table is enough since
+// none of these title-resolution tests exercise the cheap-recovery escalation
+// path. The actual issues/projects/companies lookups this route makes to
+// build the approval title (resolveApprovalProjectLabel) run through
+// createRequestScopedDb(rawDb) *after* scope is established, which resolves
+// to a real drizzle query against withFakeCompanyScopeReserve's fake reserved
+// connection instead of this mock -- see that helper's `unsafeRows` option,
+// which createAgentAppWithDb below forwards for exactly that reason.
+function createTitleResolutionDb() {
   return {
     select: vi.fn(() => ({
-      from: vi.fn((table: unknown) => ({
+      from: vi.fn(() => ({
         where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => {
-            if (table === issues) {
-              return resolve(opts.issueProjectId ? [{ projectId: opts.issueProjectId }] : []);
-            }
-            if (table === projects) {
-              return resolve(opts.projectName ? [{ name: opts.projectName }] : []);
-            }
-            if (table === companies) {
-              return resolve(opts.companyName ? [{ name: opts.companyName }] : []);
-            }
-            return resolve([]);
-          },
+          then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
         })),
       })),
     })),
+    insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
   } as any;
 }
 
-async function createAgentAppWithDb(db: any) {
+async function createAgentAppWithDb(db: any, scopeOpts: { unsafeRows?: unknown[] } = {}) {
   const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
     import("../middleware/index.js"),
     import("../routes/approvals.js"),
@@ -195,14 +199,14 @@ async function createAgentAppWithDb(db: any) {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(db));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve(db, scopeOpts)));
   app.use(errorHandler);
   return app;
 }
@@ -255,7 +259,7 @@ describe("approval routes idempotent retries", () => {
   it("does not emit duplicate approval side effects when approve is already resolved", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "hire_agent",
       status: "approved",
       payload: {},
@@ -264,7 +268,7 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.approve.mockResolvedValue({
       approval: {
         id: "approval-1",
-        companyId: "company-1",
+        companyId: "77777777-7777-4777-8777-777777777777",
         type: "hire_agent",
         status: "approved",
         payload: {},
@@ -286,7 +290,7 @@ describe("approval routes idempotent retries", () => {
   it("does not emit duplicate rejection logs when reject is already resolved", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "hire_agent",
       status: "rejected",
       payload: {},
@@ -294,7 +298,7 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.reject.mockResolvedValue({
       approval: {
         id: "approval-1",
-        companyId: "company-1",
+        companyId: "77777777-7777-4777-8777-777777777777",
         type: "hire_agent",
         status: "rejected",
         payload: {},
@@ -313,7 +317,7 @@ describe("approval routes idempotent retries", () => {
   it("rejects approval decisions for companies outside the caller scope", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-2",
-      companyId: "company-2",
+      companyId: "88888888-8888-4888-8888-888888888888",
       type: "hire_agent",
       status: "pending",
       payload: {},
@@ -330,7 +334,7 @@ describe("approval routes idempotent retries", () => {
   it("rejects approval revision requests for companies outside the caller scope", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-3",
-      companyId: "company-2",
+      companyId: "88888888-8888-4888-8888-888888888888",
       type: "hire_agent",
       status: "pending",
       payload: {},
@@ -347,7 +351,7 @@ describe("approval routes idempotent retries", () => {
   it("derives approval attribution from the authenticated actor on approve", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-4",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "hire_agent",
       status: "pending",
       payload: {},
@@ -356,7 +360,7 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.approve.mockResolvedValue({
       approval: {
         id: "approval-4",
-        companyId: "company-1",
+        companyId: "77777777-7777-4777-8777-777777777777",
         type: "hire_agent",
         status: "approved",
         payload: {},
@@ -376,7 +380,7 @@ describe("approval routes idempotent retries", () => {
   it("derives approval attribution from the authenticated actor on reject", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-5",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "hire_agent",
       status: "pending",
       payload: {},
@@ -384,7 +388,7 @@ describe("approval routes idempotent retries", () => {
     mockApprovalService.reject.mockResolvedValue({
       approval: {
         id: "approval-5",
-        companyId: "company-1",
+        companyId: "77777777-7777-4777-8777-777777777777",
         type: "hire_agent",
         status: "rejected",
         payload: {},
@@ -403,14 +407,14 @@ describe("approval routes idempotent retries", () => {
   it("derives approval attribution from the authenticated actor on request revision", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-6",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "hire_agent",
       status: "pending",
       payload: {},
     });
     mockApprovalService.requestRevision.mockResolvedValue({
       id: "approval-6",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "hire_agent",
       status: "revision_requested",
       payload: {},
@@ -431,7 +435,7 @@ describe("approval routes idempotent retries", () => {
   it("lets agents create generic issue-linked board approval requests", async () => {
     mockApprovalService.create.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "request_board_approval",
       requestedByAgentId: "agent-1",
       requestedByUserId: null,
@@ -445,7 +449,7 @@ describe("approval routes idempotent retries", () => {
     });
 
     const res = await request(await createAgentApp())
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         issueIds: ["00000000-0000-0000-0000-000000000001"],
@@ -454,7 +458,7 @@ describe("approval routes idempotent retries", () => {
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
     expect(res.body).toMatchObject({
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "request_board_approval",
       requestedByAgentId: "agent-1",
       requestedByUserId: null,
@@ -469,7 +473,7 @@ describe("approval routes idempotent retries", () => {
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        companyId: "company-1",
+        companyId: "77777777-7777-4777-8777-777777777777",
         actorType: "agent",
         actorId: "agent-1",
         action: "approval.created",
@@ -480,12 +484,16 @@ describe("approval routes idempotent retries", () => {
   it("rewrites payload.title to '<project> — <what this does>' from the linked issue's project (DUR-24)", async () => {
     mockApprovalService.create.mockResolvedValue({ id: "approval-title-1" });
 
-    const db = await createTitleResolutionDb({
-      issueProjectId: "project-1",
-      projectName: "Nordstrand dashboard",
-    });
-    const res = await request(await createAgentAppWithDb(db))
-      .post("/api/companies/company-1/approvals")
+    // resolveApprovalProjectLabel makes two single-field scoped selects here
+    // (issues.projectId, then projects.name) -- withFakeCompanyScopeReserve's
+    // fake reserved connection answers every query with the same positional
+    // `unsafeRows` tuple regardless of which table/fields were selected (see
+    // fake-scoped-db.ts), so a single 1-column tuple satisfies both: the
+    // first select takes it as a (never-compared) projectId, the second
+    // takes the same value as the project name we actually want back.
+    const db = createTitleResolutionDb();
+    const res = await request(await createAgentAppWithDb(db, { unsafeRows: [["Nordstrand dashboard"]] }))
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         issueIds: ["00000000-0000-0000-0000-000000000001"],
@@ -494,7 +502,7 @@ describe("approval routes idempotent retries", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
+      "77777777-7777-4777-8777-777777777777",
       expect.objectContaining({
         payload: expect.objectContaining({
           title: "Nordstrand dashboard — put the 2026 look, translations and Finance fixes live",
@@ -506,9 +514,12 @@ describe("approval routes idempotent retries", () => {
   it("strips a legacy PR-number title prefix and lifts prNumber/repo into a technicalReference line, never the title (DUR-24)", async () => {
     mockApprovalService.create.mockResolvedValue({ id: "approval-title-2" });
 
-    const db = await createTitleResolutionDb({ companyName: "Paperclip Fork Co" });
-    const res = await request(await createAgentAppWithDb(db))
-      .post("/api/companies/company-1/approvals")
+    // No issueIds on this request, so resolveApprovalProjectLabel skips
+    // straight to the single-field companies.name scoped select -- see the
+    // comment on the previous test for why one unsafeRows tuple is enough.
+    const db = createTitleResolutionDb();
+    const res = await request(await createAgentAppWithDb(db, { unsafeRows: [["Paperclip Fork Co"]] }))
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         payload: {
@@ -521,7 +532,7 @@ describe("approval routes idempotent retries", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
+      "77777777-7777-4777-8777-777777777777",
       expect.objectContaining({
         payload: expect.objectContaining({
           title: "Paperclip Fork Co — sub-tasks inherit the model and effort you set on a task",
@@ -535,7 +546,7 @@ describe("approval routes idempotent retries", () => {
 
   it("rejects deploy-request approvals whose payload does not match deployRequestPayloadSchema", async () => {
     const res = await request(await createAgentApp())
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         payload: {
@@ -561,7 +572,7 @@ describe("approval routes idempotent retries", () => {
     };
     mockApprovalService.create.mockResolvedValue({
       id: "approval-9",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "request_board_approval",
       requestedByAgentId: "agent-1",
       requestedByUserId: null,
@@ -575,7 +586,7 @@ describe("approval routes idempotent retries", () => {
     });
 
     const res = await request(await createAgentApp())
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({ type: "request_board_approval", payload });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
@@ -585,7 +596,7 @@ describe("approval routes idempotent retries", () => {
   it("rejects deploy-request payloads injected via resubmit", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-10",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "request_board_approval",
       status: "revision_requested",
       payload: { kind: "deploy" },
@@ -611,7 +622,7 @@ describe("approval routes idempotent retries", () => {
         resumeRequiresNormalModel: true,
       },
     }))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         payload: { title: "Approve hosting spend" },
@@ -635,7 +646,7 @@ describe("approval routes idempotent retries", () => {
         resumeRequiresNormalModel: true,
       },
     }))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         payload: { kind: "merge_pr", title: "Merge the finished PR" },
@@ -671,7 +682,7 @@ describe("approval routes idempotent retries", () => {
         from: vi.fn(() => ({
           where: vi.fn(() => {
             const rows = Object.keys(selection).includes("contextSnapshot")
-              ? [{ id: "run-1", companyId: "company-1", agentId: "agent-1", contextSnapshot: cheapContextSnapshot }]
+              ? [{ id: "run-1", companyId: "77777777-7777-4777-8777-777777777777", agentId: "agent-1", contextSnapshot: cheapContextSnapshot }]
               : Object.keys(selection).includes("status")
                 ? [{ id: "existing-wake-run", status: "queued" }]
                 : [];
@@ -687,7 +698,7 @@ describe("approval routes idempotent retries", () => {
     } as any;
 
     const res = await request(await createAgentAppWithDb(idempotentDb))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/77777777-7777-4777-8777-777777777777/approvals")
       .send({
         type: "request_board_approval",
         payload: { kind: "merge_pr", title: "Merge the finished PR" },
@@ -702,7 +713,7 @@ describe("approval routes idempotent retries", () => {
   it("blocks status-only recovery runs from resubmitting approvals", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-7",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "request_board_approval",
       status: "revision_requested",
       payload: {},
@@ -729,7 +740,7 @@ describe("approval routes idempotent retries", () => {
   it("blocks status-only recovery runs from commenting on approvals", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-8",
-      companyId: "company-1",
+      companyId: "77777777-7777-4777-8777-777777777777",
       type: "request_board_approval",
       status: "pending",
       payload: {},

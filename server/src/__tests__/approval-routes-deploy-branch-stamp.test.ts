@@ -14,6 +14,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projects, projectWorkspaces } from "@paperclipai/db";
 import { getTableName } from "drizzle-orm";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_TIMEOUT = 20_000;
 
@@ -84,6 +85,7 @@ function registerModuleMocks() {
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
+const COMPANY_ID = "55555555-5555-4555-8555-555555555555";
 
 function createRouteDb(workspaceRepoUrl: string | null | undefined = "https://github.com/acme/widgets") {
   return {
@@ -92,7 +94,7 @@ function createRouteDb(workspaceRepoUrl: string | null | undefined = "https://gi
         where: vi.fn(() => ({
           then: async (resolve: (rows: unknown[]) => unknown) => {
             if (getTableName(table as any) === getTableName(projects)) {
-              return resolve([{ id: PROJECT_ID, companyId: "company-1" }]);
+              return resolve([{ id: PROJECT_ID, companyId: COMPANY_ID }]);
             }
             if (getTableName(table as any) === getTableName(projectWorkspaces)) {
               return resolve(workspaceRepoUrl === undefined ? [] : [{ repoUrl: workspaceRepoUrl }]);
@@ -109,7 +111,7 @@ function createRouteDb(workspaceRepoUrl: string | null | undefined = "https://gi
   } as any;
 }
 
-async function createAgentApp(db: any) {
+async function createAgentApp(db: any, scopeOpts: { unsafeRows?: unknown[] } = {}) {
   const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
     import("../middleware/index.js"),
     import("../routes/approvals.js"),
@@ -120,14 +122,14 @@ async function createAgentApp(db: any) {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(db));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve(db, scopeOpts)));
   app.use(errorHandler);
   return app;
 }
@@ -186,7 +188,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: COMPANY_ID,
     });
     mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({
       deployBranch: "custom",
@@ -203,7 +205,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
         .mockResolvedValueOnce(branchesWhereHeadResponse(["custom"]));
       const app = await createAgentApp(createRouteDb());
 
-      const res = await request(app).post("/api/companies/company-1/approvals").send(deployBody());
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
 
       expect(res.status).toBe(201);
       const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
@@ -221,7 +223,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
         .mockResolvedValueOnce(branchesWhereHeadResponse(["feature/widgets"]));
       const app = await createAgentApp(createRouteDb());
 
-      const res = await request(app).post("/api/companies/company-1/approvals").send(deployBody());
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
 
       expect(res.status).toBe(201);
       const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
@@ -239,7 +241,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
         .mockResolvedValueOnce(branchesWhereHeadResponse([]));
       const app = await createAgentApp(createRouteDb());
 
-      const res = await request(app).post("/api/companies/company-1/approvals").send(deployBody());
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
 
       expect(res.status).toBe(201);
       const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
@@ -255,7 +257,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody({ commit: undefined }));
 
       expect(res.status).toBe(201);
@@ -273,7 +275,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
       mockResolveProjectDeployBranchesByProjectId.mockResolvedValue(null);
       const app = await createAgentApp(createRouteDb());
 
-      const res = await request(app).post("/api/companies/company-1/approvals").send(deployBody());
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
 
       expect(res.status).toBe(201);
       expect(mockGhFetch).not.toHaveBeenCalled();
@@ -293,7 +295,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
       const app = await createAgentApp(createRouteDb());
 
       const res = await request(app)
-        .post("/api/companies/company-1/approvals")
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
         .send(deployBody({ sourceBranch: "master", deployBranch: "master" }));
 
       expect(res.status).toBe(201);
@@ -315,7 +317,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
         type: "request_board_approval",
         status: "revision_requested",
         payload: { kind: "deploy", projectId: PROJECT_ID, workspaceId: WORKSPACE_ID },
-        companyId: "company-1",
+        companyId: COMPANY_ID,
         requestedByAgentId: "agent-1",
       });
       mockApprovalService.resubmit.mockResolvedValue({
@@ -323,9 +325,24 @@ describe("DUR-284: deploy approval branch stamp", () => {
         type: "request_board_approval",
         status: "pending",
         payload: {},
-        companyId: "company-1",
+        companyId: COMPANY_ID,
       });
-      const app = await createAgentApp(createRouteDb());
+      // Unlike the create route (which does its project/workspace lookups
+      // against `rawDb` directly, so createRouteDb()'s own .select mock
+      // handles it), the resubmit route does them through the
+      // createRequestScopedDb(rawDb) proxy -- see company-scope.ts -- which
+      // resolves every call to a *real* drizzle query builder running
+      // against withFakeCompanyScopeReserve's fake reserved connection
+      // instead of createRouteDb()'s .select mock. That connection answers
+      // every query with the same positional `unsafeRows` tuple regardless
+      // of which table/fields were selected (see fake-scoped-db.ts), so one
+      // 2-column tuple has to satisfy both the projects lookup (`id`,
+      // `companyId`) and the projectWorkspaces lookup (`repoUrl`) -- ordering
+      // it [repoUrl, companyId] lets the 1-field workspace select take just
+      // the first column while the 2-field project select takes both.
+      const app = await createAgentApp(createRouteDb(), {
+        unsafeRows: [["https://github.com/acme/widgets", COMPANY_ID]],
+      });
 
       const res = await request(app)
         .post("/api/approvals/approval-1/resubmit")

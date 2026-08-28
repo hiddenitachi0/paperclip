@@ -18,13 +18,14 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_TIMEOUT = 20_000;
 
 const bossAgentId = "11111111-1111-4111-8111-111111111111";
 const reportAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
-const companyId = "company-1";
+const companyId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -107,7 +108,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb()));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve(createRouteDb())));
   app.use(errorHandler);
   return app;
 }

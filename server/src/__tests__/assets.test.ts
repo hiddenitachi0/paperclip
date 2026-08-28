@@ -7,6 +7,14 @@ import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 
+// DUR-349: the first real HTTP round trip in this file (multer + a real
+// listening server + JSDOM/dompurify's first-load cost) has been observed to
+// occasionally exceed vitest's 5000ms default under sandbox CPU/disk
+// contention -- not a logic bug in the route (see agent-roles.test.ts for
+// the same reasoning). Raise the timeout for this file rather than let it
+// flake CI.
+vi.setConfig({ testTimeout: 20_000 });
+
 const { createAssetMock, getAssetByIdMock, logActivityMock } = vi.hoisted(() => ({
   createAssetMock: vi.fn(),
   getAssetByIdMock: vi.fn(),
