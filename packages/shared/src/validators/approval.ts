@@ -180,3 +180,35 @@ export const instructionsChangeRequestPayloadSchema = z
   });
 
 export type InstructionsChangeRequestPayload = z.infer<typeof instructionsChangeRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for a persona post that needs
+ * board sign-off before it publishes (DUR-134) -- filed for either of the
+ * two reasons the 23 August operator decision calls out: the target
+ * `persona_accounts` row is `autonomyMode:"requires_approval"` (X/Meta, or
+ * any new/misconfigured channel per the safe-by-default rule), or the
+ * account is still within its warm-up window regardless of autonomyMode.
+ * Filed by `persona-publisher.ts` itself, never by the persona's own agent
+ * directly -- same trust boundary as `deployRequestPayloadSchema` above.
+ * Approving/rejecting moves the linked `persona_posts` row to
+ * `approved`/`rejected` (see the `persona_publish` branch of
+ * `approvalService.approve`/`reject` in server/src/services/approvals.ts);
+ * approving never publishes by itself, it only clears the gate for the next
+ * publisher pass, which still re-checks the kill switch and daily cap.
+ */
+export const personaPublishRequestPayloadSchema = z
+  .object({
+    kind: z.literal("persona_publish"),
+    personaId: z.string().uuid(),
+    personaAccountId: z.string().uuid(),
+    personaPostId: z.string().uuid(),
+    platform: z.string().trim().min(1),
+    reason: z.enum(["requires_approval_channel", "warmup"]),
+    caption: z.string().trim().min(1),
+    disclosureText: z.string().trim().min(1).nullable(),
+    title: z.string().min(1),
+    summary: multilineTextSchema,
+  })
+  .strict();
+
+export type PersonaPublishRequestPayload = z.infer<typeof personaPublishRequestPayloadSchema>;

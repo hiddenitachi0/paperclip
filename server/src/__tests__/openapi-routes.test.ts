@@ -64,6 +64,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "mcp-tool-library.ts",
   // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
   "personas.ts",
+  // Persona publishing routes (DUR-134) are board/instance-admin-only and not yet in the public OpenAPI document.
+  "persona-accounts.ts",
   // Operator change-log routes (DUR-312) are a new backend feature not yet in the public OpenAPI document.
   "change-log.ts",
 ]);

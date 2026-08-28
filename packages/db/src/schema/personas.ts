@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, boolean, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -24,6 +24,11 @@ export const personas = pgTable(
     // Enforcement (blocking generation once hit) is separate follow-up work
     // in the routine that briefs her; this column is storage only.
     dailyGenerationCap: integer("daily_generation_cap"),
+    // DUR-134: the per-persona half of the publishing kill switch (item 6).
+    // Stops publishing across every one of this persona's persona_accounts
+    // on the next publish attempt. See persona_publishing_company_settings
+    // for the company-wide half.
+    publishingPaused: boolean("publishing_paused").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

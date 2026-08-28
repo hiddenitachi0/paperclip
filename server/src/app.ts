@@ -17,6 +17,7 @@ import { teamsCatalogRoutes } from "./routes/teams-catalog.js";
 import { agentRoutes } from "./routes/agents.js";
 import { agentRoleRoutes } from "./routes/agent-roles.js";
 import { personaRoutes } from "./routes/personas.js";
+import { personaAccountRoutes } from "./routes/persona-accounts.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
@@ -234,6 +235,7 @@ export async function createApp(
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager, storageService: opts.storageService }));
   api.use(agentRoleRoutes(db));
   api.use(personaRoutes(db));
+  api.use(personaAccountRoutes(db));
   api.use(mcpToolLibraryRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));

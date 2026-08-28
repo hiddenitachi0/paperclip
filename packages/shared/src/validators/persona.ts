@@ -16,6 +16,11 @@ export const createPersonaSchema = z.object({
   status: personaStatusSchema.optional(),
   // No global default -- null means unlimited. Set per persona per DUR-63.
   dailyGenerationCap: z.number().int().positive().nullable().optional(),
+  // DUR-134: the per-persona half of the publishing kill switch. Defaults to
+  // false (not paused) at the DB level; settable here so an operator can
+  // pause a persona's publishing across every account in the same PATCH
+  // that, say, takes it out of rotation for other reasons.
+  publishingPaused: z.boolean().optional(),
 });
 export type CreatePersonaInput = z.infer<typeof createPersonaSchema>;
 
