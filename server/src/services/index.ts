@@ -58,6 +58,7 @@ export { approvalService } from "./approvals.js";
 export { escalationGrantService } from "./escalation-grants.js";
 export { budgetService } from "./budgets.js";
 export { secretService } from "./secrets.js";
+export { startSecretSurfaceScanner, runSecretSurfaceScan } from "./secret-surface-scanner.js";
 export {
   routineService,
   verifyScheduleChainBootstrap,
