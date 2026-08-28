@@ -7,6 +7,7 @@ import {
   timestamp,
   integer,
   jsonb,
+  boolean,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -63,6 +64,10 @@ export const issues = pgTable(
     executionWorkspacePreference: text("execution_workspace_preference"),
     executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown>>(),
     sourceTrust: jsonb("source_trust").$type<SourceTrustMetadata | null>(),
+    // DUR-312: read-only operator changelog -- one line per fixed bug/small
+    // change, kept out of the approval queue. Set on the issue at close time.
+    changeLogVisible: boolean("change_log_visible").notNull().default(false),
+    changeLogSummary: text("change_log_summary"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -81,6 +86,11 @@ export const issues = pgTable(
       table.companyId,
       table.assigneeUserId,
       table.status,
+    ),
+    changeLogIdx: index("issues_company_change_log_idx").on(
+      table.companyId,
+      table.changeLogVisible,
+      table.completedAt,
     ),
     parentIdx: index("issues_company_parent_idx").on(table.companyId, table.parentId),
     projectIdx: index("issues_company_project_idx").on(table.companyId, table.projectId),

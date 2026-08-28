@@ -6376,3 +6376,128 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
   });
 
 });
+
+describeEmbeddedPostgres("issueService.listChangeLog", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-change-log-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedCompany() {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    return companyId;
+  }
+
+  it("only surfaces done issues explicitly marked changeLogVisible, not every done issue", async () => {
+    const companyId = await seedCompany();
+    const marked = await svc.create(companyId, {
+      title: "Fixed a bug",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    const unmarked = await svc.create(companyId, {
+      title: "Also done but not flagged",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    await svc.update(marked.id, {
+      status: "done",
+      changeLogVisible: true,
+      changeLogSummary: "Login errors are fixed; see the login page.",
+    });
+    await svc.update(unmarked.id, { status: "done" });
+
+    const entries = await svc.listChangeLog(companyId);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: marked.id,
+      changeLogSummary: "Login errors are fixed; see the login page.",
+    });
+  });
+
+  it("excludes changeLogVisible issues that are not yet done", async () => {
+    const companyId = await seedCompany();
+    const issue = await svc.create(companyId, {
+      title: "Still in progress",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    await svc.update(issue.id, { changeLogVisible: true, changeLogSummary: "Not shipped yet" });
+
+    const entries = await svc.listChangeLog(companyId);
+
+    expect(entries).toHaveLength(0);
+  });
+
+  it("sorts newest-first and filters by projectId and companyId", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany();
+    const projectId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Project A",
+    });
+
+    const older = await svc.create(companyId, {
+      title: "Older fix",
+      description: null,
+      status: "todo",
+      priority: "medium",
+      projectId,
+    });
+    const newer = await svc.create(companyId, {
+      title: "Newer fix",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    const otherCompanyIssue = await svc.create(otherCompanyId, {
+      title: "Different company fix",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+
+    await svc.update(older.id, { status: "done", changeLogVisible: true, changeLogSummary: "Older fix summary" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await svc.update(newer.id, { status: "done", changeLogVisible: true, changeLogSummary: "Newer fix summary" });
+    await svc.update(otherCompanyIssue.id, {
+      status: "done",
+      changeLogVisible: true,
+      changeLogSummary: "Should never show up for companyId",
+    });
+
+    const all = await svc.listChangeLog(companyId);
+    expect(all.map((entry) => entry.id)).toEqual([newer.id, older.id]);
+
+    const filtered = await svc.listChangeLog(companyId, { projectId });
+    expect(filtered.map((entry) => entry.id)).toEqual([older.id]);
+  });
+});
