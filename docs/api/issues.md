@@ -170,6 +170,8 @@ Supported `kind` values:
 
 For `request_confirmation`, `continuationPolicy: "wake_assignee"` wakes the assignee only after acceptance. Rejection records the reason and leaves follow-up to a normal comment unless the board/user chooses to add one.
 
+Set `payload.factCheck: true` when the request is asking the board/user to verify facts only they can check (numbers in an external system, natural-language phrasing, a workflow matching how the business actually runs) rather than asking them to authorize an action. The UI renders this as a visually distinct card from a normal accept/reject decision. Set it deliberately — do not rely on `prompt`/`detailsMarkdown` wording to imply it; the field exists precisely because inferring this from freeform text is spoofable (an agent's own prompt/detailsMarkdown can be phrased to dodge any wording-based heuristic).
+
 ### Resolve Interaction
 
 ```
