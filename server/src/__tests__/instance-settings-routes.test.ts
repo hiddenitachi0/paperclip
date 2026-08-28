@@ -17,6 +17,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   buildIssueGraphLivenessAutoRecoveryPreview: vi.fn(),
   reconcileIssueGraphLiveness: vi.fn(),
+  markInFlightRunsPausedForRestart: vi.fn(),
 }));
 const mockEnvironmentService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -71,6 +72,7 @@ describe("instance settings routes", () => {
     mockInstanceSettingsService.deactivateQuietMode.mockReset();
     mockHeartbeatService.buildIssueGraphLivenessAutoRecoveryPreview.mockReset();
     mockHeartbeatService.reconcileIssueGraphLiveness.mockReset();
+    mockHeartbeatService.markInFlightRunsPausedForRestart.mockReset();
     mockEnvironmentService.getById.mockReset();
     mockLogActivity.mockReset();
     mockInstanceSettingsService.get.mockResolvedValue({
@@ -208,6 +210,10 @@ describe("instance settings routes", () => {
       driver: "local",
       status: "active",
       config: {},
+    });
+    mockHeartbeatService.markInFlightRunsPausedForRestart.mockResolvedValue({
+      paused: 2,
+      runIds: ["run-1", "run-2"],
     });
   });
 
@@ -660,5 +666,62 @@ describe("instance settings routes", () => {
 
     expect(res.status).toBe(403);
     expect(mockInstanceSettingsService.activateQuietMode).not.toHaveBeenCalled();
+  });
+
+  it("lets an instance admin pause in-flight heartbeat runs for a planned restart and fans the audit log out to every company", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app)
+      .post("/api/instance/heartbeat-runs/pause-for-restart")
+      .send({ reason: "planned compose_recreate" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.markInFlightRunsPausedForRestart).toHaveBeenCalledWith({
+      reason: "planned compose_recreate",
+    });
+    expect(res.body).toEqual({ paused: 2, runIds: ["run-1", "run-2"] });
+    expect(mockLogActivity).toHaveBeenCalledTimes(2);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "instance.heartbeat_runs.paused_for_restart",
+        companyId: "company-1",
+        details: { pausedCount: 2 },
+      }),
+    );
+  });
+
+  it("rejects non-admin board users from pausing in-flight heartbeat runs", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).post("/api/instance/heartbeat-runs/pause-for-restart").send({});
+
+    expect(res.status).toBe(403);
+    expect(mockHeartbeatService.markInFlightRunsPausedForRestart).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent callers from pausing in-flight heartbeat runs", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app).post("/api/instance/heartbeat-runs/pause-for-restart").send({});
+
+    expect(res.status).toBe(403);
+    expect(mockHeartbeatService.markInFlightRunsPausedForRestart).not.toHaveBeenCalled();
   });
 });

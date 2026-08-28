@@ -462,7 +462,16 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   return checkoutRunId == null;
 }
 
-export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+// DUR-296: "paused_for_restart" is terminal (the run's process is gone for
+// good) but never a failure -- see HEARTBEAT_RUN_TERMINAL_STATUSES in
+// heartbeat.ts.
+export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+]);
 
 // DUR-129: a `scheduled_retry` run is neither terminal nor active — it is
 // normally promoted back to `queued` within one heartbeat scheduler tick

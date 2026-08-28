@@ -128,6 +128,9 @@ const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string 
   scheduled_retry: { icon: Clock, color: "text-sky-600 dark:text-sky-400" },
   timed_out: { icon: Timer, color: "text-orange-600 dark:text-orange-400" },
   cancelled: { icon: Slash, color: "text-neutral-500 dark:text-neutral-400" },
+  // DUR-296: interrupted by a planned restart, will resume automatically --
+  // never styled like an error/failure state.
+  paused_for_restart: { icon: RotateCcw, color: "text-sky-600 dark:text-sky-400" },
 };
 
 const RUN_LOG_PAGE_BYTES = 256_000;
