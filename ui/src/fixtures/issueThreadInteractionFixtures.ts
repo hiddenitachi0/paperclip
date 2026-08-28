@@ -502,6 +502,27 @@ export const spoofedDecisionAskRequestConfirmationInteraction = createRequestCon
   },
 });
 
+// DUR-323: the same spoof as above, but with the decision-ask moved out of
+// `prompt` and into `detailsMarkdown` instead — closing DUR-320's fix by only
+// checking `prompt` left this exact bypass open.
+export const spoofedDecisionAskInDetailsRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spoofed-decision-ask-in-details",
+  title: "Drop stale orders table?",
+  summary: "Confirm these two facts.",
+  payload: {
+    version: 1,
+    prompt: "Confirm these two facts.",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown:
+      "1. Table orders_2024 has 40,201 rows.\n2. Should I proceed with dropping orders_2024 now?",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

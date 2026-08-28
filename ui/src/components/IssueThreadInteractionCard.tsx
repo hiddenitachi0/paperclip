@@ -206,11 +206,14 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
   }
 }
 
-// DUR-320: an agent fully controls both `prompt` and `detailsMarkdown`, so a
-// real decision-ask ("Should I proceed with dropping orders_2024 now?") could
-// be dressed with 2+ numbered lines to spoof the reassuring "fact check"
-// styling below. Requiring the prompt itself to not read like a decision/
-// action request closes that gap without needing a schema-level field.
+// DUR-320/DUR-323: an agent fully controls both `prompt` and
+// `detailsMarkdown`, so a real decision-ask ("Should I proceed with dropping
+// orders_2024 now?") could be dressed with 2+ numbered lines to spoof the
+// reassuring "fact check" styling below — first by putting the ask in
+// `prompt` (DUR-320), then by moving it into `detailsMarkdown` instead once
+// only `prompt` was checked (DUR-323). Requiring neither field to read like a
+// decision/action request closes both gaps without needing a schema-level
+// field.
 const DECISION_ASK_PATTERN =
   /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:ment)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?)\b/i;
 
@@ -234,6 +237,7 @@ function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   if (numberedClaims.length < 2) return false;
   const prompt = interaction.payload.prompt ?? "";
   if (DECISION_ASK_PATTERN.test(prompt)) return false;
+  if (DECISION_ASK_PATTERN.test(details)) return false;
   return true;
 }
 
