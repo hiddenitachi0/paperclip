@@ -2906,6 +2906,30 @@ export function issueRoutes(
     return false;
   }
 
+  // DUR-313 follow-up: same exploit class as assertChangeLogFieldsAllowedOnCreate above.
+  // evaluateFeatureLaunchDoneGate only fires on a PATCH transition of an *existing* issue
+  // into "done" -- it never runs on create. Without this guard an agent could call
+  // POST /companies/:companyId/issues (or the child-issue equivalents) with
+  // { status: "done", featureLaunch: true } in one shot and land directly in done, marked
+  // as a launch, with no feature_launch approval ever required. So at creation this field
+  // is board-only, full stop -- an agent must always go through the gated PATCH path
+  // (assertFeatureLaunchFieldAllowed already lets an agent mark featureLaunch: true there).
+  function assertFeatureLaunchFieldAllowedOnCreate(
+    req: Request,
+    res: Response,
+    createBody: { featureLaunch?: unknown },
+  ) {
+    if (createBody.featureLaunch === undefined) return true;
+    if (req.actor.type === "board") return true;
+    res.status(403).json({
+      error: "featureLaunch may only be set by a board user at issue creation",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
   async function assertExplicitResumeIntentAllowed(
     req: Request,
     res: Response,
@@ -5374,6 +5398,7 @@ export function issueRoutes(
     assertCompanyAccess(req, companyId);
     if (await assertLowTrustControlPlaneDenied(req, res, companyId, null)) return;
     if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
+    if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
@@ -5695,6 +5720,7 @@ export function issueRoutes(
     if (!(await assertTaskWatchdogCreateIssueAllowed(req, res, parent.companyId, parent))) return;
     if (await assertLowTrustControlPlaneDenied(req, res, parent.companyId, parent)) return;
     if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
+    if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
@@ -5879,6 +5905,7 @@ export function issueRoutes(
       };
       requestedChildren.push(childBody);
       if (!assertChangeLogFieldsAllowedOnCreate(req, res, childBody)) return;
+      if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       if (childBody.assigneeAgentId || childBody.assigneeUserId) {

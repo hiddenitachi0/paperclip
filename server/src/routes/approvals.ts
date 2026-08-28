@@ -864,13 +864,15 @@ export function approvalRoutes(
     }
     if (isFeatureLaunchRequestApproval(approvalInput.type, approvalInput.payload)) {
       const launchPayload = featureLaunchRequestPayloadSchema.parse(approvalInput.payload);
-      // Must actually be linked to the issue it names -- otherwise a filer could
-      // parrot any issueId into the payload text without evaluateFeatureLaunchDoneGate
-      // (which reads listApprovalsForIssue, i.e. the issue_approvals link table, not
-      // the payload's issueId field) ever seeing this approval as covering that issue.
-      if (!uniqueIssueIds.includes(launchPayload.issueId)) {
+      // Must be linked to EXACTLY the issue it names, and nothing else. linkManyForApproval
+      // links this approval to every id in issueIds, and evaluateFeatureLaunchDoneGate treats
+      // any approved feature_launch approval linked to an issue as covering that issue -- it
+      // never cross-checks payload.issueId. A loose `.includes()` check here would let a filer
+      // pad issueIds with an extra issue (e.g. issueIds: [X, Y] with payload.issueId: X) and
+      // get Y silently approved as a launch riding on a card the operator only reviewed for X.
+      if (uniqueIssueIds.length !== 1 || uniqueIssueIds[0] !== launchPayload.issueId) {
         res.status(422).json({
-          error: "A feature launch approval must be linked (issueIds) to the issue named in payload.issueId",
+          error: "A feature launch approval must be linked (issueIds) to exactly the one issue named in payload.issueId",
         });
         return;
       }
