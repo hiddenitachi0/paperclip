@@ -478,12 +478,14 @@ export const pendingFactCheckRequestConfirmationInteraction = createRequestConfi
       "1. Invoice #1042 to Nordlys AS: 18 400 kr, due 2026-05-15\n2. Invoice #1043 to Vestkyst Handel: 9 750 kr, due 2026-05-22\n3. Outstanding balance across both: 28 150 kr",
     supersedeOnUserComment: true,
     target: null,
+    factCheck: true,
   },
 });
 
-// DUR-320: a decision-ask dressed with 2+ numbered lines must NOT get the
-// reassuring "fact check" styling — this is the exact spoof scenario the
-// security review flagged against isFactCheckConfirmation.
+// DUR-320/DUR-339: a decision-ask dressed with 2+ numbered lines must NOT get
+// the reassuring "fact check" styling. This fixture omits `factCheck`
+// (defaults false), so it renders as a normal confirmation regardless of the
+// numbered-lines/prose shape that used to spoof the old regex heuristic.
 export const spoofedDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-spoofed-decision-ask",
   title: "Drop stale orders table?",
@@ -502,9 +504,9 @@ export const spoofedDecisionAskRequestConfirmationInteraction = createRequestCon
   },
 });
 
-// DUR-323: the same spoof as above, but with the decision-ask moved out of
-// `prompt` and into `detailsMarkdown` instead — closing DUR-320's fix by only
-// checking `prompt` left this exact bypass open.
+// DUR-323/DUR-339: the same spoof as above, but with the decision-ask moved
+// out of `prompt` and into `detailsMarkdown` instead. Also omits `factCheck`,
+// so it renders as a normal confirmation card.
 export const spoofedDecisionAskInDetailsRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-spoofed-decision-ask-in-details",
   title: "Drop stale orders table?",

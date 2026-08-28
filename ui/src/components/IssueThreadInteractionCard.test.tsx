@@ -432,7 +432,7 @@ describe("IssueThreadInteractionCard", () => {
     expect(rejected.textContent).toContain("Changes requested");
   });
 
-  it("renders a numbered-claims confirmation as a distinct fact-check card (DUR-311)", () => {
+  it("renders a confirmation with payload.factCheck as a distinct fact-check card (DUR-311/DUR-339)", () => {
     const pending = renderCard({ interaction: pendingFactCheckRequestConfirmationInteraction });
     const pendingShell = pending.firstElementChild as HTMLElement;
     expect(pendingShell.className).toContain("border-teal-500/60");
@@ -452,7 +452,7 @@ describe("IssueThreadInteractionCard", () => {
     expect(accepted.textContent).not.toContain("Plan");
   });
 
-  it("does not render a decision-ask dressed with numbered lines as a fact-check card (DUR-320)", () => {
+  it("does not render a decision-ask dressed with numbered lines as a fact-check card without payload.factCheck (DUR-320/DUR-339)", () => {
     const spoofed = renderCard({ interaction: spoofedDecisionAskRequestConfirmationInteraction });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
@@ -460,7 +460,7 @@ describe("IssueThreadInteractionCard", () => {
     expect(spoofed.textContent).not.toContain("isn't a decision the agent needs you to make");
   });
 
-  it("does not render a decision-ask moved into detailsMarkdown as a fact-check card (DUR-323)", () => {
+  it("does not render a decision-ask moved into detailsMarkdown as a fact-check card without payload.factCheck (DUR-323/DUR-339)", () => {
     const spoofed = renderCard({ interaction: spoofedDecisionAskInDetailsRequestConfirmationInteraction });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
