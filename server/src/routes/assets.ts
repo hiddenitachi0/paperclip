@@ -4,7 +4,7 @@ import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, assets as assetsTable } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, createRequestScopedDb, withCompanyScope } from "@paperclipai/db";
 import {
   createAssetImageMetadataSchema,
   ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES,
@@ -15,6 +15,7 @@ import { accessService, agentService, assetService, logActivity } from "../servi
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { forbidden, notFound } from "../errors.js";
 import { assertCanUpdateAgent, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 const SVG_CONTENT_TYPE = "image/svg+xml";
 const ALLOWED_COMPANY_LOGO_CONTENT_TYPES = new Set<string>(ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES);
 const ALLOWED_AGENT_AVATAR_CONTENT_TYPES = new Set<string>(ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES);
@@ -83,9 +84,17 @@ function sanitizeSvgBuffer(input: Buffer): Buffer | null {
   }
 }
 
-export function assetRoutes(db: Db, storage: StorageService) {
+export function assetRoutes(rawDb: Db, storage: StorageService) {
   const router = Router();
+  // DUR-349 (DUR-277 Wave 3): this file's own request-scoped instance;
+  // rawDb stays unwrapped for the pre-scope agent/asset lookups the
+  // (b)-category routes below need before their companyId is known, and for
+  // the two db.transaction() sites (avatar create/delete) -- the
+  // request-scoped proxy does not support .transaction(), see
+  // packages/db/src/company-scope.ts. See middleware/company-scope.ts.
+  const db = createRequestScopedDb(rawDb);
   const svc = assetService(db);
+  const rawSvc = assetService(rawDb);
   const assetUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
@@ -112,9 +121,8 @@ export function assetRoutes(db: Db, storage: StorageService) {
     });
   }
 
-  router.post("/companies/:companyId/assets/images", async (req, res) => {
+  router.post("/companies/:companyId/assets/images", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
 
     try {
       await runSingleFileUpload(assetUpload, req, res);
@@ -215,9 +223,8 @@ export function assetRoutes(db: Db, storage: StorageService) {
     });
   });
 
-  router.post("/companies/:companyId/logo", async (req, res) => {
+  router.post("/companies/:companyId/logo", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
 
     try {
       await runSingleFileUpload(companyLogoUpload, req, res);
@@ -314,11 +321,8 @@ export function assetRoutes(db: Db, storage: StorageService) {
     });
   });
 
-  async function loadAgentForAvatarMutation(req: Request, companyId: string, agentId: string) {
-    if (req.actor.type === "agent") {
-      throw forbidden("Agent-authenticated callers cannot manage an agent's avatar");
-    }
-    const agentRow = await db
+  async function loadAgentRowForAvatar(dbForLookup: Db, companyId: string, agentId: string) {
+    const agentRow = await dbForLookup
       .select()
       .from(agentsTable)
       .where(eq(agentsTable.id, agentId))
@@ -326,14 +330,27 @@ export function assetRoutes(db: Db, storage: StorageService) {
     if (!agentRow || agentRow.companyId !== companyId) {
       throw notFound("Agent not found");
     }
-    await assertCanUpdateAgent(req, agentRow, accessService(db));
     return agentRow;
   }
 
-  router.post("/companies/:companyId/agents/:agentId/avatar", async (req, res) => {
+  // Runs from inside companyScopeFromParam's resolver, i.e. before scope is
+  // established -- see middleware/company-scope.ts. Uses rawDb since no
+  // scope exists yet at this point.
+  async function checkAvatarMutationAccess(req: Request, companyId: string) {
+    if (req.actor.type === "agent") {
+      throw forbidden("Agent-authenticated callers cannot manage an agent's avatar");
+    }
+    const agentRow = await loadAgentRowForAvatar(rawDb, companyId, req.params.agentId as string);
+    await assertCanUpdateAgent(req, agentRow, accessService(rawDb));
+  }
+
+  router.post(
+    "/companies/:companyId/agents/:agentId/avatar",
+    companyScopeFromParam(rawDb, checkAvatarMutationAccess),
+    async (req, res) => {
     const companyId = req.params.companyId as string;
     const agentId = req.params.agentId as string;
-    const agentRow = await loadAgentForAvatarMutation(req, companyId, agentId);
+    const agentRow = await loadAgentRowForAvatar(db, companyId, agentId);
 
     try {
       await runSingleFileUpload(agentAvatarUpload, req, res);
@@ -386,7 +403,7 @@ export function assetRoutes(db: Db, storage: StorageService) {
 
     const previousAsset = agentRow.avatarAssetId ? await svc.getById(agentRow.avatarAssetId) : null;
 
-    const createdAsset = await db.transaction(async (tx) => {
+    const createdAsset = await withCompanyScope(rawDb, companyId, async (tx) => {
       const txDb = tx as unknown as Db;
       const created = await assetService(txDb).create(companyId, {
         provider: stored.provider,
@@ -431,12 +448,16 @@ export function assetRoutes(db: Db, storage: StorageService) {
 
     const updatedAgent = await agentService(db).getById(agentId);
     res.status(201).json(updatedAgent);
-  });
+    },
+  );
 
-  router.delete("/companies/:companyId/agents/:agentId/avatar", async (req, res) => {
+  router.delete(
+    "/companies/:companyId/agents/:agentId/avatar",
+    companyScopeFromParam(rawDb, checkAvatarMutationAccess),
+    async (req, res) => {
     const companyId = req.params.companyId as string;
     const agentId = req.params.agentId as string;
-    const agentRow = await loadAgentForAvatarMutation(req, companyId, agentId);
+    const agentRow = await loadAgentRowForAvatar(db, companyId, agentId);
 
     if (!agentRow.avatarAssetId) {
       res.status(200).json(await agentService(db).getById(agentId));
@@ -445,7 +466,7 @@ export function assetRoutes(db: Db, storage: StorageService) {
 
     const previousAsset = await svc.getById(agentRow.avatarAssetId);
 
-    await db.transaction(async (tx) => {
+    await withCompanyScope(rawDb, companyId, async (tx) => {
       await tx
         .update(agentsTable)
         .set({ avatarAssetId: null, updatedAt: new Date() })
@@ -475,16 +496,25 @@ export function assetRoutes(db: Db, storage: StorageService) {
     });
 
     res.status(200).json(await agentService(db).getById(agentId));
-  });
+    },
+  );
 
-  router.get("/assets/:assetId/content", async (req, res, next) => {
+  function scopeFromAssetId() {
+    return companyScope(rawDb, async (req) => {
+      const asset = await rawSvc.getById(req.params.assetId as string);
+      if (!asset) throw notFound("Asset not found");
+      assertCompanyAccess(req, asset.companyId);
+      return asset.companyId;
+    });
+  }
+
+  router.get("/assets/:assetId/content", scopeFromAssetId(), async (req, res, next) => {
     const assetId = req.params.assetId as string;
     const asset = await svc.getById(assetId);
     if (!asset) {
       res.status(404).json({ error: "Asset not found" });
       return;
     }
-    assertCompanyAccess(req, asset.companyId);
 
     const object = await storage.getObject(asset.companyId, asset.objectKey);
     const responseContentType = asset.contentType || object.contentType || "application/octet-stream";

@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
 import { and, eq } from "drizzle-orm";
-import { companies, heartbeatRuns, issues, projectWorkspaces, projects, type Db } from "@paperclipai/db";
+import { companies, createRequestScopedDb, heartbeatRuns, issues, projectWorkspaces, projects, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -37,7 +37,8 @@ import {
 } from "../services/deploy-branches.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
-import { conflict, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
@@ -601,41 +602,51 @@ function describeApprovalMutationForEscalation(body: unknown): string {
 }
 
 export function approvalRoutes(
-  db: Db,
+  rawDb: Db,
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
 ) {
   const router = Router();
+  // DUR-349 (DUR-277 Wave 3): this file's own request-scoped instance; rawDb
+  // stays unwrapped for the pre-scope approval/run-context lookups the
+  // authz helpers below need before their companyId is known (see
+  // middleware/company-scope.ts), and for the handful of display/precheck
+  // lookups (project existence, deploy-branch ancestry/stamp, approval title
+  // project label) that already do their own explicit companyId comparison
+  // or operate on ids a prior check already validated -- see the comment
+  // above assertDeployRequestProjectExists's call sites below.
+  const db = createRequestScopedDb(rawDb);
   const svc = approvalService(db);
-  const access = accessService(db);
+  const rawSvc = approvalService(rawDb);
+  const rawAccess = accessService(rawDb);
   const agentsSvc = agentService(db);
   const instructionsSvc = agentInstructionsService();
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
+  const rawHeartbeat = heartbeatService(rawDb, {
+    pluginWorkerManager: options.pluginWorkerManager,
+  });
   const issueApprovalsSvc = issueApprovalService(db);
+  const rawIssueApprovalsSvc = issueApprovalService(rawDb);
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db);
   const escalationGrantsSvc = escalationGrantService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
-  async function requireApprovalAccess(req: Request, id: string) {
-    const approval = await svc.getById(id);
-    if (!approval) {
-      return null;
-    }
-    assertCompanyAccess(req, approval.companyId);
-    return approval;
-  }
-
-  async function assertApprovalAccessAllowed(req: Request, res: any, companyId: string) {
-    const decision = await access.decide({
+  // Runs from inside a companyScope*/companyScope resolver, i.e. before scope
+  // is ever established -- see middleware/company-scope.ts. Throws instead of
+  // writing to `res` directly (that pattern doesn't fit inside a resolver,
+  // which runs before `next()` and before a connection is reserved), so every
+  // call site now just awaits these and lets a throw short-circuit, the same
+  // way companyScope's own resolver does for badRequest.
+  async function assertApprovalAccessAllowed(req: Request, companyId: string) {
+    const decision = await rawAccess.decide({
       actor: req.actor,
       action: "company_scope:read",
       resource: { type: "company", companyId },
     });
-    if (decision.allowed) return true;
-    res.status(403).json({ error: "Approvals are outside this actor's authorization boundary" });
-    return false;
+    if (decision.allowed) return;
+    throw forbidden("Approvals are outside this actor's authorization boundary");
   }
 
   // DUR-146 Stage 1: filing a deploy or merge request approval requires the
@@ -647,39 +658,35 @@ export function approvalRoutes(
   // "deploys:approve"/"merges:approve" in the first place).
   async function assertApprovalRequestPermissionAllowed(
     req: Request,
-    res: any,
     companyId: string,
     permissionKey: "deploys:request" | "merges:request",
-  ): Promise<boolean> {
-    const decision = await access.decide({
+  ) {
+    const decision = await rawAccess.decide({
       actor: req.actor,
       action: permissionKey,
       resource: { type: "company", companyId },
     });
-    if (decision.allowed) return true;
-    res.status(403).json({
-      error:
-        permissionKey === "deploys:request"
-          ? "This actor does not hold the right to ask for a deploy."
-          : "This actor does not hold the right to ask for a merge.",
-    });
-    return false;
+    if (decision.allowed) return;
+    throw forbidden(
+      permissionKey === "deploys:request"
+        ? "This actor does not hold the right to ask for a deploy."
+        : "This actor does not hold the right to ask for a merge.",
+    );
   }
 
   async function assertApprovalMutationAllowedByRunContext(
     req: Request,
-    res: any,
     companyId: string,
     opts: {
       describeBlockedAction?: () => string;
       resolveIssueId?: () => Promise<string | null>;
     } = {},
   ) {
-    if (req.actor.type !== "agent") return true;
+    if (req.actor.type !== "agent") return;
     const runId = req.actor.runId?.trim();
-    if (!runId || !req.actor.agentId) return true;
+    if (!runId || !req.actor.agentId) return;
 
-    const run = await db
+    const run = await rawDb
       .select({
         id: heartbeatRuns.id,
         companyId: heartbeatRuns.companyId,
@@ -689,8 +696,8 @@ export function approvalRoutes(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
-    if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return true;
-    if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
+    if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return;
+    if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return;
 
     // DUR-45: this cheap run genuinely cannot take this action, but the issue
     // must not be left to rot -- hand the action to a normal-model run on the
@@ -700,7 +707,7 @@ export function approvalRoutes(
       : readIssueIdForEscalation(req.body);
     let escalation: Awaited<ReturnType<typeof recordCheapRunEscalation>> | null = null;
     if (issueId) {
-      escalation = await recordCheapRunEscalation(db, heartbeat.wakeup, {
+      escalation = await recordCheapRunEscalation(rawDb, rawHeartbeat.wakeup, {
         companyId,
         issueId,
         agentId: run.agentId,
@@ -709,50 +716,103 @@ export function approvalRoutes(
       });
     }
 
-    res.status(403).json({
-      error: "Cheap status-only recovery runs cannot create or modify approvals",
-      details: {
-        companyId,
-        runId: run.id,
-        modelProfile: "cheap",
-        recoveryIntent: "status_only",
-        resumeRequiresNormalModel: true,
-        escalation,
-      },
+    throw new HttpError(403, "Cheap status-only recovery runs cannot create or modify approvals", {
+      companyId,
+      runId: run.id,
+      modelProfile: "cheap",
+      recoveryIntent: "status_only",
+      resumeRequiresNormalModel: true,
+      escalation,
     });
-    return false;
   }
 
-  router.get("/companies/:companyId/approvals", async (req, res) => {
-    const companyId = req.params.companyId as string;
+  // Shared (b)-category lookup: resolves an approval's companyId via
+  // rawSvc.getById (pre-scope) and runs whatever combination of the access
+  // checks above the specific route needs, in the same order the route used
+  // to run them inline. See middleware/company-scope.ts's companyScope --
+  // this is the resolveCompanyId passed to it for every /approvals/:id...
+  // route below.
+  async function resolveApprovalScope(
+    req: Request,
+    opts: {
+      requireBoard?: boolean;
+      approvalAccessCheck?: boolean;
+      mutationContext?: (
+        req: Request,
+        approvalId: string,
+      ) => { describeBlockedAction?: () => string; resolveIssueId?: () => Promise<string | null> };
+    } = {},
+  ): Promise<string> {
+    if (opts.requireBoard) assertBoard(req);
+    const id = req.params.id as string;
+    const approval = await rawSvc.getById(id);
+    if (!approval) throw notFound("Approval not found");
+    assertCompanyAccess(req, approval.companyId);
+    if (opts.approvalAccessCheck) await assertApprovalAccessAllowed(req, approval.companyId);
+    if (opts.mutationContext) {
+      await assertApprovalMutationAllowedByRunContext(req, approval.companyId, opts.mutationContext(req, id));
+    }
+    return approval.companyId;
+  }
+
+  function scopeFromApprovalId(opts?: Parameters<typeof resolveApprovalScope>[1]) {
+    return companyScope(rawDb, (req) => resolveApprovalScope(req, opts));
+  }
+
+  // (a)-category checkAccess for the two /companies/:companyId/approvals
+  // routes -- composes assertCompanyAccess with the same authorization
+  // checks the routes ran inline before, now run from inside
+  // companyScopeFromParam's resolver, before scope is ever reserved.
+  async function checkApprovalsListAccess(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
+    await assertApprovalAccessAllowed(req, companyId);
+  }
+
+  async function checkApprovalCreateAccess(req: Request, companyId: string) {
+    assertCompanyAccess(req, companyId);
+    await assertApprovalAccessAllowed(req, companyId);
+    await assertApprovalMutationAllowedByRunContext(req, companyId, {
+      describeBlockedAction: () => describeApprovalMutationForEscalation(req.body),
+    });
+    // req.body here is the raw, not-yet-validated body (validate() runs
+    // after this middleware) -- reading type/payload.kind directly mirrors
+    // how companyScopeFromBody itself reads req.body.companyId pre-validation.
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const payload = (body.payload && typeof body.payload === "object" ? body.payload : {}) as Record<
+      string,
+      unknown
+    >;
+    if (isDeployRequestApproval(body.type, payload)) {
+      await assertApprovalRequestPermissionAllowed(req, companyId, "deploys:request");
+    }
+    if (isMergePrRequestApproval(body.type, payload)) {
+      await assertApprovalRequestPermissionAllowed(req, companyId, "merges:request");
+    }
+  }
+
+  router.get("/companies/:companyId/approvals", companyScopeFromParam(rawDb, checkApprovalsListAccess), async (req, res) => {
+    const companyId = req.params.companyId as string;
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
     res.json(result.map((approval) => redactApprovalPayload(approval)));
   });
 
-  router.get("/approvals/:id", async (req, res) => {
+  router.get("/approvals/:id", scopeFromApprovalId({ approvalAccessCheck: true }), async (req, res) => {
     const id = req.params.id as string;
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, approval.companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, approval.companyId))) return;
     res.json(redactApprovalPayload(approval));
   });
 
-  router.post("/companies/:companyId/approvals", validate(createApprovalSchema), async (req, res) => {
+  router.post(
+    "/companies/:companyId/approvals",
+    companyScopeFromParam(rawDb, checkApprovalCreateAccess),
+    validate(createApprovalSchema),
+    async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
-    if (
-      !(await assertApprovalMutationAllowedByRunContext(req, res, companyId, {
-        describeBlockedAction: () => describeApprovalMutationForEscalation(req.body),
-      }))
-    ) return;
     const rawIssueIds = req.body.issueIds;
     const issueIds = Array.isArray(rawIssueIds)
       ? rawIssueIds.filter((value: unknown): value is string => typeof value === "string")
@@ -761,20 +821,27 @@ export function approvalRoutes(
     const { issueIds: _issueIds, dryRun, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
-      if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
+      // deploys:request permission already checked in checkApprovalCreateAccess,
+      // before scope was ever established. assertDeployRequestProjectExists/
+      // assertDeployCommitIsAncestorOfDeployBranch/resolveDeployApprovalBranchStamp
+      // deliberately use rawDb rather than the scoped `db` here: the first
+      // does its own explicit projectRow.companyId === companyId check
+      // (an independent, app-level authorization decision, not one that
+      // needs RLS to be correct), and the other two only ever operate on a
+      // projectId/workspaceId the first call already confirmed belongs to
+      // this company -- see resolveDeployApprovalBranchStamp/
+      // assertDeployCommitIsAncestorOfDeployBranch's own docblocks.
       const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
-      await assertDeployRequestProjectExists(db, companyId, deployPayload);
-      await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
-      const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
+      await assertDeployRequestProjectExists(rawDb, companyId, deployPayload);
+      await assertDeployCommitIsAncestorOfDeployBranch(rawDb, companyId, deployPayload);
+      const branchStamp = await resolveDeployApprovalBranchStamp(rawDb, companyId, deployPayload);
       approvalInput.payload = deployRequestPayloadSchema.parse({
         ...deployPayload,
         sourceBranch: branchStamp.sourceBranch,
         deployBranch: branchStamp.deployBranch,
       });
     }
-    if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
-      if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
-    }
+    // merges:request permission already checked in checkApprovalCreateAccess.
     if (isModelBoostRequestApproval(approvalInput.type, approvalInput.payload)) {
       const boostPayload = modelBoostRequestPayloadSchema.parse(approvalInput.payload);
       const requestingAgentId =
@@ -936,26 +1003,18 @@ export function approvalRoutes(
     res.status(201).json(redactApprovalPayload(approval));
   });
 
-  router.get("/approvals/:id/issues", async (req, res) => {
+  router.get("/approvals/:id/issues", scopeFromApprovalId({ approvalAccessCheck: true }), async (req, res) => {
     const id = req.params.id as string;
-    const approval = await svc.getById(id);
-    if (!approval) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
-    assertCompanyAccess(req, approval.companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, approval.companyId))) return;
     const issues = await issueApprovalsSvc.listIssuesForApproval(id);
     res.json(issues);
   });
 
-  router.post("/approvals/:id/approve", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
+  router.post(
+    "/approvals/:id/approve",
+    scopeFromApprovalId({ requireBoard: true }),
+    validate(resolveApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
-    if (!(await requireApprovalAccess(req, id))) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied, toolGrant, instructionsChange } = await svc.approve(
       id,
@@ -1106,15 +1165,15 @@ export function approvalRoutes(
     }
 
     res.json(redactApprovalPayload(approval));
-  });
+  },
+  );
 
-  router.post("/approvals/:id/reject", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
+  router.post(
+    "/approvals/:id/reject",
+    scopeFromApprovalId({ requireBoard: true }),
+    validate(resolveApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
-    if (!(await requireApprovalAccess(req, id))) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
 
@@ -1137,18 +1196,15 @@ export function approvalRoutes(
     }
 
     res.json(redactApprovalPayload(approval));
-  });
+  },
+  );
 
   router.post(
     "/approvals/:id/request-revision",
+    scopeFromApprovalId({ requireBoard: true }),
     validate(requestApprovalRevisionSchema),
     async (req, res) => {
-      assertBoard(req);
       const id = req.params.id as string;
-      if (!(await requireApprovalAccess(req, id))) {
-        res.status(404).json({ error: "Approval not found" });
-        return;
-      }
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
 
@@ -1166,20 +1222,22 @@ export function approvalRoutes(
     },
   );
 
-  router.post("/approvals/:id/resubmit", validate(resubmitApprovalSchema), async (req, res) => {
+  router.post(
+    "/approvals/:id/resubmit",
+    scopeFromApprovalId({
+      mutationContext: (req, id) => ({
+        describeBlockedAction: () => "resubmit an approval",
+        resolveIssueId: () => firstLinkedIssueId(rawIssueApprovalsSvc, id),
+      }),
+    }),
+    validate(resubmitApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
-    if (
-      !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
-        describeBlockedAction: () => "resubmit an approval",
-        resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, existing.id),
-      }))
-    ) return;
 
     if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
@@ -1268,7 +1326,8 @@ export function approvalRoutes(
       details: { type: approval.type },
     });
     res.json(redactApprovalPayload(approval));
-  });
+  },
+  );
 
   // DUR-141: agent-only self-serve withdraw. Unlike approve/reject/request-
   // revision (assertBoard), this is deliberately NOT a board action -- it
@@ -1276,20 +1335,22 @@ export function approvalRoutes(
   // merge_pr request whose PR was closed) instead of leaving a dead entry in
   // the board's pending queue indefinitely with only a "please ignore this"
   // comment as mitigation.
-  router.post("/approvals/:id/withdraw", validate(withdrawApprovalSchema), async (req, res) => {
+  router.post(
+    "/approvals/:id/withdraw",
+    scopeFromApprovalId({
+      mutationContext: (req, id) => ({
+        describeBlockedAction: () => "withdraw an approval",
+        resolveIssueId: () => firstLinkedIssueId(rawIssueApprovalsSvc, id),
+      }),
+    }),
+    validate(withdrawApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
-    if (
-      !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
-        describeBlockedAction: () => "withdraw an approval",
-        resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, existing.id),
-      }))
-    ) return;
 
     if (req.actor.type !== "agent" || req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only the requesting agent can withdraw this approval" });
@@ -1315,34 +1376,31 @@ export function approvalRoutes(
     });
 
     res.json(redactApprovalPayload(approval));
-  });
+  },
+  );
 
-  router.get("/approvals/:id/comments", async (req, res) => {
+  router.get("/approvals/:id/comments", scopeFromApprovalId(), async (req, res) => {
     const id = req.params.id as string;
-    const approval = await svc.getById(id);
-    if (!approval) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
-    assertCompanyAccess(req, approval.companyId);
     const comments = await svc.listComments(id);
     res.json(comments);
   });
 
-  router.post("/approvals/:id/comments", validate(addApprovalCommentSchema), async (req, res) => {
+  router.post(
+    "/approvals/:id/comments",
+    scopeFromApprovalId({
+      mutationContext: (req, id) => ({
+        describeBlockedAction: () => "comment on an approval",
+        resolveIssueId: () => firstLinkedIssueId(rawIssueApprovalsSvc, id),
+      }),
+    }),
+    validate(addApprovalCommentSchema),
+    async (req, res) => {
     const id = req.params.id as string;
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, approval.companyId);
-    if (
-      !(await assertApprovalMutationAllowedByRunContext(req, res, approval.companyId, {
-        describeBlockedAction: () => "comment on an approval",
-        resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, approval.id),
-      }))
-    ) return;
     const actor = getActorInfo(req);
     const comment = await svc.addComment(id, req.body.body, {
       agentId: actor.agentId ?? undefined,
@@ -1361,7 +1419,8 @@ export function approvalRoutes(
     });
 
     res.status(201).json(comment);
-  });
+  },
+  );
 
   return router;
 }

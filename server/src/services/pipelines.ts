@@ -22,6 +22,7 @@ import {
   pipelines,
   routineRevisions,
   routines,
+  withCompanyScope,
 } from "@paperclipai/db";
 import {
   extractRoutineVariableNames,
@@ -2219,7 +2220,14 @@ async function descendantCaseIds(db: PipelineDb, companyId: string, rootCaseIds:
   return Array.from(result).map((row) => String((row as { id: string }).id));
 }
 
-export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}) {
+// DUR-349 (DUR-277 Wave 3): `rawDb` defaults to `db` for every unmigrated
+// caller, a no-op there since `db` is already the raw pooled instance for
+// them. Only routes/pipelines.ts, once wired through createRequestScopedDb,
+// passes a `db` that is the *scoped* proxy and a distinct `rawDb`, since
+// db.transaction() below is not supported through that proxy (see
+// packages/db/src/company-scope.ts) and needs the raw connection via
+// withCompanyScope instead.
+export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}, rawDb: Db = db) {
   const routinesSvc = routineService(db, { heartbeat: deps.heartbeat });
   const outputsSvc = pipelineCaseOutputsService(db);
   const authorization = authorizationService(db);
@@ -3470,7 +3478,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       stages?: Array<{ key: string; name: string; kind: PipelineStageKind; position?: number; config?: PipelineStageConfig }>;
       actor: PipelineActor;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const stageInputsBase = input.stages?.length
           ? input.stages.map((stage, index) => ({
             ...stage,
@@ -3572,7 +3580,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       const kind = normalizeStageKind(input.kind);
       await validateStageTargets(input.companyId, input.pipelineId, input.kind, config);
       await validateStageAutomationConfig(input.companyId, config);
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const [nextStage] = await tx
           .select({ key: pipelineStages.key })
           .from(pipelineStages)
@@ -3646,7 +3654,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       }
       await validateStageTargets(input.companyId, input.pipelineId, kind, config);
       await validateStageAutomationConfig(input.companyId, config);
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const nextConfig = automationRequest
           ? await syncPipelineStageAutomation(tx, {
               companyId: input.companyId,
@@ -3719,7 +3727,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             fieldPath: "env",
           }) as Record<string, EnvBinding>;
       const actorPatch = routineActorPatch(input.actor);
-      const updatedRoutine = await db.transaction(async (tx) => {
+      const updatedRoutine = await withCompanyScope(rawDb, input.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${routineId} for update`);
         const locked = await txDb
@@ -3797,7 +3805,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       moveCasesToStageId?: string | null;
       actor?: PipelineActor;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         await getPipelineOrThrow(tx, input.companyId, input.pipelineId);
         const stage = await getStageOrThrow(tx, input.pipelineId, input.stageId);
         const targetStage = input.moveCasesToStageId
@@ -3909,7 +3917,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       assertCaseKey(caseKey);
 
       const automationLedgers: Array<typeof pipelineAutomationExecutions.$inferSelect> = [];
-      const result = await db.transaction(async (tx) => {
+      const result = await withCompanyScope(rawDb, input.companyId, async (tx) => {
         const pipeline = await getPipelineOrThrow(tx, input.companyId, input.pipelineId);
         if (pipeline.archivedAt) throw unprocessable("Pipeline is archived", { code: "pipeline_archived" });
         const requestKey = input.requestKey?.trim() || null;
@@ -4288,7 +4296,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         });
       }
       if (!replayingCompletedBreakdown && items.length === 0 && config.waitForPieces && config.whenFinishedMoveTo) {
-        await db.transaction(async (tx) => {
+        await withCompanyScope(rawDb, input.companyId, async (tx) => {
           await handleChildrenTerminal(tx, input.companyId, detail.case.id, undefined, {
             allowExplicitZeroChildrenPass: true,
           });
@@ -4316,7 +4324,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       leaseToken?: string | null;
       actor: PipelineActor;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const result = await patchCaseContentInTransaction(tx, input);
         return result.case;
       });
@@ -4328,7 +4336,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       expectedVersion?: number;
       actor: PipelineActor;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const { case: current, stage } = await getCaseWithStageForUpdateOrThrow(tx, input.companyId, input.caseId);
         if (input.expectedVersion !== undefined && current.version !== input.expectedVersion) {
           throw conflict("Pipeline case version conflict", conflictDetailsForCase(current, stage));
@@ -4362,7 +4370,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       actor: Extract<PipelineActor, { type: "user" | "agent" }>;
       leaseMs?: number;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const { case: existing } = await getCaseWithStageOrThrow(tx, input.companyId, input.caseId);
         const current = await expireLeaseIfNeeded(tx, existing, { type: "system" });
         if (hasValidLease(current) && !actorOwnsLease(current, input.actor, null)) {
@@ -4401,7 +4409,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       leaseToken?: string | null;
       force?: boolean;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const { case: existing } = await getCaseWithStageOrThrow(tx, input.companyId, input.caseId);
         const current = await expireLeaseIfNeeded(tx, existing, { type: "system" });
         if (!input.force && hasValidLease(current) && !actorOwnsLease(current, input.actor, input.leaseToken)) {
@@ -4445,7 +4453,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       skipChildrenTerminalGate?: boolean;
     }) {
       const automationLedgers: Array<typeof pipelineAutomationExecutions.$inferSelect> = [];
-      const result = await db.transaction((tx) => transitionCaseInTransaction(tx, { ...input, automationLedgers }));
+      const result = await withCompanyScope(rawDb, input.companyId, (tx) => transitionCaseInTransaction(tx, { ...input, automationLedgers }));
       const automationExecutions = await executeAutomationLedgers(automationLedgers, { type: "system" });
       if (result.automationLedger) {
         return {
@@ -4498,7 +4506,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       cleanup: PipelineAutomationRetryCleanupOptions;
       actor: PipelineActor;
     }) {
-      const result = await db.transaction(async (tx) => {
+      const result = await withCompanyScope(rawDb, input.companyId, async (tx) => {
         const detail = await getCaseWithStageForUpdateOrThrow(tx, input.companyId, input.caseId);
         if (detail.case.version !== input.expectedVersion) {
           throw conflict("Pipeline case version conflict", {
@@ -4715,7 +4723,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       caseId: string;
       actor: PipelineActor;
     }) {
-      const ledger = await db.transaction(async (tx) => {
+      const ledger = await withCompanyScope(rawDb, input.companyId, async (tx) => {
         const detail = await getCaseWithStageForUpdateOrThrow(tx, input.companyId, input.caseId);
         const automation = stageAutomation(detail.stage);
         if (!automation) {
@@ -4766,7 +4774,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       confidence?: number;
       actor: PipelineActor;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         const { case: existing } = await getCaseWithStageOrThrow(tx, input.companyId, input.caseId);
         await getStageByKeyOrThrow(tx, existing.pipelineId, input.toStageKey);
         const suggestion = {
@@ -4805,7 +4813,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       reason?: string | null;
       leaseToken?: string | null;
     }) {
-      const result = await db.transaction(async (tx) => {
+      const result = await withCompanyScope(rawDb, input.companyId, async (tx) => {
         const { case: existing } = await getCaseWithStageOrThrow(tx, input.companyId, input.caseId);
         const suggestion = existing.pendingSuggestion;
         if (!suggestion || suggestion.id !== input.suggestionId) {
@@ -4884,7 +4892,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       actor: PipelineActor;
     }) {
       const automationLedgers: Array<typeof pipelineAutomationExecutions.$inferSelect> = [];
-      const result = await db.transaction(async (tx) => {
+      const result = await withCompanyScope(rawDb, input.companyId, async (tx) => {
         const detail = await getCaseWithStageOrThrow(tx, input.companyId, input.caseId);
         if (detail.stage.kind !== "review") {
           throw unprocessable("Pipeline case is not in a review stage", { code: "validation" });
@@ -4990,7 +4998,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       blockedByCaseIds: string[];
       actor: PipelineActor;
     }) {
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, input.companyId, async (tx) => {
         await getCaseWithStageOrThrow(tx, input.companyId, input.caseId);
         const blockedByCaseIds = await validateBlockerSet(tx, {
           companyId: input.companyId,
