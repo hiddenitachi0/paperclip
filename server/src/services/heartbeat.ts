@@ -12289,7 +12289,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       let outcome: RunSessionOutcome;
       const latestRun = await getRun(run.id);
-      if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
+      if (
+        // `paused_for_restart` means the DB row was flipped out from under
+        // this still-running process by a concurrent drain -- it is not a
+        // real outcome of *this* execution, and `setRunStatusIfRunning`
+        // below will no-op the write anyway since the row is no longer
+        // "running". Fall through to the adapter-result-based outcome so
+        // this run's own session/error bookkeeping reflects what actually
+        // happened, instead of forcing an outcome value paused_for_restart
+        // was deliberately kept out of. See DUR-296.
+        isHeartbeatRunTerminalStatus(latestRun?.status) &&
+        latestRun.status !== "paused_for_restart"
+      ) {
         outcome = latestRun.status;
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
