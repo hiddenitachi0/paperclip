@@ -160,5 +160,21 @@ export const issues = pgTable(
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,
       ),
+    // DUR-316: one open ticket per unique secret-scan finding (surface +
+    // location + pattern, hashed into originFingerprint by
+    // server/src/services/secret-surface-scanner.ts) so a leaked credential
+    // that keeps showing up on every sweep (e.g. a token sitting in a
+    // heartbeat_runs row or an uncleaned .env) files exactly one issue
+    // instead of a duplicate every tick -- the DB-level guard behind the
+    // app-level findOpenDuplicateTicket check, same two-layer pattern as
+    // issues_active_task_watchdog_uq above.
+    activeSecretScanFindingIdx: uniqueIndex("issues_active_secret_scan_finding_uq")
+      .on(table.companyId, table.originKind, table.originFingerprint)
+      .where(
+        sql`${table.originKind} = 'secret_scan_finding'
+          and ${table.originFingerprint} <> 'default'
+          and ${table.hiddenAt} is null
+          and ${table.status} not in ('done', 'cancelled')`,
+      ),
   }),
 );
