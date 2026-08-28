@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { CheckCircle2, XCircle, Clock, AlertTriangle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Identity } from "./Identity";
+import { DecisionReasonDialog } from "./DecisionReasonDialog";
 import {
   approvalSubject,
   approvalTechnicalReference,
@@ -39,7 +41,7 @@ export function ApprovalCard({
   approval: Approval;
   requesterAgent: Agent | null;
   onApprove?: () => void;
-  onReject?: () => void;
+  onReject?: (note: string) => void;
   onOpen?: () => void;
   detailLink?: string;
   isPending?: boolean;
@@ -51,6 +53,7 @@ export function ApprovalCard({
   linkedIssues?: Issue[];
   companyName?: string | null;
 }) {
+  const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const payload = approval.payload as Record<string, unknown> | null;
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const kindLabel = typeLabel[approval.type] ?? approval.type;
@@ -182,7 +185,7 @@ export function ApprovalCard({
                 <Button
                   variant="destructive"
                   size="sm"
-                  onClick={onReject}
+                  onClick={() => setRejectDialogOpen(true)}
                   disabled={isPending}
                 >
                   {pendingAction === "reject" ? "Rejecting..." : "Reject"}
@@ -206,6 +209,18 @@ export function ApprovalCard({
           ) : null}
         </div>
       ) : null}
+      {showResolutionButtons && (
+        <DecisionReasonDialog
+          open={rejectDialogOpen}
+          onOpenChange={setRejectDialogOpen}
+          action="reject"
+          isPending={isPending}
+          onSubmit={(note) => {
+            setRejectDialogOpen(false);
+            onReject?.(note);
+          }}
+        />
+      )}
     </div>
   );
 }

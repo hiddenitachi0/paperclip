@@ -11,6 +11,7 @@ import { executionWorkspacesApi } from "../../api/execution-workspaces";
 import { instanceSettingsApi } from "../../api/instanceSettings";
 import { issuesApi } from "../../api/issues";
 import { projectsApi } from "../../api/projects";
+import { goalsApi } from "../../api/goals";
 import { useCompany } from "../../context/CompanyContext";
 import { queryKeys } from "../../lib/queryKeys";
 import { buildCompanyUserInlineOptions, buildCompanyUserLabelMap, isAgentTaskTarget } from "../../lib/company-members";
@@ -43,7 +44,7 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { User, ArrowUpRight, Plus, GitBranch, FolderOpen, HardDrive, Check, Clock, RotateCcw, Loader2, CheckCircle2 } from "lucide-react";
+import { User, ArrowUpRight, Plus, GitBranch, FolderOpen, HardDrive, Check, Clock, RotateCcw, Loader2, CheckCircle2, Target } from "lucide-react";
 import { AgentIcon } from "../AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "../InlineEntitySelector";
 import {
@@ -163,6 +164,8 @@ export function IssueProperties({
   } | null>(null);
   const [projectOpen, setProjectOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goalSearch, setGoalSearch] = useState("");
   const [blockedByOpen, setBlockedByOpen] = useState(false);
   const [blockedBySearch, setBlockedBySearch] = useState("");
   const [blockedByExpanded, setBlockedByExpanded] = useState(false);
@@ -243,6 +246,16 @@ export function IssueProperties({
     userId: currentUserId,
   });
 
+  const { data: goals } = useQuery({
+    queryKey: queryKeys.goals.list(companyId!),
+    queryFn: () => goalsApi.list(companyId!),
+    enabled: !!companyId,
+  });
+  const orderedGoals = useMemo(
+    () => [...(goals ?? [])].sort((a, b) => a.title.localeCompare(b.title)),
+    [goals],
+  );
+
   const { data: labels } = useQuery({
     queryKey: queryKeys.issues.labels(companyId!),
     queryFn: () => issuesApi.listLabels(companyId!),
@@ -301,6 +314,13 @@ export function IssueProperties({
     if (!id) return id?.slice(0, 8) ?? "None";
     const project = orderedProjects.find((p) => p.id === id);
     return project?.name ?? id.slice(0, 8);
+  };
+
+  // Falls back to null (rendered as "No goal") rather than a truncated id when the
+  // linked goal was deleted, so a stale goalId never surfaces raw UUID fragments.
+  const goalName = (id: string | null) => {
+    if (!id) return null;
+    return orderedGoals.find((g) => g.id === id)?.title ?? null;
   };
   const currentProject = issue.projectId
     ? orderedProjects.find((project) => project.id === issue.projectId) ?? null
@@ -1774,6 +1794,55 @@ export function IssueProperties({
     </>
   );
 
+  const goalTrigger = goalName(issue.goalId) ? (
+    <>
+      <Target className="shrink-0 h-3 w-3 text-muted-foreground" />
+      <span className="text-sm truncate min-w-0" title={goalName(issue.goalId)!}>{goalName(issue.goalId)}</span>
+    </>
+  ) : (
+    <span className="text-sm text-muted-foreground">No goal</span>
+  );
+  const goalPickerOptions = [
+    { id: "", kind: "none" as const, title: "No goal" },
+    ...orderedGoals.map((goal) => ({ id: goal.id, kind: "goal" as const, goal, title: goal.title })),
+  ];
+
+  const goalContent = (
+    <>
+      <input
+        className="w-full px-2 py-1.5 text-xs bg-transparent outline-none border-b border-border mb-1 placeholder:text-muted-foreground/50"
+        placeholder="Search goals..."
+        value={goalSearch}
+        onChange={(e) => setGoalSearch(e.target.value)}
+        autoFocus={!inline}
+      />
+      <div className="max-h-48 overflow-y-auto overscroll-contain">
+        {goalPickerOptions
+          .filter((option) => {
+            if (!goalSearch.trim()) return true;
+            const q = goalSearch.toLowerCase();
+            return option.title.toLowerCase().includes(q);
+          })
+          .map((option) => (
+            <button
+              key={option.id || "__none__"}
+              className={cn(
+                "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 whitespace-nowrap",
+                option.id === (issue.goalId ?? "") && "bg-accent",
+              )}
+              onClick={() => {
+                onUpdate({ goalId: option.kind === "goal" ? option.goal.id : null });
+                setGoalOpen(false);
+              }}
+            >
+              {option.kind === "goal" ? <Target className="shrink-0 h-3 w-3 text-muted-foreground" /> : null}
+              {option.title}
+            </button>
+          ))}
+      </div>
+    </>
+  );
+
   const blockedByIds = issue.blockedBy?.map((relation) => relation.id) ?? [];
   const blockedByRelations = issue.blockedBy ?? [];
   const visibleBlockedByRelations = blockedByExpanded
@@ -2091,6 +2160,27 @@ export function IssueProperties({
           ) : undefined}
         >
           {projectContent}
+        </PropertyPicker>
+
+        <PropertyPicker
+          inline={inline}
+          label="Goal"
+          open={goalOpen}
+          onOpenChange={(open) => { setGoalOpen(open); if (!open) setGoalSearch(""); }}
+          triggerContent={goalTrigger}
+          triggerClassName="min-w-0 max-w-full"
+          popoverClassName="w-fit min-w-[11rem]"
+          extra={issue.goalId && goalName(issue.goalId) ? (
+            <Link
+              to={`/goals/${issue.goalId}`}
+              className="inline-flex items-center justify-center h-5 w-5 rounded hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ArrowUpRight className="h-3 w-3" />
+            </Link>
+          ) : undefined}
+        >
+          {goalContent}
         </PropertyPicker>
       </PropertySection>
 

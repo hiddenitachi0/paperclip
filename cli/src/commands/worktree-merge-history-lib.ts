@@ -10,6 +10,7 @@ import {
   projects,
   projectWorkspaces,
 } from "@paperclipai/db";
+import { assertNoEmbeddedGitCredential } from "@paperclipai/shared";
 
 type IssueRow = typeof issues.$inferSelect;
 type CommentRow = typeof issueComments.$inferSelect;
@@ -314,6 +315,15 @@ function sortIssuesForImport(sourceIssues: IssueRow[]): IssueRow[] {
     if (createdDelta !== 0) return createdDelta;
     return left.id.localeCompare(right.id);
   });
+}
+
+// Source rows can carry a repoUrl written before DUR-318 closed the embedded-
+// credential loophole (or imported from an untrusted/legacy dump), so a raw
+// insert of a source projectWorkspaces row must not skip the same check the
+// live write paths enforce -- otherwise a leaked secret flows straight into
+// the target DB and from there into the next `git clone` for that workspace.
+export function assertWorkspaceRepoUrlSafeForMerge(repoUrl: string | null): void {
+  if (repoUrl) assertNoEmbeddedGitCredential(repoUrl);
 }
 
 export function parseWorktreeMergeScopes(rawValue: string | undefined): WorktreeMergeScope[] {

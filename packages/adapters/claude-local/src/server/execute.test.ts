@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
+import { ADVERSARIAL_SUCCESS_TRANSCRIPT } from "@paperclipai/adapter-utils/execution-classification-test-kit";
 import { resolveClaudeAdapterResult, resolveClaudeBillingType, resolveClaudeSubscriptionOverage } from "./execute.js";
-import { parseClaudeStreamJson } from "./parse.js";
+import { parseClaudeStreamJson, createClaudeUsageCapTracker } from "./parse.js";
 
 // DUR-41: eight runs in one window were recorded `failed` (with the agent's
 // own closing summary stored as the "error", and `claude_auth_required`
@@ -23,6 +24,7 @@ const baseEnv = {
   effectiveEnv: {},
   model: "claude-sonnet-5",
   billingType: "subscription" as const,
+  maxTokensPerRun: 0,
 };
 
 function buildProc(overrides: Partial<RunProcessResult> & { stdout: string }): RunProcessResult {
@@ -44,6 +46,7 @@ function attemptFromStdout(stdout: string, proc: Partial<RunProcessResult> = {})
     proc: built,
     parsedStream,
     parsed: parsedStream.resultJson ?? null,
+    usageCapTracker: createClaudeUsageCapTracker(0),
   };
 }
 
@@ -186,6 +189,56 @@ describe("resolveClaudeAdapterResult — DUR-41 success/failure integrity", () =
 
     expect(result.errorMessage).toContain("Something actually broke.");
     expect(result.killedAfterSuccess).toBe(false);
+  });
+
+  it("[DUR-258] never attaches an error code to a run the CLI reported successful, against the shared cross-adapter adversarial transcript", () => {
+    const stdout = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "sess-6", model: "claude-sonnet-5" }),
+      JSON.stringify({
+        type: "assistant",
+        session_id: "sess-6",
+        message: { content: [{ type: "text", text: ADVERSARIAL_SUCCESS_TRANSCRIPT }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: "sess-6",
+        result: "Done.",
+      }),
+    ].join("\n");
+    const attempt = attemptFromStdout(stdout, { exitCode: 143, signal: "SIGTERM" });
+
+    const result = resolveClaudeAdapterResult(attempt, { fallbackSessionId: null }, baseEnv);
+
+    expect(result.errorCode).toBeNull();
+    expect(result.errorMessage).toBeNull();
+    expect(result.errorFamily).toBeNull();
+  });
+
+  it("[DUR-258] a genuine, unrelated failure is not mislabeled just because the transcript mentions auth/rate-limit words earlier", () => {
+    const stdout = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "sess-7", model: "claude-sonnet-5" }),
+      JSON.stringify({
+        type: "assistant",
+        session_id: "sess-7",
+        message: { content: [{ type: "text", text: ADVERSARIAL_SUCCESS_TRANSCRIPT }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        session_id: "sess-7",
+        result: "TypeError: cannot read property 'foo' of undefined",
+      }),
+    ].join("\n");
+    const attempt = attemptFromStdout(stdout, { exitCode: 1 });
+
+    const result = resolveClaudeAdapterResult(attempt, { fallbackSessionId: null }, baseEnv);
+
+    expect(result.errorMessage).toContain("cannot read property");
+    expect(result.errorCode).toBeNull();
+    expect(result.errorFamily).toBeNull();
   });
 
   it("still raises claude_auth_required for a genuine authentication failure", () => {

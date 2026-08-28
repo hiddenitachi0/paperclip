@@ -21,6 +21,7 @@ import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
+import { changeLogRoutes } from "./routes/change-log.js";
 import { fileResourceRoutes } from "./routes/file-resources.js";
 import { routineRoutes } from "./routes/routines.js";
 import { customerInboxRoutes } from "./routes/customer-inbox.js";
@@ -30,6 +31,7 @@ import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { laneARoutes } from "./routes/lane-a.js";
+import { chatRouterRoutes } from "./routes/chat-router.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { deployRunnerRoutes } from "./routes/deploy-runner.js";
 import { secretRoutes } from "./routes/secrets.js";
@@ -240,6 +242,7 @@ export async function createApp(
     pluginWorkerManager: workerManager,
   }));
   api.use(issueTreeControlRoutes(db));
+  api.use(changeLogRoutes(db));
   api.use(fileResourceRoutes(db));
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(customerInboxRoutes(db));
@@ -249,6 +252,7 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(laneARoutes(db));
+  api.use(chatRouterRoutes(db));
   api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(deployRunnerRoutes(db));
   api.use(secretRoutes(db));

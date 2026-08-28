@@ -19,6 +19,7 @@ const apiPrefixes: Record<string, string> = {
   "assets.ts": "/api",
   "auth.ts": "/api/auth",
   "board-chat.ts": "/api",
+  "chat-router.ts": "/api",
   "cloud-upstreams.ts": "/api",
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
@@ -63,6 +64,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "mcp-tool-library.ts",
   // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
   "personas.ts",
+  // Operator change-log routes (DUR-312) are a new backend feature not yet in the public OpenAPI document.
+  "change-log.ts",
 ]);
 
 function createApp() {

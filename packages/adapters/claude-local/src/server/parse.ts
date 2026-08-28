@@ -89,6 +89,89 @@ export function parseClaudeStreamJson(stdout: string) {
   };
 }
 
+// DUR-215: live per-run token accounting so an in-progress run's spend can be
+// compared against the agent's own history and flagged as abnormal while it
+// is still running, not just after it finishes. Same parsing shape as the
+// terminal `result` event's usage - each streamed `type:"assistant"` event
+// carries that call's own usage, so summing them as they arrive gives a
+// running total that converges on the same figure the terminal event would
+// eventually report.
+export function createClaudeLiveUsageTracker() {
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+  let outputTokens = 0;
+  let buffer = "";
+
+  return {
+    /** Feed one raw stdout chunk; returns the updated running total, or null if this chunk had no new usage. */
+    onChunk(chunk: string): UsageSummary | null {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      let updated = false;
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const event = parseJson(line);
+        if (!event || asString(event.type, "") !== "assistant") continue;
+        const message = parseObject(event.message);
+        const usageObj = parseObject(message.usage);
+        inputTokens += asNumber(usageObj.input_tokens, 0);
+        outputTokens += asNumber(usageObj.output_tokens, 0);
+        cachedInputTokens +=
+          asNumber(usageObj.cache_read_input_tokens, 0) + asNumber(usageObj.cache_creation_input_tokens, 0);
+        updated = true;
+      }
+      if (!updated) return null;
+      return { inputTokens, cachedInputTokens, outputTokens };
+    },
+  };
+}
+
+// DUR-213: a run makes hundreds of model calls, each re-billing the full
+// cached context, so wall-clock/turn limits alone don't bound spend - a
+// 42-minute run can rack up tens of millions of cache tokens before either
+// fires. Each streamed `type:"assistant"` event carries that call's own
+// usage (input/output/cache tokens billed for that one API call, not a
+// running total), so summing them as they arrive gives a live cumulative
+// total that converges on the same figure the terminal `result` event would
+// eventually report - letting the run be stopped before it gets there.
+export function createClaudeUsageCapTracker(maxTotalTokens: number) {
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+  let outputTokens = 0;
+  let buffer = "";
+
+  const totalTokens = () => inputTokens + cachedInputTokens + outputTokens;
+
+  return {
+    onChunk(chunk: string): boolean {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const event = parseJson(line);
+        if (!event || asString(event.type, "") !== "assistant") continue;
+        const message = parseObject(event.message);
+        const usageObj = parseObject(message.usage);
+        inputTokens += asNumber(usageObj.input_tokens, 0);
+        outputTokens += asNumber(usageObj.output_tokens, 0);
+        cachedInputTokens +=
+          asNumber(usageObj.cache_read_input_tokens, 0) + asNumber(usageObj.cache_creation_input_tokens, 0);
+      }
+      return maxTotalTokens > 0 && totalTokens() >= maxTotalTokens;
+    },
+    getUsage(): UsageSummary {
+      return { inputTokens, cachedInputTokens, outputTokens };
+    },
+    getTotalTokens(): number {
+      return totalTokens();
+    },
+  };
+}
+
 function extractClaudeErrorMessages(parsed: Record<string, unknown>): string[] {
   const raw = Array.isArray(parsed.errors) ? parsed.errors : [];
   const messages: string[] = [];
@@ -133,13 +216,26 @@ export function extractClaudeLoginUrl(text: string): string | null {
   return match[0]?.replace(/[\])}.!,?;:'\"]+$/g, "") ?? null;
 }
 
+// DUR-258: word-search only runs over the CLI's own error-shaped text —
+// the structured `result`/`errors` fields, a caller-supplied single-line
+// fallback message, and stderr (a genuinely crashed/rejected process's own
+// error text, e.g. "Invalid API key"). It deliberately excludes `stdout`:
+// in `--output-format stream-json` mode, stdout is the full multi-turn
+// transcript, and an agent merely *discussing* a login/auth topic (e.g.
+// while hardening our own auth code) was enough to mislabel a successful
+// or unrelated-failure run as a real logout.
 export function detectClaudeLoginRequired(input: {
   parsed: Record<string, unknown> | null;
-  stdout: string;
   stderr: string;
+  errorMessage?: string | null;
 }): { requiresLogin: boolean; loginUrl: string | null } {
   const resultText = asString(input.parsed?.result, "").trim();
-  const messages = [resultText, ...extractClaudeErrorMessages(input.parsed ?? {}), input.stdout, input.stderr]
+  const messages = [
+    resultText,
+    ...extractClaudeErrorMessages(input.parsed ?? {}),
+    input.errorMessage ?? "",
+    input.stderr,
+  ]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -148,7 +244,9 @@ export function detectClaudeLoginRequired(input: {
   const requiresLogin = messages.some((line) => CLAUDE_AUTH_REQUIRED_RE.test(line));
   return {
     requiresLogin,
-    loginUrl: extractClaudeLoginUrl([input.stdout, input.stderr].join("\n")),
+    // Only look up a login URL once a login is already confirmed required
+    // from the CLI's own error text — never derived from the transcript.
+    loginUrl: requiresLogin ? extractClaudeLoginUrl(input.stderr) : null,
   };
 }
 
@@ -242,9 +340,12 @@ export function isClaudeImageProcessingError(parsed: Record<string, unknown>): b
   );
 }
 
+// DUR-258: see the comment on detectClaudeLoginRequired above — this
+// deliberately excludes `stdout` (the full multi-turn transcript in
+// stream-json mode) while still allowing `stderr` (a crashed/rejected
+// process's own short error text).
 function buildClaudeTransientHaystack(input: {
   parsed?: Record<string, unknown> | null;
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): string {
@@ -255,7 +356,6 @@ function buildClaudeTransientHaystack(input: {
     input.errorMessage ?? "",
     resultText,
     ...parsedErrors,
-    input.stdout ?? "",
     input.stderr ?? "",
   ]
     .join("\n")
@@ -401,7 +501,6 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
 export function extractClaudeRetryNotBefore(
   input: {
     parsed?: Record<string, unknown> | null;
-    stdout?: string | null;
     stderr?: string | null;
     errorMessage?: string | null;
   },
@@ -413,9 +512,11 @@ export function extractClaudeRetryNotBefore(
   return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
 }
 
+// DUR-258: word-search only runs over the CLI's own error-shaped text — see
+// the comment on detectClaudeLoginRequired above for why `stdout` (the full
+// transcript) is never part of the haystack, while `stderr` still is.
 export function isClaudeTransientUpstreamError(input: {
   parsed?: Record<string, unknown> | null;
-  stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
 }): boolean {

@@ -410,6 +410,42 @@ describe("issue validators", () => {
     expect(parsed.success).toBe(true);
   });
 
+  it("defaults request_confirmation payload.factCheck to false when omitted (DUR-320/DUR-323)", () => {
+    const parsed = requestConfirmationPayloadSchema.safeParse({
+      version: 1,
+      prompt: "Do these figures match your records?",
+    });
+
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.factCheck).toBe(false);
+    }
+  });
+
+  it("accepts an explicit request_confirmation payload.factCheck: true (DUR-320/DUR-323)", () => {
+    const parsed = requestConfirmationPayloadSchema.safeParse({
+      version: 1,
+      prompt: "Do these figures match your records?",
+      detailsMarkdown: "1. orders_2024 has 40,201 rows.\n2. orders_2024_backup has 40,201 rows.",
+      factCheck: true,
+    });
+
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.factCheck).toBe(true);
+    }
+  });
+
+  it("rejects a non-boolean request_confirmation payload.factCheck", () => {
+    const parsed = requestConfirmationPayloadSchema.safeParse({
+      version: 1,
+      prompt: "Do these figures match your records?",
+      factCheck: "yes",
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
   it("rejects a request_checkbox_confirmation payload with a placeholder prompt (DUR-162)", () => {
     const parsed = requestCheckboxConfirmationPayloadSchema.safeParse({
       version: 1,

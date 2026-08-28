@@ -58,6 +58,7 @@ export { approvalService } from "./approvals.js";
 export { escalationGrantService } from "./escalation-grants.js";
 export { budgetService } from "./budgets.js";
 export { secretService } from "./secrets.js";
+export { startSecretSurfaceScanner, runSecretSurfaceScan } from "./secret-surface-scanner.js";
 export {
   routineService,
   verifyScheduleChainBootstrap,
@@ -72,8 +73,14 @@ export type {
 } from "./routines.js";
 export { costService } from "./costs.js";
 export { laneAService } from "./lane-a.js";
+export {
+  secretaryClassifierService,
+  SECRETARY_CLASSIFIER_MODEL,
+  type SecretaryClassification,
+  type SecretaryRosterEntry,
+} from "./secretary-classifier.js";
 export { financeService } from "./finance.js";
-export { heartbeatService } from "./heartbeat.js";
+export { heartbeatService, isHeartbeatRunLiveInThisProcess } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";
 export { deployCarriedIssuesService } from "./deploy-carried-issues.js";
 export { agentErrorAlertsService, DEFAULT_AGENT_ERROR_STALL_THRESHOLD_MS } from "./agent-error-alerts.js";

@@ -1,12 +1,15 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
+import { createRequestScopedDb, runInCompanyScope } from "@paperclipai/db";
 import { normalizeIssueIdentifier } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { activityService, normalizeActivityLimit } from "../services/activity.js";
 import { assertAuthenticated, assertBoard, assertCompanyAccess } from "./authz.js";
 import { accessService, heartbeatService, issueService } from "../services/index.js";
 import { sanitizeRecord } from "../redaction.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
+import { notFound } from "../errors.js";
 
 const createActivitySchema = z.object({
   actorType: z.enum(["agent", "user", "system", "plugin"]).optional().default("system"),
@@ -18,12 +21,19 @@ const createActivitySchema = z.object({
   details: z.record(z.unknown()).optional().nullable(),
 });
 
-export function activityRoutes(db: Db) {
+export function activityRoutes(rawDb: Db) {
   const router = Router();
+  // DUR-348 (DUR-277 Wave 2): this file's own request-scoped instance; rawDb
+  // stays unwrapped for the pre-scope issue/run lookups the (b)-category
+  // routes below need before their companyId is known. See
+  // middleware/company-scope.ts.
+  const db = createRequestScopedDb(rawDb);
   const svc = activityService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db);
   const issueSvc = issueService(db);
+  const rawIssueSvc = issueService(rawDb);
+  const rawHeartbeat = heartbeatService(rawDb);
 
   async function assertCompanyScopeReadAllowed(req: Parameters<typeof assertCompanyAccess>[0], res: any, companyId: string) {
     const decision = await access.decide({
@@ -64,80 +74,105 @@ export function activityRoutes(db: Db) {
     return false;
   }
 
-  async function resolveIssueByRef(rawId: string) {
+  async function resolveIssueByRef(svc: typeof issueSvc, rawId: string) {
     const identifier = normalizeIssueIdentifier(rawId);
     if (identifier) {
-      return issueSvc.getByIdentifier(identifier);
+      return svc.getByIdentifier(identifier);
     }
-    return issueSvc.getById(rawId);
+    return svc.getById(rawId);
   }
 
-  router.get("/companies/:companyId/activity", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    if (!(await assertCompanyScopeReadAllowed(req, res, companyId))) return;
-
-    const filters = {
-      companyId,
-      agentId: req.query.agentId as string | undefined,
-      entityType: req.query.entityType as string | undefined,
-      entityId: req.query.entityId as string | undefined,
-      limit: normalizeActivityLimit(Number(req.query.limit)),
-    };
-    const result = await svc.list(filters);
-    res.json(result);
-  });
-
-  router.post("/companies/:companyId/activity", validate(createActivitySchema), async (req, res) => {
-    assertBoard(req);
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    const event = await svc.create({
-      companyId,
-      ...req.body,
-      details: req.body.details ? sanitizeRecord(req.body.details) : null,
+  function scopeFromIssueIdParam(idParam: string) {
+    return companyScope(rawDb, async (req) => {
+      const issue = await resolveIssueByRef(rawIssueSvc, req.params[idParam] as string);
+      if (!issue) throw notFound("Issue not found");
+      assertCompanyAccess(req, issue.companyId);
+      return issue.companyId;
     });
-    res.status(201).json(event);
-  });
+  }
 
-  router.get("/issues/:id/activity", async (req, res) => {
+  router.get(
+    "/companies/:companyId/activity",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      if (!(await assertCompanyScopeReadAllowed(req, res, companyId))) return;
+
+      const filters = {
+        companyId,
+        agentId: req.query.agentId as string | undefined,
+        entityType: req.query.entityType as string | undefined,
+        entityId: req.query.entityId as string | undefined,
+        limit: normalizeActivityLimit(Number(req.query.limit)),
+      };
+      const result = await svc.list(filters);
+      res.json(result);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/activity",
+    companyScope(rawDb, (req) => {
+      assertBoard(req);
+      const value = req.params.companyId;
+      if (typeof value !== "string") return undefined;
+      assertCompanyAccess(req, value);
+      return value;
+    }),
+    validate(createActivitySchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const event = await svc.create({
+        companyId,
+        ...req.body,
+        details: req.body.details ? sanitizeRecord(req.body.details) : null,
+      });
+      res.status(201).json(event);
+    },
+  );
+
+  router.get("/issues/:id/activity", scopeFromIssueIdParam("id"), async (req, res) => {
     const rawId = req.params.id as string;
-    const issue = await resolveIssueByRef(rawId);
+    const issue = await resolveIssueByRef(issueSvc, rawId);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    assertCompanyAccess(req, issue.companyId);
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
     const result = await svc.forIssue(issue.id);
     res.json(result);
   });
 
-  router.get("/issues/:id/runs", async (req, res) => {
+  router.get("/issues/:id/runs", scopeFromIssueIdParam("id"), async (req, res) => {
     const rawId = req.params.id as string;
-    const issue = await resolveIssueByRef(rawId);
+    const issue = await resolveIssueByRef(issueSvc, rawId);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    assertCompanyAccess(req, issue.companyId);
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
     const result = await svc.runsForIssue(issue.companyId, issue.id);
     res.json(result);
   });
 
+  // Not wired through companyScope: a missing run replies 200 [] with no
+  // company to scope by at all (existing behavior, kept as-is), so scope is
+  // only established in the branch where a run -- and therefore a
+  // companyId -- actually exists.
   router.get("/heartbeat-runs/:runId/issues", async (req, res) => {
     assertAuthenticated(req);
     const runId = req.params.runId as string;
-    const run = await heartbeat.getRun(runId);
+    const run = await rawHeartbeat.getRun(runId);
     if (!run) {
       res.json([]);
       return;
     }
     assertCompanyAccess(req, run.companyId);
-    if (!(await assertCompanyScopeReadAllowed(req, res, run.companyId))) return;
-    const result = await svc.issuesForRun(runId);
-    res.json(result);
+    await runInCompanyScope(rawDb, run.companyId, async () => {
+      if (!(await assertCompanyScopeReadAllowed(req, res, run.companyId))) return;
+      const result = await svc.issuesForRun(runId);
+      res.json(result);
+    });
   });
 
   return router;

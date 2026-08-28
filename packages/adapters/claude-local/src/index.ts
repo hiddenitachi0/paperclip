@@ -44,6 +44,7 @@ Core fields:
 - chrome (boolean, optional): pass --chrome when running Claude
 - promptTemplate (string, optional): run prompt template
 - maxTurnsPerRun (number, optional): max turns for one run
+- maxTokensPerRun (number, optional, default 0 = uncapped): kills the run (SIGTERM then SIGKILL) once cumulative input+output+cache tokens across all model calls in the run reach this total; the adapter reports partial usage/summary and errorCode "token_cap_exceeded" instead of a bare timeout (DUR-213)
 - dangerouslySkipPermissions (boolean, optional, default true): allow non-interactive Claude runs to proceed without approval prompts. Local targets receive --dangerously-skip-permissions; remote targets receive a curated --allowedTools list so they do not inherit local bypass permissions.
 - command (string, optional): defaults to "claude"
 - extraArgs (string[], optional): additional CLI args

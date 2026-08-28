@@ -53,6 +53,7 @@ import {
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
   logScheduleChainBootstrapVerification,
+  startSecretSurfaceScanner,
 } from "./services/index.js";
 import {
   parseAdapterRegistryEnv,
@@ -67,6 +68,7 @@ import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
+import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -925,6 +927,13 @@ export async function startServer(): Promise<StartedServer> {
       logger.error({ err }, "startup heartbeat recovery failed");
     });
 
+    // DUR-316: periodic scan for known secret patterns leaking into places
+    // the Secrets store does not cover (git configs, .env/docker-compose
+    // files, heartbeat_runs free-text columns) -- runs once immediately,
+    // then every 30 minutes. Self-contained (owns its own interval/cursor),
+    // so it does not need to sit inside the reconciliation IIFE above.
+    startSecretSurfaceScanner(db as any);
+
     setInterval(() => {
       // DUR-257: once shutdown() has started draining, stop dispatching new work --
       // anything the tick starts now would just get orphaned by the imminent
@@ -1122,7 +1131,22 @@ export async function startServer(): Promise<StartedServer> {
       });
     }, backupIntervalMs);
   }
-  
+
+  if (config.heartbeatRunRetentionEnabled) {
+    logger.info(
+      {
+        retentionDays: config.heartbeatRunRetentionDays,
+        intervalMinutes: config.heartbeatRunRetentionIntervalMinutes,
+      },
+      "Heartbeat run retention sweep enabled",
+    );
+    startHeartbeatRunRetention(
+      db,
+      config.heartbeatRunRetentionIntervalMinutes * 60 * 1000,
+      config.heartbeatRunRetentionDays,
+    );
+  }
+
   // Wait for external adapters to finish loading before accepting requests.
   // Without this, adapter type validation (assertKnownAdapterType) would
   // reject valid external adapter types during the startup loading window.

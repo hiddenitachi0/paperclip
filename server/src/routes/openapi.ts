@@ -2820,6 +2820,14 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/heartbeat-runs/pause-for-restart",
+  tags: ["instance"],
+  summary: "Transactionally mark every in-flight heartbeat run paused_for_restart ahead of a planned server restart (DUR-296)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── Board chat (Conference Room Chat, experimental) ──────────────────────────
 
 registry.registerPath({
@@ -2857,6 +2865,56 @@ registry.registerPath({
     403: r.forbidden,
     404: r.notFound,
     409: r.conflict,
+    429: r.tooManyRequests,
+  },
+});
+
+// ─── Chat router (unified front door between Lane A and Lane B) ───────────────
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/chat/classify",
+  tags: ["agents"],
+  summary: "Secretary classifier (DUR-251/DUR-335): pick a lane + recipient agent for a Simple Mode message",
+  body: z.object({
+    companyId: z.string().uuid(),
+    message: z.string().trim().min(1).max(20_000),
+  }),
+  responses: {
+    200: r.ok(
+      z.object({
+        lane: z.enum(["a", "b"]),
+        targetAgentId: z.string(),
+        reasoning: z.string(),
+      }),
+    ),
+    400: r.badRequest,
+    409: r.conflict,
+    429: r.tooManyRequests,
+    502: { description: "Bad gateway", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "Service unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/chat/{agentId}/messages",
+  tags: ["agents"],
+  summary: "Route a chat message to Lane A (direct call) or Lane B (background task) and normalize the response",
+  body: z.object({
+    companyId: z.string().uuid(),
+    message: z.string().trim().min(1).max(20_000),
+    context: z.string().max(16_000).optional(),
+    conversationId: z.string().uuid().optional(),
+    laneHint: z.enum(["a", "b"]).optional(),
+  }),
+  responses: {
+    200: r.ok(),
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
     429: r.tooManyRequests,
   },
 });
