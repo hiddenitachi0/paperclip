@@ -79,6 +79,21 @@ describe("checkFundamentalPaths", () => {
     const result = checkFundamentalPaths(["server/src/services/secrets.ts", "server/src/services/agent-secret-bindings.ts"]);
     expect(result.matchedCategories).toEqual(["secrets_or_credentials"]);
   });
+
+  it("flags underscore-named permission-grant schema and the service/constants files around it (DUR-383 gap)", () => {
+    const paths = [
+      "packages/db/src/schema/principal_permission_grants.ts",
+      "packages/db/src/schema/company_agent_roles.ts",
+      "packages/shared/src/constants.ts",
+      "server/src/services/agent-permissions.ts",
+      "server/src/services/company-member-roles.ts",
+      "server/src/services/principal-access-compatibility.ts",
+      "server/src/services/companies.ts",
+    ];
+    for (const path of paths) {
+      expect(checkFundamentalPaths([path]).clean).toBe(false);
+    }
+  });
 });
 
 describe("assertMergePrOnly", () => {

@@ -94,7 +94,20 @@ const FUNDAMENTAL_PATH_PATTERNS: Array<{ category: FundamentalPathCategory; patt
   { category: "company_isolation_or_rls", pattern: /company-scope|companyScope|row-level-security|\brls\b|\btenant\b|multi-tenan/i },
   {
     category: "approval_mechanism",
-    pattern: /merge-pr-automation|merge-deploy-visibility|\bapprovals?\.ts$|approval-schema|agent-roles\.ts$|instance-settings|\baccess\.ts$/i,
+    pattern:
+      /merge-pr-automation|merge-deploy-visibility|\bapprovals?\.ts$|approval-schema|agent[-_]roles\.ts$|instance-settings|\baccess\.ts$|permission[-_]grants?|company[-_]member[-_]roles|principal[-_]access|agent[-_]permissions|companies\.ts$/i,
+  },
+  {
+    // Schema for the tables the approval/permission mechanism reads and writes
+    // (principal_permission_grants, company_agent_roles, etc). Underscore-named
+    // Drizzle schema files don't match the hyphenated service-file patterns
+    // above, so they need their own rule rather than relying on filename shape.
+    category: "approval_mechanism",
+    pattern: /packages\/db\/src\/schema\//,
+  },
+  {
+    category: "approval_mechanism",
+    pattern: /packages\/shared\/src\/constants\.ts$/,
   },
   { category: "budget_or_cost_caps", pattern: /\bbudgets?\.ts$|budget-polic|cost[-_]?cap|spend[-_]?limit/i },
   { category: "data_deletion", pattern: /\bdelete\b|\bpurge\b|retention-polic|\bgdpr\b|company-deletion/i },
