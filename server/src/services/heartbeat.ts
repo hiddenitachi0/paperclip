@@ -7,9 +7,12 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte,
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   MODEL_PROFILE_KEYS,
   envBindingSchema,
+  hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
   isEnvironmentDriverSupportedForAdapter,
   type BillingType,
   type EnvironmentLeaseStatus,
@@ -108,7 +111,7 @@ import {
   type RealizedExecutionWorkspace,
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
-import { issueService } from "./issues.js";
+import { isHeartbeatRunLockStale, issueService } from "./issues.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
@@ -227,7 +230,12 @@ import {
   redactCurrentUserValue,
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
-import { redactEventPayload, redactKnownSecretValues, redactSensitiveText } from "../redaction.js";
+import {
+  redactEventPayload,
+  redactHeartbeatRunPatchSecrets,
+  redactKnownSecretValues,
+  redactSensitiveText,
+} from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -486,6 +494,17 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
 // Routes and the scheduler construct separate heartbeatService instances, but
 // they must agree on in-process adapter executions when reaping stale runs.
 const activeRunExecutions = new Set<string>();
+
+// DUR-240: shared in-process liveness check, usable by any module (not just
+// this one) that constructs its own issueService(db) and needs to know
+// whether a run this server instance still has a handle for is actually
+// alive -- even when heartbeatRuns.status looks terminal because of a
+// process-lost false negative (see DUR-114/DUR-120). Exported at module
+// scope for the same reason activeRunExecutions is: routes and the
+// scheduler build separate service instances but share this process.
+export function isHeartbeatRunLiveInThisProcess(runId: string): boolean {
+  return runningProcesses.has(runId) || activeRunExecutions.has(runId);
+}
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
 
 type RuntimeConfigSecretResolver = Pick<
@@ -1225,6 +1244,13 @@ async function ensureManagedProjectWorkspace(input: {
     return { cwd, warning: null };
   }
 
+  if (hasEmbeddedGitCredential(input.repoUrl)) {
+    // Do not interpolate input.repoUrl into this message: the whole point of
+    // this check is that the URL carries a live secret, and this error text
+    // is exactly the kind of string that gets persisted to heartbeat_runs.
+    throw new Error(`Refusing to clone: ${EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE}`);
+  }
+
   const gitDirExists = await fs
     .stat(path.resolve(cwd, ".git"))
     .then((entry) => entry.isDirectory())
@@ -1265,8 +1291,12 @@ async function ensureManagedProjectWorkspace(input: {
     });
     return { cwd, warning: null };
   } catch (error) {
+    // Don't interpolate input.repoUrl here, and scrub `reason` (git's own
+    // stderr) before including it: on some failure modes git's error text
+    // itself echoes back embedded credentials (e.g. an auth-rejected URL),
+    // so it must be treated as untrusted even though the guard above passed.
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
+    throw new Error(`Failed to prepare managed checkout at "${cwd}": ${redactEmbeddedGitCredentials(reason)}`);
   }
 }
 
@@ -4926,7 +4956,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
-  const issuesSvc = issueService(db);
+  // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
+  // run this server instance still has an in-memory process handle for is
+  // actually alive, even when heartbeatRuns.status looks terminal (a
+  // process-lost false negative -- see DUR-114/DUR-120). Without this, a
+  // second dispatch can silently reclaim a still-live run's checkout lock
+  // and start mutating the same worktree concurrently.
+  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
   const escalationGrants = escalationGrantService(db);
   const approvalsSvc = approvalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
@@ -4958,7 +4994,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
-  const recovery = recoveryService(db, { enqueueWakeup });
+  const recovery = recoveryService(db, {
+    enqueueWakeup,
+    isRunLive: isHeartbeatRunLiveInThisProcess,
+  });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
@@ -6489,9 +6528,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const sanitizedPatch = patch ? redactHeartbeatRunPatchSecrets(patch) : patch;
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ status, ...sanitizedPatch, updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -6526,9 +6566,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const sanitizedPatch = patch ? redactHeartbeatRunPatchSecrets(patch) : patch;
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ status, ...sanitizedPatch, updatedAt: new Date() })
       .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -9522,7 +9563,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
-          | "issue_continuation_waiting_on_review";
+          | "issue_continuation_waiting_on_review"
+          | "issue_execution_lock_held_by_live_run";
         details: Record<string, unknown>;
       };
 
@@ -9633,6 +9675,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           currentExecutionRunId: issue.executionRunId,
         },
       };
+    }
+
+    // DUR-240: the check above only ever covered MAX_TURN_CONTINUATION_RETRY_REASON --
+    // every other queued-run wake reason (including the self-review gate's follow-up
+    // wake) was claimed and executed with zero check that a *different* run still
+    // actively owns this issue's execution lock. That let two live runs share one
+    // worktree (see DUR-120/DUR-237 recurrence). Mirror the same isRunLive-aware
+    // staleness test issueService's lock-adoption paths now use, scoped to exactly
+    // the wake reasons that would have gone through auto-checkout anyway
+    // (shouldAutoCheckoutIssueForWake's own exclusions), so mention replies and
+    // recovery-action runs -- which never need the lock -- are unaffected.
+    if (
+      issue.assigneeAgentId === run.agentId &&
+      issue.executionRunId &&
+      issue.executionRunId !== run.id &&
+      wakeReason &&
+      wakeReason !== "issue_comment_mentioned" &&
+      wakeReason !== "source_scoped_recovery_action" &&
+      !wakeReason.startsWith("execution_")
+    ) {
+      const lockOwnerRun = await db
+        .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, issue.executionRunId))
+        .then((rows) => rows[0] ?? null);
+      const lockOwnerStillLive =
+        !isHeartbeatRunLockStale(lockOwnerRun) || isHeartbeatRunLiveInThisProcess(issue.executionRunId);
+      if (lockOwnerStillLive) {
+        return {
+          stale: true,
+          errorCode: "issue_execution_lock_held_by_live_run",
+          reason:
+            "Cancelled because another run still actively holds this issue's execution lock; dispatching this run would let two runs mutate the same worktree concurrently",
+          details: {
+            issueId,
+            expectedExecutionRunId: run.id,
+            currentExecutionRunId: issue.executionRunId,
+          },
+        };
+      }
     }
 
     if (issue.status === "in_review") {
