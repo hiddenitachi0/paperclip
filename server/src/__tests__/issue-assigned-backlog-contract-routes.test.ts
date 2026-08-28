@@ -20,6 +20,7 @@ const mockIssueService = vi.hoisted(() => ({
 }));
 
 vi.mock("../services/index.js", () => ({
+  isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   accessService: () => ({
     canUser: vi.fn(async () => true),
