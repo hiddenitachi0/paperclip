@@ -150,3 +150,72 @@ export function redactKnownSecretValues(input: string, secretValues: Iterable<st
   }
   return output;
 }
+
+// DUR-292 item 2 (DUR-317): fixed-shape secret patterns that leak into agent
+// output/adapter results without ever being registered as a known Secret --
+// e.g. NOR-316's GitHub PAT sitting in a git remote URL. This is the same
+// pattern list as DUR-316's periodic scanner (item 1); keep the two in sync.
+// Each match is tagged with the pattern name (not just REDACTED_EVENT_VALUE)
+// so the surrounding log context stays useful for debugging which credential
+// kind leaked.
+export interface SecretLeakPattern {
+  readonly name: string;
+  readonly regex: RegExp;
+}
+
+export const SECRET_LEAK_PATTERNS: readonly SecretLeakPattern[] = [
+  { name: "github_pat", regex: /github_pat_[A-Za-z0-9_]{20,}/g },
+  { name: "github_token", regex: /ghp_[A-Za-z0-9]{20,}/g },
+  { name: "openai_key", regex: /sk-[A-Za-z0-9_-]{12,}/g },
+  { name: "shopify_shared_secret", regex: /shpss_[A-Za-z0-9]{20,}/g },
+  { name: "shopify_access_token", regex: /shpat_[A-Za-z0-9]{20,}/g },
+  { name: "slack_bot_token", regex: /xoxb-[A-Za-z0-9-]{10,}/g },
+  { name: "aws_access_key_id", regex: /AKIA[A-Z0-9]{12,}/g },
+  {
+    name: "pem_private_key",
+    regex: /-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z0-9 ]*PRIVATE KEY-----/g,
+  },
+];
+
+export function redactKnownLeakedSecretPatterns(input: string): string {
+  if (!input) return input;
+  let output = input;
+  for (const pattern of SECRET_LEAK_PATTERNS) {
+    output = output.replace(pattern.regex, `[REDACTED:${pattern.name}]`);
+  }
+  return output;
+}
+
+function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
+  if (typeof value === "string") return redactKnownLeakedSecretPatterns(value);
+  if (Array.isArray(value)) return value.map(redactKnownLeakedSecretPatternsDeep);
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      out[key] = redactKnownLeakedSecretPatternsDeep(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+// Write-time gate for heartbeat_runs: applied to the patch object right
+// before it reaches the DB update/insert (see setRunStatus/setRunStatusIfRunning
+// in server/src/services/heartbeat.ts) so a leaked credential is masked
+// before the row is ever committed, not scanned after the fact.
+export function redactHeartbeatRunPatchSecrets<T extends Record<string, unknown>>(patch: T): T {
+  const next: Record<string, unknown> = { ...patch };
+  if (typeof next.error === "string") {
+    next.error = redactKnownLeakedSecretPatterns(next.error);
+  }
+  if (typeof next.stdoutExcerpt === "string") {
+    next.stdoutExcerpt = redactKnownLeakedSecretPatterns(next.stdoutExcerpt);
+  }
+  if (typeof next.stderrExcerpt === "string") {
+    next.stderrExcerpt = redactKnownLeakedSecretPatterns(next.stderrExcerpt);
+  }
+  if (isPlainObject(next.resultJson)) {
+    next.resultJson = redactKnownLeakedSecretPatternsDeep(next.resultJson);
+  }
+  return next as T;
+}

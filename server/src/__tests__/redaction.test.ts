@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   REDACTED_EVENT_VALUE,
   redactEventPayload,
+  redactHeartbeatRunPatchSecrets,
+  redactKnownLeakedSecretPatterns,
   redactKnownSecretValues,
   redactSensitiveText,
   sanitizeRecord,
@@ -169,5 +171,105 @@ describe("redactKnownSecretValues", () => {
 
   it("is a no-op when no secret values are given", () => {
     expect(redactKnownSecretValues("nothing to redact here", [])).toBe("nothing to redact here");
+  });
+});
+
+// DUR-292 item 2 (DUR-317): a GitHub PAT sitting in a git remote URL got
+// copied verbatim into 706 heartbeat_runs rows (NOR-316) because nothing
+// masked agent output for fixed-shape secret patterns before it was
+// persisted. These patterns are unregistered (never a known Secret), so
+// redactKnownSecretValues (which only scrubs literal known-secret values)
+// can't catch them -- this is the write-time gate for that class of leak.
+describe("redactKnownLeakedSecretPatterns", () => {
+  it("masks every known leaked-secret pattern with its pattern-name marker", () => {
+    const privateKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----";
+    const input = [
+      "github_pat_11AAAAAAA0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+      "sk-live1234567890abcdef",
+      "shpss_testfixtureNOTREALzzzzzzzzzzzzzzzz",
+      "shpat_testfixtureNOTREALzzzzzzzzzzzzzzzz",
+      "xoxb-test-fixture-not-a-real-token-000000",
+      "AKIAABCDEFGHIJKLMNOP",
+      privateKey,
+    ].join("\n");
+
+    const result = redactKnownLeakedSecretPatterns(input);
+
+    expect(result).toContain("[REDACTED:github_pat]");
+    expect(result).toContain("[REDACTED:github_token]");
+    expect(result).toContain("[REDACTED:openai_key]");
+    expect(result).toContain("[REDACTED:shopify_shared_secret]");
+    expect(result).toContain("[REDACTED:shopify_access_token]");
+    expect(result).toContain("[REDACTED:slack_bot_token]");
+    expect(result).toContain("[REDACTED:aws_access_key_id]");
+    expect(result).toContain("[REDACTED:pem_private_key]");
+    expect(result).not.toContain("github_pat_11AAAAAAA0aaaaaaaaaaaa");
+    expect(result).not.toContain("ghp_1234567890abcdefghijklmnopqrstuvwxyz");
+    expect(result).not.toContain("MIIBOgIBAAJBAK");
+  });
+
+  it("leaves surrounding log context untouched so debugging stays useful", () => {
+    const input = "remote sync failed for https://x-access-token:ghp_1234567890abcdefghijklmnopqrstuvwxyz@github.com/org/repo.git: exit 128";
+
+    const result = redactKnownLeakedSecretPatterns(input);
+
+    expect(result).toBe(
+      "remote sync failed for https://x-access-token:[REDACTED:github_token]@github.com/org/repo.git: exit 128",
+    );
+  });
+
+  it("is a byte-for-byte no-op when no pattern matches", () => {
+    const input = "run completed successfully, no credentials here";
+    expect(redactKnownLeakedSecretPatterns(input)).toBe(input);
+  });
+});
+
+describe("redactHeartbeatRunPatchSecrets", () => {
+  it("redacts matching patterns in error, stdoutExcerpt, stderrExcerpt, and nested resultJson strings", () => {
+    const patch = {
+      error: "push failed: ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+      stdoutExcerpt: "cloning with token AKIAABCDEFGHIJKLMNOP",
+      stderrExcerpt: "auth error using sk-live1234567890abcdef",
+      resultJson: {
+        summary: "done",
+        stdout: "remote url had github_pat_11AAAAAAA0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in it",
+        nested: { detail: "slack token xoxb-test-fixture-not-a-real-token-000000 leaked" },
+      },
+      errorCode: "adapter_failed",
+      exitCode: 1,
+    };
+
+    const result = redactHeartbeatRunPatchSecrets(patch);
+
+    expect(result.error).toBe("push failed: [REDACTED:github_token]");
+    expect(result.stdoutExcerpt).toBe("cloning with token [REDACTED:aws_access_key_id]");
+    expect(result.stderrExcerpt).toBe("auth error using [REDACTED:openai_key]");
+    expect(result.resultJson).toEqual({
+      summary: "done",
+      stdout: "remote url had [REDACTED:github_pat] in it",
+      nested: { detail: "slack token [REDACTED:slack_bot_token] leaked" },
+    });
+    // Unrelated fields pass through unchanged.
+    expect(result.errorCode).toBe("adapter_failed");
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("is unaffected byte-for-byte when no field contains a matching pattern", () => {
+    const patch = {
+      error: "agent exited cleanly",
+      stdoutExcerpt: "build succeeded",
+      stderrExcerpt: null,
+      resultJson: { summary: "ok", cost_usd: 0.12, nested: { safe: true } },
+      errorCode: null,
+      exitCode: 0,
+    };
+
+    expect(redactHeartbeatRunPatchSecrets(patch)).toEqual(patch);
+  });
+
+  it("leaves patches without the target fields untouched", () => {
+    const patch = { status: "queued", updatedAt: new Date("2026-01-01T00:00:00Z") };
+    expect(redactHeartbeatRunPatchSecrets(patch)).toEqual(patch);
   });
 });
