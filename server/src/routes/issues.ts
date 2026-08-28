@@ -83,6 +83,7 @@ import {
   executionWorkspaceService,
   goalService,
   heartbeatService,
+  isHeartbeatRunLiveInThisProcess,
   issueApprovalService,
   issueRecoveryActionService,
   issueThreadInteractionService,
@@ -1255,7 +1256,11 @@ export function issueRoutes(
   } = {},
 ) {
   const router = Router();
-  const svc = issueService(db);
+  // DUR-240: same in-process liveness guard as heartbeat.ts's own issuesSvc --
+  // this route is the direct HTTP checkout path agents/harnesses call, so it
+  // needs the same protection against silently reclaiming a still-live run's
+  // lock when heartbeatRuns.status looks terminal but isn't.
+  const svc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
   const escalationGrantsSvc = escalationGrantService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {

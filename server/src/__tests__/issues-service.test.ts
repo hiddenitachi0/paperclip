@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   activityLog,
@@ -5449,6 +5449,156 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
       checkoutRunId: successorRunId,
       executionRunId: successorRunId,
     });
+  });
+});
+
+// DUR-240: DUR-120 only surfaced a warning when a run's lock got silently
+// reclaimed from a different run whose heartbeatRuns.status looked terminal
+// -- it never stopped the reclaim itself. These tests exercise the actual
+// dispatch-time guard: when the caller supplies an isRunLive check (as
+// heartbeat.ts and the checkout route now do), a lock must not be treated as
+// stale/reclaimable while that check reports the owning run as still alive,
+// even though its DB status looks terminal.
+describeEmbeddedPostgres("issueService lock adoption honors isRunLive override", () => {
+  let db!: ReturnType<typeof createDb>;
+  let liveRunIds!: Set<string>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-lock-liveness-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  beforeEach(() => {
+    liveRunIds = new Set();
+    svc = issueService(db, { isRunLive: (runId) => liveRunIds.has(runId) });
+  });
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(goals);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedIssueWithExecutionRun(status: string) {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status,
+      invocationSource: "manual",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Execution lock",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    return { issueId, agentId, runId };
+  }
+
+  it("does not clear an execution lock whose DB status looks terminal but isRunLive reports it alive", async () => {
+    const { issueId, runId } = await seedIssueWithExecutionRun("failed");
+    liveRunIds.add(runId);
+
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(false);
+
+    const row = await db
+      .select({ executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.executionRunId).toBe(runId);
+  });
+
+  it("still clears an execution lock whose DB status looks terminal when isRunLive reports it dead", async () => {
+    const { issueId } = await seedIssueWithExecutionRun("failed");
+
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(true);
+
+    const row = await db
+      .select({ executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.executionRunId).toBeNull();
+  });
+
+  it("does not clear a checkout lock whose DB status looks terminal but isRunLive reports it alive", async () => {
+    const { issueId, runId } = await seedIssueWithExecutionRun("timed_out");
+    liveRunIds.add(runId);
+
+    await expect(svc.clearCheckoutRunIfTerminal(issueId)).resolves.toBe(false);
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.checkoutRunId).toBe(runId);
+    expect(row?.executionRunId).toBe(runId);
+  });
+
+  it("refuses to dispatch a second run's checkout while the first run's lock is confirmed still alive", async () => {
+    const { issueId, agentId, runId } = await seedIssueWithExecutionRun("failed");
+    liveRunIds.add(runId);
+    const secondRunId = randomUUID();
+
+    await expect(
+      svc.checkout(issueId, agentId, ["todo", "in_progress"], secondRunId),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.checkoutRunId).toBe(runId);
+    expect(row?.executionRunId).toBe(runId);
   });
 });
 

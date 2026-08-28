@@ -195,6 +195,7 @@ vi.mock("../services/index.js", () => ({
   companySkillService: () => mockCompanySkillService,
   budgetService: () => mockBudgetService,
   heartbeatService: () => mockHeartbeatService,
+  isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   issueApprovalService: () => mockIssueApprovalService,
   issueService: () => mockIssueService,
   logActivity: mockLogActivity,
