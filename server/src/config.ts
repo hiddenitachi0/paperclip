@@ -63,6 +63,7 @@ export interface Config {
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
+  databaseBypassUrl: string | undefined;
   embeddedPostgresDataDir: string;
   embeddedPostgresPort: number;
   databaseBackupEnabled: boolean;
@@ -305,6 +306,14 @@ export function loadConfig(): Config {
     throw new Error(resolvedBind.errors[0]);
   }
 
+  const resolvedDatabaseUrl = process.env.DATABASE_URL ?? fileDbUrl;
+  // DUR-275/DUR-277 §4: a second connection string for runInCompanyScopeBypass's
+  // reserved connections, decoupled from the tenant-request DATABASE_URL so a
+  // future Phase 2 cutover (DUR-250) can repoint one without the other.
+  // Defaults to DATABASE_URL so bypass connections behave exactly like today's
+  // until a deployment opts into a distinct bypass role via pure config.
+  const databaseBypassUrl = process.env.DATABASE_BYPASS_URL?.trim() || resolvedDatabaseUrl;
+
   return {
     deploymentMode,
     deploymentExposure,
@@ -317,8 +326,9 @@ export function loadConfig(): Config {
     authPublicBaseUrl,
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
-    databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
+    databaseUrl: resolvedDatabaseUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
+    databaseBypassUrl,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
     ),
