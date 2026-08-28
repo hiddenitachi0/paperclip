@@ -66,6 +66,7 @@ import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
+import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -1105,7 +1106,22 @@ export async function startServer(): Promise<StartedServer> {
       });
     }, backupIntervalMs);
   }
-  
+
+  if (config.heartbeatRunRetentionEnabled) {
+    logger.info(
+      {
+        retentionDays: config.heartbeatRunRetentionDays,
+        intervalMinutes: config.heartbeatRunRetentionIntervalMinutes,
+      },
+      "Heartbeat run retention sweep enabled",
+    );
+    startHeartbeatRunRetention(
+      db,
+      config.heartbeatRunRetentionIntervalMinutes * 60 * 1000,
+      config.heartbeatRunRetentionDays,
+    );
+  }
+
   // Wait for external adapters to finish loading before accepting requests.
   // Without this, adapter type validation (assertKnownAdapterType) would
   // reject valid external adapter types during the startup loading window.

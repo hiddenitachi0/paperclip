@@ -1017,6 +1017,8 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.read",
   "external.objects.write",
   "external.objects.refresh",
+  // Personas
+  "personas.generation_cap.enforce",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

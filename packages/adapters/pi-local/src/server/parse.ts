@@ -217,8 +217,13 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
   return result;
 }
 
-export function isPiUnknownSessionError(stdout: string, stderr: string): boolean {
-  const haystack = `${stdout}\n${stderr}`
+// DUR-258: word-search only over `stderr` (a crashed/rejected process's own
+// short error text) — never `stdout`, which is the full multi-turn
+// transcript. An agent merely *discussing* a stale/missing session in its
+// own work was otherwise enough to mislabel an unrelated failure as one and
+// trigger an unwanted fresh-session retry.
+export function isPiUnknownSessionError(stderr: string): boolean {
+  const haystack = stderr
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
