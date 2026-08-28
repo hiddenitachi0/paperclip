@@ -7,9 +7,12 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte,
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   MODEL_PROFILE_KEYS,
   envBindingSchema,
+  hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
   isEnvironmentDriverSupportedForAdapter,
   type BillingType,
   type EnvironmentLeaseStatus,
@@ -1236,6 +1239,13 @@ async function ensureManagedProjectWorkspace(input: {
     return { cwd, warning: null };
   }
 
+  if (hasEmbeddedGitCredential(input.repoUrl)) {
+    // Do not interpolate input.repoUrl into this message: the whole point of
+    // this check is that the URL carries a live secret, and this error text
+    // is exactly the kind of string that gets persisted to heartbeat_runs.
+    throw new Error(`Refusing to clone: ${EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE}`);
+  }
+
   const gitDirExists = await fs
     .stat(path.resolve(cwd, ".git"))
     .then((entry) => entry.isDirectory())
@@ -1276,8 +1286,12 @@ async function ensureManagedProjectWorkspace(input: {
     });
     return { cwd, warning: null };
   } catch (error) {
+    // Don't interpolate input.repoUrl here, and scrub `reason` (git's own
+    // stderr) before including it: on some failure modes git's error text
+    // itself echoes back embedded credentials (e.g. an auth-rejected URL),
+    // so it must be treated as untrusted even though the guard above passed.
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
+    throw new Error(`Failed to prepare managed checkout at "${cwd}": ${redactEmbeddedGitCredentials(reason)}`);
   }
 }
 
