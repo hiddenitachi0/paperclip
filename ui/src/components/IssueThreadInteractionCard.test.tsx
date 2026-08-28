@@ -439,7 +439,7 @@ describe("IssueThreadInteractionCard", () => {
     expect(pendingShell.className).toContain("border-teal-500/60");
     expect(pending.textContent).toContain("Fact check");
     expect(pending.textContent).toContain("Needs your check");
-    expect(pending.textContent).toContain("isn't a decision the agent needs you to make");
+    expect(pending.textContent).toContain("Read this carefully and only confirm if it matches what you actually know");
 
     act(() => root?.unmount());
     pending.remove();
@@ -458,7 +458,7 @@ describe("IssueThreadInteractionCard", () => {
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
     expect(spoofed.textContent).not.toContain("Fact check");
-    expect(spoofed.textContent).not.toContain("isn't a decision the agent needs you to make");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
   });
 
   it("does not render a decision-ask moved into detailsMarkdown as a fact-check card without payload.factCheck (DUR-323/DUR-339)", () => {
@@ -466,7 +466,7 @@ describe("IssueThreadInteractionCard", () => {
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
     expect(spoofed.textContent).not.toContain("Fact check");
-    expect(spoofed.textContent).not.toContain("isn't a decision the agent needs you to make");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
   });
 
   it("does not render a decision-ask with a self-declared factCheck flag as a fact-check card without matching detailsMarkdown shape (DUR-337)", () => {
@@ -476,7 +476,7 @@ describe("IssueThreadInteractionCard", () => {
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
     expect(spoofed.textContent).not.toContain("Fact check");
-    expect(spoofed.textContent).not.toContain("isn't a decision the agent needs you to make");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
   });
 
   it("attaches screenshots to a plan request-changes reason as markdown images", async () => {
