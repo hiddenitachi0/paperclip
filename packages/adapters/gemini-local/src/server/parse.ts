@@ -75,6 +75,23 @@ function accumulateUsage(
   );
 }
 
+/**
+ * The Gemini CLI's own structured success/failure verdict for a terminal
+ * "result" event. See DUR-258: this is the CLI's own verdict and must win
+ * over any process-level signal (exit code) when a result event exists at
+ * all — see how `execute.ts` uses this for the `failed` determination.
+ */
+export function isGeminiResultError(event: Record<string, unknown> | null | undefined): boolean {
+  if (!event) return false;
+  const status = asString(event.status, "").toLowerCase();
+  return (
+    event.is_error === true ||
+    asString(event.subtype, "").toLowerCase() === "error" ||
+    status === "error" ||
+    status === "failed"
+  );
+}
+
 export function parseGeminiJsonl(stdout: string) {
   let sessionId: string | null = null;
   const messages: string[] = [];
@@ -146,12 +163,7 @@ export function parseGeminiJsonl(stdout: string) {
         asString(event.response, "").trim();
       if (resultText && messages.length === 0) messages.push(resultText);
       costUsd = asNumber(event.total_cost_usd, asNumber(event.cost_usd, asNumber(event.cost, costUsd ?? 0))) || costUsd;
-      const status = asString(event.status, "").toLowerCase();
-      const isError =
-        event.is_error === true ||
-        asString(event.subtype, "").toLowerCase() === "error" ||
-        status === "error" ||
-        status === "failed";
+      const isError = isGeminiResultError(event);
       if (isError) {
         const text = asErrorText(event.error ?? event.message ?? event.result).trim();
         if (text) errorMessage = text;
@@ -199,8 +211,14 @@ export function parseGeminiJsonl(stdout: string) {
   };
 }
 
-export function isGeminiSessionUnrecoverableError(stdout: string, stderr: string): boolean {
-  const haystack = `${stdout}\n${stderr}`
+// DUR-258: word-search only runs over `stderr` (a crashed/rejected
+// process's own short error text) and the CLI's own structured error
+// fields — never over `stdout`. In stream-json mode, stdout is the full
+// multi-turn transcript, and an agent merely *discussing* a session/auth
+// topic (e.g. while testing session-resume error handling) was enough to
+// mislabel a successful or unrelated-failure run.
+export function isGeminiSessionUnrecoverableError(errorText: string, stderr: string): boolean {
+  const haystack = `${errorText}\n${stderr}`
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
@@ -211,8 +229,8 @@ export function isGeminiSessionUnrecoverableError(stdout: string, stderr: string
   );
 }
 
-export function isGeminiTransientNetworkError(stdout: string, stderr: string): boolean {
-  const haystack = `${stdout}\n${stderr}`
+export function isGeminiTransientNetworkError(errorText: string, stderr: string): boolean {
+  const haystack = `${errorText}\n${stderr}`
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
@@ -263,17 +281,28 @@ export function describeGeminiFailure(parsed: Record<string, unknown>): string |
   return parts.length > 1 ? parts.join(": ") : null;
 }
 
-const GEMINI_AUTH_REQUIRED_RE = /(?:not\s+authenticated|please\s+authenticate|api[_ ]?key\s+(?:required|missing|invalid)|authentication\s+required|manual\s+authorization\s+is\s+required|unauthorized|invalid\s+credentials|not\s+logged\s+in|login\s+required|run\s+`?gemini\s+auth(?:\s+login)?`?\s+first)/i;
+// "unauthorized" alone is deliberately excluded: a run's own tool output can
+// legitimately echo an unrelated 401 response (e.g. while testing an API),
+// so a bare "unauthorized" substring is not reliable evidence of a real
+// logout. Only count it when paired with something that actually points at
+// the login flow. See DUR-258 — this used to match "unauthorized" alone.
+const GEMINI_AUTH_REQUIRED_RE =
+  /(?:not\s+authenticated|please\s+authenticate|api[_ ]?key\s+(?:required|missing|invalid)|authentication\s+required|manual\s+authorization\s+is\s+required|invalid\s+credentials|not\s+logged\s+in|login\s+required|run\s+`?gemini\s+auth(?:\s+login)?`?\s+first|unauthorized[\s\S]{0,120}(?:log\s?in|authenticate))/i;
 const GEMINI_QUOTA_EXHAUSTED_RE =
   /(?:resource_exhausted|quota|rate[-\s]?limit|too many requests|\b429\b|billing details)/i;
 
+// DUR-258: word-search only runs over the CLI's own extracted error
+// messages plus `stderr` (a crashed/rejected process's own short error
+// text) — never over `stdout`. In stream-json mode, stdout is the full
+// multi-turn transcript, and an agent merely *discussing* an auth/quota
+// topic (e.g. while hardening our own auth code) was enough to mislabel a
+// successful or unrelated-failure run as a real logout or quota stop.
 export function detectGeminiAuthRequired(input: {
   parsed: Record<string, unknown> | null;
-  stdout: string;
   stderr: string;
 }): { requiresAuth: boolean } {
   const errors = extractGeminiErrorMessages(input.parsed ?? {});
-  const messages = [...errors, input.stdout, input.stderr]
+  const messages = [...errors, input.stderr]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -285,11 +314,10 @@ export function detectGeminiAuthRequired(input: {
 
 export function detectGeminiQuotaExhausted(input: {
   parsed: Record<string, unknown> | null;
-  stdout: string;
   stderr: string;
 }): { exhausted: boolean } {
   const errors = extractGeminiErrorMessages(input.parsed ?? {});
-  const messages = [...errors, input.stdout, input.stderr]
+  const messages = [...errors, input.stderr]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())

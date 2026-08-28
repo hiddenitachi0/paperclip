@@ -85,6 +85,9 @@ export interface Config {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  heartbeatRunRetentionEnabled: boolean;
+  heartbeatRunRetentionDays: number;
+  heartbeatRunRetentionIntervalMinutes: number;
   shutdownDrainTimeoutMs: number;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
@@ -332,6 +335,22 @@ export function loadConfig(): Config {
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    // DUR-319 (DUR-292 item 4): heartbeat_runs carries per-run stdout/stderr
+    // excerpts and context snapshots -- the same class of content that leaked
+    // a GitHub PAT across 706 rows in NOR-316. Retention bounds how long any
+    // secret that slips past scanning/masking (DUR-316/317/318) stays live and
+    // readable, independent of those upstream defenses. 30 days keeps a month
+    // of run history for debugging/audit; adjust via env if that's wrong for
+    // this deployment.
+    heartbeatRunRetentionEnabled: process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED !== "false",
+    heartbeatRunRetentionDays: Math.max(
+      1,
+      Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_DAYS) || 30,
+    ),
+    heartbeatRunRetentionIntervalMinutes: Math.max(
+      1,
+      Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_INTERVAL_MINUTES) || 60,
+    ),
     // DUR-257: on SIGTERM/SIGINT, shutdown() waits this long for in-flight heartbeat
     // runs to finish naturally before it calls process.exit(0), instead of letting
     // Docker SIGKILL them mid-run (which the next boot then books as process_lost).

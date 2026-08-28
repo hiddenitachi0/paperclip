@@ -39,6 +39,7 @@ import { documentService } from "./documents.js";
 import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
+import { personaGenerationCapService } from "./persona-generation-cap.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -554,6 +555,7 @@ export function buildHostServices(
   const authorization = authorizationService(db);
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
+  const personaGenerationCap = personaGenerationCapService(db);
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2637,6 +2639,33 @@ export function buildHostServices(
             ? sanitizeRecord(row.details)
             : row.details ?? null,
         }));
+      },
+    },
+
+    personas: {
+      async reserveDailyGeneration(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+
+        // runId is required and host-enforced (not opt-in, and not taken
+        // from a plugin-supplied agent id): the host resolves the calling
+        // agent from the run itself, the same way issues.createAttachment
+        // resolves which issue a plugin may attach to from the run's
+        // checkout -- a plugin cannot reserve or evade a different
+        // persona's cap by claiming a different identity.
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const run = await db
+          .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, companyId: heartbeatRuns.companyId })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, params.runId))
+          .then((rows) => rows[0] ?? null);
+        if (!run || run.companyId !== companyId) {
+          throw new Error("Run not found in this company");
+        }
+
+        return personaGenerationCap.reserveGeneration(run.agentId);
       },
     },
 
