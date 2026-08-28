@@ -21,6 +21,7 @@ import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
+import { changeLogRoutes } from "./routes/change-log.js";
 import { fileResourceRoutes } from "./routes/file-resources.js";
 import { routineRoutes } from "./routes/routines.js";
 import { customerInboxRoutes } from "./routes/customer-inbox.js";
@@ -241,6 +242,7 @@ export async function createApp(
     pluginWorkerManager: workerManager,
   }));
   api.use(issueTreeControlRoutes(db));
+  api.use(changeLogRoutes(db));
   api.use(fileResourceRoutes(db));
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(customerInboxRoutes(db));

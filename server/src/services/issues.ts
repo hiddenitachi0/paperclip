@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNull, like, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -100,6 +100,12 @@ const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "bloc
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 export const ISSUE_LIST_DEFAULT_LIMIT = 500;
 export const ISSUE_LIST_MAX_LIMIT = 1000;
+// DUR-312: the operator changelog is meant to be read in ~30 seconds each
+// morning, not paged through -- keep the window and page size small.
+export const CHANGE_LOG_DEFAULT_DAYS = 30;
+export const CHANGE_LOG_MAX_DAYS = 180;
+export const CHANGE_LOG_DEFAULT_LIMIT = 100;
+export const CHANGE_LOG_MAX_LIMIT = 500;
 const ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE = 500;
 export const MAX_CHILD_ISSUES_CREATED_BY_HELPER = 25;
 const MAX_CHILD_COMPLETION_SUMMARIES = 20;
@@ -2361,6 +2367,8 @@ const issueListSelect = {
   executionWorkspacePreference: issues.executionWorkspacePreference,
   executionWorkspaceSettings: sql<null>`null`,
   sourceTrust: issues.sourceTrust,
+  changeLogVisible: issues.changeLogVisible,
+  changeLogSummary: issues.changeLogSummary,
   startedAt: issues.startedAt,
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
@@ -6597,6 +6605,54 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
 
     listLabels: (companyId: string) =>
       db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
+
+    // DUR-312: read-only operator changelog -- issue-level (not commit-level)
+    // rows for fixed bugs/small changes, deliberately excluded from the
+    // approval queue. Only issues an agent explicitly marked
+    // changeLogVisible surface here; being `done` alone is not enough.
+    listChangeLog: async (
+      companyId: string,
+      params: { projectId?: string | null; days?: number; limit?: number } = {},
+    ) => {
+      const days = Math.min(
+        CHANGE_LOG_MAX_DAYS,
+        Math.max(1, Math.floor(params.days ?? CHANGE_LOG_DEFAULT_DAYS)),
+      );
+      const limit = Math.min(
+        CHANGE_LOG_MAX_LIMIT,
+        Math.max(1, Math.floor(params.limit ?? CHANGE_LOG_DEFAULT_LIMIT)),
+      );
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+      const conditions = [
+        eq(issues.companyId, companyId),
+        eq(issues.changeLogVisible, true),
+        eq(issues.status, "done"),
+        isNull(issues.hiddenAt),
+        isNotNull(issues.completedAt),
+        gte(issues.completedAt, since),
+      ];
+      if (params.projectId) {
+        conditions.push(eq(issues.projectId, params.projectId));
+      }
+
+      return db
+        .select({
+          id: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          changeLogSummary: issues.changeLogSummary,
+          completedAt: issues.completedAt,
+          priority: issues.priority,
+          projectId: issues.projectId,
+          projectName: projects.name,
+        })
+        .from(issues)
+        .leftJoin(projects, eq(projects.id, issues.projectId))
+        .where(and(...conditions))
+        .orderBy(desc(issues.completedAt))
+        .limit(limit);
+    },
 
     getLabelById: (id: string) =>
       db
