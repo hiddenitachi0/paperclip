@@ -51,6 +51,22 @@ vi.mock("../storage/index.js", () => ({
   getStorageService: () => mockStorage,
 }));
 
+// DUR-379: both routes under test now run through the company-scope
+// middleware (companyScopeFromParam / scopeFromInviteToken), which reserves
+// a real connection via runInCompanyScope -- this test's hand-rolled db
+// stub isn't a real Db, so it can't back that reservation. Bypass the
+// reservation machinery in tests, running the callback with the test's own
+// db as the "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 function createSelectChain(rows: unknown[]) {
   const query = {
     then(resolve: (value: unknown[]) => unknown) {
@@ -76,7 +92,7 @@ function createSelectChain(rows: unknown[]) {
 function createDbStub(...selectResponses: unknown[][]) {
   const createdInvite = {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "agent",
     defaultsPayload: null,
@@ -133,8 +149,8 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     logoAssetId: "logo-1",
   };
   const logoAsset = {
-    companyId: "company-1",
-    objectKey: "company-1/assets/companies/logo-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
+    objectKey: "11111111-1111-4111-8111-111111111111/assets/companies/logo-1",
     contentType: "image/png",
     byteSize: 3,
     originalFilename: "logo.png",
@@ -152,7 +168,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     const db = createDbStub();
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       role: "engineer",
       permissions: {},
     });
@@ -160,14 +176,14 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "agent",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         source: "agent_key",
       },
       db,
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({});
 
     expect(res.status).toBe(403);
@@ -178,7 +194,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     const db = createDbStub();
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       role: "ceo",
       permissions: { canManageCompanySettings: false },
     });
@@ -186,14 +202,14 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "agent",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         source: "agent_key",
       },
       db,
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({});
 
     expect(res.status).toBe(403);
@@ -206,14 +222,14 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "agent",
         agentId: "agent-1",
-        companyId: "company-2",
+        companyId: "22222222-2222-4222-8222-222222222222",
         source: "agent_key",
       },
       db,
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({});
 
     expect(res.status).toBe(403);
@@ -226,7 +242,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     const db = createDbStub([companyBranding], [logoAsset]);
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       role: "ceo",
       permissions: { canManageCompanySettings: true },
     });
@@ -234,14 +250,14 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "agent",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         source: "agent_key",
       },
       db,
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({ agentMessage: "Join and configure OpenClaw gateway." });
 
     expect([200, 201]).toContain(res.status);
@@ -249,7 +265,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     expect(res.body.onboardingTextPath).toContain("/api/invites/");
     expect((db as any).__insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         inviteType: "company_join",
         allowedJoinTypes: "agent",
       }),
@@ -260,7 +276,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     const db = createDbStub([companyBranding], [logoAsset]);
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       role: "engineering-manager",
       permissions: { canManageCompanySettings: true },
     });
@@ -268,14 +284,14 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "agent",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         source: "agent_key",
       },
       db,
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({ agentMessage: "Join and configure OpenClaw gateway." });
 
     expect([200, 201]).toContain(res.status);
@@ -287,7 +303,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "board",
         userId: "user-1",
-        companyIds: ["company-1"],
+        companyIds: ["11111111-1111-4111-8111-111111111111"],
         source: "session",
         isInstanceAdmin: false,
       },
@@ -311,7 +327,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "board",
         userId: "user-1",
-        companyIds: ["company-1"],
+        companyIds: ["11111111-1111-4111-8111-111111111111"],
         source: "session",
         isInstanceAdmin: false,
       },
@@ -319,7 +335,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({});
 
     expect([200, 201]).toContain(res.status);
@@ -335,7 +351,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       {
         type: "board",
         userId: "user-1",
-        companyIds: ["company-1"],
+        companyIds: ["11111111-1111-4111-8111-111111111111"],
         source: "session",
         isInstanceAdmin: false,
       },
@@ -343,7 +359,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
     );
 
     const res = await request(app)
-      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/openclaw/invite-prompt")
       .send({});
 
     expect(res.status).toBe(403);

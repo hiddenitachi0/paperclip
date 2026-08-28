@@ -37,6 +37,22 @@ vi.mock("../services/index.js", () => ({
   deduplicateAgentName: vi.fn((name: string) => name),
 }));
 
+// DUR-379: GET /invites/:token/skills/:skillName now runs through the
+// company-scope middleware (scopeFromInviteToken), which reserves a real
+// connection via runInCompanyScope -- this test's hand-rolled db stub isn't
+// a real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests, running the callback with the test's own db as the
+// "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 function registerModuleMocks() {
   vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
 
@@ -91,6 +107,12 @@ async function createApp(actor: any, db: any = {} as any) {
 }
 
 describe.sequential("cli auth routes", () => {
+  // DUR-379: vi.resetModules() below forces every test to re-import
+  // @paperclipai/db (see the vi.mock factory above) -- the first cold
+  // import pays a real transform cost, same rationale as
+  // deploy-completion-gate-routes.test.ts. Default 5s is too tight for that.
+  vi.setConfig({ testTimeout: 30000 });
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../services/index.js");
@@ -146,7 +168,7 @@ describe.sequential("cli auth routes", () => {
   it.sequential("serves the invite-scoped paperclip skill anonymously for active invites", async () => {
     const invite = {
       id: "invite-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       inviteType: "company_join",
       allowedJoinTypes: "agent",
       tokenHash: "hash",

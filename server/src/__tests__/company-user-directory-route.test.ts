@@ -4,6 +4,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { accessRoutes } from "../routes/access.js";
 import { errorHandler } from "../middleware/index.js";
 
+// DUR-379: GET /companies/:companyId/user-directory now runs through the
+// company-scope middleware (companyScopeFromParam), which reserves a real
+// connection via runInCompanyScope -- this test's hand-rolled db stub isn't
+// a real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests, running the callback with the test's own db as the
+// "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 vi.mock("../services/index.js", () => ({
   accessService: () => ({
     isInstanceAdmin: vi.fn(),
@@ -107,11 +123,11 @@ describe("GET /companies/:companyId/user-directory", () => {
       userId: "user-1",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-1"],
-      memberships: [{ companyId: "company-1", membershipRole: "operator", status: "active" }],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
+      memberships: [{ companyId: "11111111-1111-4111-8111-111111111111", membershipRole: "operator", status: "active" }],
     });
 
-    const res = await request(app).get("/api/companies/company-1/user-directory");
+    const res = await request(app).get("/api/companies/11111111-1111-4111-8111-111111111111/user-directory");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({

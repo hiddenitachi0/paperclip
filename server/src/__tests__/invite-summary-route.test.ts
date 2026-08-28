@@ -2,9 +2,30 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
+
 const mockStorage = vi.hoisted(() => ({
   headObject: vi.fn(),
 }));
+
+// DUR-379: GET /invites/:token now runs through the company-scope
+// middleware (scopeFromInviteToken), which reserves a real connection via
+// runInCompanyScope -- this test's hand-rolled call-index db stub isn't a
+// real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests the same way the pre-migration `db.transaction()` /
+// direct `db` calls worked: run the callback with the test's own db as the
+// "scoped" db, no real connection involved. See helpers/fake-scoped-db.ts
+// for the alternative (real reserve) approach used where routes go through
+// mocked services instead of raw db calls.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
 
 function registerModuleMocks() {
   vi.doMock("../storage/index.js", () => ({
@@ -72,6 +93,12 @@ async function createApp(
 }
 
 describe("GET /invites/:token", () => {
+  // DUR-379: vi.resetModules() in beforeEach forces every test to re-import
+  // @paperclipai/db (see the vi.mock factory above) -- the first cold import
+  // pays a real transform cost, same rationale as
+  // deploy-completion-gate-routes.test.ts. Default 5s is too tight for that.
+  vi.setConfig({ testTimeout: 30000 });
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../storage/index.js");
@@ -85,7 +112,7 @@ describe("GET /invites/:token", () => {
   it("returns company branding in the invite summary response", async () => {
     const invite = {
       id: "invite-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       inviteType: "company_join",
       allowedJoinTypes: "human",
       tokenHash: "hash",
@@ -100,6 +127,7 @@ describe("GET /invites/:token", () => {
     const app = await createApp(
       createDbStub(
         [invite],
+        [invite],
         [
           {
             name: "Acme Robotics",
@@ -109,7 +137,7 @@ describe("GET /invites/:token", () => {
         ],
         [
           {
-            companyId: "company-1",
+            companyId: COMPANY_ID,
             objectKey: "company-1/assets/companies/logo-1",
             contentType: "image/png",
             byteSize: 3,
@@ -122,19 +150,19 @@ describe("GET /invites/:token", () => {
     const res = await request(app).get("/api/invites/pcp_invite_test");
 
     expect(res.status).toBe(200);
-    expect(res.body.companyId).toBe("company-1");
+    expect(res.body.companyId).toBe(COMPANY_ID);
     expect(res.body.companyName).toBe("Acme Robotics");
     expect(res.body.companyBrandColor).toBe("#114488");
     expect(res.body.companyLogoUrl).toBe("/api/invites/pcp_invite_test/logo");
     expect(res.body.inviteType).toBe("company_join");
-  }, 10_000);
+  }, 30_000);
 
   it("omits companyLogoUrl when the stored logo object is missing", async () => {
     mockStorage.headObject.mockResolvedValue({ exists: false });
 
     const invite = {
       id: "invite-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       inviteType: "company_join",
       allowedJoinTypes: "human",
       tokenHash: "hash",
@@ -149,6 +177,7 @@ describe("GET /invites/:token", () => {
     const app = await createApp(
       createDbStub(
         [invite],
+        [invite],
         [
           {
             name: "Acme Robotics",
@@ -158,7 +187,7 @@ describe("GET /invites/:token", () => {
         ],
         [
           {
-            companyId: "company-1",
+            companyId: COMPANY_ID,
             objectKey: "company-1/assets/companies/logo-1",
             contentType: "image/png",
             byteSize: 3,
@@ -172,12 +201,12 @@ describe("GET /invites/:token", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.companyLogoUrl).toBeNull();
-  }, 10_000);
+  }, 30_000);
 
   it("returns pending join-request status for an already-accepted invite", async () => {
     const invite = {
       id: "invite-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       inviteType: "company_join",
       allowedJoinTypes: "human",
       tokenHash: "hash",
@@ -192,6 +221,7 @@ describe("GET /invites/:token", () => {
     const app = await createApp(
       createDbStub(
         [invite],
+        [invite],
         [{ requestType: "human", status: "pending_approval" }],
         [
           {
@@ -202,7 +232,7 @@ describe("GET /invites/:token", () => {
         ],
         [
           {
-            companyId: "company-1",
+            companyId: COMPANY_ID,
             objectKey: "company-1/assets/companies/logo-1",
             contentType: "image/png",
             byteSize: 3,
@@ -218,12 +248,12 @@ describe("GET /invites/:token", () => {
     expect(res.body.joinRequestStatus).toBe("pending_approval");
     expect(res.body.joinRequestType).toBe("human");
     expect(res.body.companyName).toBe("Acme Robotics");
-  }, 10_000);
+  }, 30_000);
 
   it("falls back to a reusable human join request when the accepted invite reused an existing queue entry", async () => {
     const invite = {
       id: "invite-2",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       inviteType: "company_join",
       allowedJoinTypes: "human",
       tokenHash: "hash",
@@ -248,7 +278,7 @@ describe("GET /invites/:token", () => {
       logoAssetId: "logo-1",
     };
     const logoAsset = {
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       objectKey: "company-1/assets/companies/logo-1",
       contentType: "image/png",
       byteSize: 3,
@@ -256,6 +286,7 @@ describe("GET /invites/:token", () => {
     };
     const app = await createApp(
       createDbStub(
+        [invite],
         [invite],
         [],
         [{ email: "jane@example.com" }],
@@ -274,5 +305,5 @@ describe("GET /invites/:token", () => {
     expect(res.status).toBe(200);
     expect(res.body.joinRequestStatus).toBe("pending_approval");
     expect(res.body.joinRequestType).toBe("human");
-  }, 10_000);
+  }, 30_000);
 });

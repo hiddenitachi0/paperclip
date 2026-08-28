@@ -3,6 +3,8 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
+
 const mockStorage = vi.hoisted(() => ({
   getObject: vi.fn(),
   headObject: vi.fn(),
@@ -11,6 +13,22 @@ const mockStorage = vi.hoisted(() => ({
 vi.mock("../storage/index.js", () => ({
   getStorageService: () => mockStorage,
 }));
+
+// DUR-379: GET /invites/:token/logo now runs through the company-scope
+// middleware (scopeFromInviteToken), which reserves a real connection via
+// runInCompanyScope -- this test's hand-rolled call-index db stub isn't a
+// real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests, running the callback with the test's own db as the
+// "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
 
 import { accessRoutes } from "../routes/access.js";
 import { errorHandler } from "../middleware/index.js";
@@ -36,7 +54,10 @@ function createDbStub(inviteRows: unknown[], companyRows: unknown[]) {
   return {
     select() {
       selectCall += 1;
-      return selectCall === 1
+      // DUR-379: calls 1 and 2 are both the invite lookup now -- the
+      // company-scope resolver's own pre-scope lookup, then the route
+      // handler's post-scope re-fetch (see scopeFromInviteToken).
+      return selectCall === 1 || selectCall === 2
         ? createSelectChain(inviteRows)
         : createSelectChain(companyRows);
     },
@@ -71,7 +92,7 @@ describe("GET /invites/:token/logo", () => {
   it("serves the company logo for an active invite without company auth", async () => {
     const invite = {
       id: "invite-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       inviteType: "company_join",
       allowedJoinTypes: "human",
       tokenHash: "hash",
@@ -95,7 +116,7 @@ describe("GET /invites/:token/logo", () => {
     });
     const app = createApp(
       createDbStub([invite], [{
-        companyId: "company-1",
+        companyId: COMPANY_ID,
         objectKey: "assets/companies/logo-1",
         contentType: "image/png",
         byteSize: 3,
@@ -107,14 +128,14 @@ describe("GET /invites/:token/logo", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toContain("image/png");
-    expect(mockStorage.headObject).toHaveBeenCalledWith("company-1", "assets/companies/logo-1");
-    expect(mockStorage.getObject).toHaveBeenCalledWith("company-1", "assets/companies/logo-1");
+    expect(mockStorage.headObject).toHaveBeenCalledWith(COMPANY_ID, "assets/companies/logo-1");
+    expect(mockStorage.getObject).toHaveBeenCalledWith(COMPANY_ID, "assets/companies/logo-1");
   });
 
   it("returns 404 when the logo asset record exists but storage does not", async () => {
     const invite = {
       id: "invite-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       inviteType: "company_join",
       allowedJoinTypes: "human",
       tokenHash: "hash",
@@ -129,7 +150,7 @@ describe("GET /invites/:token/logo", () => {
     mockStorage.headObject.mockResolvedValue({ exists: false });
     const app = createApp(
       createDbStub([invite], [{
-        companyId: "company-1",
+        companyId: COMPANY_ID,
         objectKey: "assets/companies/logo-1",
         contentType: "image/png",
         byteSize: 3,

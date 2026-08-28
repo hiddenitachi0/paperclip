@@ -29,6 +29,22 @@ vi.mock("../services/index.js", () => ({
   notifyHireApproved: vi.fn(),
 }));
 
+// DUR-379: POST /invites/:token/accept's non-bootstrap branch now runs
+// inside runInCompanyScope/withCompanyScope (see routes/access.ts) once the
+// invite's companyId is known -- both reserve a real connection / open a
+// real transaction against rawDb, which this test's hand-rolled db stub
+// isn't. Bypass the reservation machinery in tests, running the callback
+// with the test's own db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 type QueryHooks = {
   onSet?: (value: unknown) => void;
   onValues?: (value: unknown) => void;
@@ -59,7 +75,7 @@ function createDbStub() {
   const updateMock = vi.fn();
   const invite = {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "human",
     tokenHash: "hash",
@@ -110,10 +126,10 @@ function createApp(db: Record<string, unknown>) {
     type: "board",
     source: "session",
     userId: "user-1",
-    companyIds: ["company-1"],
+    companyIds: ["11111111-1111-4111-8111-111111111111"],
     memberships: [
       {
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         membershipRole: "owner",
         status: "active",
       },
@@ -146,7 +162,7 @@ function createDirectHumanInviteDbStub() {
   const updateValues: unknown[] = [];
   const invite = {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "human",
     tokenHash: "hash",
@@ -161,7 +177,7 @@ function createDirectHumanInviteDbStub() {
   const createdJoinRequest = {
     id: "join-1",
     inviteId: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     requestType: "human",
     status: "pending_approval",
     requestIp: "::ffff:127.0.0.1",
@@ -223,7 +239,7 @@ function createAcceptedHumanInviteReplayDbStub() {
   const updateValues: unknown[] = [];
   const invite = {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "human",
     tokenHash: "hash",
@@ -238,7 +254,7 @@ function createAcceptedHumanInviteReplayDbStub() {
   const pendingJoinRequest = {
     id: "join-1",
     inviteId: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     requestType: "human",
     status: "pending_approval",
     requestIp: "::ffff:127.0.0.1",
@@ -334,7 +350,7 @@ describe("POST /invites/:token/accept", () => {
     expect(insertedValues).toEqual([
       expect.objectContaining({
         inviteId: "invite-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         requestType: "human",
         status: "pending_approval",
         requestingUserId: "invitee-user",
@@ -354,14 +370,14 @@ describe("POST /invites/:token/accept", () => {
       ]),
     );
     expect(accessServiceMock.ensureMembership).toHaveBeenCalledWith(
-      "company-1",
+      "11111111-1111-4111-8111-111111111111",
       "user",
       "invitee-user",
       "owner",
       "active",
     );
     expect(accessServiceMock.setPrincipalGrants).toHaveBeenCalledWith(
-      "company-1",
+      "11111111-1111-4111-8111-111111111111",
       "user",
       "invitee-user",
       expect.arrayContaining([
@@ -413,7 +429,7 @@ describe("POST /invites/:token/accept", () => {
       expect.arrayContaining([expect.objectContaining({ acceptedAt: expect.any(Date) })]),
     );
     expect(accessServiceMock.ensureMembership).toHaveBeenCalledWith(
-      "company-1",
+      "11111111-1111-4111-8111-111111111111",
       "user",
       "invitee-user",
       "operator",

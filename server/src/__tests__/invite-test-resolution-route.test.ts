@@ -2,6 +2,22 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// DUR-379: GET /invites/:token/test-resolution now runs through the
+// company-scope middleware (scopeFromInviteToken), which reserves a real
+// connection via runInCompanyScope -- this test's hand-rolled db stub isn't
+// a real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests, running the callback with the test's own db as the
+// "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 function createSelectChain(rows: unknown[]) {
   const query = {
     then(resolve: (value: unknown[]) => unknown) {
@@ -29,7 +45,7 @@ function createDbStub(inviteRows: unknown[]) {
 function createInvite(overrides: Record<string, unknown> = {}) {
   return {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "agent",
     tokenHash: "hash",

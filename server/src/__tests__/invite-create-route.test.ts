@@ -4,6 +4,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logActivityMock = vi.fn();
 
+// DUR-379: POST /companies/:companyId/invites now runs through the
+// company-scope middleware (companyScopeFromParam), which reserves a real
+// connection via runInCompanyScope -- this test's hand-rolled db stub isn't
+// a real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests, running the callback with the test's own db as the
+// "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => ({
@@ -29,7 +45,7 @@ function registerModuleMocks() {
 function createDbStub() {
   const createdInvite = {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "human",
     tokenHash: "hash",
@@ -88,7 +104,7 @@ async function createApp() {
       type: "board",
       source: "local_implicit",
       userId: null,
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
     };
     next();
   });
@@ -106,6 +122,12 @@ async function createApp() {
 }
 
 describe("POST /companies/:companyId/invites", () => {
+  // DUR-379: vi.resetModules() below forces every test to re-import
+  // @paperclipai/db (see the vi.mock factory above) -- the first cold
+  // import pays a real transform cost, same rationale as
+  // deploy-completion-gate-routes.test.ts. Default 5s is too tight for that.
+  vi.setConfig({ testTimeout: 30000 });
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../services/index.js");
@@ -121,7 +143,7 @@ describe("POST /companies/:companyId/invites", () => {
     const app = await createApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/invites")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/invites")
       .set("host", "paperclip.example")
       .set("x-forwarded-proto", "https")
       .send({
