@@ -2820,6 +2820,14 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/heartbeat-runs/pause-for-restart",
+  tags: ["instance"],
+  summary: "Transactionally mark every in-flight heartbeat run paused_for_restart ahead of a planned server restart (DUR-296)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── Board chat (Conference Room Chat, experimental) ──────────────────────────
 
 registry.registerPath({

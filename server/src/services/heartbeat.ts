@@ -317,7 +317,17 @@ const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
 const execFile = promisify(execFileCallback);
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
-const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
+// DUR-296: "paused_for_restart" is terminal (the run's process is gone for
+// good, a fresh run will continue the issue) but deliberately excluded from
+// UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES -- it must never be counted,
+// displayed, or retried against as a failure.
+const HEARTBEAT_RUN_TERMINAL_STATUSES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
 // DUR-42: an issue only stops being "actionable" for a timer wake-up once
 // it's done or cancelled — anything else (including in_review/blocked) may
@@ -10215,6 +10225,87 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  // DUR-296: called (via the CLI/API, instance-wide, across every company)
+  // by deploy-runner.sh right when its proactive drain wait times out with
+  // heartbeat runs still in flight -- just before a
+  // compose_recreate/compose_build_swap recipe kills the shared container
+  // out from under them (see maybe_begin_quiet_mode_drain in
+  // scripts/deploy-runner.sh, DUR-259). Marking every affected run in one
+  // atomic UPDATE keeps this a clean snapshot-and-mark rather than a
+  // read-then-write race, and keeps them out of reapOrphanedRuns' "failed" /
+  // process_lost path on next boot: paused_for_restart reads as "planned,
+  // will resume" everywhere (never as a failure -- see
+  // HEARTBEAT_RUN_TERMINAL_STATUSES/UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES
+  // above) and immediately queues a continuation wake for each affected
+  // issue, the same as a failed/timed_out/cancelled run would. That queued
+  // wake just sits behind quiet mode (already active for the drain that
+  // produced this call) until the restart completes.
+  async function markInFlightRunsPausedForRestart(opts?: { reason?: string }) {
+    const now = new Date();
+    const note =
+      opts?.reason?.trim() ||
+      "Paused for a planned platform restart -- will resume automatically.";
+
+    const paused = await db
+      .update(heartbeatRuns)
+      .set({ status: "paused_for_restart", finishedAt: now, updatedAt: now })
+      .where(inArray(heartbeatRuns.status, ["queued", "running"]))
+      .returning();
+
+    for (const run of paused) {
+      clearHeartbeatRunRuntimeStatus(run.id);
+      publishLiveEvent({
+        companyId: run.companyId,
+        type: "heartbeat.run.status",
+        payload: {
+          runId: run.id,
+          agentId: run.agentId,
+          status: run.status,
+          invocationSource: run.invocationSource,
+          triggerDetail: run.triggerDetail,
+          error: run.error ?? null,
+          errorCode: run.errorCode ?? null,
+          startedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
+          finishedAt: run.finishedAt ? new Date(run.finishedAt).toISOString() : null,
+        },
+      });
+      publishRunLifecyclePluginEvent(run);
+
+      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+        finishedAt: now,
+        error: note,
+      });
+
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: note,
+      });
+
+      await releaseEnvironmentLeasesForRun({
+        runId: run.id,
+        companyId: run.companyId,
+        agentId: run.agentId,
+        status: run.status,
+      });
+
+      // "cancelled" (-> agent status "idle"), not "failed" (-> "error") --
+      // this is a clean, deliberate stop, not a crash.
+      await finalizeAgentStatus(run.agentId, "cancelled", null);
+      await releaseIssueExecutionAndPromote(run);
+    }
+
+    if (paused.length > 0) {
+      logger.warn(
+        { pausedCount: paused.length, runIds: paused.map((r) => r.id) },
+        "paused in-flight heartbeat runs for a planned restart",
+      );
+    }
+
+    return { paused: paused.length, runIds: paused.map((r) => r.id) };
+  }
+
   async function resumeQueuedRuns() {
     const queuedRuns = await db
       .select({ agentId: heartbeatRuns.agentId })
@@ -12280,7 +12371,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       let outcome: RunSessionOutcome;
       const latestRun = await getRun(run.id);
-      if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
+      if (
+        // `paused_for_restart` means the DB row was flipped out from under
+        // this still-running process by a concurrent drain -- it is not a
+        // real outcome of *this* execution, and `setRunStatusIfRunning`
+        // below will no-op the write anyway since the row is no longer
+        // "running". Fall through to the adapter-result-based outcome so
+        // this run's own session/error bookkeeping reflects what actually
+        // happened, instead of forcing an outcome value paused_for_restart
+        // was deliberately kept out of. See DUR-296.
+        isHeartbeatRunTerminalStatus(latestRun?.status) &&
+        latestRun.status !== "paused_for_restart"
+      ) {
         outcome = latestRun.status;
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
@@ -13398,7 +13500,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         (issue.status === "todo" || issue.status === "in_progress") &&
         !issue.assigneeUserId &&
         issue.assigneeAgentId === run.agentId &&
-        (run.status === "failed" || run.status === "timed_out" || run.status === "cancelled");
+        // DUR-296: a paused_for_restart run gets the same immediate
+        // continuation dispatch as a failed/timed_out/cancelled one -- the
+        // queued wakeup this creates just sits behind quiet mode (already
+        // active for the drain that produced this status) until the
+        // restart completes, which is exactly the "will resume
+        // automatically" promise of the status.
+        (run.status === "failed" ||
+          run.status === "timed_out" ||
+          run.status === "cancelled" ||
+          run.status === "paused_for_restart");
 
       if (!issueNeedsImmediateRecovery) {
         return { kind: "released" as const };
@@ -15081,6 +15192,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+    markInFlightRunsPausedForRestart,
 
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
