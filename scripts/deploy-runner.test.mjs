@@ -547,6 +547,120 @@ test("git_fetch_reset allows an explicit backward reset when payload.allowBackwa
   }
 });
 
+test("git_fetch_reset refuses a sideways reset to a commit that only exists on a different branch than the configured deploy branch", () => {
+  // DUR-229 / DUR-221 regression: the DUR-137 backward guard only compares
+  // target_commit against whatever is currently checked out, so a commit
+  // that lives on an unrelated branch (never an ancestor OR a descendant of
+  // the current HEAD) sails straight through it. This must be caught by an
+  // independent check against the *configured* deploy branch's remote tip.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-sideways-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+
+    // master diverges from custom right after A: master gets a commit of its
+    // own, custom independently advances with a different commit — neither
+    // is an ancestor of the other, simulating DUR-221's "custom has 244
+    // commits master doesn't, and vice versa" situation.
+    g(originDir, ["branch", "master"]);
+    g(originDir, ["checkout", "--quiet", "master"]);
+    writeFileSync(path.join(originDir, "f.txt"), "M");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "only on master"]);
+    const commitM = g(originDir, ["rev-parse", "HEAD"]);
+
+    g(originDir, ["checkout", "--quiet", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "C");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "only on custom"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    const targetHeadBefore = g(targetDir, ["rev-parse", "HEAD"]);
+
+    // A deploy approval pinned to master's commit (DV_COMMIT), while this
+    // project's configured deploy branch (DV_REPO_REF) is "custom" — exactly
+    // the DUR-221 near-miss shape.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitM}" "" "" "" "custom"
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assert.equal(result.status, 3, `expected refusal exit code 3\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), commitM, "refusal path should still print the resolved (refused) commit, matching the DUR-137 refusal convention");
+
+    const targetHeadAfter = g(targetDir, ["rev-parse", "HEAD"]);
+    assert.equal(targetHeadAfter, targetHeadBefore, "target checkout must never be reset onto a commit from an unrelated branch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("git_fetch_reset still allows a pinned-commit deploy that is genuinely on the configured deploy branch", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-sideways-ok-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+
+    // Pinned to A, an ancestor of custom's (now-advanced) tip B — a
+    // legitimate forward-pinned deploy that must not be caught by the new
+    // sideways guard just because it isn't equal to the branch tip.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitA}" "" "1" "" "custom"
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assertSuccess(result, "git_fetch_reset for an on-branch pinned commit");
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitA);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("process_approval posts a skip comment (not a false success) when the backward-deploy guard fires", () => {
   const scenario = makeScenario();
   try {
@@ -590,6 +704,55 @@ test("process_approval posts a skip comment (not a false success) when the backw
     assert.match(comments[0], /Deploy skipped/);
     assert.match(comments[0], /backward/);
     assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("process_approval posts a failure comment (not a false success) when the sideways-lineage guard fires", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    mkdirSync(path.join(targetPath, ".git"), { recursive: true });
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef", kind: "deploy" },
+    });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 3; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy failed/);
+    assert.match(comments[0], /not reachable from/);
+    assert.match(comments[0], /"custom"/);
+    assert.doesNotMatch(comments[0], /is live and healthy/, "a refused sideways deploy must never read like a successful one");
   } finally {
     scenario.cleanup();
   }

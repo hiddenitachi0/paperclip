@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import { ADVERSARIAL_SUCCESS_TRANSCRIPT } from "@paperclipai/adapter-utils/execution-classification-test-kit";
 import { resolveClaudeAdapterResult, resolveClaudeBillingType, resolveClaudeSubscriptionOverage } from "./execute.js";
-import { parseClaudeStreamJson } from "./parse.js";
+import { parseClaudeStreamJson, createClaudeUsageCapTracker } from "./parse.js";
 
 // DUR-41: eight runs in one window were recorded `failed` (with the agent's
 // own closing summary stored as the "error", and `claude_auth_required`
@@ -24,6 +24,7 @@ const baseEnv = {
   effectiveEnv: {},
   model: "claude-sonnet-5",
   billingType: "subscription" as const,
+  maxTokensPerRun: 0,
 };
 
 function buildProc(overrides: Partial<RunProcessResult> & { stdout: string }): RunProcessResult {
@@ -45,6 +46,7 @@ function attemptFromStdout(stdout: string, proc: Partial<RunProcessResult> = {})
     proc: built,
     parsedStream,
     parsed: parsedStream.resultJson ?? null,
+    usageCapTracker: createClaudeUsageCapTracker(0),
   };
 }
 

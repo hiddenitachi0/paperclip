@@ -58,6 +58,8 @@ import {
   isClaudeUnknownSessionError,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeImageProcessingError,
+  createClaudeLiveUsageTracker,
+  createClaudeUsageCapTracker,
 } from "./parse.js";
 import {
   materializeRemoteClaudeConfig,
@@ -426,6 +428,7 @@ export function resolveClaudeAdapterResult(
     proc: RunProcessResult;
     parsedStream: ReturnType<typeof parseClaudeStreamJson>;
     parsed: Record<string, unknown> | null;
+    usageCapTracker: ReturnType<typeof createClaudeUsageCapTracker>;
   },
   opts: { fallbackSessionId: string | null; clearSessionOnMissingSession?: boolean },
   env: {
@@ -440,9 +443,10 @@ export function resolveClaudeAdapterResult(
     effectiveEnv: Record<string, string>;
     model: string;
     billingType: AdapterExecutionResult["billingType"];
+    maxTokensPerRun: number;
   },
 ): AdapterExecutionResult {
-  const { proc, parsedStream, parsed } = attempt;
+  const { proc, parsedStream, parsed, usageCapTracker } = attempt;
 
   if (proc.timedOut) {
     return {
@@ -451,6 +455,29 @@ export function resolveClaudeAdapterResult(
       timedOut: true,
       errorMessage: `Timed out after ${env.timeoutSec}s`,
       errorCode: "timeout",
+      clearSession: Boolean(opts.clearSessionOnMissingSession),
+    };
+  }
+
+  // DUR-213: the run was killed mid-flight for exceeding maxTokensPerRun.
+  // Unlike a plain timeout, still report what usage/text it produced
+  // before being stopped, so the operator sees partial progress instead
+  // of a bare error.
+  if (proc.usageCapped) {
+    const capUsage = usageCapTracker.getUsage();
+    return {
+      exitCode: proc.exitCode,
+      signal: proc.signal,
+      timedOut: false,
+      errorMessage: `Stopped: run exceeded the configured per-run token cap of ${env.maxTokensPerRun.toLocaleString("en-US")} tokens (used ${usageCapTracker.getTotalTokens().toLocaleString("en-US")}).`,
+      errorCode: "token_cap_exceeded",
+      usage: capUsage,
+      provider: "anthropic",
+      biller: isBedrockAuth(env.effectiveEnv) ? "aws_bedrock" : "anthropic",
+      model: parsedStream.model || asString(parsed?.model, env.model),
+      billingType: env.billingType,
+      summary: parsedStream.summary || "",
+      resultJson: { stdout: proc.stdout, stderr: proc.stderr, stopReason: "token_cap_exceeded" },
       clearSession: Boolean(opts.clearSessionOnMissingSession),
     };
   }
@@ -673,7 +700,21 @@ export function resolveClaudeAdapterResult(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog: rawOnLog, onMeta, onSpawn, authToken } = ctx;
+  // DUR-215: report live running token totals to the caller (opt-in via
+  // onUsageProgress) so an in-progress run can be flagged as abnormally
+  // expensive before it finishes. No-op, zero extra parsing, when unset.
+  const onUsageProgress = ctx.onUsageProgress;
+  const liveUsageTracker = onUsageProgress ? createClaudeLiveUsageTracker() : null;
+  const onLog = liveUsageTracker
+    ? async (stream: "stdout" | "stderr", chunk: string) => {
+        await rawOnLog(stream, chunk);
+        if (stream === "stdout") {
+          const usage = liveUsageTracker.onChunk(chunk);
+          if (usage) await onUsageProgress!(usage);
+        }
+      }
+    : rawOnLog;
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
@@ -689,6 +730,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effort = asString(config.effort, "");
   const chrome = asBoolean(config.chrome, false);
   const maxTurns = asNumber(config.maxTurnsPerRun, 0);
+  // DUR-213: per-run spend cap. 0/unset means no cap (today's behavior).
+  // Counts input + output + cache tokens across every model call in the
+  // run, since that sum is what the operator is actually billed for.
+  const maxTokensPerRun = asNumber(config.maxTokensPerRun, 0);
   const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, true);
   const configEnv = parseObject(config.env);
   const workspaceContext = parseObject(context.paperclipWorkspace);
@@ -1162,6 +1207,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    const usageCapTracker = createClaudeUsageCapTracker(maxTokensPerRun);
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       cwd,
       env,
@@ -1176,11 +1222,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         graceMs: terminalResultCleanupGraceMs,
         hasTerminalResult: ({ stdout }) => parseClaudeStreamJson(stdout).resultJson !== null,
       },
+      ...(maxTokensPerRun > 0
+        ? { usageCap: { onChunk: usageCapTracker.onChunk, graceMs: 2_000 } }
+        : {}),
     });
 
     const parsedStream = parseClaudeStreamJson(proc.stdout);
     const parsed = parsedStream.resultJson ?? parseJson(proc.stdout);
-    return { proc, parsedStream, parsed };
+    return { proc, parsedStream, parsed, usageCapTracker };
   };
 
   const toAdapterResult = (
@@ -1188,6 +1237,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       proc: RunProcessResult;
       parsedStream: ReturnType<typeof parseClaudeStreamJson>;
       parsed: Record<string, unknown> | null;
+      usageCapTracker: ReturnType<typeof createClaudeUsageCapTracker>;
     },
     opts: { fallbackSessionId: string | null; clearSessionOnMissingSession?: boolean },
   ): AdapterExecutionResult =>
@@ -1205,6 +1255,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       effectiveEnv,
       model,
       billingType,
+      maxTokensPerRun,
     });
 
   try {
@@ -1212,6 +1263,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const sessionErrorKind =
       sessionId &&
       !initial.proc.timedOut &&
+      !initial.proc.usageCapped &&
       (initial.proc.exitCode ?? 0) !== 0 &&
       initial.parsed
         ? isClaudeUnknownSessionError(initial.parsed)

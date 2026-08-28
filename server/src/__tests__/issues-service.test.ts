@@ -3179,6 +3179,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(activityLog);
     await db.delete(issues);
     await db.delete(workspaceOperations);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -3696,6 +3697,88 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
       isDependencyReady: true,
       pendingFinalizeBlockerIssueIds: [],
+    });
+  });
+
+  it("does not gate forever when the blocker's latest op belongs to a run that already terminated without finalizing (DUR-289)", async () => {
+    // Mirrors the recurrence: a run crashes/fails during workspace setup
+    // (e.g. after recording workspace_config_freshness) before ever reaching
+    // its own finalize-recording step. That run is dead and will never
+    // record a workspace_finalize row, so the barrier must not hold the
+    // dependent hostage forever even though the blocker issue is done.
+    const {
+      companyId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+      assigneeAgentId,
+    } = await seedSharedWorkspaceDependency();
+
+    const deadRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: deadRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "failed",
+      startedAt: new Date("2026-08-25T16:58:00.000Z"),
+      finishedAt: new Date("2026-08-25T17:04:15.000Z"),
+    });
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: blockerId,
+      heartbeatRunId: deadRunId,
+      phase: "workspace_config_freshness",
+      status: "succeeded",
+      startedAt: new Date("2026-08-25T16:58:28.000Z"),
+    });
+
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: true,
+      pendingFinalizeBlockerIssueIds: [],
+      unresolvedBlockerIssueIds: [],
+    });
+    await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
+      expect.objectContaining({
+        id: dependentId,
+        assigneeAgentId,
+        blockerIssueIds: [blockerId],
+      }),
+    ]);
+  });
+
+  it("still holds the finalize barrier while the blocker's latest op belongs to a live (running) run", async () => {
+    const {
+      companyId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+      assigneeAgentId,
+    } = await seedSharedWorkspaceDependency();
+
+    const liveRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: liveRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      startedAt: new Date("2026-08-25T16:58:00.000Z"),
+    });
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: blockerId,
+      heartbeatRunId: liveRunId,
+      phase: "workspace_config_freshness",
+      status: "succeeded",
+      startedAt: new Date("2026-08-25T16:58:28.000Z"),
+    });
+
+    expect(await svc.listWakeableBlockedDependents(blockerId)).toEqual([]);
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: false,
+      pendingFinalizeBlockerIssueIds: [blockerId],
+      unresolvedBlockerIssueIds: [blockerId],
     });
   });
 

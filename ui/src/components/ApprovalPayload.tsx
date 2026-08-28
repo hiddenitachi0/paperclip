@@ -69,6 +69,34 @@ export function approvalTargetBadge(payload?: Record<string, unknown> | null): s
 }
 
 /**
+ * Which branch a deploy approval's commit actually lives on, and whether
+ * that matches the project's deploy branch (DUR-226 — a deploy card must
+ * never look identical for a same-branch deploy and an off-branch one; see
+ * the DUR-221 incident where a master commit was filed against a project
+ * that deploys from custom with no visible difference on the card).
+ * Returns null when this isn't a deploy approval, or the source branch
+ * hasn't been resolved yet (older approvals filed before the backend
+ * started populating it) — callers should render nothing in that case
+ * rather than imply "checked, all clear".
+ */
+export function approvalDeployBranchInfo(payload?: Record<string, unknown> | null): {
+  sourceBranch: string;
+  deployBranch: string | null;
+  mismatch: boolean;
+} | null {
+  const kind = firstNonEmptyString(payload?.kind);
+  if (kind !== "deploy") return null;
+  const sourceBranch = firstNonEmptyString(payload?.sourceBranch);
+  if (!sourceBranch) return null;
+  const deployBranch = firstNonEmptyString(payload?.deployBranch);
+  return {
+    sourceBranch,
+    deployBranch,
+    mismatch: Boolean(deployBranch) && deployBranch !== sourceBranch,
+  };
+}
+
+/**
  * Key used to detect two pending approvals that target the same underlying
  * thing — same repo+PR for a merge, same commit for a deploy — so the Now
  * view can flag them as duplicates of each other (DUR-156). Mirrors the

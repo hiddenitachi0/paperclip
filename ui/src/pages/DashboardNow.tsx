@@ -1,4 +1,4 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Approval, Agent, Issue } from "@paperclipai/shared";
 import {
@@ -22,6 +22,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { EmptyState } from "../components/EmptyState";
 import { Identity } from "../components/Identity";
+import { DecisionReasonDialog } from "../components/DecisionReasonDialog";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { describeRunActivity } from "../lib/run-activity";
 import { classifyTaskWaiting, type TaskWaiting } from "../lib/task-waiting";
@@ -32,6 +33,7 @@ import {
   defaultTypeIcon,
   approvalTargetBadge,
   approvalDuplicateKey,
+  approvalDeployBranchInfo,
 } from "../components/ApprovalPayload";
 
 // Live board polling cadence. Fast enough to feel live, slow enough to stay cheap
@@ -746,11 +748,13 @@ function ApprovalRow({
   companyName?: string | null;
   isDuplicate: boolean;
 }) {
+  const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const queryClient = useQueryClient();
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const payload = approval.payload as Record<string, unknown>;
   const label = approvalLabel(approval.type, payload);
   const targetBadge = approvalTargetBadge(payload);
+  const branchInfo = approvalDeployBranchInfo(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -763,7 +767,7 @@ function ApprovalRow({
     },
   });
   const rejectMutation = useMutation({
-    mutationFn: () => approvalsApi.reject(approval.id),
+    mutationFn: (note: string) => approvalsApi.reject(approval.id, note),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
     },
@@ -777,11 +781,17 @@ function ApprovalRow({
     <div
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-2.5 py-2",
-        isDuplicate
+        isDuplicate || branchInfo?.mismatch
           ? "border-red-500/50 bg-red-500/[0.06]"
           : "border-amber-500/40 bg-amber-500/[0.04]",
       )}
     >
+      {branchInfo?.mismatch ? (
+        <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          Not on {branchInfo.deployBranch} — this commit is on {branchInfo.sourceBranch}
+        </p>
+      ) : null}
       {isDuplicate ? (
         <p className="flex items-center gap-1 text-[10px] font-medium text-red-600 dark:text-red-400">
           <AlertCircle className="h-3 w-3 shrink-0" />
@@ -849,12 +859,22 @@ function ApprovalRow({
             variant="destructive"
             className="h-6 flex-1 px-2 text-[11px]"
             disabled={busy}
-            onClick={() => rejectMutation.mutate()}
+            onClick={() => setRejectDialogOpen(true)}
           >
             {rejectMutation.isPending ? "…" : "Reject"}
           </Button>
         </div>
       )}
+      <DecisionReasonDialog
+        open={rejectDialogOpen}
+        onOpenChange={setRejectDialogOpen}
+        action="reject"
+        isPending={rejectMutation.isPending}
+        onSubmit={(note) => {
+          setRejectDialogOpen(false);
+          rejectMutation.mutate(note);
+        }}
+      />
     </div>
   );
 }
