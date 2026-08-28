@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assertNoEmbeddedGitCredential, hasEmbeddedGitCredential } from "./git-remote-url.js";
+import {
+  assertNoEmbeddedGitCredential,
+  hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
+} from "./git-remote-url.js";
 
 describe("hasEmbeddedGitCredential", () => {
   it("rejects a PAT used as the URL username", () => {
@@ -37,6 +41,57 @@ describe("hasEmbeddedGitCredential", () => {
 
   it("passes a value that isn't a parseable URL", () => {
     expect(hasEmbeddedGitCredential("not a url")).toBe(false);
+  });
+
+  // Regression coverage for the adversarial review of PR #189 (DUR-326/DUR-325):
+  // hasEmbeddedGitCredential() had two independent bypasses.
+
+  it("rejects a backslash-prefixed decoy hiding real userinfo (git/libcurl parses backslash literally, WHATWG URL does not)", () => {
+    expect(hasEmbeddedGitCredential("https://decoy.example\\@svcuser:s3cr3t@127.0.0.1:8899/x.git")).toBe(true);
+  });
+
+  it("rejects a backslash anywhere in the raw URL, not just before the decoy host", () => {
+    expect(hasEmbeddedGitCredential("https://github.com/acme/repo\\.git")).toBe(true);
+  });
+
+  it("rejects a non-'git' bare username on an ssh:// URL (PAT smuggled as the ssh account)", () => {
+    expect(hasEmbeddedGitCredential("ssh://ghp_realsecrettoken@github.com/acme/repo.git")).toBe(true);
+  });
+
+  it("rejects a non-'git' account in scp-like shorthand (PAT smuggled as the scp account)", () => {
+    expect(hasEmbeddedGitCredential("ghp_realsecrettoken@github.com:acme/repo.git")).toBe(true);
+  });
+
+  it("rejects a user:pass@host:path form that resembles but doesn't match scp-like syntax", () => {
+    expect(hasEmbeddedGitCredential("weird:creds@github.com:owner/repo.git")).toBe(true);
+  });
+});
+
+describe("redactEmbeddedGitCredentials", () => {
+  it("redacts userinfo out of a scheme URL embedded in free text", () => {
+    expect(
+      redactEmbeddedGitCredentials(
+        "fatal: unable to access 'https://svcuser:s3cr3t@127.0.0.1:8899/x.git/': URL rejected",
+      ),
+    ).toBe("fatal: unable to access 'https://<redacted>@127.0.0.1:8899/x.git/': URL rejected");
+  });
+
+  it("redacts a non-'git' scp-like account embedded in free text", () => {
+    expect(redactEmbeddedGitCredentials("cloning ghp_realsecrettoken@github.com:acme/repo.git failed")).toBe(
+      "cloning <redacted>@github.com:acme/repo.git failed",
+    );
+  });
+
+  it("leaves the canonical scp-like 'git' account alone", () => {
+    expect(redactEmbeddedGitCredentials("cloning git@github.com:acme/repo.git failed")).toBe(
+      "cloning git@github.com:acme/repo.git failed",
+    );
+  });
+
+  it("leaves text with no embedded credential unchanged", () => {
+    expect(redactEmbeddedGitCredentials("fatal: repository 'https://github.com/acme/repo.git/' not found")).toBe(
+      "fatal: repository 'https://github.com/acme/repo.git/' not found",
+    );
   });
 });
 

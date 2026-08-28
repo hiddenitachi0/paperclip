@@ -1083,6 +1083,7 @@ export {
   assertNoEmbeddedGitCredential,
   EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
   hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
 } from "./git-remote-url.js";
 
 export {

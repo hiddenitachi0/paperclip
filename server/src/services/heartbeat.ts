@@ -12,6 +12,7 @@ import {
   MODEL_PROFILE_KEYS,
   envBindingSchema,
   hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
   isEnvironmentDriverSupportedForAdapter,
   type BillingType,
   type EnvironmentLeaseStatus,
@@ -1274,8 +1275,12 @@ async function ensureManagedProjectWorkspace(input: {
     });
     return { cwd, warning: null };
   } catch (error) {
+    // Don't interpolate input.repoUrl here, and scrub `reason` (git's own
+    // stderr) before including it: on some failure modes git's error text
+    // itself echoes back embedded credentials (e.g. an auth-rejected URL),
+    // so it must be treated as untrusted even though the guard above passed.
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
+    throw new Error(`Failed to prepare managed checkout at "${cwd}": ${redactEmbeddedGitCredentials(reason)}`);
   }
 }
 
