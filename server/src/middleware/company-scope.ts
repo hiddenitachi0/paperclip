@@ -67,14 +67,32 @@ export function companyScope(rawDb: Db, resolveCompanyId: CompanyIdResolver): Re
 }
 
 /**
+ * A route's own access decision for the resolved companyId (typically
+ * `assertCompanyAccess` from routes/authz.ts, sometimes composed with an
+ * `assertBoard`-style caller-type check first). Passed in by the route file
+ * rather than imported here, so this module never depends on routes/authz.ts.
+ */
+export type CompanyAccessCheck = (req: Request, companyId: string) => void | Promise<void>;
+
+/**
  * Reads the target company from `req.params.companyId`. Mount only on
  * routes whose full mounted path always includes that param before this
  * handler runs.
+ *
+ * `checkAccess`, when given, runs from inside the resolver -- i.e. before
+ * `runInCompanyScope` ever reserves a connection -- so an unauthorized
+ * caller is rejected before company scope is established for the request,
+ * not after (see DUR-348's should-fix: a route that does anything inside
+ * the scope before its own authz check would otherwise establish scope for
+ * an unauthorized company first). Omit it only when the route's access
+ * check does not depend on this resolved companyId at all.
  */
-export function companyScopeFromParam(rawDb: Db): RequestHandler {
-  return companyScope(rawDb, (req) => {
+export function companyScopeFromParam(rawDb: Db, checkAccess?: CompanyAccessCheck): RequestHandler {
+  return companyScope(rawDb, async (req) => {
     const value = req.params.companyId;
-    return typeof value === "string" ? value : undefined;
+    if (typeof value !== "string") return undefined;
+    if (checkAccess) await checkAccess(req, value);
+    return value;
   });
 }
 
@@ -82,8 +100,13 @@ export function companyScopeFromParam(rawDb: Db): RequestHandler {
  * Reads the target company from `req.body.companyId`, for routes that take
  * it in a JSON body rather than a route param (e.g. board-chat.ts,
  * chat-router.ts, lane-a.ts per the DUR-277 design doc's §1 category-(a)
- * body-resolution group).
+ * body-resolution group). See `companyScopeFromParam` for `checkAccess`.
  */
-export function companyScopeFromBody(rawDb: Db): RequestHandler {
-  return companyScope(rawDb, (req) => (req.body as Record<string, unknown> | undefined)?.companyId as string | undefined);
+export function companyScopeFromBody(rawDb: Db, checkAccess?: CompanyAccessCheck): RequestHandler {
+  return companyScope(rawDb, async (req) => {
+    const value = (req.body as Record<string, unknown> | undefined)?.companyId as string | undefined;
+    if (typeof value !== "string") return undefined;
+    if (checkAccess) await checkAccess(req, value);
+    return value;
+  });
 }
