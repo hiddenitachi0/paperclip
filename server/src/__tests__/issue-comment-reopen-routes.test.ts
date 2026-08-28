@@ -1,6 +1,12 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// installActor() dynamically imports the large issues.ts route module; the
+// first test to trigger that import eats the cold transform cost and can
+// exceed the default 5s budget.
+vi.setConfig({ testTimeout: 20_000 });
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -37,8 +43,15 @@ const mockAgentService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockTxInsertValues = vi.hoisted(() => vi.fn(async () => undefined));
 const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues })));
+// withCompanyScope (packages/db/src/company-scope.ts) runs
+// `tx.execute(sql\`SELECT set_config('app.current_company_id', ...)\`)` as
+// the first statement inside every transaction it opens -- routes that
+// migrated off db.transaction(fn) directly onto withCompanyScope(rawDb,
+// companyId, fn) need this stubbed on the tx mock or that call 500s.
+const mockTxExecute = vi.hoisted(() => vi.fn(async () => undefined));
 const mockTx = vi.hoisted(() => ({
   insert: mockTxInsert,
+  execute: mockTxExecute,
 }));
 const mockDbSelectOrderBy = vi.hoisted(() => vi.fn(async () => []));
 const mockDbSelectLimit = vi.hoisted(() => vi.fn(async () => []));
@@ -66,7 +79,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
       feedbackDataSharingPreference: "prompt",
     },
   })),
-  listCompanyIds: vi.fn(async () => ["company-1"]),
+  listCompanyIds: vi.fn(async () => ["99999999-9999-4999-8999-999999999999"]),
 }));
 const mockRoutineService = vi.hoisted(() => ({
   syncRunStatusForIssue: vi.fn(async () => undefined),
@@ -131,7 +144,7 @@ vi.mock("../services/index.js", () => ({
   isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   companyService: () => ({
-    getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+    getById: vi.fn(async () => ({ id: "99999999-9999-4999-8999-999999999999", attachmentMaxBytes: 10 * 1024 * 1024 })),
   }),
   accessService: () => mockAccessService,
   agentService: () => mockAgentService,
@@ -185,13 +198,13 @@ async function installActor(app: express.Express, actor?: Record<string, unknown
     (req as any).actor = actor ?? {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["99999999-9999-4999-8999-999999999999"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes(mockDb as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(mockDb) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -210,7 +223,7 @@ async function normalizePolicy(input: {
 function makeIssue(status: "todo" | "done" | "blocked" | "cancelled" | "in_progress") {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "company-1",
+    companyId: "99999999-9999-4999-8999-999999999999",
     status,
     assigneeAgentId: "22222222-2222-4222-8222-222222222222",
     assigneeUserId: null,
@@ -224,7 +237,7 @@ function agentActor(agentId = "22222222-2222-4222-8222-222222222222") {
   return {
     type: "agent",
     agentId,
-    companyId: "company-1",
+    companyId: "99999999-9999-4999-8999-999999999999",
     source: "agent_key",
     runId: "run-1",
   };
@@ -269,6 +282,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockExternalObjectService.syncIssueSafely.mockReset();
     mockTxInsertValues.mockReset();
     mockTxInsert.mockReset();
+    mockTxExecute.mockReset();
     mockDbSelect.mockReset();
     mockDbSelectFrom.mockReset();
     mockDbSelectWhere.mockReset();
@@ -277,6 +291,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockDb.transaction.mockReset();
     mockTxInsertValues.mockResolvedValue(undefined);
     mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
+    mockTxExecute.mockResolvedValue(undefined);
     mockDbSelectOrderBy.mockResolvedValue([]);
     mockDbSelectLimit.mockResolvedValue([]);
     mockDbSelectWhere.mockImplementation(() => ({
@@ -309,14 +324,14 @@ describe.sequential("issue comment reopen routes", () => {
         feedbackDataSharingPreference: "prompt",
       },
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["99999999-9999-4999-8999-999999999999"]);
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
     mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue(null);
     mockIssueTreeControlService.getActivePauseHoldGate.mockResolvedValue(null);
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       body: "hello",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -448,7 +463,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ comment: "hello", assigneeAgentId: "codexcoder" });
 
     expect(res.status).toBe(200);
-    expect(mockAgentService.resolveByReference).toHaveBeenCalledWith("company-1", "codexcoder");
+    expect(mockAgentService.resolveByReference).toHaveBeenCalledWith("99999999-9999-4999-8999-999999999999", "codexcoder");
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
@@ -546,7 +561,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       body: "hello",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -557,7 +572,7 @@ describe.sequential("issue comment reopen routes", () => {
     const res = await request(await installActor(createApp(), {
       type: "agent",
       agentId: "33333333-3333-4333-8333-333333333333",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       source: "agent_key",
       runId: "77777777-7777-4777-8777-777777777777",
     }))
@@ -577,7 +592,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       body: "I can answer the mention without reopening.",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -617,7 +632,7 @@ describe.sequential("issue comment reopen routes", () => {
       mockIssueService.addComment.mockResolvedValue({
         id: "comment-1",
         issueId: "11111111-1111-4111-8111-111111111111",
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         body: "Please continue this closed issue.",
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -660,7 +675,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       body: "log line",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -672,7 +687,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: assigneeAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         runId: "run-self",
       }),
     )
@@ -702,7 +717,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       body: "log line",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -714,7 +729,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: assigneeAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         runId: "run-self",
       }),
     )
@@ -752,7 +767,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: assigneeAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         runId: "run-self",
       }),
     )
@@ -794,7 +809,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: otherAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         runId: "run-other",
       }),
     )
@@ -882,7 +897,7 @@ describe.sequential("issue comment reopen routes", () => {
     }));
     mockHeartbeatService.cancelRun.mockResolvedValue({
       id: "retry-run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "cancelled",
     });
@@ -985,7 +1000,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       authorType: "user",
       authorAgentId: null,
       authorUserId: "local-board",
@@ -1120,7 +1135,7 @@ describe.sequential("issue comment reopen routes", () => {
     const res = await request(await installActor(createApp(), {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["99999999-9999-4999-8999-999999999999"],
       source: "local_implicit",
       isInstanceAdmin: false,
       runId: "run-same-as-actor",
@@ -1145,7 +1160,7 @@ describe.sequential("issue comment reopen routes", () => {
     const res = await request(await installActor(createApp(), {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["99999999-9999-4999-8999-999999999999"],
       source: "local_implicit",
       isInstanceAdmin: false,
       runId: "run-same-as-actor",
@@ -1174,7 +1189,7 @@ describe.sequential("issue comment reopen routes", () => {
     const res = await request(await installActor(createApp(), {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["99999999-9999-4999-8999-999999999999"],
       source: "local_implicit",
       isInstanceAdmin: false,
       runId: "run-different",
@@ -1204,7 +1219,7 @@ describe.sequential("issue comment reopen routes", () => {
     const res = await request(await installActor(createApp(), {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["99999999-9999-4999-8999-999999999999"],
       source: "local_implicit",
       isInstanceAdmin: false,
       runId: "run-same-as-actor",
@@ -1277,7 +1292,7 @@ describe.sequential("issue comment reopen routes", () => {
     }));
     mockHeartbeatService.cancelRun.mockResolvedValue({
       id: "retry-run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "cancelled",
     });
@@ -1347,7 +1362,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       body: "hello",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -1362,7 +1377,7 @@ describe.sequential("issue comment reopen routes", () => {
     const res = await request(await installActor(createApp(), {
       type: "agent",
       agentId: "33333333-3333-4333-8333-333333333333",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       source: "agent_key",
       runId: "88888888-8888-4888-8888-888888888888",
     }))
@@ -1643,13 +1658,13 @@ describe.sequential("issue comment reopen routes", () => {
     }));
     mockHeartbeatService.getRun.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "running",
     });
     mockHeartbeatService.cancelRun.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "cancelled",
     });
@@ -1703,13 +1718,13 @@ describe.sequential("issue comment reopen routes", () => {
     }));
     mockHeartbeatService.getRun.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "running",
     });
     mockHeartbeatService.cancelRun.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "cancelled",
     });
@@ -1745,7 +1760,7 @@ describe.sequential("issue comment reopen routes", () => {
     }));
     mockHeartbeatService.getRun.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "running",
     });
@@ -1942,7 +1957,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-1",
       }),
@@ -2027,7 +2042,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-2",
       }),
@@ -2121,7 +2136,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-3",
       }),
@@ -2204,7 +2219,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-stale-isclosed",
       }),
@@ -2323,7 +2338,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: sharedId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-kind-mismatch",
       }),
@@ -2383,7 +2398,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-blank-line-metadata",
       }),
@@ -2441,7 +2456,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-5",
       }),
@@ -2500,7 +2515,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-6",
       }),
@@ -2575,7 +2590,7 @@ describe.sequential("issue comment reopen routes", () => {
         await installActor(createApp(), {
           type: "agent",
           agentId: reviewerAgentId,
-          companyId: "company-1",
+          companyId: "99999999-9999-4999-8999-999999999999",
           source: "agent_key",
           runId: "run-review-negated",
         }),
@@ -2650,7 +2665,7 @@ describe.sequential("issue comment reopen routes", () => {
         await installActor(createApp(), {
           type: "agent",
           agentId: reviewerAgentId,
-          companyId: "company-1",
+          companyId: "99999999-9999-4999-8999-999999999999",
           source: "agent_key",
           runId: "run-review-positive",
         }),
@@ -2726,7 +2741,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-atomic",
       }),
@@ -2796,7 +2811,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: reviewerAgentId,
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         source: "agent_key",
         runId: "run-review-missing",
       }),
@@ -2847,7 +2862,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: "22222222-2222-4222-8222-222222222222",
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         runId: "run-1",
       }),
     )
@@ -2936,7 +2951,7 @@ describe.sequential("issue comment reopen routes", () => {
       await installActor(createApp(), {
         type: "agent",
         agentId: "33333333-3333-4333-8333-333333333333",
-        companyId: "company-1",
+        companyId: "99999999-9999-4999-8999-999999999999",
         runId: "run-2",
       }),
     )

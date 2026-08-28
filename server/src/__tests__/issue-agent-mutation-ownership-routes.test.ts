@@ -2,6 +2,43 @@ import { Readable } from "node:stream";
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// This file's `createApp` does a fresh vi.resetModules() + dynamic
+// vi.importActual("../routes/issues.js") per test (a large route file), so
+// the first test(s) in a run pay a one-time module-transform cost that can
+// exceed vitest's 5s default -- same rationale as issue-workspace-command-
+// authz.test.ts / lane-b-message-routes.test.ts.
+vi.setConfig({ testTimeout: 20_000 });
+
+// DUR-379: routes/issues.ts now derives its request-scoped `db` from
+// createRequestScopedDb(rawDb) (packages/db/src/company-scope.ts), which
+// resolves every db.<method> call through the AsyncLocalStorage-held scope's
+// `scopedDb` -- a *real* `drizzlePg(reservedConnection, { schema })` instance
+// once company scope is established, not the plain mock object this file
+// passes in as `routeDb`/`createWatchdogDb()`'s return value. Those mocks'
+// `select`/`insert`/`transaction` implementations key off the exact
+// `db.select({...})` selection object shape (the pre-DUR-379 calling
+// convention, when `db` inside issues.ts route handlers WAS that raw mock
+// object directly) -- real drizzle instead compiles that away into SQL text
+// before ever reaching the fake reserved connection's `.unsafe()`, so those
+// selection-keyed fixtures (`rowsForSelection` in `createRunContextDb` /
+// `createWatchdogDb` below) would silently stop matching anything real
+// queries touch (task-watchdog-scope.ts's heartbeat_runs/issue_watchdogs/
+// issues lookups, cheap-run-escalation.ts's agent_wakeup_requests lookups --
+// see their inline `entityId`/`agentCompanyId` fixture branches below).
+//
+// Mocking `drizzle-orm/postgres-js`'s `drizzle` export so it returns
+// `currentScopedDb.current` (set to that same `routeDb`/watchdog-db object in
+// createApp below) instead of constructing a real drizzle instance restores
+// exactly the pre-DUR-379 behavior: `runInCompanyScope`/
+// `runInCompanyScopeBypass` in company-scope.ts still reserve a connection
+// via `rawDb.$client.reserve()` (still needs `withFakeCompanyScopeReserve`
+// for that) and still call `drizzlePg(reserved, { schema })`, but that call
+// now yields our own mock object, so createRequestScopedDb's proxy resolves
+// `db.select(...)` back to this file's existing selection-keyed fixtures
+// unchanged.
+const currentScopedDb = vi.hoisted(() => ({ current: null as unknown }));
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
@@ -135,6 +172,18 @@ const mockExternalObjectService = vi.hoisted(() => ({
 }));
 
 function registerRouteMocks() {
+  // See the DUR-379 comment near the top of this file for why this is here:
+  // it makes company-scope.ts's `drizzlePg(reserved, { schema })` calls
+  // resolve to this file's own selection-keyed fake db object instead of a
+  // real drizzle instance wrapping the fake reserved connection.
+  vi.doMock("drizzle-orm/postgres-js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("drizzle-orm/postgres-js")>();
+    return {
+      ...actual,
+      drizzle: (..._args: unknown[]) => currentScopedDb.current,
+    };
+  });
+
   vi.doMock("@paperclipai/shared/telemetry", () => ({
     trackAgentTaskCompleted: vi.fn(),
     trackErrorHandlerCrash: vi.fn(),
@@ -300,14 +349,27 @@ function createRunContextDb(
     };
     return query;
   };
+  const select = vi.fn((selection: Record<string, unknown> = {}) => ({
+    from: vi.fn(() => buildQuery(selection)),
+  }));
+  // DUR-45: cheap-run escalation leaves a plain-language comment when it
+  // hands a blocked action off to a normal-model run -- a no-op insert.
+  const insert = vi.fn(() => ({ values: vi.fn(async () => undefined) }));
   return {
-    transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
-    select: vi.fn((selection: Record<string, unknown> = {}) => ({
-      from: vi.fn(() => buildQuery(selection)),
-    })),
-    // DUR-45: cheap-run escalation leaves a plain-language comment when it
-    // hands a blocked action off to a normal-model run -- a no-op insert.
-    insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
+    // DUR-379: `withCompanyScope(rawDb, companyId, fn)` (packages/db) calls
+    // `rawDb.transaction(async (tx) => { await tx.execute(sql\`...\`); return
+    // fn(tx); })` directly against this object's own `.transaction` (not
+    // through the createRequestScopedDb proxy, since it's given `rawDb`
+    // explicitly) to set the `app.current_company_id` session claim before
+    // running the callback -- `tx.execute` needs a no-op stub or that throws
+    // "tx.execute is not a function" before `fn(tx)` ever runs. `tx` also
+    // gets the same `select`/`insert` fixtures as the top-level db object,
+    // for handlers (e.g. POST .../recovery-actions/resolve's unresolved-
+    // blockers check) that query through `tx` instead.
+    transaction: async (callback: (tx: Record<string, unknown>) => Promise<unknown>) =>
+      callback({ execute: vi.fn(async () => []), select, insert }),
+    select,
+    insert,
   };
 }
 
@@ -317,6 +379,11 @@ async function createApp(actor: Record<string, unknown>, db?: unknown) {
     typeof actor.agentId === "string" ? actor.agentId : ownerAgentId,
     typeof actor.runId === "string" ? actor.runId : ownerRunId,
   );
+  // See the DUR-379 comment near the top of this file: this is what
+  // `drizzle-orm/postgres-js`'s mocked `drizzle()` returns once company
+  // scope is established, so `db.select(...)` inside route handlers keeps
+  // resolving to this object's selection-keyed fixtures.
+  currentScopedDb.current = routeDb;
   const [{ errorHandler }, { issueRoutes }] = await Promise.all([
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -327,7 +394,7 @@ async function createApp(actor: Record<string, unknown>, db?: unknown) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes(routeDb as any, mockStorageService as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(routeDb as Record<string, unknown>) as any, mockStorageService as any));
   app.use(errorHandler);
   return app;
 }
@@ -366,6 +433,7 @@ function boardActor() {
 describe("agent issue mutation checkout ownership", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.doUnmock("drizzle-orm/postgres-js");
     vi.doUnmock("@paperclipai/shared/telemetry");
     vi.doUnmock("../telemetry.js");
     vi.doUnmock("../services/access.js");
@@ -1592,11 +1660,16 @@ describe("agent issue mutation checkout ownership", () => {
         };
         return query;
       };
+      const select = vi.fn((selection: Record<string, unknown> = {}) => ({
+        from: vi.fn(() => buildQuery(selection)),
+      }));
       return {
-        transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
-        select: vi.fn((selection: Record<string, unknown> = {}) => ({
-          from: vi.fn(() => buildQuery(selection)),
-        })),
+        // See createRunContextDb's comment above on why `tx.execute` needs a
+        // stub: withCompanyScope(rawDb, ...) calls `rawDb.transaction` (this
+        // object's own, not the request-scoped proxy) directly.
+        transaction: async (callback: (tx: Record<string, unknown>) => Promise<unknown>) =>
+          callback({ execute: vi.fn(async () => []), select }),
+        select,
       };
     }
 
@@ -1893,6 +1966,7 @@ describe("issue approval link permissions (DUR-43)", () => {
 
   beforeEach(() => {
     vi.resetModules();
+    vi.doUnmock("drizzle-orm/postgres-js");
     vi.doUnmock("@paperclipai/shared/telemetry");
     vi.doUnmock("../telemetry.js");
     vi.doUnmock("../services/access.js");

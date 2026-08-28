@@ -1317,6 +1317,7 @@ export function issueRoutes(
   const externalObjectsSvc = externalObjectService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
     enabled: async () => (await instanceSettings.getExperimental()).enableExternalObjects === true,
+    rawDb,
   });
   const routinesSvc = routineService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
@@ -4574,7 +4575,7 @@ export function issueRoutes(
     const redirectedFromLockedDocument =
       "redirectedFromLockedDocument" in result ? result.redirectedFromLockedDocument : null;
     await issueReferencesSvc.syncDocument(doc.id);
-    await externalObjectsSvc.syncDocumentSafely(doc.id);
+    await externalObjectsSvc.syncDocumentSafely(doc.id, issue.companyId);
     const referenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(referenceSummaryBefore, referenceSummaryAfter);
     const remappedAnnotations = result.created
@@ -4805,7 +4806,7 @@ export function issueRoutes(
       });
       await issueReferencesSvc.syncDocument(result.document.id);
       const referenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      await externalObjectsSvc.syncDocumentSafely(result.document.id);
+      await externalObjectsSvc.syncDocumentSafely(result.document.id, issue.companyId);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(referenceSummaryBefore, referenceSummaryAfter);
       const remappedAnnotations = await documentAnnotationsSvc.remapOpenThreadsForDocument({
         issueId: issue.id,
@@ -4919,7 +4920,7 @@ export function issueRoutes(
     }
     await issueReferencesSvc.deleteDocumentSource(removed.id);
     const referenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-    if (removed) await externalObjectsSvc.syncDocumentSafely(removed.id);
+    if (removed) await externalObjectsSvc.syncDocumentSafely(removed.id, issue.companyId);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(referenceSummaryBefore, referenceSummaryAfter);
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -5595,7 +5596,7 @@ export function issueRoutes(
       watchdogActorRunId: actor.runId,
     });
     await issueReferencesSvc.syncIssue(issue.id);
-    await externalObjectsSvc.syncIssueSafely(issue.id);
+    await externalObjectsSvc.syncIssueSafely(issue.id, issue.companyId);
     const referenceSummary = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
       issueReferencesSvc.emptySummary(),
@@ -5859,7 +5860,7 @@ export function issueRoutes(
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       watchdogActorRunId: actor.runId,
     });
-    await externalObjectsSvc.syncIssueSafely(issue.id);
+    await externalObjectsSvc.syncIssueSafely(issue.id, parent.companyId);
 
     await logActivity(db, {
       companyId: parent.companyId,
@@ -6699,7 +6700,7 @@ export function issueRoutes(
 
     if (titleOrDescriptionChanged) {
       await issueReferencesSvc.syncIssue(issue.id);
-      await externalObjectsSvc.syncIssueSafely(issue.id);
+      await externalObjectsSvc.syncIssueSafely(issue.id, issue.companyId);
     }
     const updateReferenceSummaryAfter = titleOrDescriptionChanged
       ? await issueReferencesSvc.listIssueReferenceSummary(issue.id)
@@ -7005,7 +7006,7 @@ export function issueRoutes(
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
       });
       await issueReferencesSvc.syncComment(comment.id);
-      await externalObjectsSvc.syncCommentSafely(comment.id);
+      await externalObjectsSvc.syncCommentSafely(comment.id, issue.companyId);
       const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
       const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         commentReferenceSummaryBefore,
@@ -8172,7 +8173,7 @@ export function issueRoutes(
       {
         afterTombstone: async (deletedComment, tx) => {
           await issueReferencesSvc.syncComment(deletedComment.id, tx);
-          await externalObjectsSvc.syncCommentSafely(deletedComment.id, tx);
+          await externalObjectsSvc.syncCommentSafely(deletedComment.id, issue.companyId, tx);
           annotationCleanup = await documentAnnotationsSvc.cleanupForIssueCommentDeletion(issue.id, deletedComment.id, {
             actorType: actor.actorType,
             actorId: actor.actorId,
@@ -8184,7 +8185,7 @@ export function issueRoutes(
             annotationCleanup.deletedCommentIds.map((annotationCommentId) =>
               Promise.all([
                 issueReferencesSvc.deleteCommentSource(annotationCommentId, tx),
-                externalObjectsSvc.syncCommentSafely(annotationCommentId, tx),
+                externalObjectsSvc.syncCommentSafely(annotationCommentId, issue.companyId, tx),
               ])
             ),
           );
@@ -8626,7 +8627,7 @@ export function issueRoutes(
     }
 
     await issueReferencesSvc.syncComment(comment.id);
-    await externalObjectsSvc.syncCommentSafely(comment.id);
+    await externalObjectsSvc.syncCommentSafely(comment.id, currentIssue.companyId);
     const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(currentIssue.id);
     const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
       commentReferenceSummaryBefore,

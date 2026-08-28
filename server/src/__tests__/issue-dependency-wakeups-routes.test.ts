@@ -1,6 +1,15 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
+// Route param ids must not look like an issue identifier (e.g. "ISSUE-1"
+// matches the PAP-123-shaped identifier regex) -- resolveIssueRouteId /
+// scopeFromIssueParam (DUR-379) route those through the mocked
+// getByIdentifier (which returns null here) instead of getById.
+const ISSUE_1_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const CHILD_1_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockIssueService = vi.hoisted(() => ({
@@ -20,7 +29,7 @@ vi.mock("../services/index.js", () => ({
   isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   companyService: () => ({
-    getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+    getById: vi.fn(async () => ({ id: COMPANY_ID, attachmentMaxBytes: 10 * 1024 * 1024 })),
   }),
   accessService: () => ({
     canUser: vi.fn(),
@@ -98,13 +107,13 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -130,8 +139,8 @@ describe("issue dependency wakeups in issue routes", () => {
 
   it("wakes dependents when the final blocker transitions to done", async () => {
     mockIssueService.getById.mockResolvedValue({
-      id: "issue-1",
-      companyId: "company-1",
+      id: ISSUE_1_ID,
+      companyId: COMPANY_ID,
       identifier: "PAP-100",
       title: "Finish blocker",
       description: null,
@@ -147,8 +156,8 @@ describe("issue dependency wakeups in issue routes", () => {
       labelIds: [],
     });
     mockIssueService.update.mockResolvedValue({
-      id: "issue-1",
-      companyId: "company-1",
+      id: ISSUE_1_ID,
+      companyId: COMPANY_ID,
       identifier: "PAP-100",
       title: "Finish blocker",
       description: null,
@@ -167,11 +176,12 @@ describe("issue dependency wakeups in issue routes", () => {
       {
         id: "issue-2",
         assigneeAgentId: "agent-2",
-        blockerIssueIds: ["issue-1", "issue-3"],
+        blockerIssueIds: [ISSUE_1_ID, "issue-3"],
       },
     ]);
 
-    const res = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    const app = await createApp();
+    const res = await request(app).patch(`/api/issues/${ISSUE_1_ID}`).send({ status: "done" });
     expect(res.status).toBe(200);
     await vi.waitFor(() => {
       expect(mockWakeup).toHaveBeenCalledWith(
@@ -180,17 +190,17 @@ describe("issue dependency wakeups in issue routes", () => {
           reason: "issue_blockers_resolved",
           payload: expect.objectContaining({
             issueId: "issue-2",
-            resolvedBlockerIssueId: "issue-1",
+            resolvedBlockerIssueId: ISSUE_1_ID,
           }),
         }),
       );
     });
-  });
+  }, 20_000);
 
   it("wakes the parent when all direct children become terminal", async () => {
     mockIssueService.getById.mockResolvedValue({
-      id: "child-1",
-      companyId: "company-1",
+      id: CHILD_1_ID,
+      companyId: COMPANY_ID,
       identifier: "PAP-101",
       title: "Last child",
       description: null,
@@ -206,8 +216,8 @@ describe("issue dependency wakeups in issue routes", () => {
       labelIds: [],
     });
     mockIssueService.update.mockResolvedValue({
-      id: "child-1",
-      companyId: "company-1",
+      id: CHILD_1_ID,
+      companyId: COMPANY_ID,
       identifier: "PAP-101",
       title: "Last child",
       description: null,
@@ -225,7 +235,7 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue({
       id: "parent-1",
       assigneeAgentId: "agent-9",
-      childIssueIds: ["child-0", "child-1"],
+      childIssueIds: ["child-0", CHILD_1_ID],
       childIssueSummaries: [
         {
           id: "child-0",
@@ -239,7 +249,7 @@ describe("issue dependency wakeups in issue routes", () => {
           summary: "First child finished.",
         },
         {
-          id: "child-1",
+          id: CHILD_1_ID,
           identifier: "PAP-101",
           title: "Last child",
           status: "done",
@@ -253,7 +263,7 @@ describe("issue dependency wakeups in issue routes", () => {
       childIssueSummaryTruncated: false,
     });
 
-    const res = await request(await createApp()).patch("/api/issues/child-1").send({ status: "done" });
+    const res = await request(await createApp()).patch(`/api/issues/${CHILD_1_ID}`).send({ status: "done" });
     expect(res.status).toBe(200);
     await vi.waitFor(() => {
       expect(mockWakeup).toHaveBeenCalledWith(
@@ -262,7 +272,7 @@ describe("issue dependency wakeups in issue routes", () => {
           reason: "issue_children_completed",
           payload: expect.objectContaining({
             issueId: "parent-1",
-            completedChildIssueId: "child-1",
+            completedChildIssueId: CHILD_1_ID,
             childIssueSummaries: expect.arrayContaining([
               expect.objectContaining({ identifier: "PAP-101", summary: "Last child finished." }),
             ]),
@@ -275,5 +285,5 @@ describe("issue dependency wakeups in issue routes", () => {
         }),
       );
     });
-  });
+  }, 20_000);
 });

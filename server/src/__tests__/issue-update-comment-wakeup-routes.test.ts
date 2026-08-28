@@ -1,6 +1,12 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// `vi.resetModules()` in beforeEach re-transforms the large issues.ts
+// dependency graph on every test; the first test to hit that cold-start
+// cost can exceed the default 5s budget.
+vi.setConfig({ testTimeout: 20_000 });
 
 const ASSIGNEE_AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const PREVIOUS_AGENT_ID = "22222222-2222-4222-8222-222222222222";
@@ -33,7 +39,7 @@ vi.mock("../services/index.js", () => ({
   isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   companyService: () => ({
-    getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+    getById: vi.fn(async () => ({ id: "99999999-9999-4999-8999-999999999999", attachmentMaxBytes: 10 * 1024 * 1024 })),
   }),
   accessService: () => ({
     canUser: vi.fn(async () => true),
@@ -69,7 +75,7 @@ vi.mock("../services/index.js", () => ({
         feedbackDataSharingPreference: "prompt",
       },
     })),
-    listCompanyIds: vi.fn(async () => ["company-1"]),
+    listCompanyIds: vi.fn(async () => ["99999999-9999-4999-8999-999999999999"]),
   }),
   issueApprovalService: () => ({}),
   issueReferenceService: () => ({
@@ -104,7 +110,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: "99999999-9999-4999-8999-999999999999", attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => ({
       canUser: vi.fn(async () => true),
@@ -140,7 +146,7 @@ function registerModuleMocks() {
           feedbackDataSharingPreference: "prompt",
         },
       })),
-      listCompanyIds: vi.fn(async () => ["company-1"]),
+      listCompanyIds: vi.fn(async () => ["99999999-9999-4999-8999-999999999999"]),
     }),
     issueApprovalService: () => ({}),
     issueReferenceService: () => ({
@@ -182,13 +188,13 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["99999999-9999-4999-8999-999999999999"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -196,7 +202,7 @@ async function createApp() {
 function makeIssue(overrides: Record<string, unknown> = {}) {
   return {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    companyId: "company-1",
+    companyId: "99999999-9999-4999-8999-999999999999",
     status: "todo",
     priority: "medium",
     projectId: null,
