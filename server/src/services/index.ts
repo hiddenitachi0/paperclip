@@ -73,6 +73,12 @@ export type {
 } from "./routines.js";
 export { costService } from "./costs.js";
 export { laneAService } from "./lane-a.js";
+export {
+  secretaryClassifierService,
+  SECRETARY_CLASSIFIER_MODEL,
+  type SecretaryClassification,
+  type SecretaryRosterEntry,
+} from "./secretary-classifier.js";
 export { financeService } from "./finance.js";
 export { heartbeatService, isHeartbeatRunLiveInThisProcess } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";

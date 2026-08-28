@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ComponentType } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   BudgetPolicySummary,
+  BudgetWindowKind,
   CostByAgentModel,
   CostByBiller,
   CostByProviderModel,
@@ -147,7 +148,7 @@ function FinanceSummaryCard({
 }
 
 export function Costs() {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
 
@@ -212,7 +213,7 @@ export function Costs() {
       scopeType: BudgetPolicySummary["scopeType"];
       scopeId: string;
       amount: number;
-      windowKind: BudgetPolicySummary["windowKind"];
+      windowKind: BudgetWindowKind;
     }) =>
       budgetsApi.upsertPolicy(companyId, {
         scopeType: input.scopeType,
@@ -527,6 +528,44 @@ export function Costs() {
     agent: budgetPolicies.filter((policy) => policy.scopeType === "agent"),
     project: budgetPolicies.filter((policy) => policy.scopeType === "project"),
   }), [budgetPolicies]);
+  // No company-scope policy exists yet -> synthesize a zero-amount placeholder
+  // so there's still a card to create the first one from (mirrors the
+  // per-agent default in AgentDetail.tsx). Without this, an empty
+  // budgetPoliciesByScope.company means the whole "Company budgets" section
+  // is skipped and there is no way to set a company-wide cap from this page.
+  const companyBudgetSummary: BudgetPolicySummary | null =
+    budgetPoliciesByScope.company[0] ??
+    (selectedCompany
+      ? {
+          policyId: "",
+          companyId: selectedCompany.id,
+          scopeType: "company",
+          scopeId: selectedCompany.id,
+          scopeName: selectedCompany.name,
+          metric: "billed_cents",
+          windowKind: "calendar_month_utc",
+          amount: selectedCompany.budgetMonthlyCents ?? 0,
+          observedAmount: selectedCompany.spentMonthlyCents ?? 0,
+          remainingAmount: Math.max(0, (selectedCompany.budgetMonthlyCents ?? 0) - (selectedCompany.spentMonthlyCents ?? 0)),
+          utilizationPercent:
+            (selectedCompany.budgetMonthlyCents ?? 0) > 0
+              ? Number((((selectedCompany.spentMonthlyCents ?? 0) / selectedCompany.budgetMonthlyCents) * 100).toFixed(2))
+              : 0,
+          warnPercent: 80,
+          hardStopEnabled: true,
+          notifyEnabled: true,
+          isActive: (selectedCompany.budgetMonthlyCents ?? 0) > 0,
+          status:
+            (selectedCompany.budgetMonthlyCents ?? 0) > 0 &&
+            (selectedCompany.spentMonthlyCents ?? 0) >= selectedCompany.budgetMonthlyCents
+              ? "hard_stop"
+              : "ok",
+          paused: selectedCompany.status === "paused",
+          pauseReason: selectedCompany.pauseReason ?? null,
+          windowStart: new Date(),
+          windowEnd: new Date(),
+        }
+      : null);
 
   if (!selectedCompanyId) {
     return <EmptyState icon={DollarSign} message="Select a company to view costs." />;
@@ -903,7 +942,9 @@ export function Costs() {
 
               <div className="space-y-5">
                 {(["company", "agent", "project"] as const).map((scopeType) => {
-                  const rows = budgetPoliciesByScope[scopeType];
+                  const rows = scopeType === "company"
+                    ? (companyBudgetSummary ? [companyBudgetSummary] : [])
+                    : budgetPoliciesByScope[scopeType];
                   if (rows.length === 0) return null;
                   return (
                     <section key={scopeType} className="space-y-3">
@@ -911,24 +952,24 @@ export function Costs() {
                         <h2 className="text-lg font-semibold capitalize">{scopeType} budgets</h2>
                         <p className="text-sm text-muted-foreground">
                           {scopeType === "company"
-                            ? "Company-wide monthly policy."
+                            ? "Company-wide daily or monthly policy."
                             : scopeType === "agent"
-                              ? "Recurring monthly spend policies for individual agents."
+                              ? "Recurring daily or monthly spend policies for individual agents."
                               : "Lifetime spend policies for execution-bound projects."}
                         </p>
                       </div>
                       <div className="grid gap-4 xl:grid-cols-2">
                         {rows.map((summary) => (
                           <BudgetPolicyCard
-                            key={summary.policyId}
+                            key={summary.policyId || `${summary.scopeType}-${summary.scopeId}`}
                             summary={summary}
                             isSaving={policyMutation.isPending}
-                            onSave={(amount) =>
+                            onSave={(amount, windowKind) =>
                               policyMutation.mutate({
                                 scopeType: summary.scopeType,
                                 scopeId: summary.scopeId,
                                 amount,
-                                windowKind: summary.windowKind,
+                                windowKind,
                               })}
                           />
                         ))}
@@ -937,7 +978,7 @@ export function Costs() {
                   );
                 })}
 
-                {budgetPolicies.length === 0 ? (
+                {budgetPolicies.length === 0 && !companyBudgetSummary ? (
                   <Card>
                     <CardContent className="px-5 py-8 text-sm text-muted-foreground">
                       No budget policies yet. Set agent and project budgets from their detail pages, or use the existing company monthly budget control.

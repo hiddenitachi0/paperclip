@@ -1347,11 +1347,13 @@ export function buildWorkspaceCommandEnv(input: {
   // PAPERCLIP_CONFIG this process was started with -- stripping every
   // PAPERCLIP_* var here (as sanitizeRuntimeServiceBaseEnv does) broke
   // provisioning scripts that resolve their config/worktree paths from
-  // those. Only DATABASE_URL/DATABASE_MIGRATION_URL (and the two npm auth
-  // flags, for consistency with the other spawn sites) needs to be kept out.
+  // those. Only DATABASE_URL/DATABASE_MIGRATION_URL/DATABASE_BYPASS_URL (and
+  // the two npm auth flags, for consistency with the other spawn sites)
+  // needs to be kept out.
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.DATABASE_URL;
   delete env.DATABASE_MIGRATION_URL;
+  delete env.DATABASE_BYPASS_URL;
   delete env.npm_config_tailscale_auth;
   delete env.npm_config_authenticated_private;
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
