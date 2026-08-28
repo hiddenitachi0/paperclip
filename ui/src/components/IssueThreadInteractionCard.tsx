@@ -2038,7 +2038,7 @@ export function IssueThreadInteractionCard({
           </div>
           {isFactCheck ? (
             <p className="mt-1 max-w-3xl text-xs leading-5 text-teal-800 dark:text-teal-200">
-              This isn't a decision the agent needs you to make — it's asking you to verify facts only you can check.
+              Read this carefully and only confirm if it matches what you actually know — don't confirm based on the label alone.
             </p>
           ) : null}
           {interaction.summary ? (
