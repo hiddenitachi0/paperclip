@@ -19,10 +19,30 @@ export interface RunProcessResult {
   stderr: string;
   pid: number | null;
   startedAt: string | null;
+  /**
+   * True when the process was killed mid-flight by a `usageCap` check
+   * (DUR-213) rather than by the wall-clock `timeoutSec`. Optional so
+   * every other `RunProcessResult` construction site (ssh, sandbox
+   * runner, etc.) that predates this field keeps compiling unchanged.
+   */
+  usageCapped?: boolean;
 }
 
 export interface TerminalResultCleanupOptions {
   hasTerminalResult: (output: { stdout: string; stderr: string }) => boolean;
+  graceMs?: number;
+}
+
+/**
+ * DUR-213: a live, adapter-supplied budget guard. `onChunk` receives each
+ * raw stdout chunk as it arrives (mirroring `onLog`) and does its own
+ * protocol-specific parsing/accumulation; once it returns true the process
+ * is SIGTERM'd (then SIGKILL'd after `graceMs`) the same way a wall-clock
+ * timeout is handled, so a single run can no longer burn unbounded tokens
+ * before anyone notices.
+ */
+export interface UsageCapOptions {
+  onChunk: (chunk: string) => boolean;
   graceMs?: number;
 }
 
@@ -2962,6 +2982,7 @@ export async function runChildProcess(
     onLogError?: (err: unknown, runId: string, message: string) => void;
     onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
     terminalResultCleanup?: TerminalResultCleanupOptions;
+    usageCap?: UsageCapOptions;
     stdin?: string;
     remoteExecution?: RemoteExecutionSpec | null;
   },
@@ -3025,6 +3046,7 @@ export async function runChildProcess(
         runningProcesses.set(runId, { child, graceSec: opts.graceSec, processGroupId });
 
         let timedOut = false;
+        let usageCapped = false;
         let stdout = "";
         let stderr = "";
         let logChain: Promise<void> = Promise.resolve();
@@ -3044,7 +3066,7 @@ export async function runChildProcess(
 
         const maybeArmTerminalResultCleanup = () => {
           const terminalCleanup = opts.terminalResultCleanup;
-          if (!terminalCleanup || terminalCleanupStarted || timedOut) return;
+          if (!terminalCleanup || terminalCleanupStarted || timedOut || usageCapped) return;
           if (!terminalResultSeen) {
             const stdoutStart = Math.max(0, terminalResultStdoutScanOffset - TERMINAL_RESULT_SCAN_OVERLAP_CHARS);
             const stderrStart = Math.max(0, terminalResultStderrScanOffset - TERMINAL_RESULT_SCAN_OVERLAP_CHARS);
@@ -3080,6 +3102,7 @@ export async function runChildProcess(
         const timeout =
           opts.timeoutSec > 0
             ? setTimeout(() => {
+                if (usageCapped) return;
                 timedOut = true;
                 clearTerminalCleanupTimers();
                 signalRunningProcess({ child, processGroupId }, "SIGTERM");
@@ -3089,12 +3112,33 @@ export async function runChildProcess(
               }, opts.timeoutSec * 1000)
             : null;
 
+        const maybeEnforceUsageCap = (chunk: string) => {
+          const usageCap = opts.usageCap;
+          if (!usageCap || usageCapped || timedOut) return;
+          let exceeded = false;
+          try {
+            exceeded = usageCap.onChunk(chunk);
+          } catch (err) {
+            onLogError(err, runId, "failed to evaluate usage cap");
+            return;
+          }
+          if (!exceeded) return;
+          usageCapped = true;
+          if (timeout) clearTimeout(timeout);
+          clearTerminalCleanupTimers();
+          signalRunningProcess({ child, processGroupId }, "SIGTERM");
+          setTimeout(() => {
+            signalRunningProcess({ child, processGroupId }, "SIGKILL");
+          }, Math.max(1, usageCap.graceMs ?? opts.graceSec * 1000));
+        };
+
         child.stdout?.on("data", (chunk: unknown) => {
           const readable = child.stdout;
           if (!readable) return;
           readable.pause();
           const text = String(chunk);
           stdout = appendWithCap(stdout, text);
+          maybeEnforceUsageCap(text);
           maybeArmTerminalResultCleanup();
           logChain = logChain
             .then(() => opts.onLog("stdout", text))
@@ -3160,6 +3204,7 @@ export async function runChildProcess(
                 exitCode: code,
                 signal,
                 timedOut,
+                usageCapped,
                 stdout,
                 stderr,
                 pid: child.pid ?? null,
