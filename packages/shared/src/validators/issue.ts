@@ -776,6 +776,11 @@ export const requestConfirmationPayloadSchema = z.object({
   detailsMarkdown: z.string().max(20000).nullable().optional(),
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
+  // DUR-320/DUR-323: explicit discriminator for the BEKREFT/fact-check card, set
+  // deliberately by the requesting agent. Do NOT infer this from prompt/detailsMarkdown
+  // shape or wording on the render side -- that was the spoof (present-participle
+  // rewording of decision verbs defeated a keyword-based heuristic twice in review).
+  factCheck: z.boolean().optional().default(false),
 }).superRefine((value, ctx) => {
   // DUR-162: see askUserQuestionsQuestionSchema's superRefine for rationale.
   if (isPlaceholderPromptText(value.prompt)) {
