@@ -342,7 +342,12 @@ export function loadConfig(): Config {
     // readable, independent of those upstream defenses. 30 days keeps a month
     // of run history for debugging/audit; adjust via env if that's wrong for
     // this deployment.
-    heartbeatRunRetentionEnabled: process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED !== "false",
+    //
+    // DUR-366: opt-in, not opt-out. An earlier opt-out default let this run
+    // an unreviewed, irreversible delete sweep the moment it happened to ship
+    // as a side effect of an unrelated deploy -- before the NOR-316 forensics
+    // question it was gated on ever got answered. Requires an explicit "true".
+    heartbeatRunRetentionEnabled: process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true",
     heartbeatRunRetentionDays: Math.max(
       1,
       Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_DAYS) || 30,
