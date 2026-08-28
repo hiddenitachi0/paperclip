@@ -131,7 +131,11 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
     await tempDb?.cleanup();
   });
 
-  it("keeps V1 private agent visibility from becoming issue, comment, document, attachment, activity, or work product privacy", async () => {
+  // DUR-348: /issues/:id/activity now reserves+claims+resets+releases a real
+  // connection per request (see middleware/company-scope.ts), which adds
+  // real round-trip latency on top of this test's 7-way concurrent request
+  // fan-out -- past the default 5s test timeout, though well under 30s.
+  it("keeps V1 private agent visibility from becoming issue, comment, document, attachment, activity, or work product privacy", { timeout: 20_000 }, async () => {
     const company = await seedCompany(db, "Visibility");
     const readerAgent = await seedAgent(db, company.id);
     const privateTargetAgent = await seedAgent(db, company.id, {
@@ -256,7 +260,7 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
     expect(workProducts.body).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Preview" })]));
   });
 
-  it("denies cross-company issue reads before private-agent grant evaluation can matter", async () => {
+  it("denies cross-company issue reads before private-agent grant evaluation can matter", { timeout: 20_000 }, async () => {
     const sourceCompany = await seedCompany(db, "Source");
     const targetCompany = await seedCompany(db, "Target");
     const sourceAgent = await seedAgent(db, sourceCompany.id);
