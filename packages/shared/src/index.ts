@@ -1080,6 +1080,12 @@ export {
 } from "./execution-workspace-guards.js";
 
 export {
+  assertNoEmbeddedGitCredential,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
+  hasEmbeddedGitCredential,
+} from "./git-remote-url.js";
+
+export {
   instanceSettingsSchema,
   instanceGeneralSettingsSchema,
   patchInstanceGeneralSettingsSchema,

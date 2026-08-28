@@ -7,9 +7,11 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte,
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   MODEL_PROFILE_KEYS,
   envBindingSchema,
+  hasEmbeddedGitCredential,
   isEnvironmentDriverSupportedForAdapter,
   type BillingType,
   type EnvironmentLeaseStatus,
@@ -1223,6 +1225,13 @@ async function ensureManagedProjectWorkspace(input: {
       await fs.mkdir(cwd, { recursive: true });
     }
     return { cwd, warning: null };
+  }
+
+  if (hasEmbeddedGitCredential(input.repoUrl)) {
+    // Do not interpolate input.repoUrl into this message: the whole point of
+    // this check is that the URL carries a live secret, and this error text
+    // is exactly the kind of string that gets persisted to heartbeat_runs.
+    throw new Error(`Refusing to clone: ${EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE}`);
   }
 
   const gitDirExists = await fs
