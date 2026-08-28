@@ -11,6 +11,7 @@ import {
   issueService,
   laneAService,
   logActivity,
+  secretaryClassifierService,
 } from "../services/index.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -41,6 +42,19 @@ const chatRouteMessageSchema = z.object({
   laneHint: z.enum(["a", "b"]).optional(),
 }).strict();
 
+// DUR-251/DUR-335: request body for the secretary classifier step Simple
+// Mode calls before send. The roster is looked up server-side from
+// companyId rather than trusted from the client, so a caller cannot steer
+// the classifier toward an agent it should not see.
+const chatRouteClassifySchema = z.object({
+  companyId: z.string().uuid(),
+  message: z.string().trim().min(1).max(CHAT_ROUTER_MESSAGE_MAX_LENGTH),
+}).strict();
+
+// Mirrors ui/src/lib/simple-mode.ts's UNAVAILABLE_AGENT_STATUSES — an agent
+// in one of these statuses shouldn't be offered as a routing target.
+const SECRETARY_UNAVAILABLE_AGENT_STATUSES = new Set(["terminated", "paused", "error"]);
+
 function classifyLane(input: { message: string; laneHint?: "a" | "b" }): "a" | "b" {
   if (input.laneHint === "a" && input.message.length <= LANE_A_MESSAGE_MAX_LENGTH) return "a";
   if (input.laneHint === "b") return "b";
@@ -68,6 +82,27 @@ export function chatRouterRoutes(db: Db) {
   const issues = issueService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db);
+  const secretaryClassifier = secretaryClassifierService();
+
+  // DUR-251/DUR-335: cheap Lane-A-cost classification step Simple Mode calls
+  // before send. Replaces the hardcoded CEO-then-first-agent default
+  // (ui/src/lib/simple-mode.ts's selectSimpleModeAssignee) as the primary
+  // path — that helper becomes a last-resort fallback for when this call
+  // errors or the model is unreachable. Does not touch /chat/:agentId/messages'
+  // own contract; the UI still calls that endpoint afterward with whatever
+  // agentId/laneHint it resolves to (classifier pick or user override).
+  router.post("/chat/classify", validate(chatRouteClassifySchema), async (req, res) => {
+    const { companyId, message } = req.body as { companyId: string; message: string };
+    assertCompanyAccess(req, companyId);
+
+    const companyAgents = await agents.list(companyId);
+    const roster = companyAgents
+      .filter((agent) => !SECRETARY_UNAVAILABLE_AGENT_STATUSES.has(agent.status))
+      .map((agent) => ({ id: agent.id, name: agent.name, role: agent.role }));
+
+    const classification = await secretaryClassifier.classify({ message, roster });
+    res.json(classification);
+  });
 
   router.post("/chat/:agentId/messages", validate(chatRouteMessageSchema), async (req, res) => {
     const targetAgentId = req.params.agentId as string;

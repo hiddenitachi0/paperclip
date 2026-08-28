@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "../errors.js";
 
 // DUR-220: one endpoint the chat surface calls, classifying cheap-question vs
 // real-work traffic and dispatching to Lane A (DUR-217) or Lane B (DUR-219)
@@ -12,10 +13,15 @@ const targetAgentId = "11111111-1111-4111-8111-111111111111";
 
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
+  list: vi.fn(),
 }));
 
 const mockLaneAService = vi.hoisted(() => ({
   sendMessage: vi.fn(),
+}));
+
+const mockSecretaryClassifierService = vi.hoisted(() => ({
+  classify: vi.fn(),
 }));
 
 const mockIssueService = vi.hoisted(() => ({
@@ -37,6 +43,7 @@ vi.mock("../services/index.js", () => ({
   accessService: () => mockAccessService,
   heartbeatService: () => mockHeartbeatService,
   logActivity: vi.fn(async () => undefined),
+  secretaryClassifierService: () => mockSecretaryClassifierService,
 }));
 
 function makeAgent(overrides: Partial<{ id: string; companyId: string; name: string; laneAEnabled: boolean }> = {}) {
@@ -240,5 +247,72 @@ describe("chat router routes", () => {
 
     expect(res.status).toBe(403);
     expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+});
+
+// DUR-251/DUR-335: the secretary classifier step Simple Mode calls before
+// send. The route's job is just to build the roster from companyId and hand
+// off to the service — the service's own classification logic is covered by
+// secretary-classifier-service.test.ts.
+describe("POST /chat/classify", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAccessService.decide.mockResolvedValue({ allowed: true, action: "tasks:assign", explanation: "ok" });
+  });
+
+  it("builds the roster from active company agents and returns the classification", async () => {
+    mockAgentService.list.mockResolvedValue([
+      { id: "agent-1", name: "CEO", role: "ceo", status: "idle" },
+      { id: "agent-2", name: "Backend Engineer", role: "engineer", status: "running" },
+      { id: "agent-3", name: "Retired Agent", role: "engineer", status: "terminated" },
+      { id: "agent-4", name: "Paused Agent", role: "engineer", status: "paused" },
+    ]);
+    mockSecretaryClassifierService.classify.mockResolvedValue({
+      lane: "b",
+      targetAgentId: "agent-2",
+      reasoning: "This is a build task, so it goes to the engineer.",
+    });
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post("/api/chat/classify")
+      .send({ companyId, message: "please fix the broken build" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      lane: "b",
+      targetAgentId: "agent-2",
+      reasoning: "This is a build task, so it goes to the engineer.",
+    });
+    expect(mockSecretaryClassifierService.classify).toHaveBeenCalledWith({
+      message: "please fix the broken build",
+      roster: [
+        { id: "agent-1", name: "CEO", role: "ceo" },
+        { id: "agent-2", name: "Backend Engineer", role: "engineer" },
+      ],
+    });
+  });
+
+  it("propagates a classifier failure as an error response rather than a fabricated pick", async () => {
+    mockAgentService.list.mockResolvedValue([{ id: "agent-1", name: "CEO", role: "ceo", status: "idle" }]);
+    mockSecretaryClassifierService.classify.mockRejectedValue(
+      new HttpError(503, "Secretary classifier is not configured on this instance"),
+    );
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post("/api/chat/classify")
+      .send({ companyId, message: "please fix the broken build" });
+
+    expect(res.status).toBe(503);
+  });
+
+  it("rejects an empty message", async () => {
+    const app = await createApp(boardActor());
+
+    const res = await request(app).post("/api/chat/classify").send({ companyId, message: "   " });
+
+    expect(res.status).toBe(400);
+    expect(mockSecretaryClassifierService.classify).not.toHaveBeenCalled();
   });
 });
