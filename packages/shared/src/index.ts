@@ -956,6 +956,8 @@ export type {
   PluginWebhookDeliveryRecord,
   QuotaWindow,
   ProviderQuotaResult,
+  GoalAdoptionSnapshot,
+  GoalAdoptionTrendPoint,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES } from "./types/index.js";
 export { agentAvatarUrl } from "./types/index.js";
