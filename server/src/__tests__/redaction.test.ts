@@ -223,6 +223,30 @@ describe("redactKnownLeakedSecretPatterns", () => {
     const input = "run completed successfully, no credentials here";
     expect(redactKnownLeakedSecretPatterns(input)).toBe(input);
   });
+
+  // DUR-322 adversarial review found these GitHub/Slack token variants missing.
+  it("masks the remaining GitHub token variants and the Slack user token", () => {
+    const input = [
+      "gho_1234567890abcdefghijklmnopqrstuvwxyz",
+      "ghu_1234567890abcdefghijklmnopqrstuvwxyz",
+      "ghs_1234567890abcdefghijklmnopqrstuvwxyz",
+      "ghr_1234567890abcdefghijklmnopqrstuvwxyz",
+      "xoxp-test-fixture-not-a-real-token-000000",
+    ].join("\n");
+
+    const result = redactKnownLeakedSecretPatterns(input);
+
+    expect(result).toContain("[REDACTED:github_oauth_token]");
+    expect(result).toContain("[REDACTED:github_user_token]");
+    expect(result).toContain("[REDACTED:github_app_installation_token]");
+    expect(result).toContain("[REDACTED:github_refresh_token]");
+    expect(result).toContain("[REDACTED:slack_user_token]");
+    expect(result).not.toContain("gho_1234567890abcdefghijklmnopqrstuvwxyz");
+    expect(result).not.toContain("ghu_1234567890abcdefghijklmnopqrstuvwxyz");
+    expect(result).not.toContain("ghs_1234567890abcdefghijklmnopqrstuvwxyz");
+    expect(result).not.toContain("ghr_1234567890abcdefghijklmnopqrstuvwxyz");
+    expect(result).not.toContain("xoxp-test-fixture-not-a-real-token-000000");
+  });
 });
 
 describe("redactHeartbeatRunPatchSecrets", () => {

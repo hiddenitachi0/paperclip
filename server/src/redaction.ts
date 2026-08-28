@@ -166,11 +166,28 @@ export interface SecretLeakPattern {
 export const SECRET_LEAK_PATTERNS: readonly SecretLeakPattern[] = [
   { name: "github_pat", regex: /github_pat_[A-Za-z0-9_]{20,}/g },
   { name: "github_token", regex: /ghp_[A-Za-z0-9]{20,}/g },
+  // DUR-322 follow-up: gho_/ghu_/ghs_/ghr_ were already tracked as sensitive
+  // by SECRET_TEXT_HINTS above but missing here -- e.g. a `git clone
+  // https://x-access-token:ghs_XXXX@github.com/...` failure dumps a live
+  // GitHub App installation token to stderr unmasked without these.
+  { name: "github_oauth_token", regex: /gho_[A-Za-z0-9]{20,}/g },
+  { name: "github_user_token", regex: /ghu_[A-Za-z0-9]{20,}/g },
+  { name: "github_app_installation_token", regex: /ghs_[A-Za-z0-9]{20,}/g },
+  { name: "github_refresh_token", regex: /ghr_[A-Za-z0-9]{20,}/g },
   { name: "openai_key", regex: /sk-[A-Za-z0-9_-]{12,}/g },
   { name: "shopify_shared_secret", regex: /shpss_[A-Za-z0-9]{20,}/g },
   { name: "shopify_access_token", regex: /shpat_[A-Za-z0-9]{20,}/g },
   { name: "slack_bot_token", regex: /xoxb-[A-Za-z0-9-]{10,}/g },
+  // DUR-322 follow-up: xoxp- (Slack user token, scoped to a human's full
+  // permissions) is arguably the most sensitive Slack token variant and was
+  // missing from the initial pattern set.
+  { name: "slack_user_token", regex: /xoxp-[A-Za-z0-9-]{10,}/g },
   { name: "aws_access_key_id", regex: /AKIA[A-Z0-9]{12,}/g },
+  // Known limitation (flagged in DUR-322 review): this only matches the AWS
+  // access key ID (the public half of the pair). The paired secret access
+  // key has no fixed prefix/shape, so it cannot be pattern-matched here --
+  // if an agent echoes both halves (e.g. dumping a .env on error), only the
+  // access key ID gets redacted.
   {
     name: "pem_private_key",
     regex: /-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z0-9 ]*PRIVATE KEY-----/g,
