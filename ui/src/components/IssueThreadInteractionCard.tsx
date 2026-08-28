@@ -206,15 +206,33 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
   }
 }
 
-// DUR-339: whether a confirmation is a "fact check" (BEKREFT pattern, DUR-311)
-// vs. a real decision-ask is read from the explicit `payload.factCheck` field
-// the requesting agent sets, not inferred from prompt/detailsMarkdown wording.
-// Two earlier heuristics (DUR-320, DUR-323) that guessed from prose shape were
-// both spoofable by an agent that controls that prose.
+// DUR-337: `payload.factCheck` alone is a self-declared boolean with no
+// server-side consumer (DUR-340 confirmed it's backend-inert) — an agent
+// could set it on a genuine decision-ask ("should I drop orders_2024?") and
+// get the reassuring "this isn't a decision" card for free. The flag is
+// still required (it's what DUR-339 added the field for), but it's no longer
+// sufficient on its own: `detailsMarkdown` must also contain the NOR-307-
+// shaped numbered claims a fact check actually is, and neither field may
+// read like a decision/action request (the DUR-320/DUR-323 checks). The flag
+// narrows false negatives; the content-shape floor stops it from laundering
+// an unrelated decision-ask into the low-stakes styling.
+const DECISION_ASK_PATTERN =
+  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:ment)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?)\b/i;
+
 function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   if (interaction.kind !== "request_confirmation") return false;
   if (isPlanConfirmation(interaction)) return false;
-  return interaction.payload.factCheck === true;
+  if (interaction.payload.factCheck !== true) return false;
+  const details = interaction.payload.detailsMarkdown;
+  if (!details) return false;
+  const numberedClaims = details
+    .split("\n")
+    .filter((line) => /^\s*\d+[.)]\s+\S/.test(line));
+  if (numberedClaims.length < 2) return false;
+  const prompt = interaction.payload.prompt ?? "";
+  if (DECISION_ASK_PATTERN.test(prompt)) return false;
+  if (DECISION_ASK_PATTERN.test(details)) return false;
+  return true;
 }
 
 function factCheckStatusClasses(status: IssueThreadInteraction["status"]) {

@@ -525,6 +525,29 @@ export const spoofedDecisionAskInDetailsRequestConfirmationInteraction = createR
   },
 });
 
+// DUR-337: a real decision-ask that sets `factCheck: true` with no
+// fact-check-shaped detailsMarkdown must NOT get the reassuring "fact check"
+// styling — the flag alone is a self-declared boolean with no server-side
+// consumer (DUR-340), so trusting it unconditionally lets any agent launder
+// a destructive decision-ask into the low-stakes card with zero effort.
+export const selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-self-declared-fact-check-decision-ask",
+  title: "Drop stale orders table?",
+  summary: "Should I proceed with dropping orders_2024 now?",
+  payload: {
+    version: 1,
+    prompt: "Should I proceed with dropping orders_2024 now?",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown: "1. Table has 40k rows\n2. Backup taken today",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

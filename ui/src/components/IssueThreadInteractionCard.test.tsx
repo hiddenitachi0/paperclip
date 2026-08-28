@@ -16,6 +16,7 @@ import {
   pendingFactCheckRequestConfirmationInteraction,
   pendingRequestConfirmationInteraction,
   pendingSuggestedTasksInteraction,
+  selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction,
   spoofedDecisionAskRequestConfirmationInteraction,
   spoofedDecisionAskInDetailsRequestConfirmationInteraction,
   staleTargetRequestConfirmationInteraction,
@@ -462,6 +463,16 @@ describe("IssueThreadInteractionCard", () => {
 
   it("does not render a decision-ask moved into detailsMarkdown as a fact-check card without payload.factCheck (DUR-323/DUR-339)", () => {
     const spoofed = renderCard({ interaction: spoofedDecisionAskInDetailsRequestConfirmationInteraction });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("isn't a decision the agent needs you to make");
+  });
+
+  it("does not render a decision-ask with a self-declared factCheck flag as a fact-check card without matching detailsMarkdown shape (DUR-337)", () => {
+    const spoofed = renderCard({
+      interaction: selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction,
+    });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
     expect(spoofed.textContent).not.toContain("Fact check");
