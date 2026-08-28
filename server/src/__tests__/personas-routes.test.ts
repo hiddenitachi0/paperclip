@@ -7,6 +7,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/error-handler.js";
 import { forbidden } from "../errors.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const agentId = "11111111-1111-4111-8111-111111111111";
@@ -48,11 +49,11 @@ const mockAuthz = vi.hoisted(() => ({
 
 vi.mock("../routes/authz.js", () => mockAuthz);
 
-async function buildApp(fakeDb: unknown = {}) {
+async function buildApp(fakeDb: object = {}) {
   const { personaRoutes } = await import("../routes/personas.js");
   const app = express();
   app.use(express.json());
-  app.use("/api", personaRoutes(fakeDb as never));
+  app.use("/api", personaRoutes(withFakeCompanyScopeReserve(fakeDb) as never));
   app.use(errorHandler);
   return app;
 }

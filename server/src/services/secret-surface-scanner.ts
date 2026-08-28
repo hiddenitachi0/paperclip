@@ -45,6 +45,7 @@ import { agents, heartbeatRuns } from "@paperclipai/db";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { SECRET_LEAK_PATTERNS, type SecretLeakPattern } from "../redaction.js";
 import { issueService } from "./issues.js";
 
 export const SECRET_SCAN_ORIGIN_KIND = "secret_scan_finding";
@@ -52,24 +53,12 @@ const ACTIVE_SECRET_SCAN_FINDING_CONSTRAINT = "issues_active_secret_scan_finding
 
 export type SecretScanSurface = "git_config" | "dotenv" | "docker_compose" | "heartbeat_run";
 
-export interface SecretPattern {
-  name: string;
-  regex: RegExp;
-}
+export type SecretPattern = SecretLeakPattern;
 
-// Ticket-specified starting pattern set (DUR-316). Each is anchored to a
-// vendor-specific prefix/shape to keep the false-positive rate low without
-// needing an entropy scorer.
-export const SECRET_PATTERNS: SecretPattern[] = [
-  { name: "github_pat", regex: /github_pat_[A-Za-z0-9_]{20,}/g },
-  { name: "github_token_classic", regex: /gh[pousr]_[A-Za-z0-9]{20,}/g },
-  { name: "generic_sk_key", regex: /\bsk-[A-Za-z0-9]{20,}/g },
-  { name: "shopify_shared_secret", regex: /shpss_[A-Za-z0-9]{20,}/g },
-  { name: "shopify_access_token", regex: /shpat_[A-Za-z0-9]{20,}/g },
-  { name: "slack_bot_token", regex: /xoxb-[A-Za-z0-9-]{10,}/g },
-  { name: "aws_access_key_id", regex: /\bAKIA[0-9A-Z]{16}\b/g },
-  { name: "pem_private_key", regex: /-----BEGIN[A-Z ]*PRIVATE KEY-----/g },
-];
+// DUR-327: shares the write-time masking pattern list (server/src/redaction.ts)
+// instead of keeping a separate copy, so the periodic scanner (this file) and
+// the heartbeat_runs write-time gate can never drift out of sync again.
+export const SECRET_PATTERNS: readonly SecretPattern[] = SECRET_LEAK_PATTERNS;
 
 const FALSE_POSITIVE_PATH_SEGMENTS = [
   "node_modules",
@@ -125,23 +114,32 @@ export interface RawSecretMatch {
   lineHint: string;
 }
 
-/** Scan arbitrary text for every configured secret pattern, filtering obvious placeholders. */
+/**
+ * Scan arbitrary text for every configured secret pattern, filtering obvious
+ * placeholders. Matches against the whole text (not line-by-line) because
+ * the shared pattern list (DUR-327) includes the PEM private-key pattern,
+ * which spans a BEGIN...END block across multiple lines -- a per-line split
+ * would never let that regex see both markers at once. `lineHint` is still
+ * derived per-match from just the line containing the match's start, so
+ * single-line patterns behave exactly as before.
+ */
 export function scanTextForSecrets(text: string): RawSecretMatch[] {
   if (!text) return [];
   const matches: RawSecretMatch[] = [];
-  const lines = text.split(/\r?\n/);
   for (const pattern of SECRET_PATTERNS) {
     const re = new RegExp(pattern.regex.source, pattern.regex.flags.includes("g") ? pattern.regex.flags : `${pattern.regex.flags}g`);
-    for (const line of lines) {
-      re.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = re.exec(line)) !== null) {
-        const value = match[0];
-        if (!isLikelyFalsePositiveValue(value, line)) {
-          matches.push({ pattern: pattern.name, value, lineHint: line.slice(0, 200) });
-        }
-        if (match.index === re.lastIndex) re.lastIndex += 1;
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const value = match[0];
+      const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
+      const nextNewline = text.indexOf("\n", match.index);
+      const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+      const line = text.slice(lineStart, lineEnd);
+      if (!isLikelyFalsePositiveValue(value, line)) {
+        matches.push({ pattern: pattern.name, value, lineHint: line.slice(0, 200) });
       }
+      if (match.index === re.lastIndex) re.lastIndex += 1;
     }
   }
   return matches;
@@ -463,6 +461,20 @@ export interface HeartbeatRunScanSummary {
 const HEARTBEAT_RUN_SCAN_COLUMNS = ["error", "stdoutExcerpt", "stderrExcerpt"] as const;
 const HEARTBEAT_RUN_BATCH_SIZE = 500;
 const HEARTBEAT_RUN_MAX_BATCHES_PER_SWEEP = 100;
+// DUR-360 security review of DUR-327: scanTextForSecrets runs the shared
+// pem_private_key pattern (a lazy [\s\S]*? scan for an unmatched BEGIN
+// marker) against the WHOLE field text, which is O(n^2) on adversarial input
+// with many BEGIN markers and no END (benchmarked: 1.6MB ~= 10s, blocking
+// the main API event loop for the duration of one sweep tick). Unlike the
+// filesystem surface (MAX_SCAN_FILE_BYTES), these columns/resultJson have no
+// write-time size cap, and this path selects them directly rather than
+// through the 64KB-gated `left(...)` truncation used for API display
+// (heartbeat-run-summary.ts's HEARTBEAT_RUN_SAFE_RESULT_JSON_MAX_BYTES).
+// Truncating each field to this cap before scanning keeps worst-case
+// per-field scan time bounded to tens of ms regardless of how large the
+// underlying column value is -- a real secret is always far shorter than
+// this cap, so detection is unaffected in the non-adversarial case.
+const HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS = 64 * 1024;
 
 export async function scanHeartbeatRunsForLeakedSecrets(
   db: Db,
@@ -514,7 +526,11 @@ export async function scanHeartbeatRunsForLeakedSecrets(
 
       for (const field of fields) {
         if (!field.text) continue;
-        const matches = scanTextForSecrets(field.text);
+        const text =
+          field.text.length > HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS
+            ? field.text.slice(0, HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS)
+            : field.text;
+        const matches = scanTextForSecrets(text);
         if (matches.length === 0) continue;
         summary.matchesFound += matches.length;
         const location = `heartbeat_runs.${field.column} row ${row.id}`;

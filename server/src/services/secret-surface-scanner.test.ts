@@ -15,8 +15,12 @@ describe("scanTextForSecrets", () => {
   it("matches every DUR-316 starter pattern", () => {
     const samples: Record<string, string> = {
       github_pat: "github_pat_11ABCDEFGH0123456789012345678901234567890123456789012345",
-      github_token_classic: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-      generic_sk_key: "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      github_token: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      github_oauth_token: "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      github_user_token: "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      github_app_installation_token: "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      github_refresh_token: "ghr_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      openai_key: "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
       // Split from the vendor prefix so this fixture doesn't read as one
       // contiguous secret-shaped token to GitHub's own push-protection scan
       // -- it is a synthetic value, but the whole point of this pattern set
@@ -24,14 +28,24 @@ describe("scanTextForSecrets", () => {
       shopify_shared_secret: "shpss_" + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
       shopify_access_token: "shpat_" + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
       slack_bot_token: "xoxb-" + "1234567890-abcdefghijklmnop",
+      slack_user_token: "xoxp-" + "1234567890-abcdefghijklmnop",
       aws_access_key_id: "AKIAABCDEFGHIJKLMNOP",
-      pem_private_key: "-----BEGIN RSA PRIVATE KEY-----",
     };
 
     for (const [pattern, value] of Object.entries(samples)) {
       const matches = scanTextForSecrets(`token=${value}`);
       expect(matches.some((m) => m.pattern === pattern && m.value === value), pattern).toBe(true);
     }
+  });
+
+  it("matches the shared PEM pattern's full BEGIN...END block, not just the header line", () => {
+    const pem = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEr8IqhbEDbMQPO+2VDL0Fzd/HTdWkEIiw2K",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+    const matches = scanTextForSecrets(pem);
+    expect(matches.some((m) => m.pattern === "pem_private_key")).toBe(true);
   });
 
   it("matches a token embedded in a git remote URL, same shape as NOR-316", () => {
@@ -42,7 +56,7 @@ describe("scanTextForSecrets", () => {
     ].join("\n");
     const matches = scanTextForSecrets(gitConfigText);
     expect(matches).toHaveLength(1);
-    expect(matches[0].pattern).toBe("github_token_classic");
+    expect(matches[0].pattern).toBe("github_token");
   });
 
   it("does not match plain text with no secret-shaped substrings", () => {

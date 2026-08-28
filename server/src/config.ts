@@ -63,6 +63,7 @@ export interface Config {
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
+  databaseBypassUrl: string | undefined;
   embeddedPostgresDataDir: string;
   embeddedPostgresPort: number;
   databaseBackupEnabled: boolean;
@@ -110,6 +111,22 @@ function detectTailnetBindHost(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * DUR-366: opt-in, not opt-out. An earlier opt-out default let the
+ * heartbeat_runs retention sweep run an unreviewed, irreversible delete the
+ * moment it happened to ship as a side effect of an unrelated deploy --
+ * before the NOR-316 forensics question it was gated on ever got answered.
+ * Requires an explicit "true"; every other value (unset, "false", anything
+ * else) stays disabled. Extracted as a pure function so this default is
+ * unit-testable without exercising the rest of loadConfig()'s filesystem/
+ * tailscale/git side effects.
+ */
+export function resolveHeartbeatRunRetentionEnabled(
+  env: { PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED?: string } = process.env,
+): boolean {
+  return env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true";
 }
 
 export function loadConfig(): Config {
@@ -289,6 +306,14 @@ export function loadConfig(): Config {
     throw new Error(resolvedBind.errors[0]);
   }
 
+  const resolvedDatabaseUrl = process.env.DATABASE_URL ?? fileDbUrl;
+  // DUR-275/DUR-277 §4: a second connection string for runInCompanyScopeBypass's
+  // reserved connections, decoupled from the tenant-request DATABASE_URL so a
+  // future Phase 2 cutover (DUR-250) can repoint one without the other.
+  // Defaults to DATABASE_URL so bypass connections behave exactly like today's
+  // until a deployment opts into a distinct bypass role via pure config.
+  const databaseBypassUrl = process.env.DATABASE_BYPASS_URL?.trim() || resolvedDatabaseUrl;
+
   return {
     deploymentMode,
     deploymentExposure,
@@ -301,8 +326,9 @@ export function loadConfig(): Config {
     authPublicBaseUrl,
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
-    databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
+    databaseUrl: resolvedDatabaseUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
+    databaseBypassUrl,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
     ),
@@ -341,8 +367,9 @@ export function loadConfig(): Config {
     // secret that slips past scanning/masking (DUR-316/317/318) stays live and
     // readable, independent of those upstream defenses. 30 days keeps a month
     // of run history for debugging/audit; adjust via env if that's wrong for
-    // this deployment.
-    heartbeatRunRetentionEnabled: process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED !== "false",
+    // this deployment. See resolveHeartbeatRunRetentionEnabled() above for
+    // why the enable flag itself defaults off (DUR-366).
+    heartbeatRunRetentionEnabled: resolveHeartbeatRunRetentionEnabled(),
     heartbeatRunRetentionDays: Math.max(
       1,
       Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_DAYS) || 30,

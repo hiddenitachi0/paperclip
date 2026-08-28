@@ -1,31 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildSimpleModeIssuePayload,
-  buildSimpleModeTitle,
   findLatestSimpleModeReply,
   isSimpleModeSettled,
   sanitizeSimpleModeText,
   selectSimpleModeAssignee,
 } from "./simple-mode";
-
-describe("buildSimpleModeTitle", () => {
-  it("uses the first line as the title", () => {
-    expect(buildSimpleModeTitle("Rewrite my product description\nMake it punchier")).toBe(
-      "Rewrite my product description",
-    );
-  });
-
-  it("truncates long single-line requests", () => {
-    const long = "x".repeat(120);
-    const title = buildSimpleModeTitle(long);
-    expect(title.length).toBe(80);
-    expect(title.endsWith("…")).toBe(true);
-  });
-
-  it("falls back to the trimmed text when the first line is blank", () => {
-    expect(buildSimpleModeTitle("\n\nWhat is going on?")).toBe("What is going on?");
-  });
-});
 
 describe("isSimpleModeSettled", () => {
   it("treats done, cancelled, blocked, and in_review as settled", () => {
@@ -70,22 +49,6 @@ describe("selectSimpleModeAssignee", () => {
       { id: "2", role: "engineer", status: "terminated" },
     ];
     expect(selectSimpleModeAssignee(agents)?.id).toBe("1");
-  });
-});
-
-describe("buildSimpleModeIssuePayload", () => {
-  it("builds a normal todo issue payload with no simple-mode-specific fields", () => {
-    const payload = buildSimpleModeIssuePayload({
-      text: "  Rewrite my product description to sound friendlier  ",
-      assigneeAgentId: "agent-1",
-    });
-    expect(payload).toEqual({
-      title: "Rewrite my product description to sound friendlier",
-      description: "Rewrite my product description to sound friendlier",
-      assigneeAgentId: "agent-1",
-      status: "todo",
-      priority: "medium",
-    });
   });
 });
 

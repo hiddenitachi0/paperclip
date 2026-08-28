@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Agent } from "@paperclipai/shared";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, ClipboardCheck, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import {
@@ -202,6 +202,71 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
         badge: "border-violet-500/60 bg-violet-500/10 text-violet-900 dark:bg-violet-500/15 dark:text-violet-100",
         label: "In review",
         Icon: FileText,
+      };
+  }
+}
+
+// DUR-337: `payload.factCheck` alone is a self-declared boolean with no
+// server-side consumer (DUR-340 confirmed it's backend-inert) — an agent
+// could set it on a genuine decision-ask ("should I drop orders_2024?") and
+// get the reassuring "this isn't a decision" card for free. The flag is
+// still required (it's what DUR-339 added the field for), but it's no longer
+// sufficient on its own: `detailsMarkdown` must also contain the NOR-307-
+// shaped numbered claims a fact check actually is, and neither field may
+// read like a decision/action request (the DUR-320/DUR-323 checks). The flag
+// narrows false negatives; the content-shape floor stops it from laundering
+// an unrelated decision-ask into the low-stakes styling.
+const DECISION_ASK_PATTERN =
+  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:ment)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?)\b/i;
+
+function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
+  if (interaction.kind !== "request_confirmation") return false;
+  if (isPlanConfirmation(interaction)) return false;
+  if (interaction.payload.factCheck !== true) return false;
+  const details = interaction.payload.detailsMarkdown;
+  if (!details) return false;
+  const numberedClaims = details
+    .split("\n")
+    .filter((line) => /^\s*\d+[.)]\s+\S/.test(line));
+  if (numberedClaims.length < 2) return false;
+  const prompt = interaction.payload.prompt ?? "";
+  if (DECISION_ASK_PATTERN.test(prompt)) return false;
+  if (DECISION_ASK_PATTERN.test(details)) return false;
+  return true;
+}
+
+function factCheckStatusClasses(status: IssueThreadInteraction["status"]) {
+  switch (status) {
+    case "accepted":
+    case "answered":
+      return {
+        shell: "border-2 border-teal-500/80 bg-transparent",
+        badge: "border-teal-500/60 bg-teal-500/10 text-teal-900 dark:bg-teal-500/15 dark:text-teal-100",
+        label: "Confirmed correct",
+        Icon: CheckCircle2,
+      };
+    case "rejected":
+    case "cancelled":
+      return {
+        shell: "border-2 border-red-500/80 bg-transparent",
+        badge: "border-red-500/60 bg-red-500/10 text-red-900 dark:bg-red-500/15 dark:text-red-100",
+        label: "Doesn't match",
+        Icon: XCircle,
+      };
+    case "failed":
+    case "expired":
+      return {
+        shell: "border-2 border-amber-500/70 bg-transparent",
+        badge: "border-amber-500/60 bg-amber-500/10 text-amber-900 dark:bg-amber-500/15 dark:text-amber-100",
+        label: "Expired",
+        Icon: AlertTriangle,
+      };
+    default:
+      return {
+        shell: "border-2 border-teal-500/60 bg-transparent",
+        badge: "border-teal-500/50 bg-teal-500/10 text-teal-900 dark:bg-teal-500/15 dark:text-teal-100",
+        label: "Needs your check",
+        Icon: ClipboardCheck,
       };
   }
 }
@@ -1912,9 +1977,11 @@ export function IssueThreadInteractionCard({
   externalReferences,
 }: IssueThreadInteractionCardProps) {
   const isPlan = isPlanConfirmation(interaction);
+  const isFactCheck = !isPlan && isFactCheckConfirmation(interaction);
   const planStyles = isPlan ? planStatusClasses(interaction.status) : null;
-  const StatusIcon = planStyles ? planStyles.Icon : statusIcon(interaction.status);
-  const styles = planStyles ?? statusClasses(interaction.status);
+  const factCheckStyles = isFactCheck ? factCheckStatusClasses(interaction.status) : null;
+  const StatusIcon = planStyles?.Icon ?? factCheckStyles?.Icon ?? statusIcon(interaction.status);
+  const styles = planStyles ?? factCheckStyles ?? statusClasses(interaction.status);
   const createdByLabel = resolveActorLabel({
     agentId: interaction.createdByAgentId,
     userId: interaction.createdByUserId,
@@ -1940,9 +2007,9 @@ export function IssueThreadInteractionCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className={cn("inline-flex items-center gap-1 rounded-sm border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]", styles.badge)}>
               <StatusIcon className="h-3.5 w-3.5" />
-              {isPlan ? "Plan" : interactionKindLabel(interaction.kind)}
+              {isPlan ? "Plan" : isFactCheck ? "Fact check" : interactionKindLabel(interaction.kind)}
               <span className="text-current/60">/</span>
-              {planStyles ? planStyles.label : statusLabel(interaction.status)}
+              {planStyles?.label ?? factCheckStyles?.label ?? statusLabel(interaction.status)}
             </span>
             {interaction.continuationPolicy === "wake_assignee"
               || interaction.continuationPolicy === "wake_assignee_on_accept" ? (
@@ -1965,8 +2032,15 @@ export function IssueThreadInteractionCard({
                   ? "Checkbox confirmation requested"
                   : isPlan
                     ? "Plan review"
-                    : "Confirmation requested")}
+                    : isFactCheck
+                      ? "Check these against what you know"
+                      : "Confirmation requested")}
           </div>
+          {isFactCheck ? (
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-teal-800 dark:text-teal-200">
+              Read this carefully and only confirm if it matches what you actually know — don't confirm based on the label alone.
+            </p>
+          ) : null}
           {interaction.summary ? (
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
               {interaction.summary}
