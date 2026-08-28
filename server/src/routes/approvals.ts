@@ -5,6 +5,7 @@ import {
   addApprovalCommentSchema,
   createApprovalSchema,
   deployRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   formatApprovalTechnicalReference,
   formatApprovalTitle,
   type InstructionsChangeRequestPayload,
@@ -350,6 +351,17 @@ function isInstructionsChangeRequestApproval(type: unknown, payload: Record<stri
 }
 
 /**
+ * `request_board_approval` approvals whose payload carries `kind:"feature_launch"`
+ * are DUR-313 (DUR-299 point 2)'s mandatory launch card: the one plain-language
+ * approval an operator makes for a finished, user-facing feature, instead of the
+ * merges that preceded it. Approving one is the only thing that clears
+ * evaluateFeatureLaunchDoneGate for an issue marked `featureLaunch`.
+ */
+function isFeatureLaunchRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "feature_launch";
+}
+
+/**
  * Recomputes `beforeContent` from the target agent's current instructions file
  * on disk. Called both when a proposal is first filed and whenever it is
  * resubmitted after "send back for changes" -- the proposing boss can never
@@ -436,6 +448,12 @@ async function findDuplicateOpenApproval(
     return existing
       ? { id: existing.id, targetDescription: "an instructions change proposal for this agent" }
       : null;
+  }
+  if (isFeatureLaunchRequestApproval(type, payload)) {
+    const issueId = typeof payload.issueId === "string" ? payload.issueId : "";
+    if (!issueId) return null;
+    const existing = await svc.findOpenFeatureLaunchApproval(companyId, issueId);
+    return existing ? { id: existing.id, targetDescription: "a feature launch card for this issue" } : null;
   }
   return null;
 }
@@ -843,6 +861,28 @@ export function approvalRoutes(
           targetAgent.name || targetAgent.id,
         ),
       });
+    }
+    if (isFeatureLaunchRequestApproval(approvalInput.type, approvalInput.payload)) {
+      const launchPayload = featureLaunchRequestPayloadSchema.parse(approvalInput.payload);
+      // Must actually be linked to the issue it names -- otherwise a filer could
+      // parrot any issueId into the payload text without evaluateFeatureLaunchDoneGate
+      // (which reads listApprovalsForIssue, i.e. the issue_approvals link table, not
+      // the payload's issueId field) ever seeing this approval as covering that issue.
+      if (!uniqueIssueIds.includes(launchPayload.issueId)) {
+        res.status(422).json({
+          error: "A feature launch approval must be linked (issueIds) to the issue named in payload.issueId",
+        });
+        return;
+      }
+      const targetIssue = await db
+        .select({ id: issues.id, companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, launchPayload.issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!targetIssue || targetIssue.companyId !== companyId) {
+        res.status(422).json({ error: "Feature launch approval must target an issue in this company" });
+        return;
+      }
     }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {

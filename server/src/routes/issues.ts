@@ -154,6 +154,7 @@ import { assertEnvironmentSelectionForCompany } from "./environment-selection.js
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
+import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -2847,6 +2848,31 @@ export function issueRoutes(
     res.status(403).json({
       error:
         "changeLogVisible/changeLogSummary may only be set by a board user, or in the same request that transitions the issue to done",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-313: featureLaunch is what evaluateFeatureLaunchDoneGate keys off of --
+  // an agent may freely mark an issue AS a feature launch (that only ever adds
+  // friction, requiring an approval it might not otherwise need), but only a
+  // board user may un-mark one that's already true. Without this, an agent
+  // could mark an issue as a launch, then quietly flip it back to false in the
+  // same request that transitions it to done, dodging the gate it just set.
+  function assertFeatureLaunchFieldAllowed(
+    req: Request,
+    res: Response,
+    updateFields: { featureLaunch?: unknown },
+    existing: { featureLaunch: boolean },
+  ) {
+    if (updateFields.featureLaunch === undefined) return true;
+    if (req.actor.type === "board") return true;
+    if (updateFields.featureLaunch === true) return true;
+    if (existing.featureLaunch === false) return true;
+    res.status(403).json({
+      error: "Only a board user may un-mark an issue as a feature launch once it has been marked one",
       details: {
         securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
       },
@@ -6133,6 +6159,7 @@ export function issueRoutes(
       ...updateFields
     } = req.body;
     if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
+    if (!assertFeatureLaunchFieldAllowed(req, res, updateFields, existing)) return;
     const selfReviewGateResult = await evaluateSelfReviewDoneGate({
       db,
       wakeup: heartbeat.wakeup,
@@ -6185,6 +6212,25 @@ export function issueRoutes(
     });
     if (deployCompletionGateResult) {
       res.status(409).json({ error: deployCompletionGateResult.message });
+      return;
+    }
+    // DUR-313: composes with the gates above -- this asks a narrower question again,
+    // "did the operator explicitly sign off on THIS being a finished, user-facing
+    // launch", independent of whether the work itself is done or already deployed.
+    const featureLaunchGateResult = await evaluateFeatureLaunchDoneGate({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        featureLaunch: existing.featureLaunch,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      requestedFeatureLaunch: typeof updateFields.featureLaunch === "boolean" ? updateFields.featureLaunch : undefined,
+    });
+    if (featureLaunchGateResult) {
+      res.status(409).json({ error: featureLaunchGateResult.message });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =

@@ -44,7 +44,7 @@ import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-r
 
 const DEPLOY_SUCCESS_MARKER = "is live and healthy";
 
-function approvalPayloadKind(payload: unknown): string | null {
+export function approvalPayloadKind(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const kind = (payload as Record<string, unknown>).kind;
   return typeof kind === "string" ? kind : null;
