@@ -2228,7 +2228,11 @@ async function descendantCaseIds(db: PipelineDb, companyId: string, rootCaseIds:
 // packages/db/src/company-scope.ts) and needs the raw connection via
 // withCompanyScope instead.
 export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}, rawDb: Db = db) {
-  const routinesSvc = routineService(db, { heartbeat: deps.heartbeat });
+  // routineService's dispatchRoutineRun() takes a row lock via db.transaction(),
+  // which the scoped proxy doesn't support (see the docblock above) -- give it
+  // rawDb, same as every unmigrated caller of pipelineService already did
+  // before this route was wired through createRequestScopedDb.
+  const routinesSvc = routineService(rawDb, { heartbeat: deps.heartbeat });
   const outputsSvc = pipelineCaseOutputsService(db);
   const authorization = authorizationService(db);
   const secretsSvc = secretService(db);

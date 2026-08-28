@@ -1202,6 +1202,13 @@ describeEmbeddedPostgres("pipeline routes", () => {
     });
   });
 
+  // DUR-349 (DUR-277 Wave 3): this test drives >100 sequential supertest
+  // round-trips (50 case creates + 50 transitions + patches + the bulk call
+  // itself); now that /companies/:companyId/review-cases/bulk and its
+  // sibling routes reserve a real connection per request (see
+  // middleware/company-scope.ts), that easily clears vitest's 5000ms
+  // default even though nothing here is actually hanging -- see the same
+  // reasoning in agent-roles.test.ts's file-level testTimeout bump.
   it("bulk reviews partial successes without aborting stale items", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));
@@ -1257,7 +1264,7 @@ describeEmbeddedPostgres("pipeline routes", () => {
     expect(failed.every((item: { error: { code: string } }) => item.error.code === "version_conflict")).toBe(true);
     const requestChangesDetail = await http.get(`/api/cases/${caseIds[3]}`).expect(200);
     expect(requestChangesDetail.body.stage.key).toBe("in_progress");
-  });
+  }, 20_000);
 
   it("returns conflict bodies with code, current version, and stage", async () => {
     const company = await seedCompany();
