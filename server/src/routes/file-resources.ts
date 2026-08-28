@@ -3,6 +3,7 @@ import { pipeline } from "node:stream/promises";
 import { Router } from "express";
 import { ZodError } from "zod";
 import type { Db } from "@paperclipai/db";
+import { createRequestScopedDb, runInCompanyScope } from "@paperclipai/db";
 import {
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
@@ -264,17 +265,32 @@ function denialReasonFromError(error: unknown) {
   return error.message;
 }
 
-export function fileResourceRoutes(db: Db, opts: {
+export function fileResourceRoutes(rawDb: Db, opts: {
   service?: WorkspaceFileResourceService;
   limiter?: FileResourceLimiter;
   listLimiter?: FileResourceLimiter;
 } = {}) {
   const router = Router();
+  // DUR-348 (DUR-277 Wave 2): all 3 routes below resolve companyId via a
+  // prior issue lookup (category (b) in the DUR-277 design doc). `rawSvc`
+  // (unscoped) does that one pre-scope lookup; `svc` (this file's own
+  // request-scoped instance) does everything else, once
+  // runInCompanyScope has established the request's scope below --
+  // *after* both assertBoard and assertCompanyAccess have already run, per
+  // DUR-348's should-fix. `logDeniedAttempt`/`logListDeniedAttempt` take an
+  // explicit `db` because they're called both before scope exists (the
+  // assertBoard/assertCompanyAccess denial paths, using rawDb) and after
+  // (using the scoped db) -- the scoped proxy throws if used outside an
+  // active scope, so denial logging for a pre-scope rejection must not
+  // reach for it.
+  const db = createRequestScopedDb(rawDb);
+  const rawSvc = opts.service ?? workspaceFileResourceService(rawDb);
   const svc = opts.service ?? workspaceFileResourceService(db);
   const limiter = opts.limiter ?? createFileResourceLimiter();
   const listLimiter = opts.listLimiter ?? createFileResourceListLimiter();
 
   async function logDeniedAttempt(input: {
+    scopedDb: Db;
     companyId: string;
     actor: ReturnType<typeof getActorInfo>;
     issueId: string;
@@ -284,7 +300,7 @@ export function fileResourceRoutes(db: Db, opts: {
     error: unknown;
     action?: "issue.file_resource_content_denied" | "issue.file_resource_resolve_denied" | "issue.file_resource_download_denied";
   }) {
-    await logActivity(db, {
+    await logActivity(input.scopedDb, {
       companyId: input.companyId,
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
@@ -304,6 +320,7 @@ export function fileResourceRoutes(db: Db, opts: {
   }
 
   async function logListDeniedAttempt(input: {
+    scopedDb: Db;
     companyId: string;
     actor: ReturnType<typeof getActorInfo>;
     issueId: string;
@@ -311,7 +328,7 @@ export function fileResourceRoutes(db: Db, opts: {
     target?: { projectId: string | null; workspaceId: string | null };
     error: unknown;
   }) {
-    await logActivity(db, {
+    await logActivity(input.scopedDb, {
       companyId: input.companyId,
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
@@ -339,6 +356,7 @@ export function fileResourceRoutes(db: Db, opts: {
     } catch (error) {
       if (req.actor.type === "agent" && req.actor.companyId) {
         await logListDeniedAttempt({
+          scopedDb: rawDb,
           companyId: req.actor.companyId,
           actor: getActorInfo(req),
           issueId: req.params.issueId,
@@ -349,12 +367,13 @@ export function fileResourceRoutes(db: Db, opts: {
       }
       throw error;
     }
-    const issue = await svc.getIssue(req.params.issueId);
+    const issue = await rawSvc.getIssue(req.params.issueId);
     const actor = getActorInfo(req);
     try {
       assertCompanyAccess(req, issue.companyId);
     } catch (error) {
       await logListDeniedAttempt({
+        scopedDb: rawDb,
         companyId: issue.companyId,
         actor,
         issueId: req.params.issueId,
@@ -365,75 +384,80 @@ export function fileResourceRoutes(db: Db, opts: {
       throw error;
     }
 
-    let query: ReturnType<typeof readListQuery>;
-    try {
-      query = readListQuery(req.query);
-    } catch (error) {
-      await logListDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        query: auditQuery,
-        target: auditTarget,
-        error,
-      });
-      throw error;
-    }
+    await runInCompanyScope(rawDb, issue.companyId, async () => {
+      let query: ReturnType<typeof readListQuery>;
+      try {
+        query = readListQuery(req.query);
+      } catch (error) {
+        await logListDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          query: auditQuery,
+          target: auditTarget,
+          error,
+        });
+        throw error;
+      }
 
-    let release: (() => void) | null = null;
-    try {
-      release = listLimiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
-    } catch (error) {
-      await logListDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        query,
-        target: { projectId: query.projectId, workspaceId: query.workspaceId },
-        error,
-      });
-      throw error;
-    }
+      let release: (() => void) | null = null;
+      try {
+        release = listLimiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+      } catch (error) {
+        await logListDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          query,
+          target: { projectId: query.projectId, workspaceId: query.workspaceId },
+          error,
+        });
+        throw error;
+      }
 
-    try {
-      const result = await svc.list(req.params.issueId, query, { issue });
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        action: "issue.file_resource_list",
-        entityType: "issue",
-        entityId: req.params.issueId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        details: listActivityDetails({
-          outcome: result.state === "available" ? "success" : "unavailable",
-          workspaceSelector: result.query.workspace,
-          mode: result.query.mode,
-          workspaceKind: result.workspace?.workspaceKind ?? null,
-          workspaceId: result.workspace?.workspaceId ?? null,
-          projectId: result.workspace?.projectId ?? null,
-          projectName: result.workspace?.projectName ?? null,
-          resultCount: result.items.length,
-          scannedCount: result.scannedCount,
-          truncated: result.truncated,
-          denialReason: result.unavailableReason ?? null,
-        }),
-      });
-      res.json(result);
-    } catch (error) {
-      await logListDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        query,
-        target: { projectId: query.projectId, workspaceId: query.workspaceId },
-        error,
-      });
-      throw error;
-    } finally {
-      release?.();
-    }
+      try {
+        const result = await svc.list(req.params.issueId, query, { issue });
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          action: "issue.file_resource_list",
+          entityType: "issue",
+          entityId: req.params.issueId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          details: listActivityDetails({
+            outcome: result.state === "available" ? "success" : "unavailable",
+            workspaceSelector: result.query.workspace,
+            mode: result.query.mode,
+            workspaceKind: result.workspace?.workspaceKind ?? null,
+            workspaceId: result.workspace?.workspaceId ?? null,
+            projectId: result.workspace?.projectId ?? null,
+            projectName: result.workspace?.projectName ?? null,
+            resultCount: result.items.length,
+            scannedCount: result.scannedCount,
+            truncated: result.truncated,
+            denialReason: result.unavailableReason ?? null,
+          }),
+        });
+        res.json(result);
+      } catch (error) {
+        await logListDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          query,
+          target: { projectId: query.projectId, workspaceId: query.workspaceId },
+          error,
+        });
+        throw error;
+      } finally {
+        release?.();
+      }
+    });
   });
 
   router.get("/issues/:issueId/file-resources/resolve", async (req, res) => {
@@ -443,6 +467,7 @@ export function fileResourceRoutes(db: Db, opts: {
     } catch (error) {
       if (req.actor.type === "agent" && req.actor.companyId) {
         await logDeniedAttempt({
+          scopedDb: rawDb,
           companyId: req.actor.companyId,
           actor: getActorInfo(req),
           issueId: req.params.issueId,
@@ -455,12 +480,13 @@ export function fileResourceRoutes(db: Db, opts: {
       }
       throw error;
     }
-    const issue = await svc.getIssue(req.params.issueId);
+    const issue = await rawSvc.getIssue(req.params.issueId);
     const actor = getActorInfo(req);
     try {
       assertCompanyAccess(req, issue.companyId);
     } catch (error) {
       await logDeniedAttempt({
+        scopedDb: rawDb,
         companyId: issue.companyId,
         actor,
         issueId: req.params.issueId,
@@ -472,77 +498,83 @@ export function fileResourceRoutes(db: Db, opts: {
       });
       throw error;
     }
-    let query: ReturnType<typeof readQuery>;
-    try {
-      query = readQuery(req.query);
-    } catch (error) {
-      await logDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        displayPath: safeAuditDisplayPath(req.query),
-        projectId: auditTarget.projectId,
-        workspaceId: auditTarget.workspaceId,
-        error,
-        action: "issue.file_resource_resolve_denied",
-      });
-      throw error;
-    }
-    let release: (() => void) | null = null;
-    try {
-      release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
-    } catch (error) {
-      await logDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        displayPath: query.path,
-        projectId: query.projectId,
-        workspaceId: query.workspaceId,
-        error,
-        action: "issue.file_resource_resolve_denied",
-      });
-      throw error;
-    }
-    try {
-      const result = await svc.resolve(req.params.issueId, query, { issue });
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        action: "issue.file_resource_resolve",
-        entityType: "issue",
-        entityId: req.params.issueId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        details: activityDetails({
-          outcome: "success",
-          workspaceKind: result.workspaceKind,
-          workspaceId: result.workspaceId,
-          projectId: result.projectId ?? null,
-          projectName: result.projectName ?? null,
-          displayPath: result.displayPath,
-          byteSize: result.byteSize ?? null,
-          contentType: result.contentType ?? null,
-          denialReason: result.denialReason ?? null,
-        }),
-      });
-      res.json(result);
-    } catch (error) {
-      await logDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        displayPath: query.path,
-        projectId: query.projectId,
-        workspaceId: query.workspaceId,
-        error,
-        action: "issue.file_resource_resolve_denied",
-      });
-      throw error;
-    } finally {
-      release?.();
-    }
+
+    await runInCompanyScope(rawDb, issue.companyId, async () => {
+      let query: ReturnType<typeof readQuery>;
+      try {
+        query = readQuery(req.query);
+      } catch (error) {
+        await logDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          displayPath: safeAuditDisplayPath(req.query),
+          projectId: auditTarget.projectId,
+          workspaceId: auditTarget.workspaceId,
+          error,
+          action: "issue.file_resource_resolve_denied",
+        });
+        throw error;
+      }
+      let release: (() => void) | null = null;
+      try {
+        release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+      } catch (error) {
+        await logDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          displayPath: query.path,
+          projectId: query.projectId,
+          workspaceId: query.workspaceId,
+          error,
+          action: "issue.file_resource_resolve_denied",
+        });
+        throw error;
+      }
+      try {
+        const result = await svc.resolve(req.params.issueId, query, { issue });
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          action: "issue.file_resource_resolve",
+          entityType: "issue",
+          entityId: req.params.issueId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          details: activityDetails({
+            outcome: "success",
+            workspaceKind: result.workspaceKind,
+            workspaceId: result.workspaceId,
+            projectId: result.projectId ?? null,
+            projectName: result.projectName ?? null,
+            displayPath: result.displayPath,
+            byteSize: result.byteSize ?? null,
+            contentType: result.contentType ?? null,
+            denialReason: result.denialReason ?? null,
+          }),
+        });
+        res.json(result);
+      } catch (error) {
+        await logDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          displayPath: query.path,
+          projectId: query.projectId,
+          workspaceId: query.workspaceId,
+          error,
+          action: "issue.file_resource_resolve_denied",
+        });
+        throw error;
+      } finally {
+        release?.();
+      }
+    });
   });
 
   router.get("/issues/:issueId/file-resources/content", async (req, res) => {
@@ -552,6 +584,7 @@ export function fileResourceRoutes(db: Db, opts: {
     } catch (error) {
       if (req.actor.type === "agent" && req.actor.companyId) {
         await logDeniedAttempt({
+          scopedDb: rawDb,
           companyId: req.actor.companyId,
           actor: getActorInfo(req),
           issueId: req.params.issueId,
@@ -563,12 +596,13 @@ export function fileResourceRoutes(db: Db, opts: {
       }
       throw error;
     }
-    const issue = await svc.getIssue(req.params.issueId);
+    const issue = await rawSvc.getIssue(req.params.issueId);
     const actor = getActorInfo(req);
     try {
       assertCompanyAccess(req, issue.companyId);
     } catch (error) {
       await logDeniedAttempt({
+        scopedDb: rawDb,
         companyId: issue.companyId,
         actor,
         issueId: req.params.issueId,
@@ -579,43 +613,98 @@ export function fileResourceRoutes(db: Db, opts: {
       });
       throw error;
     }
-    let query: ReturnType<typeof readQuery>;
-    try {
-      query = readQuery(req.query);
-    } catch (error) {
-      await logDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        displayPath: safeAuditDisplayPath(req.query),
-        projectId: auditTarget.projectId,
-        workspaceId: auditTarget.workspaceId,
-        error,
-      });
-      throw error;
-    }
-    let release: (() => void) | null = null;
-    try {
-      release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
-    } catch (error) {
-      await logDeniedAttempt({
-        companyId: issue.companyId,
-        actor,
-        issueId: req.params.issueId,
-        displayPath: query.path,
-        projectId: query.projectId,
-        workspaceId: query.workspaceId,
-        error,
-      });
-      throw error;
-    }
-    try {
-      if (parseBooleanQuery(req.query.download)) {
-        let result: Awaited<ReturnType<WorkspaceFileResourceService["prepareDownload"]>> | null = null;
+
+    await runInCompanyScope(rawDb, issue.companyId, async () => {
+      let query: ReturnType<typeof readQuery>;
+      try {
+        query = readQuery(req.query);
+      } catch (error) {
+        await logDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          displayPath: safeAuditDisplayPath(req.query),
+          projectId: auditTarget.projectId,
+          workspaceId: auditTarget.workspaceId,
+          error,
+        });
+        throw error;
+      }
+      let release: (() => void) | null = null;
+      try {
+        release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+      } catch (error) {
+        await logDeniedAttempt({
+          scopedDb: db,
+          companyId: issue.companyId,
+          actor,
+          issueId: req.params.issueId,
+          displayPath: query.path,
+          projectId: query.projectId,
+          workspaceId: query.workspaceId,
+          error,
+        });
+        throw error;
+      }
+      try {
+        if (parseBooleanQuery(req.query.download)) {
+          let result: Awaited<ReturnType<WorkspaceFileResourceService["prepareDownload"]>> | null = null;
+          try {
+            result = await svc.prepareDownload(req.params.issueId, query, { issue });
+          } catch (error) {
+            await logDeniedAttempt({
+              scopedDb: db,
+              companyId: issue.companyId,
+              actor,
+              issueId: req.params.issueId,
+              displayPath: query.path,
+              projectId: query.projectId,
+              workspaceId: query.workspaceId,
+              error,
+              action: "issue.file_resource_download_denied",
+            });
+            throw error;
+          }
+
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            action: "issue.file_resource_download",
+            entityType: "issue",
+            entityId: req.params.issueId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            details: activityDetails({
+              outcome: "success",
+              workspaceKind: result.resource.workspaceKind,
+              workspaceId: result.resource.workspaceId,
+              projectId: result.resource.projectId ?? null,
+              projectName: result.resource.projectName ?? null,
+              displayPath: result.resource.displayPath,
+              byteSize: result.resource.byteSize ?? null,
+              contentType: result.resource.contentType ?? null,
+            }),
+          });
+
+          res.setHeader("Content-Type", result.resource.contentType ?? "application/octet-stream");
+          if (result.resource.byteSize != null) {
+            res.setHeader("Content-Length", String(result.resource.byteSize));
+          }
+          res.setHeader("Cache-Control", "private, max-age=60");
+          res.setHeader("X-Content-Type-Options", "nosniff");
+          res.setHeader("Content-Disposition", `attachment; filename="${safeAttachmentFilename(result.resource.title)}"`);
+          await pipeline(createReadStream(result.realPath), res);
+          return;
+        }
+
+        let result: WorkspaceFileContent | null = null;
         try {
-          result = await svc.prepareDownload(req.params.issueId, query, { issue });
+          result = await svc.readContent(req.params.issueId, query, { issue });
         } catch (error) {
           await logDeniedAttempt({
+            scopedDb: db,
             companyId: issue.companyId,
             actor,
             issueId: req.params.issueId,
@@ -623,16 +712,16 @@ export function fileResourceRoutes(db: Db, opts: {
             projectId: query.projectId,
             workspaceId: query.workspaceId,
             error,
-            action: "issue.file_resource_download_denied",
           });
           throw error;
         }
 
+        if (!result) throw unprocessable("Workspace file cannot be previewed");
         await logActivity(db, {
           companyId: issue.companyId,
           actorType: actor.actorType,
           actorId: actor.actorId,
-          action: "issue.file_resource_download",
+          action: "issue.file_resource_content_read",
           entityType: "issue",
           entityId: req.params.issueId,
           agentId: actor.agentId,
@@ -649,60 +738,12 @@ export function fileResourceRoutes(db: Db, opts: {
           }),
         });
 
-        res.setHeader("Content-Type", result.resource.contentType ?? "application/octet-stream");
-        if (result.resource.byteSize != null) {
-          res.setHeader("Content-Length", String(result.resource.byteSize));
-        }
-        res.setHeader("Cache-Control", "private, max-age=60");
-        res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("Content-Disposition", `attachment; filename="${safeAttachmentFilename(result.resource.title)}"`);
-        await pipeline(createReadStream(result.realPath), res);
-        return;
+        res.set("X-Content-Type-Options", "nosniff");
+        res.json(result);
+      } finally {
+        release?.();
       }
-
-      let result: WorkspaceFileContent | null = null;
-      try {
-        result = await svc.readContent(req.params.issueId, query, { issue });
-      } catch (error) {
-        await logDeniedAttempt({
-          companyId: issue.companyId,
-          actor,
-          issueId: req.params.issueId,
-          displayPath: query.path,
-          projectId: query.projectId,
-          workspaceId: query.workspaceId,
-          error,
-        });
-        throw error;
-      }
-
-      if (!result) throw unprocessable("Workspace file cannot be previewed");
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        action: "issue.file_resource_content_read",
-        entityType: "issue",
-        entityId: req.params.issueId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        details: activityDetails({
-          outcome: "success",
-          workspaceKind: result.resource.workspaceKind,
-          workspaceId: result.resource.workspaceId,
-          projectId: result.resource.projectId ?? null,
-          projectName: result.resource.projectName ?? null,
-          displayPath: result.resource.displayPath,
-          byteSize: result.resource.byteSize ?? null,
-          contentType: result.resource.contentType ?? null,
-        }),
-      });
-
-      res.set("X-Content-Type-Options", "nosniff");
-      res.json(result);
-    } finally {
-      release?.();
-    }
+    });
   });
 
   return router;

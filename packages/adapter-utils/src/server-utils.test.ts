@@ -411,16 +411,21 @@ describe("runChildProcess", () => {
     expect(result.stdout).toBe("done");
   });
 
-  it("DUR-294: never inherits the server's own DATABASE_URL into a spawned agent process", async () => {
+  it("DUR-294/DUR-347: never inherits the server's own DATABASE_URL/DATABASE_MIGRATION_URL/DATABASE_BYPASS_URL into a spawned agent process", async () => {
     const originalDatabaseUrl = process.env.DATABASE_URL;
     const originalMigrationUrl = process.env.DATABASE_MIGRATION_URL;
+    const originalBypassUrl = process.env.DATABASE_BYPASS_URL;
     process.env.DATABASE_URL = "postgres://owner:secret@db:5432/paperclip";
     process.env.DATABASE_MIGRATION_URL = "postgres://migrator:secret@db:5432/paperclip";
+    process.env.DATABASE_BYPASS_URL = "postgres://bypass:secret@db:5432/paperclip";
     try {
       const result = await runChildProcess(
         randomUUID(),
         process.execPath,
-        ["-e", "process.stdout.write(JSON.stringify({DATABASE_URL: process.env.DATABASE_URL ?? null, DATABASE_MIGRATION_URL: process.env.DATABASE_MIGRATION_URL ?? null}))"],
+        [
+          "-e",
+          "process.stdout.write(JSON.stringify({DATABASE_URL: process.env.DATABASE_URL ?? null, DATABASE_MIGRATION_URL: process.env.DATABASE_MIGRATION_URL ?? null, DATABASE_BYPASS_URL: process.env.DATABASE_BYPASS_URL ?? null}))",
+        ],
         {
           cwd: process.cwd(),
           env: {},
@@ -431,12 +436,18 @@ describe("runChildProcess", () => {
       );
 
       expect(result.exitCode).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({ DATABASE_URL: null, DATABASE_MIGRATION_URL: null });
+      expect(JSON.parse(result.stdout)).toEqual({
+        DATABASE_URL: null,
+        DATABASE_MIGRATION_URL: null,
+        DATABASE_BYPASS_URL: null,
+      });
     } finally {
       if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = originalDatabaseUrl;
       if (originalMigrationUrl === undefined) delete process.env.DATABASE_MIGRATION_URL;
       else process.env.DATABASE_MIGRATION_URL = originalMigrationUrl;
+      if (originalBypassUrl === undefined) delete process.env.DATABASE_BYPASS_URL;
+      else process.env.DATABASE_BYPASS_URL = originalBypassUrl;
     }
   });
 

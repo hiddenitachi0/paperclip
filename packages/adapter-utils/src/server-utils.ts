@@ -2997,9 +2997,13 @@ export async function runChildProcess(
     // Stripped from the *inherited* base only, before merging in opts.env,
     // so a call site that deliberately wants to hand a specific process an
     // explicit DB credential via its own env config still can.
+    // DUR-347: DATABASE_BYPASS_URL (added for runInCompanyScopeBypass, see
+    // server/src/config.ts) is at least as privileged as DATABASE_URL --
+    // strip it for the same reason.
     const sanitizedInherited = sanitizeInheritedPaperclipEnv(process.env);
     delete sanitizedInherited.DATABASE_URL;
     delete sanitizedInherited.DATABASE_MIGRATION_URL;
+    delete sanitizedInherited.DATABASE_BYPASS_URL;
     const rawMerged: NodeJS.ProcessEnv = {
       ...sanitizedInherited,
       ...opts.env,
