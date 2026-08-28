@@ -56,8 +56,8 @@ import {
   routineRevisions,
   routineRuns,
   routines,
-  workspaceOperations,
   withCompanyScope,
+  workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -4956,15 +4956,6 @@ export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeSe
 export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
-  /**
-   * DUR-392 (DUR-277 Wave 5b): raw (unwrapped) Db instance for the handful
-   * of db.transaction() call sites below that are reachable from a
-   * company-scoped route (routes/issues.ts) -- the request-scoped proxy
-   * `db` this service otherwise uses doesn't support .transaction(), see
-   * packages/db/src/company-scope.ts. Defaults to db, a no-op for every
-   * caller that hasn't been wired through createRequestScopedDb yet (the
-   * scheduler tick, other unmigrated routes).
-   */
   rawDb?: Db;
 }
 
@@ -13002,7 +12993,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await db.transaction(async (tx) => {
+    const promotionResult = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       // Lock the context issue (if any) AND every issue that still references this run.
       //
       // A single run can hold execution locks on multiple issues: the caller's context
