@@ -2819,6 +2819,36 @@ export function issueRoutes(
     return false;
   }
 
+  // DUR-312: changeLogVisible/changeLogSummary feed the operator's no-decision-needed
+  // daily digest -- the whole point is that a line on it needs no further scrutiny.
+  // Without a narrower gate, any agent that is merely the current assignee could
+  // self-publish an unreviewed (and potentially false) one-liner. Board users are
+  // trusted outright; an agent may only set these fields in the same request that
+  // actually transitions the issue into "done", so the claim rides on the
+  // self-review/goal-condition/deploy-completion gates that already vet that
+  // transition -- it can't be bolted on before, after, or without one.
+  function assertChangeLogFieldsAllowed(
+    req: Request,
+    res: Response,
+    updateFields: { status?: unknown; changeLogVisible?: unknown; changeLogSummary?: unknown },
+    existing: { status: string },
+  ) {
+    const hasChangeLogFields =
+      updateFields.changeLogVisible !== undefined || updateFields.changeLogSummary !== undefined;
+    if (!hasChangeLogFields) return true;
+    if (req.actor.type === "board") return true;
+    const transitioningToDone = updateFields.status === "done" && existing.status !== "done";
+    if (transitioningToDone) return true;
+    res.status(403).json({
+      error:
+        "changeLogVisible/changeLogSummary may only be set by a board user, or in the same request that transitions the issue to done",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
   async function assertExplicitResumeIntentAllowed(
     req: Request,
     res: Response,
@@ -6068,6 +6098,7 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
+    if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
     const selfReviewGateResult = await evaluateSelfReviewDoneGate({
       db,
       wakeup: heartbeat.wakeup,
