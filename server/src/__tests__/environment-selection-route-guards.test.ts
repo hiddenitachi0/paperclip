@@ -53,6 +53,7 @@ const mockSecretService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/index.js", () => ({
+  isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   projectService: () => mockProjectService,
   issueService: () => mockIssueService,

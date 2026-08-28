@@ -1065,6 +1065,41 @@
       "when": 1787160060000,
       "tag": "0151_guarded_bypass_role_grant",
       "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1787160070000,
+      "tag": "0152_heartbeat_runs_retention_fks",
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1787160080000,
+      "tag": "0153_heartbeat_runs_created_at_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1787160090000,
+      "tag": "0154_persona_generation_counters",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1787160100000,
+      "tag": "0155_secret_scan_finding_dedup_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1787160200000,
+      "tag": "0156_issue_change_log_visibility",
+      "breakpoints": true
     }
   ]
 }

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execute } from "@paperclipai/adapter-gemini-local/server";
+import { ADVERSARIAL_SUCCESS_TRANSCRIPT } from "@paperclipai/adapter-utils/execution-classification-test-kit";
 
 async function writeFakeGeminiCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -423,6 +424,115 @@ describe("gemini execute", () => {
       expect(promptArg).toContain("Do not switch to another issue until you have handled this wake.");
       expect(promptArg).toContain("Second comment");
       expect(promptArg).not.toContain("Follow the paperclip heartbeat.");
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("[DUR-258] trusts the CLI's own is_error:false verdict over a post-completion nonzero exit code, even with an adversarial transcript", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-gemini-dur258-success-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "gemini");
+    await fs.mkdir(workspace, { recursive: true });
+    // Previously, gemini-local's `failed` was derived purely from the exit
+    // code and ignored the CLI's own `is_error: false` verdict — and the
+    // auth/quota word-search ran over the full stdout transcript. This pins
+    // both fixes at once: a harness-level kill after a genuine success must
+    // not flip the run to failed, even when the transcript is stuffed with
+    // every trigger word (429, rate limit, unauthorized, try again later).
+    await writeFailingGeminiCommand(commandPath, {
+      stdoutLines: [
+        {
+          type: "assistant",
+          message: { content: [{ type: "output_text", text: ADVERSARIAL_SUCCESS_TRANSCRIPT }] },
+        },
+        {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "gemini-session-dur258",
+          result: "Done.",
+        },
+      ],
+      exitCode: 143,
+    });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-dur258-success",
+        agent: { id: "a1", companyId: "c1", name: "G", adapterType: "gemini_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+        },
+        context: {},
+        authToken: "t",
+        onLog: async () => {},
+      });
+
+      expect(result.errorCode).toBeNull();
+      expect(result.errorMessage).toBeNull();
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("[DUR-258] a genuine, unrelated failure is not mislabeled auth/quota just because the transcript mentions those words earlier", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-gemini-dur258-failure-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "gemini");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFailingGeminiCommand(commandPath, {
+      stdoutLines: [
+        {
+          type: "assistant",
+          message: { content: [{ type: "output_text", text: ADVERSARIAL_SUCCESS_TRANSCRIPT }] },
+        },
+        {
+          type: "result",
+          subtype: "error",
+          is_error: true,
+          session_id: "gemini-session-dur258-fail",
+          error: "TypeError: cannot read property 'foo' of undefined",
+        },
+      ],
+      exitCode: 1,
+    });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-dur258-failure",
+        agent: { id: "a1", companyId: "c1", name: "G", adapterType: "gemini_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+        },
+        context: {},
+        authToken: "t",
+        onLog: async () => {},
+      });
+
+      expect(result.errorCode).not.toBe("gemini_auth_required");
+      expect(result.errorCode).not.toBe("gemini_network_unavailable");
+      expect(result.errorMessage).toContain("cannot read property");
     } finally {
       if (previousHome === undefined) {
         delete process.env.HOME;

@@ -100,6 +100,7 @@ import {
   type AgentSkillSnapshot,
   type AgentDetail as AgentDetailRecord,
   type BudgetPolicySummary,
+  type BudgetWindowKind,
   type HeartbeatRun,
   type HeartbeatRunEvent,
   type AgentRuntimeState,
@@ -128,6 +129,9 @@ const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string 
   scheduled_retry: { icon: Clock, color: "text-sky-600 dark:text-sky-400" },
   timed_out: { icon: Timer, color: "text-orange-600 dark:text-orange-400" },
   cancelled: { icon: Slash, color: "text-neutral-500 dark:text-neutral-400" },
+  // DUR-296: interrupted by a planned restart, will resume automatically --
+  // never styled like an error/failure state.
+  paused_for_restart: { icon: RotateCcw, color: "text-sky-600 dark:text-sky-400" },
 };
 
 const RUN_LOG_PAGE_BYTES = 256_000;
@@ -865,12 +869,12 @@ export function AgentDetail() {
   });
 
   const budgetMutation = useMutation({
-    mutationFn: (amount: number) =>
+    mutationFn: ({ amount, windowKind }: { amount: number; windowKind: BudgetWindowKind }) =>
       budgetsApi.upsertPolicy(resolvedCompanyId!, {
         scopeType: "agent",
         scopeId: agent?.id ?? routeAgentRef,
         amount,
-        windowKind: "calendar_month_utc",
+        windowKind,
       }),
     onSuccess: () => {
       if (!resolvedCompanyId) return;
@@ -1272,7 +1276,7 @@ export function AgentDetail() {
           <BudgetPolicyCard
             summary={agentBudgetSummary}
             isSaving={budgetMutation.isPending}
-            onSave={(amount) => budgetMutation.mutate(amount)}
+            onSave={(amount, windowKind) => budgetMutation.mutate({ amount, windowKind })}
             variant="plain"
           />
         </div>

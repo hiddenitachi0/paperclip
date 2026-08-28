@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request } from "express";
 import type { Db } from "@paperclipai/db";
+import { createRequestScopedDb } from "@paperclipai/db";
 import {
   createIssueTreeHoldSchema,
   isUuidLike,
@@ -10,6 +11,8 @@ import {
 import { validate } from "../middleware/validate.js";
 import { heartbeatService, issueService, issueTreeControlService, logActivity } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { companyScope } from "../middleware/company-scope.js";
+import { notFound } from "../errors.js";
 
 const TREE_RUN_CANCELLATION_RESPONSE_WAIT_MS = 1_000;
 
@@ -31,26 +34,46 @@ async function waitForRunCancellationTasks(tasks: Promise<void>[]) {
   }
 }
 
-export function issueTreeControlRoutes(db: Db) {
+export function issueTreeControlRoutes(rawDb: Db) {
   const router = Router();
+  // DUR-348 (DUR-277 Wave 2): this file's own request-scoped instance; rawDb
+  // stays unwrapped for the pre-scope root-issue lookups below, and is
+  // threaded through to issueTreeControlService's `rawDb` param, which its
+  // few db.transaction() sites need directly (unsupported through the
+  // scoped proxy -- see services/issue-tree-control.ts and
+  // middleware/company-scope.ts).
+  const db = createRequestScopedDb(rawDb);
   const issuesSvc = issueService(db);
-  const treeControlSvc = issueTreeControlService(db);
+  const rawIssuesSvc = issueService(rawDb);
+  const treeControlSvc = issueTreeControlService(db, rawDb);
   const heartbeat = heartbeatService(db);
 
-  async function resolveRootIssue(req: Request) {
+  async function resolveRootIssue(svc: typeof issuesSvc, req: Request) {
     const rootIssueId = req.params.id as string;
-    const root = await issuesSvc.getById(rootIssueId);
+    const root = await svc.getById(rootIssueId);
     return root;
   }
 
-  router.post("/issues/:id/tree-control/preview", validate(previewIssueTreeControlSchema), async (req, res) => {
-    assertBoard(req);
-    const root = await resolveRootIssue(req);
+  function scopeFromRootIssue() {
+    return companyScope(rawDb, async (req) => {
+      assertBoard(req);
+      const root = await resolveRootIssue(rawIssuesSvc, req);
+      if (!root) throw notFound("Root issue not found");
+      assertCompanyAccess(req, root.companyId);
+      return root.companyId;
+    });
+  }
+
+  router.post(
+    "/issues/:id/tree-control/preview",
+    scopeFromRootIssue(),
+    validate(previewIssueTreeControlSchema),
+    async (req, res) => {
+    const root = await resolveRootIssue(issuesSvc, req);
     if (!root) {
       res.status(404).json({ error: "Root issue not found" });
       return;
     }
-    assertCompanyAccess(req, root.companyId);
 
     const preview = await treeControlSvc.preview(root.companyId, root.id, req.body);
     const actor = getActorInfo(req);
@@ -71,16 +94,19 @@ export function issueTreeControlRoutes(db: Db) {
     });
 
     res.json(preview);
-  });
+    },
+  );
 
-  router.post("/issues/:id/tree-holds", validate(createIssueTreeHoldSchema), async (req, res) => {
-    assertBoard(req);
-    const root = await resolveRootIssue(req);
+  router.post(
+    "/issues/:id/tree-holds",
+    scopeFromRootIssue(),
+    validate(createIssueTreeHoldSchema),
+    async (req, res) => {
+    const root = await resolveRootIssue(issuesSvc, req);
     if (!root) {
       res.status(404).json({ error: "Root issue not found" });
       return;
     }
-    assertCompanyAccess(req, root.companyId);
 
     const actor = getActorInfo(req);
     const actorInput = {
@@ -295,29 +321,37 @@ export function issueTreeControlRoutes(db: Db) {
     res
       .status(result.hold.mode === "restore" || result.hold.mode === "resume" ? 200 : 201)
       .json(result);
-  });
+    },
+  );
 
-  router.get("/issues/:id/tree-control/state", async (req, res) => {
-    assertBoard(req);
+  router.get(
+    "/issues/:id/tree-control/state",
+    companyScope(rawDb, async (req) => {
+      assertBoard(req);
+      const issueId = req.params.id as string;
+      const issue = await rawIssuesSvc.getById(issueId);
+      if (!issue) throw notFound("Issue not found");
+      assertCompanyAccess(req, issue.companyId);
+      return issue.companyId;
+    }),
+    async (req, res) => {
     const issueId = req.params.id as string;
     const issue = await issuesSvc.getById(issueId);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    assertCompanyAccess(req, issue.companyId);
     const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id);
     res.json({ activePauseHold });
-  });
+    },
+  );
 
-  router.get("/issues/:id/tree-holds", async (req, res) => {
-    assertBoard(req);
-    const root = await resolveRootIssue(req);
+  router.get("/issues/:id/tree-holds", scopeFromRootIssue(), async (req, res) => {
+    const root = await resolveRootIssue(issuesSvc, req);
     if (!root) {
       res.status(404).json({ error: "Root issue not found" });
       return;
     }
-    assertCompanyAccess(req, root.companyId);
     const statusParam = typeof req.query.status === "string" ? req.query.status : null;
     const modeParam = typeof req.query.mode === "string" ? req.query.mode : null;
     const includeMembers = req.query.includeMembers === "true";
@@ -332,14 +366,12 @@ export function issueTreeControlRoutes(db: Db) {
     res.json(holds);
   });
 
-  router.get("/issues/:id/tree-holds/:holdId", async (req, res) => {
-    assertBoard(req);
-    const root = await resolveRootIssue(req);
+  router.get("/issues/:id/tree-holds/:holdId", scopeFromRootIssue(), async (req, res) => {
+    const root = await resolveRootIssue(issuesSvc, req);
     if (!root) {
       res.status(404).json({ error: "Root issue not found" });
       return;
     }
-    assertCompanyAccess(req, root.companyId);
 
     const holdId = req.params.holdId as string;
     if (!isUuidLike(holdId)) {
@@ -357,15 +389,14 @@ export function issueTreeControlRoutes(db: Db) {
 
   router.post(
     "/issues/:id/tree-holds/:holdId/release",
+    scopeFromRootIssue(),
     validate(releaseIssueTreeHoldSchema),
     async (req, res) => {
-      assertBoard(req);
-      const root = await resolveRootIssue(req);
+      const root = await resolveRootIssue(issuesSvc, req);
       if (!root) {
         res.status(404).json({ error: "Root issue not found" });
         return;
       }
-      assertCompanyAccess(req, root.companyId);
 
       const holdId = req.params.holdId as string;
       if (!isUuidLike(holdId)) {

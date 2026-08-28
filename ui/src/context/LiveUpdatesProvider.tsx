@@ -21,7 +21,16 @@ const TOAST_COOLDOWN_MAX = 3;
 const RECONNECT_SUPPRESS_MS = 2000;
 const SOCKET_CONNECTING = 0;
 const SOCKET_OPEN = 1;
-const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+// DUR-296: "paused_for_restart" is terminal (the run really has stopped)
+// but never a failure -- deliberately kept out of RUN_TOAST_STATUSES below
+// so it never surfaces an error toast.
+const TERMINAL_RUN_STATUSES = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+]);
 
 type LiveUpdatesSocketLike = {
   readyState: number;

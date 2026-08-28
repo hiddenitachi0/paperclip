@@ -239,6 +239,70 @@ async function lookupBranchesForCommitHead(
 }
 
 /**
+ * DUR-284: best-effort resolution of `payload.sourceBranch`/`payload.deployBranch`
+ * for a `kind:"deploy"` approval, so DUR-226's UI has real data for its "Deploys
+ * from <branch>" badge and mismatch warning instead of rendering nothing. Runs
+ * after assertDeployCommitIsAncestorOfDeployBranch already confirmed (or
+ * deliberately failed open on) the commit -- never throws, and leaves a field
+ * unset rather than guess when it can't be determined via GitHub.
+ *
+ * `deployBranch` is the project's declared deploy branch (same lookup the
+ * ancestry guard uses). `sourceBranch` is the branch GitHub reports the pinned
+ * commit is the current tip of; when that can't be pinned down (commit isn't a
+ * branch tip, no GitHub repo, GitHub unreachable) it's left unset rather than
+ * assumed equal to deployBranch, even though the ancestry guard makes that the
+ * common case.
+ */
+async function resolveDeployApprovalBranchStamp(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string },
+  deps: {
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+  } = {},
+): Promise<{ sourceBranch?: string; deployBranch?: string }> {
+  const branches = await resolveProjectDeployBranchesByProjectId(db, payload.projectId);
+  const deployBranch = branches?.deployBranch;
+  if (!deployBranch) return {};
+
+  const commit = payload.commit?.trim();
+  if (!commit) return { deployBranch };
+
+  const workspaceRow = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(
+      and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)),
+    )
+    .then((rows) => rows[0] ?? null);
+  const repo = parseGitHubRepoFromUrl(workspaceRow?.repoUrl);
+  if (!repo) return { deployBranch };
+
+  const fetchImpl = deps.fetchImpl ?? ghFetch;
+  const resolveGitHubToken =
+    deps.resolveGitHubToken ??
+    ((cid: string) =>
+      secretService(db).resolveGitHubToken(cid, {
+        consumerType: "system",
+        consumerId: "deploy-approval-branch-stamp",
+      }));
+  const token = await resolveGitHubToken(companyId).catch(() => null);
+
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "paperclip-deploy-approval-branch-stamp",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const actualBranches = await lookupBranchesForCommitHead(fetchImpl, headers, repo, commit);
+  if (actualBranches.includes(deployBranch)) return { deployBranch, sourceBranch: deployBranch };
+  if (actualBranches.length > 0) return { deployBranch, sourceBranch: actualBranches[0] };
+  return { deployBranch };
+}
+
+/**
  * `request_board_approval` approvals whose payload carries `kind:"model_boost"`
  * follow the temporary model/effort escalation convention (DUR-31) and must
  * validate against modelBoostRequestPayloadSchema before an operator sees them.
@@ -701,6 +765,12 @@ export function approvalRoutes(
       const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
       await assertDeployRequestProjectExists(db, companyId, deployPayload);
       await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
+      const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
+      approvalInput.payload = deployRequestPayloadSchema.parse({
+        ...deployPayload,
+        sourceBranch: branchStamp.sourceBranch,
+        deployBranch: branchStamp.deployBranch,
+      });
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
@@ -1120,6 +1190,12 @@ export function approvalRoutes(
       const deployPayload = deployRequestPayloadSchema.parse(req.body.payload);
       await assertDeployRequestProjectExists(db, existing.companyId, deployPayload);
       await assertDeployCommitIsAncestorOfDeployBranch(db, existing.companyId, deployPayload);
+      const branchStamp = await resolveDeployApprovalBranchStamp(db, existing.companyId, deployPayload);
+      req.body.payload = deployRequestPayloadSchema.parse({
+        ...deployPayload,
+        sourceBranch: branchStamp.sourceBranch,
+        deployBranch: branchStamp.deployBranch,
+      });
     }
     let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"

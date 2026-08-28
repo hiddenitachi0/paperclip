@@ -6,7 +6,17 @@ import { resolveCommandContext } from "./client/common.js";
 
 const HEARTBEAT_SOURCES = ["timer", "assignment", "on_demand", "automation"] as const;
 const HEARTBEAT_TRIGGERS = ["manual", "ping", "callback", "system"] as const;
-const TERMINAL_STATUSES = new Set<HeartbeatRunStatus>(["succeeded", "failed", "cancelled", "timed_out"]);
+// DUR-296: "paused_for_restart" is terminal (the run really has stopped) but
+// never a failure -- see HEARTBEAT_RUN_TERMINAL_STATUSES in heartbeat.ts.
+// Without it here, `heartbeat-run` would poll forever if a planned restart's
+// drain wait marks the run mid-poll.
+const TERMINAL_STATUSES = new Set<HeartbeatRunStatus>([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+]);
 const POLL_INTERVAL_MS = 200;
 
 type HeartbeatSource = (typeof HEARTBEAT_SOURCES)[number];

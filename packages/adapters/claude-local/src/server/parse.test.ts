@@ -109,7 +109,6 @@ describe("detectClaudeLoginRequired", () => {
     expect(
       detectClaudeLoginRequired({
         parsed: null,
-        stdout: "",
         stderr: "Invalid API key · Please run /login",
       }),
     ).toEqual({ requiresLogin: true, loginUrl: null });
@@ -119,7 +118,6 @@ describe("detectClaudeLoginRequired", () => {
     expect(
       detectClaudeLoginRequired({
         parsed: null,
-        stdout: "",
         stderr: "Invalid API key",
       }).requiresLogin,
     ).toBe(false);
@@ -129,7 +127,6 @@ describe("detectClaudeLoginRequired", () => {
     expect(
       detectClaudeLoginRequired({
         parsed: null,
-        stdout: "",
         stderr: "Error: request failed: 401 unauthorized",
       }).requiresLogin,
     ).toBe(false);
@@ -139,7 +136,6 @@ describe("detectClaudeLoginRequired", () => {
     expect(
       detectClaudeLoginRequired({
         parsed: null,
-        stdout: "",
         stderr: "401 unauthorized · please run /login",
       }).requiresLogin,
     ).toBe(true);
@@ -226,7 +222,6 @@ describe("isClaudeTransientUpstreamError", () => {
     expect(
       detectClaudeLoginRequired({
         parsed: null,
-        stdout: "",
         stderr: "401 unauthorized: claude usage limit reached, resets 4pm (America/Chicago)",
       }).requiresLogin,
     ).toBe(false);

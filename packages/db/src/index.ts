@@ -37,7 +37,13 @@ export {
 export {
   withCompanyScope,
   withCompanyScopeBypass,
+  runInCompanyScope,
+  runInCompanyScopeBypass,
+  createRequestScopedDb,
   type CompanyScopeBypassOptions,
+  type RequestScope,
+  type RequestCompanyScope,
+  type RequestCompanyScopeBypass,
 } from "./company-scope.js";
 export { issueRelations } from "./schema/issue_relations.js";
 export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";

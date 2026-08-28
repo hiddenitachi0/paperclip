@@ -69,6 +69,7 @@ import {
   type WorktreeLocalPaths,
 } from "./worktree-lib.js";
 import {
+  assertWorkspaceRepoUrlSafeForMerge,
   buildWorktreeMergePlan,
   parseWorktreeMergeScopes,
   type IssueAttachmentRow,
@@ -2640,6 +2641,7 @@ async function applyMergePlan(input: {
 
       for (const workspace of project.workspaces) {
         if (existingImportedWorkspaceIds.has(workspace.id)) continue;
+        assertWorkspaceRepoUrlSafeForMerge(workspace.repoUrl);
         await tx.insert(projectWorkspaces).values({
           id: workspace.id,
           companyId,
