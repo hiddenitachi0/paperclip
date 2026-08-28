@@ -57,13 +57,24 @@ const COMPLETED_ENTRY = {
   body: "Deployed to /root/paperclip -- commit 9a3a7e7abc is live and healthy (health check: http://x).",
 };
 
-function candidateRow(overrides: Partial<{ issueId: string; identifier: string | null; mergeCommitSha: string }> = {}) {
-  const { issueId = "issue-1", identifier = "PAP-1", mergeCommitSha = "9a3a7e7abcdef0123456789abcdef0123456789" } =
-    overrides;
+function candidateRow(
+  overrides: Partial<{
+    issueId: string;
+    identifier: string | null;
+    mergeCommitSha: string;
+    originalIssueIds: string[];
+  }> = {},
+) {
+  const {
+    issueId = "issue-1",
+    identifier = "PAP-1",
+    mergeCommitSha = "9a3a7e7abcdef0123456789abcdef0123456789",
+    originalIssueIds = [issueId],
+  } = overrides;
   return {
     issueId,
     identifier,
-    payload: { kind: "merge_pr", base: "custom", mergeCommitSha },
+    payload: { kind: "merge_pr", base: "custom", mergeCommitSha, originalIssueIds },
   };
 }
 
@@ -317,5 +328,68 @@ describe("deployCarriedIssuesService.tick (DUR-238)", () => {
     expect(result).toEqual({ checked: 1, closed: 2 });
     expect(mockIssueService.update).toHaveBeenCalledWith("issue-1", { status: "done" });
     expect(mockIssueService.update).toHaveBeenCalledWith("issue-2", { status: "done" });
+  });
+
+  // DUR-252 security review: `issueApprovals` is a mutable link table -- the agent that
+  // requested a merge_pr approval can relink it to ANY issue in the company after the fact (or
+  // file a fresh approval against an unrelated already-merged historical PR and link it to
+  // someone else's issue). Without the `originalIssueIds` anchor, either lets an attacker force
+  // an unrelated `in_review` issue closed with zero review of its own actual work. This is the
+  // regression test that fails without that fix: the candidate row's approval was filed for
+  // "issue-1" (per `originalIssueIds`), but the mutable link table now points the SAME approval
+  // at "issue-2" -- the exact "relink a legitimate/forged approval onto a different issue"
+  // misuse scenario the review described.
+  it("does NOT close an issue whose linked merge_pr approval was originally filed for a DIFFERENT issue (relinked/reused approval)", async () => {
+    const { deployCarriedIssuesService } = await import("../services/deploy-carried-issues.js");
+    const { db, updateCalls } = makeFakeDb({
+      dueApprovals: [DEPLOY_APPROVAL],
+      candidateRows: [
+        candidateRow({
+          issueId: "issue-2",
+          mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789",
+          originalIssueIds: ["issue-1"],
+        }),
+      ],
+    });
+    mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+
+    const svc = deployCarriedIssuesService(db as any, { readStatusLog: () => [COMPLETED_ENTRY] });
+    const result = await svc.tick();
+
+    expect(result).toEqual({ checked: 1, closed: 0 });
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    // Still marked swept -- the deploy itself completed, this candidate just never qualified.
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload.carriedIssuesSwept).toBe(true);
+  });
+
+  // A merge_pr approval approved before this fix shipped has no `originalIssueIds` at all --
+  // fail closed (never treat "unknown provenance" as "proven to match"), the same posture as
+  // every other unproven check in this file.
+  it("does NOT close an issue whose linked merge_pr approval predates originalIssueIds (field absent)", async () => {
+    const { deployCarriedIssuesService } = await import("../services/deploy-carried-issues.js");
+    const { db } = makeFakeDb({
+      dueApprovals: [DEPLOY_APPROVAL],
+      candidateRows: [
+        {
+          issueId: "issue-1",
+          identifier: "PAP-1",
+          payload: {
+            kind: "merge_pr",
+            base: "custom",
+            mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789",
+            // no originalIssueIds field
+          },
+        },
+      ],
+    });
+    mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+
+    const svc = deployCarriedIssuesService(db as any, { readStatusLog: () => [COMPLETED_ENTRY] });
+    const result = await svc.tick();
+
+    expect(result).toEqual({ checked: 1, closed: 0 });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 });

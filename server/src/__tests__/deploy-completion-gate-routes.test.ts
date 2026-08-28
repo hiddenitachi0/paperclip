@@ -223,7 +223,12 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     mockIssueService.getById.mockResolvedValue(issue);
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
     ]);
 
     const res = await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
@@ -244,7 +249,12 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     }));
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
       { id: "deploy-1", type: "request_board_approval", status: "approved", payload: { kind: "deploy", projectId: "project-1" } },
     ]);
     mockReadDeployRunnerStatus.mockReturnValue([
@@ -268,7 +278,12 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     mockIssueService.getById.mockResolvedValue(issue);
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
       { id: "deploy-other-project", type: "request_board_approval", status: "approved", payload: { kind: "deploy", projectId: "project-2" } },
     ]);
     mockReadDeployRunnerStatus.mockReturnValue([

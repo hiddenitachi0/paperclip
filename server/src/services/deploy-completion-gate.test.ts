@@ -27,7 +27,10 @@ const mergeApproval = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: "merge-approval-1",
   type: "request_board_approval",
   status: "approved",
-  payload: { kind: "merge_pr", base: "custom" },
+  // originalIssueIds defaults to [ISSUE.id]: this represents an approval genuinely filed for
+  // the issue under test (DUR-252) -- tests of the *other* case (an approval filed for a
+  // different issue) set payload.originalIssueIds explicitly.
+  payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE.id] },
   ...overrides,
 });
 
@@ -227,6 +230,46 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     expect(mockIssueApprovalService.listApprovalsForIssue).not.toHaveBeenCalled();
   });
 
+  // DUR-252 security review (defense in depth, same root cause as the deploy-carried-issues.ts
+  // fix): `issueApprovals` is a mutable link table -- the agent that requested a merge_pr
+  // approval can relink it to a DIFFERENT issue than the one it was actually filed for.
+  // `originalIssueIds` (stamped once at creation, routes/approvals.ts) anchors which issue(s)
+  // an approval genuinely completes; a linked approval whose originalIssueIds does not include
+  // THIS issue must never count as this issue's completing merge, even though the mutable link
+  // table says it's linked and a deploy for it completed.
+  it("DUR-252: does not treat a merge_pr approval linked here but originally filed for a DIFFERENT issue as this issue's completing merge", async () => {
+    const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      mergeApproval({ payload: { kind: "merge_pr", base: "custom", originalIssueIds: ["some-other-issue"] } }),
+      deployApproval(),
+    ]);
+    const readStatusLog = vi.fn().mockReturnValue([
+      {
+        ts: "t",
+        approvalId: "deploy-approval-1",
+        companyId: "company-1",
+        commentDelivered: true,
+        body: "Deployed to /root/paperclip -- commit abc123 is live and healthy (health check: http://x).",
+      },
+    ]);
+
+    const result = await evaluateDeployCompletionDoneGate({
+      db: {} as any,
+      issue: ISSUE,
+      actor: AGENT_ACTOR,
+      requestedStatus: "done",
+      currentStatus: "in_review",
+      readStatusLog,
+    });
+
+    // Same outcome as "no merge_pr approval linked at all" -- the gate does not treat this as
+    // evidence of a completed deploy for THIS issue (a relinked approval must never provide
+    // false reassurance), so it falls through to the ordinary self-certification path rather
+    // than blocking on stale/borrowed deploy evidence.
+    expect(result).toBeNull();
+  });
+
   it("is unaffected when the issue has no merge_pr approval into the deploy branch at all", async () => {
     const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom" });
@@ -330,7 +373,14 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
       const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
       mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
       mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-        mergeApproval({ payload: { kind: "merge_pr", base: "custom", mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789" } }),
+        mergeApproval({
+          payload: {
+            kind: "merge_pr",
+            base: "custom",
+            mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789",
+            originalIssueIds: [ISSUE.id],
+          },
+        }),
       ]);
       const readStatusLog = vi.fn().mockReturnValue([
         {
@@ -358,7 +408,14 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
       const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
       mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
       mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-        mergeApproval({ payload: { kind: "merge_pr", base: "custom", mergeCommitSha: "deadbeef00000000000000000000000000000000" } }),
+        mergeApproval({
+          payload: {
+            kind: "merge_pr",
+            base: "custom",
+            mergeCommitSha: "deadbeef00000000000000000000000000000000",
+            originalIssueIds: [ISSUE.id],
+          },
+        }),
       ]);
       const readStatusLog = vi.fn().mockReturnValue([
         {

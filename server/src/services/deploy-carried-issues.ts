@@ -10,6 +10,7 @@ import {
   DEPLOY_SUCCESS_MARKER,
   approvalPayloadKind,
   approvalPayloadMergeCommitSha,
+  approvalPayloadOriginalIssueIds,
   approvalPayloadProjectId,
   commitsMatch,
   extractDeployedCommit,
@@ -95,11 +96,33 @@ function shortSha(sha: string): string {
 }
 
 /**
+ * True when `payload.originalIssueIds` (stamped once, server-side, at `merge_pr` approval
+ * creation time -- see `normalizeRequestBoardApprovalPayload` in routes/approvals.ts) includes
+ * `issueId`. DUR-252 security review finding: `issueApprovals` is a mutable link table --
+ * `POST /issues/:id/approvals` lets the agent that originally requested an approval link it to
+ * ANY issue in the company, not just the one it was actually filed for (or, worse, an agent
+ * with only `merges:request` can file a merge_pr approval against an arbitrary already-merged
+ * historical PR and link it to someone else's `in_review` issue once approved). Trusting the
+ * join table alone would let either of those force-close an issue whose own work was never
+ * reviewed or merged. `originalIssueIds` is never caller-writable after creation (stripped and
+ * re-stamped from the persisted approval on every resubmit), so it anchors "which issue(s) was
+ * this approval actually filed for" independently of any later relink. A row with no
+ * `originalIssueIds` at all (an approval filed before this fix shipped) is treated as
+ * untrusted and never carries -- fails closed the same direction as every other unproven check
+ * in this file, at the cost of that one pre-existing approval not benefiting from the sweep.
+ */
+function issueMatchesApprovalOrigin(payload: Record<string, unknown>, issueId: string): boolean {
+  return approvalPayloadOriginalIssueIds(payload).includes(issueId);
+}
+
+/**
  * Every `in_review` issue in the given project with an approved merge_pr approval into the
  * declared deploy branch whose merge commit has been backfilled -- the exact candidate pool
  * item 1 of this file's docblock names. An issue with more than one such approval linked (a
  * re-review loop) contributes its first matching row; which one is immaterial since they all
- * carry the same issue toward the same conclusion.
+ * carry the same issue toward the same conclusion. Rows whose linked approval was not
+ * originally filed for that issue (see `issueMatchesApprovalOrigin`) never qualify, regardless
+ * of what the mutable `issueApprovals` link table currently says.
  */
 async function listCarriedCandidateIssues(
   db: Db,
@@ -133,7 +156,9 @@ async function listCarriedCandidateIssues(
   const byIssueId = new Map<string, CandidateIssue>();
   for (const row of rows) {
     if (byIssueId.has(row.issueId)) continue;
-    const mergeCommitSha = approvalPayloadMergeCommitSha(row.payload);
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    if (!issueMatchesApprovalOrigin(payload, row.issueId)) continue;
+    const mergeCommitSha = approvalPayloadMergeCommitSha(payload);
     if (!mergeCommitSha) continue;
     byIssueId.set(row.issueId, { issueId: row.issueId, identifier: row.identifier, mergeCommitSha });
   }
@@ -146,9 +171,17 @@ async function listCarriedCandidateIssues(
  * `workspaceId` was required. Returns null (never guesses) when neither resolves to a
  * github.com repo -- the ancestry check below then only ever has the exact-commit fast path
  * available, per this file's fail-closed rule.
+ *
+ * Both lookups are scoped to `companyId` (DUR-252 security review finding #2): `workspaceId`
+ * and `projectId` are caller-supplied fields on the approval's own payload, and without this
+ * filter a cross-tenant id would resolve another company's `repoUrl` -- low practical impact
+ * since a mismatched repo only ever feeds the fail-closed ancestry check below, but a
+ * gratuitous cross-tenant read all the same, and every other query in this file scopes by
+ * companyId.
  */
 async function resolveDeployApprovalRepo(
   db: Db,
+  companyId: string,
   payload: Record<string, unknown>,
 ): Promise<{ owner: string; name: string } | null> {
   const workspaceId = typeof payload.workspaceId === "string" ? payload.workspaceId : null;
@@ -158,7 +191,7 @@ async function resolveDeployApprovalRepo(
     const row = await db
       .select({ repoUrl: projectWorkspaces.repoUrl })
       .from(projectWorkspaces)
-      .where(eq(projectWorkspaces.id, workspaceId))
+      .where(and(eq(projectWorkspaces.id, workspaceId), eq(projectWorkspaces.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     const repo = parseGitHubRepoFromUrl(row?.repoUrl);
     if (repo) return repo;
@@ -168,7 +201,13 @@ async function resolveDeployApprovalRepo(
     const row = await db
       .select({ repoUrl: projectWorkspaces.repoUrl })
       .from(projectWorkspaces)
-      .where(and(eq(projectWorkspaces.projectId, projectId), eq(projectWorkspaces.isPrimary, true)))
+      .where(
+        and(
+          eq(projectWorkspaces.projectId, projectId),
+          eq(projectWorkspaces.companyId, companyId),
+          eq(projectWorkspaces.isPrimary, true),
+        ),
+      )
       .then((rows) => rows[0] ?? null);
     return parseGitHubRepoFromUrl(row?.repoUrl);
   }
@@ -337,7 +376,7 @@ export function deployCarriedIssuesService(
         continue;
       }
 
-      const repo = await resolveDeployApprovalRepo(db, payload);
+      const repo = await resolveDeployApprovalRepo(db, approval.companyId, payload);
       const token = repo ? await resolveGitHubToken(approval.companyId) : null;
 
       for (const candidate of candidates) {

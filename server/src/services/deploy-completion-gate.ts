@@ -74,6 +74,17 @@ export function approvalPayloadMergeCommitSha(payload: unknown): string | null {
   return typeof sha === "string" && sha.length >= 7 ? sha : null;
 }
 
+// DUR-252: the issue id(s) a `merge_pr` approval was actually filed for, stamped once at
+// creation (routes/approvals.ts's stampOriginalIssueIds) and never caller-writable afterward.
+// Empty for a payload with no such field (predates this fix, or not a merge_pr payload) --
+// callers must treat that the same as "proven not to match", never as "unknown, allow anyway".
+export function approvalPayloadOriginalIssueIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const ids = (payload as Record<string, unknown>).originalIssueIds;
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id): id is string => typeof id === "string");
+}
+
 const COMMIT_IN_BODY = /\bcommit ([0-9a-f]{7,40})\b/i;
 
 // A runner-log entry's own `commit` structured field is only reliably populated for a "carried"
@@ -177,7 +188,15 @@ export async function evaluateDeployCompletionDoneGate(
       approval.type === "request_board_approval" &&
       approval.status === "approved" &&
       approvalPayloadKind(approval.payload) === "merge_pr" &&
-      approvalPayloadBase(approval.payload) === branches.deployBranch,
+      approvalPayloadBase(approval.payload) === branches.deployBranch &&
+      // DUR-252: `issueApprovals` is a mutable link table -- an agent that requested a
+      // merge_pr approval may relink it to any issue in the company later, so a linked
+      // approval alone is not proof it was filed for THIS issue. `originalIssueIds` is
+      // stamped once at creation and never caller-writable after (see
+      // routes/approvals.ts's stampOriginalIssueIds); an approval with no such field at all
+      // predates this fix and is treated as unproven, same fail-closed posture as
+      // deploy-carried-issues.ts's identical check.
+      approvalPayloadOriginalIssueIds(approval.payload).includes(input.issue.id),
   );
   // This issue's completing action was never a merge into the declared deploy branch — the
   // acceptance criterion "do not block issues that never touch a deploy branch" applies.
