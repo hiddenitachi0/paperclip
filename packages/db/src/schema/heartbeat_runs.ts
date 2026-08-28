@@ -67,6 +67,7 @@ export const heartbeatRuns = pgTable(
       table.companyId,
       table.createdAt,
     ),
+    createdAtIdx: index("heartbeat_runs_created_at_idx").on(table.createdAt),
     companyLivenessIdx: index("heartbeat_runs_company_liveness_idx").on(
       table.companyId,
       table.livenessState,
