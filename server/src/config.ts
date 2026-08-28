@@ -112,6 +112,22 @@ function detectTailnetBindHost(): string | undefined {
   }
 }
 
+/**
+ * DUR-366: opt-in, not opt-out. An earlier opt-out default let the
+ * heartbeat_runs retention sweep run an unreviewed, irreversible delete the
+ * moment it happened to ship as a side effect of an unrelated deploy --
+ * before the NOR-316 forensics question it was gated on ever got answered.
+ * Requires an explicit "true"; every other value (unset, "false", anything
+ * else) stays disabled. Extracted as a pure function so this default is
+ * unit-testable without exercising the rest of loadConfig()'s filesystem/
+ * tailscale/git side effects.
+ */
+export function resolveHeartbeatRunRetentionEnabled(
+  env: { PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED?: string } = process.env,
+): boolean {
+  return env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true";
+}
+
 export function loadConfig(): Config {
   const fileConfig = readConfigFile();
   const fileDatabaseMode =
@@ -341,13 +357,9 @@ export function loadConfig(): Config {
     // secret that slips past scanning/masking (DUR-316/317/318) stays live and
     // readable, independent of those upstream defenses. 30 days keeps a month
     // of run history for debugging/audit; adjust via env if that's wrong for
-    // this deployment.
-    //
-    // DUR-366: opt-in, not opt-out. An earlier opt-out default let this run
-    // an unreviewed, irreversible delete sweep the moment it happened to ship
-    // as a side effect of an unrelated deploy -- before the NOR-316 forensics
-    // question it was gated on ever got answered. Requires an explicit "true".
-    heartbeatRunRetentionEnabled: process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true",
+    // this deployment. See resolveHeartbeatRunRetentionEnabled() above for
+    // why the enable flag itself defaults off (DUR-366).
+    heartbeatRunRetentionEnabled: resolveHeartbeatRunRetentionEnabled(),
     heartbeatRunRetentionDays: Math.max(
       1,
       Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_DAYS) || 30,
