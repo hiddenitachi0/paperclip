@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Agent } from "@paperclipai/shared";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, ClipboardCheck, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import {
@@ -202,6 +202,62 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
         badge: "border-violet-500/60 bg-violet-500/10 text-violet-900 dark:bg-violet-500/15 dark:text-violet-100",
         label: "In review",
         Icon: FileText,
+      };
+  }
+}
+
+/**
+ * A confirmation whose detailsMarkdown lists concrete numbered claims (the
+ * NOR-307 pattern, DUR-311) is asking the operator to verify a fact only they
+ * can check — accounting figures, wording that should read naturally, a
+ * workflow that should match how the business actually runs — not to decide
+ * something the agent lacked authority to decide itself. It renders as a
+ * distinct "fact check" card (teal) so it never reads like a GODKJENN /
+ * deploy-approval decision card.
+ */
+function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
+  if (interaction.kind !== "request_confirmation") return false;
+  if (isPlanConfirmation(interaction)) return false;
+  const details = interaction.payload.detailsMarkdown;
+  if (!details) return false;
+  const numberedClaims = details
+    .split("\n")
+    .filter((line) => /^\s*\d+[.)]\s+\S/.test(line));
+  return numberedClaims.length >= 2;
+}
+
+function factCheckStatusClasses(status: IssueThreadInteraction["status"]) {
+  switch (status) {
+    case "accepted":
+    case "answered":
+      return {
+        shell: "border-2 border-teal-500/80 bg-transparent",
+        badge: "border-teal-500/60 bg-teal-500/10 text-teal-900 dark:bg-teal-500/15 dark:text-teal-100",
+        label: "Confirmed correct",
+        Icon: CheckCircle2,
+      };
+    case "rejected":
+    case "cancelled":
+      return {
+        shell: "border-2 border-red-500/80 bg-transparent",
+        badge: "border-red-500/60 bg-red-500/10 text-red-900 dark:bg-red-500/15 dark:text-red-100",
+        label: "Doesn't match",
+        Icon: XCircle,
+      };
+    case "failed":
+    case "expired":
+      return {
+        shell: "border-2 border-amber-500/70 bg-transparent",
+        badge: "border-amber-500/60 bg-amber-500/10 text-amber-900 dark:bg-amber-500/15 dark:text-amber-100",
+        label: "Expired",
+        Icon: AlertTriangle,
+      };
+    default:
+      return {
+        shell: "border-2 border-teal-500/60 bg-transparent",
+        badge: "border-teal-500/50 bg-teal-500/10 text-teal-900 dark:bg-teal-500/15 dark:text-teal-100",
+        label: "Needs your check",
+        Icon: ClipboardCheck,
       };
   }
 }
@@ -1912,9 +1968,11 @@ export function IssueThreadInteractionCard({
   externalReferences,
 }: IssueThreadInteractionCardProps) {
   const isPlan = isPlanConfirmation(interaction);
+  const isFactCheck = !isPlan && isFactCheckConfirmation(interaction);
   const planStyles = isPlan ? planStatusClasses(interaction.status) : null;
-  const StatusIcon = planStyles ? planStyles.Icon : statusIcon(interaction.status);
-  const styles = planStyles ?? statusClasses(interaction.status);
+  const factCheckStyles = isFactCheck ? factCheckStatusClasses(interaction.status) : null;
+  const StatusIcon = planStyles?.Icon ?? factCheckStyles?.Icon ?? statusIcon(interaction.status);
+  const styles = planStyles ?? factCheckStyles ?? statusClasses(interaction.status);
   const createdByLabel = resolveActorLabel({
     agentId: interaction.createdByAgentId,
     userId: interaction.createdByUserId,
@@ -1940,9 +1998,9 @@ export function IssueThreadInteractionCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className={cn("inline-flex items-center gap-1 rounded-sm border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]", styles.badge)}>
               <StatusIcon className="h-3.5 w-3.5" />
-              {isPlan ? "Plan" : interactionKindLabel(interaction.kind)}
+              {isPlan ? "Plan" : isFactCheck ? "Fact check" : interactionKindLabel(interaction.kind)}
               <span className="text-current/60">/</span>
-              {planStyles ? planStyles.label : statusLabel(interaction.status)}
+              {planStyles?.label ?? factCheckStyles?.label ?? statusLabel(interaction.status)}
             </span>
             {interaction.continuationPolicy === "wake_assignee"
               || interaction.continuationPolicy === "wake_assignee_on_accept" ? (
@@ -1965,8 +2023,15 @@ export function IssueThreadInteractionCard({
                   ? "Checkbox confirmation requested"
                   : isPlan
                     ? "Plan review"
-                    : "Confirmation requested")}
+                    : isFactCheck
+                      ? "Check these against what you know"
+                      : "Confirmation requested")}
           </div>
+          {isFactCheck ? (
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-teal-800 dark:text-teal-200">
+              This isn't a decision the agent needs you to make — it's asking you to verify facts only you can check.
+            </p>
+          ) : null}
           {interaction.summary ? (
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
               {interaction.summary}

@@ -462,6 +462,25 @@ export const planApprovalAcceptedRequestConfirmationInteraction = createRequestC
   },
 });
 
+export const pendingFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-fact-check",
+  title: "Check these invoice totals",
+  summary:
+    "The agent pulled these numbers from Fiken and needs the operator to confirm they're right — not a decision, a fact only the operator can check.",
+  payload: {
+    version: 1,
+    prompt: "Do these numbers match what you see in Fiken?",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Invoice #1042 to Nordlys AS: 18 400 kr, due 2026-05-15\n2. Invoice #1043 to Vestkyst Handel: 9 750 kr, due 2026-05-22\n3. Outstanding balance across both: 28 150 kr",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

@@ -13,6 +13,7 @@ import {
   commentExpiredRequestConfirmationInteraction,
   disabledDeclineReasonRequestConfirmationInteraction,
   failedRequestConfirmationInteraction,
+  pendingFactCheckRequestConfirmationInteraction,
   pendingRequestConfirmationInteraction,
   pendingSuggestedTasksInteraction,
   staleTargetRequestConfirmationInteraction,
@@ -427,6 +428,26 @@ describe("IssueThreadInteractionCard", () => {
     });
     expect((rejected.firstElementChild as HTMLElement).className).toContain("border-red-500/80");
     expect(rejected.textContent).toContain("Changes requested");
+  });
+
+  it("renders a numbered-claims confirmation as a distinct fact-check card (DUR-311)", () => {
+    const pending = renderCard({ interaction: pendingFactCheckRequestConfirmationInteraction });
+    const pendingShell = pending.firstElementChild as HTMLElement;
+    expect(pendingShell.className).toContain("border-teal-500/60");
+    expect(pending.textContent).toContain("Fact check");
+    expect(pending.textContent).toContain("Needs your check");
+    expect(pending.textContent).toContain("isn't a decision the agent needs you to make");
+
+    act(() => root?.unmount());
+    pending.remove();
+    root = null;
+
+    const accepted = renderCard({
+      interaction: { ...pendingFactCheckRequestConfirmationInteraction, status: "accepted" },
+    });
+    expect((accepted.firstElementChild as HTMLElement).className).toContain("border-teal-500/80");
+    expect(accepted.textContent).toContain("Confirmed correct");
+    expect(accepted.textContent).not.toContain("Plan");
   });
 
   it("attaches screenshots to a plan request-changes reason as markdown images", async () => {
