@@ -1057,7 +1057,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const transientRetryNotBefore =
         (attempt.proc.exitCode ?? 0) !== 0
           ? extractCodexRetryNotBefore({
-              stdout: attempt.proc.stdout,
               stderr: attempt.proc.stderr,
               errorMessage: fallbackErrorMessage,
             })
@@ -1065,7 +1064,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const transientUpstream =
         (attempt.proc.exitCode ?? 0) !== 0 &&
         isCodexTransientUpstreamError({
-          stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
           errorMessage: fallbackErrorMessage,
         });
@@ -1111,7 +1109,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         sessionId &&
         !initial.proc.timedOut &&
         (initial.proc.exitCode ?? 0) !== 0 &&
-        isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
+        isCodexUnknownSessionError(initial.rawStderr)
       ) {
         await onLog(
           "stdout",

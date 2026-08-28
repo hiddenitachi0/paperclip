@@ -296,6 +296,13 @@ export interface HostServices {
     explainAssignment(params: WorkerToHostMethods["authorization.policies.explainAssignment"][0]): Promise<WorkerToHostMethods["authorization.policies.explainAssignment"][1]>;
     searchAudit(params: WorkerToHostMethods["authorization.audit.search"][0]): Promise<WorkerToHostMethods["authorization.audit.search"][1]>;
   };
+
+  /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
+  personas: {
+    reserveDailyGeneration(
+      params: WorkerToHostMethods["personas.reserveDailyGeneration"][0],
+    ): Promise<WorkerToHostMethods["personas.reserveDailyGeneration"][1]>;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +497,9 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "authorization.policies.previewAssignment": "authorization.policies.read",
   "authorization.policies.explainAssignment": "authorization.policies.read",
   "authorization.audit.search": "authorization.audit.read",
+
+  // Personas
+  "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
 };
 
 // ---------------------------------------------------------------------------
@@ -960,6 +970,10 @@ export function createHostClientHandlers(
     }),
     "authorization.audit.search": gated("authorization.audit.search", async (params) => {
       return services.authorization.searchAudit(params);
+    }),
+
+    "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {
+      return services.personas.reserveDailyGeneration(params);
     }),
   };
 }
