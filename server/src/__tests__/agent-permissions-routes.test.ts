@@ -203,6 +203,7 @@ function registerModuleMocks() {
     companySkillService: () => mockCompanySkillService,
     budgetService: () => mockBudgetService,
     heartbeatService: () => mockHeartbeatService,
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     ISSUE_LIST_DEFAULT_LIMIT: 500,
     issueApprovalService: () => mockIssueApprovalService,
     issueService: () => mockIssueService,

@@ -2347,6 +2347,14 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
     },
+    personas: {
+      async reserveDailyGeneration(companyId, options) {
+        requireCapability(manifest, capabilitySet, "personas.generation_cap.enforce");
+        requireCompanyId(companyId);
+        if (!options?.runId) throw new Error("reserveDailyGeneration requires options.runId");
+        return { allowed: true, cap: null, usedToday: 0 };
+      },
+    },
     data: {
       register(key, handler) {
         dataHandlers.set(key, handler);

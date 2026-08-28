@@ -83,6 +83,7 @@ function registerModuleMocks() {
     companySkillService: () => mockCompanySkillService,
     budgetService: () => mockBudgetService,
     heartbeatService: () => mockHeartbeatService,
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     issueApprovalService: () => mockIssueApprovalService,
     issueService: () => ({}),
     logActivity: mockLogActivity,

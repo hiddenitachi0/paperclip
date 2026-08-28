@@ -542,8 +542,22 @@ function buildLivenessOriginalIssueComment(finding: IssueLivenessFinding, escala
   ].join("\n");
 }
 
-export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup }) {
-  const issuesSvc = issueService(db);
+export function recoveryService(
+  db: Db,
+  deps: {
+    enqueueWakeup: RecoveryWakeup;
+    // DUR-240: lets callers (heartbeat.ts, routes/agents.ts) supply the same
+    // in-process liveness check used by issuesSvc's own lock-adoption paths.
+    // Without it, sweepStaleIssueLocks below can silently clear a still-live
+    // run's checkout/execution lock -- on a background timer, independent of
+    // any dispatch attempt -- purely because heartbeatRuns.status looks
+    // terminal (a process-lost false negative, see DUR-114/DUR-120). The next
+    // unrelated dispatch then freely claims the now-unlocked issue while the
+    // "terminal" run is still mutating its worktree.
+    isRunLive?: (runId: string) => boolean;
+  },
+) {
+  const issuesSvc = issueService(db, { isRunLive: deps.isRunLive });
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
   const budgets = budgetService(db);

@@ -8,6 +8,7 @@ export { instanceUserRoles } from "./instance_user_roles.js";
 export { userSidebarPreferences } from "./user_sidebar_preferences.js";
 export { companyAgentRoles } from "./company_agent_roles.js";
 export { personas } from "./personas.js";
+export { personaGenerationCounters } from "./persona_generation_counters.js";
 export { companyMcpTools } from "./company_mcp_tools.js";
 export { agents } from "./agents.js";
 export { agentMemberships } from "./agent_memberships.js";
