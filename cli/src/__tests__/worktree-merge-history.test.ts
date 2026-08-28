@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildWorktreeMergePlan, parseWorktreeMergeScopes } from "../commands/worktree-merge-history-lib.js";
+import {
+  assertWorkspaceRepoUrlSafeForMerge,
+  buildWorktreeMergePlan,
+  parseWorktreeMergeScopes,
+} from "../commands/worktree-merge-history-lib.js";
 
 function makeIssue(overrides: Record<string, unknown> = {}) {
   return {
@@ -165,6 +169,23 @@ describe("worktree merge history planner", () => {
   it("parses default scopes", () => {
     expect(parseWorktreeMergeScopes(undefined)).toEqual(["issues", "comments"]);
     expect(parseWorktreeMergeScopes("issues")).toEqual(["issues"]);
+  });
+
+  it("rejects a source workspace repoUrl carrying embedded credentials before merge insert", () => {
+    const credentialedWorkspace = makeProjectWorkspace({
+      repoUrl: "https://x-access-token:ghp_leakedtoken@github.com/example/project.git",
+    });
+    expect(() => assertWorkspaceRepoUrlSafeForMerge(credentialedWorkspace.repoUrl)).toThrow(
+      /embedded credentials/,
+    );
+  });
+
+  it("allows a clean source workspace repoUrl (or none) through merge insert", () => {
+    const cleanWorkspace = makeProjectWorkspace({ repoUrl: "https://github.com/example/project.git" });
+    expect(() => assertWorkspaceRepoUrlSafeForMerge(cleanWorkspace.repoUrl)).not.toThrow();
+
+    const noRepoWorkspace = makeProjectWorkspace({ repoUrl: null });
+    expect(() => assertWorkspaceRepoUrlSafeForMerge(noRepoWorkspace.repoUrl)).not.toThrow();
   });
 
   it("dedupes nested worktree issues by preserved source uuid", () => {
