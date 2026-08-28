@@ -455,6 +455,20 @@ export interface HeartbeatRunScanSummary {
 const HEARTBEAT_RUN_SCAN_COLUMNS = ["error", "stdoutExcerpt", "stderrExcerpt"] as const;
 const HEARTBEAT_RUN_BATCH_SIZE = 500;
 const HEARTBEAT_RUN_MAX_BATCHES_PER_SWEEP = 100;
+// DUR-360 security review of DUR-327: scanTextForSecrets runs the shared
+// pem_private_key pattern (a lazy [\s\S]*? scan for an unmatched BEGIN
+// marker) against the WHOLE field text, which is O(n^2) on adversarial input
+// with many BEGIN markers and no END (benchmarked: 1.6MB ~= 10s, blocking
+// the main API event loop for the duration of one sweep tick). Unlike the
+// filesystem surface (MAX_SCAN_FILE_BYTES), these columns/resultJson have no
+// write-time size cap, and this path selects them directly rather than
+// through the 64KB-gated `left(...)` truncation used for API display
+// (heartbeat-run-summary.ts's HEARTBEAT_RUN_SAFE_RESULT_JSON_MAX_BYTES).
+// Truncating each field to this cap before scanning keeps worst-case
+// per-field scan time bounded to tens of ms regardless of how large the
+// underlying column value is -- a real secret is always far shorter than
+// this cap, so detection is unaffected in the non-adversarial case.
+const HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS = 64 * 1024;
 
 export async function scanHeartbeatRunsForLeakedSecrets(
   db: Db,
@@ -506,7 +520,11 @@ export async function scanHeartbeatRunsForLeakedSecrets(
 
       for (const field of fields) {
         if (!field.text) continue;
-        const matches = scanTextForSecrets(field.text);
+        const text =
+          field.text.length > HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS
+            ? field.text.slice(0, HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS)
+            : field.text;
+        const matches = scanTextForSecrets(text);
         if (matches.length === 0) continue;
         summary.matchesFound += matches.length;
         const location = `heartbeat_runs.${field.column} row ${row.id}`;
