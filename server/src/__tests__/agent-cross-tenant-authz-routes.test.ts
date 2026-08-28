@@ -1,7 +1,6 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 vi.unmock("http");
 vi.unmock("node:http");
@@ -108,6 +107,17 @@ const mockCompanySkillService = vi.hoisted(() => ({
 const mockWorkspaceOperationService = vi.hoisted(() => ({}));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockGetTelemetryClient = vi.hoisted(() => vi.fn());
+
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+    withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+  };
+});
 
 vi.mock("@paperclipai/shared/telemetry", () => ({
   trackAgentCreated: vi.fn(),
@@ -237,7 +247,7 @@ async function createApp(actor: Record<string, unknown>) {
     };
     next();
   });
-  app.use("/api", agentRoutes(withFakeCompanyScopeReserve({}) as any));
+  app.use("/api", agentRoutes({} as any));
   app.use(errorHandler);
   return app;
 }

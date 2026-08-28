@@ -1,7 +1,6 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -29,6 +28,17 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("@paperclipai/db", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@paperclipai/db")>();
+    return {
+      ...actual,
+      createRequestScopedDb: (rawDb: unknown) => rawDb,
+      runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+      withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+      runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    };
+  });
+
   vi.doMock("@paperclipai/shared/telemetry", () => ({
     trackAgentTaskCompleted: mockTrackAgentTaskCompleted,
     trackErrorHandlerCrash: vi.fn(),
@@ -122,7 +132,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(mockDb) as any, {} as any));
+  app.use("/api", issueRoutes(mockDb as any, {} as any));
   app.use(errorHandler);
   return app;
 }

@@ -3,7 +3,6 @@ import request from "supertest";
 import { getTableName } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.ts";
-import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_COMPANY_ID = "66666666-6666-4666-8666-666666666666";
 
@@ -49,6 +48,17 @@ const mockRoutineService = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("@paperclipai/db", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@paperclipai/db")>();
+    return {
+      ...actual,
+      createRequestScopedDb: (rawDb: unknown) => rawDb,
+      runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+      withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+      runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    };
+  });
+
   vi.doMock("../services/access.js", () => ({
     accessService: () => mockAccessService,
   }));
@@ -125,7 +135,7 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp(db: unknown = withFakeCompanyScopeReserve({})) {
+async function createApp(db: unknown = {}) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -317,7 +327,7 @@ describe("issue activity event routes", () => {
       })),
     };
 
-    const res = await request(await createApp(withFakeCompanyScopeReserve(dbMock)))
+    const res = await request(await createApp(dbMock))
       .patch(`/api/issues/${issue.id}`)
       .send({ executionWorkspaceId: nextExecutionWorkspaceId });
 
@@ -382,7 +392,7 @@ describe("issue activity event routes", () => {
       }),
     };
 
-    const res = await request(await createApp(withFakeCompanyScopeReserve(dbMock)))
+    const res = await request(await createApp(dbMock))
       .patch(`/api/issues/${issue.id}`)
       .send({ status: "done" });
 
@@ -423,7 +433,7 @@ describe("issue activity event routes", () => {
       }),
     };
 
-    const res = await request(await createApp(withFakeCompanyScopeReserve(dbMock)))
+    const res = await request(await createApp(dbMock))
       .patch(`/api/issues/${issue.id}`)
       .send({ title: "Updated title" });
 

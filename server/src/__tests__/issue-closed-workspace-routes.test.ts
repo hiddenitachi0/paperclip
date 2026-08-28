@@ -1,7 +1,6 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const testCompanyId = "55555555-5555-4555-8555-555555555555";
@@ -40,6 +39,17 @@ const mockProjectService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 
 function registerServiceMocks() {
+  vi.doMock("@paperclipai/db", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@paperclipai/db")>();
+    return {
+      ...actual,
+      createRequestScopedDb: (rawDb: unknown) => rawDb,
+      runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+      withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+      runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    };
+  });
+
   vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
 
   vi.doMock("@paperclipai/shared/telemetry", () => ({
@@ -157,7 +167,7 @@ async function createApp() {
     };
     next();
   });
-  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
+  app.use("/api", issueRoutes({} as any, {} as any));
   app.use(errorHandler);
   return app;
 }
