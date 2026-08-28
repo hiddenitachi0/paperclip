@@ -16,6 +16,7 @@ import {
   pendingFactCheckRequestConfirmationInteraction,
   pendingRequestConfirmationInteraction,
   pendingSuggestedTasksInteraction,
+  spoofedDecisionAskRequestConfirmationInteraction,
   staleTargetRequestConfirmationInteraction,
   rejectedSuggestedTasksInteraction,
 } from "../fixtures/issueThreadInteractionFixtures";
@@ -448,6 +449,14 @@ describe("IssueThreadInteractionCard", () => {
     expect((accepted.firstElementChild as HTMLElement).className).toContain("border-teal-500/80");
     expect(accepted.textContent).toContain("Confirmed correct");
     expect(accepted.textContent).not.toContain("Plan");
+  });
+
+  it("does not render a decision-ask dressed with numbered lines as a fact-check card (DUR-320)", () => {
+    const spoofed = renderCard({ interaction: spoofedDecisionAskRequestConfirmationInteraction });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("isn't a decision the agent needs you to make");
   });
 
   it("attaches screenshots to a plan request-changes reason as markdown images", async () => {

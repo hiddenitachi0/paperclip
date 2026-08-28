@@ -481,6 +481,27 @@ export const pendingFactCheckRequestConfirmationInteraction = createRequestConfi
   },
 });
 
+// DUR-320: a decision-ask dressed with 2+ numbered lines must NOT get the
+// reassuring "fact check" styling — this is the exact spoof scenario the
+// security review flagged against isFactCheckConfirmation.
+export const spoofedDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spoofed-decision-ask",
+  title: "Drop stale orders table?",
+  summary: "Should I proceed with dropping orders_2024 now?",
+  payload: {
+    version: 1,
+    prompt: "Should I proceed with dropping orders_2024 now?",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown:
+      "1. Table orders_2024 has 40,201 rows.\n2. Table orders_2024_backup has 40,201 rows.",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",
