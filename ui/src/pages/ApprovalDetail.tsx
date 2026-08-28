@@ -9,7 +9,17 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
-import { approvalLabel, approvalTechnicalReference, approvalDeployBranchInfo, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
+import {
+  approvalLabel,
+  approvalTechnicalReference,
+  approvalDeployBranchInfo,
+  approvalIsPersonaRequest,
+  typeIcon,
+  defaultTypeIcon,
+  ApprovalPayloadRenderer,
+  credentialRequestFields,
+  credentialRequestFriendlyName,
+} from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { DecisionReasonDialog, type DecisionReasonAction } from "../components/DecisionReasonDialog";
 import { Button } from "@/components/ui/button";
@@ -182,6 +192,12 @@ export function ApprovalDetail() {
   const isBudgetApproval = approval.type === "budget_override_required";
   const isCredentialRequest = approval.type === "credential_request";
   const credentialFields = isCredentialRequest ? credentialRequestFields(payload) : null;
+  // DUR-177 item 17: for a persona-related approval, keep the approval UUID
+  // and raw JSON payload out of the default view — a non-technical operator
+  // reviewing e.g. a persona's generated caption shouldn't be shown internal
+  // plumbing. Non-persona approvals are untouched (see the coordination note
+  // in DUR-177 about not restructuring this file more than items 16-18 need).
+  const isPersonaApproval = approvalIsPersonaRequest(payload);
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
   const branchInfo = approvalDeployBranchInfo(payload);
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
@@ -239,7 +255,9 @@ export function ApprovalDetail() {
             <TypeIcon className="h-5 w-5 text-muted-foreground shrink-0" />
             <div>
               <h2 className="text-lg font-semibold">{approvalLabel(approval.type, approval.payload as Record<string, unknown> | null)}</h2>
-              <p className="text-xs text-muted-foreground font-mono">{approval.id}</p>
+              {!isPersonaApproval && (
+                <p className="text-xs text-muted-foreground font-mono">{approval.id}</p>
+              )}
               {approvalTechnicalReference(approval.payload as Record<string, unknown> | null) && (
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {approvalTechnicalReference(approval.payload as Record<string, unknown> | null)}
@@ -279,12 +297,17 @@ export function ApprovalDetail() {
             onClick={() => setShowRawPayload((v) => !v)}
           >
             <ChevronRight className={`h-3 w-3 transition-transform ${showRawPayload ? "rotate-90" : ""}`} />
-            See full request
+            {isPersonaApproval ? "Advanced" : "See full request"}
           </button>
           {showRawPayload && (
-            <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
-              {JSON.stringify(payload, null, 2)}
-            </pre>
+            <div className="space-y-1.5">
+              {isPersonaApproval && (
+                <p className="text-xs text-muted-foreground font-mono">{approval.id}</p>
+              )}
+              <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
+                {JSON.stringify(payload, null, 2)}
+              </pre>
+            </div>
           )}
           {approval.decisionNote && (
             <p className="text-xs text-muted-foreground">Decision note: {approval.decisionNote}</p>
@@ -316,7 +339,7 @@ export function ApprovalDetail() {
         {isCredentialRequest && isActionable && (
           <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
             <label className="text-sm font-medium">
-              {credentialFields?.envKey ? `Value for ${credentialFields.envKey}` : "Credential value"}
+              {credentialRequestFriendlyName(payload)}
             </label>
             <input
               type="password"
