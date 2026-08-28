@@ -1065,6 +1065,13 @@
       "when": 1787160060000,
       "tag": "0151_guarded_bypass_role_grant",
       "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1787160070000,
+      "tag": "0152_secret_scan_finding_dedup_index",
+      "breakpoints": true
     }
   ]
 }

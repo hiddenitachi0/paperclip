@@ -52,6 +52,7 @@ import {
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
   logScheduleChainBootstrapVerification,
+  startSecretSurfaceScanner,
 } from "./services/index.js";
 import {
   parseAdapterRegistryEnv,
@@ -922,6 +923,13 @@ export async function startServer(): Promise<StartedServer> {
     })().catch((err) => {
       logger.error({ err }, "startup heartbeat recovery failed");
     });
+
+    // DUR-316: periodic scan for known secret patterns leaking into places
+    // the Secrets store does not cover (git configs, .env/docker-compose
+    // files, heartbeat_runs free-text columns) -- runs once immediately,
+    // then every 30 minutes. Self-contained (owns its own interval/cursor),
+    // so it does not need to sit inside the reconciliation IIFE above.
+    startSecretSurfaceScanner(db as any);
 
     setInterval(() => {
       // DUR-257: once shutdown() has started draining, stop dispatching new work --
