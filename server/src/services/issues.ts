@@ -32,6 +32,7 @@ import {
   labels,
   projectWorkspaces,
   projects,
+  withCompanyScope,
   workspaceOperations,
 } from "@paperclipai/db";
 import type {
@@ -3574,11 +3575,61 @@ export interface IssueServiceOptions {
   // to reclaim a checkout/execution lock from a run this check reports as
   // still live, even if its DB status says otherwise.
   isRunLive?: (runId: string) => boolean;
+  // DUR-379 (DUR-277 Wave 5b): `rawDb` defaults to `db` for every unmigrated
+  // caller (heartbeat.ts, recovery/service.ts, ...), a no-op there since
+  // `db` is already the raw pooled instance for them. Only
+  // routes/issues.ts, once wired through createRequestScopedDb, passes a
+  // `db` that is the *scoped* proxy and a distinct `rawDb`, since
+  // db.transaction() below is not supported through that proxy (see
+  // packages/db/src/company-scope.ts) and needs the raw connection via
+  // withCompanyScope instead.
+  rawDb?: Db;
 }
 
 export function issueService(db: Db, options: IssueServiceOptions = {}) {
+  const rawDb = options.rawDb ?? db;
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
+
+  // DUR-379: a handful of mutation methods below (lock-adoption,
+  // release/force-release, comment/attachment removal) only take a narrow
+  // entity id, not a companyId -- by the time any of them run through a
+  // route, the caller has already resolved and access-checked the
+  // relevant issue's companyId (see routes/issues.ts's per-route scope
+  // middleware), so this is plumbing to learn the RLS claim value for
+  // withCompanyScope's transaction, not a new authorization decision. Reads
+  // via `rawDb` directly (not withCompanyScopeBypass) since it exposes
+  // nothing beyond the single row's companyId that the caller's own id
+  // already targets -- no different in reach than the raw connection reads
+  // these transactions already performed today. Returns null (not a thrown
+  // error) on a missing row so callers can preserve their existing
+  // "row already gone" return contract instead of a new thrown error.
+  async function companyIdForIssue(issueId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
+
+  async function companyIdForComment(commentId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issueComments.companyId })
+      .from(issueComments)
+      .where(eq(issueComments.id, commentId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
+
+  async function companyIdForAttachment(attachmentId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issueAttachments.companyId })
+      .from(issueAttachments)
+      .where(eq(issueAttachments.id, attachmentId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
 
   // DUR-101: DUR-98 Class D found duplicate implementation tickets filed for
   // work that was already open (in one case a paid agent was assigned to
@@ -4358,7 +4409,9 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     actorRunId: string;
     expectedCheckoutRunId: string;
   }) {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(input.issueId);
+    if (!companyId) return { adopted: null, latest: null };
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       const lockedIssue = await tx
         .select({
           id: issues.id,
@@ -4458,7 +4511,9 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     actorAgentId: string;
     actorRunId: string;
   }) {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(input.issueId);
+    if (!companyId) return null;
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
       );
@@ -4501,7 +4556,9 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
   }
 
   async function clearExecutionRunIfTerminal(issueId: string): Promise<boolean> {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(issueId);
+    if (!companyId) return false;
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(
         sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
       );
@@ -4549,7 +4606,9 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
   // precondition: a terminal run holds no real claim regardless of who is
   // assigned or what status the issue is currently in.
   async function clearCheckoutRunIfTerminal(issueId: string): Promise<boolean> {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(issueId);
+    if (!companyId) return false;
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(
         sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
       );
@@ -5277,7 +5336,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         children: data.children,
       });
 
-      const initialClaim = await db.transaction(async (tx) => {
+      const initialClaim = await withCompanyScope(rawDb, sourceIssue.companyId, async (tx) => {
         await tx.execute(sql`select ${issues.id} from ${issues} where ${issues.id} = ${sourceIssue.id} for update`);
 
         const belongsToPlanDocument = await tx
@@ -5349,7 +5408,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       const newlyCreatedIssues: Array<typeof issues.$inferSelect> = [];
 
       while (true) {
-        const step = await db.transaction(async (tx) => {
+        const step = await withCompanyScope(rawDb, sourceIssue.companyId, async (tx) => {
           await tx.execute(
             sql`select ${issuePlanDecompositions.id}
                 from ${issuePlanDecompositions}
@@ -5585,7 +5644,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
           titleSimilarityDuplicate = duplicate.ticket;
         }
       }
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
@@ -6059,7 +6118,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         return enriched;
       };
 
-      return dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx);
+      return dbOrTx === db ? withCompanyScope(rawDb, existing.companyId, runUpdate) : runUpdate(dbOrTx);
     },
 
     clearExecutionWorkspaceEnvironmentSelection: async (companyId: string, environmentId: string) => {
@@ -6098,8 +6157,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     // detaches those rows (and their underlying assets/documents) rather
     // than destroying them; they resurface under the "No task" group on the
     // Files page (see company-artifacts.ts).
-    remove: (id: string) =>
-      db.transaction(async (tx) => {
+    remove: async (id: string) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const removedIssue = await tx
           .delete(issues)
           .where(eq(issues.id, id))
@@ -6109,7 +6170,8 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         if (!removedIssue) return null;
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;
-      }),
+      });
+    },
 
     checkout: async (id: string, agentId: string, expectedStatuses: string[], checkoutRunId: string | null) => {
       const issueCompany = await db
@@ -6452,8 +6514,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       });
     },
 
-    release: async (id: string, actorAgentId?: string, actorRunId?: string | null) =>
-      db.transaction(async (tx) => {
+    release: async (id: string, actorAgentId?: string, actorRunId?: string | null) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         await tx.execute(
           sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
         );
@@ -6502,10 +6566,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         if (!updated) return null;
         const [enriched] = await withIssueLabels(tx, [updated]);
         return enriched;
-      }),
+      });
+    },
 
-    adminForceRelease: async (id: string, options: { clearAssignee?: boolean } = {}) =>
-      db.transaction(async (tx) => {
+    adminForceRelease: async (id: string, options: { clearAssignee?: boolean } = {}) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         await tx.execute(
           sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
         );
@@ -6547,7 +6614,8 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
             executionRunId: existing.executionRunId,
           },
         };
-      }),
+      });
+    },
 
     // Narrow self-serve escape hatch for DUR-86: an issue can get permanently
     // deadlocked when one of its blockedByIssueIds points at a *cancelled*
@@ -6558,8 +6626,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     // lets the issue's own current assignee unlink specifically the terminal
     // (done/cancelled) blockers — never a still-open one — without needing
     // that boundary access, breaking the cycle.
-    clearTerminalBlockers: async (id: string) =>
-      db.transaction(async (tx) => {
+    clearTerminalBlockers: async (id: string) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         await tx.execute(
           sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
         );
@@ -6601,7 +6671,8 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         if (!updated) return null;
         const [enriched] = await withIssueLabels(tx, [updated]);
         return { issue: enriched, clearedBlockerIssueIds };
-      }),
+      });
+    },
 
     listLabels: (companyId: string) =>
       db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
@@ -6789,8 +6860,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
+      const companyId = await companyIdForComment(commentId);
+      if (!companyId) return null;
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const [comment] = await tx
           .delete(issueComments)
           .where(eq(issueComments.id, commentId))
@@ -6822,8 +6895,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
+      const companyId = await companyIdForComment(commentId);
+      if (!companyId) return null;
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const now = new Date();
         const [comment] = await tx
           .update(issueComments)
@@ -6944,7 +7019,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         }
       }
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, issue.companyId, async (tx) => {
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -7038,8 +7113,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         .where(eq(issueAttachments.id, id))
         .then((rows) => rows[0] ?? null),
 
-    removeAttachment: async (id: string) =>
-      db.transaction(async (tx) => {
+    removeAttachment: async (id: string) => {
+      const companyId = await companyIdForAttachment(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const existing = await tx
           .select({
             id: issueAttachments.id,
@@ -7067,7 +7144,8 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         await tx.delete(issueAttachments).where(eq(issueAttachments.id, id));
         await tx.delete(assets).where(eq(assets.id, existing.assetId));
         return existing;
-      }),
+      });
+    },
 
     findMentionedAgents: async (companyId: string, body: string) => {
       const explicitAgentMentionIds = extractAgentMentionIds(body);
