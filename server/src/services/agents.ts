@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { withCompanyScope } from "@paperclipai/db";
 import {
   agents,
   agentConfigRevisions,
@@ -248,7 +249,15 @@ function assertNoPluginToolAssignmentFields(data: Record<string, unknown>) {
   }
 }
 
-export function agentService(db: Db) {
+// DUR-378 (DUR-277 Wave 5a): `rawDb` defaults to `db` for every unmigrated
+// caller, a no-op there -- `db` is already the raw pooled instance for them.
+// Only routes/agents.ts and routes/mcp-tool-library.ts, once wired through
+// createRequestScopedDb, pass a `db` that is the *scoped* proxy and a
+// distinct `rawDb`, since db.transaction() below is not supported through
+// that proxy (see packages/db/src/company-scope.ts) and needs the raw
+// connection via withCompanyScope instead. Same pattern as
+// services/issue-tree-control.ts (DUR-348/Wave 2).
+export function agentService(db: Db, rawDb: Db = db) {
   const secretsSvc = secretService(db);
 
   function currentUtcMonthWindow(now = new Date()) {
@@ -493,7 +502,7 @@ export function agentService(db: Db) {
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
-    return db.transaction(async (tx) => {
+    return withCompanyScope(rawDb, existing.companyId, async (tx) => {
       const txDb = tx as unknown as Db;
       const updated = await tx
         .update(agents)
@@ -582,7 +591,7 @@ export function agentService(db: Db) {
             { adapterType },
           )
         : {};
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const created = await tx
           .insert(agents)
@@ -614,7 +623,9 @@ export function agentService(db: Db) {
     // ever changes this column, so it always stays paired with a fresh
     // secret-binding resync via syncAgentSecretBindings.
     syncMcpToolSelection: async (agentId: string, desiredToolIds: string[]) => {
-      return db.transaction(async (tx) => {
+      const existing = await getById(agentId);
+      if (!existing) throw notFound("Agent not found");
+      return withCompanyScope(rawDb, existing.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
           .update(agents)
@@ -756,7 +767,7 @@ export function agentService(db: Db) {
       const existing = await getById(id);
       if (!existing) return null;
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, existing.companyId, async (tx) => {
         await tx.update(agents).set({ reportsTo: null }).where(eq(agents.reportsTo, id));
         await tx
           .update(issues)
@@ -786,7 +797,10 @@ export function agentService(db: Db) {
     },
 
     activatePendingApproval: async (id: string) => {
-      const activatedAgent = await db.transaction(async (tx) => {
+      const existing = await getById(id);
+      if (!existing) return null;
+
+      const activatedAgent = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
           .update(agents)
@@ -807,8 +821,7 @@ export function agentService(db: Db) {
         return { agent: activatedAgent, activated: true };
       }
 
-      const existing = await getById(id);
-      return existing ? { agent: existing, activated: false } : null;
+      return { agent: existing, activated: false };
     },
 
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {

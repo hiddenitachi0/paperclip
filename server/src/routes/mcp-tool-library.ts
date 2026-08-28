@@ -40,7 +40,11 @@ export function mcpToolLibraryRoutes(rawDb: Db) {
   // stays unwrapped for the pre-scope lookups the agent/tool-id routes below
   // need before their companyId is known. See middleware/company-scope.ts.
   const db = createRequestScopedDb(rawDb);
-  const svc = agentService(db);
+  // DUR-378: agentService's own db.transaction() sites (syncMcpToolSelection,
+  // called below) aren't supported through the scoped proxy -- pass rawDb
+  // explicitly so it uses withCompanyScope internally instead. See
+  // services/agents.ts and packages/db/src/company-scope.ts.
+  const svc = agentService(db, rawDb);
 
   function scopeFromCompanyIdParam() {
     return companyScope(rawDb, (req) => {
