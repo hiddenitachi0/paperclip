@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   computeFindingFingerprint,
@@ -5,6 +6,10 @@ import {
   resolveCompanyIdFromPath,
   scanTextForSecrets,
 } from "./secret-surface-scanner.js";
+
+function sha256Prefix(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
 
 describe("scanTextForSecrets", () => {
   it("matches every DUR-316 starter pattern", () => {
@@ -68,18 +73,42 @@ describe("scanTextForSecrets", () => {
 });
 
 describe("maskSecretMatch", () => {
-  it("never returns the original value and keeps only a short head/tail", () => {
-    const value = "ghp_realTokenLooksLikeThis123456789012";
-    const masked = maskSecretMatch(value);
+  /** No contiguous 4+ char run of the real value -- head, tail, or anywhere else -- may survive into the masked output. */
+  function assertNoLiteralSubstringLeaked(value: string, masked: string) {
+    for (let i = 0; i + 4 <= value.length; i += 1) {
+      const chunk = value.slice(i, i + 4);
+      expect(masked, `masked output must not contain literal chunk "${chunk}" from the real value`).not.toContain(chunk);
+    }
+  }
+
+  it("never returns the original value or any literal fragment of it, for a long token", () => {
+    // Random-looking suffix with no dictionary words, so it can't coincidentally overlap
+    // with the pattern-name label (a public constant, not secret material) in the output.
+    const value = "ghp_Q7mX2vLpZ9wR4tK6nB1cF8jH3dS5yA0e";
+    const masked = maskSecretMatch(value, "github_token_classic");
     expect(masked).not.toBe(value);
-    expect(masked).not.toContain(value.slice(10, -4));
-    expect(masked.startsWith(value.slice(0, 6))).toBe(true);
-    expect(masked.endsWith(value.slice(-4))).toBe(true);
+    assertNoLiteralSubstringLeaked(value, masked);
+    expect(masked).toBe(`<github_token_classic> (len ${value.length}, sha256 prefix ${sha256Prefix(value)})`);
   });
 
-  it("fully masks short values instead of leaking them via head/tail", () => {
-    const masked = maskSecretMatch("AKIA1234");
-    expect(masked).toBe("*".repeat(8));
+  it("never returns the original value or any literal fragment of it, for a short token", () => {
+    const value = "AKIA1234";
+    const masked = maskSecretMatch(value, "aws_access_key_id");
+    expect(masked).not.toBe(value);
+    assertNoLiteralSubstringLeaked(value, masked);
+    expect(masked).toBe(`<aws_access_key_id> (len ${value.length}, sha256 prefix ${sha256Prefix(value)})`);
+  });
+
+  it("is deterministic for the same value and pattern", () => {
+    const a = maskSecretMatch("sk-abcdefghijklmnopqrstuvwxyz", "generic_sk_key");
+    const b = maskSecretMatch("sk-abcdefghijklmnopqrstuvwxyz", "generic_sk_key");
+    expect(a).toBe(b);
+  });
+
+  it("produces a different hash prefix for a different value even with the same pattern and length", () => {
+    const a = maskSecretMatch("sk-abcdefghijklmnopqrstuvwxyz", "generic_sk_key");
+    const b = maskSecretMatch("sk-zyxwvutsrqponmlkjihgfedcba", "generic_sk_key");
+    expect(a).not.toBe(b);
   });
 });
 
