@@ -53,6 +53,7 @@ import {
   companySkillService,
   budgetService,
   heartbeatService,
+  isHeartbeatRunLiveInThisProcess,
   ISSUE_LIST_DEFAULT_LIMIT,
   issueApprovalService,
   issueRecoveryActionService,
@@ -202,7 +203,10 @@ export function agentRoutes(
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
-  const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
+  const recovery = recoveryService(db, {
+    enqueueWakeup: heartbeat.wakeup,
+    isRunLive: isHeartbeatRunLiveInThisProcess,
+  });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
   const instructions = agentInstructionsService();

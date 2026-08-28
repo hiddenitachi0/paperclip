@@ -74,6 +74,7 @@ function registerServiceMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
       getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),

@@ -2766,7 +2766,13 @@ export function buildHostServices(
         // Track the subscription so it can be cleaned up on dispose() if the run
         // never reaches a terminal status (hang, crash, network partition).
         if (notifyWorker) {
-          const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+          // DUR-296: "paused_for_restart" is terminal (the run's process is
+          // gone for good) but must never be reported to the plugin as
+          // "error" -- see HEARTBEAT_RUN_TERMINAL_STATUSES in heartbeat.ts.
+          // Leaving it off this set previously meant a paused run's
+          // subscription leaked until the 30-minute safety-net timeout
+          // instead of cleaning up immediately.
+          const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out", "paused_for_restart"]);
 
           const cleanup = () => {
             unsubscribe();
@@ -2791,11 +2797,12 @@ export function buildHostServices(
             } else if (event.type === "heartbeat.run.status") {
               const status = payload.status as string;
               if (TERMINAL_STATUSES.has(status)) {
+                const eventType = status === "succeeded" ? "done" : status === "paused_for_restart" ? "status" : "error";
                 notifyWorker("agents.sessions.event", {
                   sessionId: params.sessionId,
                   runId: run.id,
                   seq: 0,
-                  eventType: status === "succeeded" ? "done" : "error",
+                  eventType,
                   stream: "system",
                   message: status === "succeeded" ? "Run completed" : `Run ${status}`,
                   payload: payload,

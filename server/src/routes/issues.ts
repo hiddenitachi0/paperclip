@@ -83,6 +83,7 @@ import {
   executionWorkspaceService,
   goalService,
   heartbeatService,
+  isHeartbeatRunLiveInThisProcess,
   issueApprovalService,
   issueRecoveryActionService,
   issueThreadInteractionService,
@@ -1255,7 +1256,11 @@ export function issueRoutes(
   } = {},
 ) {
   const router = Router();
-  const svc = issueService(db);
+  // DUR-240: same in-process liveness guard as heartbeat.ts's own issuesSvc --
+  // this route is the direct HTTP checkout path agents/harnesses call, so it
+  // needs the same protection against silently reclaiming a still-live run's
+  // lock when heartbeatRuns.status looks terminal but isn't.
+  const svc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
   const escalationGrantsSvc = escalationGrantService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
@@ -2812,6 +2817,62 @@ export function issueRoutes(
     if (req.actor.type === "board") return true;
     res.status(403).json({
       error: "Only board users may set structured comment presentation or metadata",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-312: changeLogVisible/changeLogSummary feed the operator's no-decision-needed
+  // daily digest -- the whole point is that a line on it needs no further scrutiny.
+  // Without a narrower gate, any agent that is merely the current assignee could
+  // self-publish an unreviewed (and potentially false) one-liner. Board users are
+  // trusted outright; an agent may only set these fields in the same request that
+  // actually transitions the issue into "done", so the claim rides on the
+  // self-review/goal-condition/deploy-completion gates that already vet that
+  // transition -- it can't be bolted on before, after, or without one.
+  function assertChangeLogFieldsAllowed(
+    req: Request,
+    res: Response,
+    updateFields: { status?: unknown; changeLogVisible?: unknown; changeLogSummary?: unknown },
+    existing: { status: string },
+  ) {
+    const hasChangeLogFields =
+      updateFields.changeLogVisible !== undefined || updateFields.changeLogSummary !== undefined;
+    if (!hasChangeLogFields) return true;
+    if (req.actor.type === "board") return true;
+    const transitioningToDone = updateFields.status === "done" && existing.status !== "done";
+    if (transitioningToDone) return true;
+    res.status(403).json({
+      error:
+        "changeLogVisible/changeLogSummary may only be set by a board user, or in the same request that transitions the issue to done",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-312 follow-up: issue creation (POST /companies/:companyId/issues and
+  // POST /issues/:id/children) never runs a new issue through the
+  // self-review/goal-condition/deploy-completion done-gates -- those only fire on a
+  // PATCH transition of an *existing* issue into "done". A create call that sets
+  // status: "done" directly would otherwise let an agent mint a pre-"done" issue and
+  // attach an unreviewed changeLogVisible/changeLogSummary to it, bypassing
+  // assertChangeLogFieldsAllowed entirely. So at creation these fields are
+  // board-only, full stop -- an agent must always go through the gated PATCH path.
+  function assertChangeLogFieldsAllowedOnCreate(
+    req: Request,
+    res: Response,
+    createBody: { changeLogVisible?: unknown; changeLogSummary?: unknown },
+  ) {
+    const hasChangeLogFields =
+      createBody.changeLogVisible !== undefined || createBody.changeLogSummary !== undefined;
+    if (!hasChangeLogFields) return true;
+    if (req.actor.type === "board") return true;
+    res.status(403).json({
+      error: "changeLogVisible/changeLogSummary may only be set by a board user at issue creation",
       details: {
         securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
       },
@@ -5286,6 +5347,7 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (await assertLowTrustControlPlaneDenied(req, res, companyId, null)) return;
+    if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
@@ -5606,6 +5668,7 @@ export function issueRoutes(
     if (!isTaskBridgeKeyActor(req) && !(await assertIssueReadAllowed(req, res, parent))) return;
     if (!(await assertTaskWatchdogCreateIssueAllowed(req, res, parent.companyId, parent))) return;
     if (await assertLowTrustControlPlaneDenied(req, res, parent.companyId, parent)) return;
+    if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
@@ -5789,6 +5852,7 @@ export function issueRoutes(
         ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
       };
       requestedChildren.push(childBody);
+      if (!assertChangeLogFieldsAllowedOnCreate(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       if (childBody.assigneeAgentId || childBody.assigneeUserId) {
@@ -6068,6 +6132,7 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
+    if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
     const selfReviewGateResult = await evaluateSelfReviewDoneGate({
       db,
       wakeup: heartbeat.wakeup,
