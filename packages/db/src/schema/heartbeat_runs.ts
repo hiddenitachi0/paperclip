@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { type AnyPgColumn, pgTable, uuid, text, timestamp, jsonb, index, integer, bigint, boolean } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -68,6 +69,10 @@ export const heartbeatRuns = pgTable(
       table.createdAt,
     ),
     createdAtIdx: index("heartbeat_runs_created_at_idx").on(table.createdAt),
+    companyIssueIdIdx: index("heartbeat_runs_company_issue_id_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot} ->> 'issueId')`,
+    ),
     companyLivenessIdx: index("heartbeat_runs_company_liveness_idx").on(
       table.companyId,
       table.livenessState,
