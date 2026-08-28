@@ -3549,7 +3549,17 @@ async function countBlockedInboxIssues(dbOrTx: any, companyId: string, filters?:
   }, 0);
 }
 
-export function issueService(db: Db) {
+export interface IssueServiceOptions {
+  // DUR-240: an optional in-process liveness check. `heartbeatRuns.status`
+  // can look terminal while the run is a process-lost false negative --
+  // e.g. its process is still alive but detection wrongly declared it dead
+  // (see DUR-114/DUR-120). When provided, lock-adoption paths below refuse
+  // to reclaim a checkout/execution lock from a run this check reports as
+  // still live, even if its DB status says otherwise.
+  isRunLive?: (runId: string) => boolean;
+}
+
+export function issueService(db: Db, options: IssueServiceOptions = {}) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
 
@@ -4305,13 +4315,24 @@ export function issueService(db: Db) {
     );
   }
 
+  // DUR-240: wraps isHeartbeatRunLockStale with the optional in-process
+  // liveness override from IssueServiceOptions -- see its doc comment.
+  function isLockRunActuallyStale(
+    runId: string,
+    run: { status: string; scheduledRetryAt?: Date | string | null } | null | undefined,
+  ): boolean {
+    if (!isHeartbeatRunLockStale(run)) return false;
+    if (options.isRunLive?.(runId)) return false;
+    return true;
+  }
+
   async function isTerminalOrMissingHeartbeatRun(runId: string, dbOrTx: DbReader = db) {
     const run = await dbOrTx
       .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
-    return isHeartbeatRunLockStale(run);
+    return isLockRunActuallyStale(runId, run);
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -4365,7 +4386,7 @@ export function issueService(db: Db) {
           .where(eq(heartbeatRuns.id, input.actorRunId))
           .then((rows) => rows[0] ?? null),
       ]);
-      const stale = isHeartbeatRunLockStale(existingRun);
+      const stale = isLockRunActuallyStale(input.expectedCheckoutRunId, existingRun);
       const actorLive = actorRun && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status);
       if (!stale || !actorLive) {
         return { adopted: null, latest: lockedIssue };
@@ -4482,7 +4503,7 @@ export function issueService(db: Db) {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.executionRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !isHeartbeatRunLockStale(run)) return false;
+      if (!isLockRunActuallyStale(issue.executionRunId, run)) return false;
 
       const updated = await tx
         .update(issues)
@@ -4530,7 +4551,7 @@ export function issueService(db: Db) {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.checkoutRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !isHeartbeatRunLockStale(run)) return false;
+      if (!isLockRunActuallyStale(issue.checkoutRunId, run)) return false;
 
       if (issue.executionRunId && issue.executionRunId !== issue.checkoutRunId) {
         await tx.execute(
@@ -4541,7 +4562,7 @@ export function issueService(db: Db) {
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, issue.executionRunId))
           .then((rows) => rows[0] ?? null);
-        if (executionRun && !isHeartbeatRunLockStale(executionRun)) return false;
+        if (!isLockRunActuallyStale(issue.executionRunId, executionRun)) return false;
       }
 
       const updated = await tx

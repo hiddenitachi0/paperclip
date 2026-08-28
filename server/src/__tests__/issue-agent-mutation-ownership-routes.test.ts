@@ -174,6 +174,7 @@ function registerRouteMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     ISSUE_LIST_DEFAULT_LIMIT: 100,
     ISSUE_LIST_MAX_LIMIT: 500,

@@ -35,6 +35,7 @@ function registerModuleMocks() {
     companySkillService: () => ({}),
     budgetService: () => ({}),
     heartbeatService: () => ({}),
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     ISSUE_LIST_DEFAULT_LIMIT: 500,
     issueApprovalService: () => ({}),
     issueService: () => ({}),
