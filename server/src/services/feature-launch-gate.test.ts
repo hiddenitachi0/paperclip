@@ -27,6 +27,12 @@ const launchApproval = (overrides: Partial<Record<string, unknown>> = {}) => ({
 });
 
 describe("evaluateFeatureLaunchDoneGate (DUR-313)", () => {
+  // First `import("./feature-launch-gate.js")` in the file pays a real transform cost
+  // (it pulls in deploy-completion-gate.ts for approvalPayloadKind) -- same pre-existing
+  // characteristic documented in feature-launch-gate-routes.test.ts / deploy-completion-gate-routes.test.ts.
+  // Default 5s is too tight under load.
+  vi.setConfig({ testTimeout: 20000 });
+
   beforeEach(() => {
     mockIssueApprovalService.listApprovalsForIssue.mockReset();
   });
