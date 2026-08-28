@@ -281,6 +281,27 @@ export function registerAccessCommands(program: Command): void {
         }
       }),
   );
+  // DUR-296: called by deploy-runner.sh once its proactive drain wait
+  // (DUR-259) times out with heartbeat runs still in flight, right before a
+  // compose_recreate/compose_build_swap recipe recreates the shared
+  // container out from under them.
+  addCommonClientOptions(
+    instance
+      .command("heartbeat-runs:pause-for-restart")
+      .description("Transactionally mark every in-flight heartbeat run paused_for_restart ahead of a planned restart")
+      .option("--reason <text>", "Optional note recorded on each paused run")
+      .action(async (opts: BaseClientOptions & { reason?: string }) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          printOutput(
+            await ctx.api.post("/api/instance/heartbeat-runs/pause-for-restart", { reason: opts.reason }),
+            { json: ctx.json },
+          );
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
 
   const sidebar = program.command("sidebar").description("Sidebar preference and badge operations");
   addSimpleGet(sidebar, "preferences", "Get current sidebar preferences", "/api/sidebar-preferences/me");

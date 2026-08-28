@@ -806,6 +806,13 @@ export const HEARTBEAT_RUN_STATUSES = [
   "failed",
   "cancelled",
   "timed_out",
+  // DUR-296: set transactionally (never by the run itself) when a run is
+  // still in flight once a planned server restart's drain wait times out --
+  // reads as "interrupted by a planned restart, will resume" and must never
+  // be treated as a failure. See HEARTBEAT_RUN_TERMINAL_STATUSES in
+  // heartbeat.ts (terminal, but deliberately excluded from
+  // UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES).
+  "paused_for_restart",
 ] as const;
 export type HeartbeatRunStatus = (typeof HEARTBEAT_RUN_STATUSES)[number];
 
