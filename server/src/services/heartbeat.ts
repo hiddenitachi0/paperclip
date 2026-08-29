@@ -5021,7 +5021,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     isRunLive: isHeartbeatRunLiveInThisProcess,
   });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
-  const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
+  const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup, rawDb });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
   async function releaseEnvironmentLeasesForRun(input: {
