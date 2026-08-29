@@ -39,8 +39,38 @@ type ScopedDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 // opens a real `BEGIN`; anything nested inside that callback on the same
 // connection uses a SAVEPOINT instead of a second `BEGIN`, which would
 // silently attach to (and let an inner COMMIT prematurely finish) the outer
-// transaction rather than erroring.
+// transaction rather than erroring. No call site nests today (verified via
+// DUR-916 review), but that invariant isn't enforced anywhere, so this is
+// handled defensively rather than assumed.
 const reservedScopeTxDepth = new WeakMap<Db, number>();
+
+// DUR-916 review mod #2: drizzle's real `db.transaction(cb)` gives `cb` a
+// `tx.rollback()` sentinel method -- calling it throws a special object that
+// `db.transaction()` catches internally and resolves (not rejects) around.
+// The hand-rolled BEGIN/SAVEPOINT wrapper here has no way to reproduce that
+// resolve-on-rollback semantics (there is no outer `db.transaction()` call to
+// catch it), so `.rollback()` is explicitly overridden to fail loudly instead
+// of silently behaving differently than a real drizzle transaction would. No
+// call site uses `tx.rollback()` today (verified during the DUR-916 review),
+// so this only guards against a future, easy-to-make mistake.
+function withRollbackGuard(scopedDb: Db): ScopedDb {
+  return new Proxy(scopedDb as object, {
+    get(target, prop, receiver) {
+      if (prop === "rollback") {
+        return () => {
+          throw new Error(
+            "withCompanyScope: tx.rollback() is not supported for a call running on a " +
+              "runInCompanyScope()-reserved connection (DUR-418) -- drizzle's rollback-sentinel " +
+              "resolve-not-reject semantics aren't reproduced by the hand-rolled BEGIN/SAVEPOINT wrapper " +
+              "used here. Throw a regular Error from the callback instead; it rolls back this call's " +
+              "SAVEPOINT/transaction the same as any other failure.",
+          );
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as ScopedDb;
+}
 
 async function runOnReservedScope<T>(scopedDb: Db, fn: (scopedDb: ScopedDb) => Promise<T>): Promise<T> {
   const depth = reservedScopeTxDepth.get(scopedDb) ?? 0;
@@ -49,7 +79,7 @@ async function runOnReservedScope<T>(scopedDb: Db, fn: (scopedDb: ScopedDb) => P
   try {
     await scopedDb.execute(depth === 0 ? sql`BEGIN` : sql.raw(`SAVEPOINT ${savepoint}`));
     try {
-      const result = await fn(scopedDb as unknown as ScopedDb);
+      const result = await fn(withRollbackGuard(scopedDb));
       await scopedDb.execute(depth === 0 ? sql`COMMIT` : sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
       return result;
     } catch (err) {
@@ -73,24 +103,51 @@ export async function withCompanyScope<T>(
   }
 
   // DUR-418: if we're already running inside a runInCompanyScope()-reserved
-  // connection for this same company, run this transaction on THAT
-  // connection (BEGIN/SAVEPOINT below) instead of calling db.transaction(),
-  // which would reserve a SECOND physical connection from the same pool.
-  // Under enough concurrent requests that both hold a runInCompanyScope
-  // reservation and call withCompanyScope, every such nested
-  // db.transaction() call blocks forever waiting for a connection that can
-  // never free up (releasing the outer reservation requires this nested
-  // wait to finish first) -- a permanent pool-exhaustion deadlock, not
-  // merely contention. See DUR-418 for the full repro.
-  //
-  // Only reused when the companyId matches the active scope exactly: the
-  // reserved connection's session-level app.current_company_id claim is
-  // already set to that company by runInCompanyScope, so no per-transaction
-  // set_config is needed here. A mismatched companyId falls through to
-  // acquiring its own connection below, since reusing the wrong session
-  // claim would silently break RLS isolation for that call.
+  // connection, run this transaction on THAT connection (BEGIN/SAVEPOINT in
+  // runOnReservedScope) instead of calling db.transaction(), which would
+  // reserve a SECOND physical connection from the same pool. Under enough
+  // concurrent requests that both hold a runInCompanyScope reservation and
+  // call withCompanyScope, every such nested db.transaction() call blocks
+  // forever waiting for a connection that can never free up (releasing the
+  // outer reservation requires this nested wait to finish first) -- a
+  // permanent pool-exhaustion deadlock, not merely contention. See DUR-418
+  // for the full repro.
   const activeScope = requestCompanyScopeStorage.getStore();
-  if (activeScope?.kind === "scoped" && activeScope.companyId === companyId) {
+  if (activeScope && !activeScope.liveness.released) {
+    if (activeScope.kind === "scoped") {
+      // Only reused when the companyId matches the active scope exactly: the
+      // reserved connection's session-level app.current_company_id claim is
+      // already set to that company by runInCompanyScope, so no
+      // per-transaction set_config is needed here (re-issuing it would just
+      // be a second, redundant claim-setting path that could drift from the
+      // session-level one over time).
+      //
+      // DUR-916 review mod #3: a DIFFERENT companyId is rejected outright,
+      // not silently handed a second connection -- falling back would
+      // reintroduce the exact pool-exhaustion deadlock this fix exists to
+      // close, just conditionally (only in the cross-company case) and with
+      // no visible signal when it happens. Legitimate cross-company access
+      // has its own audited path: withCompanyScopeBypass +
+      // cross_company_access_log.
+      if (activeScope.companyId !== companyId) {
+        throw new Error(
+          `withCompanyScope: called for companyId ${companyId} while already inside a ` +
+            `runInCompanyScope() request scope for a different companyId (${activeScope.companyId}). ` +
+            "Reusing the outer connection would silently attach this call to the wrong company's " +
+            "session claim, and acquiring a second pool connection here would reintroduce the DUR-418 " +
+            "pool-exhaustion deadlock. Use withCompanyScopeBypass(rawDb, opts, fn) with a " +
+            "cross_company_access_log entry for legitimate cross-company access instead.",
+        );
+      }
+      return runOnReservedScope(activeScope.scopedDb, fn);
+    }
+
+    // DUR-916 review mod #4: kind === "bypass" (from runInCompanyScopeBypass)
+    // has no per-company claim to protect in the first place -- the
+    // connection's access is already granted by paperclip_app_bypass role
+    // membership, which covers every company regardless of what companyId
+    // this call requested. Safe to reuse unconditionally, with no claim to
+    // set or compare.
     return runOnReservedScope(activeScope.scopedDb, fn);
   }
 
@@ -178,15 +235,31 @@ export async function withCompanyScopeBypass<T>(
 //      commands/tests call directly and must keep getting the raw,
 //      always-pooled, unscoped db with no ALS involvement at all).
 
+// DUR-418: AsyncLocalStorage propagates a scope to every continuation spawned
+// while `fn` was synchronously running -- including a fire-and-forget
+// (`void someAsyncCall()`) chain that outlives `fn` itself and keeps running
+// after runInCompanyScope's `finally` block has already reset+released the
+// reserved connection back to the pool. `liveness.released` is flipped to
+// `true` synchronously, before that release happens, so withCompanyScope can
+// tell "the scope object is still in scope" apart from "the connection it
+// points to is still safe to touch" and fall back to acquiring its own
+// connection instead of issuing BEGIN on a connection some other request may
+// already be mid-transaction on.
+export interface ReservedScopeLiveness {
+  released: boolean;
+}
+
 export interface RequestCompanyScope {
   readonly kind: "scoped";
   readonly companyId: string;
   readonly scopedDb: Db;
+  readonly liveness: ReservedScopeLiveness;
 }
 
 export interface RequestCompanyScopeBypass {
   readonly kind: "bypass";
   readonly scopedDb: Db;
+  readonly liveness: ReservedScopeLiveness;
 }
 
 export type RequestScope = RequestCompanyScope | RequestCompanyScopeBypass;
@@ -288,11 +361,12 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
   }
 
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  const liveness: ReservedScopeLiveness = { released: false };
   let unsafeToRelease = false;
   try {
     await reserved`select set_config('app.current_company_id', ${companyId}, false)`;
     const scopedDb = drizzlePg(reserved, { schema });
-    return await requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb }, fn);
+    return await requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb, liveness }, fn);
   } catch (err) {
     if (err instanceof ConnectionReleaseUnsafeError) {
       unsafeToRelease = true;
@@ -301,11 +375,22 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
     throw err;
   } finally {
     if (unsafeToRelease) {
+      // The connection is abandoned, never handed back to the pool -- so
+      // it remains exclusively (if unsafely) available to whatever is still
+      // using it, and `liveness.released` deliberately stays `false`: a
+      // still-running orphaned continuation may keep issuing queries/nested
+      // withCompanyScope calls on it safely, since nothing else can acquire
+      // this same physical connection out from under it.
       console.error(
         "company-scope: response closed before its handler finished; abandoning the reserved connection " +
           "instead of recycling it, since the handler may still be using it",
       );
     } else {
+      // Flip this before the connection actually goes back to the pool, not
+      // after -- withCompanyScope reads it from other (possibly still
+      // in-flight) continuations of this same scope, and must never see
+      // "still safe to reuse" once release has been kicked off.
+      liveness.released = true;
       await resetClaimAndRelease(reserved);
     }
   }
@@ -325,6 +410,7 @@ export async function runInCompanyScopeBypass<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  const liveness: ReservedScopeLiveness = { released: false };
   try {
     const [membership] = (await reserved`
       select pg_has_role(current_user, 'paperclip_app_bypass', 'member') as has_bypass
@@ -347,8 +433,9 @@ export async function runInCompanyScopeBypass<T>(
       companyIdsTouched: opts.companyIdsTouched ?? null,
     });
 
-    return await requestCompanyScopeStorage.run({ kind: "bypass", scopedDb }, fn);
+    return await requestCompanyScopeStorage.run({ kind: "bypass", scopedDb, liveness }, fn);
   } finally {
+    liveness.released = true;
     await resetClaimAndRelease(reserved);
   }
 }
