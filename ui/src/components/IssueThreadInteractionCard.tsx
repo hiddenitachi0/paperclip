@@ -259,11 +259,16 @@ const INVISIBLE_CHAR_PATTERN =
 // NFKC-normalized string contains the matched word. Decompose first (NFD)
 // so every combining mark -- whether it arrived already split or as a
 // precomposed character -- is broken back out to a base letter plus a
-// stripped Mn codepoint, then fold compatibility variants (NFKC) as before.
+// stripped mark codepoint, then fold compatibility variants (NFKC) as before.
+// DUR-416: Mn's sibling categories Mc (spacing combining marks, e.g.
+// Devanagari vowel signs) and Me (enclosing marks, e.g. combining enclosing
+// circle) attach to the preceding base letter the same way Mn does and were
+// missed by the Mn-only strip -- widen to \p{M}, the general combining-mark
+// superclass (Mn + Mc + Me), so all three are stripped.
 function normalizeForDecisionScan(text: string): string {
   return text
     .normalize("NFD")
-    .replace(/\p{Mn}/gu, "")
+    .replace(/\p{M}/gu, "")
     .replace(INVISIBLE_CHAR_PATTERN, "")
     .normalize("NFKC")
     .replace(INVISIBLE_CHAR_PATTERN, "");

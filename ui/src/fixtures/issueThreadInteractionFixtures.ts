@@ -688,6 +688,32 @@ export const combiningMarkSpoofedFactCheckRequestConfirmationInteraction = creat
   },
 });
 
+// DUR-416: the DUR-413 fix stripped Unicode general category Mn
+// (Nonspacing_Mark) but missed its sibling categories Mc (Spacing_Combining_Mark,
+// e.g. U+093E DEVANAGARI VOWEL SIGN AA) and Me (Enclosing_Mark, e.g. U+20DD
+// COMBINING ENCLOSING CIRCLE) -- both attach to the preceding base letter the
+// same way Mn does without a word/grapheme boundary, and both render as a
+// barely-visible stray glyph next to the letter rather than an obvious
+// corruption. Reproduces the reviewer's exact repro strings.
+export const spacingAndEnclosingMarkSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spacing-enclosing-mark-spoofed-fact-check",
+  title: "Quick check on vendor payout",
+  summary: "Quick check on vendor payout",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. wाire $50,000 to the vendor now.\n2. w⃝ire the remaining balance once confirmed.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",
