@@ -1256,6 +1256,12 @@ export function issueRoutes(
     searchRateLimiter?: CompanySearchRateLimiter;
     pluginWorkerManager?: PluginWorkerManager;
     taskWatchdogEnqueueWakeup?: TaskWatchdogServiceDeps["enqueueWakeup"] | null;
+    // Test-only hook: fire-and-forget queueTaskWatchdogEvaluation() calls can
+    // still be running after a request completes (DUR-417). Tests that hard-
+    // delete rows in afterEach need to drain these first or they race a
+    // truncate against an in-flight insert; production callers leave this
+    // unset and pay no cost.
+    onTaskWatchdogEvaluationQueued?: (evaluation: Promise<unknown>) => void;
   } = {},
 ) {
   const router = Router();
@@ -1370,11 +1376,13 @@ export function issueRoutes(
   // nothing is ever reserved-and-held across this call's lifetime, so it can't
   // deadlock against (or corrupt) any other connection, request-held or not.
   async function queueTaskWatchdogEvaluation(issue: { id: string; companyId: string }, runId?: string | null) {
-    await taskWatchdogEvaluationSvc
+    const evaluation = taskWatchdogEvaluationSvc
       .reconcileForIssueAndAncestors(issue.companyId, issue.id, { runId: runId ?? null })
       .catch((err) => {
         logger.warn({ err, issueId: issue.id }, "task watchdog evaluation hook failed");
       });
+    opts.onTaskWatchdogEvaluationQueued?.(evaluation);
+    await evaluation;
   }
 
   async function sourceTrustForActorWrite(
