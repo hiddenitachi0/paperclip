@@ -518,4 +518,71 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
     },
     5_000,
   );
+
+  it(
+    // DUR-920: queueTaskWatchdogEvaluation-style call sites fire a
+    // withCompanyScope() call fire-and-forget (`void someCall()`) from
+    // inside a runInCompanyScope()-wrapped route handler, then let the
+    // handler return without awaiting it. Before this fix,
+    // runInCompanyScope's `finally` block reset+released the reserved
+    // connection as soon as `fn` resolved, with no regard for that orphaned
+    // call already being mid-flight on the SAME connection (it read
+    // `liveness.released === false` before the handler returned) -- an
+    // unrelated request could then reserve the same physical connection
+    // while the orphan was still issuing queries on it. This proves
+    // runInCompanyScope now waits for such an in-flight call to drain
+    // before releasing, instead of releasing out from under it.
+    "runInCompanyScope waits for an in-flight fire-and-forget withCompanyScope call to drain before releasing the connection",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("in-flight-drain");
+      try {
+        let orphanStarted = false;
+        let orphanFinished = false;
+        let resolveOrphanGate!: () => void;
+        const orphanGate = new Promise<void>((resolve) => {
+          resolveOrphanGate = resolve;
+        });
+        let orphanPromise!: Promise<unknown>;
+
+        const outerPromise = runInCompanyScope(singleConnDb, companyA.id, async () => {
+          // Fire-and-forget, mirroring `void queueTaskWatchdogEvaluation(...)`
+          // -- started but deliberately not awaited before `fn` returns.
+          orphanPromise = withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            orphanStarted = true;
+            await orphanGate;
+            await tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyA.id));
+            orphanFinished = true;
+          });
+        });
+
+        // Give the orphan a tick to actually start (commit to
+        // runOnReservedScope / increment liveness.inFlight -- this involves
+        // a real BEGIN round-trip, hence the more generous wait than a pure
+        // microtask check would need).
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(orphanStarted).toBe(true);
+
+        // The outer runInCompanyScope call must NOT have resolved yet --
+        // its finally block should be blocked awaiting the orphan's drain,
+        // not racing ahead to release the connection.
+        let outerResolved = false;
+        void outerPromise.then(() => {
+          outerResolved = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(outerResolved).toBe(false);
+        expect(orphanFinished).toBe(false);
+
+        resolveOrphanGate();
+        await orphanPromise;
+        await outerPromise;
+
+        expect(orphanFinished).toBe(true);
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    15_000,
+  );
 });

@@ -131,7 +131,21 @@ function withRollbackGuard(scopedDb: Db): ScopedDb {
   }) as unknown as ScopedDb;
 }
 
-async function runOnReservedScope<T>(scopedDb: Db, fn: (scopedDb: ScopedDb) => Promise<T>): Promise<T> {
+async function runOnReservedScope<T>(
+  scopedDb: Db,
+  liveness: ReservedScopeLiveness,
+  fn: (scopedDb: ScopedDb) => Promise<T>,
+): Promise<T> {
+  // DUR-920: mark this call as committed to reusing the reserved connection
+  // for its whole duration, synchronously, before any `await` -- the caller
+  // (withCompanyScope) just checked `liveness.released === false` in the
+  // same synchronous turn, so incrementing here with no intervening await
+  // closes the window where runInCompanyScope's finally block could flip
+  // `released` and release the connection in between the check and this
+  // call actually starting. See markInFlightDrained's call sites for the
+  // other half: runInCompanyScope/runInCompanyScopeBypass wait for this
+  // counter to drain back to zero before releasing.
+  liveness.inFlight += 1;
   const stack = getReservedScopeStack(scopedDb);
   const depth = stack.depth;
   const savepoint = `with_company_scope_${depth}`;
@@ -152,6 +166,13 @@ async function runOnReservedScope<T>(scopedDb: Db, fn: (scopedDb: ScopedDb) => P
     }
   } finally {
     releaseTurn(stack, depth);
+    // DUR-920: see the comment above this call's increment -- this call is
+    // no longer committed to the connection, so it no longer counts toward
+    // what runInCompanyScope's finally block is waiting to drain.
+    liveness.inFlight -= 1;
+    if (liveness.inFlight === 0) {
+      markInFlightDrained(liveness);
+    }
   }
 }
 
@@ -201,7 +222,7 @@ export async function withCompanyScope<T>(
             "cross_company_access_log entry for legitimate cross-company access instead.",
         );
       }
-      return runOnReservedScope(activeScope.scopedDb, fn);
+      return runOnReservedScope(activeScope.scopedDb, activeScope.liveness, fn);
     }
 
     // DUR-916 review mod #4: kind === "bypass" (from runInCompanyScopeBypass)
@@ -210,7 +231,7 @@ export async function withCompanyScope<T>(
     // membership, which covers every company regardless of what companyId
     // this call requested. Safe to reuse unconditionally, with no claim to
     // set or compare.
-    return runOnReservedScope(activeScope.scopedDb, fn);
+    return runOnReservedScope(activeScope.scopedDb, activeScope.liveness, fn);
   }
 
   return db.transaction(async (tx) => {
@@ -309,6 +330,51 @@ export async function withCompanyScopeBypass<T>(
 // already be mid-transaction on.
 export interface ReservedScopeLiveness {
   released: boolean;
+  // DUR-920: count of runOnReservedScope() calls currently committed to this
+  // reserved connection (incremented/decremented synchronously around each
+  // call, see runOnReservedScope). `released` alone only stops NEW calls from
+  // starting to reuse the connection -- it does nothing for a call that
+  // already read `released === false` and is mid-flight (e.g. a
+  // fire-and-forget continuation started just before the request handler
+  // resolved). runInCompanyScope/runInCompanyScopeBypass wait for this to
+  // drain to zero (bounded, see waitForInFlightDrain) before actually
+  // releasing the connection back to the pool.
+  inFlight: number;
+  // Set by waitForInFlightDrain while it is waiting; invoked by
+  // runOnReservedScope's finally block when inFlight reaches 0. Never more
+  // than one waiter at a time in practice (only runInCompanyScope's own
+  // finally block waits), but nulled out immediately after firing/timing out
+  // either way so a stale reference can't be double-invoked.
+  onDrained: (() => void) | null;
+}
+
+// DUR-920: how long runInCompanyScope's finally block waits for in-flight
+// runOnReservedScope() calls to drain before releasing the reserved
+// connection. Bounded, not unbounded -- an in-flight fire-and-forget call
+// that itself never resolves (e.g. it's stuck on a downstream call with no
+// timeout of its own) must not block this request's connection from ever
+// being released. If the bound is hit, the connection is abandoned instead
+// of released (same "never recycle with unknown/unsafe state" precedent as
+// resetClaimAndRelease's own catch branch below) rather than risk handing a
+// connection with a still-open transaction to an unrelated request.
+const IN_FLIGHT_DRAIN_TIMEOUT_MS = 10_000;
+
+async function waitForInFlightDrain(liveness: ReservedScopeLiveness): Promise<void> {
+  if (liveness.inFlight === 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      liveness.onDrained = null;
+      resolve();
+    }, IN_FLIGHT_DRAIN_TIMEOUT_MS);
+    liveness.onDrained = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+}
+
+function markInFlightDrained(liveness: ReservedScopeLiveness): void {
+  liveness.onDrained?.();
 }
 
 export interface RequestCompanyScope {
@@ -423,7 +489,7 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
   }
 
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
-  const liveness: ReservedScopeLiveness = { released: false };
+  const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
   let unsafeToRelease = false;
   try {
     await reserved`select set_config('app.current_company_id', ${companyId}, false)`;
@@ -451,9 +517,28 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
       // Flip this before the connection actually goes back to the pool, not
       // after -- withCompanyScope reads it from other (possibly still
       // in-flight) continuations of this same scope, and must never see
-      // "still safe to reuse" once release has been kicked off.
+      // "still safe to reuse" once release has been kicked off. New calls
+      // stop reusing this connection right here; DUR-920: any call that
+      // already committed to reusing it (read `released === false` a moment
+      // earlier, e.g. a fire-and-forget continuation) is tracked in
+      // `liveness.inFlight` and must be waited out -- bounded -- before the
+      // connection actually goes back to the pool, or it could be handed to
+      // an unrelated request while still mid-transaction.
       liveness.released = true;
-      await resetClaimAndRelease(reserved);
+      await waitForInFlightDrain(liveness);
+      if (liveness.inFlight > 0) {
+        // Bound hit while calls were still in flight -- same "never recycle
+        // with unknown/unsafe state" precedent as resetClaimAndRelease's own
+        // catch branch: abandon the connection (one lost pool slot) instead
+        // of risking cross-tenant transaction corruption.
+        console.error(
+          `company-scope: ${liveness.inFlight} runOnReservedScope() call(s) still in flight ` +
+            `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; abandoning the reserved connection ` +
+            "instead of recycling it, since it may still be mid-transaction",
+        );
+      } else {
+        await resetClaimAndRelease(reserved);
+      }
     }
   }
 }
@@ -472,7 +557,7 @@ export async function runInCompanyScopeBypass<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
-  const liveness: ReservedScopeLiveness = { released: false };
+  const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
   try {
     const [membership] = (await reserved`
       select pg_has_role(current_user, 'paperclip_app_bypass', 'member') as has_bypass
@@ -497,8 +582,20 @@ export async function runInCompanyScopeBypass<T>(
 
     return await requestCompanyScopeStorage.run({ kind: "bypass", scopedDb, liveness }, fn);
   } finally {
+    // DUR-920: see the matching comment in runInCompanyScope -- wait for any
+    // call that already committed to reusing this connection to drain
+    // (bounded) before releasing it, instead of releasing underneath it.
     liveness.released = true;
-    await resetClaimAndRelease(reserved);
+    await waitForInFlightDrain(liveness);
+    if (liveness.inFlight > 0) {
+      console.error(
+        `company-scope: ${liveness.inFlight} runOnReservedScope() call(s) still in flight ` +
+          `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; abandoning the reserved connection ` +
+          "instead of recycling it, since it may still be mid-transaction",
+      );
+    } else {
+      await resetClaimAndRelease(reserved);
+    }
   }
 }
 
