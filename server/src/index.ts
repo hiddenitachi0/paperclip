@@ -45,6 +45,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   mergeDeployVisibilityService,
+  mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   instanceSettingsService,
@@ -865,6 +866,7 @@ export async function startServer(): Promise<StartedServer> {
     const environmentCustomImages = environmentCustomImageService(schedulerDb as any, { pluginWorkerManager });
     const routines = routineService(schedulerDb as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
+    const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
@@ -1048,6 +1050,32 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
         });
+
+      // DUR-299 point 6 / DUR-314: delegate the "61 percent" of merge_pr
+      // approvals (CI green + no fundamental-surface path touched +
+      // independent agent review) so they never reach the operator. Gated by
+      // its own live kill switch (general.mergePrAutomationEnabled, checked
+      // inside tick()) in addition to the startup flag above -- see
+      // merge-pr-automation.ts for the full set of hard rules.
+      if (mergePrAutomation) {
+        void runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mergePrAutomation",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mergePrAutomation",
+          },
+          () => mergePrAutomation.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.approved > 0) {
+              logger.info({ ...result }, "merge-pr automation tick approved delegated merge_pr approvals");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "merge-pr automation tick failed");
+          });
+      }
 
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold

@@ -157,6 +157,7 @@ When adding endpoints:
 - Keep routes and nav aligned with available API surface
 - Use company selection context for company-scoped pages
 - Surface failures clearly; do not silently ignore API errors
+- GODKJENN (approve) and BEKREFT (confirm) are not the same thing: a board approval asks the operator to decide something the agent lacks authority to decide; a `request_confirmation` fact check asks the operator to verify a fact only they can check (numbers in an external system, natural-sounding wording, a real workflow). See "Fact Checks (the BEKREFT pattern)" in [`docs/guides/agent-developer/handling-approvals.md`](docs/guides/agent-developer/handling-approvals.md) for the exact shape and how the UI renders it distinctly.
 
 ## 10. Pull Request Requirements
 
