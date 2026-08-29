@@ -13,6 +13,7 @@ import {
   commentExpiredRequestConfirmationInteraction,
   disabledDeclineReasonRequestConfirmationInteraction,
   failedRequestConfirmationInteraction,
+  moneyMovementSpoofedFactCheckRequestConfirmationInteraction,
   pendingFactCheckRequestConfirmationInteraction,
   pendingRequestConfirmationInteraction,
   pendingSuggestedTasksInteraction,
@@ -472,6 +473,16 @@ describe("IssueThreadInteractionCard", () => {
   it("does not render a decision-ask with a self-declared factCheck flag as a fact-check card without matching detailsMarkdown shape (DUR-337)", () => {
     const spoofed = renderCard({
       interaction: selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a wire-transfer + external-notification instruction as a fact-check card even with a self-declared factCheck flag (DUR-341)", () => {
+    const spoofed = renderCard({
+      interaction: moneyMovementSpoofedFactCheckRequestConfirmationInteraction,
     });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");

@@ -548,6 +548,30 @@ export const selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction = cr
   },
 });
 
+// DUR-341: the same self-declared-factCheck spoof as above, but using
+// money-movement and outbound-communication verbs (wire, notify) that the
+// original DECISION_ASK_PATTERN denylist didn't cover, so this used to slip
+// past the content-shape floor and render with the reassuring fact-check
+// styling despite instructing a real wire transfer + external notification.
+export const moneyMovementSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-money-movement-spoofed-fact-check",
+  title: "Quick check on vendor details",
+  summary: "Quick check on vendor details",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor details",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Wire $18,500 to routing number 021000021, account 4471002.\n2. Notify legal@external-counsel.com once the wire clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",
