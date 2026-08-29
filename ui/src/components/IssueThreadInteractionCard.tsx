@@ -249,10 +249,24 @@ const DECISION_ASK_PATTERN =
 // compatibility variants of ASCII letters) before running the pattern
 // against any operator-facing field this heuristic scans.
 const INVISIBLE_CHAR_PATTERN =
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 
+// DUR-413: a combining diacritical mark (Unicode general category Mn)
+// inserted between the letters of a covered verb -- e.g. "w" + \u0301 +
+// "ire" -- renders as "ẃire" to a human but is not the literal "wire"
+// text, and NFKC *composes* the sequence into a single precomposed
+// character instead of stripping it, so neither the raw nor the
+// NFKC-normalized string contains the matched word. Decompose first (NFD)
+// so every combining mark -- whether it arrived already split or as a
+// precomposed character -- is broken back out to a base letter plus a
+// stripped Mn codepoint, then fold compatibility variants (NFKC) as before.
 function normalizeForDecisionScan(text: string): string {
-  return text.normalize("NFKC").replace(INVISIBLE_CHAR_PATTERN, "");
+  return text
+    .normalize("NFD")
+    .replace(/\p{Mn}/gu, "")
+    .replace(INVISIBLE_CHAR_PATTERN, "")
+    .normalize("NFKC")
+    .replace(INVISIBLE_CHAR_PATTERN, "");
 }
 
 function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
