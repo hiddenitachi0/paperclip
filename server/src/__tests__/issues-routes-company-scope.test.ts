@@ -9,6 +9,8 @@ import {
   companies,
   createDb,
   createRequestScopedDb,
+  feedbackExports,
+  feedbackVotes,
   heartbeatRuns,
   issues,
   issueComments,
@@ -66,6 +68,8 @@ describeEmbeddedPostgres("issueRoutes company-scope wiring (DUR-379)", () => {
   }, 30_000);
 
   afterEach(async () => {
+    await db.delete(feedbackExports);
+    await db.delete(feedbackVotes);
     await db.delete(issueComments);
     await db.delete(activityLog);
     await db.delete(issues);
@@ -126,6 +130,20 @@ describeEmbeddedPostgres("issueRoutes company-scope wiring (DUR-379)", () => {
         title: `Issue ${seq}`,
         status: "todo",
         priority: "medium",
+      })
+      .returning()
+      .then((r) => r[0]!);
+  }
+
+  async function seedAgentComment(companyId: string, issueId: string, authorAgentId: string) {
+    return db
+      .insert(issueComments)
+      .values({
+        companyId,
+        issueId,
+        authorAgentId,
+        authorType: "agent",
+        body: "Agent comment eligible for feedback voting.",
       })
       .returning()
       .then((r) => r[0]!);
@@ -320,5 +338,36 @@ describeEmbeddedPostgres("issueRoutes company-scope wiring (DUR-379)", () => {
     const saved = rows.filter((c) => c.issueId === issue.id);
     expect(saved).toHaveLength(2);
     expect(saved.every((c) => c.companyId === company.id)).toBe(true);
+  });
+
+  // DUR-392 regression guard: feedbackService.saveIssueVote used to call
+  // `db.transaction()` directly instead of `withCompanyScope(rawDb, companyId,
+  // fn)`. Because routes/issues.ts passes the *scoped* `db` proxy into
+  // feedbackService, and that proxy deliberately throws on `.transaction()`
+  // (see packages/db/src/company-scope.ts), the unfixed code would 500 on
+  // every real request through POST /issues/:id/feedback-votes -- this isn't
+  // a silent cross-tenant leak here, it's a hard failure, but it's the same
+  // class of bug the design doc's §3 migration list is about: every
+  // db.transaction() site reachable from a company-scoped issues.ts route
+  // must go through withCompanyScope instead.
+  it("POST /issues/:id/feedback-votes uses withCompanyScope inside saveIssueVote (regression guard)", async () => {
+    const company = await seedCompany("FeedbackVote");
+    const agent = await seedAgent(company.id);
+    const issue = await seedIssue(company.id, company.issuePrefix, 1);
+    const comment = await seedAgentComment(company.id, issue.id, agent.id);
+
+    const app = await createApp(boardActor(company.id));
+    const res = await request(app)
+      .post(`/api/issues/${issue.id}/feedback-votes`)
+      .send({ targetType: "issue_comment", targetId: comment.id, vote: "up" });
+
+    expect(res.status, `expected 201 but got ${res.status}: ${JSON.stringify(res.body)}`).toBe(201);
+    expect(res.body.companyId).toBe(company.id);
+    expect(res.body.targetId).toBe(comment.id);
+
+    const rows = await db.select().from(feedbackVotes);
+    const saved = rows.find((v) => v.targetId === comment.id);
+    expect(saved).toBeDefined();
+    expect(saved!.companyId).toBe(company.id);
   });
 });

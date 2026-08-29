@@ -1274,8 +1274,9 @@ export function issueRoutes(
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
+    rawDb,
   });
-  const feedback = feedbackService(db);
+  const feedback = feedbackService(db, { rawDb });
   const companiesSvc = companyService(db);
   let searchSvc = opts.searchService ?? null;
   const getSearchService = () => {
