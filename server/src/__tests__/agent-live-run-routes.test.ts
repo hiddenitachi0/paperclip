@@ -2,6 +2,26 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// This file fully mocks the service layer (mockAgentService,
+// mockHeartbeatService, etc. below) -- it exercises route wiring, not real
+// DB company-scope enforcement. The `db` this file's createApp() passes to
+// agentRoutes() defaults to a plain fake (`{}` or a select/from/where
+// stub), not a real pool, so company-scope.ts's real `runInCompanyScope` --
+// which reserves a physical connection via `rawDb.$client.reserve()` --
+// fails here (see 2e91a693). Mock it to populate the same AsyncLocalStorage
+// scope directly with the fake db (no reservation), and use a real UUID for
+// the companyId placeholder so company-scope.ts's format validation (which
+// still runs for real) accepts it.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
@@ -95,7 +115,7 @@ async function createApp(db: Record<string, unknown> = {}) {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["c0000001-0000-4000-8000-000000000001"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -170,7 +190,7 @@ describe("agent live run routes", () => {
     vi.clearAllMocks();
     mockIssueService.getByIdentifier.mockResolvedValue({
       id: "issue-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       executionRunId: "run-1",
       assigneeAgentId: "agent-1",
       status: "in_progress",
@@ -178,7 +198,7 @@ describe("agent live run routes", () => {
     mockIssueService.getById.mockResolvedValue(null);
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       name: "Builder",
       adapterType: "codex_local",
     });
@@ -194,7 +214,7 @@ describe("agent live run routes", () => {
       censorUsernameInLogs: false,
       feedbackDataSharingPreference: "prompt",
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["c0000001-0000-4000-8000-000000000001"]);
     mockHeartbeatService.buildRunOutputSilence.mockResolvedValue(null);
     mockHeartbeatService.decorateActiveRunStatus.mockImplementation((run) => ({
       ...run,
@@ -218,7 +238,7 @@ describe("agent live run routes", () => {
     mockHeartbeatService.buildRunOutputSilence.mockResolvedValue(null);
     mockHeartbeatService.getRunLogAccess.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       logStore: "local_file",
       logRef: "logs/run-1.ndjson",
     });
@@ -231,7 +251,7 @@ describe("agent live run routes", () => {
     });
     mockHeartbeatService.wakeup.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       agentId: "agent-1",
       status: "queued",
       invocationSource: "on_demand",
@@ -330,7 +350,7 @@ describe("agent live run routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(mockHeartbeatService.decorateActiveRunStatus).toHaveBeenCalledWith(
       expect.objectContaining({ id: "run-1", issueId: "issue-1" }),
-      { companyId: "company-1", issueId: "issue-1" },
+      { companyId: "c0000001-0000-4000-8000-000000000001", issueId: "issue-1" },
     );
     expect(res.body).toMatchObject({
       currentStatusMessage: "Syncing workspace to sandbox",
@@ -351,7 +371,7 @@ describe("agent live run routes", () => {
     expect(mockHeartbeatService.getRunLogAccess).toHaveBeenCalledWith("run-1");
     expect(mockHeartbeatService.readLog).toHaveBeenCalledWith({
       id: "run-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       logStore: "local_file",
       logRef: "logs/run-1.ndjson",
     }, {
@@ -370,7 +390,7 @@ describe("agent live run routes", () => {
   it("caps company live run polling by default", async () => {
     const rows = Array.from({ length: 75 }, (_, index) => ({
       id: `run-${index}`,
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       status: "running",
       invocationSource: "on_demand",
       triggerDetail: "manual",
@@ -397,7 +417,7 @@ describe("agent live run routes", () => {
 
     const res = await requestApp(
       await createApp(db),
-      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs"),
+      (baseUrl) => request(baseUrl).get("/api/companies/c0000001-0000-4000-8000-000000000001/live-runs"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -409,7 +429,7 @@ describe("agent live run routes", () => {
   it("treats explicit zero or invalid live run limit as the capped default", async () => {
     const rows = Array.from({ length: 75 }, (_, index) => ({
       id: `run-${index}`,
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       status: "running",
       invocationSource: "on_demand",
       triggerDetail: "manual",
@@ -436,7 +456,7 @@ describe("agent live run routes", () => {
 
     const res = await requestApp(
       await createApp(db),
-      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs?limit=0&minCount=0"),
+      (baseUrl) => request(baseUrl).get("/api/companies/c0000001-0000-4000-8000-000000000001/live-runs?limit=0&minCount=0"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -447,7 +467,7 @@ describe("agent live run routes", () => {
   it("does not pad with recent runs when no minCount is requested", async () => {
     const liveRows = Array.from({ length: 8 }, (_, index) => ({
       id: `run-live-${index}`,
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       status: "running",
       invocationSource: "on_demand",
       triggerDetail: "manual",
@@ -493,7 +513,7 @@ describe("agent live run routes", () => {
 
     const res = await requestApp(
       await createApp(db),
-      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs"),
+      (baseUrl) => request(baseUrl).get("/api/companies/c0000001-0000-4000-8000-000000000001/live-runs"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -504,7 +524,7 @@ describe("agent live run routes", () => {
   it("pads with recent runs when minCount is explicitly requested", async () => {
     const liveRows = Array.from({ length: 2 }, (_, index) => ({
       id: `run-live-${index}`,
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       status: "running",
       invocationSource: "on_demand",
       triggerDetail: "manual",
@@ -529,7 +549,7 @@ describe("agent live run routes", () => {
     }));
     const recentRows = Array.from({ length: 4 }, (_, index) => ({
       id: `run-recent-${index}`,
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       status: "succeeded",
       invocationSource: "on_demand",
       triggerDetail: "manual",
@@ -575,7 +595,7 @@ describe("agent live run routes", () => {
 
     const res = await requestApp(
       await createApp(db),
-      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs?minCount=4"),
+      (baseUrl) => request(baseUrl).get("/api/companies/c0000001-0000-4000-8000-000000000001/live-runs?minCount=4"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -587,7 +607,7 @@ describe("agent live run routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .post(`/api/agents/${routeAgentId}/heartbeat/invoke?companyId=company-1`)
+        .post(`/api/agents/${routeAgentId}/heartbeat/invoke?companyId=c0000001-0000-4000-8000-000000000001`)
         .send({
           reason: "issue_assigned",
           payload: {
@@ -628,7 +648,7 @@ describe("agent live run routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .post(`/api/agents/${routeAgentId}/heartbeat/invoke?companyId=company-1`)
+        .post(`/api/agents/${routeAgentId}/heartbeat/invoke?companyId=c0000001-0000-4000-8000-000000000001`)
         .send({}),
     );
 
