@@ -407,6 +407,11 @@ const createIssueBaseSchema = z.object({
   billingCode: z.string().optional().nullable(),
   changeLogVisible: z.boolean().optional(),
   changeLogSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(500)).optional().nullable(),
+  // DUR-313: marks an issue as a user-facing feature launch (DUR-299 point 2) --
+  // once true, evaluateFeatureLaunchDoneGate requires an approved feature_launch
+  // approval before this issue can move to done. See assertFeatureLaunchFieldAllowed
+  // in server/src/routes/issues.ts for who may flip it back to false.
+  featureLaunch: z.boolean().optional(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
   executionPolicy: issueExecutionPolicySchema.optional().nullable(),
   executionWorkspaceId: z.string().uuid().optional().nullable(),
