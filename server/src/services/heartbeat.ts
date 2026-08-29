@@ -5941,7 +5941,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let skipped = 0;
 
     for (const due of dueMonitors) {
-      const claimed = await withCompanyScope(rawDb, due.companyId, async (tx) => {
+      const claimed = await db.transaction(async (tx) => {
         const [updated] = await tx
           .update(issues)
           .set({
