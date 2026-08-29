@@ -1,8 +1,16 @@
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { accessRoutes } from "../routes/access.js";
 import { errorHandler } from "../middleware/index.js";
+import { authUsers, companies, createDb, invites, joinRequests } from "@paperclipai/db";
+import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+
+// DUR-381: every request now does a real reserve/set-claim/release round
+// trip through embedded Postgres -- real latency the default 5s test
+// timeout doesn't leave much room for.
+vi.setConfig({ testTimeout: 15_000 });
 
 const accessServiceMock = vi.hoisted(() => ({
   isInstanceAdmin: vi.fn(),
@@ -29,295 +37,141 @@ vi.mock("../services/index.js", () => ({
   notifyHireApproved: vi.fn(),
 }));
 
-type QueryHooks = {
-  onSet?: (value: unknown) => void;
-  onValues?: (value: unknown) => void;
-};
-
-function createQuery(rows: unknown[], hooks: QueryHooks = {}) {
-  const query = {
-    from: vi.fn(() => query),
-    where: vi.fn(() => query),
-    orderBy: vi.fn(() => query),
-    set: vi.fn((value: unknown) => {
-      hooks.onSet?.(value);
-      return query;
-    }),
-    values: vi.fn((value: unknown) => {
-      hooks.onValues?.(value);
-      return query;
-    }),
-    returning: vi.fn(() => query),
-    then(resolve: (value: unknown[]) => unknown, reject?: (reason: unknown) => unknown) {
-      return Promise.resolve(rows).then(resolve, reject);
-    },
-  };
-  return query;
+function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
 }
 
-function createDbStub() {
-  const updateMock = vi.fn();
-  const invite = {
-    id: "invite-1",
-    companyId: "company-1",
-    inviteType: "company_join",
-    allowedJoinTypes: "human",
-    tokenHash: "hash",
-    defaultsPayload: { humanRole: "viewer" },
-    expiresAt: new Date("2027-03-10T00:00:00.000Z"),
-    invitedByUserId: "user-1",
-    revokedAt: null,
-    acceptedAt: null,
-    createdAt: new Date("2026-03-07T00:00:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:00:00.000Z"),
-  };
+// DUR-381: POST /invites/:token/accept now runs under scopeFromInviteToken()
+// -- a real reserved Postgres connection scoped to the invite's own
+// companyId (a UUID-format check that rejects the old mock's "company-1"
+// literal before the route handler is ever reached) -- and the handler's
+// own queries additionally run part of their work inside a nested
+// withCompanyScope(rawDb, companyId, ...) transaction. A hand-rolled
+// call-count-sequenced db stub (the file's original approach) can't stand
+// in for either of those, so this needs an actual embedded Postgres
+// database end to end. accessService (ensureMembership/setPrincipalGrants/
+// etc.) stays mocked -- it's a legitimate service-level unit-test boundary
+// one layer above the DB.
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
-  const db = {
-    select() {
-      return {
-        from() {
-          return {
-            where() {
-              return Promise.resolve([invite]);
-            },
-          };
-        },
-      };
-    },
-    update(...args: unknown[]) {
-      updateMock(...args);
-      return {
-        set() {
-          return {
-            where() {
-              return {
-                returning() {
-                  return Promise.resolve([]);
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  };
-
-  return { db, updateMock };
-}
-
-function createApp(db: Record<string, unknown>) {
-  return createAppWithActor(db, {
-    type: "board",
-    source: "session",
-    userId: "user-1",
-    companyIds: ["company-1"],
-    memberships: [
-      {
-        companyId: "company-1",
-        membershipRole: "owner",
-        status: "active",
-      },
-    ],
-  });
-}
-
-function createAppWithActor(db: Record<string, unknown>, actor: Record<string, unknown>) {
-  const app = express();
-  app.use(express.json());
-  app.use((req, _res, next) => {
-    (req as any).actor = actor;
-    next();
-  });
-  app.use(
-    "/api",
-    accessRoutes(db as any, {
-      deploymentMode: "authenticated",
-      deploymentExposure: "private",
-      bindHost: "127.0.0.1",
-      allowedHostnames: [],
-    }),
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres invite-accept-existing-member tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
-  app.use(errorHandler);
-  return app;
 }
 
-function createDirectHumanInviteDbStub() {
-  const insertedValues: unknown[] = [];
-  const updateValues: unknown[] = [];
-  const invite = {
-    id: "invite-1",
-    companyId: "company-1",
-    inviteType: "company_join",
-    allowedJoinTypes: "human",
-    tokenHash: "hash",
-    defaultsPayload: { human: { role: "owner" } },
-    expiresAt: new Date("2027-03-10T00:00:00.000Z"),
-    invitedByUserId: "inviter-user",
-    revokedAt: null,
-    acceptedAt: null,
-    createdAt: new Date("2026-03-07T00:00:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:00:00.000Z"),
-  };
-  const createdJoinRequest = {
-    id: "join-1",
-    inviteId: "invite-1",
-    companyId: "company-1",
-    requestType: "human",
-    status: "pending_approval",
-    requestIp: "::ffff:127.0.0.1",
-    requestingUserId: "invitee-user",
-    requestEmailSnapshot: "invitee@example.com",
-    agentName: null,
-    adapterType: null,
-    capabilities: null,
-    agentDefaultsPayload: null,
-    claimSecretHash: null,
-    claimSecretExpiresAt: null,
-    claimSecretConsumedAt: null,
-    createdAgentId: null,
-    approvedByUserId: null,
-    approvedAt: null,
-    rejectedByUserId: null,
-    rejectedAt: null,
-    createdAt: new Date("2026-03-07T00:01:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:01:00.000Z"),
-  };
-  const approvedJoinRequest = {
-    ...createdJoinRequest,
-    status: "approved",
-    approvedByUserId: "inviter-user",
-    approvedAt: new Date("2026-03-07T00:02:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:02:00.000Z"),
-  };
-  const selectResponses = [
-    [invite],
-    [{ email: "invitee@example.com" }],
-    [],
-  ];
-  const updateResponses = [[], [approvedJoinRequest]];
-  const insertResponses = [[createdJoinRequest]];
+describeEmbeddedPostgres("POST /invites/:token/accept", () => {
+  let realDb!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
-  const db = {
-    select() {
-      return createQuery(selectResponses.shift() ?? []);
-    },
-    update() {
-      return createQuery(updateResponses.shift() ?? [], {
-        onSet: (value) => updateValues.push(value),
-      });
-    },
-    insert() {
-      return createQuery(insertResponses.shift() ?? [], {
-        onValues: (value) => insertedValues.push(value),
-      });
-    },
-    transaction(callback: (tx: unknown) => unknown) {
-      return callback(db);
-    },
-  };
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-invite-accept-existing-member-");
+    realDb = createDb(tempDb.connectionString);
+  }, 30_000);
 
-  return { db, insertedValues, updateValues };
-}
-
-function createAcceptedHumanInviteReplayDbStub() {
-  const updateValues: unknown[] = [];
-  const invite = {
-    id: "invite-1",
-    companyId: "company-1",
-    inviteType: "company_join",
-    allowedJoinTypes: "human",
-    tokenHash: "hash",
-    defaultsPayload: { human: { role: "operator" } },
-    expiresAt: new Date("2027-03-10T00:00:00.000Z"),
-    invitedByUserId: "inviter-user",
-    revokedAt: null,
-    acceptedAt: new Date("2026-03-07T00:05:00.000Z"),
-    createdAt: new Date("2026-03-07T00:00:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:05:00.000Z"),
-  };
-  const pendingJoinRequest = {
-    id: "join-1",
-    inviteId: "invite-1",
-    companyId: "company-1",
-    requestType: "human",
-    status: "pending_approval",
-    requestIp: "::ffff:127.0.0.1",
-    requestingUserId: "invitee-user",
-    requestEmailSnapshot: "invitee@example.com",
-    agentName: null,
-    adapterType: null,
-    capabilities: null,
-    agentDefaultsPayload: null,
-    claimSecretHash: null,
-    claimSecretExpiresAt: null,
-    claimSecretConsumedAt: null,
-    createdAgentId: null,
-    approvedByUserId: null,
-    approvedAt: null,
-    rejectedByUserId: null,
-    rejectedAt: null,
-    createdAt: new Date("2026-03-07T00:01:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:01:00.000Z"),
-  };
-  const replayedJoinRequest = {
-    ...pendingJoinRequest,
-    requestIp: "::ffff:127.0.0.1",
-    updatedAt: new Date("2026-03-07T00:06:00.000Z"),
-  };
-  const approvedJoinRequest = {
-    ...replayedJoinRequest,
-    status: "approved",
-    approvedByUserId: "inviter-user",
-    approvedAt: new Date("2026-03-07T00:07:00.000Z"),
-    updatedAt: new Date("2026-03-07T00:07:00.000Z"),
-  };
-  const selectResponses = [
-    [invite],
-    [pendingJoinRequest],
-    [{ email: "invitee@example.com" }],
-    [pendingJoinRequest],
-  ];
-  const updateResponses = [[replayedJoinRequest], [approvedJoinRequest]];
-
-  const db = {
-    select() {
-      return createQuery(selectResponses.shift() ?? []);
-    },
-    update() {
-      return createQuery(updateResponses.shift() ?? [], {
-        onSet: (value) => updateValues.push(value),
-      });
-    },
-    insert: vi.fn(),
-    transaction(callback: (tx: unknown) => unknown) {
-      return callback(db);
-    },
-  };
-
-  return { db, updateValues };
-}
-
-describe("POST /invites/:token/accept", () => {
-  beforeEach(() => {
+  afterEach(async () => {
+    await realDb.delete(joinRequests);
+    await realDb.delete(invites);
+    await realDb.delete(authUsers);
+    await realDb.delete(companies);
     vi.clearAllMocks();
   });
 
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  function createAppWithActor(actor: Record<string, unknown>) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as any).actor = actor;
+      next();
+    });
+    app.use(
+      "/api",
+      accessRoutes(realDb, {
+        deploymentMode: "authenticated",
+        deploymentExposure: "private",
+        bindHost: "127.0.0.1",
+        allowedHostnames: [],
+      }),
+    );
+    app.use(errorHandler);
+    return app;
+  }
+
+  async function seedCompany() {
+    const companyId = randomUUID();
+    await realDb.insert(companies).values({
+      id: companyId,
+      name: `Company ${companyId.slice(0, 8)}`,
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    return companyId;
+  }
+
   it("does not consume a human invite when the signed-in user is already a company member", async () => {
-    const { db, updateMock } = createDbStub();
-    const app = createApp(db);
+    const companyId = await seedCompany();
+    const token = "pcp_invite_test";
+    await realDb.insert(invites).values({
+      companyId,
+      inviteType: "company_join",
+      allowedJoinTypes: "human",
+      tokenHash: hashToken(token),
+      defaultsPayload: { human: { role: "viewer" } },
+      expiresAt: new Date("2027-03-10T00:00:00.000Z"),
+      invitedByUserId: "user-1",
+    });
+    const app = createAppWithActor({
+      type: "board",
+      source: "session",
+      userId: "user-1",
+      companyIds: [companyId],
+      memberships: [
+        {
+          companyId,
+          membershipRole: "owner",
+          status: "active",
+        },
+      ],
+    });
 
     const res = await request(app)
-      .post("/api/invites/pcp_invite_test/accept")
+      .post(`/api/invites/${token}/accept`)
       .send({ requestType: "human" });
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe("You already belong to this company");
-    expect(updateMock).not.toHaveBeenCalled();
+
+    const [invite] = await realDb.select().from(invites);
+    expect(invite?.acceptedAt).toBeNull();
+    const joinRequestRows = await realDb.select().from(joinRequests);
+    expect(joinRequestRows).toHaveLength(0);
   });
 
   it("grants company access immediately for a human invite", async () => {
-    const { db, insertedValues, updateValues } = createDirectHumanInviteDbStub();
-    const app = createAppWithActor(db, {
+    const companyId = await seedCompany();
+    const token = "pcp_invite_test";
+    await realDb.insert(invites).values({
+      companyId,
+      inviteType: "company_join",
+      allowedJoinTypes: "human",
+      tokenHash: hashToken(token),
+      defaultsPayload: { human: { role: "owner" } },
+      expiresAt: new Date("2027-03-10T00:00:00.000Z"),
+      invitedByUserId: "inviter-user",
+    });
+    const now = new Date();
+    await realDb.insert(authUsers).values({
+      id: "invitee-user",
+      name: "Invitee",
+      email: "invitee@example.com",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const app = createAppWithActor({
       type: "board",
       source: "session",
       userId: "invitee-user",
@@ -326,42 +180,37 @@ describe("POST /invites/:token/accept", () => {
     });
 
     const res = await request(app)
-      .post("/api/invites/pcp_invite_test/accept")
+      .post(`/api/invites/${token}/accept`)
       .send({ requestType: "human" });
 
     expect(res.status).toBe(202);
     expect(res.body.status).toBe("approved");
-    expect(insertedValues).toEqual([
+
+    const [joinRequestRow] = await realDb.select().from(joinRequests);
+    expect(joinRequestRow).toEqual(
       expect.objectContaining({
-        inviteId: "invite-1",
-        companyId: "company-1",
+        companyId,
         requestType: "human",
-        status: "pending_approval",
+        status: "approved",
         requestingUserId: "invitee-user",
         requestEmailSnapshot: "invitee@example.com",
+        approvedByUserId: "inviter-user",
       }),
-    ]);
-    expect(updateValues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          acceptedAt: expect.any(Date),
-        }),
-        expect.objectContaining({
-          status: "approved",
-          approvedByUserId: "inviter-user",
-          approvedAt: expect.any(Date),
-        }),
-      ]),
     );
+    expect(joinRequestRow?.approvedAt).toBeInstanceOf(Date);
+
+    const [invite] = await realDb.select().from(invites);
+    expect(invite?.acceptedAt).toBeInstanceOf(Date);
+
     expect(accessServiceMock.ensureMembership).toHaveBeenCalledWith(
-      "company-1",
+      companyId,
       "user",
       "invitee-user",
       "owner",
       "active",
     );
     expect(accessServiceMock.setPrincipalGrants).toHaveBeenCalledWith(
-      "company-1",
+      companyId,
       "user",
       "invitee-user",
       expect.arrayContaining([
@@ -374,15 +223,49 @@ describe("POST /invites/:token/accept", () => {
       expect.anything(),
       expect.objectContaining({
         action: "join.approved",
-        entityId: "join-1",
+        entityId: joinRequestRow!.id,
         details: expect.objectContaining({ source: "human_invite_accept" }),
       }),
     );
   });
 
   it("replays a consumed human invite for the same user and repairs company access", async () => {
-    const { db, updateValues } = createAcceptedHumanInviteReplayDbStub();
-    const app = createAppWithActor(db, {
+    const companyId = await seedCompany();
+    const token = "pcp_invite_test";
+    const [invite] = await realDb
+      .insert(invites)
+      .values({
+        companyId,
+        inviteType: "company_join",
+        allowedJoinTypes: "human",
+        tokenHash: hashToken(token),
+        defaultsPayload: { human: { role: "operator" } },
+        expiresAt: new Date("2027-03-10T00:00:00.000Z"),
+        invitedByUserId: "inviter-user",
+        acceptedAt: new Date("2026-03-07T00:05:00.000Z"),
+      })
+      .returning();
+    const now = new Date();
+    await realDb.insert(authUsers).values({
+      id: "invitee-user",
+      name: "Invitee",
+      email: "invitee@example.com",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const [pendingJoinRequest] = await realDb
+      .insert(joinRequests)
+      .values({
+        inviteId: invite!.id,
+        companyId,
+        requestType: "human",
+        status: "pending_approval",
+        requestIp: "::ffff:127.0.0.1",
+        requestingUserId: "invitee-user",
+        requestEmailSnapshot: "invitee@example.com",
+      })
+      .returning();
+    const app = createAppWithActor({
       type: "board",
       source: "session",
       userId: "invitee-user",
@@ -391,29 +274,22 @@ describe("POST /invites/:token/accept", () => {
     });
 
     const res = await request(app)
-      .post("/api/invites/pcp_invite_test/accept")
+      .post(`/api/invites/${token}/accept`)
       .send({ requestType: "human" });
 
     expect(res.status).toBe(202);
     expect(res.body.status).toBe("approved");
-    expect(updateValues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          requestIp: expect.any(String),
-          updatedAt: expect.any(Date),
-        }),
-        expect.objectContaining({
-          status: "approved",
-          approvedByUserId: "inviter-user",
-          approvedAt: expect.any(Date),
-        }),
-      ]),
-    );
-    expect(updateValues).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ acceptedAt: expect.any(Date) })]),
-    );
+
+    const [joinRequestRow] = await realDb.select().from(joinRequests);
+    expect(joinRequestRow?.id).toBe(pendingJoinRequest!.id);
+    expect(joinRequestRow?.status).toBe("approved");
+    expect(joinRequestRow?.approvedByUserId).toBe("inviter-user");
+    expect(joinRequestRow?.approvedAt).toBeInstanceOf(Date);
+    // Replaying an already-accepted invite must not re-stamp acceptedAt.
+    expect(joinRequestRow?.updatedAt.getTime()).toBeGreaterThan(pendingJoinRequest!.updatedAt.getTime());
+
     expect(accessServiceMock.ensureMembership).toHaveBeenCalledWith(
-      "company-1",
+      companyId,
       "user",
       "invitee-user",
       "operator",
@@ -423,7 +299,7 @@ describe("POST /invites/:token/accept", () => {
       expect.anything(),
       expect.objectContaining({
         action: "join.request_replayed",
-        entityId: "join-1",
+        entityId: joinRequestRow!.id,
         details: expect.objectContaining({ inviteReplay: true }),
       }),
     );
@@ -431,7 +307,7 @@ describe("POST /invites/:token/accept", () => {
       expect.anything(),
       expect.objectContaining({
         action: "join.approved",
-        entityId: "join-1",
+        entityId: joinRequestRow!.id,
         details: expect.objectContaining({ source: "human_invite_accept" }),
       }),
     );
