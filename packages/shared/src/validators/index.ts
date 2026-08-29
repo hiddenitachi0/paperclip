@@ -502,6 +502,7 @@ export {
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -512,6 +513,7 @@ export {
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
+  type FeatureLaunchRequestPayload,
 } from "./approval.js";
 
 export {
