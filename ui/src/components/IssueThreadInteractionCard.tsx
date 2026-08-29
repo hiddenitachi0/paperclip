@@ -248,6 +248,14 @@ function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   const prompt = interaction.payload.prompt ?? "";
   if (DECISION_ASK_PATTERN.test(prompt)) return false;
   if (DECISION_ASK_PATTERN.test(details)) return false;
+  // DUR-341 follow-up: `title`/`summary` are base interaction fields, set
+  // independently of `payload`, and render directly on the card (title even
+  // overrides the "Fact check" heading). An innocuous prompt/detailsMarkdown
+  // pair paired with a title/summary carrying the real instruction ("Wire
+  // $18,500 to ...") would otherwise slip the fact-check styling on an actual
+  // decision. Scan them the same way.
+  if (DECISION_ASK_PATTERN.test(interaction.title ?? "")) return false;
+  if (DECISION_ASK_PATTERN.test(interaction.summary ?? "")) return false;
   return true;
 }
 

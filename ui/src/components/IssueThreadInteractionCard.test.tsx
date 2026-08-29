@@ -22,6 +22,7 @@ import {
   spoofedDecisionAskRequestConfirmationInteraction,
   spoofedDecisionAskInDetailsRequestConfirmationInteraction,
   staleTargetRequestConfirmationInteraction,
+  titleSummarySpoofedFactCheckRequestConfirmationInteraction,
   rejectedSuggestedTasksInteraction,
 } from "../fixtures/issueThreadInteractionFixtures";
 
@@ -494,6 +495,16 @@ describe("IssueThreadInteractionCard", () => {
   it("does not render a past-tense-phrased money movement instruction as a fact-check card (DUR-341)", () => {
     const spoofed = renderCard({
       interaction: pastTenseMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a fact-check card when the money-movement instruction lives in title/summary instead of the payload (DUR-341)", () => {
+    const spoofed = renderCard({
+      interaction: titleSummarySpoofedFactCheckRequestConfirmationInteraction,
     });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
