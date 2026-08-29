@@ -585,4 +585,74 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
     },
     15_000,
   );
+
+  it(
+    // DUR-925: a service that closes over the `tx` handed to a
+    // withCompanyScope() callback (e.g. secrets.ts's syncSecretRefsForTarget,
+    // constructed with `db = tx`) and calls `db.transaction(fn)` directly on
+    // it -- not withCompanyScope(db, companyId, fn) again -- must still work
+    // when that `tx` is backed by a runInCompanyScope()-reserved connection.
+    // Before the fix this reached drizzle's real PostgresJsSession.transaction(),
+    // which calls the reserved connection's nonexistent `.begin()` and threw
+    // "this.client.begin is not a function". Now it's routed through the
+    // same SAVEPOINT-reuse mechanism as a true nested withCompanyScope call.
+    "tx.transaction() called directly inside a reused-connection withCompanyScope call commits via SAVEPOINT instead of throwing",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("direct-tx-transaction");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            // Mirrors secrets.ts:2534's `db.transaction(async (tx) => {...})`
+            // called directly on the value received from withCompanyScope,
+            // not via withCompanyScope(db, companyId, fn) again.
+            await tx.transaction(async (innerTx) => {
+              await innerTx.update(companies).set({ name: "inner-write" }).where(eq(companies.id, companyA.id));
+            });
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("inner-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    // Same gap as above, but proves an error thrown inside the direct
+    // tx.transaction() call rolls back only its own SAVEPOINT (the outer
+    // withCompanyScope's write survives), same as a true nested
+    // withCompanyScope call would.
+    "an error thrown inside a direct tx.transaction() call rolls back only its own SAVEPOINT, not the outer transaction",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("direct-tx-transaction-rollback");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            await expect(
+              tx.transaction(async (innerTx) => {
+                await innerTx
+                  .update(companies)
+                  .set({ name: "inner-write-should-roll-back" })
+                  .where(eq(companies.id, companyA.id));
+                throw new Error("boom");
+              }),
+            ).rejects.toThrow("boom");
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("outer-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
 });

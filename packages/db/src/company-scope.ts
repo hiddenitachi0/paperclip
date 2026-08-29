@@ -112,7 +112,28 @@ function releaseTurn(stack: ReservedScopeStack, depth: number): void {
 // of silently behaving differently than a real drizzle transaction would. No
 // call site uses `tx.rollback()` today (verified during the DUR-916 review),
 // so this only guards against a future, easy-to-make mistake.
-function withRollbackGuard(scopedDb: Db): ScopedDb {
+//
+// DUR-925: the same proxy also traps `.transaction()`. Without this, a
+// service that closes over the value handed to a withCompanyScope()/
+// runOnReservedScope() callback (e.g. secrets.ts's syncSecretRefsForTarget,
+// constructed with `db = tx` for one business operation) and calls
+// `db.transaction(fn)` directly on it -- without going back through
+// withCompanyScope() -- reaches drizzle's real PostgresJsSession.transaction(),
+// which calls `this.client.begin()`. The reserved connection backing this
+// proxy is a postgres.js ReservedSql, which has no `.begin()` (only the
+// top-level pool Sql does) -- see createRequestScopedDb's `.transaction`
+// trap below for the sibling case this mirrors. Rather than fail loudly like
+// that sibling trap, this one stays silently compatible: it routes the call
+// through runOnReservedScope on the same connection/liveness, i.e. exactly
+// what a true nested withCompanyScope(db, companyId, fn) call would do
+// (SAVEPOINT, not a second BEGIN -- see the ReservedScopeStack depth
+// tracking above). This keeps call sites written against the top-level
+// pooled Db working unmodified when handed a reserved-connection-backed tx,
+// which is the load-bearing pattern DUR-418 originally flagged as systemic
+// (agents.ts/documents.ts/document-annotations.ts/external-objects.ts/
+// feedback.ts/heartbeat.ts all pass a `tx` down into service functions this
+// way).
+function withRollbackGuard(scopedDb: Db, liveness: ReservedScopeLiveness): ScopedDb {
   return new Proxy(scopedDb as object, {
     get(target, prop, receiver) {
       if (prop === "rollback") {
@@ -125,6 +146,9 @@ function withRollbackGuard(scopedDb: Db): ScopedDb {
               "SAVEPOINT/transaction the same as any other failure.",
           );
         };
+      }
+      if (prop === "transaction") {
+        return (fn: (tx: ScopedDb) => Promise<unknown>) => runOnReservedScope(scopedDb, liveness, fn);
       }
       return Reflect.get(target, prop, receiver);
     },
@@ -153,7 +177,7 @@ async function runOnReservedScope<T>(
   try {
     await scopedDb.execute(depth === 0 ? sql`BEGIN` : sql.raw(`SAVEPOINT ${savepoint}`));
     try {
-      const result = await fn(withRollbackGuard(scopedDb));
+      const result = await fn(withRollbackGuard(scopedDb, liveness));
       await waitForTurn(stack, depth);
       await scopedDb.execute(depth === 0 ? sql`COMMIT` : sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
       return result;
