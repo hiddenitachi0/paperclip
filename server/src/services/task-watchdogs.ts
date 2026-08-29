@@ -196,12 +196,6 @@ type TaskWatchdogWakeup = (
 
 export type TaskWatchdogServiceDeps = {
   enqueueWakeup?: TaskWatchdogWakeup;
-  // DUR-414: mirrors IssueServiceOptions.rawDb -- callers on the request
-  // path (routes/issues.ts) pass the scoped proxy as `db` and must supply
-  // the raw pooled instance here so issueService's withCompanyScope() calls
-  // (e.g. ensureReusableWatchdogIssue's issuesSvc.create()) don't try to
-  // open a transaction through the request-scoped proxy, which throws.
-  rawDb?: Db;
 };
 
 function normalizeInstructions(value: string | null | undefined): string | null {
@@ -725,7 +719,7 @@ export async function upsertIssueWatchdogForIssue(
 }
 
 export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) {
-  const issuesSvc = issueService(db, { rawDb: deps.rawDb });
+  const issuesSvc = issueService(db);
 
   async function loadWatchdogSubtreeIssues(companyId: string, watchedIssueId: string) {
     const rows = await db.execute(sql`
