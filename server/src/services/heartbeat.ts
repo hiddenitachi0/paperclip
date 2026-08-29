@@ -5941,7 +5941,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let skipped = 0;
 
     for (const due of dueMonitors) {
-      const claimed = await db.transaction(async (tx) => {
+      const claimed = await withCompanyScope(rawDb, due.companyId, async (tx) => {
         const [updated] = await tx
           .update(issues)
           .set({
@@ -7706,7 +7706,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }, "status_only");
     const now = new Date();
 
-    const retryRun = await db.transaction(async (tx) => {
+    const retryRun = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
       );
@@ -7942,7 +7942,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryReason: "process_lost",
     }, "normal_model");
 
-    const queued = await db.transaction(async (tx) => {
+    const queued = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -8563,7 +8563,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           details: Record<string, unknown>;
         };
 
-    const scheduleResult = await db.transaction(async (tx): Promise<ScheduledRetryTransactionResult> => {
+    const scheduleResult = await withCompanyScope(rawDb, run.companyId, async (tx): Promise<ScheduledRetryTransactionResult> => {
       if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON) {
         if (issueId) {
           await tx.execute(
