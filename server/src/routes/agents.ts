@@ -199,7 +199,7 @@ export function agentRoutes(
   ] as const;
 
   const router = Router();
-  const svc = agentService(db);
+  const svc = agentService(db, { rawDb });
   const access = accessService(db);
   const storage = options.storageService;
   const approvalsSvc = approvalService(db);

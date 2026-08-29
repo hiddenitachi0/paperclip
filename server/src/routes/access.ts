@@ -2616,7 +2616,7 @@ export function accessRoutes(
   const db = createRequestScopedDb(rawDb);
   const router = Router();
   const access = accessService(db);
-  const agents = agentService(db);
+  const agents = agentService(db, { rawDb });
   const routeInviteResolutionNetwork = opts.inviteResolutionNetwork
     ? { ...defaultInviteResolutionNetwork, ...opts.inviteResolutionNetwork }
     : inviteResolutionNetwork;
