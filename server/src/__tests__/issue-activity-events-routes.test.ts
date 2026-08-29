@@ -1,8 +1,12 @@
 import express from "express";
 import request from "supertest";
+import { getTableName } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.ts";
-import { withFakeCompanyScopeReserve, type FakeUnsafeRows } from "./helpers/fake-scoped-db.js";
+
+vi.setConfig({ testTimeout: 30_000 });
+
+const TEST_COMPANY_ID = "66666666-6666-4666-8666-666666666666";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -39,13 +43,24 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
       feedbackDataSharingPreference: "prompt",
     },
   })),
-  listCompanyIds: vi.fn(async () => ["99999999-9999-4999-8999-999999999999"]),
+  listCompanyIds: vi.fn(async () => [TEST_COMPANY_ID]),
 }));
 const mockRoutineService = vi.hoisted(() => ({
   syncRunStatusForIssue: vi.fn(async () => undefined),
 }));
 
 function registerModuleMocks() {
+  vi.doMock("@paperclipai/db", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@paperclipai/db")>();
+    return {
+      ...actual,
+      createRequestScopedDb: (rawDb: unknown) => rawDb,
+      runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+      withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+      runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    };
+  });
+
   vi.doMock("../services/access.js", () => ({
     accessService: () => mockAccessService,
   }));
@@ -78,7 +93,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "99999999-9999-4999-8999-999999999999", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: TEST_COMPANY_ID, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => ({
@@ -122,7 +137,7 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp(db: unknown = {}, unsafeRows: FakeUnsafeRows = []) {
+async function createApp(db: unknown = {}) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -133,13 +148,13 @@ async function createApp(db: unknown = {}, unsafeRows: FakeUnsafeRows = []) {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["99999999-9999-4999-8999-999999999999"],
+      companyIds: [TEST_COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(db as object, { unsafeRows }) as any, {} as any));
+  app.use("/api", issueRoutes(db as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -147,7 +162,7 @@ async function createApp(db: unknown = {}, unsafeRows: FakeUnsafeRows = []) {
 function makeIssue() {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "99999999-9999-4999-8999-999999999999",
+    companyId: TEST_COMPANY_ID,
     status: "todo",
     assigneeAgentId: "22222222-2222-4222-8222-222222222222",
     assigneeUserId: null,
@@ -200,7 +215,7 @@ describe("issue activity event routes", () => {
         feedbackDataSharingPreference: "prompt",
       },
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["99999999-9999-4999-8999-999999999999"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue([TEST_COMPANY_ID]);
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
   });
 
@@ -297,21 +312,24 @@ describe("issue activity event routes", () => {
       updatedAt: new Date(),
     }));
 
-    // The route's workspace-name lookup runs inside company scope (DUR-392),
-    // so it queries through the real reserved-connection drizzle instance,
-    // not a mock db.select() chain -- branch on the compiled query text per
-    // table instead (see FakeUnsafeRows in helpers/fake-scoped-db.ts).
-    const unsafeRows: FakeUnsafeRows = (query) => {
-      if (query.includes("project_workspaces")) {
-        return [[previousProjectWorkspaceId, "Main workspace"]];
-      }
-      if (query.includes("execution_workspaces")) {
-        return [[nextExecutionWorkspaceId, "Feature workspace"]];
-      }
-      return [];
+    const dbMock = {
+      select: vi.fn(() => ({
+        from: (table: unknown) => ({
+          where: async () => {
+            const tableName = getTableName(table as Parameters<typeof getTableName>[0]);
+            if (tableName === "project_workspaces") {
+              return [{ id: previousProjectWorkspaceId, name: "Main workspace" }];
+            }
+            if (tableName === "execution_workspaces") {
+              return [{ id: nextExecutionWorkspaceId, name: "Feature workspace" }];
+            }
+            return [];
+          },
+        }),
+      })),
     };
 
-    const res = await request(await createApp({}, unsafeRows))
+    const res = await request(await createApp(dbMock))
       .patch(`/api/issues/${issue.id}`)
       .send({ executionWorkspaceId: nextExecutionWorkspaceId });
 
@@ -355,23 +373,28 @@ describe("issue activity event routes", () => {
       updatedAt: new Date(),
     }));
 
-    // listSuccessfulRunHandoffStates() selects, in this order:
-    // entityId, action, agentId, runId, details, createdAt -- see
-    // routes/issues.ts. This query runs inside company scope (DUR-392), so
-    // it goes through the real reserved-connection drizzle instance; feed it
-    // a positional value-tuple via unsafeRows instead of a mock db.select()
-    // chain (see FakeUnsafeRows in helpers/fake-scoped-db.ts).
-    const handoffActivityRow = [
-      issue.id,
-      "issue.successful_run_handoff_required",
-      issue.assigneeAgentId,
-      "run-1",
-      { sourceRunId: "run-1", correctiveRunId: "run-2" },
-      new Date("2026-05-01T00:00:00.000Z"),
-    ];
-    const unsafeRows: FakeUnsafeRows = [handoffActivityRow];
+    const handoffActivityRow = {
+      entityId: issue.id,
+      action: "issue.successful_run_handoff_required",
+      agentId: issue.assigneeAgentId,
+      runId: "run-1",
+      details: {
+        sourceRunId: "run-1",
+        correctiveRunId: "run-2",
+      },
+      createdAt: new Date("2026-05-01T00:00:00.000Z"),
+    };
+    const dbMock = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            orderBy: async () => [handoffActivityRow],
+          }),
+        }),
+      }),
+    };
 
-    const res = await request(await createApp({}, unsafeRows))
+    const res = await request(await createApp(dbMock))
       .patch(`/api/issues/${issue.id}`)
       .send({ status: "done" });
 
