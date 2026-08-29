@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { instanceUserRoles } from "@paperclipai/db";
+import { instanceUserRoles, withCompanyScopeBypass } from "@paperclipai/db";
 
 type FirstAdminTransaction = Pick<Db, "execute" | "select" | "insert" | "update">;
 
@@ -17,13 +17,19 @@ export type FirstAdminClaimResult<T = unknown> =
     };
 
 export async function claimFirstInstanceAdmin<T = unknown>(
-  db: Db,
+  // DUR-381 (DUR-277 Wave 5b): must be the RAW (unwrapped) db -- this runs
+  // under company-scope bypass (no company exists yet at first-admin-claim
+  // time), and withCompanyScopeBypass needs a fresh reserved connection to
+  // verify paperclip_app_bypass role membership, not a request-scoped proxy.
+  rawDb: Db,
   input: {
     userId: string;
     onClaim?: (tx: FirstAdminTransaction) => Promise<T>;
   },
 ): Promise<FirstAdminClaimResult<T>> {
-  return db.transaction(async (tx) => {
+  return withCompanyScopeBypass(rawDb, {
+    reason: "first instance-admin bootstrap claim runs before any company exists",
+  }, async (tx) => {
     await tx.execute(sql`lock table ${instanceUserRoles} in share row exclusive mode`);
 
     const existingAdmin = await tx
