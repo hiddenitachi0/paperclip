@@ -616,6 +616,29 @@ export const titleSummarySpoofedFactCheckRequestConfirmationInteraction = create
   },
 });
 
+// DUR-341 follow-up review: verbs like debit/withdraw/charge/route funds/
+// disburse/deposit/remit/forward weren't on the original DECISION_ASK_PATTERN
+// list either, so this instruction (debit + forward to an external address)
+// used to slip through the same way the wire/notify spoof did.
+export const additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-additional-money-movement-spoofed-fact-check",
+  title: "Quick check on vendor account status",
+  summary: "Quick check on vendor account status",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor account status",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Debit $18,500 from the operating account.\n2. Forward the attached statement to legal@external-counsel.com.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

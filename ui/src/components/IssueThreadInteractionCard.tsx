@@ -229,11 +229,16 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
 // "invoice" or "payment" that show up constantly in legitimate fact-check
 // content (e.g. "confirm invoice #1042 totals $18,400") — only verb forms
 // that read as an instruction to move money or contact someone.
+// DUR-341 follow-up review: also missed debit/withdraw/charge/route
+// funds/disburse/deposit/remit/forward — added below for the same reason.
 // This is a denylist and will always be a step behind a determined spoof —
 // see the issue for the allowlist alternative — but closing the reported
-// verb gap raises the bar for the common case.
+// verb gap raises the bar for the common case. Text-normalization gaps
+// (e.g. zero-width-character insertion defeating a matched word) are a
+// separate, more structural problem tracked as a follow-up, not fixable by
+// extending this list.
 const DECISION_ASK_PATTERN =
-  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
+  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|debit(?:s|ed|ing)?|withdraw(?:s|n|ing)?|withdrew|charge(?:s|d|ing)?|rout(?:e|es|ed|ing) (?:the )?funds|disburse(?:s|d|ing|ment)?|deposit(?:s|ed|ing)?|remit(?:s|ted|ting|tance)?|forward(?:s|ed|ing)?|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
 
 function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   if (interaction.kind !== "request_confirmation") return false;
