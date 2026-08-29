@@ -26,6 +26,14 @@
 // service, as almost every route in this wave does) needs its test to pass
 // the exact tuple shape its query produces; getting that wrong silently
 // would be worse than the query simply coming back empty.
+//
+// A test whose route issues more than one distinct scoped query in the same
+// request (e.g. two `Promise.all`'d selects against different tables) can't
+// tell them apart with a single static array -- every `.unsafe()` call on
+// the one reserved connection would get the same rows. Pass a function
+// instead: it receives the compiled SQL text (and bind params) per call and
+// returns that call's rows, so different queries can branch on e.g.
+// `query.includes("project_workspaces")`.
 const FAKE_DRIVER_OPTIONS = {
   parsers: {},
   serializers: {},
@@ -39,21 +47,26 @@ const FAKE_DRIVER_OPTIONS = {
   },
 };
 
-function makeFakeReservedConnection(unsafeRows: unknown[]) {
+export type FakeUnsafeRows = unknown[] | ((query: string, params: unknown[]) => unknown[]);
+
+function makeFakeReservedConnection(unsafeRows: FakeUnsafeRows) {
+  const rowsFor = (query: string, params: unknown[]) =>
+    typeof unsafeRows === "function" ? unsafeRows(query, params) : unsafeRows;
   const reserved = async (..._args: unknown[]) => [];
   Object.assign(reserved, {
     release: () => {},
     options: FAKE_DRIVER_OPTIONS,
-    unsafe: (..._args: unknown[]) => {
-      const result: Promise<unknown[]> & { values?: () => Promise<unknown[]> } = Promise.resolve(unsafeRows);
-      result.values = () => Promise.resolve(unsafeRows);
+    unsafe: (query: string, params: unknown[] = []) => {
+      const rows = rowsFor(query, params);
+      const result: Promise<unknown[]> & { values?: () => Promise<unknown[]> } = Promise.resolve(rows);
+      result.values = () => Promise.resolve(rows);
       return result;
     },
   });
   return reserved;
 }
 
-export function withFakeCompanyScopeReserve<T extends object>(fakeDb: T, opts: { unsafeRows?: unknown[] } = {}): T {
+export function withFakeCompanyScopeReserve<T extends object>(fakeDb: T, opts: { unsafeRows?: FakeUnsafeRows } = {}): T {
   const unsafeRows = opts.unsafeRows ?? [];
   Object.defineProperty(fakeDb, "$client", {
     value: {
