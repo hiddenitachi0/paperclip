@@ -5,6 +5,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createDb } from "./client.js";
 import {
+  ConnectionReleaseUnsafeError,
   createRequestScopedDb,
   requestCompanyScopeStorage,
   runInCompanyScope,
@@ -121,6 +122,48 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
     } finally {
       reserved.release();
       await singleConnDb.$client.end();
+    }
+  });
+
+  // DUR-421 follow-up: reproduces the production crash where a client abort
+  // (Node's `close` event on http.ServerResponse, which fires on premature
+  // termination as well as normal completion) let companyScope() middleware
+  // release a reserved connection while its route handler was still
+  // mid-flight, so a later request could reserve the same physical
+  // connection and interleave its wire traffic with the orphaned handler's
+  // -- surfaced as Postgres "bind message supplies N parameters, but
+  // prepared statement requires M" errors that crashed the process. This
+  // proves the fix at the primitive level: when `fn` signals
+  // ConnectionReleaseUnsafeError, runInCompanyScope must abandon the
+  // connection rather than recycle it.
+  it("abandons (never releases) the reserved connection when fn() rejects with ConnectionReleaseUnsafeError", async () => {
+    const singleConnDb = createSingleConnectionDb();
+    const companyA = await seedCompany("A");
+
+    try {
+      const result = await runInCompanyScope(singleConnDb, companyA.id, async () => {
+        throw new ConnectionReleaseUnsafeError();
+      });
+      expect(result).toBeUndefined();
+
+      // The pool has exactly one physical connection. If it were released
+      // (instead of abandoned), a fresh reserve() would resolve almost
+      // immediately; since it must remain abandoned, reserve() should still
+      // be pending after a short wait.
+      let resolved = false;
+      const reservePromise = singleConnDb.$client
+        .reserve()
+        .then((reserved) => {
+          resolved = true;
+          reserved.release();
+        })
+        .catch(() => {});
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(resolved).toBe(false);
+      void reservePromise;
+    } finally {
+      await singleConnDb.$client.end({ timeout: 0 });
     }
   });
 

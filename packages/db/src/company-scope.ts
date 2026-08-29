@@ -166,6 +166,36 @@ function withDrizzleCompatibleClient(reserved: ReservedSql, rawDb: Db): Reserved
   return reserved;
 }
 
+// DUR-421 follow-up: Node's http.ServerResponse `close` event fires not only
+// on a normal completed response but also "if the underlying connection was
+// terminated prematurely (before the response completion)" (Node's own
+// docs) -- e.g. a browser tab navigating away and its SPA data layer
+// aborting the in-flight fetch via AbortController, which is routine, not
+// exceptional. companyScope() (middleware/company-scope.ts) listens for both
+// `finish` and `close` to resolve runInCompanyScope's `fn` and release the
+// reserved connection, because relying on `finish` alone would leak the
+// connection forever on a genuinely aborted request. But when `close` fires
+// *without* `finish` having already fired, the route handler chain may still
+// be mid-flight (Express's `next()` is fire-and-forget -- nothing here
+// actually awaits the handler's completion). Releasing the connection back
+// to the pool in that case lets a subsequent request reserve the same
+// physical connection while the orphaned handler is still issuing queries on
+// it, interleaving both requests' wire traffic and corrupting the Postgres
+// extended-query protocol for both (surfaced in production as e.g. "bind
+// message supplies N parameters, but prepared statement requires M").
+// Throwing this from `fn` signals runInCompanyScope to abandon the
+// connection instead -- same "never recycle with unknown state" precedent as
+// resetClaimAndRelease's own catch branch below.
+export class ConnectionReleaseUnsafeError extends Error {
+  constructor() {
+    super(
+      "company-scope: response stream closed before its handler finished; the handler may still be using this " +
+        "connection, so it will not be recycled back to the pool",
+    );
+    this.name = "ConnectionReleaseUnsafeError";
+  }
+}
+
 async function resetClaimAndRelease(reserved: ReservedSql): Promise<void> {
   try {
     await reserved`RESET app.current_company_id`;
@@ -205,12 +235,26 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
   }
 
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  let unsafeToRelease = false;
   try {
     await reserved`select set_config('app.current_company_id', ${companyId}, false)`;
     const scopedDb = drizzlePg(reserved, { schema });
     return await requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb }, fn);
+  } catch (err) {
+    if (err instanceof ConnectionReleaseUnsafeError) {
+      unsafeToRelease = true;
+      return undefined as T;
+    }
+    throw err;
   } finally {
-    await resetClaimAndRelease(reserved);
+    if (unsafeToRelease) {
+      console.error(
+        "company-scope: response closed before its handler finished; abandoning the reserved connection " +
+          "instead of recycling it, since the handler may still be using it",
+      );
+    } else {
+      await resetClaimAndRelease(reserved);
+    }
   }
 }
 
