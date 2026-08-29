@@ -222,15 +222,18 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
 // refund, reimburse, pay out) and outbound-communication (send, email,
 // notify, share, post, publish, message) verbs, so a numbered-claims block
 // that actually instructs a wire transfer + external notification still
-// slipped through as a "fact check". Deliberately does NOT include bare
-// nouns like "invoice" or "payment" that show up constantly in legitimate
-// fact-check content (e.g. "confirm invoice #1042 totals $18,400") — only
-// verb forms that read as an instruction to move money or contact someone.
+// slipped through as a "fact check". Past-tense/inflected forms (sent,
+// notified, posted, emailed, wired, transferred, ...) are covered too —
+// a spoof only needs to phrase the instruction as already-done to dodge a
+// present-tense-only match. Deliberately does NOT include bare nouns like
+// "invoice" or "payment" that show up constantly in legitimate fact-check
+// content (e.g. "confirm invoice #1042 totals $18,400") — only verb forms
+// that read as an instruction to move money or contact someone.
 // This is a denylist and will always be a step behind a determined spoof —
 // see the issue for the allowlist alternative — but closing the reported
 // verb gap raises the bar for the common case.
 const DECISION_ASK_PATTERN =
-  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out)?|wire|transfer(?:s|ring)?|refund|reimburse|send(?:s|ing)?|email(?:s|ing)?|notify|notifies|notifying|share(?:s|d|ing)?|post(?:s|ing)?|publish(?:es|ing)?|message(?:s|d|ing)?|dm|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing)?|varsl(?:e|er)?|publiser(?:e|er)?)\b/i;
+  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
 
 function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   if (interaction.kind !== "request_confirmation") return false;

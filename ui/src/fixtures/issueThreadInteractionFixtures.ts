@@ -572,6 +572,25 @@ export const moneyMovementSpoofedFactCheckRequestConfirmationInteraction = creat
   },
 });
 
+export const pastTenseMoneyMovementSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-past-tense-money-movement-spoofed-fact-check",
+  title: "Quick check on vendor payout status",
+  summary: "Quick check on vendor payout status",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout status",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. $18,500 was wired to routing number 021000021, account 4471002.\n2. A notice was sent to legal@external-counsel.com once it cleared.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",
