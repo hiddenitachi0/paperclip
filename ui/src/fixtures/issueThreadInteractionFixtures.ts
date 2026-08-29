@@ -639,6 +639,30 @@ export const additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteracti
   },
 });
 
+// DUR-405: a zero-width space (U+200B) inserted inside an already-covered
+// word ("W​ire") defeats DECISION_ASK_PATTERN's plain word-boundary
+// match even though the word reads as "Wire" to a human and to any renderer
+// that doesn't display invisible characters. Reproduces the reviewer's exact
+// repro string.
+export const zeroWidthSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-zero-width-spoofed-fact-check",
+  title: "Quick check on vendor payout",
+  summary: "Quick check on vendor payout",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. W​ire $18,500 to routing 021000021.\n2. No​tify legal@external-counsel.com once it clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",
