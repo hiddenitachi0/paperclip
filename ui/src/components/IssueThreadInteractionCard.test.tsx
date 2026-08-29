@@ -25,6 +25,7 @@ import {
   staleTargetRequestConfirmationInteraction,
   titleSummarySpoofedFactCheckRequestConfirmationInteraction,
   rejectedSuggestedTasksInteraction,
+  zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
 } from "../fixtures/issueThreadInteractionFixtures";
 
 let root: Root | null = null;
@@ -516,6 +517,16 @@ describe("IssueThreadInteractionCard", () => {
   it("does not render a debit + forward-to-external-address instruction as a fact-check card (DUR-341)", () => {
     const spoofed = renderCard({
       interaction: additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a fact-check card when a zero-width space is spliced inside a denylisted word (DUR-405)", () => {
+    const spoofed = renderCard({
+      interaction: zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
     });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");

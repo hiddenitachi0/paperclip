@@ -639,6 +639,28 @@ export const additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteracti
   },
 });
 
+// DUR-405: a zero-width space (U+200B) spliced into "wire" reads identically
+// to a human but historically defeated DECISION_ASK_PATTERN outright, since
+// the regex never saw a contiguous "wire".
+export const zeroWidthSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-zero-width-spoofed-fact-check",
+  title: "Quick check on wiring instructions",
+  summary: "Quick check on wiring instructions",
+  payload: {
+    version: 1,
+    prompt: "Quick check on wiring instructions",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. W​ire $18,500 to routing 021000021.\n2. Notify legal@external-counsel.com once the wire clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

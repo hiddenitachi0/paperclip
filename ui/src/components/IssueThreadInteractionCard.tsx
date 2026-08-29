@@ -240,6 +240,19 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
 const DECISION_ASK_PATTERN =
   /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|debit(?:s|ed|ing)?|withdraw(?:s|n|ing)?|withdrew|charge(?:s|d|ing)?|rout(?:e|es|ed|ing) (?:the )?funds|disburse(?:s|d|ing|ment)?|deposit(?:s|ed|ing)?|remit(?:s|ted|ting|tance)?|forward(?:s|ed|ing)?|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
 
+// DUR-405: an invisible Unicode codepoint inserted inside an otherwise-covered
+// word (e.g. "w​ire") reads identically to a human but defeats
+// DECISION_ASK_PATTERN outright, since the regex never sees a contiguous
+// "wire". Strip every Unicode format character (category Cf: zero-width
+// space/joiner/non-joiner, bidi override marks, word joiner, BOM, soft
+// hyphen, etc. — none of them render as visible content) and fold
+// compatibility variants (fullwidth "ｗire", ligatures) to their canonical
+// form via NFKC before running the denylist, so the check sees what a human
+// reading the card actually sees.
+function normalizeForDecisionMatch(text: string): string {
+  return text.normalize("NFKC").replace(/\p{Cf}/gu, "");
+}
+
 function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   if (interaction.kind !== "request_confirmation") return false;
   if (isPlanConfirmation(interaction)) return false;
@@ -251,16 +264,16 @@ function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
     .filter((line) => /^\s*\d+[.)]\s+\S/.test(line));
   if (numberedClaims.length < 2) return false;
   const prompt = interaction.payload.prompt ?? "";
-  if (DECISION_ASK_PATTERN.test(prompt)) return false;
-  if (DECISION_ASK_PATTERN.test(details)) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionMatch(prompt))) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionMatch(details))) return false;
   // DUR-341 follow-up: `title`/`summary` are base interaction fields, set
   // independently of `payload`, and render directly on the card (title even
   // overrides the "Fact check" heading). An innocuous prompt/detailsMarkdown
   // pair paired with a title/summary carrying the real instruction ("Wire
   // $18,500 to ...") would otherwise slip the fact-check styling on an actual
   // decision. Scan them the same way.
-  if (DECISION_ASK_PATTERN.test(interaction.title ?? "")) return false;
-  if (DECISION_ASK_PATTERN.test(interaction.summary ?? "")) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionMatch(interaction.title ?? ""))) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionMatch(interaction.summary ?? ""))) return false;
   return true;
 }
 
