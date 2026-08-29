@@ -24,6 +24,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { runCleanupCascadeWithRetry } from "./helpers/retry-cleanup.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -106,22 +107,24 @@ describeEmbeddedPostgres("heartbeat whole-instance concurrency ceiling (DUR-151)
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await db.delete(environmentLeases);
-    await db.delete(activityLog);
-    await db.delete(companySkills);
-    await db.delete(issueDocuments);
-    await db.delete(issueAttachments);
-    await db.delete(documents);
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
-    await db.delete(workspaceOperations);
-    await db.delete(executionWorkspaces);
-    await db.delete(companies);
+    await runCleanupCascadeWithRetry(async () => {
+      await db.delete(environmentLeases);
+      await db.delete(activityLog);
+      await db.delete(companySkills);
+      await db.delete(issueDocuments);
+      await db.delete(issueAttachments);
+      await db.delete(documents);
+      await db.delete(issueComments);
+      await db.delete(issues);
+      await db.delete(heartbeatRunEvents);
+      await db.delete(heartbeatRuns);
+      await db.delete(agentWakeupRequests);
+      await db.delete(agentRuntimeState);
+      await db.delete(agents);
+      await db.delete(workspaceOperations);
+      await db.delete(executionWorkspaces);
+      await db.delete(companies);
+    });
     await instanceSettingsService(db).updateGeneral({
       globalMaxConcurrentRuns: 4,
     });
