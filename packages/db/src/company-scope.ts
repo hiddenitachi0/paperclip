@@ -32,6 +32,37 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 type ScopedDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
+// DUR-418: tracks how many withCompanyScope() calls are currently nested on
+// top of a single request's reserved connection (see runOnReservedScope
+// below), keyed by the RequestCompanyScope's scopedDb object identity (one
+// per runInCompanyScope() call, i.e. one per request/tick). A first call
+// opens a real `BEGIN`; anything nested inside that callback on the same
+// connection uses a SAVEPOINT instead of a second `BEGIN`, which would
+// silently attach to (and let an inner COMMIT prematurely finish) the outer
+// transaction rather than erroring.
+const reservedScopeTxDepth = new WeakMap<Db, number>();
+
+async function runOnReservedScope<T>(scopedDb: Db, fn: (scopedDb: ScopedDb) => Promise<T>): Promise<T> {
+  const depth = reservedScopeTxDepth.get(scopedDb) ?? 0;
+  const savepoint = `with_company_scope_${depth}`;
+  reservedScopeTxDepth.set(scopedDb, depth + 1);
+  try {
+    await scopedDb.execute(depth === 0 ? sql`BEGIN` : sql.raw(`SAVEPOINT ${savepoint}`));
+    try {
+      const result = await fn(scopedDb as unknown as ScopedDb);
+      await scopedDb.execute(depth === 0 ? sql`COMMIT` : sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
+      return result;
+    } catch (err) {
+      await scopedDb
+        .execute(depth === 0 ? sql`ROLLBACK` : sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`))
+        .catch(() => {});
+      throw err;
+    }
+  } finally {
+    reservedScopeTxDepth.set(scopedDb, depth);
+  }
+}
+
 export async function withCompanyScope<T>(
   db: Db,
   companyId: string,
@@ -39,6 +70,28 @@ export async function withCompanyScope<T>(
 ): Promise<T> {
   if (!UUID_RE.test(companyId)) {
     throw new Error(`withCompanyScope: companyId is not a UUID: ${companyId}`);
+  }
+
+  // DUR-418: if we're already running inside a runInCompanyScope()-reserved
+  // connection for this same company, run this transaction on THAT
+  // connection (BEGIN/SAVEPOINT below) instead of calling db.transaction(),
+  // which would reserve a SECOND physical connection from the same pool.
+  // Under enough concurrent requests that both hold a runInCompanyScope
+  // reservation and call withCompanyScope, every such nested
+  // db.transaction() call blocks forever waiting for a connection that can
+  // never free up (releasing the outer reservation requires this nested
+  // wait to finish first) -- a permanent pool-exhaustion deadlock, not
+  // merely contention. See DUR-418 for the full repro.
+  //
+  // Only reused when the companyId matches the active scope exactly: the
+  // reserved connection's session-level app.current_company_id claim is
+  // already set to that company by runInCompanyScope, so no per-transaction
+  // set_config is needed here. A mismatched companyId falls through to
+  // acquiring its own connection below, since reusing the wrong session
+  // claim would silently break RLS isolation for that call.
+  const activeScope = requestCompanyScopeStorage.getStore();
+  if (activeScope?.kind === "scoped" && activeScope.companyId === companyId) {
+    return runOnReservedScope(activeScope.scopedDb, fn);
   }
 
   return db.transaction(async (tx) => {

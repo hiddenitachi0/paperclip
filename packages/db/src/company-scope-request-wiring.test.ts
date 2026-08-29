@@ -10,6 +10,7 @@ import {
   requestCompanyScopeStorage,
   runInCompanyScope,
   runInCompanyScopeBypass,
+  withCompanyScope,
 } from "./company-scope.js";
 import { companies, crossCompanyAccessLog } from "./schema/index.js";
 import {
@@ -214,4 +215,151 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
       }
     }
   });
+});
+
+// DUR-418: withCompanyScope(rawDb, companyId, fn) used to unconditionally call
+// rawDb.transaction(...), which reserves a SECOND physical connection even
+// when called from inside a runInCompanyScope()-reserved request scope for
+// the very same company. Under enough concurrent requests that each hold one
+// runInCompanyScope reservation and then call withCompanyScope, every nested
+// db.transaction() blocks forever waiting for a connection that can only
+// free up once that same blocked call returns -- a permanent pool-exhaustion
+// deadlock. Fixed by detecting the active AsyncLocalStorage scope and running
+// on that reserved connection via BEGIN/SAVEPOINT instead of a second BEGIN.
+// These tests use a `max: 1` pool so a regression back to `rawDb.transaction()`
+// inside an active scope hangs (and fails on the test's own timeout) rather
+// than silently passing by drawing a second connection from a bigger pool.
+describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope-reserved connection", () => {
+  let db!: Db;
+  let connectionString!: string;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-dur418-nested-scope-");
+    connectionString = tempDb.connectionString;
+    db = createDb(connectionString);
+  }, 30_000);
+
+  afterEach(async () => {
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  function createSingleConnectionDb(): Db {
+    const sql = postgres(connectionString, { max: 1 });
+    return drizzlePg(sql, {}) as unknown as Db;
+  }
+
+  async function seedCompany(label: string) {
+    return db
+      .insert(companies)
+      .values({
+        name: `DUR-418 ${label}`,
+        issuePrefix: `D418${randomUUID().replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+  }
+
+  it(
+    "withCompanyScope inside an active runInCompanyScope for the same companyId does not draw a second connection",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("reuse");
+      try {
+        const seenName = await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          return withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            const rows = await tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyA.id));
+            return rows[0]?.name;
+          });
+        });
+        expect(seenName).toBe(`DUR-418 reuse`);
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    "true nested withCompanyScope calls use SAVEPOINT (not a second BEGIN) and both writes commit",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("nested-commit");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            await withCompanyScope(singleConnDb, companyA.id, async (innerTx) => {
+              await innerTx.update(companies).set({ name: "inner-write" }).where(eq(companies.id, companyA.id));
+            });
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("inner-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    "an error thrown inside a nested withCompanyScope call rolls back only its own SAVEPOINT, not the outer transaction",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("nested-rollback");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            await expect(
+              withCompanyScope(singleConnDb, companyA.id, async (innerTx) => {
+                await innerTx
+                  .update(companies)
+                  .set({ name: "inner-write-should-roll-back" })
+                  .where(eq(companies.id, companyA.id));
+                throw new Error("boom");
+              }),
+            ).rejects.toThrow("boom");
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("outer-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    "withCompanyScope for a DIFFERENT companyId than the active scope falls through to its own connection and claim, not the outer one's",
+    async () => {
+      const companyA = await seedCompany("mismatch-outer");
+      const companyB = await seedCompany("mismatch-inner");
+      const poolDb = createDb(connectionString);
+
+      try {
+        const innerClaim = await runInCompanyScope(poolDb, companyA.id, async () => {
+          return withCompanyScope(poolDb, companyB.id, async (tx) => {
+            const rows = await tx.execute(
+              drizzleSql`select current_setting('app.current_company_id', true) as claim`,
+            );
+            return (rows as unknown as { claim: string }[])[0]?.claim;
+          });
+        });
+
+        expect(innerClaim).toBe(companyB.id);
+      } finally {
+        await poolDb.$client.end();
+      }
+    },
+    10_000,
+  );
 });
