@@ -11,6 +11,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // new value), who did it. Also covers the same for a change to an agent's
 // rights (permissions).
 
+// This file fully mocks the service layer (mockAgentService, mockAccessService,
+// etc. below) -- it exercises route wiring and audit-logging, not real DB
+// company-scope enforcement. The `db` this file's createApp() passes to
+// agentRoutes() is a plain fake with select/from/where stubs, not a real pool,
+// so company-scope.ts's real `runInCompanyScope` -- which reserves a physical
+// connection via `rawDb.$client.reserve()` -- fails here (see 2e91a693).
+// Mock it to populate the same AsyncLocalStorage scope directly with the
+// fake db (no reservation).
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 const revisionId = "44444444-4444-4444-8444-444444444444";
