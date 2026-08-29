@@ -2369,6 +2369,7 @@ const issueListSelect = {
   sourceTrust: issues.sourceTrust,
   changeLogVisible: issues.changeLogVisible,
   changeLogSummary: issues.changeLogSummary,
+  featureLaunch: issues.featureLaunch,
   startedAt: issues.startedAt,
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
