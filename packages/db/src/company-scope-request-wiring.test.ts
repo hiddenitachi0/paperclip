@@ -462,4 +462,60 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
     },
     10_000,
   );
+
+  it(
+    // DUR-918 review, required change #1: two withCompanyScope calls on the
+    // same reserved connection that are NOT sequentially awaited (started
+    // back-to-back, e.g. via Promise.all, or a fire-and-forget continuation
+    // racing the handler that spawned it -- the DUR-417
+    // queueTaskWatchdogEvaluation pattern) get depth 0 (outer, real
+    // BEGIN/COMMIT) and depth 1 (inner, SAVEPOINT) respectively, same as
+    // true nesting. Unlike true nesting, nothing about the caller guarantees
+    // depth 0 finishes its own work AFTER depth 1 does. This test
+    // deliberately lets the depth-0 call finish (and attempt to close)
+    // FIRST while the depth-1 call is still open -- the exact ordering that
+    // used to end the whole transaction out from under the still-open
+    // SAVEPOINT (surfacing as a "savepoint does not exist" error and/or
+    // autocommitted, unintentionally-non-atomic writes). With the fix, the
+    // depth-0 close waits for the depth-1 call to finish first, so both
+    // resolve cleanly and the depth-1 (later) write wins, exactly as if the
+    // calls had been properly awaited one after another.
+    "concurrent (non-awaited) sibling withCompanyScope calls on the same reserved connection still close in strict LIFO order",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("concurrent-siblings");
+      try {
+        let releaseInner!: () => void;
+        const innerGate = new Promise<void>((resolve) => {
+          releaseInner = resolve;
+        });
+
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          // Both calls are kicked off back-to-back, with neither awaited
+          // before the other starts -- `outer` gets depth 0, `inner` gets
+          // depth 1, same as if they were genuinely nested.
+          const outer = withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+          });
+          const inner = withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            // Deliberately held open until well after `outer`'s single
+            // round trip above has certainly finished, to force `outer`'s
+            // close to be the one that has to wait.
+            await innerGate;
+            await tx.update(companies).set({ name: "inner-write" }).where(eq(companies.id, companyA.id));
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          releaseInner();
+          await expect(Promise.all([outer, inner])).resolves.toBeDefined();
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("inner-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
 });

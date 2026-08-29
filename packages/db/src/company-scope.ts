@@ -42,7 +42,66 @@ type ScopedDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 // transaction rather than erroring. No call site nests today (verified via
 // DUR-916 review), but that invariant isn't enforced anywhere, so this is
 // handled defensively rather than assumed.
-const reservedScopeTxDepth = new WeakMap<Db, number>();
+//
+// DUR-918 review: depth is assigned in call-start order, which is safe
+// on its own (BEGIN/SAVEPOINT are issued in that same order -- see
+// runOnReservedScope), but nothing about depth ASSIGNMENT stops two
+// sibling calls from CLOSING (COMMIT/RELEASE SAVEPOINT) out of LIFO order
+// when they run concurrently instead of being awaited one after another
+// (e.g. two withCompanyScope calls on the same scope started via
+// Promise.all, or a fire-and-forget continuation racing the handler that
+// spawned it -- the exact DUR-417 queueTaskWatchdogEvaluation pattern).
+// If a shallower call's COMMIT/ROLLBACK runs while a deeper call's
+// SAVEPOINT is still open, it ends the whole transaction out from under
+// the deeper call -- its subsequent statements land autocommitted outside
+// any transaction, and its own RELEASE SAVEPOINT/ROLLBACK TO SAVEPOINT
+// then fails against a connection with no open transaction. `waiters`
+// below closes that gap: a call may only issue its own finalize statement
+// once it is the innermost (topmost) still-open call, so completion order
+// is always forced back into the same LIFO order depth was assigned in --
+// see waitForTurn/releaseTurn.
+interface ReservedScopeStack {
+  /** Count of withCompanyScope() calls currently open (BEGIN/SAVEPOINT issued, not yet finalized) on this connection. */
+  depth: number;
+  /** Resolvers for calls waiting to become the topmost open call before they may finalize -- keyed by their own depth. */
+  waiters: Map<number, () => void>;
+}
+
+const reservedScopeStacks = new WeakMap<Db, ReservedScopeStack>();
+
+function getReservedScopeStack(scopedDb: Db): ReservedScopeStack {
+  let stack = reservedScopeStacks.get(scopedDb);
+  if (!stack) {
+    stack = { depth: 0, waiters: new Map() };
+    reservedScopeStacks.set(scopedDb, stack);
+  }
+  return stack;
+}
+
+// Resolves once `depth` is the innermost (topmost) still-open call on this
+// connection -- i.e. every deeper call has already finalized. For strictly
+// sequential (awaited) nesting this is already true by construction and
+// resolves immediately with no extra wait; it only actually blocks a call
+// whose sibling(s) opened after it are still mid-flight. This mirrors the
+// dependency real nesting already has (an outer await already can't resume
+// until an inner awaited call finishes) -- it does not introduce a new kind
+// of wait, only extends the same guarantee to calls that weren't awaited
+// relative to each other.
+async function waitForTurn(stack: ReservedScopeStack, depth: number): Promise<void> {
+  if (stack.depth === depth + 1) return;
+  await new Promise<void>((resolve) => {
+    stack.waiters.set(depth, resolve);
+  });
+}
+
+function releaseTurn(stack: ReservedScopeStack, depth: number): void {
+  stack.depth = depth;
+  const nextWaiter = stack.waiters.get(depth - 1);
+  if (nextWaiter) {
+    stack.waiters.delete(depth - 1);
+    nextWaiter();
+  }
+}
 
 // DUR-916 review mod #2: drizzle's real `db.transaction(cb)` gives `cb` a
 // `tx.rollback()` sentinel method -- calling it throws a special object that
@@ -73,23 +132,26 @@ function withRollbackGuard(scopedDb: Db): ScopedDb {
 }
 
 async function runOnReservedScope<T>(scopedDb: Db, fn: (scopedDb: ScopedDb) => Promise<T>): Promise<T> {
-  const depth = reservedScopeTxDepth.get(scopedDb) ?? 0;
+  const stack = getReservedScopeStack(scopedDb);
+  const depth = stack.depth;
   const savepoint = `with_company_scope_${depth}`;
-  reservedScopeTxDepth.set(scopedDb, depth + 1);
+  stack.depth = depth + 1;
   try {
     await scopedDb.execute(depth === 0 ? sql`BEGIN` : sql.raw(`SAVEPOINT ${savepoint}`));
     try {
       const result = await fn(withRollbackGuard(scopedDb));
+      await waitForTurn(stack, depth);
       await scopedDb.execute(depth === 0 ? sql`COMMIT` : sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
       return result;
     } catch (err) {
+      await waitForTurn(stack, depth);
       await scopedDb
         .execute(depth === 0 ? sql`ROLLBACK` : sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`))
         .catch(() => {});
       throw err;
     }
   } finally {
-    reservedScopeTxDepth.set(scopedDb, depth);
+    releaseTurn(stack, depth);
   }
 }
 
