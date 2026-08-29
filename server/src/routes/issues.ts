@@ -1314,6 +1314,25 @@ export function issueRoutes(
     enqueueWakeup: opts.taskWatchdogEnqueueWakeup === undefined
       ? heartbeat.wakeup
       : opts.taskWatchdogEnqueueWakeup ?? undefined,
+    rawDb,
+  }) ?? noopTaskWatchdogService();
+  // DUR-417: reconciliation triggered fire-and-forget from the request path
+  // (queueTaskWatchdogEvaluation below) must never run on the request-scoped
+  // `db` proxy or hold a reserved AsyncLocalStorage-scoped connection --
+  // by the time it runs, the request that triggered it may already have
+  // released its own reserved connection back to the pool, and evaluation
+  // can itself open further nested connections (ensureReusableWatchdogIssue's
+  // issuesSvc.create()) while running. Built on plain `rawDb` instead, this
+  // mirrors exactly how the periodic heartbeat scheduler already drives the
+  // same reconcile* methods (see heartbeat.ts's own taskWatchdogService(db)
+  // wiring at startup, where `db` there is already the raw pooled instance)
+  // -- every query just borrows/returns its own pool connection per call,
+  // so nothing here is ever held open across a nested reservation.
+  const taskWatchdogEvaluationSvc = taskWatchdogFactory?.(rawDb, {
+    enqueueWakeup: opts.taskWatchdogEnqueueWakeup === undefined
+      ? heartbeat.wakeup
+      : opts.taskWatchdogEnqueueWakeup ?? undefined,
+    rawDb,
   }) ?? noopTaskWatchdogService();
   const externalObjectsSvc = externalObjectService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
@@ -1338,8 +1357,20 @@ export function issueRoutes(
   const feedbackExportService = opts?.feedbackExportService;
   const environmentsSvc = environmentService(db);
 
+  // DUR-417: called fire-and-forget (`void queueTaskWatchdogEvaluation(...)`)
+  // from every call site below so the response is never held up on a second
+  // DB round trip. That means this can still be running well after the
+  // request's own reserved connection (see middleware/company-scope.ts) has
+  // been released back to the pool -- reusing that connection here via the
+  // ambient `db` proxy would let a later request's queries interleave with
+  // this one on the same physical socket once it's handed back out,
+  // corrupting the postgres wire protocol for both. Using taskWatchdogEvaluationSvc
+  // (built on plain `rawDb`, not the request-scoped proxy) instead means every
+  // query it runs just borrows/returns its own pool connection per call --
+  // nothing is ever reserved-and-held across this call's lifetime, so it can't
+  // deadlock against (or corrupt) any other connection, request-held or not.
   async function queueTaskWatchdogEvaluation(issue: { id: string; companyId: string }, runId?: string | null) {
-    await taskWatchdogsSvc
+    await taskWatchdogEvaluationSvc
       .reconcileForIssueAndAncestors(issue.companyId, issue.id, { runId: runId ?? null })
       .catch((err) => {
         logger.warn({ err, issueId: issue.id }, "task watchdog evaluation hook failed");
@@ -3976,7 +4007,7 @@ export function issueRoutes(
         instructionsChanged: (existingWatchdog?.instructions ?? null) !== (watchdog.instructions ?? null),
       },
     });
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json(watchdog);
   });
 
@@ -4016,7 +4047,7 @@ export function issueRoutes(
         },
       });
     }
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json({ ok: true });
   });
 
@@ -5689,7 +5720,7 @@ export function issueRoutes(
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
     });
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
 
     res.status(201).json({
       ...issue,
@@ -5949,7 +5980,7 @@ export function issueRoutes(
       watchdogParentIssueId: serializationContext?.watchdogParentIssueId,
       currentChildIssueId: currentSerializedChild?.id ?? issue.id,
     });
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
 
     res.status(201).json(issue);
   });
@@ -6145,7 +6176,7 @@ export function issueRoutes(
           requestedByActorId: actor.actorId,
         });
       }
-      await queueTaskWatchdogEvaluation(issue, actor.runId);
+      void queueTaskWatchdogEvaluation(issue, actor.runId);
     }
     await blockWatchdogParentOnCurrentChild({
       actor,
@@ -7392,7 +7423,7 @@ export function issueRoutes(
       }
     })();
 
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json({ ...issueResponse, comment });
   });
 
@@ -7427,7 +7458,7 @@ export function issueRoutes(
       entityId: issue.id,
     });
 
-    await queueTaskWatchdogEvaluation(existing, actor.runId);
+    void queueTaskWatchdogEvaluation(existing, actor.runId);
     res.json(issue);
   });
 
@@ -7651,7 +7682,7 @@ export function issueRoutes(
         entityId: result.issue.id,
         details: { clearedBlockerIssueIds: result.clearedBlockerIssueIds },
       });
-      await queueTaskWatchdogEvaluation(existing, actor.runId);
+      void queueTaskWatchdogEvaluation(existing, actor.runId);
     }
 
     res.json(result);
@@ -8930,7 +8961,7 @@ export function issueRoutes(
       }
     })();
 
-    await queueTaskWatchdogEvaluation(currentIssue, actor.runId);
+    void queueTaskWatchdogEvaluation(currentIssue, actor.runId);
     res.status(201).json(comment);
   });
 

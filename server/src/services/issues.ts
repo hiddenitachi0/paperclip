@@ -5283,7 +5283,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       // it defaults the child's override only when this call left
       // assigneeAdapterOverrides unset entirely (explicit values, including
       // explicit null, always win).
-      let child = await issueService(db).create(parent.companyId, {
+      let child = await issueService(db, { rawDb }).create(parent.companyId, {
         ...issueData,
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
