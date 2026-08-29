@@ -5,6 +5,8 @@ import {
   instanceUserRoles,
   issues,
   principalPermissionGrants,
+  withCompanyScope,
+  withCompanyScopeBypass,
 } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { conflict } from "../errors.js";
@@ -25,7 +27,15 @@ type MemberArchiveInput = {
   } | null;
 };
 
-export function accessService(db: Db) {
+// DUR-381 (DUR-277 Wave 5b): `rawDb` defaults to `db` for every unmigrated
+// caller, a no-op there since `db` is already the raw pooled instance for
+// them (same pattern as issueTreeControlService, DUR-348). Only
+// routes/access.ts, once wired through createRequestScopedDb, passes a
+// `db` that is the *scoped* proxy and a distinct `rawDb` -- the
+// db.transaction() calls below are not supported through that proxy (see
+// packages/db/src/company-scope.ts) and need the raw connection via
+// withCompanyScope/withCompanyScopeBypass instead.
+export function accessService(db: Db, rawDb: Db = db) {
   const authorization = authorizationService(db);
 
   async function isInstanceAdmin(userId: string | null | undefined): Promise<boolean> {
@@ -131,7 +141,7 @@ export function accessService(db: Db) {
     const member = await getMemberById(companyId, memberId);
     if (!member) return null;
 
-    await db.transaction(async (tx) => {
+    await withCompanyScope(rawDb, companyId, async (tx) => {
       await tx
         .delete(principalPermissionGrants)
         .where(
@@ -319,7 +329,7 @@ export function accessService(db: Db) {
   }
 
   async function archiveMember(companyId: string, memberId: string, input: MemberArchiveInput = {}) {
-    return db.transaction(async (tx) => {
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(sql`
         select ${companyMemberships.id}
         from ${companyMemberships}
@@ -453,7 +463,15 @@ export function accessService(db: Db) {
     const existingByCompany = new Map(existing.map((row) => [row.companyId, row]));
     const target = new Set(companyIds);
 
-    await db.transaction(async (tx) => {
+    await withCompanyScopeBypass(
+      rawDb,
+      {
+        reason: "a user's company access list update spans every company being granted or archived in one request",
+        actorType: "user",
+        actorId: options.actorUserId ?? null,
+        companyIdsTouched: [...new Set([...existingByCompany.keys(), ...target])],
+      },
+      async (tx) => {
       const toArchive = existing.filter((row) => !target.has(row.companyId) && row.status !== "archived");
       if (toArchive.length > 0 && options.actorUserId && options.actorUserId === userId) {
         throw conflict("You cannot remove yourself");
@@ -573,7 +591,7 @@ export function accessService(db: Db) {
     grants: GrantInput[],
     grantedByUserId: string | null,
   ) {
-    await db.transaction(async (tx) => {
+    await withCompanyScope(rawDb, companyId, async (tx) => {
       await tx
         .delete(principalPermissionGrants)
         .where(
