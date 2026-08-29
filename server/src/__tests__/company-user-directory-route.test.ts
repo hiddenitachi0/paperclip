@@ -1,8 +1,14 @@
+import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { accessRoutes } from "../routes/access.js";
-import { errorHandler } from "../middleware/index.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { authUsers, companies, companyMemberships, createDb } from "@paperclipai/db";
+import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+
+// DUR-381: every request now does a real reserve/set-claim/release round
+// trip through embedded Postgres -- real latency the default 5s test
+// timeout doesn't leave much room for.
+vi.setConfig({ testTimeout: 15_000 });
 
 vi.mock("../services/index.js", () => ({
   accessService: () => ({
@@ -24,107 +30,124 @@ vi.mock("../services/index.js", () => ({
   notifyHireApproved: vi.fn(),
 }));
 
-function createDbStub() {
-  const activeMemberships = [
-    { principalId: "user-2", status: "active" as const },
-    { principalId: "user-1", status: "active" as const },
-  ];
-  const users = [
-    { id: "user-1", name: "Dotta", email: "dotta@example.com", image: "https://example.com/dotta.png" },
-    { id: "user-2", name: null, email: "alex@example.com", image: null },
-  ];
+// DUR-381: GET /companies/:companyId/user-directory now runs under
+// companyScopeFromParam(rawDb, assertCompanyAccess) -- a real reserved
+// Postgres connection with a UUID-validated companyId, and its handler
+// re-queries companyMemberships/authUsers through that *scoped* db proxy.
+// A hand-rolled table-shape-sniffing mock (the file's original approach)
+// can't stand in for that real query, so this needs an actual embedded
+// Postgres database end to end.
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
-  const isCompanyMembershipsTable = (table: unknown) =>
-    !!table &&
-    typeof table === "object" &&
-    "membershipRole" in table &&
-    "principalType" in table &&
-    "principalId" in table;
-  const isAuthUsersTable = (table: unknown) =>
-    !!table &&
-    typeof table === "object" &&
-    "emailVerified" in table &&
-    "createdAt" in table &&
-    "updatedAt" in table;
-
-  return {
-    select() {
-      return {
-        from(table: unknown) {
-          if (isCompanyMembershipsTable(table)) {
-            const query = {
-              where() {
-                return query;
-              },
-              orderBy() {
-                return Promise.resolve(activeMemberships);
-              },
-            };
-            return query;
-          }
-          if (isAuthUsersTable(table)) {
-            return {
-              where() {
-                return Promise.resolve(users);
-              },
-            };
-          }
-          throw new Error("Unexpected table");
-        },
-      };
-    },
-  };
-}
-
-function createApp(actor: Express.Request["actor"]) {
-  const app = express();
-  app.use(express.json());
-  app.use((req, _res, next) => {
-    req.actor = actor;
-    next();
-  });
-  app.use(
-    "/api",
-    accessRoutes(createDbStub() as never, {
-      deploymentMode: "authenticated",
-      deploymentExposure: "private",
-      bindHost: "127.0.0.1",
-      allowedHostnames: [],
-    }),
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres company-user-directory tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
-  app.use(errorHandler);
-  return app;
 }
 
-describe("GET /companies/:companyId/user-directory", () => {
-  beforeEach(() => {
+describeEmbeddedPostgres("GET /companies/:companyId/user-directory", () => {
+  let realDb!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-company-user-directory-");
+    realDb = createDb(tempDb.connectionString);
+  }, 30_000);
+
+  afterEach(async () => {
+    await realDb.delete(companyMemberships);
+    await realDb.delete(authUsers);
+    await realDb.delete(companies);
     vi.clearAllMocks();
   });
 
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function createApp(actor: Express.Request["actor"]) {
+    const { accessRoutes } = await import("../routes/access.js");
+    const { errorHandler } = await import("../middleware/index.js");
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = actor;
+      next();
+    });
+    app.use(
+      "/api",
+      accessRoutes(realDb, {
+        deploymentMode: "authenticated",
+        deploymentExposure: "private",
+        bindHost: "127.0.0.1",
+        allowedHostnames: [],
+      }),
+    );
+    app.use(errorHandler);
+    return app;
+  }
+
   it("returns active human users for operators without manage-permissions access", async () => {
-    const app = createApp({
+    const companyId = randomUUID();
+    const now = new Date();
+    await realDb.insert(companies).values({
+      id: companyId,
+      name: `Company ${companyId.slice(0, 8)}`,
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    await realDb.insert(authUsers).values([
+      {
+        id: "user-1",
+        name: "Dotta",
+        email: "dotta@example.com",
+        image: "https://example.com/dotta.png",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "user-2",
+        name: "",
+        email: "alex@example.com",
+        image: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    await realDb.insert(companyMemberships).values([
+      { companyId, principalType: "user", principalId: "user-2", status: "active", updatedAt: now },
+      {
+        companyId,
+        principalType: "user",
+        principalId: "user-1",
+        status: "active",
+        updatedAt: new Date(now.getTime() + 1000),
+      },
+    ]);
+
+    const app = await createApp({
       type: "board",
       userId: "user-1",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-1"],
-      memberships: [{ companyId: "company-1", membershipRole: "operator", status: "active" }],
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "operator", status: "active" }],
     });
 
-    const res = await request(app).get("/api/companies/company-1/user-directory");
+    const res = await request(app).get(`/api/companies/${companyId}/user-directory`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       users: [
         {
-          principalId: "user-2",
-          status: "active",
-          user: { id: "user-2", name: null, email: "alex@example.com", image: null },
-        },
-        {
           principalId: "user-1",
           status: "active",
           user: { id: "user-1", name: "Dotta", email: "dotta@example.com", image: "https://example.com/dotta.png" },
+        },
+        {
+          principalId: "user-2",
+          status: "active",
+          user: { id: "user-2", name: "", email: "alex@example.com", image: null },
         },
       ],
     });
