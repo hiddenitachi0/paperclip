@@ -10,12 +10,21 @@ import { TooltipProvider } from "./ui/tooltip";
 import {
   pendingAskUserQuestionsInteraction,
   commentExpiredAskUserQuestionsInteraction,
+  additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
   commentExpiredRequestConfirmationInteraction,
   disabledDeclineReasonRequestConfirmationInteraction,
   failedRequestConfirmationInteraction,
+  moneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+  pastTenseMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+  pendingFactCheckRequestConfirmationInteraction,
   pendingRequestConfirmationInteraction,
   pendingSuggestedTasksInteraction,
+  selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction,
+  spoofedDecisionAskRequestConfirmationInteraction,
+  spoofedDecisionAskInDetailsRequestConfirmationInteraction,
   staleTargetRequestConfirmationInteraction,
+  titleSummarySpoofedFactCheckRequestConfirmationInteraction,
+  zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
   rejectedSuggestedTasksInteraction,
 } from "../fixtures/issueThreadInteractionFixtures";
 
@@ -427,6 +436,102 @@ describe("IssueThreadInteractionCard", () => {
     });
     expect((rejected.firstElementChild as HTMLElement).className).toContain("border-red-500/80");
     expect(rejected.textContent).toContain("Changes requested");
+  });
+
+  it("renders a confirmation with payload.factCheck as a distinct fact-check card (DUR-311/DUR-339)", () => {
+    const pending = renderCard({ interaction: pendingFactCheckRequestConfirmationInteraction });
+    const pendingShell = pending.firstElementChild as HTMLElement;
+    expect(pendingShell.className).toContain("border-teal-500/60");
+    expect(pending.textContent).toContain("Fact check");
+    expect(pending.textContent).toContain("Needs your check");
+    expect(pending.textContent).toContain("Read this carefully and only confirm if it matches what you actually know");
+
+    act(() => root?.unmount());
+    pending.remove();
+    root = null;
+
+    const accepted = renderCard({
+      interaction: { ...pendingFactCheckRequestConfirmationInteraction, status: "accepted" },
+    });
+    expect((accepted.firstElementChild as HTMLElement).className).toContain("border-teal-500/80");
+    expect(accepted.textContent).toContain("Confirmed correct");
+    expect(accepted.textContent).not.toContain("Plan");
+  });
+
+  it("does not render a decision-ask dressed with numbered lines as a fact-check card without payload.factCheck (DUR-320/DUR-339)", () => {
+    const spoofed = renderCard({ interaction: spoofedDecisionAskRequestConfirmationInteraction });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a decision-ask moved into detailsMarkdown as a fact-check card without payload.factCheck (DUR-323/DUR-339)", () => {
+    const spoofed = renderCard({ interaction: spoofedDecisionAskInDetailsRequestConfirmationInteraction });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a decision-ask with a self-declared factCheck flag as a fact-check card without matching detailsMarkdown shape (DUR-337)", () => {
+    const spoofed = renderCard({
+      interaction: selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a wire-transfer + external-notification instruction as a fact-check card even with a self-declared factCheck flag (DUR-341)", () => {
+    const spoofed = renderCard({
+      interaction: moneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a past-tense-phrased money movement instruction as a fact-check card (DUR-341)", () => {
+    const spoofed = renderCard({
+      interaction: pastTenseMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a fact-check card when the money-movement instruction lives in title/summary instead of the payload (DUR-341)", () => {
+    const spoofed = renderCard({
+      interaction: titleSummarySpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a fact-check card when a zero-width character is inserted inside a covered verb (DUR-405)", () => {
+    const spoofed = renderCard({
+      interaction: zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a debit + forward-to-external-address instruction as a fact-check card (DUR-341)", () => {
+    const spoofed = renderCard({
+      interaction: additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
   });
 
   it("attaches screenshots to a plan request-changes reason as markdown images", async () => {

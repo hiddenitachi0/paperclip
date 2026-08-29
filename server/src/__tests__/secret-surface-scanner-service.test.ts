@@ -196,6 +196,36 @@ describeEmbeddedPostgres("secret-surface-scanner", () => {
     expect(allFindingIssues).toHaveLength(1);
   });
 
+  it("DUR-360: does not hang on an adversarial multi-MB error column (unbounded-input DoS via the shared multi-line PEM pattern)", async () => {
+    const companyId = await seedCompany();
+    await seedAgent(companyId, { title: "Security Reviewer" });
+    const runnerAgentId = await seedAgent(companyId);
+
+    // Many BEGIN markers with no matching END make the shared pem_private_key
+    // pattern's lazy [\s\S]*? scan quadratic if run against the whole,
+    // untruncated column value -- this reproduces the finding from DUR-360's
+    // review of PR #201 (benchmarked ~10s on a 1.6MB string of this shape).
+    const adversarialError = "-----BEGIN RSA PRIVATE KEY----- ".repeat(60_000); // ~2MB
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      error: adversarialError,
+    });
+
+    const start = performance.now();
+    const sweep = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: null });
+    const elapsedMs = performance.now() - start;
+
+    expect(sweep.rowsScanned).toBe(1);
+    // Generous bound well under the ~10s an unbounded scan of this input
+    // would take -- proves the per-field cap is actually being applied, not
+    // just that the DB round-trip is fast.
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+
   it("walks .git/config, .env, and docker-compose files under a company path, skips excluded dirs, and attributes by path", async () => {
     const companyId = await seedCompany();
     await seedAgent(companyId, { title: "Security Reviewer" });
