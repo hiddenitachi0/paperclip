@@ -372,6 +372,75 @@ describe("issue workspace command authorization", () => {
     );
   });
 
+  it("rejects an agent setting featureLaunch on issue creation (DUR-313 create-path bypass)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
+      .send({
+        title: "Self-published launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("featureLaunch");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent setting featureLaunch on child issue creation (DUR-313 create-path bypass)", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ id: "issue-1" }));
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({
+        title: "Self-published launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("featureLaunch");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set featureLaunch on issue creation", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
+      .send({
+        title: "Board-filed launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ featureLaunch: true }),
+    );
+  });
+
   it("rejects agent callers that patch assignee adapter workspace teardown commands", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue());
     const app = await createApp({

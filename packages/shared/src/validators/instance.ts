@@ -82,6 +82,12 @@ export const instanceGeneralSettingsSchema = z.object({
   // atomically with the flip), not by the generic general-settings patch --
   // see patchInstanceGeneralSettingsSchema below, which omits it.
   quietMode: quietModeStateSchema.default(DEFAULT_QUIET_MODE_STATE),
+  // DUR-299 point 6 / DUR-314: live kill switch for the delegated
+  // merge_pr-approval automation (server/src/services/merge-pr-automation.ts).
+  // Defaults to false -- the automation ships dormant and an operator must
+  // explicitly opt in via a normal PATCH here (no redeploy needed either way
+  // to turn it on or back off).
+  mergePrAutomationEnabled: z.boolean().default(false),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.omit({ quietMode: true }).partial();

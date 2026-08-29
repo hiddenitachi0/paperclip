@@ -82,6 +82,7 @@ export {
 export { financeService } from "./finance.js";
 export { heartbeatService, isHeartbeatRunLiveInThisProcess } from "./heartbeat.js";
 export { mergeDeployVisibilityService, MERGE_DEPLOY_VISIBILITY_DELAY_MS } from "./merge-deploy-visibility.js";
+export { mergePrAutomationService } from "./merge-pr-automation.js";
 export { agentErrorAlertsService, DEFAULT_AGENT_ERROR_STALL_THRESHOLD_MS } from "./agent-error-alerts.js";
 export { untrackedWriteAlertsService } from "./untracked-write-alerts.js";
 export { resolveProjectDeployBranches, type ProjectDeployBranches } from "./deploy-branches.js";

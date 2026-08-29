@@ -104,6 +104,12 @@ export interface InstanceGeneralSettings {
   globalMaxConcurrentRuns: number;
   /** DUR-224 quiet-mode state; not settable via the general-settings patch route. */
   quietMode: QuietModeState;
+  /**
+   * DUR-299 point 6 / DUR-314: live kill switch for the delegated
+   * merge_pr-approval automation. Defaults to false -- ships dormant, an
+   * operator opts in via a normal general-settings PATCH.
+   */
+  mergePrAutomationEnabled: boolean;
 }
 
 export interface InstanceExperimentalSettings {

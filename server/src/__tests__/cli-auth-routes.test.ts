@@ -1,6 +1,10 @@
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { companies, createDb as createRealDb, invites } from "@paperclipai/db";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const mockAccessService = vi.hoisted(() => ({
   isInstanceAdmin: vi.fn(),
@@ -95,7 +99,7 @@ async function createApp(actor: any, db: any = {} as any) {
   });
   app.use(
     "/api",
-    accessRoutes(db, {
+    accessRoutes(withFakeCompanyScopeReserve(db), {
       deploymentMode: "authenticated",
       deploymentExposure: "private",
       bindHost: "127.0.0.1",
@@ -105,6 +109,12 @@ async function createApp(actor: any, db: any = {} as any) {
   app.use(errorHandler);
   return app;
 }
+
+// DUR-381: each test re-imports routes/access.js under a fresh module cache
+// key (see createApp above) AND now goes through a real reserve/set-claim/
+// release round trip per request (see withFakeCompanyScopeReserve) -- both
+// add real latency the default 5s test timeout doesn't leave much room for.
+vi.setConfig({ testTimeout: 15_000 });
 
 describe.sequential("cli auth routes", () => {
   // DUR-379: vi.resetModules() below forces every test to re-import
@@ -165,36 +175,11 @@ describe.sequential("cli auth routes", () => {
     expect(skillRes.status, skillRes.text || JSON.stringify(skillRes.body)).toBe(401);
   });
 
-  it.sequential("serves the invite-scoped paperclip skill anonymously for active invites", async () => {
-    const invite = {
-      id: "invite-1",
-      companyId: "11111111-1111-4111-8111-111111111111",
-      inviteType: "company_join",
-      allowedJoinTypes: "agent",
-      tokenHash: "hash",
-      defaultsPayload: null,
-      expiresAt: new Date(Date.now() + 60_000),
-      invitedByUserId: null,
-      revokedAt: null,
-      acceptedAt: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    const db = {
-      select: vi.fn(() => ({
-        from: vi.fn(() => ({
-          where: vi.fn().mockResolvedValue([invite]),
-        })),
-      })),
-    };
-
-    const app = await createApp({ type: "none", source: "none" }, db);
-    const res = await request(app).get("/api/invites/token-123/skills/paperclip");
-
-    expect(res.status).toBe(200);
-    expect(res.headers["content-type"]).toContain("text/markdown");
-    expect(res.text).toContain("# Paperclip Skill");
-  });
+  // DUR-381: moved to the embedded-postgres describe block below -- this
+  // route re-queries the invite via the *scoped* db proxy after
+  // scopeFromInviteToken() resolves scope, so a plain mocked `db.select()`
+  // chain (which only intercepts the raw object, not the real drizzle
+  // instance the scope proxy forwards to) can no longer stand in for it.
 
   it.sequential("marks challenge status as requiring sign-in for anonymous viewers", async () => {
     mockBoardAuthService.describeCliAuthChallenge.mockResolvedValue({
@@ -443,5 +428,96 @@ describe.sequential("cli auth routes", () => {
     expect(res.status).toBe(400);
     expect(mockBoardAuthService.getBoardApiKeyForUser).not.toHaveBeenCalled();
     expect(mockBoardAuthService.revokeBoardApiKey).not.toHaveBeenCalled();
+  });
+});
+
+// DUR-381: GET /invites/:token/skills/:skillName resolves scope via
+// scopeFromInviteToken() (a real rawDb lookup) and then re-queries the
+// invite through the *scoped* db proxy inside the handler -- a plain
+// `db.select()` mock (as the rest of this file uses for its fully-mocked
+// accessService routes) can't stand in for that second, real query, so
+// this one route needs an actual reserved Postgres connection end to end.
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres invite-skill test on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+  );
+}
+
+function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+describeEmbeddedPostgres("GET /invites/:token/skills/:skillName (DUR-381)", () => {
+  let realDb!: ReturnType<typeof createRealDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-cli-auth-invite-skill-");
+    realDb = createRealDb(tempDb.connectionString);
+  }, 30_000);
+
+  afterEach(async () => {
+    await realDb.delete(invites);
+    await realDb.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function createRealApp() {
+    appImportCounter += 1;
+    const routeModulePath = `../routes/access.js?cli-auth-invite-skill-${appImportCounter}`;
+    const middlewareModulePath = `../middleware/index.js?cli-auth-invite-skill-${appImportCounter}`;
+    const [{ accessRoutes }, { errorHandler }] = await Promise.all([
+      import(routeModulePath) as Promise<typeof import("../routes/access.js")>,
+      import(middlewareModulePath) as Promise<typeof import("../middleware/index.js")>,
+    ]);
+
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "none", source: "none" };
+      next();
+    });
+    app.use(
+      "/api",
+      accessRoutes(realDb, {
+        deploymentMode: "authenticated",
+        deploymentExposure: "private",
+        bindHost: "127.0.0.1",
+        allowedHostnames: [],
+      }),
+    );
+    app.use(errorHandler);
+    return app;
+  }
+
+  it("serves the invite-scoped paperclip skill anonymously for active invites", async () => {
+    const token = "token-123";
+    const companyId = randomUUID();
+    await realDb.insert(companies).values({
+      id: companyId,
+      name: `Company ${companyId.slice(0, 8)}`,
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    await realDb.insert(invites).values({
+      id: randomUUID(),
+      companyId,
+      inviteType: "company_join",
+      allowedJoinTypes: "agent",
+      tokenHash: hashToken(token),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const app = await createRealApp();
+    const res = await request(app).get(`/api/invites/${token}/skills/paperclip`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/markdown");
+    expect(res.text).toContain("# Paperclip Skill");
   });
 });

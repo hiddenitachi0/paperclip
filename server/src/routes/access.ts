@@ -29,6 +29,7 @@ import {
   joinRequests,
   principalPermissionGrants,
   runInCompanyScope,
+  runInCompanyScopeBypass,
   withCompanyScope,
 } from "@paperclipai/db";
 import {
@@ -81,6 +82,7 @@ import {
   findReusableHumanJoinRequest,
 } from "../lib/join-request-dedupe.js";
 import { assertAuthenticated, assertCompanyAccess } from "./authz.js";
+import { companyScope, companyScopeBypass, companyScopeBypassForRoute, companyScopeFromParam } from "../middleware/company-scope.js";
 import {
   claimBoardOwnership,
   inspectBoardClaimChallenge
@@ -88,7 +90,6 @@ import {
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
 import { secretService } from "../services/secrets.js";
-import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -2605,30 +2606,36 @@ export function accessRoutes(
     inviteResolutionNetwork?: Partial<InviteResolutionNetwork>;
   }
 ) {
-  // DUR-379 (DUR-277 Wave 5b): this file's own request-scoped instance; the
-  // raw `rawDb` stays unwrapped for the pre-scope lookups the (b)-category
-  // routes below need before their companyId (and therefore their scope) is
-  // known, for the two dual-mode invite routes (accept/revoke) that must
-  // stay unscoped for a bootstrap_ceo invite (company-less by construction),
-  // and for the category-(c) instance-wide routes (cli-auth, board-api-keys,
-  // board-delegate-tokens, admin, skills, board-claim) that stay bypass-
-  // scoped -- see middleware/company-scope.ts and the DUR-277 design doc §1.
+  // DUR-381 (DUR-277 Wave 5b/5c): access.ts has the most genuinely mixed
+  // category split of any route family in the wave (DUR-277 design doc §1) --
+  // board/instance-admin identity routes are category (c) (genuinely
+  // instance-wide, no single company), company invite/member/join-request
+  // routes are (a)/(b). Every route below establishes SOME AsyncLocalStorage
+  // scope (real via companyScope*/scopeFromInviteLookup, or bypass via
+  // companyScopeBypass*) before it runs, because `access`/`boardAuth`/
+  // `agents` below -- and every inline `db.*` call in this file -- go
+  // through the request-scoped proxy, which throws on a missing scope by
+  // design (DUR-275 mod #1) rather than silently falling back to raw access.
   const db = createRequestScopedDb(rawDb);
   const router = Router();
-  const access = accessService(db);
-  const agents = agentService(db, { rawDb });
+  const access = accessService(db, rawDb);
+  const boardAuth = boardAuthService(db);
+  const agents = agentService(db);
   const routeInviteResolutionNetwork = opts.inviteResolutionNetwork
     ? { ...defaultInviteResolutionNetwork, ...opts.inviteResolutionNetwork }
     : inviteResolutionNetwork;
 
-  // DUR-379: raw-db counterparts used only by the category-(c) instance-wide
-  // routes below (never company-scoped) and the pre-scope lookups the
-  // (b)-category routes need -- never for anything that ends up serving a
-  // company-scoped route's response, so a lookup made on an unscoped
-  // connection is never mistaken for scoped data.
+  // DUR-379: raw-db counterparts used only by the pre-scope `checkAccess`
+  // callbacks below (assertInstanceAdmin, assertCompanyPermission,
+  // assertCanGenerateOpenClawInvitePrompt) -- these run as
+  // companyScopeFromParam's `checkAccess` argument, i.e. from inside its
+  // resolver, before runInCompanyScope ever establishes an AsyncLocalStorage
+  // scope, so they must never touch the request-scoped `access`/`agents`
+  // above (built on `db`), which throw outside any active scope (DUR-275
+  // mod #1). Never used for anything that ends up serving a company-scoped
+  // route's response.
   const rawAccess = accessService(rawDb);
   const rawAgents = agentService(rawDb);
-  const boardAuth = boardAuthService(rawDb);
 
   async function assertInstanceAdmin(req: Request) {
     if (req.actor.type !== "board") throw unauthorized();
@@ -2637,55 +2644,69 @@ export function accessRoutes(
     if (!allowed) throw forbidden("Instance admin required");
   }
 
-  /** scopeFromInviteToken (DUR-379): resolve `req.params.token` to an invite, then scope. Public/token-authorized -- no assertCompanyAccess, matching this route family's existing authorization model (possession of the token, not actor company membership). */
-  function scopeFromInviteToken(paramName: string = "token") {
-    return companyScope(rawDb, async (req) => {
-      const token = (req.params[paramName] as string).trim();
-      if (!token) throw notFound("Invite not found");
-      const invite = await rawDb
-        .select()
-        .from(invites)
-        .where(eq(invites.tokenHash, hashToken(token)))
-        .then((rows) => rows[0] ?? null);
-      if (!invite) throw notFound("Invite not found");
-      if (!invite.companyId) throw notFound("Invite not found");
-      return invite.companyId;
-    });
+  function lenientActorInfo(req: Request): { actorType: string | null; actorId: string | null } {
+    if (req.actor.type === "agent") return { actorType: "agent", actorId: req.actor.agentId ?? null };
+    if (req.actor.type === "board") return { actorType: "user", actorId: req.actor.userId ?? null };
+    return { actorType: req.actor.type, actorId: null };
   }
 
-  /** scopeFromInviteId (DUR-379): resolve `req.params.inviteId` to an invite, then scope. Only used for company_join-type invites -- bootstrap_ceo invites (nullable companyId) are handled separately by the revoke route itself. */
-  function scopeFromInviteId(paramName: string = "inviteId") {
-    return companyScope(rawDb, async (req) => {
-      const id = req.params[paramName] as string;
-      const invite = await rawDb
-        .select()
-        .from(invites)
-        .where(eq(invites.id, id))
-        .then((rows) => rows[0] ?? null);
-      if (!invite) throw notFound("Invite not found");
-      if (!invite.companyId) throw notFound("Invite not found");
-      return invite.companyId;
-    });
+  // DUR-381 (DUR-277 Wave 5b) category (b): a handful of routes resolve
+  // their company from an entity (an invite) looked up by token/id rather
+  // than a `:companyId` param, per the DUR-277 design doc's "lookup entity,
+  // then scope" pattern (see issue-tree-control.ts's scopeFromRootIssue for
+  // the established precedent). A bootstrap_ceo invite has no companyId at
+  // all (no company exists yet), so this falls back to a bypass scope
+  // instead of rejecting -- unlike the generic `companyScope` helper, which
+  // always requires a resolved company UUID.
+  function scopeFromInviteLookup(
+    loadInvite: (req: Request) => Promise<typeof invites.$inferSelect | null>,
+  ) {
+    return (req: Request, res: import("express").Response, next: import("express").NextFunction) => {
+      Promise.resolve()
+        .then(async () => {
+          const invite = await loadInvite(req);
+          if (!invite) throw notFound("Invite not found");
+          const finish = () =>
+            new Promise<void>((resolve) => {
+              res.once("finish", resolve);
+              res.once("close", resolve);
+              next();
+            });
+          if (invite.companyId) {
+            return runInCompanyScope(rawDb, invite.companyId, finish);
+          }
+          return runInCompanyScopeBypass(
+            rawDb,
+            {
+              reason: "invite has no resolved company yet (bootstrap invite)",
+              ...lenientActorInfo(req),
+              route: req.path,
+            },
+            finish,
+          );
+        })
+        .catch((err) => {
+          if (!res.headersSent) next(err);
+          else console.error("access.ts invite scope: error after response started", err);
+        });
+    };
   }
 
-  /** scopeFromJoinRequestParam (DUR-379): resolve `req.params.requestId` to a join request, then scope. Public/claim-secret-authorized -- no assertCompanyAccess, matching this route's existing authorization model. */
-  function scopeFromJoinRequestParam(paramName: string = "requestId") {
-    return companyScope(rawDb, async (req) => {
-      const id = req.params[paramName] as string;
-      const joinRequest = await rawDb
-        .select()
-        .from(joinRequests)
-        .where(eq(joinRequests.id, id))
-        .then((rows) => rows[0] ?? null);
-      if (!joinRequest) throw notFound("Join request not found");
-      return joinRequest.companyId;
-    });
+  function loadInviteByTokenRaw(token: string) {
+    const trimmed = token.trim();
+    if (!trimmed) return Promise.resolve(null);
+    return rawDb
+      .select()
+      .from(invites)
+      .where(eq(invites.tokenHash, hashToken(trimmed)))
+      .then((rows) => rows[0] ?? null);
   }
 
-  // DUR-379 (DUR-277 §1 category c): board-claim/bootstrap-claim are
-  // instance-wide, pre-company first-admin bootstrap flows -- deliberately
-  // left unscoped (raw db), not wired through companyScope.
-  router.get("/board-claim/:token", async (req, res) => {
+  function scopeFromInviteToken() {
+    return scopeFromInviteLookup((req) => loadInviteByTokenRaw(req.params.token as string));
+  }
+
+  router.get("/board-claim/:token", companyScopeBypassForRoute(rawDb, "board-claim challenge lookup: no company resolved before board ownership is claimed"), async (req, res) => {
     const token = (req.params.token as string).trim();
     const code =
       typeof req.query.code === "string" ? req.query.code.trim() : undefined;
@@ -2696,7 +2717,7 @@ export function accessRoutes(
     res.json(challenge);
   });
 
-  router.post("/board-claim/:token/claim", async (req, res) => {
+  router.post("/board-claim/:token/claim", companyScopeBypassForRoute(rawDb, "board ownership claim: instance-wide, no single company"), async (req, res) => {
     const token = (req.params.token as string).trim();
     const code =
       typeof req.body?.code === "string" ? req.body.code.trim() : undefined;
@@ -2733,7 +2754,7 @@ export function accessRoutes(
     throw conflict("Board claim challenge is no longer available");
   });
 
-  router.post("/bootstrap/claim", async (req, res) => {
+  router.post("/bootstrap/claim", companyScopeBypassForRoute(rawDb, "first-instance-admin bootstrap claim: instance-wide, no company exists yet"), async (req, res) => {
     if (
       opts.deploymentMode !== "authenticated" ||
       opts.deploymentExposure !== "private"
@@ -2764,6 +2785,7 @@ export function accessRoutes(
   // companyScope. `boardAuth` above is the raw (rawDb-backed) instance.
   router.post(
     "/cli-auth/challenges",
+    companyScopeBypassForRoute(rawDb, "CLI device-auth challenge creation: pre-auth, no company resolved yet"),
     validate(createCliAuthChallengeSchema),
     async (req, res) => {
       const created = await boardAuth.createCliAuthChallenge(req.body);
@@ -2785,7 +2807,7 @@ export function accessRoutes(
     },
   );
 
-  router.get("/cli-auth/challenges/:id", async (req, res) => {
+  router.get("/cli-auth/challenges/:id", companyScopeBypassForRoute(rawDb, "CLI device-auth challenge status poll: pre-auth"), async (req, res) => {
     const id = (req.params.id as string).trim();
     const token =
       typeof req.query.token === "string" ? req.query.token.trim() : "";
@@ -2813,6 +2835,7 @@ export function accessRoutes(
 
   router.post(
     "/cli-auth/challenges/:id/approve",
+    companyScopeBypassForRoute(rawDb, "CLI device-auth approval: a board actor may approve access spanning multiple companies in one request"),
     validate(resolveCliAuthChallengeSchema),
     async (req, res) => {
       const id = (req.params.id as string).trim();
@@ -2866,6 +2889,7 @@ export function accessRoutes(
 
   router.post(
     "/cli-auth/challenges/:id/cancel",
+    companyScopeBypassForRoute(rawDb, "CLI device-auth cancellation: pre-auth"),
     validate(resolveCliAuthChallengeSchema),
     async (req, res) => {
       const id = (req.params.id as string).trim();
@@ -2877,7 +2901,7 @@ export function accessRoutes(
     },
   );
 
-  router.get("/cli-auth/me", async (req, res) => {
+  router.get("/cli-auth/me", companyScopeBypassForRoute(rawDb, "board identity/session summary spans all of a user's company memberships"), async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       throw unauthorized("Board authentication required");
     }
@@ -2893,7 +2917,7 @@ export function accessRoutes(
     });
   });
 
-  router.get("/board-api-keys", async (req, res) => {
+  router.get("/board-api-keys", companyScopeBypassForRoute(rawDb, "board API key management is scoped to the user, not a single company"), async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       throw unauthorized("Board authentication required");
     }
@@ -2905,6 +2929,7 @@ export function accessRoutes(
 
   router.post(
     "/board-api-keys",
+    companyScopeBypassForRoute(rawDb, "board API key management is scoped to the user, not a single company"),
     validate(createBoardApiKeySchema),
     async (req, res) => {
       if (req.actor.type !== "board" || !req.actor.userId) {
@@ -2946,7 +2971,7 @@ export function accessRoutes(
     },
   );
 
-  router.delete("/board-api-keys/:keyId", async (req, res) => {
+  router.delete("/board-api-keys/:keyId", companyScopeBypassForRoute(rawDb, "board API key management is scoped to the user, not a single company"), async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       throw unauthorized("Board authentication required");
     }
@@ -2988,7 +3013,7 @@ export function accessRoutes(
   // never authenticates as "board"; see the board_delegate actor branch in
   // middleware/auth.ts and assertBoardOrDelegate in authz.ts for how it's
   // actually consumed.
-  router.get("/board-delegate-tokens", async (req, res) => {
+  router.get("/board-delegate-tokens", companyScopeBypassForRoute(rawDb, "board delegate token management is scoped to the user, not a single company"), async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       throw unauthorized("Board authentication required");
     }
@@ -3000,6 +3025,7 @@ export function accessRoutes(
 
   router.post(
     "/board-delegate-tokens",
+    companyScopeBypassForRoute(rawDb, "board delegate token management is scoped to the user, not a single company"),
     validate(createDelegateTokenSchema),
     async (req, res) => {
       if (req.actor.type !== "board" || !req.actor.userId) {
@@ -3039,7 +3065,7 @@ export function accessRoutes(
     },
   );
 
-  router.post("/board-delegate-tokens/:tokenId/revoke", async (req, res) => {
+  router.post("/board-delegate-tokens/:tokenId/revoke", companyScopeBypassForRoute(rawDb, "board delegate token management is scoped to the user, not a single company"), async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       throw unauthorized("Board authentication required");
     }
@@ -3073,7 +3099,7 @@ export function accessRoutes(
     res.json({ ok: true, tokenId: revoked.id });
   });
 
-  router.post("/cli-auth/revoke-current", async (req, res) => {
+  router.post("/cli-auth/revoke-current", companyScopeBypassForRoute(rawDb, "board API key self-logout is scoped to the user, not a single company"), async (req, res) => {
     if (req.actor.type !== "board" || req.actor.source !== "board_key") {
       throw badRequest("Current board API key context is required");
     }
@@ -3382,8 +3408,10 @@ export function accessRoutes(
     };
   }
 
-  // DUR-379 (DUR-277 §1 category c): the global skill catalog, not company
-  // data -- deliberately left unscoped, not wired through companyScope.
+  // DUR-381 (DUR-277 Wave 5b) category (c), no scope needed: these three
+  // routes are pure in-memory/filesystem reads (listAvailableSkills,
+  // readSkillMarkdown) that never touch `db`, so there is no request-scoped
+  // proxy access to establish a scope for.
   router.get("/skills/available", (req, res) => {
     assertAuthenticated(req);
     res.json({ skills: listAvailableSkills() });
@@ -3475,7 +3503,7 @@ export function accessRoutes(
 
   router.post(
     "/companies/:companyId/openclaw/invite-prompt",
-    companyScopeFromParam(rawDb, assertCanGenerateOpenClawInvitePrompt),
+    companyScopeFromParam(rawDb, (req, companyId) => assertCanGenerateOpenClawInvitePrompt(req, companyId)),
     validate(createOpenClawInvitePromptSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -3741,17 +3769,18 @@ export function accessRoutes(
 
   router.post(
     "/invites/:token/accept",
+    scopeFromInviteToken(),
     validate(acceptInviteSchema),
     async (req, res) => {
       const token = (req.params.token as string).trim();
       if (!token) throw notFound("Invite not found");
 
-      // DUR-379: this whole lookup, and the bootstrap_ceo branch below, run
-      // on the raw (unscoped) db -- a bootstrap invite is company-less by
-      // construction (nullable companyId, see packages/db/src/schema/invites.ts),
-      // so there is no companyId to scope on. Only once we know the invite
-      // is a normal company_join invite (below) do we open company scope.
-      const invite = await rawDb
+      // DUR-381: scopeFromInviteLookup (above) already resolved this same
+      // token to an invite and established company scope (real, or bypass
+      // for a company-less bootstrap invite) before this handler ever runs
+      // -- so this lookup, and everything below, goes through the
+      // request-scoped `db`, not a raw connection.
+      const invite = await db
         .select()
         .from(invites)
         .where(eq(invites.tokenHash, hashToken(token)))
@@ -3761,7 +3790,7 @@ export function accessRoutes(
       }
       const inviteAlreadyAccepted = Boolean(invite.acceptedAt);
       const existingJoinRequestForInvite = inviteAlreadyAccepted
-        ? await rawDb
+        ? await db
             .select()
             .from(joinRequests)
             .where(eq(joinRequests.inviteId, invite.id))
@@ -3820,12 +3849,10 @@ export function accessRoutes(
       const companyId = invite.companyId;
       if (!companyId) throw conflict("Invite is missing company scope");
 
-      // DUR-379: everything from here on touches company-scoped tables
-      // (joinRequests, invites, agents, activity log) through the request-
-      // scoped `db`, so it runs inside company scope now that companyId is
-      // known -- the bootstrap_ceo branch above already returned before
-      // reaching here and never enters this scope.
-      await runInCompanyScope(rawDb, companyId, async () => {
+      // DUR-381: company scope for this companyId was already established
+      // by scopeFromInviteLookup (above) before this handler ran -- no
+      // second runInCompanyScope needed here (nesting it would just reserve
+      // a redundant second pooled connection for the rest of this request).
       if (
         invite.allowedJoinTypes !== "both" &&
         invite.allowedJoinTypes !== requestType
@@ -4236,16 +4263,26 @@ export function accessRoutes(
           ? { diagnostics: joinDefaults.diagnostics }
           : {})
       });
-      });
     }
   );
 
-  router.post("/invites/:inviteId/revoke", async (req, res) => {
+  router.post(
+    "/invites/:inviteId/revoke",
+    scopeFromInviteLookup((req) =>
+      rawDb
+        .select()
+        .from(invites)
+        .where(eq(invites.id, req.params.inviteId as string))
+        .then((rows) => rows[0] ?? null),
+    ),
+    async (req, res) => {
     const id = req.params.inviteId as string;
-    // DUR-379: raw lookup -- a bootstrap_ceo invite is company-less
-    // (nullable companyId), so we can't establish company scope until we
-    // know which branch below we're in.
-    const invite = await rawDb
+    // DUR-381: scopeFromInviteLookup (above) already resolved this same
+    // inviteId and established company scope (real, or bypass for a
+    // company-less bootstrap invite) before this handler ever runs -- so
+    // this lookup, and everything below, goes through the request-scoped
+    // `db`, not a raw connection or a second nested runInCompanyScope.
+    const invite = await db
       .select()
       .from(invites)
       .where(eq(invites.id, id))
@@ -4260,36 +4297,26 @@ export function accessRoutes(
     if (invite.acceptedAt) throw conflict("Invite already consumed");
     if (invite.revokedAt) return res.json(invite);
 
-    const doRevoke = async (dbHandle: Db) => {
-      const revoked = await dbHandle
-        .update(invites)
-        .set({ revokedAt: new Date(), updatedAt: new Date() })
-        .where(eq(invites.id, id))
-        .returning()
-        .then((rows) => rows[0]);
+    const revoked = await db
+      .update(invites)
+      .set({ revokedAt: new Date(), updatedAt: new Date() })
+      .where(eq(invites.id, id))
+      .returning()
+      .then((rows) => rows[0]);
 
-      if (invite.companyId) {
-        await logActivity(dbHandle, {
-          companyId: invite.companyId,
-          actorType: req.actor.type === "agent" ? "agent" : "user",
-          actorId:
-            req.actor.type === "agent"
-              ? req.actor.agentId ?? "unknown-agent"
-              : req.actor.userId ?? "board",
-          action: "invite.revoked",
-          entityType: "invite",
-          entityId: id
-        });
-      }
-      return revoked;
-    };
-
-    // DUR-379: only the company_join branch (invite.companyId set) opens
-    // company scope -- the bootstrap_ceo branch stays on the raw db, same
-    // as its lookup above.
-    const revoked = invite.companyId
-      ? await runInCompanyScope(rawDb, invite.companyId, () => doRevoke(db))
-      : await doRevoke(rawDb);
+    if (invite.companyId) {
+      await logActivity(db, {
+        companyId: invite.companyId,
+        actorType: req.actor.type === "agent" ? "agent" : "user",
+        actorId:
+          req.actor.type === "agent"
+            ? req.actor.agentId ?? "unknown-agent"
+            : req.actor.userId ?? "board",
+        action: "invite.revoked",
+        entityType: "invite",
+        entityId: id
+      });
+    }
 
     res.json(revoked);
   });
@@ -4519,7 +4546,16 @@ export function accessRoutes(
 
   router.post(
     "/join-requests/:requestId/claim-api-key",
-    scopeFromJoinRequestParam(),
+    companyScope(rawDb, async (req) => {
+      const requestId = req.params.requestId as string;
+      const joinRequest = await rawDb
+        .select({ companyId: joinRequests.companyId })
+        .from(joinRequests)
+        .where(eq(joinRequests.id, requestId))
+        .then((rows) => rows[0] ?? null);
+      if (!joinRequest) throw notFound("Join request not found");
+      return joinRequest.companyId;
+    }),
     validate(claimJoinRequestApiKeySchema),
     async (req, res) => {
       const requestId = req.params.requestId as string;
@@ -4924,11 +4960,13 @@ export function accessRoutes(
     }
   );
 
-  // DUR-379 (DUR-277 §1 category c): admin/* is an instance-admin view/
-  // action spanning every company -- deliberately left unscoped (raw db/
-  // rawAccess), not wired through companyScope.
+  // DUR-381 (DUR-277 Wave 5b) category (c): instance-admin routes manage
+  // state (instance-admin role grants, cross-company user access) that by
+  // definition spans every company on the instance, so there is no single
+  // companyId to scope to.
   router.post(
     "/admin/users/:userId/promote-instance-admin",
+    companyScopeBypassForRoute(rawDb, "instance-admin role grant spans all companies"),
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
@@ -4937,7 +4975,7 @@ export function accessRoutes(
     }
   );
 
-  router.get("/admin/users", async (req, res) => {
+  router.get("/admin/users", companyScopeBypassForRoute(rawDb, "instance-admin user search spans all companies"), async (req, res) => {
     await assertInstanceAdmin(req);
     const query = searchAdminUsersQuerySchema.parse(req.query);
     const needle = query.query.trim().toLowerCase();
@@ -4999,6 +5037,7 @@ export function accessRoutes(
 
   router.post(
     "/admin/users/:userId/demote-instance-admin",
+    companyScopeBypassForRoute(rawDb, "instance-admin role revocation spans all companies"),
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
@@ -5008,7 +5047,10 @@ export function accessRoutes(
     }
   );
 
-  router.get("/admin/users/:userId/company-access", async (req, res) => {
+  router.get(
+    "/admin/users/:userId/company-access",
+    companyScopeBypassForRoute(rawDb, "a user's cross-company access summary spans all companies"),
+    async (req, res) => {
     await assertInstanceAdmin(req);
     const userId = req.params.userId as string;
     res.json(await loadUserCompanyAccessResponse(rawDb, rawAccess, userId));
@@ -5016,6 +5058,7 @@ export function accessRoutes(
 
   router.put(
     "/admin/users/:userId/company-access",
+    companyScopeBypassForRoute(rawDb, "granting/revoking a user's access across companies spans all companies"),
     validate(updateUserCompanyAccessSchema),
     async (req, res) => {
       await assertInstanceAdmin(req);

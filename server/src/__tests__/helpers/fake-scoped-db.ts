@@ -40,7 +40,15 @@ const FAKE_DRIVER_OPTIONS = {
 };
 
 function makeFakeReservedConnection(unsafeRows: unknown[]) {
-  const reserved = async (..._args: unknown[]) => [];
+  // DUR-381: the raw tagged-template calls runInCompanyScope/runInCompanyScopeBypass
+  // make directly on `reserved` (set_config, the paperclip_app_bypass role
+  // check, RESET) never go through `.unsafe()` -- only drizzle's own query
+  // execution does. `runInCompanyScopeBypass` destructures this call's result
+  // as `[{ has_bypass }]`, so it must resolve truthy here for a bypass-scoped
+  // route to reach its (mocked-service) handler at all; the other two callers
+  // (set_config, RESET) never inspect the return value, so this is safe for
+  // every caller of `reserved` as a tagged template.
+  const reserved = async (..._args: unknown[]) => [{ has_bypass: true }];
   Object.assign(reserved, {
     release: () => {},
     options: FAKE_DRIVER_OPTIONS,
