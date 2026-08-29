@@ -24,6 +24,7 @@ import {
   UserRound,
   Sparkles,
   ScrollText,
+  TrendingUp,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -222,6 +223,7 @@ export function Sidebar() {
           <SidebarNavItem to="/org" label="Org" icon={Network} />
           <SidebarNavItem to="/jobs" label="Jobs" icon={Briefcase} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
+          <SidebarNavItem to="/goal-adoption" label="Goal Adoption" icon={TrendingUp} />
           <SidebarNavItem to="/changelog" label="Changelog" icon={ScrollText} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
