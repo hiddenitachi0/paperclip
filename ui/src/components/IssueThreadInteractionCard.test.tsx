@@ -24,6 +24,7 @@ import {
   spoofedDecisionAskInDetailsRequestConfirmationInteraction,
   staleTargetRequestConfirmationInteraction,
   titleSummarySpoofedFactCheckRequestConfirmationInteraction,
+  zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
   rejectedSuggestedTasksInteraction,
 } from "../fixtures/issueThreadInteractionFixtures";
 
@@ -506,6 +507,16 @@ describe("IssueThreadInteractionCard", () => {
   it("does not render a fact-check card when the money-movement instruction lives in title/summary instead of the payload (DUR-341)", () => {
     const spoofed = renderCard({
       interaction: titleSummarySpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a fact-check card when a zero-width character is inserted inside a covered verb (DUR-405)", () => {
+    const spoofed = renderCard({
+      interaction: zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
     });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");
