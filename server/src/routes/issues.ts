@@ -1314,6 +1314,7 @@ export function issueRoutes(
     enqueueWakeup: opts.taskWatchdogEnqueueWakeup === undefined
       ? heartbeat.wakeup
       : opts.taskWatchdogEnqueueWakeup ?? undefined,
+    rawDb,
   }) ?? noopTaskWatchdogService();
   const externalObjectsSvc = externalObjectService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
