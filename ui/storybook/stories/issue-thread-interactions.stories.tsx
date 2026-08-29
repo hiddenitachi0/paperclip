@@ -22,6 +22,7 @@ import {
   mixedIssueThreadInteractions,
   optionalDeclineRequestConfirmationInteraction,
   pendingAskUserQuestionsInteraction,
+  pendingFactCheckRequestConfirmationInteraction,
   pendingRequestCheckboxConfirmationInteraction,
   pendingRequestConfirmationInteraction,
   pendingSuggestedTasksInteraction,
@@ -543,6 +544,24 @@ export const RequestConfirmationPlanApprovalConfirmed: Story = {
       >
         <IssueThreadInteractionCard
           interaction={planApprovalAcceptedRequestConfirmationInteraction}
+          agentMap={storybookAgentMap}
+          currentUserId={issueThreadInteractionFixtureMeta.currentUserId}
+          userLabelMap={boardUserLabels}
+        />
+      </ScenarioCard>
+    </StoryFrame>
+  ),
+};
+
+export const RequestConfirmationFactCheckPending: Story = {
+  render: () => (
+    <StoryFrame>
+      <ScenarioCard
+        title="Fact check (DUR-311, the BEKREFT pattern)"
+        description="Numbered claims outside the system (accounting figures, wording, a workflow) render as a teal 'Fact check' card, distinct from a Plan card or a GODKJENN/deploy-approval decision card."
+      >
+        <IssueThreadInteractionCard
+          interaction={pendingFactCheckRequestConfirmationInteraction}
           agentMap={storybookAgentMap}
           currentUserId={issueThreadInteractionFixtureMeta.currentUserId}
           userLabelMap={boardUserLabels}

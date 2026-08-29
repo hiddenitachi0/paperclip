@@ -3,6 +3,14 @@ import {
   WORKSPACE_OVERVIEW_DEFAULT_LIMIT,
   WORKSPACE_OVERVIEW_MAX_LIMIT,
 } from "../constants.js";
+import { EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE, hasEmbeddedGitCredential } from "../git-remote-url.js";
+
+// DUR-329: execution workspaces have their own repoUrl write path, separate
+// from project_workspaces (DUR-318) -- gate it the same way so a credentialed
+// URL can't reach PAPERCLIP_WORKSPACE_REPO_URL via this door instead.
+const executionWorkspaceRepoUrlSchema = z
+  .string()
+  .refine((value) => !hasEmbeddedGitCredential(value), { message: EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE });
 
 export const executionWorkspaceStatusSchema = z.enum([
   "active",
@@ -138,7 +146,7 @@ export const executionWorkspaceCloseReadinessSchema = z.object({
 export const updateExecutionWorkspaceSchema = z.object({
   name: z.string().min(1).optional(),
   cwd: z.string().optional().nullable(),
-  repoUrl: z.string().optional().nullable(),
+  repoUrl: executionWorkspaceRepoUrlSchema.optional().nullable(),
   baseRef: z.string().optional().nullable(),
   branchName: z.string().optional().nullable(),
   providerRef: z.string().optional().nullable(),
