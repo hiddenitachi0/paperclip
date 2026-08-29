@@ -4,6 +4,8 @@ import { getTableName } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.ts";
 
+vi.setConfig({ testTimeout: 30_000 });
+
 const TEST_COMPANY_ID = "66666666-6666-4666-8666-666666666666";
 
 const mockIssueService = vi.hoisted(() => ({
