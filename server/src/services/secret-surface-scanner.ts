@@ -161,12 +161,18 @@ function hasLowEntropy(value: string): boolean {
   return maxCount / chars.length >= 0.6;
 }
 
-/** Mask a matched secret so forensic issues carry enough signal without becoming a new leak site. */
-export function maskSecretMatch(value: string): string {
-  if (value.length <= 10) return "*".repeat(value.length);
-  const head = value.slice(0, 6);
-  const tail = value.slice(-4);
-  return `${head}${"*".repeat(Math.max(4, value.length - 10))}${tail}`;
+/**
+ * Mask a matched secret so forensic issues carry enough signal without becoming a new leak
+ * site. DUR-357: earlier revealed a literal head/tail of the value -- for a 40-char classic
+ * GitHub token that put 10 real characters (plus its exact length and vendor prefix) into an
+ * issue every agent in the company can read, which is the same mistake in miniature the module
+ * exists to close. This form is fixed-shape and non-positional: no character of `value` ever
+ * appears in the output, only its length and a truncated hash a human can use to confirm which
+ * occurrence of a rotated/removed credential this finding refers to.
+ */
+export function maskSecretMatch(value: string, patternName: string): string {
+  const hashPrefix = crypto.createHash("sha256").update(value).digest("hex").slice(0, 8);
+  return `<${patternName}> (len ${value.length}, sha256 prefix ${hashPrefix})`;
 }
 
 function isExcludedPath(filePath: string): boolean {
@@ -429,7 +435,7 @@ export async function scanFilesystemForLeakedSecrets(
         surface: candidate.surface,
         location,
         pattern: match.pattern,
-        maskedValue: maskSecretMatch(match.value),
+        maskedValue: maskSecretMatch(match.value, match.pattern),
         detail: `Found while scanning ${candidate.surface === "git_config" ? "a .git/config remote URL" : candidate.surface === "dotenv" ? "a .env file" : "a docker-compose file"} under the Paperclip instance root.`,
       });
       if (result.filed) summary.issuesFiled += 1;
@@ -534,7 +540,7 @@ export async function scanHeartbeatRunsForLeakedSecrets(
             surface: "heartbeat_run",
             location,
             pattern: match.pattern,
-            maskedValue: maskSecretMatch(match.value),
+            maskedValue: maskSecretMatch(match.value, match.pattern),
             detail: `Found in the \`${field.column}\` column of heartbeat_runs row ${row.id} (run recorded ${row.createdAt.toISOString()}).`,
           });
           if (result.filed) summary.issuesFiled += 1;
