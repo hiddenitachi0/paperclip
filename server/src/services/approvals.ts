@@ -201,6 +201,22 @@ export function approvalService(db: Db) {
       return rows[0] ?? null;
     },
 
+    findOpenFeatureLaunchApproval: async (companyId: string, issueId: string) => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            inArray(approvals.status, resolvableStatuses),
+            sql`${approvals.payload} ->> 'kind' = 'feature_launch'`,
+            sql`${approvals.payload} ->> 'issueId' = ${issueId}`,
+          ),
+        );
+      return rows[0] ?? null;
+    },
+
     findOpenDeployApproval: async (companyId: string, projectId: string, workspaceId: string) => {
       const rows = await db
         .select()

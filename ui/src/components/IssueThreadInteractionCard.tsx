@@ -237,8 +237,14 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
 // (e.g. zero-width-character insertion defeating a matched word) are a
 // separate, more structural problem tracked as a follow-up, not fixable by
 // extending this list.
+// DUR-408 (DUR-405/DUR-407 security review follow-up): still missed
+// release/credit/disclose/cash out (money-movement) and reach out/text/
+// alert/contact (outbound-comms, same family as notify/message). Also
+// widened "route funds" to "route ... proceeds" since routing sale
+// proceeds elsewhere is the same instruction without the literal word
+// "funds".
 const DECISION_ASK_PATTERN =
-  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|debit(?:s|ed|ing)?|withdraw(?:s|n|ing)?|withdrew|charge(?:s|d|ing)?|rout(?:e|es|ed|ing) (?:the )?funds|disburse(?:s|d|ing|ment)?|deposit(?:s|ed|ing)?|remit(?:s|ted|ting|tance)?|forward(?:s|ed|ing)?|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
+  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|debit(?:s|ed|ing)?|withdraw(?:s|n|ing)?|withdrew|charge(?:s|d|ing)?|rout(?:e|es|ed|ing) (?:the )?(?:funds|proceeds)|disburse(?:s|d|ing|ment)?|deposit(?:s|ed|ing)?|remit(?:s|ted|ting|tance)?|forward(?:s|ed|ing)?|releas(?:e|es|ed|ing)|credit(?:s|ed|ing)?|disclos(?:e|es|ed|ing)|cash(?:es|ed|ing)?[- ]?out|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|reach(?:es|ed|ing)? out|text(?:s|ed|ing)?|alert(?:s|ed|ing)?|contact(?:s|ed|ing)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
 
 // DUR-405: a zero-width or other invisible codepoint inserted inside an
 // already-covered word (e.g. "W\u200Bire") reads as the plain word to a
@@ -248,8 +254,13 @@ const DECISION_ASK_PATTERN =
 // controls) and apply compatibility normalization (folds fullwidth/other
 // compatibility variants of ASCII letters) before running the pattern
 // against any operator-facing field this heuristic scans.
+// DUR-408 (DUR-407 security review follow-up): variation selectors
+// (U+FE00-U+FE0F, plus the U+E0100-U+E01EF IVS supplement) were not
+// covered -- e.g. inserting VS-16 inside "Wire" still bypassed the pattern
+// after normalization. The `u` flag is needed to address the supplement
+// range by code point.
 const INVISIBLE_CHAR_PATTERN =
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\u{E0100}-\u{E01EF}\uFEFF]/gu;
 
 // DUR-413: a combining diacritical mark (Unicode general category Mn)
 // inserted between the letters of a covered verb -- e.g. "w" + \u0301 +

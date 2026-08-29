@@ -26,6 +26,8 @@ import {
   spoofedDecisionAskInDetailsRequestConfirmationInteraction,
   staleTargetRequestConfirmationInteraction,
   titleSummarySpoofedFactCheckRequestConfirmationInteraction,
+  variationSelectorSpoofedFactCheckRequestConfirmationInteraction,
+  verbGapSpoofedFactCheckRequestConfirmationInteraction,
   zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
   rejectedSuggestedTasksInteraction,
 } from "../fixtures/issueThreadInteractionFixtures";
@@ -549,6 +551,26 @@ describe("IssueThreadInteractionCard", () => {
   it("does not render a debit + forward-to-external-address instruction as a fact-check card (DUR-341)", () => {
     const spoofed = renderCard({
       interaction: additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a release/cash-out + contact/disclose instruction as a fact-check card (DUR-408)", () => {
+    const spoofed = renderCard({
+      interaction: verbGapSpoofedFactCheckRequestConfirmationInteraction,
+    });
+    const shell = spoofed.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("border-teal-500/60");
+    expect(spoofed.textContent).not.toContain("Fact check");
+    expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  it("does not render a fact-check card when a Unicode variation selector is inserted inside a covered verb (DUR-408)", () => {
+    const spoofed = renderCard({
+      interaction: variationSelectorSpoofedFactCheckRequestConfirmationInteraction,
     });
     const shell = spoofed.firstElementChild as HTMLElement;
     expect(shell.className).not.toContain("border-teal-500/60");

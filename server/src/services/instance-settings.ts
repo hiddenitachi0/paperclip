@@ -55,6 +55,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
       globalMaxConcurrentRuns:
         parsed.data.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
       quietMode: parsed.data.quietMode ?? DEFAULT_QUIET_MODE_STATE,
+      mergePrAutomationEnabled: parsed.data.mergePrAutomationEnabled ?? false,
     };
   }
   return {
@@ -65,6 +66,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     instructionsStalenessThresholdDays: DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
     globalMaxConcurrentRuns: DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
     quietMode: DEFAULT_QUIET_MODE_STATE,
+    mergePrAutomationEnabled: false,
   };
 }
 
