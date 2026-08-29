@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
+import { createRequestScopedDb } from "@paperclipai/db";
 import {
   catalogTeamInstallSchema,
   catalogTeamListQuerySchema,
@@ -15,9 +16,15 @@ import {
 } from "../services/teams-catalog.js";
 import { forbidden } from "../errors.js";
 import { assertAuthenticated, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { companyScopeFromParam } from "../middleware/company-scope.js";
 
-export function teamsCatalogRoutes(db: Db) {
+export function teamsCatalogRoutes(rawDb: Db) {
   const router = Router();
+  // DUR-348 (DUR-277 Wave 2): the plain /teams/catalog* group below has no
+  // companyId (global catalog browsing) and stays unscoped, per the
+  // DUR-277 design doc's §1 category-(a+d) note for this file. Only the
+  // `/companies/:companyId/teams/catalog/...` group is scoped.
+  const db = createRequestScopedDb(rawDb);
   const agents = agentService(db);
   const access = accessService(db);
   const svc = teamsCatalogService(db);
@@ -85,19 +92,22 @@ export function teamsCatalogRoutes(db: Db) {
     res.json(await getCatalogTeamOrThrow(catalogRef));
   });
 
-  router.get("/companies/:companyId/teams/catalog/installed", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    res.json(await svc.listInstalledCatalogTeams(companyId));
-  });
+  router.get(
+    "/companies/:companyId/teams/catalog/installed",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      res.json(await svc.listInstalledCatalogTeams(companyId));
+    },
+  );
 
   router.post(
     "/companies/:companyId/teams/catalog/:catalogId/preview",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
     validate(catalogTeamPreviewSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const catalogRef = firstQueryString(req.query.ref) ?? (req.params.catalogId as string);
-      assertCompanyAccess(req, companyId);
       const result = await svc.previewCatalogTeamImport(companyId, catalogRef, {
         ...req.body,
         actor: getActorInfo(req),
@@ -108,6 +118,7 @@ export function teamsCatalogRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/teams/catalog/:catalogId/install",
+    companyScopeFromParam(rawDb, assertCompanyAccess),
     validate(catalogTeamInstallSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;

@@ -71,21 +71,24 @@ describe("isCodexUnknownSessionError", () => {
   it("detects the current missing-rollout thread error", () => {
     expect(
       isCodexUnknownSessionError(
-        "",
         "Error: thread/resume: thread/resume failed: no rollout found for thread id d448e715-7607-4bcc-91fc-7a3c0c5a9632",
       ),
     ).toBe(true);
   });
 
   it("still detects existing stale-session wordings", () => {
-    expect(isCodexUnknownSessionError("unknown thread id", "")).toBe(true);
-    expect(isCodexUnknownSessionError("", "state db missing rollout path for thread abc")).toBe(true);
-    expect(isCodexUnknownSessionError("", "state db returned stale rollout path for thread abc")).toBe(true);
+    expect(isCodexUnknownSessionError("unknown thread id")).toBe(true);
+    expect(isCodexUnknownSessionError("state db missing rollout path for thread abc")).toBe(true);
+    expect(isCodexUnknownSessionError("state db returned stale rollout path for thread abc")).toBe(true);
   });
 
   it("does not classify unrelated Codex failures as stale sessions", () => {
-    expect(isCodexUnknownSessionError("", "model overloaded")).toBe(false);
+    expect(isCodexUnknownSessionError("model overloaded")).toBe(false);
   });
+
+  // DUR-258: isCodexUnknownSessionError now only ever accepts a single
+  // stderr string — there is no stdout/transcript parameter left to
+  // accidentally pass a full agent run transcript into.
 });
 
 describe("isCodexTransientUpstreamError", () => {

@@ -10,6 +10,15 @@
 #  - Postgres port not published at all (server reaches db over the compose network)
 #  - restart: unless-stopped so the always-on brain survives reboots
 #  - PAPERCLIP_ALLOWED_HOSTNAMES lets the Tailscale hostname through the host guard
+#  - stop_grace_period (DUR-257): every `up -d --force-recreate` / `--no-build` swap
+#    the deploy runner does sends the OLD server container SIGTERM, then SIGKILL after
+#    this long. Docker's default is 10s, which is shorter than most agent turns --
+#    server/src/index.ts's shutdown() waits (up to PAPERCLIP_SHUTDOWN_DRAIN_TIMEOUT_MS,
+#    default 240s) for in-flight heartbeat runs to finish before it calls
+#    process.exit(0), so this needs enough headroom for that wait plus its own
+#    telemetry/db cleanup, or Docker SIGKILLs it mid-drain and defeats the point.
+#    Keep this a few seconds above PAPERCLIP_SHUTDOWN_DRAIN_TIMEOUT_MS if that env var
+#    is overridden.
 #
 # Required in .env (never committed):
 #   BETTER_AUTH_SECRET=<openssl rand -hex 32>
@@ -18,6 +27,7 @@
 services:
   server:
     restart: unless-stopped
+    stop_grace_period: 260s
     environment:
       PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
     ports: !override

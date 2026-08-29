@@ -104,6 +104,7 @@ function registerRouteMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
       getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
@@ -284,6 +285,147 @@ describe("issue workspace command authorization", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("host-executed workspace commands");
     expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent setting changeLogVisible/changeLogSummary on issue creation", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "Self-published bugfix",
+        status: "done",
+        changeLogVisible: true,
+        changeLogSummary: "Fixed a critical payment bug",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("changeLogVisible/changeLogSummary");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent setting changeLogVisible/changeLogSummary on child issue creation", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ id: "issue-1" }));
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({
+        title: "Self-published bugfix",
+        status: "done",
+        changeLogVisible: true,
+        changeLogSummary: "Fixed a critical payment bug",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("changeLogVisible/changeLogSummary");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set changeLogVisible/changeLogSummary on issue creation", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "Backfilled bugfix",
+        status: "done",
+        changeLogVisible: true,
+        changeLogSummary: "Fixed a critical payment bug",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ changeLogVisible: true, changeLogSummary: "Fixed a critical payment bug" }),
+    );
+  });
+
+  it("rejects an agent setting featureLaunch on issue creation (DUR-313 create-path bypass)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "Self-published launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("featureLaunch");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent setting featureLaunch on child issue creation (DUR-313 create-path bypass)", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ id: "issue-1" }));
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({
+        title: "Self-published launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("featureLaunch");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set featureLaunch on issue creation", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "Board-filed launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ featureLaunch: true }),
+    );
   });
 
   it("rejects agent callers that patch assignee adapter workspace teardown commands", async () => {

@@ -428,6 +428,73 @@ describe.sequential("workspace runtime service route authorization", () => {
     expect(mockProjectService.updateWorkspace).not.toHaveBeenCalled();
   });
 
+  it("rejects a workspace repoUrl with an embedded credential (DUR-318)", async () => {
+    mockProjectService.getById.mockResolvedValue(buildProject({ id: projectId }));
+    const app = await createProjectApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post(`/api/projects/${projectId}/workspaces`)
+      .send({
+        name: "Exploit",
+        repoUrl: "https://ghp_leakedtoken123@github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.details)).toContain("credential helper");
+    expect(mockProjectService.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("accepts a workspace repoUrl with no embedded credential (DUR-318)", async () => {
+    mockProjectService.getById.mockResolvedValue(buildProject({ id: projectId }));
+    const app = await createProjectApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post(`/api/projects/${projectId}/workspaces`)
+      .send({
+        name: "Legit",
+        repoUrl: "https://github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockProjectService.createWorkspace).toHaveBeenCalledWith(
+      projectId,
+      expect.objectContaining({ repoUrl: "https://github.com/acme/repo.git" }),
+    );
+  });
+
+  it("rejects an update setting a workspace repoUrl with an embedded credential (DUR-318)", async () => {
+    mockProjectService.getById.mockResolvedValue(buildProject({ id: projectId }));
+    const app = await createProjectApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .patch(`/api/projects/${projectId}/workspaces/${workspaceId}`)
+      .send({
+        repoUrl: "https://user:hunter2@github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.details)).toContain("credential helper");
+    expect(mockProjectService.updateWorkspace).not.toHaveBeenCalled();
+  });
+
   it("allows board callers through the project workspace runtime auth gate", async () => {
     mockProjectService.getById.mockResolvedValue(null);
     const app = await createProjectApp({
@@ -517,6 +584,50 @@ describe.sequential("workspace runtime service route authorization", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("host-executed workspace commands");
     expect(mockExecutionWorkspaceService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an update setting an execution workspace repoUrl with an embedded credential (DUR-329)", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue(buildExecutionWorkspace({ id: executionWorkspaceId }));
+    const app = await createExecutionWorkspaceApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .patch(`/api/execution-workspaces/${executionWorkspaceId}`)
+      .send({
+        repoUrl: "https://user:hunter2@github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.details)).toContain("credential helper");
+    expect(mockExecutionWorkspaceService.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts an update setting an execution workspace repoUrl with no embedded credential (DUR-329)", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue(buildExecutionWorkspace({ id: executionWorkspaceId }));
+    const app = await createExecutionWorkspaceApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .patch(`/api/execution-workspaces/${executionWorkspaceId}`)
+      .send({
+        repoUrl: "https://github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockExecutionWorkspaceService.update).toHaveBeenCalledWith(
+      executionWorkspaceId,
+      expect.objectContaining({ repoUrl: "https://github.com/acme/repo.git" }),
+    );
   });
 
   it("allows board callers through the execution workspace runtime auth gate", async () => {

@@ -69,6 +69,7 @@ import {
   type WorktreeLocalPaths,
 } from "./worktree-lib.js";
 import {
+  assertWorkspaceRepoUrlSafeForMerge,
   buildWorktreeMergePlan,
   parseWorktreeMergeScopes,
   type IssueAttachmentRow,
@@ -746,7 +747,7 @@ async function rebindSeededProjectWorkspaces(input: {
   const targetRepo = detectGitWorkspaceInfo(input.currentCwd);
   if (!targetRepo) return [];
 
-  const db = createDb(input.targetConnectionString);
+  const db = createDb(input.targetConnectionString, "paperclip-cli-worktree");
   const closableDb = db as typeof db & {
     $client?: { end?: (opts?: { timeout?: number }) => Promise<void> };
   };
@@ -1117,7 +1118,7 @@ async function ensureEmbeddedPostgres(dataDir: string, preferredPort: number): P
 }
 
 export async function pauseSeededScheduledRoutines(connectionString: string): Promise<number> {
-  const db = createDb(connectionString);
+  const db = createDb(connectionString, "paperclip-cli-worktree");
   try {
     const scheduledRoutineIds = await db
       .selectDistinct({ routineId: routineTriggers.routineId })
@@ -1186,7 +1187,7 @@ function normalizeWorktreeRuntimeConfig(runtimeConfig: unknown): {
 export async function quarantineSeededWorktreeExecutionState(
   connectionString: string,
 ): Promise<SeededWorktreeExecutionQuarantineSummary> {
-  const db = createDb(connectionString);
+  const db = createDb(connectionString, "paperclip-cli-worktree");
   const summary = { ...EMPTY_SEEDED_WORKTREE_EXECUTION_QUARANTINE_SUMMARY };
   try {
     await db.transaction(async (tx) => {
@@ -1969,7 +1970,7 @@ async function openConfiguredDb(configPath: string): Promise<OpenDbHandle> {
         `Database for ${configPath} is not up to date.${pending} Run \`pnpm db:migrate\` (or start Paperclip once) before using worktree merge history.`,
       );
     }
-    const db = createDb(connectionString) as ClosableDb;
+    const db = createDb(connectionString, "paperclip-cli-worktree") as ClosableDb;
     return {
       db,
       stop: async () => {
@@ -2640,6 +2641,7 @@ async function applyMergePlan(input: {
 
       for (const workspace of project.workspaces) {
         if (existingImportedWorkspaceIds.has(workspace.id)) continue;
+        assertWorkspaceRepoUrlSafeForMerge(workspace.repoUrl);
         await tx.insert(projectWorkspaces).values({
           id: workspace.id,
           companyId,

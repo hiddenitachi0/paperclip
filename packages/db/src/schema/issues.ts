@@ -7,6 +7,7 @@ import {
   timestamp,
   integer,
   jsonb,
+  boolean,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -63,6 +64,14 @@ export const issues = pgTable(
     executionWorkspacePreference: text("execution_workspace_preference"),
     executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown>>(),
     sourceTrust: jsonb("source_trust").$type<SourceTrustMetadata | null>(),
+    // DUR-312: read-only operator changelog -- one line per fixed bug/small
+    // change, kept out of the approval queue. Set on the issue at close time.
+    changeLogVisible: boolean("change_log_visible").notNull().default(false),
+    changeLogSummary: text("change_log_summary"),
+    // DUR-313: marks this issue as a user-facing feature launch (DUR-299 point 2).
+    // Once true, evaluateFeatureLaunchDoneGate (server/src/services/feature-launch-gate.ts)
+    // requires an approved feature_launch approval before the issue can move to done.
+    featureLaunch: boolean("feature_launch").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -81,6 +90,11 @@ export const issues = pgTable(
       table.companyId,
       table.assigneeUserId,
       table.status,
+    ),
+    changeLogIdx: index("issues_company_change_log_idx").on(
+      table.companyId,
+      table.changeLogVisible,
+      table.completedAt,
     ),
     parentIdx: index("issues_company_parent_idx").on(table.companyId, table.parentId),
     projectIdx: index("issues_company_project_idx").on(table.companyId, table.projectId),
@@ -157,6 +171,22 @@ export const issues = pgTable(
       .where(
         sql`${table.originKind} = 'stranded_issue_recovery'
           and ${table.originId} is not null
+          and ${table.hiddenAt} is null
+          and ${table.status} not in ('done', 'cancelled')`,
+      ),
+    // DUR-316: one open ticket per unique secret-scan finding (surface +
+    // location + pattern, hashed into originFingerprint by
+    // server/src/services/secret-surface-scanner.ts) so a leaked credential
+    // that keeps showing up on every sweep (e.g. a token sitting in a
+    // heartbeat_runs row or an uncleaned .env) files exactly one issue
+    // instead of a duplicate every tick -- the DB-level guard behind the
+    // app-level findOpenDuplicateTicket check, same two-layer pattern as
+    // issues_active_task_watchdog_uq above.
+    activeSecretScanFindingIdx: uniqueIndex("issues_active_secret_scan_finding_uq")
+      .on(table.companyId, table.originKind, table.originFingerprint)
+      .where(
+        sql`${table.originKind} = 'secret_scan_finding'
+          and ${table.originFingerprint} <> 'default'
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,
       ),

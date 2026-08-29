@@ -956,6 +956,8 @@ export type {
   PluginWebhookDeliveryRecord,
   QuotaWindow,
   ProviderQuotaResult,
+  GoalAdoptionSnapshot,
+  GoalAdoptionTrendPoint,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES } from "./types/index.js";
 export { agentAvatarUrl } from "./types/index.js";
@@ -1078,6 +1080,13 @@ export {
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
 } from "./execution-workspace-guards.js";
+
+export {
+  assertNoEmbeddedGitCredential,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
+  hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
+} from "./git-remote-url.js";
 
 export {
   instanceSettingsSchema,
@@ -1356,6 +1365,7 @@ export {
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -1368,6 +1378,7 @@ export {
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
+  type FeatureLaunchRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,

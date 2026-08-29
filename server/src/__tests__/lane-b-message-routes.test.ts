@@ -136,6 +136,7 @@ function registerRouteMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     ISSUE_LIST_DEFAULT_LIMIT: 100,
     ISSUE_LIST_MAX_LIMIT: 500,
     accessService: () => mockAccessService,

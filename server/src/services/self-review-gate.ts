@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
@@ -396,6 +397,105 @@ export async function findExistingSelfReviewPassWake(
     .then((rows) => rows[0] ?? null);
 }
 
+/**
+ * DUR-245: findExistingSelfReviewPassWake only matches the exact (issueId, sourceRunId) pair,
+ * so it only protects against the SAME run retrying its own declined PATCH. It does nothing
+ * for a DIFFERENT run (a later heartbeat, after the scheduled pass finished without actually
+ * completing the handoff -- e.g. the corrective run burned its turn budget re-investigating
+ * instead of just reviewing and re-PATCHing) attempting the transition later: that run gets
+ * its own fresh idempotency key, sails past findExistingSelfReviewPassWake, and this gate
+ * schedules yet another "one extra pass" for it. If that pass also fails to land the handoff,
+ * the cycle repeats indefinitely -- silently, with no operator-visible signal beyond the issue
+ * sitting in `blocked`/`todo` forever (see DUR-245).
+ *
+ * The gate's own design intent (see isSelfReviewPassRunId above) is to bound this to exactly
+ * one extra pass per issue, not one per attempting run. This checks whether ANY self-review
+ * pass wake has already reached a terminal `completed` state for this issue, regardless of
+ * which run originally triggered it, so a second (or third, ...) run doesn't pay for another
+ * pass that was already used up.
+ */
+/**
+ * DUR-270 (security review of DUR-245): a stable fingerprint of what a self-review pass
+ * actually reviewed, so a completed pass on an OLD diff can't silently vouch for a NEW,
+ * unreviewed diff on the same issue -- see the reviewedDiffFingerprint comment on
+ * evaluateSelfReviewDoneGate below. null when EITHER read couldn't be produced, not just
+ * when both are null (DUR-276): changedFilePaths and diffContent come from two independent
+ * git invocations with different maxBuffer caps, so a diff can routinely blow the content
+ * buffer while staying under the path-only buffer. If content silently degraded to null
+ * while paths stayed non-null, the old both-null check let the fingerprint collapse to a
+ * pure function of the file-path set -- two different diffs touching the same path(s) would
+ * hash identically and a stale pass could vouch for content it never actually saw. Callers
+ * must treat "either read unknown" as "fingerprint unknown", not as a fingerprint of its own.
+ */
+export function computeReviewedDiffFingerprint(
+  changedFilePaths: readonly string[] | null,
+  diffContent: string | null,
+): string | null {
+  if (changedFilePaths === null || diffContent === null) return null;
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify([...changedFilePaths].sort()));
+  hash.update(" ");
+  hash.update(diffContent);
+  return hash.digest("hex");
+}
+
+/**
+ * DUR-270: `matchingDiffFingerprint` narrows "has this issue used its one bounded pass" to
+ * "...for THIS diff". Passing it undefined preserves the original DUR-245 semantics (any
+ * completed pass for the issue counts, regardless of diff) for callers that don't have a
+ * diff to compare against at all -- e.g. the issue's git workspace itself can't be resolved,
+ * so there is genuinely nothing to compare. Passing a real fingerprint only matches a pass
+ * that reviewed that exact diff, so a later, different diff on the same issue -- e.g. a new
+ * commit adding a risky-surface change -- doesn't get waved through on an older, unrelated
+ * pass's coattails.
+ *
+ * DUR-286: `null` is intentionally NOT treated the same as `undefined` here. `null` means a
+ * diff exists but couldn't be fully read (e.g. computeReviewedDiffFingerprint nulled out
+ * because the diff-content buffer overflowed while the path-only read succeeded -- an
+ * ordinary occurrence, not a workspace-resolution failure). A stored `reviewedDiffFingerprint`
+ * of `null` on some OTHER completed pass could come from a completely different diff that
+ * happened to hit the same partial-read failure, so matching null-to-null here would silently
+ * let a stale, unrelated pass vouch for content it never saw -- the exact class of gap DUR-270
+ * closed for the false-hash-match case. `null` therefore always misses, forcing the caller to
+ * schedule a fresh pass for that diff.
+ */
+export async function findCompletedSelfReviewPassForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string; matchingDiffFingerprint?: string | null },
+) {
+  if (input.matchingDiffFingerprint === null) return null;
+
+  const rows = await db
+    .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+        eq(agentWakeupRequests.status, "completed"),
+      ),
+    );
+  if (input.matchingDiffFingerprint === undefined) {
+    return rows[0] ?? null;
+  }
+  const fingerprint = input.matchingDiffFingerprint;
+  return (
+    rows.find((row) => (row.payload as { reviewedDiffFingerprint?: string } | null)?.reviewedDiffFingerprint === fingerprint) ??
+    null
+  );
+}
+
+// DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /
+// enqueueWakeup) has many legitimate no-throw skip paths -- company inactive, heartbeat
+// disabled, an unresolved dependency blocker, etc -- that just write a "skipped" wakeup
+// row and resolve to `null`, indistinguishable from a real schedule by return value alone.
+// Passing onNotScheduled lets the gate observe which of those actually happened instead of
+// assuming every non-throwing call means a corrective run was scheduled.
+export type SelfReviewGateWakeupNotScheduledInfo =
+  | { kind: "skipped"; reason: string; unresolvedBlockerIssueIds?: string[] }
+  | { kind: "deferred"; reason: string };
+
 export type SelfReviewGateWakeup = (
   agentId: string,
   opts: {
@@ -407,6 +507,7 @@ export type SelfReviewGateWakeup = (
     requestedByActorType?: "user" | "agent" | "system";
     requestedByActorId?: string | null;
     contextSnapshot?: Record<string, unknown>;
+    onNotScheduled?: (info: SelfReviewGateWakeupNotScheduledInfo) => void;
   },
 ) => Promise<unknown>;
 
@@ -456,13 +557,20 @@ export async function evaluateSelfReviewDoneGate(input: {
   // DUR-71: detection is driven by the actual changed file paths, not by asking the agent
   // whether its own work is risky. changedFilePaths is null (not []) when the diff genuinely
   // couldn't be read (e.g. a non-local workspace) -- that degrades to the ordinary-only
-  // prompt rather than guessing at risk. Only computed here (once we know we're actually
-  // about to schedule a new pass), not on every duplicate/retry hit of this gate.
+  // prompt rather than guessing at risk.
   //
   // DUR-91: path-only detection misses risky content in a generically-named file (e.g.
   // DUR-67's codex-home.ts, which strips `mcp_servers` blocks carrying secrets but matches
   // no filename pattern). getChangedDiffContentForIssueWorkspace/detectRiskySurfaceFromDiffContent
   // supplement the path check with the same patterns run against added diff lines.
+  //
+  // DUR-270 (security review of DUR-245): this now has to run BEFORE the "already used its
+  // one pass" check below, not after -- DUR-245's fix let a later run through as soon as ANY
+  // prior pass had completed for this issue, without ever looking at whether the diff had
+  // changed since. That silently skipped risky-surface detection for a genuinely new, risky
+  // commit landed under an issue that had already burned its one pass on an earlier, boring
+  // diff. Reading the diff on every retry (not just when actually scheduling) is the price of
+  // closing that gap.
   const [changedFilePaths, diffContent] = await Promise.all([
     getChangedFilePathsForIssueWorkspace(input.db, { companyId: input.issue.companyId, issueId: input.issue.id }),
     getChangedDiffContentForIssueWorkspace(input.db, { companyId: input.issue.companyId, issueId: input.issue.id }),
@@ -473,6 +581,35 @@ export async function evaluateSelfReviewDoneGate(input: {
       ...(diffContent ? detectRiskySurfaceFromDiffContent(diffContent) : []),
     ]),
   ];
+  const reviewedDiffFingerprint = computeReviewedDiffFingerprint(changedFilePaths, diffContent);
+
+  // DUR-286: computeReviewedDiffFingerprint nulls the fingerprint whenever EITHER read failed
+  // (DUR-276), but only a workspace that's genuinely unresolvable (BOTH reads null -- no diff
+  // exists to compare against at all, e.g. the workspace hasn't been realized yet) should fall
+  // back to findCompletedSelfReviewPassForIssue's lenient "any completed pass counts" mode. A
+  // partial failure (one read succeeded) means a real diff exists but couldn't be fully read
+  // -- routinely just the diff-content buffer overflowing on a large generated/vendored file
+  // while the path-only read stays under its own, separate cap -- and must be treated like a
+  // new, unreviewed diff instead: passing the real (null) fingerprint here makes the lookup
+  // below always miss, so this attempt falls through to scheduling a fresh pass rather than
+  // letting an unrelated older pass on this issue silently vouch for content it never saw.
+  const workspaceFullyUnresolvable = changedFilePaths === null && diffContent === null;
+
+  // DUR-245: this issue already used its one bounded extra pass under a different run, and
+  // that pass reached a terminal state without landing the handoff (otherwise currentStatus
+  // would already equal requestedStatus and we wouldn't be here). Scheduling yet another pass
+  // for the SAME diff would just repeat the same failure mode indefinitely; let this attempt
+  // through instead. DUR-270: scoped to the current diff's fingerprint so this only bypasses
+  // re-review of a diff that was actually reviewed -- a later, different (possibly risky) diff
+  // on the same issue still gets its own pass, matching detectRiskySurfaceFromDiff(Content)'s
+  // fresh-per-diff design intent.
+  const priorPass = await findCompletedSelfReviewPassForIssue(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+    matchingDiffFingerprint: workspaceFullyUnresolvable ? undefined : reviewedDiffFingerprint,
+  });
+  if (priorPass) return null;
+
   const riskySurfaceNote =
     riskySurfaceCategories.length > 0
       ? ` This one also touches ${riskySurfaceCategories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ")}, so I've included some adversarial questions on top of the usual check.`
@@ -486,6 +623,14 @@ export async function evaluateSelfReviewDoneGate(input: {
     requestedStatus: input.requestedStatus,
   });
 
+  // DUR-293: input.wakeup resolving without throwing does NOT mean a corrective run was
+  // actually scheduled -- enqueueWakeup has many legitimate no-throw skip paths (company
+  // inactive, heartbeat disabled, an unresolved dependency blocker, ...) that just record a
+  // "skipped" wakeup row and resolve to null, indistinguishable from a real schedule by
+  // return value alone. onNotScheduled reports which (if either) actually happened so this
+  // gate can respond honestly instead of always claiming "I've scheduled a follow-up run".
+  let notScheduled: SelfReviewGateWakeupNotScheduledInfo | undefined;
+
   try {
     await input.wakeup(input.actor.agentId, {
       source: "automation",
@@ -498,6 +643,9 @@ export async function evaluateSelfReviewDoneGate(input: {
         resumeFromRunId: sourceRunId,
         [SELF_REVIEW_PASS_CONTEXT_KEY]: true,
         instruction,
+        // DUR-270: recorded so a later findCompletedSelfReviewPassForIssue lookup can tell
+        // whether THIS pass actually reviewed the diff a later attempt is asking to bypass.
+        reviewedDiffFingerprint,
       },
       contextSnapshot: {
         issueId: input.issue.id,
@@ -516,11 +664,61 @@ export async function evaluateSelfReviewDoneGate(input: {
       idempotencyKey,
       requestedByActorType: "system",
       requestedByActorId: "issue_self_review_gate",
+      onNotScheduled: (info) => {
+        notScheduled = info;
+      },
     });
   } catch {
     // Scheduling the extra pass failed (e.g. the agent is paused or the company is over
     // budget). Don't let a self-review scheduling failure block a real disposition — let
     // the transition through as requested instead.
+    return null;
+  }
+
+  // "deferred" means the wake is genuinely queued behind the caller's own still-active
+  // execution run and will fire once that run finishes -- that's a real scheduled follow-up,
+  // just like "queued"/"coalesced", so it falls through to the normal blocking message below.
+  if (notScheduled?.kind === "skipped") {
+    if (notScheduled.reason === "issue_dependencies_blocked") {
+      // Honest version of the standard "blocked by unresolved blockers" shape used elsewhere
+      // (see server/src/routes/issues.ts) instead of the false "I've scheduled a follow-up
+      // run" claim -- no run was, or ever will be, dispatched by this skipped wake.
+      const blockerNote =
+        notScheduled.unresolvedBlockerIssueIds && notScheduled.unresolvedBlockerIssueIds.length > 0
+          ? ` (${notScheduled.unresolvedBlockerIssueIds.join(", ")})`
+          : "";
+      return {
+        message:
+          `This task is blocked by unresolved blocker issue(s)${blockerNote} and can't move to review or ` +
+          "done until they're resolved. No follow-up self-review run was scheduled for this attempt " +
+          "because the issue is dependency-blocked, not because a check is pending.",
+      };
+    }
+    // DUR-295 (security review of DUR-293): the agent's own daily heartbeat run/cost cap
+    // (getHeartbeatDailyCapBlock in heartbeat.ts) is keyed on THIS agent's own usage for the
+    // current UTC day -- unlike the other skip reasons below, an agent can land here through
+    // its own ordinary wakeup volume (no operator action, no special permission needed), and
+    // then have this exact PATCH -- the one the self-review pass exists to check -- sail
+    // through with the adversarial risky-surface review never run. Letting the transition
+    // through here would turn "I happened to be busy today" into a silent bypass of the one
+    // review this gate is supposed to guarantee. Block honestly instead: the cap resets at
+    // the next UTC day boundary, so this is a real, bounded wait, not a permanent stall.
+    if (notScheduled.reason === "heartbeat.daily_run_limit" || notScheduled.reason === "heartbeat.daily_cost_limit") {
+      return {
+        message:
+          "This task needs one more self-check before it can move to review or done, but I couldn't " +
+          "schedule that follow-up run because this agent has already hit its own daily heartbeat cap " +
+          "for today. No follow-up run was, or will be, scheduled for this attempt -- retrying this PATCH " +
+          "won't help. The cap resets at the next UTC day boundary; retry after that, or ask an operator " +
+          "to raise it sooner.",
+      };
+    }
+    // Every other no-throw skip reason (company inactive, heartbeat disabled on this agent,
+    // wakeOnDemand disabled, an active tree-control pause hold, ...) is operator-controlled
+    // configuration or state, not something this agent's own request volume can land it in --
+    // nothing was, or ever will be, scheduled either way, so treat it the same as the
+    // catch block above and let the transition through rather than block forever on a promise
+    // that can't be kept.
     return null;
   }
 

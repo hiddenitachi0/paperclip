@@ -462,6 +462,255 @@ export const planApprovalAcceptedRequestConfirmationInteraction = createRequestC
   },
 });
 
+export const pendingFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-fact-check",
+  title: "Check these invoice totals",
+  summary:
+    "The agent pulled these numbers from Fiken and needs the operator to confirm they're right — not a decision, a fact only the operator can check.",
+  payload: {
+    version: 1,
+    prompt: "Do these numbers match what you see in Fiken?",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Invoice #1042 to Nordlys AS: 18 400 kr, due 2026-05-15\n2. Invoice #1043 to Vestkyst Handel: 9 750 kr, due 2026-05-22\n3. Outstanding balance across both: 28 150 kr",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-320/DUR-339: a decision-ask dressed with 2+ numbered lines must NOT get
+// the reassuring "fact check" styling. This fixture omits `factCheck`
+// (defaults false), so it renders as a normal confirmation regardless of the
+// numbered-lines/prose shape that used to spoof the old regex heuristic.
+export const spoofedDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spoofed-decision-ask",
+  title: "Drop stale orders table?",
+  summary: "Should I proceed with dropping orders_2024 now?",
+  payload: {
+    version: 1,
+    prompt: "Should I proceed with dropping orders_2024 now?",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown:
+      "1. Table orders_2024 has 40,201 rows.\n2. Table orders_2024_backup has 40,201 rows.",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
+// DUR-323/DUR-339: the same spoof as above, but with the decision-ask moved
+// out of `prompt` and into `detailsMarkdown` instead. Also omits `factCheck`,
+// so it renders as a normal confirmation card.
+export const spoofedDecisionAskInDetailsRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spoofed-decision-ask-in-details",
+  title: "Drop stale orders table?",
+  summary: "Confirm these two facts.",
+  payload: {
+    version: 1,
+    prompt: "Confirm these two facts.",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown:
+      "1. Table orders_2024 has 40,201 rows.\n2. Should I proceed with dropping orders_2024 now?",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
+// DUR-337: a real decision-ask that sets `factCheck: true` with no
+// fact-check-shaped detailsMarkdown must NOT get the reassuring "fact check"
+// styling — the flag alone is a self-declared boolean with no server-side
+// consumer (DUR-340), so trusting it unconditionally lets any agent launder
+// a destructive decision-ask into the low-stakes card with zero effort.
+export const selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-self-declared-fact-check-decision-ask",
+  title: "Drop stale orders table?",
+  summary: "Should I proceed with dropping orders_2024 now?",
+  payload: {
+    version: 1,
+    prompt: "Should I proceed with dropping orders_2024 now?",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown: "1. Table has 40k rows\n2. Backup taken today",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-341: the same self-declared-factCheck spoof as above, but using
+// money-movement and outbound-communication verbs (wire, notify) that the
+// original DECISION_ASK_PATTERN denylist didn't cover, so this used to slip
+// past the content-shape floor and render with the reassuring fact-check
+// styling despite instructing a real wire transfer + external notification.
+export const moneyMovementSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-money-movement-spoofed-fact-check",
+  title: "Quick check on vendor details",
+  summary: "Quick check on vendor details",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor details",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Wire $18,500 to routing number 021000021, account 4471002.\n2. Notify legal@external-counsel.com once the wire clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+export const pastTenseMoneyMovementSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-past-tense-money-movement-spoofed-fact-check",
+  title: "Quick check on vendor payout status",
+  summary: "Quick check on vendor payout status",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout status",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. $18,500 was wired to routing number 021000021, account 4471002.\n2. A notice was sent to legal@external-counsel.com once it cleared.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-341 follow-up: `title`/`summary` are base interaction fields set
+// independently of `payload`, and title even overrides the "Fact check"
+// heading on render. This spoof keeps prompt/detailsMarkdown innocuous (so
+// they pass DECISION_ASK_PATTERN and the numbered-claims content-shape
+// floor) and puts the real wire-transfer + external-notification
+// instruction in title/summary instead, which the original scan never
+// touched.
+export const titleSummarySpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-title-summary-spoofed-fact-check",
+  title: "Wire $18,500 to routing 021000021 acct 4471002",
+  summary: "Notify legal@external-counsel.com once the wire clears.",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor details",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown: "1. Item A totals $100.\n2. Item B totals $200.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-341 follow-up review: verbs like debit/withdraw/charge/route funds/
+// disburse/deposit/remit/forward weren't on the original DECISION_ASK_PATTERN
+// list either, so this instruction (debit + forward to an external address)
+// used to slip through the same way the wire/notify spoof did.
+export const additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-additional-money-movement-spoofed-fact-check",
+  title: "Quick check on vendor account status",
+  summary: "Quick check on vendor account status",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor account status",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Debit $18,500 from the operating account.\n2. Forward the attached statement to legal@external-counsel.com.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-405: a zero-width space (U+200B) inserted inside an already-covered
+// word ("W​ire") defeats DECISION_ASK_PATTERN's plain word-boundary
+// match even though the word reads as "Wire" to a human and to any renderer
+// that doesn't display invisible characters. Reproduces the reviewer's exact
+// repro string.
+export const zeroWidthSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-zero-width-spoofed-fact-check",
+  title: "Quick check on vendor payout",
+  summary: "Quick check on vendor payout",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. W​ire $18,500 to routing 021000021.\n2. No​tify legal@external-counsel.com once it clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-408 (DUR-405/DUR-407 security review follow-up): verbs like
+// release/credit/disclose (money-movement) and reach out/text/alert/contact
+// (outbound-comms) weren't on DECISION_ASK_PATTERN, so this instruction
+// (release funds + disclose the balance to an outside contact) used to slip
+// through the same way earlier verb gaps did.
+export const verbGapSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-verb-gap-spoofed-fact-check",
+  title: "Quick check on vendor account status",
+  summary: "Quick check on vendor account status",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor account status",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Release the held funds to the vendor and cash out the remaining balance.\n2. Contact the auditor at audit@external-counsel.com and disclose the account balance.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-408 (DUR-407 security review follow-up): a Unicode variation
+// selector (VS-16, U+FE0F) inserted inside an already-covered word
+// ("W\uFE0Fire") defeats DECISION_ASK_PATTERN's literal match the same
+// way the DUR-405 zero-width-space bypass did, just via an uncovered
+// codepoint range. Reproduces the reviewer's exact repro string.
+export const variationSelectorSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-variation-selector-spoofed-fact-check",
+  title: "Quick check on vendor payout",
+  summary: "Quick check on vendor payout",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. W\uFE0Fire $1,000 now to routing 021000021.\n2. No\uFE0Ftify legal@external-counsel.com once it clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

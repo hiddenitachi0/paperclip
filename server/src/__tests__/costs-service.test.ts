@@ -20,6 +20,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 function makeDb(overrides: Record<string, unknown> = {}) {
   const selectChain = {
@@ -35,7 +36,7 @@ function makeDb(overrides: Record<string, unknown> = {}) {
 
   const thenableChain = Object.assign(Promise.resolve([]), selectChain);
 
-  return {
+  return withFakeCompanyScopeReserve({
     select: vi.fn().mockReturnValue(thenableChain),
     insert: vi.fn().mockReturnValue({
       values: vi.fn().mockReturnValue({ returning: vi.fn().mockResolvedValue([]) }),
@@ -44,7 +45,7 @@ function makeDb(overrides: Record<string, unknown> = {}) {
       set: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }),
     }),
     ...overrides,
-  };
+  });
 }
 
 const mockCompanyService = vi.hoisted(() => ({
@@ -94,7 +95,7 @@ const mockFinanceService = vi.hoisted(() => ({
 }));
 const mockBudgetService = vi.hoisted(() => ({
   overview: vi.fn().mockResolvedValue({
-    companyId: "company-1",
+    companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     policies: [],
     activeIncidents: [],
     pausedAgentCount: 0,
@@ -179,33 +180,33 @@ beforeEach(() => {
     explanation: "Allowed by test mock.",
   });
   mockCompanyService.update.mockResolvedValue({
-    id: "company-1",
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     name: "Paperclip",
     budgetMonthlyCents: 100,
     spentMonthlyCents: 0,
   });
   mockAgentService.getById.mockResolvedValue({
     id: "agent-1",
-    companyId: "company-1",
+    companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     name: "Budget Agent",
     budgetMonthlyCents: 100,
     spentMonthlyCents: 0,
   });
   mockAgentService.update.mockResolvedValue({
     id: "agent-1",
-    companyId: "company-1",
+    companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     name: "Budget Agent",
     budgetMonthlyCents: 100,
     spentMonthlyCents: 0,
   });
   mockIssueService.getById.mockResolvedValue({
     id: "issue-1",
-    companyId: "company-1",
+    companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     identifier: "PC1A2-1",
   });
   mockIssueService.getByIdentifier.mockResolvedValue({
     id: "issue-1",
-    companyId: "company-1",
+    companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     identifier: "PC1A2-1",
   });
   mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
@@ -236,7 +237,7 @@ describe("cost routes", () => {
   it("returns finance summary rows for valid requests", async () => {
     const app = await createApp();
     const res = await request(app)
-      .get("/api/companies/company-1/costs/finance-summary")
+      .get("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/costs/finance-summary")
       .query({ from: "2026-02-01T00:00:00.000Z", to: "2026-02-28T23:59:59.999Z" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
@@ -254,7 +255,7 @@ describe("cost routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockIssueService.getByIdentifier).toHaveBeenCalledWith("PC1A2-1");
-    expect(mockCostService.issueTreeSummary).toHaveBeenCalledWith("company-1", "issue-1", {
+    expect(mockCostService.issueTreeSummary).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "issue-1", {
       excludeRoot: false,
     });
     expect(res.body).toEqual({
@@ -286,11 +287,11 @@ describe("cost routes", () => {
       userId: "board-user",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-2"],
+      companyIds: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
     });
 
     const res = await request(app)
-      .patch("/api/companies/company-1/budgets")
+      .patch("/api/companies/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/budgets")
       .send({ budgetMonthlyCents: 2500 });
 
     expect(res.status).toBe(403);
@@ -303,7 +304,7 @@ describe("cost routes", () => {
       userId: "board-user",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-2"],
+      companyIds: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
     });
 
     const res = await request(app)
@@ -318,7 +319,7 @@ describe("cost routes", () => {
     const app = await createAppWithActor({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       runId: "run-1",
     });
 
@@ -337,7 +338,7 @@ describe("cost routes", () => {
     const app = await createAppWithActor({
       type: "agent",
       agentId: "agent-2",
-      companyId: "company-1",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       runId: "run-2",
     });
 
@@ -355,7 +356,7 @@ describe("cost routes", () => {
   it("allows authorized board users to update an agent budget and budget policy", async () => {
     mockAgentService.update.mockResolvedValueOnce({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       name: "Budget Agent",
       budgetMonthlyCents: 2500,
       spentMonthlyCents: 0,
@@ -365,8 +366,8 @@ describe("cost routes", () => {
       userId: "board-user",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-1"],
-      memberships: [{ companyId: "company-1", status: "active", membershipRole: "admin" }],
+      companyIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      memberships: [{ companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status: "active", membershipRole: "admin" }],
     });
 
     const res = await request(app)
@@ -376,7 +377,7 @@ describe("cost routes", () => {
     expect(res.status).toBe(200);
     expect(mockAgentService.update).toHaveBeenCalledWith("agent-1", { budgetMonthlyCents: 2500 });
     expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
-      "company-1",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       {
         scopeType: "agent",
         scopeId: "agent-1",
@@ -388,7 +389,7 @@ describe("cost routes", () => {
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        companyId: "company-1",
+        companyId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         actorType: "user",
         actorId: "board-user",
         agentId: null,
@@ -853,5 +854,78 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(summary.estimatedDebitCents).toBe(2_000_000_000);
     expect(byKindRow?.debitCents).toBe(4_000_000_000);
     expect(byKindRow?.netCents).toBe(4_000_000_000);
+  });
+
+  describe("runTokenAnomalyThreshold (DUR-215)", () => {
+    async function seedAgentRuns(totalTokensPerRun: number[]) {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Cost Agent",
+        role: "engineer",
+        status: "active",
+        adapterType: "claude_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      let occurredAt = new Date("2026-04-01T00:00:00.000Z").getTime();
+      for (const totalTokens of totalTokensPerRun) {
+        const heartbeatRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: heartbeatRunId,
+          companyId,
+          agentId,
+          status: "succeeded",
+        });
+        await db.insert(costEvents).values({
+          companyId,
+          agentId,
+          heartbeatRunId,
+          provider: "anthropic",
+          biller: "anthropic",
+          billingType: "subscription_included",
+          model: "claude-sonnet-5",
+          inputTokens: totalTokens,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          costCents: 1,
+          occurredAt: new Date(occurredAt),
+        });
+        occurredAt += 60_000;
+      }
+
+      return agentId;
+    }
+
+    it("flags a threshold at median + 3 stddev above an agent's own run history", async () => {
+      const agentId = await seedAgentRuns([10, 10, 10, 10, 90]);
+
+      const result = await costs.runTokenAnomalyThreshold(agentId);
+
+      expect(result).toEqual({ median: 10, stddev: 32, threshold: 106, sampleSize: 5 });
+    });
+
+    it("returns null when the agent has fewer than the minimum sample size", async () => {
+      const agentId = await seedAgentRuns([10, 10, 10, 90]);
+
+      expect(await costs.runTokenAnomalyThreshold(agentId)).toBeNull();
+    });
+
+    it("returns null when the agent's run history has no spread to define an anomaly against", async () => {
+      const agentId = await seedAgentRuns([50, 50, 50, 50, 50]);
+
+      expect(await costs.runTokenAnomalyThreshold(agentId)).toBeNull();
+    });
   });
 });

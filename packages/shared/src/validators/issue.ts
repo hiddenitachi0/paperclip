@@ -405,6 +405,13 @@ const createIssueBaseSchema = z.object({
   assigneeUserId: z.string().optional().nullable(),
   requestDepth: issueRequestDepthInputSchema.optional().default(0),
   billingCode: z.string().optional().nullable(),
+  changeLogVisible: z.boolean().optional(),
+  changeLogSummary: multilineTextSchema.pipe(z.string().trim().min(1).max(500)).optional().nullable(),
+  // DUR-313: marks an issue as a user-facing feature launch (DUR-299 point 2) --
+  // once true, evaluateFeatureLaunchDoneGate requires an approved feature_launch
+  // approval before this issue can move to done. See assertFeatureLaunchFieldAllowed
+  // in server/src/routes/issues.ts for who may flip it back to false.
+  featureLaunch: z.boolean().optional(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
   executionPolicy: issueExecutionPolicySchema.optional().nullable(),
   executionWorkspaceId: z.string().uuid().optional().nullable(),
@@ -774,6 +781,11 @@ export const requestConfirmationPayloadSchema = z.object({
   detailsMarkdown: z.string().max(20000).nullable().optional(),
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
+  // DUR-320/DUR-323: explicit discriminator for the BEKREFT/fact-check card, set
+  // deliberately by the requesting agent. Do NOT infer this from prompt/detailsMarkdown
+  // shape or wording on the render side -- that was the spoof (present-participle
+  // rewording of decision verbs defeated a keyword-based heuristic twice in review).
+  factCheck: z.boolean().optional().default(false),
 }).superRefine((value, ctx) => {
   // DUR-162: see askUserQuestionsQuestionSchema's superRefine for rationale.
   if (isPlaceholderPromptText(value.prompt)) {

@@ -1037,6 +1037,76 @@
       "when": 1787160020000,
       "tag": "0147_lane_a_primitive",
       "breakpoints": true
+    },
+    {
+      "idx": 148,
+      "version": "7",
+      "when": 1787160040000,
+      "tag": "0148_heartbeat_runs_company_created_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1787160030000,
+      "tag": "0149_rls_company_isolation",
+      "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1787160050000,
+      "tag": "0150_rls_indirect_tenancy_gap",
+      "breakpoints": true
+    },
+    {
+      "idx": 151,
+      "version": "7",
+      "when": 1787160060000,
+      "tag": "0151_guarded_bypass_role_grant",
+      "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1787160070000,
+      "tag": "0152_heartbeat_runs_retention_fks",
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1787160080000,
+      "tag": "0153_heartbeat_runs_created_at_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1787160090000,
+      "tag": "0154_persona_generation_counters",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1787160100000,
+      "tag": "0155_secret_scan_finding_dedup_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1787160200000,
+      "tag": "0156_issue_change_log_visibility",
+      "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1787160210000,
+      "tag": "0157_issue_feature_launch",
+      "breakpoints": true
     }
   ]
 }

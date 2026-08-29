@@ -1,6 +1,9 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const COMPANY_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 const mockProjectService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -82,7 +85,7 @@ async function createApp(routeType: "project" | "goal") {
     (req as any).actor = {
       type: "board",
       userId: "board-user",
-      companyIds: ["company-1"],
+      companyIds: ["company-1", COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -97,7 +100,7 @@ async function createApp(routeType: "project" | "goal") {
     const { goalRoutes } = await vi.importActual<typeof import("../routes/goals.js")>(
       "../routes/goals.js",
     );
-    app.use("/api", goalRoutes({} as any));
+    app.use("/api", goalRoutes(withFakeCompanyScopeReserve({}) as any));
   }
   app.use(errorHandler);
   return app;
@@ -134,7 +137,7 @@ describe("project and goal telemetry routes", () => {
     });
     mockGoalService.create.mockResolvedValue({
       id: "goal-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       title: "Telemetry goal",
       description: null,
       level: "team",
@@ -156,7 +159,7 @@ describe("project and goal telemetry routes", () => {
   it("emits telemetry when a goal is created", async () => {
     const app = await createApp("goal");
     const res = await request(app)
-      .post("/api/companies/company-1/goals")
+      .post(`/api/companies/${COMPANY_ID}/goals`)
       .send({ title: "Telemetry goal", level: "team" });
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);

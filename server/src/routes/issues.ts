@@ -83,6 +83,7 @@ import {
   executionWorkspaceService,
   goalService,
   heartbeatService,
+  isHeartbeatRunLiveInThisProcess,
   issueApprovalService,
   issueRecoveryActionService,
   issueThreadInteractionService,
@@ -153,6 +154,7 @@ import { assertEnvironmentSelectionForCompany } from "./environment-selection.js
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
+import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -1255,7 +1257,11 @@ export function issueRoutes(
   } = {},
 ) {
   const router = Router();
-  const svc = issueService(db);
+  // DUR-240: same in-process liveness guard as heartbeat.ts's own issuesSvc --
+  // this route is the direct HTTP checkout path agents/harnesses call, so it
+  // needs the same protection against silently reclaiming a still-live run's
+  // lock when heartbeatRuns.status looks terminal but isn't.
+  const svc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
   const escalationGrantsSvc = escalationGrantService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
@@ -2812,6 +2818,111 @@ export function issueRoutes(
     if (req.actor.type === "board") return true;
     res.status(403).json({
       error: "Only board users may set structured comment presentation or metadata",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-312: changeLogVisible/changeLogSummary feed the operator's no-decision-needed
+  // daily digest -- the whole point is that a line on it needs no further scrutiny.
+  // Without a narrower gate, any agent that is merely the current assignee could
+  // self-publish an unreviewed (and potentially false) one-liner. Board users are
+  // trusted outright; an agent may only set these fields in the same request that
+  // actually transitions the issue into "done", so the claim rides on the
+  // self-review/goal-condition/deploy-completion gates that already vet that
+  // transition -- it can't be bolted on before, after, or without one.
+  function assertChangeLogFieldsAllowed(
+    req: Request,
+    res: Response,
+    updateFields: { status?: unknown; changeLogVisible?: unknown; changeLogSummary?: unknown },
+    existing: { status: string },
+  ) {
+    const hasChangeLogFields =
+      updateFields.changeLogVisible !== undefined || updateFields.changeLogSummary !== undefined;
+    if (!hasChangeLogFields) return true;
+    if (req.actor.type === "board") return true;
+    const transitioningToDone = updateFields.status === "done" && existing.status !== "done";
+    if (transitioningToDone) return true;
+    res.status(403).json({
+      error:
+        "changeLogVisible/changeLogSummary may only be set by a board user, or in the same request that transitions the issue to done",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-313: featureLaunch is what evaluateFeatureLaunchDoneGate keys off of --
+  // an agent may freely mark an issue AS a feature launch (that only ever adds
+  // friction, requiring an approval it might not otherwise need), but only a
+  // board user may un-mark one that's already true. Without this, an agent
+  // could mark an issue as a launch, then quietly flip it back to false in the
+  // same request that transitions it to done, dodging the gate it just set.
+  function assertFeatureLaunchFieldAllowed(
+    req: Request,
+    res: Response,
+    updateFields: { featureLaunch?: unknown },
+    existing: { featureLaunch: boolean },
+  ) {
+    if (updateFields.featureLaunch === undefined) return true;
+    if (req.actor.type === "board") return true;
+    if (updateFields.featureLaunch === true) return true;
+    if (existing.featureLaunch === false) return true;
+    res.status(403).json({
+      error: "Only a board user may un-mark an issue as a feature launch once it has been marked one",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-312 follow-up: issue creation (POST /companies/:companyId/issues and
+  // POST /issues/:id/children) never runs a new issue through the
+  // self-review/goal-condition/deploy-completion done-gates -- those only fire on a
+  // PATCH transition of an *existing* issue into "done". A create call that sets
+  // status: "done" directly would otherwise let an agent mint a pre-"done" issue and
+  // attach an unreviewed changeLogVisible/changeLogSummary to it, bypassing
+  // assertChangeLogFieldsAllowed entirely. So at creation these fields are
+  // board-only, full stop -- an agent must always go through the gated PATCH path.
+  function assertChangeLogFieldsAllowedOnCreate(
+    req: Request,
+    res: Response,
+    createBody: { changeLogVisible?: unknown; changeLogSummary?: unknown },
+  ) {
+    const hasChangeLogFields =
+      createBody.changeLogVisible !== undefined || createBody.changeLogSummary !== undefined;
+    if (!hasChangeLogFields) return true;
+    if (req.actor.type === "board") return true;
+    res.status(403).json({
+      error: "changeLogVisible/changeLogSummary may only be set by a board user at issue creation",
+      details: {
+        securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
+      },
+    });
+    return false;
+  }
+
+  // DUR-313 follow-up: same exploit class as assertChangeLogFieldsAllowedOnCreate above.
+  // evaluateFeatureLaunchDoneGate only fires on a PATCH transition of an *existing* issue
+  // into "done" -- it never runs on create. Without this guard an agent could call
+  // POST /companies/:companyId/issues (or the child-issue equivalents) with
+  // { status: "done", featureLaunch: true } in one shot and land directly in done, marked
+  // as a launch, with no feature_launch approval ever required. So at creation this field
+  // is board-only, full stop -- an agent must always go through the gated PATCH path
+  // (assertFeatureLaunchFieldAllowed already lets an agent mark featureLaunch: true there).
+  function assertFeatureLaunchFieldAllowedOnCreate(
+    req: Request,
+    res: Response,
+    createBody: { featureLaunch?: unknown },
+  ) {
+    if (createBody.featureLaunch === undefined) return true;
+    if (req.actor.type === "board") return true;
+    res.status(403).json({
+      error: "featureLaunch may only be set by a board user at issue creation",
       details: {
         securityPrinciples: ["Least Privilege", "Secure Defaults", "Complete Mediation"],
       },
@@ -5286,6 +5397,8 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (await assertLowTrustControlPlaneDenied(req, res, companyId, null)) return;
+    if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
+    if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = req.body;
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
@@ -5606,6 +5719,8 @@ export function issueRoutes(
     if (!isTaskBridgeKeyActor(req) && !(await assertIssueReadAllowed(req, res, parent))) return;
     if (!(await assertTaskWatchdogCreateIssueAllowed(req, res, parent.companyId, parent))) return;
     if (await assertLowTrustControlPlaneDenied(req, res, parent.companyId, parent)) return;
+    if (!assertChangeLogFieldsAllowedOnCreate(req, res, req.body)) return;
+    if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, req.body)) return;
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
       parent.companyId,
@@ -5789,6 +5904,8 @@ export function issueRoutes(
         ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
       };
       requestedChildren.push(childBody);
+      if (!assertChangeLogFieldsAllowedOnCreate(req, res, childBody)) return;
+      if (!assertFeatureLaunchFieldAllowedOnCreate(req, res, childBody)) return;
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
       if (childBody.assigneeAgentId || childBody.assigneeUserId) {
@@ -6068,6 +6185,8 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
+    if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
+    if (!assertFeatureLaunchFieldAllowed(req, res, updateFields, existing)) return;
     const selfReviewGateResult = await evaluateSelfReviewDoneGate({
       db,
       wakeup: heartbeat.wakeup,
@@ -6120,6 +6239,25 @@ export function issueRoutes(
     });
     if (deployCompletionGateResult) {
       res.status(409).json({ error: deployCompletionGateResult.message });
+      return;
+    }
+    // DUR-313: composes with the gates above -- this asks a narrower question again,
+    // "did the operator explicitly sign off on THIS being a finished, user-facing
+    // launch", independent of whether the work itself is done or already deployed.
+    const featureLaunchGateResult = await evaluateFeatureLaunchDoneGate({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        featureLaunch: existing.featureLaunch,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      requestedFeatureLaunch: typeof updateFields.featureLaunch === "boolean" ? updateFields.featureLaunch : undefined,
+    });
+    if (featureLaunchGateResult) {
+      res.status(409).json({ error: featureLaunchGateResult.message });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =

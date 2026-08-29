@@ -43,6 +43,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   mergeDeployVisibilityService,
+  mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   instanceSettingsService,
@@ -52,6 +53,7 @@ import {
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
   logScheduleChainBootstrapVerification,
+  startSecretSurfaceScanner,
 } from "./services/index.js";
 import {
   parseAdapterRegistryEnv,
@@ -65,6 +67,8 @@ import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
+import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
+import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -636,6 +640,16 @@ export async function startServer(): Promise<StartedServer> {
         finishedAt: finishedAt.toISOString(),
         durationMs: Date.now() - startedAtMs,
       };
+      if (result.engine === "javascript") {
+        // DUR-271: this fallback silently degrades every backup to a much
+        // slower, more DB-load-intensive path (row-streaming through Node
+        // instead of native pg_dump) -- surfaced loudly here so a future
+        // pg_dump regression doesn't take hours to notice again.
+        logger.warn(
+          { pgDumpFailureReason: result.pgDumpFailureReason, trigger },
+          `${label} database backup fell back to the slow JS engine -- pg_dump was unavailable or failed`,
+        );
+      }
       logger.info(
         {
           backupFile: result.backupFile,
@@ -805,11 +819,24 @@ export async function startServer(): Promise<StartedServer> {
     throw err;
   }
 
+  // DUR-257: shared between the heartbeat scheduler tick and the shutdown handler
+  // below (which is defined much later in this function, outside the
+  // heartbeatSchedulerEnabled block) so a SIGTERM/SIGINT can (a) stop the periodic
+  // tick from dispatching any more work and (b) wait for whatever's already running
+  // to actually finish before the process exits, instead of the deploy runner's
+  // container recreate yanking it out from under an in-flight run.
+  let heartbeatDrainState: { isDraining: boolean; getInFlightRunCount: () => number } | null = null;
+
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
+    heartbeatDrainState = {
+      isDraining: false,
+      getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
+    };
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(db as any);
+    const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(db as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(db as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(db as any);
     const issueThreadInteractions = issueThreadInteractionService(db as any);
@@ -900,7 +927,20 @@ export async function startServer(): Promise<StartedServer> {
       logger.error({ err }, "startup heartbeat recovery failed");
     });
 
+    // DUR-316: periodic scan for known secret patterns leaking into places
+    // the Secrets store does not cover (git configs, .env/docker-compose
+    // files, heartbeat_runs free-text columns) -- runs once immediately,
+    // then every 30 minutes. Self-contained (owns its own interval/cursor),
+    // so it does not need to sit inside the reconciliation IIFE above.
+    startSecretSurfaceScanner(db as any);
+
     setInterval(() => {
+      // DUR-257: once shutdown() has started draining, stop dispatching new work --
+      // anything the tick starts now would just get orphaned by the imminent
+      // container kill. Runs already in flight are left alone; shutdown() waits for
+      // those separately.
+      if (heartbeatDrainState?.isDraining) return;
+
       const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
       if (sweptRuntimeStatuses > 0) {
         logger.info(
@@ -943,6 +983,25 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
         });
+
+      // DUR-299 point 6 / DUR-314: delegate the "61 percent" of merge_pr
+      // approvals (CI green + no fundamental-surface path touched +
+      // independent agent review) so they never reach the operator. Gated by
+      // its own live kill switch (general.mergePrAutomationEnabled, checked
+      // inside tick()) in addition to the startup flag above -- see
+      // merge-pr-automation.ts for the full set of hard rules.
+      if (mergePrAutomation) {
+        void mergePrAutomation
+          .tick(new Date())
+          .then((result) => {
+            if (result.approved > 0) {
+              logger.info({ ...result }, "merge-pr automation tick approved delegated merge_pr approvals");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "merge-pr automation tick failed");
+          });
+      }
 
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold
@@ -1076,7 +1135,22 @@ export async function startServer(): Promise<StartedServer> {
       });
     }, backupIntervalMs);
   }
-  
+
+  if (config.heartbeatRunRetentionEnabled) {
+    logger.info(
+      {
+        retentionDays: config.heartbeatRunRetentionDays,
+        intervalMinutes: config.heartbeatRunRetentionIntervalMinutes,
+      },
+      "Heartbeat run retention sweep enabled",
+    );
+    startHeartbeatRunRetention(
+      db,
+      config.heartbeatRunRetentionIntervalMinutes * 60 * 1000,
+      config.heartbeatRunRetentionDays,
+    );
+  }
+
   // Wait for external adapters to finish loading before accepting requests.
   // Without this, adapter type validation (assertKnownAdapterType) would
   // reject valid external adapter types during the startup loading window.
@@ -1158,6 +1232,14 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      if (heartbeatDrainState) {
+        heartbeatDrainState.isDraining = true;
+        await waitForInFlightRunsToDrain(signal, config.shutdownDrainTimeoutMs, {
+          getInFlightRunCount: heartbeatDrainState.getInFlightRunCount,
+          logger,
+        });
+      }
+
       const telemetryClient = getTelemetryClient();
       if (telemetryClient) {
         telemetryClient.stop();

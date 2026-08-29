@@ -63,7 +63,7 @@ describe("parseGrokJsonl", () => {
 
 describe("isGrokUnknownSessionError", () => {
   it("detects stale resume failures", () => {
-    expect(isGrokUnknownSessionError("", "session not found")).toBe(true);
-    expect(isGrokUnknownSessionError("", "everything fine")).toBe(false);
+    expect(isGrokUnknownSessionError("session not found")).toBe(true);
+    expect(isGrokUnknownSessionError("everything fine")).toBe(false);
   });
 });

@@ -66,6 +66,14 @@ export const deployRequestPayloadSchema = z
     commit: z.string().optional(),
     title: z.string().min(1),
     note: multilineTextSchema,
+    // DUR-284: the branch the pinned commit actually lives on, and the
+    // project's configured deploy branch -- stamped server-side at filing
+    // time (server/src/routes/approvals.ts) so the UI's "Deploys from
+    // <branch>" badge and mismatch warning have real data. Never trust a
+    // caller-supplied value for either: the whole point is that a filer
+    // can't assert its own "everything matches".
+    sourceBranch: z.string().trim().min(1).optional(),
+    deployBranch: z.string().trim().min(1).optional(),
     // DUR-138: lets a caller explicitly acknowledge an already-open duplicate
     // (see findDuplicateOpenApproval / the acknowledgedDuplicateOfApprovalId
     // check in server/src/routes/approvals.ts) and file a genuine second
@@ -172,3 +180,27 @@ export const instructionsChangeRequestPayloadSchema = z
   });
 
 export type InstructionsChangeRequestPayload = z.infer<typeof instructionsChangeRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for DUR-299 point 2's launch gate: the
+ * ONE plain-language card the operator approves for a finished, user-facing feature,
+ * instead of the merges that preceded it. Every field is the operator's own required
+ * shape (what's new, where to find it, what to test, what happens if it fails) --
+ * see `evaluateFeatureLaunchDoneGate` in server/src/services/feature-launch-gate.ts,
+ * the only place approving one of these actually clears an issue's launch gate.
+ */
+export const featureLaunchRequestPayloadSchema = z
+  .object({
+    kind: z.literal("feature_launch"),
+    issueId: z.string().uuid(),
+    whatIsNew: multilineTextSchema.pipe(z.string().trim().min(1)),
+    whereToFindIt: multilineTextSchema.pipe(z.string().trim().min(1)),
+    whatToTest: multilineTextSchema.pipe(z.string().trim().min(1)),
+    whatIfItFails: multilineTextSchema.pipe(z.string().trim().min(1)),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
+  })
+  .strict();
+
+export type FeatureLaunchRequestPayload = z.infer<typeof featureLaunchRequestPayloadSchema>;

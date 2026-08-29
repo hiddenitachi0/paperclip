@@ -1,11 +1,14 @@
+import { useState } from "react";
 import { CheckCircle2, XCircle, Clock, AlertTriangle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Identity } from "./Identity";
+import { DecisionReasonDialog } from "./DecisionReasonDialog";
 import {
   approvalSubject,
   approvalTechnicalReference,
+  approvalDeployBranchInfo,
   typeIcon,
   defaultTypeIcon,
   ApprovalPayloadRenderer,
@@ -38,7 +41,7 @@ export function ApprovalCard({
   approval: Approval;
   requesterAgent: Agent | null;
   onApprove?: () => void;
-  onReject?: () => void;
+  onReject?: (note: string) => void;
   onOpen?: () => void;
   detailLink?: string;
   isPending?: boolean;
@@ -50,11 +53,13 @@ export function ApprovalCard({
   linkedIssues?: Issue[];
   companyName?: string | null;
 }) {
+  const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const payload = approval.payload as Record<string, unknown> | null;
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
   const kindLabel = typeLabel[approval.type] ?? approval.type;
   const subject = approvalSubject(payload);
   const technicalReference = approvalTechnicalReference(payload);
+  const branchInfo = approvalDeployBranchInfo(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -89,6 +94,14 @@ export function ApprovalCard({
                     {companyName}
                   </Badge>
                 )}
+                {branchInfo && !branchInfo.mismatch && (
+                  <Badge
+                    variant="outline"
+                    className="border-border/70 bg-background/70 px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
+                  >
+                    Deploys from {branchInfo.sourceBranch}
+                  </Badge>
+                )}
                 {requesterAgent && (
                   <div className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     <span>Requested by</span>
@@ -111,6 +124,12 @@ export function ApprovalCard({
                     <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
                       <AlertTriangle className="h-3 w-3" />
                       No linked ticket
+                    </span>
+                  )}
+                  {branchInfo?.mismatch && (
+                    <span className="inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
+                      <AlertTriangle className="h-3 w-3" />
+                      Not on {branchInfo.deployBranch} — this commit is on {branchInfo.sourceBranch}
                     </span>
                   )}
                   <span>{subject ?? kindLabel}</span>
@@ -166,7 +185,7 @@ export function ApprovalCard({
                 <Button
                   variant="destructive"
                   size="sm"
-                  onClick={onReject}
+                  onClick={() => setRejectDialogOpen(true)}
                   disabled={isPending}
                 >
                   {pendingAction === "reject" ? "Rejecting..." : "Reject"}
@@ -190,6 +209,18 @@ export function ApprovalCard({
           ) : null}
         </div>
       ) : null}
+      {showResolutionButtons && (
+        <DecisionReasonDialog
+          open={rejectDialogOpen}
+          onOpenChange={setRejectDialogOpen}
+          action="reject"
+          isPending={isPending}
+          onSubmit={(note) => {
+            setRejectDialogOpen(false);
+            onReject?.(note);
+          }}
+        />
+      )}
     </div>
   );
 }

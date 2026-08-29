@@ -53,7 +53,7 @@ describe("opencode_local stale session detection", () => {
     const stderr =
       "NotFoundError: Resource not found: /Users/test/.local/share/opencode/storage/session/project/ses_missing.json";
 
-    expect(isOpenCodeUnknownSessionError("", stderr)).toBe(true);
+    expect(isOpenCodeUnknownSessionError(stderr)).toBe(true);
   });
 });
 

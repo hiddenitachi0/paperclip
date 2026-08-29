@@ -208,6 +208,37 @@ export function instanceSettingsRoutes(db: Db) {
     res.json(result);
   });
 
+  // DUR-296: called by deploy-runner.sh right after its proactive drain
+  // wait (maybe_begin_quiet_mode_drain, DUR-259) times out with heartbeat
+  // runs still in flight -- transactionally marks all of them
+  // paused_for_restart, instance-wide, in one atomic update, instead of
+  // letting them fall through to being reaped as "failed"/process_lost on
+  // next boot. Admin-gated like the quiet-mode endpoints above, since it's
+  // an instance-wide maintenance action.
+  router.post("/instance/heartbeat-runs/pause-for-restart", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+    const result = await heartbeat.markInFlightRunsPausedForRestart({ reason });
+    const actor = getActorInfo(req);
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.heartbeat_runs.paused_for_restart",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: { pausedCount: result.paused },
+        }),
+      ),
+    );
+    res.json(result);
+  });
+
   router.post(
     "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",
     validate(issueGraphLivenessAutoRecoveryRequestSchema),
