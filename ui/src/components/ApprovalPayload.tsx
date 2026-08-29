@@ -251,8 +251,64 @@ export function BoardApprovalPayload({
   hideTitle?: boolean;
 }) {
   const nextPayload = hideTitle ? { ...payload, title: undefined } : payload;
+  if (firstNonEmptyString(payload.kind) === "feature_launch") {
+    return <FeatureLaunchPayloadContent payload={nextPayload} />;
+  }
   return (
     <BoardApprovalPayloadContent payload={nextPayload} />
+  );
+}
+
+/**
+ * DUR-299 point 2's launch gate card: what's new, where to find it, what to
+ * test, what happens if it fails. These four fields are required by
+ * featureLaunchRequestPayloadSchema (packages/shared/src/validators/approval.ts)
+ * -- render them as labeled plain text instead of falling through to the
+ * generic board-approval fields (title/summary/risks/...), which don't exist
+ * on this payload shape.
+ */
+function FeatureLaunchPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const whatIsNew = firstNonEmptyString(payload.whatIsNew);
+  const whereToFindIt = firstNonEmptyString(payload.whereToFindIt);
+  const whatToTest = firstNonEmptyString(payload.whatToTest);
+  const whatIfItFails = firstNonEmptyString(payload.whatIfItFails);
+
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Title</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {whatIsNew && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">What's new</p>
+          <p className="leading-6 text-foreground/90">{whatIsNew}</p>
+        </div>
+      )}
+      {whereToFindIt && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Where to find it</p>
+          <p className="leading-6 text-foreground/90">{whereToFindIt}</p>
+        </div>
+      )}
+      {whatToTest && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">What to test</p>
+          <p className="leading-6 text-foreground/90">{whatToTest}</p>
+        </div>
+      )}
+      {whatIfItFails && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">
+            If it fails
+          </p>
+          <p className="mt-1 leading-6 text-foreground">{whatIfItFails}</p>
+        </div>
+      )}
+    </div>
   );
 }
 
