@@ -91,6 +91,7 @@ export interface Config {
   heartbeatRunRetentionIntervalMinutes: number;
   shutdownDrainTimeoutMs: number;
   companyDeletionEnabled: boolean;
+  mergePrAutomationEnabled: boolean;
   telemetryEnabled: boolean;
 }
 
@@ -360,6 +361,12 @@ export function loadConfig(): Config {
     feedbackExportBackendUrl,
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
+    // DUR-299/DUR-314: startup-level circuit breaker for the merge_pr
+    // automation, defense-in-depth alongside the live, DB-backed
+    // general.mergePrAutomationEnabled kill switch (which defaults to false
+    // -- this env flag only controls whether the capability is wired up at
+    // all, following the same convention as heartbeatSchedulerEnabled).
+    mergePrAutomationEnabled: process.env.PAPERCLIP_MERGE_PR_AUTOMATION_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     // DUR-319 (DUR-292 item 4): heartbeat_runs carries per-run stdout/stderr
     // excerpts and context snapshots -- the same class of content that leaked
