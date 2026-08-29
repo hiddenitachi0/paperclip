@@ -388,7 +388,10 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
           approvalId: "some-other-issues-deploy-approval",
           companyId: "company-1",
           commentDelivered: true,
-          body: "Deployed to /root/paperclip -- commit 9a3a7e7 is live and healthy (health check: http://x).",
+          // DUR-420: commitsMatch() now requires a 12-char minimum overlap (deploy-runner.sh
+          // logs --short=12 going forward) -- this fixture must be >=12 chars to exercise the
+          // legitimate-match path this test claims to.
+          body: "Deployed to /root/paperclip -- commit 9a3a7e7abcde is live and healthy (health check: http://x).",
         },
       ]);
 
@@ -402,6 +405,45 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
       });
 
       expect(result).toBeNull();
+    });
+
+    // DUR-420 security review finding #1: a 10-char prefix collision (below the 12-char
+    // minimum) must NOT be treated as a match -- see the matching regression test/comment in
+    // deploy-carried-issues.test.ts for the full grinding-attack threat model.
+    it("still blocks done when the shipped commit only shares a 10-char prefix with this issue's merge commit (below the anti-collision minimum)", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({
+          payload: {
+            kind: "merge_pr",
+            base: "custom",
+            mergeCommitSha: "9a3a7e7abcffffffffffffffffffffffffffff",
+            originalIssueIds: [ISSUE.id],
+          },
+        }),
+      ]);
+      const readStatusLog = vi.fn().mockReturnValue([
+        {
+          ts: "t",
+          approvalId: "some-other-issues-deploy-approval",
+          companyId: "company-1",
+          commentDelivered: true,
+          body: "Deployed to /root/paperclip -- commit 9a3a7e7abcde is live and healthy (health check: http://x).",
+        },
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: fakeDbWithProjectDeployApprovalIds(["some-other-issues-deploy-approval"]),
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+        readStatusLog,
+      });
+
+      expect(result).not.toBeNull();
+      expect(result?.message).toContain("no deploy approval has been filed");
     });
 
     it("still blocks done when no project deploy approval's shipped commit matches this issue's merge commit", async () => {

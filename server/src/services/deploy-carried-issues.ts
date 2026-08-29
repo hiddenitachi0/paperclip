@@ -172,12 +172,17 @@ async function listCarriedCandidateIssues(
  * github.com repo -- the ancestry check below then only ever has the exact-commit fast path
  * available, per this file's fail-closed rule.
  *
- * Both lookups are scoped to `companyId` (DUR-252 security review finding #2): `workspaceId`
- * and `projectId` are caller-supplied fields on the approval's own payload, and without this
- * filter a cross-tenant id would resolve another company's `repoUrl` -- low practical impact
- * since a mismatched repo only ever feeds the fail-closed ancestry check below, but a
- * gratuitous cross-tenant read all the same, and every other query in this file scopes by
- * companyId.
+ * Both lookups are scoped to `companyId` AND `projectId` (DUR-252/DUR-420 security review
+ * finding #2): `workspaceId` and `projectId` are both caller-supplied fields on the approval's
+ * own payload, filed by whichever agent requested the deploy. Scoping the `workspaceId` lookup
+ * by `companyId` alone (the original fix) only closes the cross-tenant version of this --
+ * within one company, an agent could still point `workspaceId` at a DIFFERENT project's
+ * workspace it also has visibility into (e.g. a fork/mirror repo it controls) while leaving
+ * `projectId` naming the project the candidate issue actually belongs to, making the ancestry
+ * check below run against the wrong repository entirely. `projectId` has no default here (the
+ * caller already couldn't resolve a project-scoped candidate pool without it, since
+ * `listCarriedCandidateIssues` is itself queried per-project) -- absent, this fails closed by
+ * skipping repo resolution altogether rather than trusting a companyId-only match.
  */
 async function resolveDeployApprovalRepo(
   db: Db,
@@ -186,18 +191,25 @@ async function resolveDeployApprovalRepo(
 ): Promise<{ owner: string; name: string } | null> {
   const workspaceId = typeof payload.workspaceId === "string" ? payload.workspaceId : null;
   const projectId = approvalPayloadProjectId(payload);
+  if (!projectId) return null;
 
   if (workspaceId) {
     const row = await db
       .select({ repoUrl: projectWorkspaces.repoUrl })
       .from(projectWorkspaces)
-      .where(and(eq(projectWorkspaces.id, workspaceId), eq(projectWorkspaces.companyId, companyId)))
+      .where(
+        and(
+          eq(projectWorkspaces.id, workspaceId),
+          eq(projectWorkspaces.companyId, companyId),
+          eq(projectWorkspaces.projectId, projectId),
+        ),
+      )
       .then((rows) => rows[0] ?? null);
     const repo = parseGitHubRepoFromUrl(row?.repoUrl);
     if (repo) return repo;
   }
 
-  if (projectId) {
+  {
     const row = await db
       .select({ repoUrl: projectWorkspaces.repoUrl })
       .from(projectWorkspaces)
@@ -211,8 +223,6 @@ async function resolveDeployApprovalRepo(
       .then((rows) => rows[0] ?? null);
     return parseGitHubRepoFromUrl(row?.repoUrl);
   }
-
-  return null;
 }
 
 /**

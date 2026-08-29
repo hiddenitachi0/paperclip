@@ -49,12 +49,15 @@ const DEPLOY_APPROVAL = {
   payload: { kind: "deploy", projectId: "project-1", workspaceId: "workspace-1" },
 };
 
+// DUR-420: deploy-runner.sh now logs a 12-char (not 7-char) short sha, and commitsMatch()
+// requires a 12-char minimum overlap -- this fixture's commit must be >=12 chars for the
+// exact/prefix-match tests below to exercise the fast path they claim to.
 const COMPLETED_ENTRY = {
   ts: "t",
   approvalId: "deploy-approval-1",
   companyId: "company-1",
   commentDelivered: true,
-  body: "Deployed to /root/paperclip -- commit 9a3a7e7abc is live and healthy (health check: http://x).",
+  body: "Deployed to /root/paperclip -- commit 9a3a7e7abcde is live and healthy (health check: http://x).",
 };
 
 function candidateRow(
@@ -204,7 +207,7 @@ describe("deployCarriedIssuesService.tick (DUR-238)", () => {
     expect(result).toEqual({ checked: 1, closed: 1 });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toContain("compare/1111111111111111111111111111111111111a...9a3a7e7abc");
+    expect(url).toContain("compare/1111111111111111111111111111111111111a...9a3a7e7abcde");
     expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer gh-token" });
     expect(mockIssueService.update).toHaveBeenCalledWith("issue-1", { status: "done" });
   });
@@ -390,6 +393,75 @@ describe("deployCarriedIssuesService.tick (DUR-238)", () => {
     const result = await svc.tick();
 
     expect(result).toEqual({ checked: 1, closed: 0 });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  // DUR-420 security review finding #1: commitsMatch()'s old 7-char minimum overlap is only
+  // ~2^28 possibilities -- a few CPU-seconds of local grinding is enough for an attacker to
+  // produce a real merge commit whose sha happens to share a short prefix with an unrelated
+  // commit that's about to deploy, closing their own issue as "carried" without their code
+  // ever shipping. This candidate's mergeCommitSha shares only the deployed commit's first 10
+  // chars (below the new 12-char minimum) -- must NOT close via the fast path, and with no
+  // GitHub repo resolvable to fall back on, must not close at all.
+  it("does NOT close via the fast path on a 10-char (below the 12-char minimum) prefix collision (DUR-420 short-sha grinding)", async () => {
+    const { deployCarriedIssuesService } = await import("../services/deploy-carried-issues.js");
+    const { db, updateCalls } = makeFakeDb({
+      dueApprovals: [DEPLOY_APPROVAL],
+      // Shares "9a3a7e7abc" (10 chars) with COMPLETED_ENTRY's deployed commit
+      // "9a3a7e7abcde", but diverges at the 11th char -- below the 12-char minimum, and not
+      // actually equal beyond that prefix, so this must never be treated as a match.
+      candidateRows: [candidateRow({ mergeCommitSha: "9a3a7e7abcffffffffffffffffffffffffffff" })],
+      // No workspaceRepoUrl/primaryWorkspaceRepoUrl configured -- repo never resolves, so the
+      // ancestry-check fallback is unavailable too (matches the fail-closed rule).
+    });
+    mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    const fetchImpl = vi.fn();
+
+    const svc = deployCarriedIssuesService(db as any, {
+      readStatusLog: () => [COMPLETED_ENTRY],
+      fetch: fetchImpl,
+    });
+    const result = await svc.tick();
+
+    expect(result).toEqual({ checked: 1, closed: 0 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].payload.carriedIssuesSwept).toBe(true);
+  });
+
+  // DUR-420 security review finding #2: `resolveDeployApprovalRepo` scoping `workspaceId`'s
+  // lookup by `companyId` alone (the original fix) still lets a deploy approval's `workspaceId`
+  // point at a DIFFERENT project's workspace within the same company -- the ancestry check
+  // would then run against the wrong repository. Scoping by `projectId` too means a
+  // `workspaceId` that doesn't actually belong to the approval's own `payload.projectId` must
+  // fail to resolve a repo at all (never silently fall through to some other repo).
+  it("does NOT resolve a repo (and so never attempts ancestry) when workspaceId belongs to a different project than the approval's payload.projectId", async () => {
+    const { deployCarriedIssuesService } = await import("../services/deploy-carried-issues.js");
+    const { db } = makeFakeDb({
+      dueApprovals: [DEPLOY_APPROVAL], // payload.projectId = "project-1", workspaceId = "workspace-1"
+      // Not an exact/prefix match -- forces the ancestry-check path, which needs a resolved repo.
+      candidateRows: [candidateRow({ mergeCommitSha: "1111111111111111111111111111111111111a" })],
+      // The fake db's projectWorkspaces where() doesn't itself check projectId (it's a plain
+      // mock), so this models the *production* query correctly rejecting the row: no matching
+      // workspaceRepoUrl is returned for a workspace-1/project-1 pair that doesn't really
+      // exist, and no primary-workspace fallback either (the point is that a project-scoped
+      // query returns nothing here, not that this fake enforces the SQL itself).
+      workspaceRepoUrl: undefined,
+      primaryWorkspaceRepoUrl: undefined,
+    });
+    mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    const fetchImpl = vi.fn();
+
+    const svc = deployCarriedIssuesService(db as any, {
+      readStatusLog: () => [COMPLETED_ENTRY],
+      fetch: fetchImpl,
+    });
+    const result = await svc.tick();
+
+    expect(result).toEqual({ checked: 1, closed: 0 });
+    // No repo resolved -> ancestry check never even attempted.
+    expect(fetchImpl).not.toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 });

@@ -97,12 +97,29 @@ export function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | 
   return match ? match[1] : null;
 }
 
-// Both sides may be a short or full sha (deploy-runner.sh logs `git rev-parse --short HEAD`;
+// Both sides may be a short or full sha (deploy-runner.sh logs `git rev-parse --short=12 HEAD`;
 // GitHub's API returns the full 40-char sha) -- treat them as the same commit when one is a
-// prefix of the other, requiring at least 7 hex chars so this can't degrade into a near-empty-
-// string match.
+// prefix of the other.
+//
+// DUR-420 security review finding: a 7-char minimum (the old threshold, matching git's
+// pre-DUR-420 default `--short` length) is only ~2^28 possible prefixes -- a few CPU-seconds
+// of local grinding (varying a commit's trailer/timestamp to change its hash) is enough for an
+// attacker to produce a commit whose full sha happens to share its first 7 hex chars with some
+// other, unrelated commit that is about to (or already did) deploy. Both call sites of this
+// function compare an attacker-influenceable full sha (a merge_pr approval's own
+// `mergeCommitSha`, backfilled from the attacker's real merged PR) against a deployed-commit
+// value read off deploy-runner's status log, so a collision here would let an issue whose code
+// never actually shipped get treated as "carried"/"already live" by coincidence alone. 12 hex
+// chars (~2^48 possibilities) raises grinding cost from feasible to effectively infeasible;
+// deploy-runner.sh was widened to log `--short=12` to match (see its `after_commit`/
+// `before_commit` comments) so this isn't reducible to "the short side is only ever 7 chars
+// long anyway". A status-log entry logged before that change (still short-7) now simply never
+// matches here -- fails closed, consistent with every other unproven check in this file, rather
+// than special-casing the legacy length back open.
+const MIN_COMMIT_MATCH_LENGTH = 12;
+
 export function commitsMatch(a: string | null, b: string | null): boolean {
-  if (!a || !b || a.length < 7 || b.length < 7) return false;
+  if (!a || !b || a.length < MIN_COMMIT_MATCH_LENGTH || b.length < MIN_COMMIT_MATCH_LENGTH) return false;
   const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
   return longer.toLowerCase().startsWith(shorter.toLowerCase());
 }
