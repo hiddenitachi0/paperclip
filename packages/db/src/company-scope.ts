@@ -133,6 +133,17 @@ function releaseTurn(stack: ReservedScopeStack, depth: number): void {
 // (agents.ts/documents.ts/document-annotations.ts/external-objects.ts/
 // feedback.ts/heartbeat.ts all pass a `tx` down into service functions this
 // way).
+//
+// DUR-926 review: the trap must check `liveness.released` the same way
+// withCompanyScope's own reuse branch does (see that check a few dozen lines
+// down). Without it, a `tx`/`scopedDb` reference captured by something that
+// outlives the owning runInCompanyScope() call (a fire-and-forget/`void`
+// continuation -- the exact DUR-417/DUR-920 pattern this file already
+// documents as real) could call `.transaction()` *after* the connection has
+// been reset and handed back to the pool for an unrelated request/company.
+// Unlike withCompanyScope, this trap only closes over `scopedDb`/`liveness`,
+// not the raw pooled `Db`, so it has no fresh-connection fallback to reuse --
+// it fails loudly instead, matching createRequestScopedDb's sibling trap.
 function withRollbackGuard(scopedDb: Db, liveness: ReservedScopeLiveness): ScopedDb {
   return new Proxy(scopedDb as object, {
     get(target, prop, receiver) {
@@ -148,7 +159,20 @@ function withRollbackGuard(scopedDb: Db, liveness: ReservedScopeLiveness): Scope
         };
       }
       if (prop === "transaction") {
-        return (fn: (tx: ScopedDb) => Promise<unknown>) => runOnReservedScope(scopedDb, liveness, fn);
+        return (fn: (tx: ScopedDb) => Promise<unknown>) => {
+          if (liveness.released) {
+            throw new Error(
+              "withCompanyScope: tx.transaction() was called after the runInCompanyScope() request scope " +
+                "that reserved this connection already released it (DUR-926) -- this tx/scopedDb reference " +
+                "was captured by something that outlived the owning request (e.g. a fire-and-forget " +
+                "continuation, the DUR-417/DUR-920 pattern). The physical connection behind it may already " +
+                "be back in the pool serving an unrelated request/company; reusing it here would silently " +
+                "interleave writes with that unrelated request instead of erroring. Do not capture a " +
+                "tx/scopedDb reference for use beyond the callback it was handed to.",
+            );
+          }
+          return runOnReservedScope(scopedDb, liveness, fn);
+        };
       }
       return Reflect.get(target, prop, receiver);
     },

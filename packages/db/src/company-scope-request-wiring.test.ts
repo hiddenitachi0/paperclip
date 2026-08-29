@@ -655,4 +655,41 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
     },
     5_000,
   );
+
+  it(
+    // DUR-926 review: the DUR-925 `.transaction()` trap must refuse to reuse
+    // a connection whose owning runInCompanyScope() call has already
+    // returned and released it -- the same liveness.released guard
+    // withCompanyScope's own reuse branch already has (see the "outlives
+    // release" test above for that sibling case). A `tx` captured by
+    // something that outlives the request (a fire-and-forget continuation,
+    // the DUR-417/DUR-920 pattern) and then used to call `.transaction()`
+    // must fail loudly instead of silently issuing BEGIN/SAVEPOINT on a
+    // connection the pool may already have handed to an unrelated
+    // request/company.
+    "tx.transaction() called after the owning runInCompanyScope call has released the connection throws instead of reusing it",
+    async () => {
+      const companyA = await seedCompany("transaction-after-release");
+      let capturedTx: Parameters<Parameters<typeof withCompanyScope>[2]>[0] | undefined;
+
+      await runInCompanyScope(db, companyA.id, async () => {
+        await withCompanyScope(db, companyA.id, async (tx) => {
+          capturedTx = tx;
+        });
+      });
+
+      // By now runInCompanyScope's finally has already reset+released the
+      // connection. Simulate the orphaned fire-and-forget continuation
+      // calling tx.transaction() on the captured reference. The guard throws
+      // synchronously (same as the companyId-mismatch check further down in
+      // withCompanyScope itself), not as a rejected promise, since the trap
+      // never reaches the `await` inside runOnReservedScope.
+      expect(() =>
+        capturedTx!.transaction(async () => {
+          throw new Error("should never run");
+        }),
+      ).toThrow(/tx\.transaction\(\) was called after .* already released it/);
+    },
+    10_000,
+  );
 });
