@@ -462,6 +462,92 @@ export const planApprovalAcceptedRequestConfirmationInteraction = createRequestC
   },
 });
 
+export const pendingFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-fact-check",
+  title: "Check these invoice totals",
+  summary:
+    "The agent pulled these numbers from Fiken and needs the operator to confirm they're right — not a decision, a fact only the operator can check.",
+  payload: {
+    version: 1,
+    prompt: "Do these numbers match what you see in Fiken?",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. Invoice #1042 to Nordlys AS: 18 400 kr, due 2026-05-15\n2. Invoice #1043 to Vestkyst Handel: 9 750 kr, due 2026-05-22\n3. Outstanding balance across both: 28 150 kr",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-320/DUR-339: a decision-ask dressed with 2+ numbered lines must NOT get
+// the reassuring "fact check" styling. This fixture omits `factCheck`
+// (defaults false), so it renders as a normal confirmation regardless of the
+// numbered-lines/prose shape that used to spoof the old regex heuristic.
+export const spoofedDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spoofed-decision-ask",
+  title: "Drop stale orders table?",
+  summary: "Should I proceed with dropping orders_2024 now?",
+  payload: {
+    version: 1,
+    prompt: "Should I proceed with dropping orders_2024 now?",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown:
+      "1. Table orders_2024 has 40,201 rows.\n2. Table orders_2024_backup has 40,201 rows.",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
+// DUR-323/DUR-339: the same spoof as above, but with the decision-ask moved
+// out of `prompt` and into `detailsMarkdown` instead. Also omits `factCheck`,
+// so it renders as a normal confirmation card.
+export const spoofedDecisionAskInDetailsRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spoofed-decision-ask-in-details",
+  title: "Drop stale orders table?",
+  summary: "Confirm these two facts.",
+  payload: {
+    version: 1,
+    prompt: "Confirm these two facts.",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown:
+      "1. Table orders_2024 has 40,201 rows.\n2. Should I proceed with dropping orders_2024 now?",
+    supersedeOnUserComment: true,
+    target: null,
+  },
+});
+
+// DUR-337: a real decision-ask that sets `factCheck: true` with no
+// fact-check-shaped detailsMarkdown must NOT get the reassuring "fact check"
+// styling — the flag alone is a self-declared boolean with no server-side
+// consumer (DUR-340), so trusting it unconditionally lets any agent launder
+// a destructive decision-ask into the low-stakes card with zero effort.
+export const selfDeclaredFactCheckDecisionAskRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-self-declared-fact-check-decision-ask",
+  title: "Drop stale orders table?",
+  summary: "Should I proceed with dropping orders_2024 now?",
+  payload: {
+    version: 1,
+    prompt: "Should I proceed with dropping orders_2024 now?",
+    acceptLabel: "Yes, proceed",
+    rejectLabel: "No, don't",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Why not?",
+    detailsMarkdown: "1. Table has 40k rows\n2. Backup taken today",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 export const rejectedRequestConfirmationInteraction = createRequestConfirmationInteraction({
   id: "interaction-confirmation-rejected",
   status: "rejected",

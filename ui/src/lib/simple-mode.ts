@@ -1,21 +1,11 @@
 import type { IssueComment } from "@paperclipai/shared";
 
 /**
- * Simple mode (DUR-212): a text box that turns into a normal Paperclip issue
- * behind the scenes. These helpers keep that translation — and the
- * reverse translation back into plain language for the reply — out of the
- * page component so they can be unit tested without rendering React.
+ * Simple mode (DUR-212): a text box that sends through the chat router
+ * (DUR-220/DUR-335) behind the scenes. These helpers keep the fallback
+ * assignee pick, settle/poll logic, and reply sanitization out of the page
+ * component so they can be unit tested without rendering React.
  */
-
-const TITLE_MAX_LENGTH = 80;
-
-/** First line of the request, trimmed to a title. Falls back to the raw text. */
-export function buildSimpleModeTitle(text: string): string {
-  const firstLine = text.trim().split("\n")[0]?.trim() ?? "";
-  const source = firstLine || text.trim();
-  if (source.length <= TITLE_MAX_LENGTH) return source;
-  return `${source.slice(0, TITLE_MAX_LENGTH - 1).trimEnd()}…`;
-}
 
 const CLOSED_FOR_SIMPLE_MODE = new Set<string>([
   "done",
@@ -31,13 +21,15 @@ export function isSimpleModeSettled(status: string): boolean {
 
 type AssigneeCandidate = { id: string; role: string; status: string };
 
-const UNAVAILABLE_AGENT_STATUSES = new Set(["terminated", "paused", "error"]);
+// Mirrors server/src/routes/chat-router.ts's SECRETARY_UNAVAILABLE_AGENT_STATUSES.
+export const UNAVAILABLE_AGENT_STATUSES = new Set(["terminated", "paused", "error"]);
 
 /**
- * Pick who a simple-mode request should land on. The person never chooses an
- * agent, so default to the company's CEO (the generalist, company-facing
- * role) — the same default the board concierge chat uses — and only fall
- * back to "whoever is available" if there is no CEO.
+ * Last-resort pick for who a simple-mode request should land on, used only
+ * when the secretary classifier (POST /api/chat/classify, DUR-335) errors or
+ * is unreachable — the classifier is the primary path now. Defaults to the
+ * company's CEO (the generalist, company-facing role) and only falls back to
+ * "whoever is available" if there is no CEO.
  */
 export function selectSimpleModeAssignee<T extends AssigneeCandidate>(
   agents: T[] | null | undefined,
@@ -47,20 +39,6 @@ export function selectSimpleModeAssignee<T extends AssigneeCandidate>(
   const ceo = available.find((a) => a.role === "ceo");
   if (ceo) return ceo;
   return available[0] ?? agents[0] ?? null;
-}
-
-export function buildSimpleModeIssuePayload(input: {
-  text: string;
-  assigneeAgentId: string;
-}): Record<string, unknown> {
-  const description = input.text.trim();
-  return {
-    title: buildSimpleModeTitle(description),
-    description,
-    assigneeAgentId: input.assigneeAgentId,
-    status: "todo" as const,
-    priority: "medium" as const,
-  };
 }
 
 // Redact the kinds of references a non-technical reader should never have to
