@@ -210,6 +210,7 @@ export function agentRoutes(
   });
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
+    rawDb,
   });
   const recovery = recoveryService(db, {
     enqueueWakeup: heartbeat.wakeup,
