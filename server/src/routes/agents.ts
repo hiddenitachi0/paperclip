@@ -4223,7 +4223,7 @@ export function agentRoutes(
     res.json(redactedEvents);
   });
 
-  router.get("/heartbeat-runs/:runId/log", scopeFromRunParam((runId) => heartbeat.getRunLogAccess(runId)), async (req, res) => {
+  router.get("/heartbeat-runs/:runId/log", scopeFromRunParam((runId) => rawHeartbeat.getRunLogAccess(runId)), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRunLogAccess(runId);
     if (!run) {
