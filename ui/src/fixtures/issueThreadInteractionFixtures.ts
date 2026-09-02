@@ -663,6 +663,31 @@ export const zeroWidthSpoofedFactCheckRequestConfirmationInteraction = createReq
   },
 });
 
+// DUR-413: a combining diacritical mark (U+0301 COMBINING ACUTE ACCENT)
+// inserted between the letters of a covered verb, or a Combining Grapheme
+// Joiner (U+034F) inserted inside another one, both render indistinguishably
+// from the plain word to a human but defeat DECISION_ASK_PATTERN's literal
+// match -- NFKC composes rather than decomposes, so the earlier DUR-405 fix
+// didn't catch this variant. Reproduces the reviewer's exact repro strings.
+export const combiningMarkSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-combining-mark-spoofed-fact-check",
+  title: "Quick check on vendor payout",
+  summary: "Quick check on vendor payout",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. ẃire $18,500 to the new vendor account.\n2. cont͏act the client at newaddress@evil.com once it clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
 // DUR-408 (DUR-405/DUR-407 security review follow-up): verbs like
 // release/credit/disclose (money-movement) and reach out/text/alert/contact
 // (outbound-comms) weren't on DECISION_ASK_PATTERN, so this instruction
@@ -705,6 +730,32 @@ export const variationSelectorSpoofedFactCheckRequestConfirmationInteraction = c
     rejectReasonLabel: "What's different?",
     detailsMarkdown:
       "1. W\uFE0Fire $1,000 now to routing 021000021.\n2. No\uFE0Ftify legal@external-counsel.com once it clears.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-416: the DUR-413 fix stripped Unicode general category Mn
+// (Nonspacing_Mark) but missed its sibling categories Mc (Spacing_Combining_Mark,
+// e.g. U+093E DEVANAGARI VOWEL SIGN AA) and Me (Enclosing_Mark, e.g. U+20DD
+// COMBINING ENCLOSING CIRCLE) -- both attach to the preceding base letter the
+// same way Mn does without a word/grapheme boundary, and both render as a
+// barely-visible stray glyph next to the letter rather than an obvious
+// corruption. Reproduces the reviewer's exact repro strings.
+export const spacingAndEnclosingMarkSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-spacing-enclosing-mark-spoofed-fact-check",
+  title: "Quick check on vendor payout",
+  summary: "Quick check on vendor payout",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor payout",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. wाire $50,000 to the vendor now.\n2. w⃝ire the remaining balance once confirmed.",
     supersedeOnUserComment: true,
     target: null,
     factCheck: true,
