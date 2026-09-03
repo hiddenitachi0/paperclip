@@ -102,9 +102,17 @@ function registerModuleMocks() {
 // through runInCompanyScope -- see middleware/company-scope.ts), which is a
 // real drizzle instance layered over withFakeCompanyScopeReserve's fake
 // reserved connection, not this select()/from()/where() chain (that chain is
-// dead code for any query reachable through the scoped db). The fake
-// connection's default `unsafeRows: []` already gives the "no matching
-// heartbeat run" result this suite wants, so no custom rows are needed here.
+// dead code for any query reachable through the scoped db).
+//
+// DUR-923's assertMergePrIssueIdsAreRelevant issues a second real query
+// (`{id, companyId, assigneeAgentId}`) whenever a merge_pr approval is filed
+// -- every test in this suite does. A shared 3-value tuple
+// `[ISSUE_ID, companyId, null]` resolves that guard's target issue as
+// unassigned (which it always lets any agent name -- this suite is about the
+// orthogonal DUR-237 mergeCommitSha strip, not issue ownership) while still
+// giving the heartbeatRuns 4-column read a mismatched (null) `agentId`, so
+// assertApprovalMutationAllowedByRunContext keeps falling into its "not this
+// run's own row" branch and returning true (unblocked) regardless.
 function createMinimalDb() {
   const fakeDb = {
     select: vi.fn(() => ({
@@ -115,7 +123,9 @@ function createMinimalDb() {
       })),
     })),
   };
-  return withFakeCompanyScopeReserve(fakeDb as any);
+  return withFakeCompanyScopeReserve(fakeDb as any, {
+    unsafeRows: [[ISSUE_ID, "22222222-2222-4222-8222-222222222222", null]],
+  });
 }
 
 async function createAgentApp() {
