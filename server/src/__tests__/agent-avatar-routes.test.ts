@@ -4,6 +4,35 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_AGENT_AVATAR_BYTES } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
 
+// DUR-381 (Wave 5b follow-up): assets.ts now wires the avatar routes through
+// companyScopeFromParam() (DUR-394), whose runInCompanyScope reserves a
+// physical connection via `rawDb.$client.reserve()`. This file passes a plain
+// select/transaction stub as the db and fully mocks the service layer -- it
+// exercises route wiring, not real company-scope enforcement -- so mock
+// runInCompanyScope to populate the same AsyncLocalStorage scope directly
+// with the stub (same pattern as agent-delete-avatar-cleanup.test.ts /
+// DUR-414). vi.mock survives the per-test vi.resetModules() below.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run(
+        { kind: "scoped", companyId, scopedDb: rawDb, liveness: { released: false, inFlight: 0, onDrained: null } } as never,
+        fn,
+      ),
+    // The avatar handlers' write transactions go through
+    // withCompanyScope(rawDb, ...), which inside that scope would run
+    // BEGIN/COMMIT via `execute` on the reserved connection -- something this
+    // file's select/transaction stub has no business faking. Pin it to the
+    // stub's own `transaction(cb)` so the TxSpy assertions below (update/
+    // delete calls inside the transaction) keep exercising the same thing.
+    withCompanyScope: async (rawDb: { transaction: (cb: (tx: unknown) => Promise<unknown>) => Promise<unknown> }, _companyId: string, fn: (tx: unknown) => Promise<unknown>) =>
+      rawDb.transaction((tx) => fn(tx)),
+  };
+});
+
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 const otherCompanyId = "33333333-3333-4333-8333-333333333333";

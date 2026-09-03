@@ -4984,7 +4984,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   // process-lost false negative -- see DUR-114/DUR-120). Without this, a
   // second dispatch can silently reclaim a still-live run's checkout lock
   // and start mutating the same worktree concurrently.
-  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
+  // DUR-381: thread `rawDb` through too. This service is constructed from
+  // the request-scoped proxy by routes/issues.ts and routes/agents.ts, and
+  // executeRun() (a fire-and-forget continuation that outlives the request
+  // scope) calls issuesSvc.checkout(), whose clearExecutionRunIfTerminal
+  // runs withCompanyScope(rawDb, ...). With no active request scope left,
+  // withCompanyScope falls through to `rawDb.transaction()` -- which the
+  // proxy deliberately refuses ("db.transaction() is not supported through
+  // the request-scoped proxy"), so every auto-checkout heartbeat run failed
+  // at setup (caught by the signoff-policy e2e suite).
+  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess, rawDb });
   const escalationGrants = escalationGrantService(db);
   const approvalsSvc = approvalService(db);
   const issueApprovalsSvc = issueApprovalService(db);

@@ -6091,7 +6091,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
           // DUR-29: closing the issue settles any decision it was waiting on — resolve
           // still-pending issue-thread interactions so they don't linger in the operator's
           // "needs you" list for work that already shipped.
-          await issueThreadInteractionService(db).resolveAllPendingForIssueClosed(
+          await issueThreadInteractionService(db, { rawDb }).resolveAllPendingForIssueClosed(
             { id: updated.id, companyId: existing.companyId, status: updated.status },
             { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
             tx,

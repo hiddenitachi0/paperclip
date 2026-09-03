@@ -99,6 +99,33 @@ const mockExternalObjectService = vi.hoisted(() => ({
   syncIssueSafely: vi.fn(async () => undefined),
 }));
 
+// DUR-418 (post-DUR-379): inside a companyScope()-wrapped route, the real
+// withCompanyScope(rawDb, companyId, fn) no longer calls `rawDb.transaction`
+// -- it reuses the request's reserved connection and hands `fn` a real
+// drizzle instance built over that (here: fake) connection instead of
+// `mockTx`. This file's assertions are about *what the route writes inside
+// the transaction* (`mockTx.insert`, `mockIssueService.update(..., mockTx)`,
+// `mockDb.transaction` call counts), not about the connection-reuse
+// mechanics, which packages/db/src/company-scope*.test.ts cover. Pin
+// withCompanyScope to its pooled-connection shape so `fn` keeps receiving
+// `mockTx` through `mockDb.transaction`.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { sql } = await import("drizzle-orm");
+  return {
+    ...actual,
+    withCompanyScope: async (
+      db: { transaction: (cb: (tx: { execute: (q: unknown) => Promise<unknown> }) => Promise<unknown>) => Promise<unknown> },
+      companyId: string,
+      fn: (tx: unknown) => Promise<unknown>,
+    ) =>
+      db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT set_config('app.current_company_id', ${companyId}, true)`);
+        return fn(tx);
+      }),
+  };
+});
+
 vi.mock("@paperclipai/shared/telemetry", () => ({
   trackAgentTaskCompleted: vi.fn(),
   trackErrorHandlerCrash: vi.fn(),

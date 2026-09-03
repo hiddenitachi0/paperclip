@@ -4,7 +4,7 @@ import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, assets as assetsTable, createRequestScopedDb } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, createRequestScopedDb, withCompanyScope } from "@paperclipai/db";
 import {
   createAssetImageMetadataSchema,
   ALLOWED_IMAGE_UPLOAD_CONTENT_TYPES,
@@ -405,7 +405,12 @@ export function assetRoutes(rawDb: Db, storage: StorageService) {
 
     const previousAsset = agentRow.avatarAssetId ? await svc.getById(agentRow.avatarAssetId) : null;
 
-    const createdAsset = await db.transaction(async (tx) => {
+    // DUR-381: the request-scoped proxy deliberately does not forward
+    // db.transaction() (see createRequestScopedDb) -- inside a
+    // companyScope()-wrapped route, withCompanyScope(rawDb, ...) reuses the
+    // request's reserved connection (DUR-418) instead of taking a second
+    // pool connection.
+    const createdAsset = await withCompanyScope(rawDb, companyId, async (tx) => {
       const txDb = tx as unknown as Db;
       const created = await assetService(txDb).create(companyId, {
         provider: stored.provider,
@@ -467,7 +472,9 @@ export function assetRoutes(rawDb: Db, storage: StorageService) {
 
     const previousAsset = await svc.getById(agentRow.avatarAssetId);
 
-    await db.transaction(async (tx) => {
+    // DUR-381: see the POST handler above -- db.transaction() is not
+    // forwarded by the request-scoped proxy.
+    await withCompanyScope(rawDb, companyId, async (tx) => {
       await tx
         .update(agentsTable)
         .set({ avatarAssetId: null, updatedAt: new Date() })

@@ -368,6 +368,13 @@ function createRunContextDb(
     // blockers check) that query through `tx` instead.
     transaction: async (callback: (tx: Record<string, unknown>) => Promise<unknown>) =>
       callback({ execute: vi.fn(async () => []), select, insert }),
+    // DUR-418 (post-DUR-379): when withCompanyScope(rawDb, ...) runs inside a
+    // companyScope()-wrapped route it no longer calls `rawDb.transaction`
+    // at all -- it reuses the request's reserved connection and issues
+    // BEGIN/COMMIT (or SAVEPOINT) via `scopedDb.execute(...)` on the object
+    // the mocked `drizzle()` above returns, i.e. this one. Same no-op stub
+    // the `tx` above already carries, for the same reason.
+    execute: vi.fn(async () => []),
     select,
     insert,
   };
@@ -1669,6 +1676,9 @@ describe("agent issue mutation checkout ownership", () => {
         // object's own, not the request-scoped proxy) directly.
         transaction: async (callback: (tx: Record<string, unknown>) => Promise<unknown>) =>
           callback({ execute: vi.fn(async () => []), select }),
+        // See createRunContextDb: DUR-418's reserved-connection reuse path
+        // runs BEGIN/COMMIT through `execute` on this object directly.
+        execute: vi.fn(async () => []),
         select,
       };
     }
