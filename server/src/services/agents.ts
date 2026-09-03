@@ -15,6 +15,7 @@ import {
   issueExecutionDecisions,
   issues,
   issueComments,
+  withCompanyScope,
 } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -248,7 +249,19 @@ function assertNoPluginToolAssignmentFields(data: Record<string, unknown>) {
   }
 }
 
-export function agentService(db: Db) {
+export interface AgentServiceOptions {
+  // DUR-392 (DUR-277 Wave 5b): mirrors issueService's IssueServiceOptions.rawDb --
+  // defaults to `db` for every unmigrated caller, a no-op there since `db` is
+  // already the raw pooled instance. Only routes/agents.ts, once wired through
+  // createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+  // distinct `rawDb`, since db.transaction() below is not supported through
+  // that proxy (see packages/db/src/company-scope.ts) and needs the raw
+  // connection via withCompanyScope instead.
+  rawDb?: Db;
+}
+
+export function agentService(db: Db, options: AgentServiceOptions = {}) {
+  const rawDb = options.rawDb ?? db;
   const secretsSvc = secretService(db);
 
   function currentUtcMonthWindow(now = new Date()) {
@@ -493,7 +506,7 @@ export function agentService(db: Db) {
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
-    return db.transaction(async (tx) => {
+    return withCompanyScope(rawDb, existing.companyId, async (tx) => {
       const txDb = tx as unknown as Db;
       const updated = await tx
         .update(agents)
@@ -582,7 +595,7 @@ export function agentService(db: Db) {
             { adapterType },
           )
         : {};
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const created = await tx
           .insert(agents)
@@ -614,7 +627,13 @@ export function agentService(db: Db) {
     // ever changes this column, so it always stays paired with a fresh
     // secret-binding resync via syncAgentSecretBindings.
     syncMcpToolSelection: async (agentId: string, desiredToolIds: string[]) => {
-      return db.transaction(async (tx) => {
+      const target = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, agentId))
+        .then((rows) => rows[0] ?? null);
+      if (!target) throw notFound("Agent not found");
+      return withCompanyScope(rawDb, target.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
           .update(agents)
@@ -756,7 +775,7 @@ export function agentService(db: Db) {
       const existing = await getById(id);
       if (!existing) return null;
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, existing.companyId, async (tx) => {
         await tx.update(agents).set({ reportsTo: null }).where(eq(agents.reportsTo, id));
         await tx
           .update(issues)
@@ -786,7 +805,13 @@ export function agentService(db: Db) {
     },
 
     activatePendingApproval: async (id: string) => {
-      const activatedAgent = await db.transaction(async (tx) => {
+      const target = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!target) return null;
+      const activatedAgent = await withCompanyScope(rawDb, target.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
           .update(agents)

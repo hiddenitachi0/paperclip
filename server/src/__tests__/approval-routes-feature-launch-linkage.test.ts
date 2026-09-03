@@ -15,6 +15,21 @@ import { getTableName } from "drizzle-orm";
 
 const TEST_TIMEOUT = 20_000;
 
+// DUR-347: POST /api/approvals runs through company-scope middleware, which
+// reserves a real connection via runInCompanyScope -- this test's
+// hand-rolled db stub isn't a real Db, so it can't back that reservation.
+// Bypass the reservation machinery in tests, running the callback directly,
+// no real connection involved -- same pattern used elsewhere pre-DUR-381.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
+
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
   getById: vi.fn(),
@@ -68,7 +83,7 @@ function registerModuleMocks() {
   }));
 }
 
-const COMPANY_ID = "company-1";
+const COMPANY_ID = "33333333-3333-4333-8333-333333333333";
 const LAUNCH_ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_ISSUE_ID = "22222222-2222-4222-8222-222222222222";
 

@@ -5,10 +5,12 @@ import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createDb } from "./client.js";
 import {
+  ConnectionReleaseUnsafeError,
   createRequestScopedDb,
   requestCompanyScopeStorage,
   runInCompanyScope,
   runInCompanyScopeBypass,
+  withCompanyScope,
 } from "./company-scope.js";
 import { companies, crossCompanyAccessLog } from "./schema/index.js";
 import {
@@ -124,6 +126,48 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
     }
   });
 
+  // DUR-421 follow-up: reproduces the production crash where a client abort
+  // (Node's `close` event on http.ServerResponse, which fires on premature
+  // termination as well as normal completion) let companyScope() middleware
+  // release a reserved connection while its route handler was still
+  // mid-flight, so a later request could reserve the same physical
+  // connection and interleave its wire traffic with the orphaned handler's
+  // -- surfaced as Postgres "bind message supplies N parameters, but
+  // prepared statement requires M" errors that crashed the process. This
+  // proves the fix at the primitive level: when `fn` signals
+  // ConnectionReleaseUnsafeError, runInCompanyScope must abandon the
+  // connection rather than recycle it.
+  it("abandons (never releases) the reserved connection when fn() rejects with ConnectionReleaseUnsafeError", async () => {
+    const singleConnDb = createSingleConnectionDb();
+    const companyA = await seedCompany("A");
+
+    try {
+      const result = await runInCompanyScope(singleConnDb, companyA.id, async () => {
+        throw new ConnectionReleaseUnsafeError();
+      });
+      expect(result).toBeUndefined();
+
+      // The pool has exactly one physical connection. If it were released
+      // (instead of abandoned), a fresh reserve() would resolve almost
+      // immediately; since it must remain abandoned, reserve() should still
+      // be pending after a short wait.
+      let resolved = false;
+      const reservePromise = singleConnDb.$client
+        .reserve()
+        .then((reserved) => {
+          resolved = true;
+          reserved.release();
+        })
+        .catch(() => {});
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(resolved).toBe(false);
+      void reservePromise;
+    } finally {
+      await singleConnDb.$client.end({ timeout: 0 });
+    }
+  });
+
   it("runInCompanyScopeBypass throws when the connection's role is not a member of paperclip_app_bypass", async () => {
     // pg_has_role() always returns true for the migration-running superuser
     // regardless of actual grants, so the negative case has to run as a real
@@ -171,4 +215,481 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
       }
     }
   });
+});
+
+// DUR-418: withCompanyScope(rawDb, companyId, fn) used to unconditionally call
+// rawDb.transaction(...), which reserves a SECOND physical connection even
+// when called from inside a runInCompanyScope()-reserved request scope for
+// the very same company. Under enough concurrent requests that each hold one
+// runInCompanyScope reservation and then call withCompanyScope, every nested
+// db.transaction() blocks forever waiting for a connection that can only
+// free up once that same blocked call returns -- a permanent pool-exhaustion
+// deadlock. Fixed by detecting the active AsyncLocalStorage scope and running
+// on that reserved connection via BEGIN/SAVEPOINT instead of a second BEGIN.
+// These tests use a `max: 1` pool so a regression back to `rawDb.transaction()`
+// inside an active scope hangs (and fails on the test's own timeout) rather
+// than silently passing by drawing a second connection from a bigger pool.
+describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope-reserved connection", () => {
+  let db!: Db;
+  let connectionString!: string;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-dur418-nested-scope-");
+    connectionString = tempDb.connectionString;
+    db = createDb(connectionString);
+  }, 30_000);
+
+  afterEach(async () => {
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  function createSingleConnectionDb(): Db {
+    const sql = postgres(connectionString, { max: 1 });
+    return drizzlePg(sql, {}) as unknown as Db;
+  }
+
+  async function seedCompany(label: string) {
+    return db
+      .insert(companies)
+      .values({
+        name: `DUR-418 ${label}`,
+        issuePrefix: `D418${randomUUID().replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+  }
+
+  it(
+    "withCompanyScope inside an active runInCompanyScope for the same companyId does not draw a second connection",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("reuse");
+      try {
+        const seenName = await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          return withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            const rows = await tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyA.id));
+            return rows[0]?.name;
+          });
+        });
+        expect(seenName).toBe(`DUR-418 reuse`);
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    "true nested withCompanyScope calls use SAVEPOINT (not a second BEGIN) and both writes commit",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("nested-commit");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            await withCompanyScope(singleConnDb, companyA.id, async (innerTx) => {
+              await innerTx.update(companies).set({ name: "inner-write" }).where(eq(companies.id, companyA.id));
+            });
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("inner-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    "an error thrown inside a nested withCompanyScope call rolls back only its own SAVEPOINT, not the outer transaction",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("nested-rollback");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            await expect(
+              withCompanyScope(singleConnDb, companyA.id, async (innerTx) => {
+                await innerTx
+                  .update(companies)
+                  .set({ name: "inner-write-should-roll-back" })
+                  .where(eq(companies.id, companyA.id));
+                throw new Error("boom");
+              }),
+            ).rejects.toThrow("boom");
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("outer-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    // DUR-916 review mod #3: rejects outright instead of silently falling
+    // back to a second connection, which would reintroduce the deadlock
+    // conditionally (only in the cross-company case) with no visible signal.
+    "withCompanyScope for a DIFFERENT companyId than the active scoped scope rejects instead of silently acquiring a second connection",
+    async () => {
+      const companyA = await seedCompany("mismatch-outer");
+      const companyB = await seedCompany("mismatch-inner");
+
+      await runInCompanyScope(db, companyA.id, async () => {
+        await expect(
+          withCompanyScope(db, companyB.id, async (tx) => {
+            await tx.execute(drizzleSql`select 1`);
+          }),
+        ).rejects.toThrow(/different companyId/);
+      });
+    },
+    10_000,
+  );
+
+  it(
+    // DUR-916 review mod #4: a "bypass" outer scope (runInCompanyScopeBypass)
+    // has no per-company claim to protect, so it's always safe to reuse
+    // regardless of what companyId the nested withCompanyScope call requests.
+    "withCompanyScope inside an active runInCompanyScopeBypass scope reuses that connection for any companyId",
+    async () => {
+      const grantSql = postgres(connectionString, { max: 1 });
+      try {
+        await grantSql.unsafe("GRANT paperclip_app_bypass TO CURRENT_USER");
+      } finally {
+        await grantSql.end();
+      }
+
+      try {
+        const singleConnDb = createSingleConnectionDb();
+        const companyA = await seedCompany("bypass-reuse");
+        try {
+          const name = await runInCompanyScopeBypass(
+            singleConnDb,
+            { reason: "DUR-418 test: bypass reuse" },
+            async () => {
+              return withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+                const rows = await tx
+                  .select({ name: companies.name })
+                  .from(companies)
+                  .where(eq(companies.id, companyA.id));
+                return rows[0]?.name;
+              });
+            },
+          );
+          expect(name).toBe("DUR-418 bypass-reuse");
+        } finally {
+          await singleConnDb.$client.end();
+        }
+      } finally {
+        const revokeSql = postgres(connectionString, { max: 1 });
+        try {
+          await revokeSql.unsafe("REVOKE paperclip_app_bypass FROM CURRENT_USER");
+        } finally {
+          await revokeSql.end();
+        }
+      }
+    },
+    10_000,
+  );
+
+  it(
+    // DUR-916 review mod #2: tx.rollback() can't reproduce drizzle's
+    // resolve-not-reject sentinel semantics on a hand-rolled BEGIN/SAVEPOINT
+    // wrapper, so it must fail loudly instead of behaving subtly differently.
+    "calling tx.rollback() inside a reused-connection withCompanyScope call throws a clear, explicit error",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("rollback-guard");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await expect(
+            withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+              (tx as unknown as { rollback: () => void }).rollback();
+            }),
+          ).rejects.toThrow(/tx\.rollback\(\) is not supported/);
+        });
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    // Regression found while validating this fix against a concurrent
+    // change (DUR-417) that runs queueTaskWatchdogEvaluation()
+    // fire-and-forget from inside a runInCompanyScope() request scope.
+    // AsyncLocalStorage propagates the scope to that orphaned continuation
+    // even after runInCompanyScope's own `fn` has returned and its `finally`
+    // has already reset+released the connection back to the pool -- without
+    // the liveness check, a withCompanyScope call from that orphaned
+    // continuation would try to BEGIN on a connection some other request may
+    // already be mid-transaction on. This proves withCompanyScope falls back
+    // to its own connection once the outer scope's connection has been
+    // released, instead of reusing a stale scope reference.
+    "withCompanyScope from a continuation that outlives the outer runInCompanyScope call falls back to its own connection instead of touching the released one",
+    async () => {
+      const companyA = await seedCompany("outlives-release");
+      let capturedScope: unknown;
+
+      await runInCompanyScope(db, companyA.id, async () => {
+        capturedScope = requestCompanyScopeStorage.getStore();
+      });
+
+      // By now runInCompanyScope's finally has already reset+released the
+      // connection. Simulate the orphaned fire-and-forget continuation by
+      // re-entering the captured scope directly and calling withCompanyScope.
+      const name = await requestCompanyScopeStorage.run(capturedScope as never, async () => {
+        return withCompanyScope(db, companyA.id, async (tx) => {
+          const rows = await tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyA.id));
+          return rows[0]?.name;
+        });
+      });
+
+      expect(name).toBe("DUR-418 outlives-release");
+    },
+    10_000,
+  );
+
+  it(
+    // DUR-918 review, required change #1: two withCompanyScope calls on the
+    // same reserved connection that are NOT sequentially awaited (started
+    // back-to-back, e.g. via Promise.all, or a fire-and-forget continuation
+    // racing the handler that spawned it -- the DUR-417
+    // queueTaskWatchdogEvaluation pattern) get depth 0 (outer, real
+    // BEGIN/COMMIT) and depth 1 (inner, SAVEPOINT) respectively, same as
+    // true nesting. Unlike true nesting, nothing about the caller guarantees
+    // depth 0 finishes its own work AFTER depth 1 does. This test
+    // deliberately lets the depth-0 call finish (and attempt to close)
+    // FIRST while the depth-1 call is still open -- the exact ordering that
+    // used to end the whole transaction out from under the still-open
+    // SAVEPOINT (surfacing as a "savepoint does not exist" error and/or
+    // autocommitted, unintentionally-non-atomic writes). With the fix, the
+    // depth-0 close waits for the depth-1 call to finish first, so both
+    // resolve cleanly and the depth-1 (later) write wins, exactly as if the
+    // calls had been properly awaited one after another.
+    "concurrent (non-awaited) sibling withCompanyScope calls on the same reserved connection still close in strict LIFO order",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("concurrent-siblings");
+      try {
+        let releaseInner!: () => void;
+        const innerGate = new Promise<void>((resolve) => {
+          releaseInner = resolve;
+        });
+
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          // Both calls are kicked off back-to-back, with neither awaited
+          // before the other starts -- `outer` gets depth 0, `inner` gets
+          // depth 1, same as if they were genuinely nested.
+          const outer = withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+          });
+          const inner = withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            // Deliberately held open until well after `outer`'s single
+            // round trip above has certainly finished, to force `outer`'s
+            // close to be the one that has to wait.
+            await innerGate;
+            await tx.update(companies).set({ name: "inner-write" }).where(eq(companies.id, companyA.id));
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          releaseInner();
+          await expect(Promise.all([outer, inner])).resolves.toBeDefined();
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("inner-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    // DUR-920: queueTaskWatchdogEvaluation-style call sites fire a
+    // withCompanyScope() call fire-and-forget (`void someCall()`) from
+    // inside a runInCompanyScope()-wrapped route handler, then let the
+    // handler return without awaiting it. Before this fix,
+    // runInCompanyScope's `finally` block reset+released the reserved
+    // connection as soon as `fn` resolved, with no regard for that orphaned
+    // call already being mid-flight on the SAME connection (it read
+    // `liveness.released === false` before the handler returned) -- an
+    // unrelated request could then reserve the same physical connection
+    // while the orphan was still issuing queries on it. This proves
+    // runInCompanyScope now waits for such an in-flight call to drain
+    // before releasing, instead of releasing out from under it.
+    "runInCompanyScope waits for an in-flight fire-and-forget withCompanyScope call to drain before releasing the connection",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("in-flight-drain");
+      try {
+        let orphanStarted = false;
+        let orphanFinished = false;
+        let resolveOrphanGate!: () => void;
+        const orphanGate = new Promise<void>((resolve) => {
+          resolveOrphanGate = resolve;
+        });
+        let orphanPromise!: Promise<unknown>;
+
+        const outerPromise = runInCompanyScope(singleConnDb, companyA.id, async () => {
+          // Fire-and-forget, mirroring `void queueTaskWatchdogEvaluation(...)`
+          // -- started but deliberately not awaited before `fn` returns.
+          orphanPromise = withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            orphanStarted = true;
+            await orphanGate;
+            await tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyA.id));
+            orphanFinished = true;
+          });
+        });
+
+        // Give the orphan a tick to actually start (commit to
+        // runOnReservedScope / increment liveness.inFlight -- this involves
+        // a real BEGIN round-trip, hence the more generous wait than a pure
+        // microtask check would need).
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(orphanStarted).toBe(true);
+
+        // The outer runInCompanyScope call must NOT have resolved yet --
+        // its finally block should be blocked awaiting the orphan's drain,
+        // not racing ahead to release the connection.
+        let outerResolved = false;
+        void outerPromise.then(() => {
+          outerResolved = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(outerResolved).toBe(false);
+        expect(orphanFinished).toBe(false);
+
+        resolveOrphanGate();
+        await orphanPromise;
+        await outerPromise;
+
+        expect(orphanFinished).toBe(true);
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    15_000,
+  );
+
+  it(
+    // DUR-925: a service that closes over the `tx` handed to a
+    // withCompanyScope() callback (e.g. secrets.ts's syncSecretRefsForTarget,
+    // constructed with `db = tx`) and calls `db.transaction(fn)` directly on
+    // it -- not withCompanyScope(db, companyId, fn) again -- must still work
+    // when that `tx` is backed by a runInCompanyScope()-reserved connection.
+    // Before the fix this reached drizzle's real PostgresJsSession.transaction(),
+    // which calls the reserved connection's nonexistent `.begin()` and threw
+    // "this.client.begin is not a function". Now it's routed through the
+    // same SAVEPOINT-reuse mechanism as a true nested withCompanyScope call.
+    "tx.transaction() called directly inside a reused-connection withCompanyScope call commits via SAVEPOINT instead of throwing",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("direct-tx-transaction");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            // Mirrors secrets.ts:2534's `db.transaction(async (tx) => {...})`
+            // called directly on the value received from withCompanyScope,
+            // not via withCompanyScope(db, companyId, fn) again.
+            await tx.transaction(async (innerTx) => {
+              await innerTx.update(companies).set({ name: "inner-write" }).where(eq(companies.id, companyA.id));
+            });
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("inner-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    // Same gap as above, but proves an error thrown inside the direct
+    // tx.transaction() call rolls back only its own SAVEPOINT (the outer
+    // withCompanyScope's write survives), same as a true nested
+    // withCompanyScope call would.
+    "an error thrown inside a direct tx.transaction() call rolls back only its own SAVEPOINT, not the outer transaction",
+    async () => {
+      const singleConnDb = createSingleConnectionDb();
+      const companyA = await seedCompany("direct-tx-transaction-rollback");
+      try {
+        await runInCompanyScope(singleConnDb, companyA.id, async () => {
+          await withCompanyScope(singleConnDb, companyA.id, async (tx) => {
+            await tx.update(companies).set({ name: "outer-write" }).where(eq(companies.id, companyA.id));
+            await expect(
+              tx.transaction(async (innerTx) => {
+                await innerTx
+                  .update(companies)
+                  .set({ name: "inner-write-should-roll-back" })
+                  .where(eq(companies.id, companyA.id));
+                throw new Error("boom");
+              }),
+            ).rejects.toThrow("boom");
+          });
+        });
+
+        const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+        expect(row?.name).toBe("outer-write");
+      } finally {
+        await singleConnDb.$client.end();
+      }
+    },
+    5_000,
+  );
+
+  it(
+    // DUR-926 review: the DUR-925 `.transaction()` trap must refuse to reuse
+    // a connection whose owning runInCompanyScope() call has already
+    // returned and released it -- the same liveness.released guard
+    // withCompanyScope's own reuse branch already has (see the "outlives
+    // release" test above for that sibling case). A `tx` captured by
+    // something that outlives the request (a fire-and-forget continuation,
+    // the DUR-417/DUR-920 pattern) and then used to call `.transaction()`
+    // must fail loudly instead of silently issuing BEGIN/SAVEPOINT on a
+    // connection the pool may already have handed to an unrelated
+    // request/company.
+    "tx.transaction() called after the owning runInCompanyScope call has released the connection throws instead of reusing it",
+    async () => {
+      const companyA = await seedCompany("transaction-after-release");
+      let capturedTx: Parameters<Parameters<typeof withCompanyScope>[2]>[0] | undefined;
+
+      await runInCompanyScope(db, companyA.id, async () => {
+        await withCompanyScope(db, companyA.id, async (tx) => {
+          capturedTx = tx;
+        });
+      });
+
+      // By now runInCompanyScope's finally has already reset+released the
+      // connection. Simulate the orphaned fire-and-forget continuation
+      // calling tx.transaction() on the captured reference. The guard throws
+      // synchronously (same as the companyId-mismatch check further down in
+      // withCompanyScope itself), not as a rejected promise, since the trap
+      // never reaches the `await` inside runOnReservedScope.
+      expect(() =>
+        capturedTx!.transaction(async () => {
+          throw new Error("should never run");
+        }),
+      ).toThrow(/tx\.transaction\(\) was called after .* already released it/);
+    },
+    10_000,
+  );
 });

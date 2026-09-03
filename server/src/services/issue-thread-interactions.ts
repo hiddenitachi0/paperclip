@@ -10,6 +10,7 @@ import {
   issueDocuments,
   issueThreadInteractions,
   issues,
+  withCompanyScope,
 } from "@paperclipai/db";
 import { trackInteractionResolved } from "@paperclipai/shared/telemetry";
 import type {
@@ -758,7 +759,11 @@ async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
   return expired;
 }
 
-export function issueThreadInteractionService(db: Db) {
+export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = {}) {
+  // DUR-379 (DUR-277 Wave 5b): see the matching comment in
+  // services/issues.ts -- rawDb defaults to db for every unmigrated caller,
+  // a no-op there.
+  const rawDb = options.rawDb ?? db;
   async function getIdempotentInteraction(args: {
     issueId: string;
     companyId: string;
@@ -852,7 +857,7 @@ export function issueThreadInteractionService(db: Db) {
         : undefined;
 
     const now = new Date();
-    const result = await db.transaction(async (tx) => {
+    const result = await withCompanyScope(rawDb, args.issue.companyId, async (tx) => {
       const [updated] = await tx
         .update(issueThreadInteractions)
         .set({
@@ -1259,7 +1264,7 @@ export function issueThreadInteractionService(db: Db) {
       const createdByClientKey = new Map<string, SuggestTasksResultCreatedTask>();
       const createdWakeTargets: IssueWakeTarget[] = [];
 
-      await db.transaction(async (tx) => {
+      await withCompanyScope(rawDb, issue.companyId, async (tx) => {
         const resolvedAt = new Date();
         const [claimed] = await tx
           .update(issueThreadInteractions)

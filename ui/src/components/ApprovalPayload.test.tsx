@@ -170,4 +170,42 @@ describe("ApprovalPayloadRenderer", () => {
       root.unmount();
     });
   });
+
+  it("renders feature_launch payload fields as a plain-language card, not raw JSON", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "feature_launch",
+            issueId: "8e6f9a2e-9e2a-4f7a-9c8b-1a2b3c4d5e6f",
+            title: "Operator changelog page",
+            whatIsNew: "A read-only changelog page that lists finished, user-facing changes.",
+            whereToFindIt: "New \"Changelog\" link in the sidebar, next to Approvals.",
+            whatToTest: "Open the Changelog page and confirm recent launches show up in order.",
+            whatIfItFails: "Hide the sidebar link; the underlying data is unaffected.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Operator changelog page");
+    expect(container.textContent).toContain(
+      "A read-only changelog page that lists finished, user-facing changes.",
+    );
+    expect(container.textContent).toContain(
+      "New \"Changelog\" link in the sidebar, next to Approvals.",
+    );
+    expect(container.textContent).toContain(
+      "Open the Changelog page and confirm recent launches show up in order.",
+    );
+    expect(container.textContent).toContain("Hide the sidebar link; the underlying data is unaffected.");
+    expect(container.textContent).not.toContain("\"whatIsNew\"");
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });

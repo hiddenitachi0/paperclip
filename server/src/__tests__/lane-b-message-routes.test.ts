@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 // `vi.resetModules()` in beforeEach re-transforms the large issues.ts
 // dependency graph on every test; the first test in this file eats that
@@ -239,7 +240,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, mockStorageService as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, mockStorageService as any));
   app.use(errorHandler);
   return app;
 }

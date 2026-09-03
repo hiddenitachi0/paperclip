@@ -1,6 +1,15 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const COMPANY_1_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const COMPANY_2_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+// Route param ids must not look like an issue identifier (e.g. "ISSUE-1"
+// matches the PAP-123-shaped identifier regex) -- resolveIssueRouteId /
+// scopeFromIssueParam (DUR-379) route those through getByIdentifier
+// (unconfigured here, so it resolves to null) instead of getById.
+const ISSUE_1_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 const mockFeedbackService = vi.hoisted(() => ({
   getFeedbackTraceById: vi.fn(),
@@ -43,7 +52,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
       feedbackDataSharingPreference: "prompt",
     },
   })),
-  listCompanyIds: vi.fn(async () => ["company-1"]),
+  listCompanyIds: vi.fn(async () => [COMPANY_1_ID]),
 }));
 const mockRoutineService = vi.hoisted(() => ({
   syncRunStatusForIssue: vi.fn(async () => undefined),
@@ -85,7 +94,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: COMPANY_1_ID, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => mockAgentService,
@@ -136,7 +145,12 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any, { feedbackExportService: mockFeedbackExportService }));
+  app.use(
+    "/api",
+    issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any, {
+      feedbackExportService: mockFeedbackExportService,
+    }),
+  );
   app.use(errorHandler);
   return app;
 }
@@ -172,7 +186,7 @@ describe("issue feedback trace routes", () => {
         feedbackDataSharingPreference: "prompt",
       },
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue([COMPANY_1_ID]);
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
     mockLogActivity.mockResolvedValue(undefined);
   });
@@ -180,8 +194,8 @@ describe("issue feedback trace routes", () => {
   it("flushes a newly shared feedback trace immediately after saving the vote", async () => {
     const targetId = "11111111-1111-4111-8111-111111111111";
     mockIssueService.getById.mockResolvedValue({
-      id: "issue-1",
-      companyId: "company-1",
+      id: ISSUE_1_ID,
+      companyId: COMPANY_1_ID,
       identifier: "PAP-1",
     });
     mockFeedbackService.saveIssueVote.mockResolvedValue({
@@ -201,11 +215,11 @@ describe("issue feedback trace routes", () => {
       userId: "user-1",
       source: "session",
       isInstanceAdmin: true,
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_1_ID],
     });
 
     const res = await request(app)
-      .post("/api/issues/issue-1/feedback-votes")
+      .post(`/api/issues/${ISSUE_1_ID}/feedback-votes`)
       .send({
         targetType: "issue_comment",
         targetId,
@@ -215,48 +229,60 @@ describe("issue feedback trace routes", () => {
 
     expect([200, 201]).toContain(res.status);
     expect(mockFeedbackExportService.flushPendingFeedbackTraces).toHaveBeenCalledWith({
-      companyId: "company-1",
+      companyId: COMPANY_1_ID,
       traceId: "trace-1",
       limit: 1,
     });
-  });
+  }, 30_000);
 
-  it("rejects non-board callers before fetching a feedback trace", async () => {
+  it("rejects non-board callers before returning a feedback trace's contents", async () => {
+    // DUR-379: scopeFromFeedbackTraceParam resolves the trace's companyId
+    // (via a lookup on the raw, unscoped service) before the route handler's
+    // own board-only actor-type check ever runs, so the lookup must resolve
+    // to a company the actor can see or the request 404s before the handler
+    // gets a chance to reject on actor type at all.
+    mockFeedbackService.getFeedbackTraceById.mockResolvedValue({
+      id: "trace-1",
+      companyId: COMPANY_1_ID,
+    });
     const app = await createApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: COMPANY_1_ID,
       source: "agent_key",
       runId: "run-1",
     });
 
     const res = await request(app).get("/api/feedback-traces/trace-1");
     expect(res.status).toBe(403);
-    expect(mockFeedbackService.getFeedbackTraceById).not.toHaveBeenCalled();
-  });
+    // The resolver's lookup call is the only one -- the handler body's own
+    // (would-be second) getFeedbackTraceById call is short-circuited by the
+    // 403 actor-type check before it ever runs.
+    expect(mockFeedbackService.getFeedbackTraceById).toHaveBeenCalledTimes(1);
+  }, 30_000);
 
   it("returns 404 when a board user lacks access to the trace company", async () => {
     mockFeedbackService.getFeedbackTraceById.mockResolvedValue({
       id: "trace-1",
-      companyId: "company-2",
+      companyId: COMPANY_2_ID,
     });
     const app = await createApp({
       type: "board",
       userId: "user-1",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_1_ID],
     });
 
     const res = await request(app).get("/api/feedback-traces/trace-1");
 
     expect(res.status).toBe(404);
-  });
+  }, 30_000);
 
   it("returns 404 for bundle fetches when a board user lacks access to the trace company", async () => {
     mockFeedbackService.getFeedbackTraceBundle.mockResolvedValue({
       id: "trace-1",
-      companyId: "company-2",
+      companyId: COMPANY_2_ID,
       issueId: "issue-1",
       files: [],
     });
@@ -265,11 +291,11 @@ describe("issue feedback trace routes", () => {
       userId: "user-1",
       source: "session",
       isInstanceAdmin: false,
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_1_ID],
     });
 
     const res = await request(app).get("/api/feedback-traces/trace-1/bundle");
 
     expect(res.status).toBe(404);
-  });
+  }, 30_000);
 });

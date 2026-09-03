@@ -1,6 +1,13 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// `vi.resetModules()` in beforeEach re-transforms the large issues.ts
+// dependency graph on every test; the first test in this file eats that
+// cold-start cost and can exceed the default 5s budget (see
+// lane-b-message-routes.test.ts for the same pattern).
+vi.setConfig({ testTimeout: 20_000 });
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
@@ -113,7 +120,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: companyId, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => mockAgentService,
@@ -151,22 +158,19 @@ function registerModuleMocks() {
   }));
 }
 
-function createRunContextDb(contextSnapshot: Record<string, unknown>) {
-  return {
-    select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) =>
-            resolve([{
-              id: "run-1",
-              companyId,
-              agentId: "agent-1",
-              contextSnapshot,
-            }]),
-        })),
-      })),
-    })),
-  };
+// DUR-379: the "cheap status-only recovery run" check
+// (loadActorRunContext in routes/issues.ts) now runs its
+// `db.select({ id, companyId, agentId, contextSnapshot }).from(heartbeatRuns)...`
+// through the request-scoped drizzle db created inside runInCompanyScope
+// (packages/db/src/company-scope.ts), not through any method on the mock
+// object passed into issueRoutes -- so a select()/from()/where() mock on
+// that object is dead code post-migration. The fake reserved connection's
+// `.unsafe(...).values()` (see helpers/fake-scoped-db.ts) is what real
+// drizzle selects resolve to instead; it wants an array of positional
+// value-tuples in the exact order of the select()'s field list above:
+// [id, companyId, agentId, contextSnapshot].
+function runContextRow(contextSnapshot: Record<string, unknown>): unknown[] {
+  return ["run-1", companyId, "agent-1", contextSnapshot];
 }
 
 async function createApp(
@@ -177,7 +181,7 @@ async function createApp(
     source: "local_implicit",
     isInstanceAdmin: false,
   },
-  db: unknown = {},
+  unsafeRows: unknown[] = [],
 ) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -189,7 +193,7 @@ async function createApp(
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes(db as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}, { unsafeRows }) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -365,13 +369,13 @@ describe("issue document revision routes", () => {
         runId: "run-1",
         source: "agent_jwt",
       },
-      createRunContextDb({
+      [runContextRow({
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         allowDeliverableWork: false,
         allowDocumentUpdates: false,
         resumeRequiresNormalModel: true,
-      }),
+      })],
     ))
       .post(`/api/issues/${issueId}/documents/plan/revisions/revision-1/restore`)
       .send({});
