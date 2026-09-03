@@ -108,6 +108,11 @@ function onAppPoolNotice(notice: unknown): void {
   console.log(notice);
 }
 
+// DUR-280: per-statement ceiling (ms) applied to every connection in the app
+// pool. Exported so a path that legitimately needs longer can reference the
+// baseline it is overriding rather than re-deriving the number.
+export const APP_POOL_STATEMENT_TIMEOUT_MS = 30_000;
+
 // DUR-294: every CLI command and one-off script that calls createDb()
 // directly against DATABASE_URL used to fall back to this same
 // "paperclip-app" tag, making it indistinguishable from the live server's
@@ -130,7 +135,21 @@ export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_
     // noisy 25P01 "no active transaction" notices emitted on reset.
     max: getAppPoolMax(),
     onnotice: onAppPoolNotice,
-    connection: { application_name: applicationName },
+    // DUR-280: without these, a stuck/blocked query or an exhausted pool
+    // queues new requests forever with no error and no recovery -- every
+    // request handler that touches the DB (including auth) hangs
+    // indefinitely instead of failing fast. Bound every stage so a DB-side
+    // problem surfaces as an error the app can log/retry rather than an
+    // unbounded hang.
+    //
+    // statement_timeout is a per-connection *default* for this pool, not a
+    // hard ceiling: a deliberately long-running maintenance path (e.g. the
+    // heartbeat_runs retention sweep) can lift it for its own transaction with
+    // `SET LOCAL statement_timeout`. Backups/restores and the core migration
+    // runner use their own postgres() clients and are not affected at all.
+    connect_timeout: 10,
+    idle_timeout: 30,
+    connection: { application_name: applicationName, statement_timeout: APP_POOL_STATEMENT_TIMEOUT_MS },
     ...(unscopedAccessHook
       ? { debug: unscopedAccessHook.debug, onclose: unscopedAccessHook.clearConnection }
       : {}),
