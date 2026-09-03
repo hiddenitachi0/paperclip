@@ -1283,6 +1283,22 @@ export function issueRoutes(
     pluginWorkerManager: opts.pluginWorkerManager,
     rawDb,
   });
+  // DUR-932: post-response wakeup fan-out (PATCH /issues/:id and POST
+  // /issues/:id/comments below) is fired with `void (async () => {...})()`
+  // so the response is never held up on it. That means it can still be
+  // running well after this request's reserved connection (see
+  // middleware/company-scope.ts) has been released back to the pool --
+  // reusing `heartbeat` (built on the request-scoped `db` proxy) there would
+  // let a later request's queries interleave with these on the same
+  // physical socket once it's handed back out, corrupting the postgres wire
+  // protocol for both (08P01 "bind message supplies N parameters...").
+  // `rawHeartbeat`, built on plain `rawDb`, borrows/returns its own pool
+  // connection per query instead -- same fix shape as queueTaskWatchdogEvaluation
+  // (DUR-417) above.
+  const rawHeartbeat = heartbeatService(rawDb, {
+    pluginWorkerManager: opts.pluginWorkerManager,
+    rawDb,
+  });
   const feedback = feedbackService(db, { rawDb });
   const companiesSvc = companyService(db);
   let searchSvc = opts.searchService ?? null;
@@ -1350,6 +1366,12 @@ export function issueRoutes(
     pluginWorkerManager: opts.pluginWorkerManager,
   });
   const environmentRuntime = environmentRuntimeService(db, {
+    pluginWorkerManager: opts.pluginWorkerManager,
+  });
+  // DUR-932: see rawHeartbeat above -- destroyReusableSandboxLeasesForTerminalIssue
+  // is only ever called from the same post-response fire-and-forget blocks,
+  // so it always needs the rawDb-backed instance, never the request-scoped one.
+  const rawEnvironmentRuntime = environmentRuntimeService(rawDb, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
   const issueTreeControlFactory = Object.prototype.hasOwnProperty.call(
@@ -3244,7 +3266,10 @@ export function issueRoutes(
     executionWorkspaceId?: string | null;
   }) {
     try {
-      await environmentRuntime.destroyReusableSandboxLeases({
+      // DUR-932: both call sites run from the post-response fire-and-forget
+      // wakeup blocks below, after the request's reserved connection may
+      // already be released -- always use the rawDb-backed instance.
+      await rawEnvironmentRuntime.destroyReusableSandboxLeases({
         companyId: issue.companyId,
         issueId: issue.id,
         executionWorkspaceId: issue.executionWorkspaceId ?? null,
@@ -7214,11 +7239,16 @@ export function issueRoutes(
 
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
-      type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
+      // DUR-932: this whole block runs fire-and-forget after res.json() may
+      // already have released the request's reserved connection -- every
+      // lookup/write below must go through the rawDb-backed `rawSvc` /
+      // `rawHeartbeat` / `rawDb`, never the request-scoped `svc` / `heartbeat`
+      // / `db`. See the rawHeartbeat comment near its declaration above.
+      type WakeupRequest = NonNullable<Parameters<typeof rawHeartbeat.wakeup>[1]>;
       type DependencyReadinessProvider = {
-        getDependencyReadiness?: typeof svc.getDependencyReadiness;
+        getDependencyReadiness?: typeof rawSvc.getDependencyReadiness;
       };
-      const dependencyReadinessSvc = svc as DependencyReadinessProvider;
+      const dependencyReadinessSvc = rawSvc as DependencyReadinessProvider;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
@@ -7240,7 +7270,7 @@ export function issueRoutes(
           resolvedBlockerIssueId: input.resolvedBlockerIssueId,
         });
         try {
-          const existingWake = await findExistingIssueBlockersResolvedWake(db, {
+          const existingWake = await findExistingIssueBlockersResolvedWake(rawDb, {
             companyId: issue.companyId,
             idempotencyKey,
           });
@@ -7370,7 +7400,7 @@ export function issueRoutes(
 
         let mentionedIds: string[] = [];
         try {
-          mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
+          mentionedIds = await rawSvc.findMentionedAgents(issue.companyId, commentBody);
         } catch (err) {
           logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
         }
@@ -7398,7 +7428,7 @@ export function issueRoutes(
 
       const becameDone = existing.status !== "done" && issue.status === "done";
       if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(issue.id);
+        const dependents = await rawSvc.listWakeableBlockedDependents(issue.id);
         for (const dependent of dependents) {
           await addDependencyResolvedWakeup({
             agentId: dependent.assigneeAgentId,
@@ -7444,7 +7474,7 @@ export function issueRoutes(
         await destroyReusableSandboxLeasesForTerminalIssue(issue);
       }
       if (becameTerminal && issue.parentId) {
-        const parent = await svc.getWakeableParentAfterChildCompletion(issue.parentId);
+        const parent = await rawSvc.getWakeableParentAfterChildCompletion(issue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {
             source: "automation",
@@ -7474,13 +7504,13 @@ export function issueRoutes(
       }
 
       for (const { agentId, wakeup } of wakeups.values()) {
-        heartbeat
+        rawHeartbeat
           .wakeup(agentId, wakeup)
           .then((wakeRun) => {
             if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
             const payload = wakeup.payload && typeof wakeup.payload === "object" ? wakeup.payload : {};
             const dependentIssueId = typeof payload.issueId === "string" ? payload.issueId : issue.id;
-            return logActivity(db, {
+            return logActivity(rawDb, {
               companyId: issue.companyId,
               actorType: "system",
               actorId: "issue_update",
@@ -8811,7 +8841,10 @@ export function issueRoutes(
 
     // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
     void (async () => {
-      type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
+      // DUR-932: fire-and-forget after res.status(201).json() -- see the
+      // rawHeartbeat comment near its declaration above. Every lookup/write
+      // below goes through rawDb-backed `rawSvc` / `rawHeartbeat` / `rawDb`.
+      type WakeupRequest = NonNullable<Parameters<typeof rawHeartbeat.wakeup>[1]>;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
@@ -8833,7 +8866,7 @@ export function issueRoutes(
           resolvedBlockerIssueId: input.resolvedBlockerIssueId,
         });
         try {
-          const existingWake = await findExistingIssueBlockersResolvedWake(db, {
+          const existingWake = await findExistingIssueBlockersResolvedWake(rawDb, {
             companyId: currentIssue.companyId,
             idempotencyKey,
           });
@@ -8937,7 +8970,7 @@ export function issueRoutes(
 
       let mentionedIds: string[] = [];
       try {
-        mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
+        mentionedIds = await rawSvc.findMentionedAgents(issue.companyId, req.body.body);
       } catch (err) {
         logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
       }
@@ -8964,7 +8997,7 @@ export function issueRoutes(
 
       const becameDone = issueBeforeCommentDecision.status !== "done" && currentIssue.status === "done";
       if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(currentIssue.id);
+        const dependents = await rawSvc.listWakeableBlockedDependents(currentIssue.id);
         for (const dependent of dependents) {
           await addDependencyResolvedWakeup({
             agentId: dependent.assigneeAgentId,
@@ -8982,7 +9015,7 @@ export function issueRoutes(
         await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
       }
       if (becameTerminal && currentIssue.parentId) {
-        const parent = await svc.getWakeableParentAfterChildCompletion(currentIssue.parentId);
+        const parent = await rawSvc.getWakeableParentAfterChildCompletion(currentIssue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {
             source: "automation",
@@ -9012,13 +9045,13 @@ export function issueRoutes(
       }
 
       for (const { agentId, wakeup } of wakeups.values()) {
-        heartbeat
+        rawHeartbeat
           .wakeup(agentId, wakeup)
           .then((wakeRun) => {
             if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
             const payload = wakeup.payload && typeof wakeup.payload === "object" ? wakeup.payload : {};
             const dependentIssueId = typeof payload.issueId === "string" ? payload.issueId : currentIssue.id;
-            return logActivity(db, {
+            return logActivity(rawDb, {
               companyId: currentIssue.companyId,
               actorType: "system",
               actorId: "issue_comment",

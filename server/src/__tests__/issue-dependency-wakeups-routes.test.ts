@@ -24,6 +24,12 @@ const mockIssueService = vi.hoisted(() => ({
   getWakeableParentAfterChildCompletion: vi.fn(),
   findMentionedAgents: vi.fn(async () => []),
 }));
+// DUR-932: records the `db` identity every heartbeatService()/issueService()
+// construction call was made with, so a test can pin that the post-response
+// wakeup fan-out in routes/issues.ts is built from the raw pooled db (not
+// the request-scoped proxy) -- see rawHeartbeat/rawSvc there.
+const heartbeatServiceCalls = vi.hoisted(() => [] as unknown[]);
+const issueServiceCalls = vi.hoisted(() => [] as unknown[]);
 
 vi.mock("../services/index.js", () => ({
   isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
@@ -50,10 +56,13 @@ vi.mock("../services/index.js", () => ({
     getById: vi.fn(),
     getDefaultCompanyGoal: vi.fn(),
   }),
-  heartbeatService: () => ({
-    wakeup: mockWakeup,
-    reportRunActivity: vi.fn(async () => undefined),
-  }),
+  heartbeatService: (db: unknown) => {
+    heartbeatServiceCalls.push(db);
+    return {
+      wakeup: mockWakeup,
+      reportRunActivity: vi.fn(async () => undefined),
+    };
+  },
   getIssueContinuationSummaryDocument: vi.fn(async () => null),
   instanceSettingsService: () => ({
     get: vi.fn(),
@@ -82,7 +91,10 @@ vi.mock("../services/index.js", () => ({
     expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
     expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   }),
-  issueService: () => mockIssueService,
+  issueService: (db: unknown) => {
+    issueServiceCalls.push(db);
+    return mockIssueService;
+  },
   logActivity: vi.fn(async () => undefined),
   projectService: () => ({
     getById: vi.fn(),
@@ -113,7 +125,9 @@ async function createApp() {
     };
     next();
   });
-  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
+  const rawDb = withFakeCompanyScopeReserve({});
+  app.use("/api", issueRoutes(rawDb as any, {} as any));
+  (app as unknown as { rawDb: unknown }).rawDb = rawDb;
   app.use(errorHandler);
   return app;
 }
@@ -125,6 +139,8 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
+    heartbeatServiceCalls.length = 0;
+    issueServiceCalls.length = 0;
     mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.getComment.mockResolvedValue(null);
     mockIssueService.getCommentCursor.mockResolvedValue({
@@ -285,5 +301,83 @@ describe("issue dependency wakeups in issue routes", () => {
         }),
       );
     });
+  }, 20_000);
+
+  // DUR-932: the PATCH /issues/:id and POST /issues/:id/comments handlers
+  // fire their wakeup fan-out (heartbeat.wakeup, listWakeableBlockedDependents,
+  // etc.) via `void (async () => {...})()` so the response doesn't wait on it.
+  // That means it can still be running after this request's reserved
+  // connection is released back to the pool -- before the fix, that block
+  // reused `heartbeat`/`svc` (built on the request-scoped db), so a later
+  // request could reuse the same physical connection while this one was
+  // still issuing queries on it, corrupting the postgres wire protocol
+  // (08P01 "bind message supplies N parameters..."). This pins that the
+  // fan-out is now built from the raw pooled db instead (rawHeartbeat/rawSvc),
+  // mirroring the DUR-417 queueTaskWatchdogEvaluation fix already in place.
+  it("builds the post-response wakeup fan-out from the raw pooled db, not the request-scoped proxy (DUR-932)", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      id: ISSUE_1_ID,
+      companyId: COMPANY_ID,
+      identifier: "PAP-100",
+      title: "Finish blocker",
+      description: null,
+      status: "blocked",
+      priority: "medium",
+      parentId: null,
+      assigneeAgentId: "agent-1",
+      assigneeUserId: null,
+      createdByAgentId: null,
+      createdByUserId: null,
+      executionWorkspaceId: null,
+      labels: [],
+      labelIds: [],
+    });
+    mockIssueService.update.mockResolvedValue({
+      id: ISSUE_1_ID,
+      companyId: COMPANY_ID,
+      identifier: "PAP-100",
+      title: "Finish blocker",
+      description: null,
+      status: "done",
+      priority: "medium",
+      parentId: null,
+      assigneeAgentId: "agent-1",
+      assigneeUserId: null,
+      createdByAgentId: null,
+      createdByUserId: null,
+      executionWorkspaceId: null,
+      labels: [],
+      labelIds: [],
+    });
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      {
+        id: "issue-2",
+        assigneeAgentId: "agent-2",
+        blockerIssueIds: [ISSUE_1_ID, "issue-3"],
+      },
+    ]);
+
+    const app = await createApp();
+    const rawDb = (app as unknown as { rawDb: unknown }).rawDb;
+    const res = await request(app).patch(`/api/issues/${ISSUE_1_ID}`).send({ status: "done" });
+    expect(res.status).toBe(200);
+
+    await vi.waitFor(() => {
+      expect(mockWakeup).toHaveBeenCalledWith(
+        "agent-2",
+        expect.objectContaining({ reason: "issue_blockers_resolved" }),
+      );
+    });
+
+    // heartbeatService() is constructed once from the scoped `db` (for
+    // synchronous request-path wakeups elsewhere) and once from `rawDb`
+    // (rawHeartbeat, used by the fire-and-forget block above). Before the
+    // fix there was no rawDb-identity call at all.
+    expect(heartbeatServiceCalls.some((db) => db === rawDb)).toBe(true);
+    // issueService() likewise needs a rawDb-identity instance (rawSvc) that
+    // the fire-and-forget block's listWakeableBlockedDependents/
+    // findMentionedAgents/getWakeableParentAfterChildCompletion calls run
+    // through instead of the request-scoped `svc`.
+    expect(issueServiceCalls.some((db) => db === rawDb)).toBe(true);
   }, 20_000);
 });
