@@ -22,6 +22,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -95,36 +96,39 @@ function registerModuleMocks() {
   }));
 }
 
-// Discriminates on the queried table so this same fake can answer both
-// resolveProjectIdForIssues (issues.projectId) and resolveProjectPrimaryRepo
-// (projectWorkspaces.repoUrl) -- pass `null` for either to make that lookup resolve nothing
-// (keeping the repo-validation guard a no-op), matching the fail-open-on-unknown-project
-// posture the guard itself takes.
-//
-// Dynamically imports `@paperclipai/db` rather than a static top-level import: this suite's
-// `beforeEach` calls `vi.resetModules()` and the route module is re-imported dynamically after
-// that reset, so a statically-imported `issues`/`projectWorkspaces` captured before the reset
-// would be a DIFFERENT module instance than the one `routes/approvals.ts` sees -- table
-// identity comparisons below would silently never match.
-async function createDbWithProjectAndRepo(input: { projectId: string | null; repoUrl: string | null }) {
-  const { issues, projectWorkspaces } = await import("@paperclipai/db");
-  return {
-    select: vi.fn(() => ({
-      from: vi.fn((table: unknown) => ({
-        where: vi.fn(() => ({
-          then: async (resolve: (rows: unknown[]) => unknown) => {
-            if (table === issues) {
-              return resolve(input.projectId ? [{ projectId: input.projectId }] : []);
-            }
-            if (table === projectWorkspaces) {
-              return resolve(input.repoUrl ? [{ repoUrl: input.repoUrl }] : []);
-            }
-            return resolve([]);
-          },
-        })),
-      })),
-    })),
-  } as any;
+// The queries approvals.ts issues for the originalIssueIds/repo-validation guard run
+// against the company-scoped `db` (createRequestScopedDb(rawDb) resolved through
+// runInCompanyScope's AsyncLocalStorage -- see middleware/company-scope.ts), which is a
+// REAL drizzle instance layered over the fake reserved connection
+// `withFakeCompanyScopeReserve` provides, not a select()/from()/where() mock chain on the
+// raw db object. Those real queries execute via the reserved connection's
+// `client.unsafe(query, params).values()`, so this discriminates on the compiled SQL
+// text's table name to answer resolveProjectIdForIssues (issues.projectId) and
+// resolveProjectPrimaryRepo (projectWorkspaces.repoUrl) differently -- pass `null` for
+// either to make that lookup resolve nothing (keeping the repo-validation guard a no-op),
+// matching the fail-open-on-unknown-project posture the guard itself takes. Every other
+// real query this route issues (e.g. the heartbeat-run cheap-recovery-context lookup)
+// resolves to no rows, which is the bypass-this-check outcome those call sites want.
+function createDbWithProjectAndRepo(input: { projectId: string | null; repoUrl: string | null }) {
+  const fakeDb = withFakeCompanyScopeReserve({} as Record<string, unknown>) as any;
+  const baseReserve = fakeDb.$client.reserve;
+  fakeDb.$client.reserve = async (...args: unknown[]) => {
+    const reserved = await baseReserve(...args);
+    reserved.unsafe = (...unsafeArgs: unknown[]) => {
+      const sql = String(unsafeArgs[0] ?? "");
+      let rows: unknown[] = [];
+      if (sql.includes("project_workspaces")) {
+        rows = input.repoUrl ? [[input.repoUrl]] : [];
+      } else if (sql.includes("issues")) {
+        rows = input.projectId ? [[input.projectId]] : [];
+      }
+      const result: Promise<unknown[]> & { values?: () => Promise<unknown[]> } = Promise.resolve(rows);
+      result.values = () => Promise.resolve(rows);
+      return result;
+    };
+    return reserved;
+  };
+  return fakeDb;
 }
 
 async function createAgentApp(db?: unknown) {
@@ -138,7 +142,7 @@ async function createAgentApp(db?: unknown) {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
@@ -147,7 +151,9 @@ async function createAgentApp(db?: unknown) {
   });
   app.use(
     "/api",
-    approvalRoutes((db ?? (await createDbWithProjectAndRepo({ projectId: null, repoUrl: null }))) as any),
+    approvalRoutes(
+      (db ?? withFakeCompanyScopeReserve({} as Record<string, unknown>)) as any,
+    ),
   );
   app.use(errorHandler);
   return app;
@@ -155,6 +161,7 @@ async function createAgentApp(db?: unknown) {
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_ISSUE_ID = "22222222-2222-4222-8222-222222222222";
+const COMPANY_ID = "33333333-3333-4333-8333-333333333333";
 
 describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", () => {
   beforeEach(() => {
@@ -188,7 +195,7 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: COMPANY_ID,
     });
   });
 
@@ -196,7 +203,7 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -213,7 +220,7 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -236,7 +243,7 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -252,7 +259,7 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
   it("never lets resubmit change originalIssueIds, even when the caller supplies a different value", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       requestedByAgentId: "agent-1",
       type: "request_board_approval",
       status: "pending",
@@ -268,7 +275,7 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: COMPANY_ID,
     });
     const app = await createAgentApp();
 
@@ -290,14 +297,14 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
   });
 
   it("rejects filing a merge_pr approval whose repo does not match the project's registered GitHub repo", async () => {
-    const db = await createDbWithProjectAndRepo({
+    const db = createDbWithProjectAndRepo({
       projectId: "project-1",
       repoUrl: "https://github.com/acme/real-repo",
     });
     const app = await createAgentApp(db);
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -309,14 +316,14 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
   });
 
   it("allows filing a merge_pr approval whose repo matches the project's registered GitHub repo", async () => {
-    const db = await createDbWithProjectAndRepo({
+    const db = createDbWithProjectAndRepo({
       projectId: "project-1",
       repoUrl: "https://github.com/acme/real-repo",
     });
     const app = await createAgentApp(db);
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -328,11 +335,11 @@ describe("DUR-252: merge_pr originalIssueIds anchor + repo validation guard", ()
   });
 
   it("does not reject an unresolvable repo claim (project has no registered repo) -- fails open on unknown, not on unproven", async () => {
-    const db = await createDbWithProjectAndRepo({ projectId: "project-1", repoUrl: null });
+    const db = createDbWithProjectAndRepo({ projectId: "project-1", repoUrl: null });
     const app = await createAgentApp(db);
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post(`/api/companies/${COMPANY_ID}/approvals`)
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
