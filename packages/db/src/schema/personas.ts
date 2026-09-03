@@ -21,8 +21,8 @@ export const personas = pgTable(
     status: text("status").notNull().default("draft"),
     // DUR-63 operator decision: no global default cap -- null means
     // unlimited until the operator sets one for this persona at creation.
-    // Enforcement (blocking generation once hit) is separate follow-up work
-    // in the routine that briefs her; this column is storage only.
+    // Enforced in code at generate-image call time, before the provider is
+    // invoked -- see server/src/services/persona-generation-cap.ts (DUR-177).
     dailyGenerationCap: integer("daily_generation_cap"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
