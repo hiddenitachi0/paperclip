@@ -4,6 +4,12 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageService } from "../storage/types.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// `vi.resetModules()` in beforeEach re-transforms the large issues.ts
+// dependency graph on every test; the first test to hit that cold-start
+// cost can exceed the default 5s budget.
+vi.setConfig({ testTimeout: 20_000 });
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -74,7 +80,7 @@ function registerRouteMocks() {
           feedbackDataSharingPreference: "prompt",
         },
       })),
-      listCompanyIds: vi.fn(async () => ["company-1"]),
+      listCompanyIds: vi.fn(async () => ["99999999-9999-4999-8999-999999999999"]),
     }),
     issueApprovalService: () => ({}),
     issueReferenceService: () => ({
@@ -161,13 +167,13 @@ async function createApp(storage: StorageService, options?: { companyIds?: strin
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: options?.companyIds ?? ["company-1"],
+      companyIds: options?.companyIds ?? ["99999999-9999-4999-8999-999999999999"],
       source: options?.source ?? "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, storage));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, storage));
   app.use(errorHandler);
   return app;
 }
@@ -176,7 +182,7 @@ function makeAttachment(contentType: string, originalFilename: string) {
   const now = new Date("2026-01-01T00:00:00.000Z");
   return {
     id: "attachment-1",
-    companyId: "company-1",
+    companyId: "99999999-9999-4999-8999-999999999999",
     issueId: "11111111-1111-4111-8111-111111111111",
     issueCommentId: null,
     assetId: "asset-1",
@@ -236,7 +242,7 @@ describe("issue attachment routes", () => {
     vi.clearAllMocks();
     mockLogActivity.mockResolvedValue(undefined);
     mockCompanyService.getById.mockResolvedValue({
-      id: "company-1",
+      id: "99999999-9999-4999-8999-999999999999",
       attachmentMaxBytes: 1024 * 1024 * 1024,
     });
     mockWorkProductService.createForIssue.mockReset();
@@ -248,20 +254,20 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     mockIssueService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
     });
     mockIssueService.createAttachment.mockResolvedValue(makeAttachment("application/zip", "bundle.zip"));
 
     const app = await createApp(storage);
     const res = await request(app)
-      .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
       .attach("file", Buffer.from("zip"), { filename: "bundle.zip", contentType: "application/zip" });
 
     expect([200, 201]).toContain(res.status);
     const putFileCall = storage.__calls.putFile;
     expect(putFileCall).toMatchObject({
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       namespace: "issues/11111111-1111-4111-8111-111111111111",
       originalFilename: "bundle.zip",
       contentType: "application/zip",
@@ -281,14 +287,14 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     mockIssueService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
     });
     mockIssueService.createAttachment.mockResolvedValue(makeAttachment("video/mp4", "clip.mp4"));
 
     const app = await createApp(storage);
     const res = await request(app)
-      .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
       .attach("file", Buffer.from("mp4"), { filename: "clip.mp4", contentType: "video/mp4" });
 
     expect(res.status).toBe(201);
@@ -308,14 +314,14 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     mockIssueService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
     });
     mockIssueService.createAttachment.mockResolvedValue(makeAttachment("application/x-msdownload", "payload.exe"));
 
     const app = await createApp(storage);
     const res = await request(app)
-      .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
       .attach("file", Buffer.from("exe"), { filename: "payload.exe", contentType: "application/x-msdownload" });
 
     expect(res.status).toBe(201);
@@ -337,14 +343,14 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     mockIssueService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
     });
     mockIssueService.createAttachment.mockResolvedValue(makeAttachment("application/octet-stream", "large.bin"));
 
     const app = await createApp(storage);
     const res = await request(app)
-      .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
       .attach("file", Buffer.alloc(MAX_ATTACHMENT_BYTES + 1), {
         filename: "large.bin",
         contentType: "application/octet-stream",
@@ -358,18 +364,18 @@ describe("issue attachment routes", () => {
   it("enforces the configured per-company issue attachment limit", async () => {
     const storage = createStorageService();
     mockCompanyService.getById.mockResolvedValue({
-      id: "company-1",
+      id: "99999999-9999-4999-8999-999999999999",
       attachmentMaxBytes: 4,
     });
     mockIssueService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
     });
 
     const app = await createApp(storage);
     const res = await request(app)
-      .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
+      .post("/api/companies/99999999-9999-4999-8999-999999999999/issues/11111111-1111-4111-8111-111111111111/attachments")
       .attach("file", Buffer.from("large"), { filename: "large.txt", contentType: "text/plain" });
 
     expect(res.status).toBe(422);
@@ -471,7 +477,7 @@ describe("issue attachment routes", () => {
     expect(res.headers["content-disposition"]).toBe('inline; filename="clip.mp4"');
     expect(Buffer.from(res.body).toString("utf8")).toBe("bcd");
     expect(storage.getObject).toHaveBeenCalledWith(
-      "company-1",
+      "99999999-9999-4999-8999-999999999999",
       "issues/issue-1/clip.mp4",
       { range: { start: 1, end: 3 } },
     );
@@ -525,7 +531,7 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("video/mp4", "clip.mp4"));
 
-    const app = await createApp(storage, { companyIds: ["company-2"], source: "session" });
+    const app = await createApp(storage, { companyIds: ["88888888-8888-4888-8888-888888888888"], source: "session" });
     const res = await request(app).get("/api/attachments/attachment-1/content");
 
     expect(res.status).toBe(403);
@@ -536,7 +542,7 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     const issue = {
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
       projectId: null,
     };
@@ -599,7 +605,7 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     const issue = {
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
       projectId: null,
     };
@@ -631,7 +637,7 @@ describe("issue attachment routes", () => {
     const storage = createStorageService();
     const issue = {
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "99999999-9999-4999-8999-999999999999",
       identifier: "PAP-1",
       projectId: null,
     };

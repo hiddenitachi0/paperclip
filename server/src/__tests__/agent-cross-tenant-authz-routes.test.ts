@@ -1,6 +1,9 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+vi.setConfig({ testTimeout: 30_000 });
 
 vi.unmock("http");
 vi.unmock("node:http");
@@ -117,75 +120,6 @@ vi.mock("../telemetry.js", () => ({
   getTelemetryClient: mockGetTelemetryClient,
 }));
 
-vi.mock("../routes/authz.js", async () => {
-  const { forbidden, unauthorized } = await vi.importActual<typeof import("../errors.js")>("../errors.js");
-  function assertAuthenticated(req: Express.Request) {
-    if (req.actor.type === "none") {
-      throw unauthorized();
-    }
-  }
-
-  function assertBoard(req: Express.Request) {
-    if (req.actor.type !== "board") {
-      throw forbidden("Board access required");
-    }
-  }
-
-  function assertCompanyAccess(req: Express.Request, expectedCompanyId: string) {
-    assertAuthenticated(req);
-    if (req.actor.type === "agent" && req.actor.companyId !== expectedCompanyId) {
-      throw forbidden("Agent key cannot access another company");
-    }
-    if (req.actor.type === "board" && req.actor.source !== "local_implicit") {
-      const allowedCompanies = req.actor.companyIds ?? [];
-      if (!allowedCompanies.includes(expectedCompanyId)) {
-        throw forbidden("User does not have access to this company");
-      }
-    }
-  }
-
-  function assertInstanceAdmin(req: Express.Request) {
-    assertBoard(req);
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
-    throw forbidden("Instance admin access required");
-  }
-
-  function assertBoardOrDelegate(req: Express.Request, requiredScope: string) {
-    if (req.actor.type === "board") return;
-    if (req.actor.type === "board_delegate") {
-      if ((req.actor as any).delegateScopes?.includes(requiredScope)) return;
-      throw forbidden(`Delegate token is not scoped for ${requiredScope}`);
-    }
-    throw forbidden("Board or delegate access required");
-  }
-
-  function getActorInfo(req: Express.Request) {
-    assertAuthenticated(req);
-    if (req.actor.type === "agent") {
-      return {
-        actorType: "agent" as const,
-        actorId: req.actor.agentId ?? "unknown-agent",
-        agentId: req.actor.agentId ?? null,
-        runId: req.actor.runId ?? null,
-      };
-    }
-    return {
-      actorType: "user" as const,
-      actorId: req.actor.userId ?? "board",
-      agentId: null,
-      runId: req.actor.runId ?? null,
-    };
-  }
-
-  return {
-    assertAuthenticated,
-    assertBoard,
-    assertBoardOrDelegate,
-    assertCompanyAccess,
-    assertInstanceAdmin,
-    getActorInfo,
-  };
-});
 
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
@@ -236,7 +170,7 @@ async function createApp(actor: Record<string, unknown>) {
     };
     next();
   });
-  app.use("/api", agentRoutes({} as any));
+  app.use("/api", agentRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }
@@ -258,6 +192,7 @@ async function requestApp(
     return await buildRequest(`http://127.0.0.1:${address.port}`);
   } finally {
     if (server.listening) {
+      (server as any).closeAllConnections?.();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) reject(error);

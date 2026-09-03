@@ -1,6 +1,9 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const companyId = "99999999-9999-4999-8999-999999999999";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -33,7 +36,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
       feedbackDataSharingPreference: "prompt",
     },
   })),
-  listCompanyIds: vi.fn(async () => ["company-1"]),
+  listCompanyIds: vi.fn(async () => [companyId]),
 }));
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
@@ -118,7 +121,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: companyId, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => ({ getById: vi.fn(async () => null) }),
@@ -160,13 +163,13 @@ async function installActor(app: express.Express, actor?: Record<string, unknown
     (req as any).actor = actor ?? {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: [companyId],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -174,7 +177,7 @@ async function installActor(app: express.Express, actor?: Record<string, unknown
 function makeIssue() {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "company-1",
+    companyId: companyId,
     status: "in_progress",
     assigneeAgentId: "22222222-2222-4222-8222-222222222222",
     assigneeUserId: null,
@@ -187,7 +190,7 @@ function makeIssue() {
 function makeComment(overrides: Record<string, unknown> = {}) {
   return {
     id: "comment-1",
-    companyId: "company-1",
+    companyId: companyId,
     issueId: "11111111-1111-4111-8111-111111111111",
     authorAgentId: null,
     authorUserId: "local-board",
@@ -243,7 +246,7 @@ describe.sequential("issue comment cancel routes", () => {
     });
     mockHeartbeatService.getRun.mockResolvedValue({
       id: "run-1",
-      companyId: "company-1",
+      companyId: companyId,
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "running",
       startedAt: new Date("2026-04-11T15:00:00.000Z"),
@@ -257,7 +260,7 @@ describe.sequential("issue comment cancel routes", () => {
         feedbackDataSharingPreference: "prompt",
       },
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue([companyId]);
     mockLogActivity.mockResolvedValue(undefined);
     mockDocumentAnnotationService.cleanupForIssueCommentDeletion.mockResolvedValue({
       deletedCommentIds: [],
@@ -275,7 +278,10 @@ describe.sequential("issue comment cancel routes", () => {
     expect(res.status, JSON.stringify({
       body: res.body,
       tombstoneCalls: mockIssueService.tombstoneComment.mock.calls,
-      activityCalls: mockLogActivity.mock.calls,
+      // Only the details payload (2nd arg) -- the 1st arg is the
+      // request-scoped db proxy, which throws on serialization once the
+      // request's AsyncLocalStorage scope has already exited.
+      activityCalls: mockLogActivity.mock.calls.map((call) => call[1]),
     })).toBe(200);
     expect(res.body).toMatchObject({
       id: "comment-1",
@@ -378,7 +384,7 @@ describe.sequential("issue comment cancel routes", () => {
       expect.objectContaining({ afterTombstone: expect.any(Function) }),
     );
     expect(mockIssueReferenceService.syncComment).toHaveBeenCalledWith("comment-1", "tx");
-    expect(mockExternalObjectService.syncCommentSafely).toHaveBeenCalledWith("comment-1", "tx");
+    expect(mockExternalObjectService.syncCommentSafely).toHaveBeenCalledWith("comment-1", companyId, "tx");
     expect(mockDocumentAnnotationService.cleanupForIssueCommentDeletion).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       "comment-1",
@@ -389,7 +395,7 @@ describe.sequential("issue comment cancel routes", () => {
       "tx",
     );
     expect(mockIssueReferenceService.deleteCommentSource).toHaveBeenCalledWith("annotation-comment-1", "tx");
-    expect(mockExternalObjectService.syncCommentSafely).toHaveBeenCalledWith("annotation-comment-1", "tx");
+    expect(mockExternalObjectService.syncCommentSafely).toHaveBeenCalledWith("annotation-comment-1", companyId, "tx");
     const deletedActivity = mockLogActivity.mock.calls.find((call) => call[1]?.action === "issue.comment_deleted")?.[1];
     expect(deletedActivity).toEqual(expect.objectContaining({
       action: "issue.comment_deleted",

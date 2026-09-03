@@ -11,6 +11,24 @@ vi.mock("acpx/runtime", () => ({
   isAcpRuntimeError: vi.fn(() => false),
 }));
 
+// This file fully mocks the service layer (mockAgentService,
+// mockAccessService, etc. below) -- it exercises route wiring, not real DB
+// company-scope enforcement. The `db` this file's createApp() passes to
+// agentRoutes() is createDbStub(), a plain fake, not a real pool, so
+// company-scope.ts's real `runInCompanyScope` -- which reserves a physical
+// connection via `rawDb.$client.reserve()` -- fails here (see 2e91a693).
+// Mock it to populate the same AsyncLocalStorage scope directly with the
+// fake db (no reservation).
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 
@@ -1356,9 +1374,11 @@ describe.sequential("agent permission routes", () => {
       ...baseAgent,
       status: "idle",
     };
-    // First getById (getAccessibleAgent) sees the pending agent; the second
+    // The first two getById calls (scopeFromAgentParam's company-scope
+    // lookup, then getAccessibleAgent) see the pending agent; the third
     // (after the approval resolves) sees the activated agent.
     mockAgentService.getById
+      .mockResolvedValueOnce(pendingAgent)
       .mockResolvedValueOnce(pendingAgent)
       .mockResolvedValue(approvedAgent);
     mockApprovalService.findOpenHireApprovalForAgent.mockResolvedValue({
@@ -1404,9 +1424,12 @@ describe.sequential("agent permission routes", () => {
       ...baseAgent,
       status: "terminated",
     };
-    // getAccessibleAgent sees the pending agent; after the rejection resolves
-    // (which terminates internally) the route re-reads the terminated agent.
+    // The first two getById calls (scopeFromAgentParam's company-scope
+    // lookup, then getAccessibleAgent) see the pending agent; after the
+    // rejection resolves (which terminates internally) the route re-reads
+    // the terminated agent.
     mockAgentService.getById
+      .mockResolvedValueOnce(pendingAgent)
       .mockResolvedValueOnce(pendingAgent)
       .mockResolvedValue(terminatedAgent);
     mockApprovalService.findOpenHireApprovalForAgent.mockResolvedValue({

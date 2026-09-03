@@ -1,6 +1,6 @@
 import { and, asc, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { documentRevisions, documents, issueDocuments, issues } from "@paperclipai/db";
+import { documentRevisions, documents, issueDocuments, issues, withCompanyScope } from "@paperclipai/db";
 import { isSystemIssueDocumentKey, issueDocumentKeySchema } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 
@@ -114,9 +114,22 @@ const issueDocumentSelect = {
   updatedAt: documents.updatedAt,
 };
 
-export function documentService(db: Db) {
+export function documentService(db: Db, options: { rawDb?: Db } = {}) {
+  // DUR-379 (DUR-277 Wave 5b): see the matching comment in
+  // services/issues.ts -- rawDb defaults to db for every unmigrated caller,
+  // a no-op there.
+  const rawDb = options.rawDb ?? db;
   const filterSystemDocuments = <T extends { key: string }>(rows: T[], includeSystem: boolean) =>
     includeSystem ? rows : rows.filter((row) => !isSystemIssueDocumentKey(row.key));
+
+  async function companyIdForIssue(issueId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
 
   return {
     getIssueDocumentPayload: async (
@@ -225,7 +238,7 @@ export function documentService(db: Db) {
       const maxAttempts = input.lockedDocumentStrategy === "create_new_document" ? 3 : 1;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         try {
-          return await db.transaction(async (tx) => {
+          return await withCompanyScope(rawDb, issue.companyId, async (tx) => {
           const now = new Date();
           const existing = await tx
             .select({
@@ -526,7 +539,9 @@ export function documentService(db: Db) {
       createdByUserId?: string | null;
     }) => {
       const key = normalizeDocumentKey(input.key);
-      return db.transaction(async (tx) => {
+      const companyId = await companyIdForIssue(input.issueId);
+      if (!companyId) throw notFound("Document not found");
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
           .from(issueDocuments)
@@ -626,7 +641,9 @@ export function documentService(db: Db) {
       lockedByUserId?: string | null;
     }) => {
       const key = normalizeDocumentKey(input.key);
-      return db.transaction(async (tx) => {
+      const companyId = await companyIdForIssue(input.issueId);
+      if (!companyId) throw notFound("Document not found");
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
           .from(issueDocuments)
@@ -673,7 +690,9 @@ export function documentService(db: Db) {
 
     unlockIssueDocument: async (issueId: string, rawKey: string) => {
       const key = normalizeDocumentKey(rawKey);
-      return db.transaction(async (tx) => {
+      const companyId = await companyIdForIssue(issueId);
+      if (!companyId) throw notFound("Document not found");
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
           .from(issueDocuments)
@@ -720,7 +739,9 @@ export function documentService(db: Db) {
 
     deleteIssueDocument: async (issueId: string, rawKey: string) => {
       const key = normalizeDocumentKey(rawKey);
-      return db.transaction(async (tx) => {
+      const companyId = await companyIdForIssue(issueId);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
           .from(issueDocuments)
