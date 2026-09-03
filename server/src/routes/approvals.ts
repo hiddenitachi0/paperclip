@@ -565,6 +565,100 @@ function stripUntrustedMergeCommitSha(payload: Record<string, unknown>) {
   if (payload.kind === "merge_pr") delete payload.mergeCommitSha;
 }
 
+function parseOwnerSlashRepo(repo: unknown): { owner: string; name: string } | null {
+  if (typeof repo !== "string") return null;
+  const [owner, rawName] = repo.split("/");
+  if (!owner || !rawName) return null;
+  return { owner, name: rawName.replace(/\.git$/i, "") };
+}
+
+async function resolveProjectIdForIssues(db: Db, issueIds: string[]): Promise<string | null> {
+  for (const issueId of issueIds) {
+    const row = await db
+      .select({ projectId: issues.projectId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    if (row?.projectId) return row.projectId;
+  }
+  return null;
+}
+
+async function resolveProjectPrimaryRepo(
+  db: Db,
+  companyId: string,
+  projectId: string,
+): Promise<{ owner: string; name: string } | null> {
+  const row = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(
+      and(
+        eq(projectWorkspaces.projectId, projectId),
+        eq(projectWorkspaces.companyId, companyId),
+        eq(projectWorkspaces.isPrimary, true),
+      ),
+    )
+    .then((rows) => rows[0] ?? null);
+  return parseGitHubRepoFromUrl(row?.repoUrl);
+}
+
+/**
+ * DUR-252 security review finding #1: `payload.repo`/`payload.prNumber` on a `kind:"merge_pr"`
+ * approval are caller-supplied and, before this, never cross-checked against the project's own
+ * registered GitHub repo anywhere in the pipeline -- `merge-deploy-visibility.ts` hits whatever
+ * repo the payload names directly to verify a PR merged. Only rejects on a *proven* mismatch
+ * (both the claimed repo and the project's registered repo resolve, and they disagree) -- an
+ * unresolvable claim or project is let through unchanged, the same fail-open-on-unknown posture
+ * `appendMergeConsequenceSentence` above already takes, since this is a filing-time UX/integrity
+ * check, not the fail-closed ancestry gate in deploy-carried-issues.ts.
+ *
+ * This alone does not close the finding's full misuse scenario (an attacker can still cite an
+ * unrelated already-merged PR *within the correct repo*) -- see `originalIssueIds` below, which
+ * is what actually anchors an approval to the issue(s) it was filed for regardless of repo.
+ */
+async function assertMergePrRepoMatchesProject(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  payload: Record<string, unknown>,
+) {
+  if (payload.kind !== "merge_pr") return;
+  const claimed = parseOwnerSlashRepo(payload.repo);
+  if (!claimed) return;
+  const projectId = await resolveProjectIdForIssues(db, issueIds);
+  if (!projectId) return;
+  const registered = await resolveProjectPrimaryRepo(db, companyId, projectId);
+  if (!registered) return;
+  if (
+    claimed.owner.toLowerCase() !== registered.owner.toLowerCase() ||
+    claimed.name.toLowerCase() !== registered.name.toLowerCase()
+  ) {
+    throw unprocessable(
+      `"${payload.repo}" does not match this project's registered GitHub repository ` +
+        `(${registered.owner}/${registered.name}) -- a merge_pr approval must reference the project's own repo.`,
+      { claimedRepo: payload.repo, registeredRepo: `${registered.owner}/${registered.name}` },
+    );
+  }
+}
+
+/**
+ * DUR-252 security review finding: the ONLY thing anchoring a `merge_pr` approval to a
+ * particular issue, once approved, is the mutable `issueApprovals` link table -- and
+ * `assertCanManageIssueApprovalLinks` lets whichever agent requested an approval relink it to
+ * ANY issue in the company at any later time. `deploy-carried-issues.ts`'s sweep trusts that
+ * link alone to auto-close an issue with zero further authorization check. Stamping the issue
+ * id(s) an approval was actually filed for, once, at creation, and never letting the request
+ * body overwrite it afterward (mirrors `stripUntrustedMergeCommitSha`'s "only one code path may
+ * ever write this" pattern) gives `listCarriedCandidateIssues` an immutable ground truth to
+ * check a candidate issue against instead of trusting the link table by itself.
+ */
+function stampOriginalIssueIds(payload: Record<string, unknown>, issueIds: string[]) {
+  if (payload.kind !== "merge_pr") return;
+  delete payload.originalIssueIds;
+  payload.originalIssueIds = issueIds;
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
@@ -575,6 +669,8 @@ async function normalizeRequestBoardApprovalPayload(
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   appendToolGrantCapabilitySummary(payload);
   stripUntrustedMergeCommitSha(payload);
+  await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
+  stampOriginalIssueIds(payload, issueIds);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
   payload.title = formatApprovalTitle(projectLabel, payload.title);
@@ -1289,6 +1385,21 @@ export function approvalRoutes(
       // DUR-237: resubmit's payload is just as caller-controlled as create's -- see
       // stripUntrustedMergeCommitSha's docblock for why this can never come from the request body.
       stripUntrustedMergeCommitSha(normalizedPayload);
+      if (normalizedPayload.kind === "merge_pr") {
+        // DUR-252: resubmit is exactly as caller-controlled as create -- re-validate any new
+        // `repo` claim, and, critically, never let resubmit overwrite `originalIssueIds` with
+        // anything but what creation already anchored (stampOriginalIssueIds ignores its
+        // issueIds argument's provenance and always wins, so feeding it the EXISTING persisted
+        // value here rather than re-deriving from the current, mutable issueApprovals links is
+        // what keeps this immutable across a relink).
+        const existingOriginalIssueIds = (existing.payload as Record<string, unknown> | null)
+          ?.originalIssueIds;
+        const anchorIssueIds = Array.isArray(existingOriginalIssueIds)
+          ? existingOriginalIssueIds.filter((value): value is string => typeof value === "string")
+          : [];
+        await assertMergePrRepoMatchesProject(db, existing.companyId, anchorIssueIds, normalizedPayload);
+        stampOriginalIssueIds(normalizedPayload, anchorIssueIds);
+      }
     }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
       // Re-verify the boss/report relationship still holds -- it may have

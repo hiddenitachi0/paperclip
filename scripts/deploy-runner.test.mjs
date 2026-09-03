@@ -848,7 +848,10 @@ test("DUR-237: a successful deploy also records the deployed commit as a structu
     writeFileSync(path.join(targetPath, "f.txt"), "A");
     g(["add", "f.txt"]);
     g(["commit", "--quiet", "-m", "A"]);
-    const expectedCommit = g(["rev-parse", "--short", "HEAD"]);
+    // DUR-420: deploy-runner.sh logs `--short=12`, not git's 7-char default -- match it here so
+    // this asserts against what the script actually produces (see commitsMatch()'s matching
+    // 12-char minimum in deploy-completion-gate.ts for the full threat model this closes).
+    const expectedCommit = g(["rev-parse", "--short=12", "HEAD"]);
 
     const project = {
       id: "proj-1",
