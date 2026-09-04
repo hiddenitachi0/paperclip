@@ -209,7 +209,11 @@ export function redactKnownLeakedSecretPatterns(input: string): string {
   return output;
 }
 
-function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
+// Exported (DUR-372) so callers with their own JSON-shaped value to scrub --
+// e.g. workspace_operations.metadata in workspace-operations.ts -- can reuse
+// the identical deep-walk instead of only having access to the
+// heartbeat_runs-shaped redactHeartbeatRunPatchSecrets below.
+export function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
   if (typeof value === "string") return redactKnownLeakedSecretPatterns(value);
   if (Array.isArray(value)) return value.map(redactKnownLeakedSecretPatternsDeep);
   if (isPlainObject(value)) {
