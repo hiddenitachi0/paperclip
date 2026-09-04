@@ -54,6 +54,7 @@ diagnostics/
 # deploy-runner.sh local runtime state (default paths, see scripts/deploy-runner.sh)
 /.deploy-runner-processed
 /deploy-runner.log
+/deploy-failure-logs/
 
 # Playwright
 tests/e2e/test-results/
