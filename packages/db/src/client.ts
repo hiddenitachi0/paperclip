@@ -5,6 +5,11 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
+import {
+  createUnscopedTenantAccessDebugHook,
+  isUnscopedTenantAccessLoggingEnabled,
+  loadTenantTableNames,
+} from "./unscoped-tenant-access-log.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
@@ -71,7 +76,21 @@ export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
 // server itself should pass a distinct applicationName so they show up
 // under their own identity.
 export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_APP_APPLICATION_NAME) {
-  const sql = postgres(url, { connection: { application_name: applicationName } });
+  // DUR-304: opt-in (env-gated, see isUnscopedTenantAccessLoggingEnabled)
+  // instrumentation for the RLS transition -- off by default so normal
+  // operation never pays postgres.js's per-query debug-mode overhead.
+  const unscopedAccessHook = isUnscopedTenantAccessLoggingEnabled()
+    ? createUnscopedTenantAccessDebugHook(applicationName)
+    : null;
+  const sql = postgres(url, {
+    connection: { application_name: applicationName },
+    ...(unscopedAccessHook ? { debug: unscopedAccessHook.debug } : {}),
+  });
+  if (unscopedAccessHook) {
+    void loadTenantTableNames(sql)
+      .then((tableNames) => unscopedAccessHook.setTenantTables(tableNames))
+      .catch(() => {});
+  }
   return drizzlePg(sql, { schema });
 }
 
