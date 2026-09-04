@@ -42,7 +42,10 @@ import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-r
  * an `external_service` monitor watching deploy-runner) until a deploy completes.
  */
 
-const DEPLOY_SUCCESS_MARKER = "is live and healthy";
+// Exported for deploy-carried-issues.ts (DUR-238), which needs the same "did deploy-runner
+// record this commit as live" primitives to sweep every OTHER issue a completed deploy carries,
+// not just answer the narrower "is THIS issue's own gate satisfied" question below.
+export const DEPLOY_SUCCESS_MARKER = "is live and healthy";
 
 export function approvalPayloadKind(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
@@ -50,13 +53,13 @@ export function approvalPayloadKind(payload: unknown): string | null {
   return typeof kind === "string" ? kind : null;
 }
 
-function approvalPayloadBase(payload: unknown): string | null {
+export function approvalPayloadBase(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const base = (payload as Record<string, unknown>).base;
   return typeof base === "string" ? base : null;
 }
 
-function approvalPayloadProjectId(payload: unknown): string | null {
+export function approvalPayloadProjectId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const projectId = (payload as Record<string, unknown>).projectId;
   return typeof projectId === "string" ? projectId : null;
@@ -65,10 +68,21 @@ function approvalPayloadProjectId(payload: unknown): string | null {
 // DUR-237: the merge_pr approval's own merge commit sha, backfilled asynchronously onto
 // `payload.mergeCommitSha` by merge-deploy-visibility.ts once it confirms via GitHub that the PR
 // actually merged. Undefined until that check has run (or if it never resolved to a merge).
-function approvalPayloadMergeCommitSha(payload: unknown): string | null {
+export function approvalPayloadMergeCommitSha(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const sha = (payload as Record<string, unknown>).mergeCommitSha;
   return typeof sha === "string" && sha.length >= 7 ? sha : null;
+}
+
+// DUR-252: the issue id(s) a `merge_pr` approval was actually filed for, stamped once at
+// creation (routes/approvals.ts's stampOriginalIssueIds) and never caller-writable afterward.
+// Empty for a payload with no such field (predates this fix, or not a merge_pr payload) --
+// callers must treat that the same as "proven not to match", never as "unknown, allow anyway".
+export function approvalPayloadOriginalIssueIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const ids = (payload as Record<string, unknown>).originalIssueIds;
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id): id is string => typeof id === "string");
 }
 
 const COMMIT_IN_BODY = /\bcommit ([0-9a-f]{7,40})\b/i;
@@ -77,18 +91,35 @@ const COMMIT_IN_BODY = /\bcommit ([0-9a-f]{7,40})\b/i;
 // outcome (DUR-152) or, after DUR-237's deploy-runner.sh change, a fresh success. Older success
 // entries only ever wrote the commit into the free-text body ("... commit abc1234 is live and
 // healthy ...") -- fall back to parsing that so this doesn't only work going forward.
-function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | null {
+export function extractDeployedCommit(entry: DeployRunnerStatusEntry): string | null {
   if (entry.commit) return entry.commit;
   const match = entry.body.match(COMMIT_IN_BODY);
   return match ? match[1] : null;
 }
 
-// Both sides may be a short or full sha (deploy-runner.sh logs `git rev-parse --short HEAD`;
+// Both sides may be a short or full sha (deploy-runner.sh logs `git rev-parse --short=12 HEAD`;
 // GitHub's API returns the full 40-char sha) -- treat them as the same commit when one is a
-// prefix of the other, requiring at least 7 hex chars so this can't degrade into a near-empty-
-// string match.
-function commitsMatch(a: string | null, b: string | null): boolean {
-  if (!a || !b || a.length < 7 || b.length < 7) return false;
+// prefix of the other.
+//
+// DUR-420 security review finding: a 7-char minimum (the old threshold, matching git's
+// pre-DUR-420 default `--short` length) is only ~2^28 possible prefixes -- a few CPU-seconds
+// of local grinding (varying a commit's trailer/timestamp to change its hash) is enough for an
+// attacker to produce a commit whose full sha happens to share its first 7 hex chars with some
+// other, unrelated commit that is about to (or already did) deploy. Both call sites of this
+// function compare an attacker-influenceable full sha (a merge_pr approval's own
+// `mergeCommitSha`, backfilled from the attacker's real merged PR) against a deployed-commit
+// value read off deploy-runner's status log, so a collision here would let an issue whose code
+// never actually shipped get treated as "carried"/"already live" by coincidence alone. 12 hex
+// chars (~2^48 possibilities) raises grinding cost from feasible to effectively infeasible;
+// deploy-runner.sh was widened to log `--short=12` to match (see its `after_commit`/
+// `before_commit` comments) so this isn't reducible to "the short side is only ever 7 chars
+// long anyway". A status-log entry logged before that change (still short-7) now simply never
+// matches here -- fails closed, consistent with every other unproven check in this file, rather
+// than special-casing the legacy length back open.
+const MIN_COMMIT_MATCH_LENGTH = 12;
+
+export function commitsMatch(a: string | null, b: string | null): boolean {
+  if (!a || !b || a.length < MIN_COMMIT_MATCH_LENGTH || b.length < MIN_COMMIT_MATCH_LENGTH) return false;
   const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
   return longer.toLowerCase().startsWith(shorter.toLowerCase());
 }
@@ -174,7 +205,15 @@ export async function evaluateDeployCompletionDoneGate(
       approval.type === "request_board_approval" &&
       approval.status === "approved" &&
       approvalPayloadKind(approval.payload) === "merge_pr" &&
-      approvalPayloadBase(approval.payload) === branches.deployBranch,
+      approvalPayloadBase(approval.payload) === branches.deployBranch &&
+      // DUR-252: `issueApprovals` is a mutable link table -- an agent that requested a
+      // merge_pr approval may relink it to any issue in the company later, so a linked
+      // approval alone is not proof it was filed for THIS issue. `originalIssueIds` is
+      // stamped once at creation and never caller-writable after (see
+      // routes/approvals.ts's stampOriginalIssueIds); an approval with no such field at all
+      // predates this fix and is treated as unproven, same fail-closed posture as
+      // deploy-carried-issues.ts's identical check.
+      approvalPayloadOriginalIssueIds(approval.payload).includes(input.issue.id),
   );
   // This issue's completing action was never a merge into the declared deploy branch — the
   // acceptance criterion "do not block issues that never touch a deploy branch" applies.
