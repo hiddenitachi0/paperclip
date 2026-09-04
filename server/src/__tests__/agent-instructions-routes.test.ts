@@ -2,6 +2,31 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// This file fully mocks the service layer (mockAgentService,
+// mockAgentInstructionsService, etc. below) -- it exercises route wiring,
+// not real DB company-scope enforcement (see the embedded-Postgres
+// agents-wakeup-company-scope.test.ts for that). The `rawDb` these tests
+// pass to agentRoutes() is a plain object/`{}`, not a real pool, so
+// company-scope.ts's real `runInCompanyScope` -- which reserves a physical
+// connection via `rawDb.$client.reserve()` -- fails/hangs here. The
+// companyId-format validation and any `checkAccess` callback in
+// company-scope.ts still run for real: both happen inside companyScope()'s
+// resolver, strictly before runInCompanyScope is ever called, so swapping
+// out only the connection-reservation step below does not weaken that
+// check. The replacement populates the same AsyncLocalStorage scope
+// createRequestScopedDb(rawDb) reads from, using the test's own `rawDb` as
+// the "scoped" db directly (no reservation), which is exactly what routes
+// here expect createRequestScopedDb(rawDb) to resolve to.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   update: vi.fn(),
@@ -111,7 +136,7 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["c0000001-0000-4000-8000-000000000001"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -152,7 +177,7 @@ async function requestApp(
 function makeAgent() {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "company-1",
+    companyId: "c0000001-0000-4000-8000-000000000001",
     name: "Agent",
     role: "engineer",
     title: "Engineer",
@@ -190,7 +215,7 @@ describe("agent instructions bundle routes", () => {
     }));
     mockAgentInstructionsService.getBundle.mockResolvedValue({
       agentId: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       mode: "managed",
       rootPath: "/tmp/agent-1",
       managedRootPath: "/tmp/agent-1",
@@ -248,7 +273,7 @@ describe("agent instructions bundle routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .get("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle?companyId=company-1"),
+        .get("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle?companyId=c0000001-0000-4000-8000-000000000001"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -263,7 +288,7 @@ describe("agent instructions bundle routes", () => {
 
   it("writes a bundle file and persists compatibility config", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .put("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle/file?companyId=company-1")
+      .put("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle/file?companyId=c0000001-0000-4000-8000-000000000001")
       .send({
         path: "AGENTS.md",
         content: "# Updated Agent\n",
@@ -305,7 +330,7 @@ describe("agent instructions bundle routes", () => {
     });
 
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=company-1")
+      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=c0000001-0000-4000-8000-000000000001")
       .send({
         adapterType: "claude_local",
         adapterConfig: {
@@ -344,7 +369,7 @@ describe("agent instructions bundle routes", () => {
     });
 
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=company-1")
+      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=c0000001-0000-4000-8000-000000000001")
       .send({
         adapterConfig: {
           command: "codex --profile engineer",
@@ -382,7 +407,7 @@ describe("agent instructions bundle routes", () => {
     });
 
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=company-1")
+      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=c0000001-0000-4000-8000-000000000001")
       .send({
         replaceAdapterConfig: true,
         adapterConfig: {

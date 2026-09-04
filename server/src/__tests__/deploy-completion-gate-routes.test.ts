@@ -9,6 +9,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -41,9 +42,9 @@ const mockAccessService = vi.hoisted(() => ({
 // the gate under test (e.g. agent lookups) -- none of it has a projectId, so self-review-gate
 // and the goal-condition judge both no-op for these fixtures without needing their own mocks.
 const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
-  limit: vi.fn(async () => [{ companyId: "company-1", agentId: "agent-1", contextSnapshot: null, permissions: null }]),
+  limit: vi.fn(async () => [{ companyId: "11111111-1111-4111-8111-111111111111", agentId: "agent-1", contextSnapshot: null, permissions: null }]),
   then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
-    Promise.resolve([{ companyId: "company-1", agentId: "agent-1", contextSnapshot: null, permissions: null }]).then(
+    Promise.resolve([{ companyId: "11111111-1111-4111-8111-111111111111", agentId: "agent-1", contextSnapshot: null, permissions: null }]).then(
       onFulfilled,
       onRejected,
     ),
@@ -81,14 +82,14 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: "11111111-1111-4111-8111-111111111111", attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => ({
-      getById: vi.fn(async (agentId: string) => ({ id: agentId, companyId: "company-1", permissions: null })),
+      getById: vi.fn(async (agentId: string) => ({ id: agentId, companyId: "11111111-1111-4111-8111-111111111111", permissions: null })),
       resolveByReference: vi.fn(async (_companyId: string, reference: string) => ({
         ambiguous: false,
-        agent: { id: reference, companyId: "company-1", status: "idle", orgChainHealth: { status: "healthy" } },
+        agent: { id: reference, companyId: "11111111-1111-4111-8111-111111111111", status: "idle", orgChainHealth: { status: "healthy" } },
       })),
     }),
     documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
@@ -106,7 +107,7 @@ function registerModuleMocks() {
         id: "instance-settings-1",
         general: { censorUsernameInLogs: false, feedbackDataSharingPreference: "prompt" },
       })),
-      listCompanyIds: vi.fn(async () => ["company-1"]),
+      listCompanyIds: vi.fn(async () => ["11111111-1111-4111-8111-111111111111"]),
     }),
     issueApprovalService: () => mockIssueApprovalService,
     issueReferenceService: () => ({
@@ -144,10 +145,10 @@ async function createApp(actor?: TestActor) {
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).actor =
-      actor ?? { type: "board", userId: "local-board", companyIds: ["company-1"], source: "local_implicit", isInstanceAdmin: false };
+      actor ?? { type: "board", userId: "local-board", companyIds: ["11111111-1111-4111-8111-111111111111"], source: "local_implicit", isInstanceAdmin: false };
     next();
   });
-  app.use("/api", issueRoutes(mockDb as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(mockDb) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -158,7 +159,7 @@ const AGENT_ID = "33333333-3333-4333-8333-333333333333";
 function baseIssue(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: ISSUE_ID,
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     status: "in_review",
     assigneeAgentId: AGENT_ID,
     assigneeUserId: null,
@@ -171,14 +172,18 @@ function baseIssue(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-const AGENT_ACTOR: TestActor = { type: "agent", agentId: AGENT_ID, companyId: "company-1", runId: "run-1" };
+const AGENT_ACTOR: TestActor = { type: "agent", agentId: AGENT_ID, companyId: "11111111-1111-4111-8111-111111111111", runId: "run-1" };
 
 describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
   // Dynamically importing routes/issues.ts (a very large file) after vi.resetModules() pays a
   // real esbuild transform cost on the first test that hits it -- the same pre-existing
   // characteristic already present in issue-execution-policy-routes.test.ts (unrelated to this
   // change; reproduces there too when that file is run standalone). Default 5s is too tight.
-  vi.setConfig({ testTimeout: 20000 });
+  // DUR-379: now that this file's route also goes through company-scope's real
+  // reserve/set-claim/reset/release sequence (even against the fake connection stub), the
+  // first test's cold-start budget got tighter still -- 20s was already right at the edge and
+  // now intermittently trips, so this heads further up front.
+  vi.setConfig({ testTimeout: 45000 });
 
   beforeEach(() => {
     vi.resetModules();
@@ -223,7 +228,12 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     mockIssueService.getById.mockResolvedValue(issue);
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
     ]);
 
     const res = await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
@@ -244,14 +254,19 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     }));
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
       { id: "deploy-1", type: "request_board_approval", status: "approved", payload: { kind: "deploy", projectId: "project-1" } },
     ]);
     mockReadDeployRunnerStatus.mockReturnValue([
       {
         ts: "t",
         approvalId: "deploy-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         commentDelivered: true,
         body: "Deployed to /root/paperclip -- commit abc123 is live and healthy (health check: http://x).",
       },
@@ -268,14 +283,19 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     mockIssueService.getById.mockResolvedValue(issue);
     mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master", projectId: "project-1" });
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
-      { id: "merge-1", type: "request_board_approval", status: "approved", payload: { kind: "merge_pr", base: "custom" } },
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
       { id: "deploy-other-project", type: "request_board_approval", status: "approved", payload: { kind: "deploy", projectId: "project-2" } },
     ]);
     mockReadDeployRunnerStatus.mockReturnValue([
       {
         ts: "t",
         approvalId: "deploy-other-project",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         commentDelivered: true,
         body: "Deployed to /root/paperclip -- commit abc123 is live and healthy (health check: http://x).",
       },

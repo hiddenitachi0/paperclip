@@ -965,6 +965,8 @@ export type {
   PluginWebhookDeliveryRecord,
   QuotaWindow,
   ProviderQuotaResult,
+  GoalAdoptionSnapshot,
+  GoalAdoptionTrendPoint,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES } from "./types/index.js";
 export { agentAvatarUrl } from "./types/index.js";
@@ -1373,6 +1375,7 @@ export {
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -1386,6 +1389,7 @@ export {
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
+  type FeatureLaunchRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,

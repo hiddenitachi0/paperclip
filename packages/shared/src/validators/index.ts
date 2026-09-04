@@ -518,6 +518,7 @@ export {
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
   type RequestApprovalRevision,
@@ -529,6 +530,7 @@ export {
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
+  type FeatureLaunchRequestPayload,
 } from "./approval.js";
 
 export {

@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
+import { createRequestScopedDb } from "@paperclipai/db";
 import {
   catalogSkillListQuerySchema,
   companySkillCommentCreateSchema,
@@ -26,6 +27,7 @@ import {
 } from "../services/skills-catalog.js";
 import { forbidden } from "../errors.js";
 import { assertAuthenticated, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { getTelemetryClient } from "../telemetry.js";
 
 type SkillTelemetryInput = {
@@ -36,10 +38,16 @@ type SkillTelemetryInput = {
   metadata: Record<string, unknown> | null;
 };
 
-export function companySkillRoutes(db: Db) {
+export function companySkillRoutes(rawDb: Db) {
   const router = Router();
-  const agents = agentService(db);
-  const access = accessService(db);
+  // DUR-394 (DUR-277 Wave 3): this file's own request-scoped instance; rawDb
+  // stays unwrapped for assertCanMutateCompanySkills, which now runs
+  // exclusively as the pre-scope `checkAccess` callback below (see
+  // middleware/company-scope.ts) -- before that, a scope for this request's
+  // companyId is not yet established.
+  const db = createRequestScopedDb(rawDb);
+  const agents = agentService(rawDb);
+  const access = accessService(rawDb);
   const svc = companySkillService(db);
 
   function canCreateSkills(agent: { permissions: Record<string, unknown> | null | undefined }) {
@@ -122,6 +130,16 @@ export function companySkillRoutes(db: Db) {
     throw forbidden("Missing permission: skills:create");
   }
 
+  function scopeFromCompanyParam() {
+    return companyScopeFromParam(rawDb, (req, companyId) => assertCompanyAccess(req, companyId));
+  }
+
+  function scopeFromCompanyParamMutate() {
+    return companyScopeFromParam(rawDb, (req, companyId) => assertCanMutateCompanySkills(req, companyId));
+  }
+
+  // ── Catalog routes: instance-wide, no companyId at all ──────────────────
+
   router.get("/skills/catalog", async (req, res) => {
     assertAuthenticated(req);
     const query = catalogSkillListQuerySchema.parse({
@@ -145,9 +163,10 @@ export function companySkillRoutes(db: Db) {
     res.json(getCatalogSkillOrThrow(catalogRef));
   });
 
-  router.get("/companies/:companyId/skills", async (req, res) => {
+  // ── Company-scoped routes: companyId is always the URL param ────────────
+
+  router.get("/companies/:companyId/skills", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.list(companyId, companySkillListQuerySchema.parse({
       q: firstQueryString(req.query.q),
       sort: firstQueryString(req.query.sort),
@@ -161,16 +180,14 @@ export function companySkillRoutes(db: Db) {
     res.json(result);
   });
 
-  router.get("/companies/:companyId/skills/categories", async (req, res) => {
+  router.get("/companies/:companyId/skills/categories", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     res.json(await svc.categoryCounts(companyId));
   });
 
-  router.get("/companies/:companyId/skills/:skillId", async (req, res) => {
+  router.get("/companies/:companyId/skills/:skillId", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.detail(companyId, skillId, skillActor(req));
     if (!result) {
       res.status(404).json({ error: "Skill not found" });
@@ -179,18 +196,16 @@ export function companySkillRoutes(db: Db) {
     res.json(result);
   });
 
-  router.get("/companies/:companyId/skills/:skillId/versions", async (req, res) => {
+  router.get("/companies/:companyId/skills/:skillId/versions", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    assertCompanyAccess(req, companyId);
     res.json(await svc.listVersions(companyId, skillId));
   });
 
-  router.get("/companies/:companyId/skills/:skillId/versions/:versionId", async (req, res) => {
+  router.get("/companies/:companyId/skills/:skillId/versions/:versionId", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
     const versionId = req.params.versionId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.getVersion(companyId, skillId, versionId);
     if (!result) {
       res.status(404).json({ error: "Skill version not found" });
@@ -201,11 +216,11 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/:skillId/versions",
+    scopeFromCompanyParamMutate(),
     validate(companySkillVersionCreateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.createVersion(companyId, skillId, req.body, skillActor(req));
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -227,10 +242,9 @@ export function companySkillRoutes(db: Db) {
     },
   );
 
-  router.post("/companies/:companyId/skills/:skillId/star", async (req, res) => {
+  router.post("/companies/:companyId/skills/:skillId/star", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.starSkill(companyId, skillId, skillActor(req));
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -247,10 +261,9 @@ export function companySkillRoutes(db: Db) {
     res.json(result);
   });
 
-  router.delete("/companies/:companyId/skills/:skillId/star", async (req, res) => {
+  router.delete("/companies/:companyId/skills/:skillId/star", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.unstarSkill(companyId, skillId, skillActor(req));
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -269,11 +282,11 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/:skillId/fork",
+    scopeFromCompanyParamMutate(),
     validate(companySkillForkSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.forkSkill(companyId, skillId, req.body, skillActor(req));
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -295,20 +308,19 @@ export function companySkillRoutes(db: Db) {
     },
   );
 
-  router.get("/companies/:companyId/skills/:skillId/comments", async (req, res) => {
+  router.get("/companies/:companyId/skills/:skillId/comments", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    assertCompanyAccess(req, companyId);
     res.json(await svc.listComments(companyId, skillId));
   });
 
   router.post(
     "/companies/:companyId/skills/:skillId/comments",
+    scopeFromCompanyParam(),
     validate(companySkillCommentCreateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      assertCompanyAccess(req, companyId);
       const result = await svc.createComment(companyId, skillId, req.body, skillActor(req));
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -328,12 +340,12 @@ export function companySkillRoutes(db: Db) {
 
   router.patch(
     "/companies/:companyId/skills/:skillId/comments/:commentId",
+    scopeFromCompanyParam(),
     validate(companySkillCommentUpdateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
       const commentId = req.params.commentId as string;
-      assertCompanyAccess(req, companyId);
       const result = await svc.updateComment(companyId, skillId, commentId, req.body, skillActor(req));
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -351,11 +363,10 @@ export function companySkillRoutes(db: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/skills/:skillId/comments/:commentId", async (req, res) => {
+  router.delete("/companies/:companyId/skills/:skillId/comments/:commentId", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
     const commentId = req.params.commentId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.deleteComment(companyId, skillId, commentId, skillActor(req));
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -372,10 +383,9 @@ export function companySkillRoutes(db: Db) {
     res.json(result);
   });
 
-  router.get("/companies/:companyId/skills/:skillId/update-status", async (req, res) => {
+  router.get("/companies/:companyId/skills/:skillId/update-status", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    assertCompanyAccess(req, companyId);
     const result = await svc.updateStatus(companyId, skillId);
     if (!result) {
       res.status(404).json({ error: "Skill not found" });
@@ -384,11 +394,10 @@ export function companySkillRoutes(db: Db) {
     res.json(result);
   });
 
-  router.get("/companies/:companyId/skills/:skillId/files", async (req, res) => {
+  router.get("/companies/:companyId/skills/:skillId/files", scopeFromCompanyParam(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
     const relativePath = String(req.query.path ?? "SKILL.md");
-    assertCompanyAccess(req, companyId);
     const result = await svc.readFile(companyId, skillId, relativePath);
     if (!result) {
       res.status(404).json({ error: "Skill not found" });
@@ -399,10 +408,10 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills",
+    scopeFromCompanyParamMutate(),
     validate(companySkillCreateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.createLocalSkill(companyId, req.body, skillActor(req));
 
       const actor = getActorInfo(req);
@@ -427,11 +436,11 @@ export function companySkillRoutes(db: Db) {
 
   router.patch(
     "/companies/:companyId/skills/:skillId",
+    scopeFromCompanyParamMutate(),
     validate(companySkillUpdateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.updateSkill(companyId, skillId, req.body);
 
       const actor = getActorInfo(req);
@@ -457,11 +466,11 @@ export function companySkillRoutes(db: Db) {
 
   router.patch(
     "/companies/:companyId/skills/:skillId/files",
+    scopeFromCompanyParamMutate(),
     validate(companySkillFileUpdateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.updateFile(
         companyId,
         skillId,
@@ -492,10 +501,10 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/import",
+    scopeFromCompanyParamMutate(),
     validate(companySkillImportSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const source = String(req.body.source ?? "");
       const result = await svc.importFromSource(companyId, source);
 
@@ -532,10 +541,10 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/install-catalog",
+    scopeFromCompanyParamMutate(),
     validate(companySkillInstallCatalogSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.installFromCatalog(companyId, req.body);
 
       const actor = getActorInfo(req);
@@ -564,10 +573,10 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/scan-projects",
+    scopeFromCompanyParamMutate(),
     validate(companySkillProjectScanRequestSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.scanProjectWorkspaces(companyId, req.body);
 
       const actor = getActorInfo(req);
@@ -595,10 +604,9 @@ export function companySkillRoutes(db: Db) {
     },
   );
 
-  router.delete("/companies/:companyId/skills/:skillId", async (req, res) => {
+  router.delete("/companies/:companyId/skills/:skillId", scopeFromCompanyParamMutate(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const skillId = req.params.skillId as string;
-    await assertCanMutateCompanySkills(req, companyId);
     const result = await svc.deleteSkill(companyId, skillId);
     if (!result) {
       res.status(404).json({ error: "Skill not found" });
@@ -626,10 +634,10 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/:skillId/audit",
+    scopeFromCompanyParamMutate(),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const result = await svc.auditSkill(companyId, skillId);
       if (!result) {
         res.status(404).json({ error: "Skill not found" });
@@ -661,11 +669,11 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/:skillId/install-update",
+    scopeFromCompanyParamMutate(),
     validate(companySkillInstallUpdateSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const before = await svc.getById(companyId, skillId);
       const result = await svc.installUpdate(companyId, skillId, req.body);
       if (!result) {
@@ -701,11 +709,11 @@ export function companySkillRoutes(db: Db) {
 
   router.post(
     "/companies/:companyId/skills/:skillId/reset",
+    scopeFromCompanyParamMutate(),
     validate(companySkillResetSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const skillId = req.params.skillId as string;
-      await assertCanMutateCompanySkills(req, companyId);
       const before = await svc.getById(companyId, skillId);
       const result = await svc.resetSkill(companyId, skillId, req.body);
       if (!result) {

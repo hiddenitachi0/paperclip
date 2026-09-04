@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { projectRoutes } from "../routes/projects.js";
 import { issueRoutes } from "../routes/issues.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockProjectService = vi.hoisted(() => ({
   create: vi.fn(),
@@ -137,7 +138,7 @@ function createProjectApp() {
 
 function createIssueApp() {
   issueServer ??= buildApp((expressApp) => {
-    expressApp.use("/api", issueRoutes({} as any, {} as any));
+    expressApp.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
   }).listen(0);
   return issueServer;
 }
@@ -177,7 +178,7 @@ describe.sequential("execution environment route guards", () => {
     mockIssueService.assertCheckoutOwner.mockReset();
     mockCompanyService.getById.mockReset();
     mockCompanyService.getById.mockResolvedValue({
-      id: "company-1",
+      id: "22222222-2222-4222-8222-222222222222",
       attachmentMaxBytes: 10 * 1024 * 1024,
     });
     mockEnvironmentService.getById.mockReset();
@@ -195,20 +196,20 @@ describe.sequential("execution environment route guards", () => {
   it("accepts sandbox environments on project create", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "sandbox",
       config: { provider: "fake-plugin" },
     });
     mockProjectService.create.mockResolvedValue({
       id: "project-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       name: "Sandboxed Project",
       status: "backlog",
     });
     const app = createProjectApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/projects")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/projects")
       .send({
         name: "Sandboxed Project",
         executionWorkspacePolicy: {
@@ -224,20 +225,20 @@ describe.sequential("execution environment route guards", () => {
   it("accepts sandbox environments on project update", async () => {
     mockProjectService.getById.mockResolvedValue({
       id: "project-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       name: "Sandboxed Project",
       status: "backlog",
       archivedAt: null,
     });
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "sandbox",
       config: { provider: "fake-plugin" },
     });
     mockProjectService.update.mockResolvedValue({
       id: "project-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       name: "Sandboxed Project",
       status: "backlog",
     });
@@ -259,13 +260,13 @@ describe.sequential("execution environment route guards", () => {
   it("accepts sandbox environments on issue create", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "sandbox",
       config: { provider: "fake-plugin" },
     });
     mockIssueService.create.mockResolvedValue({
       id: "issue-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       title: "Sandboxed Issue",
       status: "todo",
       identifier: "PAPA-999",
@@ -273,7 +274,7 @@ describe.sequential("execution environment route guards", () => {
     const app = createIssueApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/issues")
       .send({
         title: "Sandboxed Issue",
         executionWorkspaceSettings: {
@@ -288,14 +289,14 @@ describe.sequential("execution environment route guards", () => {
   it("rejects unsupported driver environments on issue create", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "unsupported_driver",
       config: {},
     });
     const app = createIssueApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/issues")
       .send({
         title: "Unsupported Driver Issue",
         executionWorkspaceSettings: {
@@ -311,14 +312,14 @@ describe.sequential("execution environment route guards", () => {
   it("rejects built-in fake sandbox environments on issue create", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "sandbox",
       config: { provider: "fake" },
     });
     const app = createIssueApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/issues")
       .send({
         title: "Fake Sandbox Issue",
         executionWorkspaceSettings: {
@@ -334,13 +335,13 @@ describe.sequential("execution environment route guards", () => {
   it("accepts plugin-backed sandbox environments on issue create", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "sandbox",
       config: { provider: "fake-plugin" },
     });
     mockIssueService.create.mockResolvedValue({
       id: "issue-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       title: "Plugin Sandbox Issue",
       status: "todo",
       identifier: "PAPA-999",
@@ -348,7 +349,7 @@ describe.sequential("execution environment route guards", () => {
     const app = createIssueApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/issues")
       .send({
         title: "Plugin Sandbox Issue",
         executionWorkspaceSettings: {
@@ -361,9 +362,16 @@ describe.sequential("execution environment route guards", () => {
   });
 
   it("accepts sandbox environments on issue update", async () => {
+    // Not "issue-1": scopeFromIssueParam's issue-id lookup middleware
+    // (server/src/routes/issues.ts) dispatches to svc.getByIdentifier (not
+    // svc.getById) for any :id shaped like an issue identifier
+    // (normalizeIssueIdentifier / ISSUE_REFERENCE_IDENTIFIER_RE matches
+    // "issue-1" as "ISSUE-1"), and this file never stubs getByIdentifier --
+    // a UUID-shaped id keeps the lookup on the getById mock below.
+    const updateIssueId = "33333333-3333-4333-8333-333333333333";
     mockIssueService.getById.mockResolvedValue({
-      id: "issue-1",
-      companyId: "company-1",
+      id: updateIssueId,
+      companyId: "22222222-2222-4222-8222-222222222222",
       status: "todo",
       assigneeAgentId: null,
       assigneeUserId: null,
@@ -372,20 +380,20 @@ describe.sequential("execution environment route guards", () => {
     });
     mockEnvironmentService.getById.mockResolvedValue({
       id: sandboxEnvironmentId,
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       driver: "sandbox",
       config: { provider: "fake-plugin" },
     });
     mockIssueService.update.mockResolvedValue({
-      id: "issue-1",
-      companyId: "company-1",
+      id: updateIssueId,
+      companyId: "22222222-2222-4222-8222-222222222222",
       status: "todo",
       identifier: "PAPA-999",
     });
     const app = createIssueApp();
 
     const res = await request(app)
-      .patch("/api/issues/issue-1")
+      .patch(`/api/issues/${updateIssueId}`)
       .send({
         executionWorkspaceSettings: {
           environmentId: sandboxEnvironmentId,
