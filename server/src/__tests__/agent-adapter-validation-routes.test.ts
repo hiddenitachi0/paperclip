@@ -5,6 +5,34 @@ import request from "supertest";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerAdapterModule } from "../adapters/index.js";
 
+// This file fully mocks the service layer (mockAgentService,
+// mockAccessService, etc. below) -- it exercises route wiring and adapter
+// validation, not real DB company-scope enforcement (see the
+// embedded-Postgres agents-wakeup-company-scope.test.ts for that). The
+// `rawDb` this file's createApp() passes to agentRoutes() is a plain fake
+// with select/from/where stubs, not a real pool, so company-scope.ts's real
+// `runInCompanyScope` -- which reserves a physical connection via
+// `rawDb.$client.reserve()` -- fails/hangs here. The companyId-format
+// validation and any `checkAccess` callback in company-scope.ts still run
+// for real: both happen inside companyScope()'s resolver, strictly before
+// runInCompanyScope is ever called, so swapping out only the
+// connection-reservation step below does not weaken that check. The
+// replacement populates the same AsyncLocalStorage scope
+// createRequestScopedDb(rawDb) reads from, using the test's own `rawDb` as
+// the "scoped" db directly (no reservation) -- which matters here in
+// particular because POST /companies/:companyId/agents calls
+// `db.select().from(companies)...` directly (not through a mocked service),
+// so it needs that call to keep resolving to this file's fake db.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const mockAgentService = vi.hoisted(() => ({
   create: vi.fn(),
   getById: vi.fn(),
@@ -140,7 +168,7 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["c0000001-0000-4000-8000-000000000001"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -151,7 +179,7 @@ async function createApp() {
       from: vi.fn(() => ({
         where: vi.fn(async () => [
           {
-            id: "company-1",
+            id: "c0000001-0000-4000-8000-000000000001",
             requireBoardApprovalForNewAgents: false,
           },
         ]),
@@ -222,7 +250,7 @@ describe("agent routes adapter validation", () => {
     }));
     mockAgentService.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
       id: String(input.id ?? "11111111-1111-4111-8111-111111111111"),
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       name: String(input.name ?? "Agent"),
       urlKey: "agent",
       role: String(input.role ?? "general"),
@@ -246,7 +274,7 @@ describe("agent routes adapter validation", () => {
     }));
     mockAgentService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       name: "Codex",
       urlKey: "codex",
       role: "engineer",
@@ -288,7 +316,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "External Agent",
           adapterType: "external_test",
@@ -303,7 +331,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "Codex Agent",
           adapterType: "codex_local",
@@ -357,7 +385,7 @@ describe("agent routes adapter validation", () => {
     const adapterConfig = patch.adapterConfig as Record<string, unknown>;
     const env = adapterConfig.env as Record<string, unknown>;
     expect(env.OPENAI_API_KEY).toBe("sk-test-key");
-    expect(String(env.CODEX_HOME)).toContain(`/companies/company-1/agents/${agentId}/codex-home`);
+    expect(String(env.CODEX_HOME)).toContain(`/companies/c0000001-0000-4000-8000-000000000001/agents/${agentId}/codex-home`);
   });
 
   it("allows codex_local agents to share the host Codex home", async () => {
@@ -365,7 +393,7 @@ describe("agent routes adapter validation", () => {
     const sharedHome = path.join(os.homedir(), ".codex");
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "Shared Codex",
           adapterType: "codex_local",
@@ -388,7 +416,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "Keyed Codex",
           adapterType: "codex_local",
@@ -406,7 +434,7 @@ describe("agent routes adapter validation", () => {
     const adapterConfig = createInput.adapterConfig as Record<string, unknown>;
     const env = adapterConfig.env as Record<string, unknown>;
     expect(env.OPENAI_API_KEY).toBe("sk-test-key");
-    expect(String(env.CODEX_HOME)).toContain(`/companies/company-1/agents/${agentId}/codex-home`);
+    expect(String(env.CODEX_HOME)).toContain(`/companies/c0000001-0000-4000-8000-000000000001/agents/${agentId}/codex-home`);
   });
 
   // DUR-132 item 9: a codex_local agent with mcpServers but no OPENAI_API_KEY
@@ -417,7 +445,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "MCP Codex",
           adapterType: "codex_local",
@@ -432,7 +460,7 @@ describe("agent routes adapter validation", () => {
     const agentId = String(createInput.id);
     const adapterConfig = createInput.adapterConfig as Record<string, unknown>;
     const env = adapterConfig.env as Record<string, unknown> | undefined;
-    expect(String(env?.CODEX_HOME)).toContain(`/companies/company-1/agents/${agentId}/codex-home`);
+    expect(String(env?.CODEX_HOME)).toContain(`/companies/c0000001-0000-4000-8000-000000000001/agents/${agentId}/codex-home`);
   });
 
   // DUR-132 item 6: a literal credential-shaped mcpServers value is not
@@ -443,7 +471,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "Higgsfield Agent",
           adapterType: "claude_local",
@@ -468,7 +496,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "Plain Agent",
           adapterType: "claude_local",
@@ -486,7 +514,7 @@ describe("agent routes adapter validation", () => {
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
       request(baseUrl)
-        .post("/api/companies/company-1/agents")
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
         .send({
           name: "Missing Adapter",
           adapterType: missingAdapterType,

@@ -18,13 +18,14 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_TIMEOUT = 20_000;
 
 const bossAgentId = "11111111-1111-4111-8111-111111111111";
 const reportAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
-const companyId = "company-1";
+const companyId = "22222222-2222-4222-8222-222222222222";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -80,8 +81,16 @@ function registerModuleMocks() {
   }));
 }
 
+// DUR-394: routes under company-scope middleware run their real db.select()
+// calls (e.g. assertApprovalMutationAllowedByRunContext's heartbeatRuns
+// lookup) against createRequestScopedDb(rawDb)'s AsyncLocalStorage-resolved
+// scoped db (a real drizzle instance over withFakeCompanyScopeReserve's fake
+// reserved connection -- see middleware/company-scope.ts), not this
+// select()/from()/where() chain. This suite never needs that lookup to find
+// a matching run, so the default `unsafeRows: []` withFakeCompanyScopeReserve
+// provides is enough -- this chain is kept only in case that changes.
 function createRouteDb() {
-  return {
+  const fakeDb = {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
         where: vi.fn(() => ({
@@ -93,7 +102,8 @@ function createRouteDb() {
       })),
     })),
     insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
-  } as any;
+  };
+  return withFakeCompanyScopeReserve(fakeDb as any);
 }
 
 async function createApp(actor: Record<string, unknown>) {

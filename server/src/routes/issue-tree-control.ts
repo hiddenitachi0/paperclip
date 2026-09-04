@@ -46,7 +46,7 @@ export function issueTreeControlRoutes(rawDb: Db) {
   const issuesSvc = issueService(db);
   const rawIssuesSvc = issueService(rawDb);
   const treeControlSvc = issueTreeControlService(db, rawDb);
-  const heartbeat = heartbeatService(db);
+  const heartbeat = heartbeatService(db, { rawDb });
 
   async function resolveRootIssue(svc: typeof issuesSvc, req: Request) {
     const rootIssueId = req.params.id as string;

@@ -260,10 +260,29 @@ const DECISION_ASK_PATTERN =
 // after normalization. The `u` flag is needed to address the supplement
 // range by code point.
 const INVISIBLE_CHAR_PATTERN =
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\u{E0100}-\u{E01EF}\uFEFF]/gu;
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\u{E0100}-\u{E01EF}\uFEFF]/gu;
 
+// DUR-413: a combining diacritical mark (Unicode general category Mn)
+// inserted between the letters of a covered verb -- e.g. "w" + \u0301 +
+// "ire" -- renders as "ẃire" to a human but is not the literal "wire"
+// text, and NFKC *composes* the sequence into a single precomposed
+// character instead of stripping it, so neither the raw nor the
+// NFKC-normalized string contains the matched word. Decompose first (NFD)
+// so every combining mark -- whether it arrived already split or as a
+// precomposed character -- is broken back out to a base letter plus a
+// stripped mark codepoint, then fold compatibility variants (NFKC) as before.
+// DUR-416: Mn's sibling categories Mc (spacing combining marks, e.g.
+// Devanagari vowel signs) and Me (enclosing marks, e.g. combining enclosing
+// circle) attach to the preceding base letter the same way Mn does and were
+// missed by the Mn-only strip -- widen to \p{M}, the general combining-mark
+// superclass (Mn + Mc + Me), so all three are stripped.
 function normalizeForDecisionScan(text: string): string {
-  return text.normalize("NFKC").replace(INVISIBLE_CHAR_PATTERN, "");
+  return text
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(INVISIBLE_CHAR_PATTERN, "")
+    .normalize("NFKC")
+    .replace(INVISIBLE_CHAR_PATTERN, "");
 }
 
 function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {

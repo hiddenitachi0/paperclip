@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const assigneeAgentId = "22222222-2222-4222-8222-222222222222";
 
@@ -38,14 +39,14 @@ vi.mock("../services/index.js", () => ({
       ambiguous: false,
       agent: {
         id: reference,
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         status: "active",
         orgChainHealth: { status: "healthy" },
       },
     })),
   }),
   companyService: () => ({
-    getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+    getById: vi.fn(async () => ({ id: "11111111-1111-4111-8111-111111111111", attachmentMaxBytes: 10 * 1024 * 1024 })),
   }),
   documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
   documentService: () => ({
@@ -74,7 +75,7 @@ vi.mock("../services/index.js", () => ({
         feedbackDataSharingPreference: "prompt",
       },
     })),
-    listCompanyIds: vi.fn(async () => ["company-1"]),
+    listCompanyIds: vi.fn(async () => ["11111111-1111-4111-8111-111111111111"]),
   }),
   issueApprovalService: () => ({}),
   issueRecoveryActionService: () => ({
@@ -124,13 +125,13 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -144,7 +145,7 @@ function makeIssue(input: {
 }) {
   return {
     id: input.id,
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     identifier: input.id === "child-1" ? "PAP-3701" : "PAP-3700",
     title: input.title,
     description: null,
@@ -167,10 +168,17 @@ function expectClearAssignedStatusValidation(res: request.Response) {
 }
 
 describe("assigned backlog creation contract", () => {
+  // Dynamically importing routes/issues.ts (a very large file) via vi.importActual pays a real
+  // esbuild transform cost the first time this process hits it, and DUR-379's company-scope
+  // wiring adds real reserve/set-claim/reset/release work on top of that for every request --
+  // see the identical rationale in deploy-completion-gate-routes.test.ts. Default 5s is too
+  // tight for that cold path.
+  vi.setConfig({ testTimeout: 30000 });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssueService.getById.mockResolvedValue(makeIssue({
-      id: "parent-1",
+      id: "77777777-7777-4777-8777-777777777777",
       title: "Parent issue",
       status: "blocked",
       assigneeAgentId,
@@ -187,7 +195,7 @@ describe("assigned backlog creation contract", () => {
         id: "child-1",
         title: String(data.title),
         status: String(data.status),
-        parentId: "parent-1",
+        parentId: "77777777-7777-4777-8777-777777777777",
         assigneeAgentId: data.assigneeAgentId as string | null | undefined,
       }),
       parentBlockerAdded: Boolean(data.blockParentUntilDone),
@@ -199,7 +207,7 @@ describe("assigned backlog creation contract", () => {
 
   it("does not silently create a top-level assigned issue as backlog when status is omitted", async () => {
     const res = await request(await createApp())
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
       .send({
         title: "Assigned executable work",
         assigneeAgentId,
@@ -213,7 +221,7 @@ describe("assigned backlog creation contract", () => {
     }
 
     expect(mockIssueService.create).toHaveBeenCalledWith(
-      "company-1",
+      "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
         title: "Assigned executable work",
         assigneeAgentId,
@@ -248,7 +256,7 @@ describe("assigned backlog creation contract", () => {
 
   it("does not let a parent-blocking assigned child become an unwoken backlog leaf by default", async () => {
     const res = await request(await createApp())
-      .post("/api/issues/parent-1/children")
+      .post("/api/issues/77777777-7777-4777-8777-777777777777/children")
       .send({
         title: "Assigned child blocker",
         assigneeAgentId,
@@ -263,7 +271,7 @@ describe("assigned backlog creation contract", () => {
     }
 
     expect(mockIssueService.createChild).toHaveBeenCalledWith(
-      "parent-1",
+      "77777777-7777-4777-8777-777777777777",
       expect.objectContaining({
         title: "Assigned child blocker",
         assigneeAgentId,
@@ -273,7 +281,7 @@ describe("assigned backlog creation contract", () => {
     );
     expect(res.body).toEqual(expect.objectContaining({
       assigneeAgentId,
-      parentId: "parent-1",
+      parentId: "77777777-7777-4777-8777-777777777777",
       status: "todo",
     }));
     expect(mockLogActivity).toHaveBeenCalledWith(
@@ -301,7 +309,7 @@ describe("assigned backlog creation contract", () => {
 
   it("preserves deliberate assigned backlog as parked work without assignment wakeup", async () => {
     const res = await request(await createApp())
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
       .send({
         title: "Parked assigned work",
         assigneeAgentId,
@@ -310,7 +318,7 @@ describe("assigned backlog creation contract", () => {
 
     expect(res.status).toBe(201);
     expect(mockIssueService.create).toHaveBeenCalledWith(
-      "company-1",
+      "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
         title: "Parked assigned work",
         assigneeAgentId,
