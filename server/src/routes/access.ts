@@ -23,11 +23,11 @@ import {
   companies,
   companyLogos,
   companyMemberships,
+  createRequestScopedDb,
   instanceUserRoles,
   invites,
   joinRequests,
   principalPermissionGrants,
-  createRequestScopedDb,
   runInCompanyScope,
   runInCompanyScopeBypass,
   withCompanyScope,
@@ -2606,8 +2606,7 @@ export function accessRoutes(
     inviteResolutionNetwork?: Partial<InviteResolutionNetwork>;
   }
 ) {
-  const router = Router();
-  // DUR-381 (DUR-277 Wave 5b): access.ts has the most genuinely mixed
+  // DUR-381 (DUR-277 Wave 5b/5c): access.ts has the most genuinely mixed
   // category split of any route family in the wave (DUR-277 design doc §1) --
   // board/instance-admin identity routes are category (c) (genuinely
   // instance-wide, no single company), company invite/member/join-request
@@ -2618,6 +2617,7 @@ export function accessRoutes(
   // through the request-scoped proxy, which throws on a missing scope by
   // design (DUR-275 mod #1) rather than silently falling back to raw access.
   const db = createRequestScopedDb(rawDb);
+  const router = Router();
   const access = accessService(db, rawDb);
   const boardAuth = boardAuthService(db);
   const agents = agentService(db);
@@ -2625,10 +2625,22 @@ export function accessRoutes(
     ? { ...defaultInviteResolutionNetwork, ...opts.inviteResolutionNetwork }
     : inviteResolutionNetwork;
 
+  // DUR-379: raw-db counterparts used only by the pre-scope `checkAccess`
+  // callbacks below (assertInstanceAdmin, assertCompanyPermission,
+  // assertCanGenerateOpenClawInvitePrompt) -- these run as
+  // companyScopeFromParam's `checkAccess` argument, i.e. from inside its
+  // resolver, before runInCompanyScope ever establishes an AsyncLocalStorage
+  // scope, so they must never touch the request-scoped `access`/`agents`
+  // above (built on `db`), which throw outside any active scope (DUR-275
+  // mod #1). Never used for anything that ends up serving a company-scoped
+  // route's response.
+  const rawAccess = accessService(rawDb);
+  const rawAgents = agentService(rawDb);
+
   async function assertInstanceAdmin(req: Request) {
     if (req.actor.type !== "board") throw unauthorized();
     if (isLocalImplicit(req)) return;
-    const allowed = await access.isInstanceAdmin(req.actor.userId);
+    const allowed = await rawAccess.isInstanceAdmin(req.actor.userId);
     if (!allowed) throw forbidden("Instance admin required");
   }
 
@@ -2767,6 +2779,10 @@ export function accessRoutes(
     res.json({ claimed: true, userId: claimed.userId });
   });
 
+  // DUR-379 (DUR-277 §1 category c): cli-auth/board-api-keys/board-delegate-
+  // tokens are instance-wide board-credential flows, not company data --
+  // deliberately left unscoped (raw db/services), not wired through
+  // companyScope. `boardAuth` above is the raw (rawDb-backed) instance.
   router.post(
     "/cli-auth/challenges",
     companyScopeBypassForRoute(rawDb, "CLI device-auth challenge creation: pre-auth, no company resolved yet"),
@@ -2844,7 +2860,7 @@ export function accessRoutes(
           boardApiKeyId: approved.challenge.boardApiKeyId,
         });
         for (const companyId of companyIds) {
-          await logActivity(db, {
+          await logActivity(rawDb, {
             companyId,
             actorType: "user",
             actorId: userId,
@@ -2935,7 +2951,7 @@ export function accessRoutes(
         boardApiKeyId: key.id,
       });
       for (const companyId of companyIds) {
-        await logActivity(db, {
+        await logActivity(rawDb, {
           companyId,
           actorType: "user",
           actorId: req.actor.userId,
@@ -2973,7 +2989,7 @@ export function accessRoutes(
       boardApiKeyId: key.id,
     });
     for (const companyId of companyIds) {
-      await logActivity(db, {
+      await logActivity(rawDb, {
         companyId,
         actorType: "user",
         actorId: req.actor.userId,
@@ -3027,7 +3043,7 @@ export function accessRoutes(
         userId: req.actor.userId,
       });
       for (const companyId of companyIds) {
-        await logActivity(db, {
+        await logActivity(rawDb, {
           companyId,
           actorType: "user",
           actorId: req.actor.userId,
@@ -3066,7 +3082,7 @@ export function accessRoutes(
       userId: req.actor.userId,
     });
     for (const companyId of companyIds) {
-      await logActivity(db, {
+      await logActivity(rawDb, {
         companyId,
         actorType: "user",
         actorId: req.actor.userId,
@@ -3097,7 +3113,7 @@ export function accessRoutes(
       boardApiKeyId: key.id,
     });
     for (const companyId of companyIds) {
-      await logActivity(db, {
+      await logActivity(rawDb, {
         companyId,
         actorType: "user",
         actorId: key.userId,
@@ -3113,6 +3129,12 @@ export function accessRoutes(
     res.json({ revoked: true, keyId: key.id });
   });
 
+  // DUR-379: both of the following are used exclusively as
+  // companyScopeFromParam's `checkAccess` argument now, which runs from
+  // inside the resolver -- i.e. before any company scope is established --
+  // so they must use the raw (unscoped) `rawAccess`/`rawAgents`, not the
+  // request-scoped `access`/`agents`, which would throw outside any active
+  // AsyncLocalStorage scope.
   async function assertCompanyPermission(
     req: Request,
     companyId: string,
@@ -3121,7 +3143,7 @@ export function accessRoutes(
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "agent") {
       if (!req.actor.agentId) throw forbidden();
-      const allowed = await access.hasPermission(
+      const allowed = await rawAccess.hasPermission(
         companyId,
         "agent",
         req.actor.agentId,
@@ -3132,7 +3154,7 @@ export function accessRoutes(
     }
     if (req.actor.type !== "board") throw unauthorized();
     if (isLocalImplicit(req)) return;
-    const allowed = await access.canUser(
+    const allowed = await rawAccess.canUser(
       companyId,
       req.actor.userId,
       permissionKey
@@ -3147,7 +3169,7 @@ export function accessRoutes(
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "agent") {
       if (!req.actor.agentId) throw forbidden("Agent authentication required");
-      const actorAgent = await agents.getById(req.actor.agentId);
+      const actorAgent = await rawAgents.getById(req.actor.agentId);
       if (!actorAgent || actorAgent.companyId !== companyId) {
         throw forbidden("Agent key cannot access another company");
       }
@@ -3162,7 +3184,7 @@ export function accessRoutes(
     }
     if (req.actor.type !== "board") throw unauthorized();
     if (isLocalImplicit(req)) return;
-    const allowed = await access.canUser(companyId, req.actor.userId, "users:invite");
+    const allowed = await rawAccess.canUser(companyId, req.actor.userId, "users:invite");
     if (!allowed) throw forbidden("Permission denied");
   }
 
@@ -3753,6 +3775,11 @@ export function accessRoutes(
       const token = (req.params.token as string).trim();
       if (!token) throw notFound("Invite not found");
 
+      // DUR-381: scopeFromInviteLookup (above) already resolved this same
+      // token to an invite and established company scope (real, or bypass
+      // for a company-less bootstrap invite) before this handler ever runs
+      // -- so this lookup, and everything below, goes through the
+      // request-scoped `db`, not a raw connection.
       const invite = await db
         .select()
         .from(invites)
@@ -3821,6 +3848,11 @@ export function accessRoutes(
       const requestType = req.body.requestType as "human" | "agent";
       const companyId = invite.companyId;
       if (!companyId) throw conflict("Invite is missing company scope");
+
+      // DUR-381: company scope for this companyId was already established
+      // by scopeFromInviteLookup (above) before this handler ran -- no
+      // second runInCompanyScope needed here (nesting it would just reserve
+      // a redundant second pooled connection for the rest of this request).
       if (
         invite.allowedJoinTypes !== "both" &&
         invite.allowedJoinTypes !== requestType
@@ -4245,6 +4277,11 @@ export function accessRoutes(
     ),
     async (req, res) => {
     const id = req.params.inviteId as string;
+    // DUR-381: scopeFromInviteLookup (above) already resolved this same
+    // inviteId and established company scope (real, or bypass for a
+    // company-less bootstrap invite) before this handler ever runs -- so
+    // this lookup, and everything below, goes through the request-scoped
+    // `db`, not a raw connection or a second nested runInCompanyScope.
     const invite = await db
       .select()
       .from(invites)
@@ -4933,7 +4970,7 @@ export function accessRoutes(
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
-      const result = await access.promoteInstanceAdmin(userId);
+      const result = await rawAccess.promoteInstanceAdmin(userId);
       res.status(201).json(result);
     }
   );
@@ -4942,7 +4979,7 @@ export function accessRoutes(
     await assertInstanceAdmin(req);
     const query = searchAdminUsersQuerySchema.parse(req.query);
     const needle = query.query.trim().toLowerCase();
-    const users = await db
+    const users = await rawDb
       .select({
         id: authUsers.id,
         email: authUsers.email,
@@ -4960,7 +4997,7 @@ export function accessRoutes(
       : users;
     const userIds = filteredUsers.slice(0, 50).map((user) => user.id);
     const memberships = userIds.length
-      ? await db
+      ? await rawDb
           .select({
             principalId: companyMemberships.principalId,
           })
@@ -4983,7 +5020,7 @@ export function accessRoutes(
     const adminIds = new Set(
       await Promise.all(
         userIds.map(async (userId) =>
-          (await access.isInstanceAdmin(userId)) ? userId : null,
+          (await rawAccess.isInstanceAdmin(userId)) ? userId : null,
         ),
       ).then((values) => values.filter((value): value is string => Boolean(value))),
     );
@@ -5004,7 +5041,7 @@ export function accessRoutes(
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
-      const removed = await access.demoteInstanceAdmin(userId);
+      const removed = await rawAccess.demoteInstanceAdmin(userId);
       if (!removed) throw notFound("Instance admin role not found");
       res.json(removed);
     }
@@ -5016,7 +5053,7 @@ export function accessRoutes(
     async (req, res) => {
     await assertInstanceAdmin(req);
     const userId = req.params.userId as string;
-    res.json(await loadUserCompanyAccessResponse(db, access, userId));
+    res.json(await loadUserCompanyAccessResponse(rawDb, rawAccess, userId));
   });
 
   router.put(
@@ -5026,12 +5063,12 @@ export function accessRoutes(
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
-      await access.setUserCompanyAccess(
+      await rawAccess.setUserCompanyAccess(
         userId,
         req.body.companyIds ?? [],
         { actorUserId: req.actor.userId ?? null },
       );
-      res.json(await loadUserCompanyAccessResponse(db, access, userId));
+      res.json(await loadUserCompanyAccessResponse(rawDb, rawAccess, userId));
     }
   );
 

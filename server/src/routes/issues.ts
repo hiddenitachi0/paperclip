@@ -7,6 +7,7 @@ import type { Db } from "@paperclipai/db";
 import {
   activityLog,
   agents,
+  createRequestScopedDb,
   documents,
   executionWorkspaces,
   heartbeatRuns,
@@ -21,6 +22,7 @@ import {
   pipelineStages,
   pipelines,
   projectWorkspaces,
+  withCompanyScope,
 } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
@@ -109,6 +111,7 @@ import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/t
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 
 async function alertOwningCompanyOfCrossCompanyWriteAttempt(
   db: Db,
@@ -1239,7 +1242,7 @@ class AutoApprovalIssueMissingError extends Error {
 }
 
 export function issueRoutes(
-  db: Db,
+  rawDb: Db,
   storage: StorageService,
   opts: {
     feedbackExportService?: {
@@ -1254,20 +1257,49 @@ export function issueRoutes(
     searchRateLimiter?: CompanySearchRateLimiter;
     pluginWorkerManager?: PluginWorkerManager;
     taskWatchdogEnqueueWakeup?: TaskWatchdogServiceDeps["enqueueWakeup"] | null;
+    // Test-only hook: fire-and-forget queueTaskWatchdogEvaluation() calls can
+    // still be running after a request completes (DUR-417). Tests that hard-
+    // delete rows in afterEach need to drain these first or they race a
+    // truncate against an in-flight insert; production callers leave this
+    // unset and pay no cost.
+    onTaskWatchdogEvaluationQueued?: (evaluation: Promise<unknown>) => void;
   } = {},
 ) {
   const router = Router();
+  // DUR-379 (DUR-277 Wave 5b): this file's own request-scoped instance;
+  // `rawDb` stays unwrapped for the pre-scope lookups every (b)-category
+  // route below needs before its companyId (and therefore its scope) is
+  // known -- see middleware/company-scope.ts and the DUR-277 design doc §1.
+  // Follows the same shape as routes/agents.ts's DUR-378 wiring.
+  const db = createRequestScopedDb(rawDb);
   // DUR-240: same in-process liveness guard as heartbeat.ts's own issuesSvc --
   // this route is the direct HTTP checkout path agents/harnesses call, so it
   // needs the same protection against silently reclaiming a still-live run's
   // lock when heartbeatRuns.status looks terminal but isn't.
-  const svc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
+  const svc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess, rawDb });
   const escalationGrantsSvc = escalationGrantService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
+    rawDb,
   });
-  const feedback = feedbackService(db);
+  // DUR-932: post-response wakeup fan-out (PATCH /issues/:id and POST
+  // /issues/:id/comments below) is fired with `void (async () => {...})()`
+  // so the response is never held up on it. That means it can still be
+  // running well after this request's reserved connection (see
+  // middleware/company-scope.ts) has been released back to the pool --
+  // reusing `heartbeat` (built on the request-scoped `db` proxy) there would
+  // let a later request's queries interleave with these on the same
+  // physical socket once it's handed back out, corrupting the postgres wire
+  // protocol for both (08P01 "bind message supplies N parameters...").
+  // `rawHeartbeat`, built on plain `rawDb`, borrows/returns its own pool
+  // connection per query instead -- same fix shape as queueTaskWatchdogEvaluation
+  // (DUR-417) above.
+  const rawHeartbeat = heartbeatService(rawDb, {
+    pluginWorkerManager: opts.pluginWorkerManager,
+    rawDb,
+  });
+  const feedback = feedbackService(db, { rawDb });
   const companiesSvc = companyService(db);
   let searchSvc = opts.searchService ?? null;
   const getSearchService = () => {
@@ -1282,11 +1314,19 @@ export function issueRoutes(
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
-  const workProductsSvc = workProductService(db);
-  const documentsSvc = documentService(db);
-  const documentAnnotationsSvc = documentAnnotationService(db);
-  const issueReferencesSvc = issueReferenceService(db);
-  const issueThreadInteractionsSvc = issueThreadInteractionService(db);
+  const workProductsSvc = workProductService(db, { rawDb });
+  const documentsSvc = documentService(db, { rawDb });
+  const documentAnnotationsSvc = documentAnnotationService(db, { rawDb });
+  const issueReferencesSvc = issueReferenceService(db, { rawDb });
+  const issueThreadInteractionsSvc = issueThreadInteractionService(db, { rawDb });
+  // DUR-379: raw-db counterparts used only for the pre-scope lookups the
+  // company-scope helpers below need -- never for anything that ends up in
+  // a response, so a lookup made on an unscoped connection is never
+  // mistaken for scoped data. Mirrors routes/agents.ts's DUR-378 rawSvc.
+  const rawSvc = issueService(rawDb, { isRunLive: isHeartbeatRunLiveInThisProcess });
+  const rawWorkProductsSvc = workProductService(rawDb);
+  const rawAgentsSvc = agentService(rawDb);
+  const rawFeedback = feedbackService(rawDb);
   const taskWatchdogFactory: TaskWatchdogServiceFactory | undefined = Object.prototype.hasOwnProperty.call(
     serviceIndex,
     "taskWatchdogService",
@@ -1297,15 +1337,41 @@ export function issueRoutes(
     enqueueWakeup: opts.taskWatchdogEnqueueWakeup === undefined
       ? heartbeat.wakeup
       : opts.taskWatchdogEnqueueWakeup ?? undefined,
+    rawDb,
+  }) ?? noopTaskWatchdogService();
+  // DUR-417: reconciliation triggered fire-and-forget from the request path
+  // (queueTaskWatchdogEvaluation below) must never run on the request-scoped
+  // `db` proxy or hold a reserved AsyncLocalStorage-scoped connection --
+  // by the time it runs, the request that triggered it may already have
+  // released its own reserved connection back to the pool, and evaluation
+  // can itself open further nested connections (ensureReusableWatchdogIssue's
+  // issuesSvc.create()) while running. Built on plain `rawDb` instead, this
+  // mirrors exactly how the periodic heartbeat scheduler already drives the
+  // same reconcile* methods (see heartbeat.ts's own taskWatchdogService(db)
+  // wiring at startup, where `db` there is already the raw pooled instance)
+  // -- every query just borrows/returns its own pool connection per call,
+  // so nothing here is ever held open across a nested reservation.
+  const taskWatchdogEvaluationSvc = taskWatchdogFactory?.(rawDb, {
+    enqueueWakeup: opts.taskWatchdogEnqueueWakeup === undefined
+      ? heartbeat.wakeup
+      : opts.taskWatchdogEnqueueWakeup ?? undefined,
+    rawDb,
   }) ?? noopTaskWatchdogService();
   const externalObjectsSvc = externalObjectService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
     enabled: async () => (await instanceSettings.getExperimental()).enableExternalObjects === true,
+    rawDb,
   });
   const routinesSvc = routineService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
   const environmentRuntime = environmentRuntimeService(db, {
+    pluginWorkerManager: opts.pluginWorkerManager,
+  });
+  // DUR-932: see rawHeartbeat above -- destroyReusableSandboxLeasesForTerminalIssue
+  // is only ever called from the same post-response fire-and-forget blocks,
+  // so it always needs the rawDb-backed instance, never the request-scoped one.
+  const rawEnvironmentRuntime = environmentRuntimeService(rawDb, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
   const issueTreeControlFactory = Object.prototype.hasOwnProperty.call(
@@ -1320,12 +1386,26 @@ export function issueRoutes(
   const feedbackExportService = opts?.feedbackExportService;
   const environmentsSvc = environmentService(db);
 
+  // DUR-417: called fire-and-forget (`void queueTaskWatchdogEvaluation(...)`)
+  // from every call site below so the response is never held up on a second
+  // DB round trip. That means this can still be running well after the
+  // request's own reserved connection (see middleware/company-scope.ts) has
+  // been released back to the pool -- reusing that connection here via the
+  // ambient `db` proxy would let a later request's queries interleave with
+  // this one on the same physical socket once it's handed back out,
+  // corrupting the postgres wire protocol for both. Using taskWatchdogEvaluationSvc
+  // (built on plain `rawDb`, not the request-scoped proxy) instead means every
+  // query it runs just borrows/returns its own pool connection per call --
+  // nothing is ever reserved-and-held across this call's lifetime, so it can't
+  // deadlock against (or corrupt) any other connection, request-held or not.
   async function queueTaskWatchdogEvaluation(issue: { id: string; companyId: string }, runId?: string | null) {
-    await taskWatchdogsSvc
+    const evaluation = taskWatchdogEvaluationSvc
       .reconcileForIssueAndAncestors(issue.companyId, issue.id, { runId: runId ?? null })
       .catch((err) => {
         logger.warn({ err, issueId: issue.id }, "task watchdog evaluation hook failed");
       });
+    opts.onTaskWatchdogEvaluationQueued?.(evaluation);
+    await evaluation;
   }
 
   async function sourceTrustForActorWrite(
@@ -3186,7 +3266,10 @@ export function issueRoutes(
     executionWorkspaceId?: string | null;
   }) {
     try {
-      await environmentRuntime.destroyReusableSandboxLeases({
+      // DUR-932: both call sites run from the post-response fire-and-forget
+      // wakeup blocks below, after the request's reserved connection may
+      // already be released -- always use the rawDb-backed instance.
+      await rawEnvironmentRuntime.destroyReusableSandboxLeases({
         companyId: issue.companyId,
         issueId: issue.id,
         executionWorkspaceId: issue.executionWorkspaceId ?? null,
@@ -3200,10 +3283,14 @@ export function issueRoutes(
     }
   }
 
+  // DUR-379: this runs from router.param("id"/"issueId", ...) below -- before
+  // any route-level middleware, including the company-scope wiring further
+  // down -- so no AsyncLocalStorage scope is active yet. Must use the raw
+  // instance (mirrors routes/agents.ts's DUR-378 shortname-lookup comment).
   async function resolveIssueRouteId(rawId: string): Promise<string> {
     const identifier = normalizeIssueReferenceIdentifier(rawId);
     if (identifier) {
-      const issue = await svc.getByIdentifier(identifier);
+      const issue = await rawSvc.getByIdentifier(identifier);
       if (issue) {
         return issue.id;
       }
@@ -3258,6 +3345,114 @@ export function issueRoutes(
     }
   });
 
+  // DUR-379 (DUR-277 Wave 5b): shared parameterized lookup + company-scope
+  // helpers, following the resolveRootIssue/scopeFromRootIssue pattern from
+  // routes/issue-tree-control.ts (DUR-348/Wave 2) and routes/agents.ts's
+  // scopeFromLookup (DUR-378/Wave 5a). `lookup` always runs against a raw
+  // (unwrapped) service -- never the scoped `db`/`svc` above -- since no
+  // AsyncLocalStorage scope exists yet when the resolver itself runs,
+  // before runInCompanyScope ever reserves a connection. Each route's own
+  // handler re-resolves the same entity afterward through the scoped
+  // service, exactly as those two files' routes do.
+  function scopeFromLookup<T extends { companyId: string }>(
+    lookup: (req: Request) => Promise<T | null | undefined>,
+    notFoundMessage: string,
+    checkAccess: (req: Request, companyId: string) => void = assertCompanyAccess,
+  ) {
+    return companyScope(rawDb, async (req) => {
+      const entity = await lookup(req);
+      if (!entity) throw notFound(notFoundMessage);
+      checkAccess(req, entity.companyId);
+      return entity.companyId;
+    });
+  }
+
+  // Covers the dominant ~59-site pattern this file's routes use: an
+  // `/issues/:id/*`-shaped route (or `/lane-b/messages/:issueId`, via the
+  // `paramName` override) whose companyId is only known after looking the
+  // issue up. `rawId` is resolved through the same identifier-or-UUID logic
+  // as router.param("id"/"issueId", ...) above, since a raw (non-UUID)
+  // identifier can reach here directly if this helper is ever used ahead of
+  // that param resolution.
+  function scopeFromIssueParam(paramName: string = "id") {
+    return scopeFromLookup(async (req) => {
+      const rawId = req.params[paramName] as string;
+      const identifier = normalizeIssueReferenceIdentifier(rawId);
+      return identifier ? rawSvc.getByIdentifier(identifier) : rawSvc.getById(rawId);
+    }, "Issue not found");
+  }
+
+  // Covers the 2 `/work-products/:id` routes.
+  function scopeFromWorkProductParam(paramName: string = "id") {
+    return scopeFromLookup(
+      (req) => rawWorkProductsSvc.getById(req.params[paramName] as string),
+      "Work product not found",
+    );
+  }
+
+  // Covers the 1 `/labels/:labelId` route.
+  function scopeFromLabelParam(paramName: string = "labelId") {
+    return scopeFromLookup(
+      (req) => rawSvc.getLabelById(req.params[paramName] as string),
+      "Label not found",
+    );
+  }
+
+  // Covers the 2 `/attachments/:attachmentId*` routes.
+  function scopeFromAttachmentParam(paramName: string = "attachmentId") {
+    return scopeFromLookup(
+      (req) => rawSvc.getAttachmentById(req.params[paramName] as string),
+      "Attachment not found",
+    );
+  }
+
+  // Covers the 1 `/lane-b/:agentId/messages` route.
+  function scopeFromAgentParam(paramName: string = "agentId") {
+    return scopeFromLookup(
+      (req) => rawAgentsSvc.getById(req.params[paramName] as string),
+      "Agent not found",
+    );
+  }
+
+  // Covers the 2 routes (POST .../interactions, POST .../comments) whose
+  // handlers call alertOwningCompanyOfCrossCompanyWriteAttempt -- a
+  // per-target-company activity-log entry, distinct from the structured
+  // logger.error assertCompanyAccess itself already emits -- BEFORE
+  // rejecting a cross-company agent write. That alert has to run (on the
+  // raw connection, since no scope exists yet) before assertCompanyAccess
+  // throws, or a real cross-company write attempt would stop producing that
+  // activity-log entry once assertCompanyAccess moved into this
+  // pre-handler middleware. The handler bodies still call both again
+  // for the same-company case that always reaches them; that's a harmless,
+  // now-redundant no-op re-check, not touched here.
+  function scopeFromIssueParamWithCrossCompanyAlert(action: string, paramName: string = "id") {
+    return companyScope(rawDb, async (req) => {
+      const rawId = req.params[paramName] as string;
+      const identifier = normalizeIssueReferenceIdentifier(rawId);
+      const issue = identifier ? await rawSvc.getByIdentifier(identifier) : await rawSvc.getById(rawId);
+      if (!issue) throw notFound("Issue not found");
+      await alertOwningCompanyOfCrossCompanyWriteAttempt(rawDb, req, issue, action);
+      assertCompanyAccess(req, issue.companyId);
+      return issue.companyId;
+    });
+  }
+
+  // Covers the 2 `/feedback-traces/:traceId*` routes. These two use the
+  // pre-existing `actorCanAccessCompany` boolean-check + 404 style (to avoid
+  // leaking a cross-company trace's existence) rather than the throwing
+  // `assertCompanyAccess` used everywhere else in this file -- preserved
+  // here via a custom `checkAccess` so the response shape for an
+  // unauthorized cross-company request is unchanged by this wiring.
+  function scopeFromFeedbackTraceParam(paramName: string = "traceId") {
+    return scopeFromLookup(
+      (req) => rawFeedback.getFeedbackTraceById(req.params[paramName] as string),
+      "Feedback trace not found",
+      (req, companyId) => {
+        if (!actorCanAccessCompany(req, companyId)) throw notFound("Feedback trace not found");
+      },
+    );
+  }
+
   // Common malformed path when companyId is empty in "/api/companies/{companyId}/issues".
   router.get("/issues", (_req, res) => {
     res.status(400).json({
@@ -3265,7 +3460,7 @@ export function issueRoutes(
     });
   });
 
-  router.get("/companies/:companyId/search", async (req, res) => {
+  router.get("/companies/:companyId/search", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const companyScopeDecision = await access.decide({
@@ -3293,7 +3488,7 @@ export function issueRoutes(
     res.json(result);
   });
 
-  router.get("/companies/:companyId/issues", async (req, res) => {
+  router.get("/companies/:companyId/issues", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (isTaskBridgeKeyActor(req)) {
@@ -3463,7 +3658,7 @@ export function issueRoutes(
     })));
   });
 
-  router.get("/companies/:companyId/issues/count", async (req, res) => {
+  router.get("/companies/:companyId/issues/count", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (isTaskBridgeKeyActor(req)) {
@@ -3551,14 +3746,14 @@ export function issueRoutes(
     res.json({ count });
   });
 
-  router.get("/companies/:companyId/labels", async (req, res) => {
+  router.get("/companies/:companyId/labels", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const result = await svc.listLabels(companyId);
     res.json(result);
   });
 
-  router.post("/companies/:companyId/labels", validate(createIssueLabelSchema), async (req, res) => {
+  router.post("/companies/:companyId/labels", companyScopeFromParam(rawDb, assertCompanyAccess), validate(createIssueLabelSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const label = await svc.createLabel(companyId, req.body);
@@ -3577,7 +3772,7 @@ export function issueRoutes(
     res.status(201).json(label);
   });
 
-  router.delete("/labels/:labelId", async (req, res) => {
+  router.delete("/labels/:labelId", scopeFromLabelParam(), async (req, res) => {
     const labelId = req.params.labelId as string;
     const existing = await svc.getLabelById(labelId);
     if (!existing) {
@@ -3605,7 +3800,7 @@ export function issueRoutes(
     res.json(removed);
   });
 
-  router.get("/issues/:id/heartbeat-context", async (req, res) => {
+  router.get("/issues/:id/heartbeat-context", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -3759,7 +3954,7 @@ export function issueRoutes(
     });
   });
 
-  router.get("/issues/:id", async (req, res) => {
+  router.get("/issues/:id", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -3843,7 +4038,7 @@ export function issueRoutes(
     });
   });
 
-  router.get("/issues/:id/watchdog", async (req, res) => {
+  router.get("/issues/:id/watchdog", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -3855,7 +4050,7 @@ export function issueRoutes(
     res.json(await taskWatchdogsSvc.getActiveForIssue(issue.companyId, issue.id));
   });
 
-  router.put("/issues/:id/watchdog", validate(upsertIssueWatchdogSchema), async (req, res) => {
+  router.put("/issues/:id/watchdog", scopeFromIssueParam(), validate(upsertIssueWatchdogSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -3895,11 +4090,11 @@ export function issueRoutes(
         instructionsChanged: (existingWatchdog?.instructions ?? null) !== (watchdog.instructions ?? null),
       },
     });
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json(watchdog);
   });
 
-  router.delete("/issues/:id/watchdog", async (req, res) => {
+  router.delete("/issues/:id/watchdog", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -3935,11 +4130,11 @@ export function issueRoutes(
         },
       });
     }
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json({ ok: true });
   });
 
-  router.get("/issues/:id/recovery-actions", async (req, res) => {
+  router.get("/issues/:id/recovery-actions", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -3958,7 +4153,7 @@ export function issueRoutes(
     });
   });
 
-  router.post("/issues/:id/recovery-actions/resolve", validate(resolveIssueRecoveryActionSchema), async (req, res) => {
+  router.post("/issues/:id/recovery-actions/resolve", scopeFromIssueParam(), validate(resolveIssueRecoveryActionSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3994,7 +4189,7 @@ export function issueRoutes(
     });
 
     const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
-    const result = await db.transaction(async (tx) => {
+    const result = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
       let issue = existing;
       if (outcome === "blocked") {
         const unresolvedBlockers = await tx
@@ -4127,7 +4322,7 @@ export function issueRoutes(
     });
   });
 
-  router.get("/issues/:id/work-products", async (req, res) => {
+  router.get("/issues/:id/work-products", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4140,7 +4335,7 @@ export function issueRoutes(
     res.json(workProducts);
   });
 
-  router.get("/issues/:id/external-objects", async (req, res) => {
+  router.get("/issues/:id/external-objects", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4152,7 +4347,7 @@ export function issueRoutes(
     res.json(objects);
   });
 
-  router.get("/issues/:id/external-object-summary", async (req, res) => {
+  router.get("/issues/:id/external-object-summary", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4164,14 +4359,14 @@ export function issueRoutes(
     res.json(summary);
   });
 
-  router.post("/companies/:companyId/issues/external-object-summaries", validate(externalObjectSummariesSchema), async (req, res) => {
+  router.post("/companies/:companyId/issues/external-object-summaries", companyScopeFromParam(rawDb, assertCompanyAccess), validate(externalObjectSummariesSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const summaries = await externalObjectsSvc.getIssueSummaries(companyId, req.body.issueIds);
     res.json({ summaries: Object.fromEntries(summaries) });
   });
 
-  router.post("/issues/:id/external-objects/refresh", validate(refreshExternalObjectsSchema), async (req, res) => {
+  router.post("/issues/:id/external-objects/refresh", scopeFromIssueParam(), validate(refreshExternalObjectsSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4203,7 +4398,7 @@ export function issueRoutes(
     res.json({ refreshed: results });
   });
 
-  router.get("/issues/:id/documents", async (req, res) => {
+  router.get("/issues/:id/documents", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4218,7 +4413,7 @@ export function issueRoutes(
     res.json(docs);
   });
 
-  router.get("/issues/:id/documents/:key", async (req, res) => {
+  router.get("/issues/:id/documents/:key", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4248,7 +4443,7 @@ export function issueRoutes(
     res.json({ ...doc, annotations });
   });
 
-  router.get("/issues/:id/documents/:key/annotations", async (req, res) => {
+  router.get("/issues/:id/documents/:key/annotations", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4271,6 +4466,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/documents/:key/annotations",
+    scopeFromIssueParam(),
     validate(createDocumentAnnotationThreadSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -4324,7 +4520,7 @@ export function issueRoutes(
     },
   );
 
-  router.get("/issues/:id/documents/:key/annotations/:threadId", async (req, res) => {
+  router.get("/issues/:id/documents/:key/annotations/:threadId", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4351,6 +4547,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/documents/:key/annotations/:threadId/comments",
+    scopeFromIssueParam(),
     validate(createDocumentAnnotationCommentSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -4409,6 +4606,7 @@ export function issueRoutes(
 
   router.patch(
     "/issues/:id/documents/:key/annotations/:threadId",
+    scopeFromIssueParam(),
     validate(updateDocumentAnnotationThreadSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -4455,7 +4653,7 @@ export function issueRoutes(
     },
   );
 
-  router.put("/issues/:id/documents/:key", validate(upsertIssueDocumentSchema), async (req, res) => {
+  router.put("/issues/:id/documents/:key", scopeFromIssueParam(), validate(upsertIssueDocumentSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4492,7 +4690,7 @@ export function issueRoutes(
     const redirectedFromLockedDocument =
       "redirectedFromLockedDocument" in result ? result.redirectedFromLockedDocument : null;
     await issueReferencesSvc.syncDocument(doc.id);
-    await externalObjectsSvc.syncDocumentSafely(doc.id);
+    await externalObjectsSvc.syncDocumentSafely(doc.id, issue.companyId);
     const referenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(referenceSummaryBefore, referenceSummaryAfter);
     const remappedAnnotations = result.created
@@ -4584,7 +4782,7 @@ export function issueRoutes(
     res.status(result.created ? 201 : 200).json(doc);
   });
 
-  router.post("/issues/:id/documents/:key/lock", async (req, res) => {
+  router.post("/issues/:id/documents/:key/lock", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4632,7 +4830,7 @@ export function issueRoutes(
     res.json(result.document);
   });
 
-  router.post("/issues/:id/documents/:key/unlock", async (req, res) => {
+  router.post("/issues/:id/documents/:key/unlock", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4674,7 +4872,7 @@ export function issueRoutes(
     res.json(result.document);
   });
 
-  router.get("/issues/:id/documents/:key/revisions", async (req, res) => {
+  router.get("/issues/:id/documents/:key/revisions", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4693,6 +4891,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/documents/:key/revisions/:revisionId/restore",
+    scopeFromIssueParam(),
     validate(restoreIssueDocumentRevisionSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -4722,7 +4921,7 @@ export function issueRoutes(
       });
       await issueReferencesSvc.syncDocument(result.document.id);
       const referenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      await externalObjectsSvc.syncDocumentSafely(result.document.id);
+      await externalObjectsSvc.syncDocumentSafely(result.document.id, issue.companyId);
       const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(referenceSummaryBefore, referenceSummaryAfter);
       const remappedAnnotations = await documentAnnotationsSvc.remapOpenThreadsForDocument({
         issueId: issue.id,
@@ -4811,7 +5010,7 @@ export function issueRoutes(
     },
   );
 
-  router.delete("/issues/:id/documents/:key", async (req, res) => {
+  router.delete("/issues/:id/documents/:key", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4836,7 +5035,7 @@ export function issueRoutes(
     }
     await issueReferencesSvc.deleteDocumentSource(removed.id);
     const referenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-    if (removed) await externalObjectsSvc.syncDocumentSafely(removed.id);
+    if (removed) await externalObjectsSvc.syncDocumentSafely(removed.id, issue.companyId);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(referenceSummaryBefore, referenceSummaryAfter);
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -4887,7 +5086,7 @@ export function issueRoutes(
     res.json({ ok: true });
   });
 
-  router.post("/issues/:id/work-products", validate(createIssueWorkProductSchema), async (req, res) => {
+  router.post("/issues/:id/work-products", scopeFromIssueParam(), validate(createIssueWorkProductSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4937,7 +5136,7 @@ export function issueRoutes(
     res.status(201).json(product);
   });
 
-  router.post("/issues/:id/low-trust/promotions", validate(promoteLowTrustOutputSchema), async (req, res) => {
+  router.post("/issues/:id/low-trust/promotions", scopeFromIssueParam(), validate(promoteLowTrustOutputSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -4976,7 +5175,7 @@ export function issueRoutes(
       promotedByActorId: actor.actorId,
       promotedAt,
     });
-    const product = await db.transaction(async (tx) => {
+    const product = await withCompanyScope(rawDb, issue.companyId, async (tx) => {
       const markPromoted = { sourceTrust: promotionTrust, updatedAt: promotedAt };
       const updatedSource = await (async () => {
         if (req.body.sourceArtifactKind === "issue") {
@@ -5082,7 +5281,7 @@ export function issueRoutes(
     res.status(201).json(product);
   });
 
-  router.patch("/work-products/:id", validate(updateIssueWorkProductSchema), async (req, res) => {
+  router.patch("/work-products/:id", scopeFromWorkProductParam(), validate(updateIssueWorkProductSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await workProductsSvc.getById(id);
     if (!existing) {
@@ -5142,7 +5341,7 @@ export function issueRoutes(
     res.json(product);
   });
 
-  router.delete("/work-products/:id", async (req, res) => {
+  router.delete("/work-products/:id", scopeFromWorkProductParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await workProductsSvc.getById(id);
     if (!existing) {
@@ -5183,7 +5382,7 @@ export function issueRoutes(
     res.json(removed);
   });
 
-  router.post("/issues/:id/read", async (req, res) => {
+  router.post("/issues/:id/read", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5215,7 +5414,7 @@ export function issueRoutes(
     res.json(readState);
   });
 
-  router.delete("/issues/:id/read", async (req, res) => {
+  router.delete("/issues/:id/read", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5247,7 +5446,7 @@ export function issueRoutes(
     res.json({ id: issue.id, removed });
   });
 
-  router.post("/issues/:id/inbox-archive", async (req, res) => {
+  router.post("/issues/:id/inbox-archive", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5279,7 +5478,7 @@ export function issueRoutes(
     res.json(archiveState);
   });
 
-  router.delete("/issues/:id/inbox-archive", async (req, res) => {
+  router.delete("/issues/:id/inbox-archive", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5311,7 +5510,7 @@ export function issueRoutes(
     res.json(removed ?? { ok: true });
   });
 
-  router.get("/issues/:id/approvals", async (req, res) => {
+  router.get("/issues/:id/approvals", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5324,7 +5523,7 @@ export function issueRoutes(
     res.json(approvals);
   });
 
-  router.post("/issues/:id/approvals", validate(linkIssueApprovalSchema), async (req, res) => {
+  router.post("/issues/:id/approvals", scopeFromIssueParam(), validate(linkIssueApprovalSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5360,7 +5559,7 @@ export function issueRoutes(
     res.status(201).json(approvals);
   });
 
-  router.delete("/issues/:id/approvals/:approvalId", async (req, res) => {
+  router.delete("/issues/:id/approvals/:approvalId", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const approvalId = req.params.approvalId as string;
     const issue = await svc.getById(id);
@@ -5393,7 +5592,7 @@ export function issueRoutes(
     res.json({ ok: true });
   });
 
-  router.post("/companies/:companyId/issues", applyCreateIssueStatusDefault, validate(createIssueSchema), async (req, res) => {
+  router.post("/companies/:companyId/issues", companyScopeFromParam(rawDb, assertCompanyAccess), applyCreateIssueStatusDefault, validate(createIssueSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (await assertLowTrustControlPlaneDenied(req, res, companyId, null)) return;
@@ -5513,7 +5712,7 @@ export function issueRoutes(
       watchdogActorRunId: actor.runId,
     });
     await issueReferencesSvc.syncIssue(issue.id);
-    await externalObjectsSvc.syncIssueSafely(issue.id);
+    await externalObjectsSvc.syncIssueSafely(issue.id, issue.companyId);
     const referenceSummary = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const referenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
       issueReferencesSvc.emptySummary(),
@@ -5605,7 +5804,7 @@ export function issueRoutes(
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
     });
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
 
     res.status(201).json({
       ...issue,
@@ -5614,7 +5813,7 @@ export function issueRoutes(
     });
   });
 
-  router.post("/lane-b/:agentId/messages", validate(laneBSubmitMessageSchema), async (req, res) => {
+  router.post("/lane-b/:agentId/messages", scopeFromAgentParam(), validate(laneBSubmitMessageSchema), async (req, res) => {
     const agentId = req.params.agentId as string;
     const agent = await agentsSvc.getById(agentId);
     if (!agent) {
@@ -5679,7 +5878,7 @@ export function issueRoutes(
     });
   });
 
-  router.get("/lane-b/messages/:issueId", async (req, res) => {
+  router.get("/lane-b/messages/:issueId", scopeFromIssueParam("issueId"), async (req, res) => {
     const id = req.params.issueId as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -5708,7 +5907,7 @@ export function issueRoutes(
     });
   });
 
-  router.post("/issues/:id/children", applyCreateIssueStatusDefault, validate(createChildIssueSchema), async (req, res) => {
+  router.post("/issues/:id/children", scopeFromIssueParam(), applyCreateIssueStatusDefault, validate(createChildIssueSchema), async (req, res) => {
     const parentId = req.params.id as string;
     const parent = await svc.getById(parentId);
     if (!parent) {
@@ -5778,7 +5977,7 @@ export function issueRoutes(
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       watchdogActorRunId: actor.runId,
     });
-    await externalObjectsSvc.syncIssueSafely(issue.id);
+    await externalObjectsSvc.syncIssueSafely(issue.id, parent.companyId);
 
     await logActivity(db, {
       companyId: parent.companyId,
@@ -5866,12 +6065,12 @@ export function issueRoutes(
       watchdogParentIssueId: serializationContext?.watchdogParentIssueId,
       currentChildIssueId: currentSerializedChild?.id ?? issue.id,
     });
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
 
     res.status(201).json(issue);
   });
 
-  router.get("/issues/:id/accepted-plan-decompositions", async (req, res) => {
+  router.get("/issues/:id/accepted-plan-decompositions", scopeFromIssueParam(), async (req, res) => {
     const sourceIssueId = req.params.id as string;
     const sourceIssue = await svc.getById(sourceIssueId);
     if (!sourceIssue) {
@@ -5883,7 +6082,7 @@ export function issueRoutes(
     res.json(decompositions);
   });
 
-  router.post("/issues/:id/accepted-plan-decompositions", validate(createAcceptedPlanDecompositionSchema), async (req, res) => {
+  router.post("/issues/:id/accepted-plan-decompositions", scopeFromIssueParam(), validate(createAcceptedPlanDecompositionSchema), async (req, res) => {
     const sourceIssueId = req.params.id as string;
     const sourceIssue = await svc.getById(sourceIssueId);
     if (!sourceIssue) {
@@ -6063,7 +6262,7 @@ export function issueRoutes(
           requestedByActorId: actor.actorId,
         });
       }
-      await queueTaskWatchdogEvaluation(issue, actor.runId);
+      void queueTaskWatchdogEvaluation(issue, actor.runId);
     }
     await blockWatchdogParentOnCurrentChild({
       actor,
@@ -6078,7 +6277,7 @@ export function issueRoutes(
     });
   });
 
-  router.post("/issues/:id/monitor/check-now", async (req, res) => {
+  router.post("/issues/:id/monitor/check-now", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -6099,7 +6298,7 @@ export function issueRoutes(
     res.json({ ok: true });
   });
 
-  router.post("/issues/:id/scheduled-retry/retry-now", async (req, res) => {
+  router.post("/issues/:id/scheduled-retry/retry-now", scopeFromIssueParam(), async (req, res) => {
     assertBoardOrDelegate(req, "issue.scheduled_retry_retry_now");
     const id = req.params.id as string;
     const issue = await svc.getById(id);
@@ -6149,7 +6348,7 @@ export function issueRoutes(
     res.json(result);
   });
 
-  router.patch("/issues/:id", validate(updateIssueRouteSchema), async (req, res) => {
+  router.patch("/issues/:id", scopeFromIssueParam(), validate(updateIssueRouteSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -6541,7 +6740,7 @@ export function issueRoutes(
     try {
       if (transition.decision && decisionId) {
         const decision = transition.decision;
-        issue = await db.transaction(async (tx) => {
+        issue = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
           const updated = await svc.update(
             id,
             {
@@ -6639,7 +6838,7 @@ export function issueRoutes(
 
     if (titleOrDescriptionChanged) {
       await issueReferencesSvc.syncIssue(issue.id);
-      await externalObjectsSvc.syncIssueSafely(issue.id);
+      await externalObjectsSvc.syncIssueSafely(issue.id, issue.companyId);
     }
     const updateReferenceSummaryAfter = titleOrDescriptionChanged
       ? await issueReferencesSvc.listIssueReferenceSummary(issue.id)
@@ -6945,7 +7144,7 @@ export function issueRoutes(
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
       });
       await issueReferencesSvc.syncComment(comment.id);
-      await externalObjectsSvc.syncCommentSafely(comment.id);
+      await externalObjectsSvc.syncCommentSafely(comment.id, issue.companyId);
       const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
       const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
         commentReferenceSummaryBefore,
@@ -7040,11 +7239,16 @@ export function issueRoutes(
 
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
-      type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
+      // DUR-932: this whole block runs fire-and-forget after res.json() may
+      // already have released the request's reserved connection -- every
+      // lookup/write below must go through the rawDb-backed `rawSvc` /
+      // `rawHeartbeat` / `rawDb`, never the request-scoped `svc` / `heartbeat`
+      // / `db`. See the rawHeartbeat comment near its declaration above.
+      type WakeupRequest = NonNullable<Parameters<typeof rawHeartbeat.wakeup>[1]>;
       type DependencyReadinessProvider = {
-        getDependencyReadiness?: typeof svc.getDependencyReadiness;
+        getDependencyReadiness?: typeof rawSvc.getDependencyReadiness;
       };
-      const dependencyReadinessSvc = svc as DependencyReadinessProvider;
+      const dependencyReadinessSvc = rawSvc as DependencyReadinessProvider;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
@@ -7066,7 +7270,7 @@ export function issueRoutes(
           resolvedBlockerIssueId: input.resolvedBlockerIssueId,
         });
         try {
-          const existingWake = await findExistingIssueBlockersResolvedWake(db, {
+          const existingWake = await findExistingIssueBlockersResolvedWake(rawDb, {
             companyId: issue.companyId,
             idempotencyKey,
           });
@@ -7196,7 +7400,7 @@ export function issueRoutes(
 
         let mentionedIds: string[] = [];
         try {
-          mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
+          mentionedIds = await rawSvc.findMentionedAgents(issue.companyId, commentBody);
         } catch (err) {
           logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
         }
@@ -7224,7 +7428,7 @@ export function issueRoutes(
 
       const becameDone = existing.status !== "done" && issue.status === "done";
       if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(issue.id);
+        const dependents = await rawSvc.listWakeableBlockedDependents(issue.id);
         for (const dependent of dependents) {
           await addDependencyResolvedWakeup({
             agentId: dependent.assigneeAgentId,
@@ -7270,7 +7474,7 @@ export function issueRoutes(
         await destroyReusableSandboxLeasesForTerminalIssue(issue);
       }
       if (becameTerminal && issue.parentId) {
-        const parent = await svc.getWakeableParentAfterChildCompletion(issue.parentId);
+        const parent = await rawSvc.getWakeableParentAfterChildCompletion(issue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {
             source: "automation",
@@ -7300,13 +7504,13 @@ export function issueRoutes(
       }
 
       for (const { agentId, wakeup } of wakeups.values()) {
-        heartbeat
+        rawHeartbeat
           .wakeup(agentId, wakeup)
           .then((wakeRun) => {
             if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
             const payload = wakeup.payload && typeof wakeup.payload === "object" ? wakeup.payload : {};
             const dependentIssueId = typeof payload.issueId === "string" ? payload.issueId : issue.id;
-            return logActivity(db, {
+            return logActivity(rawDb, {
               companyId: issue.companyId,
               actorType: "system",
               actorId: "issue_update",
@@ -7330,11 +7534,11 @@ export function issueRoutes(
       }
     })();
 
-    await queueTaskWatchdogEvaluation(issue, actor.runId);
+    void queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json({ ...issueResponse, comment });
   });
 
-  router.delete("/issues/:id", async (req, res) => {
+  router.delete("/issues/:id", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -7365,11 +7569,11 @@ export function issueRoutes(
       entityId: issue.id,
     });
 
-    await queueTaskWatchdogEvaluation(existing, actor.runId);
+    void queueTaskWatchdogEvaluation(existing, actor.runId);
     res.json(issue);
   });
 
-  router.post("/issues/:id/checkout", validate(checkoutIssueSchema), async (req, res) => {
+  router.post("/issues/:id/checkout", scopeFromIssueParam(), validate(checkoutIssueSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -7453,7 +7657,7 @@ export function issueRoutes(
     res.json(updated);
   });
 
-  router.post("/issues/:id/release", async (req, res) => {
+  router.post("/issues/:id/release", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -7490,7 +7694,7 @@ export function issueRoutes(
     res.json(released);
   });
 
-  router.post("/issues/:id/admin/force-release", async (req, res) => {
+  router.post("/issues/:id/admin/force-release", scopeFromIssueParam(), async (req, res) => {
     if (req.actor.type !== "board") {
       res.status(403).json({ error: "Board access required" });
       return;
@@ -7547,7 +7751,7 @@ export function issueRoutes(
   // it can never remove a live blocker — so it's safe to allow directly for
   // the issue's own current assignee without going through the full
   // decideIssueAccess boundary check.
-  router.post("/issues/:id/blockers/clear-terminal", async (req, res) => {
+  router.post("/issues/:id/blockers/clear-terminal", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -7589,13 +7793,13 @@ export function issueRoutes(
         entityId: result.issue.id,
         details: { clearedBlockerIssueIds: result.clearedBlockerIssueIds },
       });
-      await queueTaskWatchdogEvaluation(existing, actor.runId);
+      void queueTaskWatchdogEvaluation(existing, actor.runId);
     }
 
     res.json(result);
   });
 
-  router.get("/issues/:id/comments", async (req, res) => {
+  router.get("/issues/:id/comments", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -7630,7 +7834,7 @@ export function issueRoutes(
     res.json(comments);
   });
 
-  router.get("/issues/:id/interactions", async (req, res) => {
+  router.get("/issues/:id/interactions", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -7658,7 +7862,7 @@ export function issueRoutes(
   // open every issue one by one (DUR-30). Only ever returns "pending" rows: every
   // interaction kind can only be resolved by a board actor, so "pending" already
   // means "directed at the operator, not agent-to-agent".
-  router.get("/companies/:companyId/interactions", async (req, res) => {
+  router.get("/companies/:companyId/interactions", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const status = req.query.status;
@@ -7670,7 +7874,7 @@ export function issueRoutes(
     res.json(interactions);
   });
 
-  router.post("/issues/:id/interactions", validate(createIssueThreadInteractionSchema), async (req, res) => {
+  router.post("/issues/:id/interactions", scopeFromIssueParamWithCrossCompanyAlert("create_interaction"), validate(createIssueThreadInteractionSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -7728,6 +7932,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/interactions/:interactionId/accept",
+    scopeFromIssueParam(),
     validate(acceptIssueThreadInteractionSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -7836,6 +8041,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/interactions/:interactionId/reject",
+    scopeFromIssueParam(),
     validate(rejectIssueThreadInteractionSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -7893,6 +8099,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/interactions/:interactionId/respond",
+    scopeFromIssueParam(),
     validate(respondIssueThreadInteractionSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -7946,6 +8153,7 @@ export function issueRoutes(
 
   router.post(
     "/issues/:id/interactions/:interactionId/cancel",
+    scopeFromIssueParam(),
     validate(cancelIssueThreadInteractionSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -7997,7 +8205,7 @@ export function issueRoutes(
     },
   );
 
-  router.get("/issues/:id/comments/:commentId", async (req, res) => {
+  router.get("/issues/:id/comments/:commentId", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const commentId = req.params.commentId as string;
     const issue = await svc.getById(id);
@@ -8015,7 +8223,7 @@ export function issueRoutes(
     res.json(comment);
   });
 
-  router.delete("/issues/:id/comments/:commentId", async (req, res) => {
+  router.delete("/issues/:id/comments/:commentId", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const commentId = req.params.commentId as string;
     const issue = await svc.getById(id);
@@ -8108,7 +8316,7 @@ export function issueRoutes(
       {
         afterTombstone: async (deletedComment, tx) => {
           await issueReferencesSvc.syncComment(deletedComment.id, tx);
-          await externalObjectsSvc.syncCommentSafely(deletedComment.id, tx);
+          await externalObjectsSvc.syncCommentSafely(deletedComment.id, issue.companyId, tx);
           annotationCleanup = await documentAnnotationsSvc.cleanupForIssueCommentDeletion(issue.id, deletedComment.id, {
             actorType: actor.actorType,
             actorId: actor.actorId,
@@ -8120,7 +8328,7 @@ export function issueRoutes(
             annotationCleanup.deletedCommentIds.map((annotationCommentId) =>
               Promise.all([
                 issueReferencesSvc.deleteCommentSource(annotationCommentId, tx),
-                externalObjectsSvc.syncCommentSafely(annotationCommentId, tx),
+                externalObjectsSvc.syncCommentSafely(annotationCommentId, issue.companyId, tx),
               ])
             ),
           );
@@ -8159,7 +8367,7 @@ export function issueRoutes(
     res.json(deleted);
   });
 
-  router.get("/issues/:id/feedback-votes", async (req, res) => {
+  router.get("/issues/:id/feedback-votes", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -8176,7 +8384,7 @@ export function issueRoutes(
     res.json(votes);
   });
 
-  router.get("/issues/:id/feedback-traces", async (req, res) => {
+  router.get("/issues/:id/feedback-traces", scopeFromIssueParam(), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -8210,7 +8418,7 @@ export function issueRoutes(
     res.json(traces);
   });
 
-  router.get("/feedback-traces/:traceId", async (req, res) => {
+  router.get("/feedback-traces/:traceId", scopeFromFeedbackTraceParam(), async (req, res) => {
     const traceId = req.params.traceId as string;
     if (req.actor.type !== "board") {
       res.status(403).json({ error: "Only board users can view feedback traces" });
@@ -8225,7 +8433,7 @@ export function issueRoutes(
     res.json(trace);
   });
 
-  router.get("/feedback-traces/:traceId/bundle", async (req, res) => {
+  router.get("/feedback-traces/:traceId/bundle", scopeFromFeedbackTraceParam(), async (req, res) => {
     const traceId = req.params.traceId as string;
     if (req.actor.type !== "board") {
       res.status(403).json({ error: "Only board users can view feedback trace bundles" });
@@ -8239,7 +8447,7 @@ export function issueRoutes(
     res.json(bundle);
   });
 
-  router.post("/issues/:id/comments", validate(addIssueCommentSchema), async (req, res) => {
+  router.post("/issues/:id/comments", scopeFromIssueParamWithCrossCompanyAlert("create_comment"), validate(addIssueCommentSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -8477,7 +8685,7 @@ export function issueRoutes(
       };
       let txResult: { comment: Awaited<ReturnType<typeof svc.addComment>>; issue: NonNullable<Awaited<ReturnType<typeof svc.update>>> };
       try {
-        txResult = await db.transaction(async (tx) => {
+        txResult = await withCompanyScope(rawDb, currentIssue.companyId, async (tx) => {
           const insertedComment = await svc.addComment(
             id,
             req.body.body,
@@ -8562,7 +8770,7 @@ export function issueRoutes(
     }
 
     await issueReferencesSvc.syncComment(comment.id);
-    await externalObjectsSvc.syncCommentSafely(comment.id);
+    await externalObjectsSvc.syncCommentSafely(comment.id, currentIssue.companyId);
     const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(currentIssue.id);
     const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
       commentReferenceSummaryBefore,
@@ -8633,7 +8841,10 @@ export function issueRoutes(
 
     // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
     void (async () => {
-      type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
+      // DUR-932: fire-and-forget after res.status(201).json() -- see the
+      // rawHeartbeat comment near its declaration above. Every lookup/write
+      // below goes through rawDb-backed `rawSvc` / `rawHeartbeat` / `rawDb`.
+      type WakeupRequest = NonNullable<Parameters<typeof rawHeartbeat.wakeup>[1]>;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
@@ -8655,7 +8866,7 @@ export function issueRoutes(
           resolvedBlockerIssueId: input.resolvedBlockerIssueId,
         });
         try {
-          const existingWake = await findExistingIssueBlockersResolvedWake(db, {
+          const existingWake = await findExistingIssueBlockersResolvedWake(rawDb, {
             companyId: currentIssue.companyId,
             idempotencyKey,
           });
@@ -8759,7 +8970,7 @@ export function issueRoutes(
 
       let mentionedIds: string[] = [];
       try {
-        mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
+        mentionedIds = await rawSvc.findMentionedAgents(issue.companyId, req.body.body);
       } catch (err) {
         logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
       }
@@ -8786,7 +8997,7 @@ export function issueRoutes(
 
       const becameDone = issueBeforeCommentDecision.status !== "done" && currentIssue.status === "done";
       if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(currentIssue.id);
+        const dependents = await rawSvc.listWakeableBlockedDependents(currentIssue.id);
         for (const dependent of dependents) {
           await addDependencyResolvedWakeup({
             agentId: dependent.assigneeAgentId,
@@ -8804,7 +9015,7 @@ export function issueRoutes(
         await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
       }
       if (becameTerminal && currentIssue.parentId) {
-        const parent = await svc.getWakeableParentAfterChildCompletion(currentIssue.parentId);
+        const parent = await rawSvc.getWakeableParentAfterChildCompletion(currentIssue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {
             source: "automation",
@@ -8834,13 +9045,13 @@ export function issueRoutes(
       }
 
       for (const { agentId, wakeup } of wakeups.values()) {
-        heartbeat
+        rawHeartbeat
           .wakeup(agentId, wakeup)
           .then((wakeRun) => {
             if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
             const payload = wakeup.payload && typeof wakeup.payload === "object" ? wakeup.payload : {};
             const dependentIssueId = typeof payload.issueId === "string" ? payload.issueId : currentIssue.id;
-            return logActivity(db, {
+            return logActivity(rawDb, {
               companyId: currentIssue.companyId,
               actorType: "system",
               actorId: "issue_comment",
@@ -8864,11 +9075,11 @@ export function issueRoutes(
       }
     })();
 
-    await queueTaskWatchdogEvaluation(currentIssue, actor.runId);
+    void queueTaskWatchdogEvaluation(currentIssue, actor.runId);
     res.status(201).json(comment);
   });
 
-  router.post("/issues/:id/feedback-votes", validate(upsertIssueFeedbackVoteSchema), async (req, res) => {
+  router.post("/issues/:id/feedback-votes", scopeFromIssueParam(), validate(upsertIssueFeedbackVoteSchema), async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
     if (!issue) {
@@ -8967,7 +9178,7 @@ export function issueRoutes(
     res.status(201).json(result.vote);
   });
 
-  router.get("/issues/:id/attachments", async (req, res) => {
+  router.get("/issues/:id/attachments", scopeFromIssueParam(), async (req, res) => {
     const issueId = req.params.id as string;
     const issue = await svc.getById(issueId);
     if (!issue) {
@@ -8979,7 +9190,7 @@ export function issueRoutes(
     res.json(attachments.map(withContentPath));
   });
 
-  router.post("/companies/:companyId/issues/:issueId/attachments", async (req, res) => {
+  router.post("/companies/:companyId/issues/:issueId/attachments", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     const issueId = req.params.issueId as string;
     assertCompanyAccess(req, companyId);
@@ -9071,7 +9282,7 @@ export function issueRoutes(
     res.status(201).json(withContentPath(attachment));
   });
 
-  router.get("/attachments/:attachmentId/content", async (req, res, next) => {
+  router.get("/attachments/:attachmentId/content", scopeFromAttachmentParam(), async (req, res, next) => {
     const attachmentId = req.params.attachmentId as string;
     const attachment = await svc.getAttachmentById(attachmentId);
     if (!attachment) {
@@ -9135,7 +9346,7 @@ export function issueRoutes(
     object.stream.pipe(res);
   });
 
-  router.delete("/attachments/:attachmentId", async (req, res) => {
+  router.delete("/attachments/:attachmentId", scopeFromAttachmentParam(), async (req, res) => {
     const attachmentId = req.params.attachmentId as string;
     const attachment = await svc.getAttachmentById(attachmentId);
     if (!attachment) {

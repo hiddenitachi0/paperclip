@@ -33,6 +33,7 @@ import { Approvals } from "./pages/Approvals";
 import { ApprovalDetail } from "./pages/ApprovalDetail";
 import { Changelog } from "./pages/Changelog";
 import { Costs } from "./pages/Costs";
+import { GoalAdoption } from "./pages/GoalAdoption";
 import { Activity } from "./pages/Activity";
 import { Inbox } from "./pages/Inbox";
 import { BoardChat } from "./pages/BoardChat";
@@ -200,6 +201,7 @@ function boardRoutes() {
       <Route path="approvals/:approvalId" element={<ApprovalDetail />} />
       <Route path="changelog" element={<Changelog />} />
       <Route path="costs" element={<Costs />} />
+      <Route path="goal-adoption" element={<GoalAdoption />} />
       <Route path="activity" element={<Activity />} />
       {/* Conference Room Chat surfaces (PAP-136/PAP-137): routes stay
           registered but redirect to the company home while the experimental

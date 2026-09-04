@@ -45,6 +45,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   mergeDeployVisibilityService,
+  deployCarriedIssuesService,
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
@@ -866,6 +867,7 @@ export async function startServer(): Promise<StartedServer> {
     const environmentCustomImages = environmentCustomImageService(schedulerDb as any, { pluginWorkerManager });
     const routines = routineService(schedulerDb as any, { pluginWorkerManager });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
+    const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
@@ -1049,6 +1051,30 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
+      // issue in the same project whose merge commit shipped as part of it (exact match or a
+      // confirmed git ancestor) instead of leaving each to wait for its own agent to retry the
+      // done PATCH (see deploy-carried-issues.ts). Wrapped in runInCompanyScopeBypass (DUR-352)
+      // for the same reason as mergeDeployVisibility above: its tick() scans approvals across
+      // every company in one sweep, so bypass (not per-company scope) is the right primitive.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: deployCarriedIssues",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:deployCarriedIssues",
+        },
+        () => deployCarriedIssues.tick(),
+      )
+        .then((result) => {
+          if (result.closed > 0) {
+            logger.info({ ...result }, "deploy-carried-issues tick auto-closed issues carried by a completed deploy");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "deploy-carried-issues tick failed");
         });
 
       // DUR-299 point 6 / DUR-314: delegate the "61 percent" of merge_pr

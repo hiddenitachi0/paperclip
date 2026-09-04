@@ -40,6 +40,7 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("issue watchdog routes", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let pendingTaskWatchdogEvaluations: Promise<unknown>[] = [];
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-watchdogs-routes-");
@@ -47,6 +48,12 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
   }, 20_000);
 
   afterEach(async () => {
+    // DUR-421: queueTaskWatchdogEvaluation() runs fire-and-forget from the
+    // request path (DUR-417) and can still be writing (e.g. issue_comments)
+    // after a request resolves. Drain it before the hard deletes below or a
+    // still-in-flight insert races the truncate and fails FK constraints.
+    await Promise.allSettled(pendingTaskWatchdogEvaluations);
+    pendingTaskWatchdogEvaluations = [];
     await db.delete(activityLog);
     await db.delete(issueComments);
     await db.delete(heartbeatRunEvents);
@@ -80,7 +87,15 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       };
       next();
     });
-    app.use("/api", issueRoutes(db, {} as any, { taskWatchdogEnqueueWakeup: null }));
+    app.use(
+      "/api",
+      issueRoutes(db, {} as any, {
+        taskWatchdogEnqueueWakeup: null,
+        onTaskWatchdogEvaluationQueued: (evaluation) => {
+          pendingTaskWatchdogEvaluations.push(evaluation);
+        },
+      }),
+    );
     app.use(errorHandler);
     return app;
   }
