@@ -13,9 +13,15 @@ const COMMAND_ENV_SECRET_ASSIGNMENT_RE = new RegExp(
 );
 const COMMAND_AUTHORIZATION_BEARER_RE = /(\bAuthorization\s*:\s*Bearer\s+)[^\s"'`]+/gi;
 const COMMAND_OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]{12,}\b/g;
-const COMMAND_GITHUB_TOKEN_RE = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
+// `gh auth status` (no --show-token) already partially masks classic tokens (ghp_/gho_/...)
+// with literal asterisks, but fine-grained PATs use the `github_pat_<id>_<secret>` shape and
+// were falling through this pattern entirely (DUR-370) -- match that prefix too.
+const COMMAND_GITHUB_TOKEN_RE = /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g;
 const COMMAND_JWT_RE =
   /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b/g;
+// PEM-encoded private key blocks (RSA/EC/DSA/OPENSSH/PKCS8/encrypted) (DUR-371).
+const COMMAND_PEM_PRIVATE_KEY_RE =
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
 const COMMAND_SECRET_HINTS = [
   "api",
   "key",
@@ -35,6 +41,8 @@ const COMMAND_SECRET_HINTS = [
   "ghu_",
   "ghs_",
   "ghr_",
+  "github_pat_",
+  "-----begin",
 ] as const;
 
 function maybeContainsSecretText(command: string) {
@@ -54,5 +62,6 @@ export function redactCommandText(command: string, redactedValue = REDACTED_COMM
     )
     .replace(COMMAND_OPENAI_KEY_RE, redactedValue)
     .replace(COMMAND_GITHUB_TOKEN_RE, redactedValue)
+    .replace(COMMAND_PEM_PRIVATE_KEY_RE, redactedValue)
     .replace(COMMAND_JWT_RE, redactedValue);
 }
