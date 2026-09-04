@@ -329,7 +329,13 @@ async function loadCompanyAgentHierarchy(db: Db, companyId: string) {
   return new Map(rows.map((agent) => [agent.id, agent]));
 }
 
-async function isAgentInSubtree(db: Db, companyId: string, rootAgentId: string, targetAgentId: string) {
+// Exported for callers outside the authorization decide() surface that need the same
+// "does rootAgentId manage targetAgentId (directly or transitively via reportsTo)"
+// check `decide()` already applies for "allow_manager_chain" (see e.g.
+// tasks:manage_active_checkouts below) -- see approvals.ts's
+// assertMergePrIssueIdsAreRelevant (DUR-923), which reuses this instead of
+// re-implementing its own reportsTo walk.
+export async function isAgentInSubtree(db: Db, companyId: string, rootAgentId: string, targetAgentId: string) {
   return agentIsInSubtree(
     await loadCompanyAgentHierarchy(db, companyId),
     rootAgentId,
