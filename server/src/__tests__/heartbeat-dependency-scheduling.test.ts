@@ -135,20 +135,53 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(documents);
     await db.delete(issueRelations);
     await db.delete(issueTreeHolds);
-    await db.delete(issues);
+    // Fire-and-forget run continuations (see `executeRun`'s `void ... .catch(...)`
+    // dispatch) can still be appending post-completion notice comments (e.g. the
+    // successful-run-handoff "Missing issue disposition" notice) after the
+    // idle-poll above observes every heartbeat run has left queued/running.
+    // Retry the issueComments/issues pair so any such late-arriving comment gets
+    // swept up instead of tripping the issue_comments_issue_id_issues_id_fk FK.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await db.delete(issueComments);
+      try {
+        await db.delete(issues);
+        break;
+      } catch (error) {
+        if (attempt === 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     await db.delete(heartbeatRunEvents);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
-    await db.delete(companySkills);
-    await db.delete(environments);
-    await db.delete(workspaceOperations);
-    await db.delete(executionWorkspaces);
-    await db.delete(environmentLeases);
-    await db.delete(companySkills);
-    await db.delete(companies);
+    // Same trailing-continuation race as above, one hop further downstream:
+    // a leftover executeRun() can still be writing agentRuntimeState right as
+    // we clean up, so retry the agents delete too.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await db.delete(agentRuntimeState);
+      try {
+        await db.delete(agents);
+        break;
+      } catch (error) {
+        if (attempt === 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await db.delete(companySkills);
+      await db.delete(environments);
+      await db.delete(workspaceOperations);
+      await db.delete(executionWorkspaces);
+      await db.delete(environmentLeases);
+      try {
+        await db.delete(companies);
+        break;
+      } catch (error) {
+        if (attempt === 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
   });
 
   afterAll(async () => {
