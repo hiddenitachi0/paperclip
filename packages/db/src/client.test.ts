@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   applyPendingMigrations,
+  createDb,
   inspectMigrations,
 } from "./client.js";
 import {
@@ -540,5 +542,38 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
       }
     },
     20_000,
+  );
+});
+
+describeEmbeddedPostgres("createDb connection safeguards", () => {
+  it(
+    "aborts a stuck query via statement_timeout instead of hanging indefinitely",
+    async () => {
+      const connectionString = await createTempDatabase();
+      const db = createDb(connectionString);
+
+      try {
+        const start = Date.now();
+        let caught: unknown;
+        try {
+          await db.execute(sql`select pg_sleep(60)`);
+        } catch (error) {
+          caught = error;
+        }
+        const elapsedMs = Date.now() - start;
+
+        expect(caught).toBeDefined();
+        const cause = caught instanceof Error ? (caught.cause ?? caught) : caught;
+        expect(String((cause as { message?: string })?.message)).toMatch(/statement timeout/i);
+        // Must fail near the 30s statement_timeout, not after pg_sleep(60) returns.
+        expect(elapsedMs).toBeLessThan(45_000);
+      } finally {
+        await db.$client.end({ timeout: 0 });
+      }
+    },
+    // Budget covers embedded-Postgres startup plus the 30s statement_timeout
+    // itself — well short of pg_sleep(60)'s full duration, which is the
+    // point: the query must fail on the timeout, not on the sleep completing.
+    60_000,
   );
 });

@@ -71,7 +71,17 @@ export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
 // server itself should pass a distinct applicationName so they show up
 // under their own identity.
 export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_APP_APPLICATION_NAME) {
-  const sql = postgres(url, { connection: { application_name: applicationName } });
+  const sql = postgres(url, {
+    // DUR-280: without these, a stuck/blocked query or an exhausted pool
+    // queues new requests forever with no error and no recovery -- every
+    // request handler that touches the DB (including auth) hangs
+    // indefinitely instead of failing fast. Bound every stage so a DB-side
+    // problem surfaces as an error the app can log/retry rather than an
+    // unbounded hang.
+    connect_timeout: 10,
+    idle_timeout: 30,
+    connection: { application_name: applicationName, statement_timeout: 30_000 },
+  });
   return drizzlePg(sql, { schema });
 }
 
