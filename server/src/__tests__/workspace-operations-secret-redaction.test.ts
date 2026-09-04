@@ -68,8 +68,8 @@ describeEmbeddedPostgres("workspace operation secret redaction", () => {
 
     const leaked = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
     const operation = await recorder.recordOperation({
-      phase: "git_push",
-      command: "git push",
+      phase: "git_push", // paperclip:allow-git-push: test fixture label only; run() below is mocked and never shells out
+      command: "git push", // paperclip:allow-git-push: test fixture label only; run() below is mocked and never shells out
       run: async () => ({
         status: "failed",
         exitCode: 128,
