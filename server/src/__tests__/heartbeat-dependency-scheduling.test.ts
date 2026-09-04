@@ -87,15 +87,63 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
   return fn();
 }
 
+/**
+ * The heartbeat run under test can still be flushing async side effects (comments,
+ * company_skills provisioning, etc.) for a moment after its status row leaves
+ * queued/running, racing this cleanup's deletes -- the FK violation lands on
+ * whichever child table's trailing write hasn't settled yet, not always the same
+ * one. Retrying the whole (idempotent) delete chain rides out that race instead of
+ * trying to out-order it.
+ */
+async function deleteAllTestDataWithRetry(db: ReturnType<typeof createDb>, maxAttempts = 5) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await db.delete(environmentLeases);
+      await db.delete(activityLog);
+      await db.delete(companySkills);
+      await db.delete(issueComments);
+      await db.delete(issueDocuments);
+      await db.delete(documentRevisions);
+      await db.delete(documents);
+      await db.delete(issueRelations);
+      await db.delete(issueTreeHolds);
+      await db.delete(issues);
+      await db.delete(heartbeatRunEvents);
+      await db.delete(activityLog);
+      await db.delete(heartbeatRuns);
+      await db.delete(agentWakeupRequests);
+      await db.delete(agentRuntimeState);
+      await db.delete(agents);
+      await db.delete(companySkills);
+      await db.delete(environments);
+      await db.delete(workspaceOperations);
+      await db.delete(executionWorkspaces);
+      await db.delete(environmentLeases);
+      await db.delete(companySkills);
+      await db.delete(companies);
+      return;
+    } catch (err) {
+      const isForeignKeyRace = err instanceof Error && /violates foreign key constraint/.test(err.message);
+      if (!isForeignKeyRace || attempt === maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+    }
+  }
+}
+
 describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let pendingDispatchedRuns: Promise<unknown>[] = [];
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-dependency-scheduling-");
     db = createDb(tempDb.connectionString);
-    heartbeat = heartbeatService(db);
+    heartbeat = heartbeatService(db, {
+      onRunDispatched: (run) => {
+        pendingDispatchedRuns.push(run);
+      },
+    });
     await ensureIssueRelationsTable(db);
   }, 20_000);
 
@@ -111,6 +159,15 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       model: "test-model",
     }));
     runningProcesses.clear();
+    // DUR-927: executeRun() is fire-and-forget and can itself dispatch more
+    // fire-and-forget runs for dependents once it completes (dependency wake
+    // re-check). Drain in a loop, not a single Promise.allSettled snapshot,
+    // since new promises can land on the array while we're awaiting it.
+    while (pendingDispatchedRuns.length > 0) {
+      const batch = pendingDispatchedRuns;
+      pendingDispatchedRuns = [];
+      await Promise.allSettled(batch);
+    }
     let idlePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db
@@ -126,29 +183,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await db.delete(environmentLeases);
-    await db.delete(activityLog);
-    await db.delete(companySkills);
-    await db.delete(issueComments);
-    await db.delete(issueDocuments);
-    await db.delete(documentRevisions);
-    await db.delete(documents);
-    await db.delete(issueRelations);
-    await db.delete(issueTreeHolds);
-    await db.delete(issues);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(activityLog);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
-    await db.delete(companySkills);
-    await db.delete(environments);
-    await db.delete(workspaceOperations);
-    await db.delete(executionWorkspaces);
-    await db.delete(environmentLeases);
-    await db.delete(companySkills);
-    await db.delete(companies);
+    await deleteAllTestDataWithRetry(db);
   });
 
   afterAll(async () => {
