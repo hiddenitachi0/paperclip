@@ -95,22 +95,31 @@ function registerModuleMocks() {
   }));
 }
 
-// approvals.ts's real (not service-mocked) db.select() calls -- here just
+// approvals.ts's real (not service-mocked) db.select() calls -- here
 // assertApprovalMutationAllowedByRunContext's heartbeat_runs run-context
-// lookup, since resolveProjectDeployBranches is fully mocked above -- run
-// against the request-scoped db built by createRequestScopedDb(rawDb). That
-// proxy always resolves through the real drizzle-orm query builder bound to
-// whatever connection runInCompanyScope reserved (see
-// middleware/company-scope.ts), so a fake `.select().from().where()` chain on
-// the object passed to approvalRoutes(...) is never actually reached; only
-// the shape of the *reserved connection* (rawDb.$client.reserve()) matters.
-// withFakeCompanyScopeReserve's default empty `unsafeRows` makes every real
-// select (including the heartbeat_runs lookup) resolve to no rows, so
-// assertApprovalMutationAllowedByRunContext finds no run and returns true,
-// letting the route continue -- exactly what createMinimalDb's dead fake
-// chain used to simulate before company-scope wiring made it unreachable.
+// lookup and (DUR-923) assertMergePrIssueIdsAreRelevant's `{id, companyId,
+// assigneeAgentId}` issues lookup, since resolveProjectDeployBranches is
+// fully mocked above -- run against the request-scoped db built by
+// createRequestScopedDb(rawDb). That proxy always resolves through the real
+// drizzle-orm query builder bound to whatever connection runInCompanyScope
+// reserved (see middleware/company-scope.ts), so a fake
+// `.select().from().where()` chain on the object passed to approvalRoutes(...)
+// is never actually reached; only the shape of the *reserved connection*
+// (rawDb.$client.reserve()) matters.
+//
+// A single shared 3-value tuple `[ISSUE_ID, companyId, null]` satisfies both
+// real queries this suite's requests issue: the heartbeat_runs 4-column read
+// gets a mismatched (null) `agentId`, so assertApprovalMutationAllowedByRunContext
+// falls into its "not this run's own row" branch and returns true (unblocked)
+// regardless; and the issues 3-column read resolves the DUR-923 guard's
+// target issue as unassigned, which that guard always lets any agent name --
+// this suite is about the orthogonal DUR-40 mirror-branch check, not issue
+// ownership, so a no-op default keeps it that way.
 function createMinimalDb() {
-  return withFakeCompanyScopeReserve({});
+  return withFakeCompanyScopeReserve(
+    {},
+    { unsafeRows: [[ISSUE_ID, "22222222-2222-4222-8222-222222222222", null]] },
+  );
 }
 
 async function createAgentApp() {

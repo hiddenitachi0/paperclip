@@ -73,6 +73,12 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
 }));
+// DUR-923's issueIds-relevance guard lives in this same normalizeRequestBoardApprovalPayload
+// path -- this suite's fixture defaults every issue to unassigned (see
+// createDbWithProjectAndRepo below) so that guard is a no-op here and this file keeps testing
+// only originalIssueIds/repo behavior. Stubbed rather than omitted so a future change that
+// makes the guard reach isAgentInSubtree doesn't throw on an undefined import.
+const mockIsAgentInSubtree = vi.hoisted(() => vi.fn(async () => false));
 
 // No deploy/mirror branch declared for this project -- keeps the DUR-40 guard a no-op so this
 // suite only exercises originalIssueIds/repo validation.
@@ -86,6 +92,7 @@ function registerModuleMocks() {
     approvalService: () => mockApprovalService,
     escalationGrantService: () => mockEscalationGrantService,
     heartbeatService: () => mockHeartbeatService,
+    isAgentInSubtree: mockIsAgentInSubtree,
     issueApprovalService: () => mockIssueApprovalService,
     issueThreadInteractionService: () => mockIssueThreadInteractionService,
     logActivity: mockLogActivity,
@@ -103,13 +110,26 @@ function registerModuleMocks() {
 // `withFakeCompanyScopeReserve` provides, not a select()/from()/where() mock chain on the
 // raw db object. Those real queries execute via the reserved connection's
 // `client.unsafe(query, params).values()`, so this discriminates on the compiled SQL
-// text's table name to answer resolveProjectIdForIssues (issues.projectId) and
-// resolveProjectPrimaryRepo (projectWorkspaces.repoUrl) differently -- pass `null` for
-// either to make that lookup resolve nothing (keeping the repo-validation guard a no-op),
-// matching the fail-open-on-unknown-project posture the guard itself takes. Every other
-// real query this route issues (e.g. the heartbeat-run cheap-recovery-context lookup)
-// resolves to no rows, which is the bypass-this-check outcome those call sites want.
-function createDbWithProjectAndRepo(input: { projectId: string | null; repoUrl: string | null }) {
+// text's table/column names to answer resolveProjectIdForIssues (issues.projectId),
+// resolveProjectPrimaryRepo (projectWorkspaces.repoUrl), and DUR-923's
+// assertMergePrIssueIdsAreRelevant (issues.assigneeAgentId) differently -- pass `null`
+// project/repo to make that lookup resolve nothing (keeping the repo-validation guard a
+// no-op), matching the fail-open-on-unknown-project posture the guard itself takes.
+// `issueAssignee` defaults every issue to unassigned so DUR-923's guard is a no-op here too
+// unless a test opts in. The assignee-select check runs before the generic "issues" check
+// since both queries hit the `issues` table -- only DUR-923's also selects
+// `assignee_agent_id`. Every other real query this route issues (e.g. the heartbeat-run
+// cheap-recovery-context lookup) resolves to no rows, which is the bypass-this-check
+// outcome those call sites want.
+function createDbWithProjectAndRepo(input: {
+  projectId: string | null;
+  repoUrl: string | null;
+  issueAssignee?: { id: string; companyId: string; assigneeAgentId: string | null } | null;
+}) {
+  const issueAssignee =
+    input.issueAssignee !== undefined
+      ? input.issueAssignee
+      : { id: ISSUE_ID, companyId: COMPANY_ID, assigneeAgentId: null };
   const fakeDb = withFakeCompanyScopeReserve({} as Record<string, unknown>) as any;
   const baseReserve = fakeDb.$client.reserve;
   fakeDb.$client.reserve = async (...args: unknown[]) => {
@@ -117,7 +137,11 @@ function createDbWithProjectAndRepo(input: { projectId: string | null; repoUrl: 
     reserved.unsafe = (...unsafeArgs: unknown[]) => {
       const sql = String(unsafeArgs[0] ?? "");
       let rows: unknown[] = [];
-      if (sql.includes("project_workspaces")) {
+      if (sql.includes("assignee_agent_id")) {
+        rows = issueAssignee
+          ? [[issueAssignee.id, issueAssignee.companyId, issueAssignee.assigneeAgentId]]
+          : [];
+      } else if (sql.includes("project_workspaces")) {
         rows = input.repoUrl ? [[input.repoUrl]] : [];
       } else if (sql.includes("issues")) {
         rows = input.projectId ? [[input.projectId]] : [];
@@ -151,9 +175,7 @@ async function createAgentApp(db?: unknown) {
   });
   app.use(
     "/api",
-    approvalRoutes(
-      (db ?? withFakeCompanyScopeReserve({} as Record<string, unknown>)) as any,
-    ),
+    approvalRoutes((db ?? createDbWithProjectAndRepo({ projectId: null, repoUrl: null })) as any),
   );
   app.use(errorHandler);
   return app;

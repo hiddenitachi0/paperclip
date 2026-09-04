@@ -114,7 +114,7 @@ export {
   addAgentCatalogOverride,
   removeAgentCatalogOverride,
 } from "./agent-roles.js";
-export { authorizationService } from "./authorization.js";
+export { authorizationService, isAgentInSubtree } from "./authorization.js";
 export type {
   AuthorizationAction,
   AuthorizationActor,
