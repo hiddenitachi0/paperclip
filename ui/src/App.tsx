@@ -236,8 +236,12 @@ function InboxRootRedirect() {
 
 function LegacySettingsRedirect() {
   const location = useLocation();
-  const { companies, selectedCompany, loading } = useCompany();
+  const { companies, selectedCompany, loading, unauthorized } = useCompany();
   const { companyPrefix } = useParams<{ companyPrefix?: string }>();
+
+  if (unauthorized) {
+    return <Navigate to="/auth" replace />;
+  }
 
   if (loading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
@@ -326,8 +330,12 @@ function OnboardingRoutePage() {
 }
 
 function CompanyRootRedirect() {
-  const { companies, selectedCompany, loading } = useCompany();
+  const { companies, selectedCompany, loading, unauthorized } = useCompany();
   const location = useLocation();
+
+  if (unauthorized) {
+    return <Navigate to="/auth" replace />;
+  }
 
   if (loading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
@@ -351,7 +359,11 @@ function CompanyRootRedirect() {
 
 function UnprefixedBoardRedirect() {
   const location = useLocation();
-  const { companies, selectedCompany, loading } = useCompany();
+  const { companies, selectedCompany, loading, unauthorized } = useCompany();
+
+  if (unauthorized) {
+    return <Navigate to="/auth" replace />;
+  }
 
   if (loading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
