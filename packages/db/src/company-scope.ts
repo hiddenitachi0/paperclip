@@ -717,6 +717,30 @@ export function createRequestScopedDb(rawDb: Db): Db {
               "return value directly instead of this wrapped singleton.",
           );
         }
+        // DUR-932: a fire-and-forget continuation spawned from inside a
+        // runInCompanyScope()-wrapped handler (e.g. `void someCall()`, or a
+        // `.then()` chain the handler never awaits) keeps this same
+        // AsyncLocalStorage context alive after the handler itself returns.
+        // If the outer runInCompanyScope has already reset+released the
+        // reserved connection by then (`store.liveness.released`), calling
+        // straight through to `store.scopedDb` here -- unlike
+        // withCompanyScope/tx.transaction(), which route through
+        // runOnReservedScope and get DUR-926/DUR-920's liveness check --
+        // would hand back a query bound to an already-recycled physical
+        // connection. A second, unrelated request can already be issuing
+        // its own queries on that same connection by the time this one
+        // lands, corrupting Postgres's extended-query protocol for both
+        // (surfaced as "bind message supplies N parameters, but prepared
+        // statement requires M") instead of failing loudly here.
+        if (store.liveness.released) {
+          throw new Error(
+            `createRequestScopedDb: attempted to use "${describePath(path, prop)}" after the ` +
+              "runInCompanyScope/runInCompanyScopeBypass call that reserved this connection already " +
+              "released it (DUR-932) -- this db reference outlived its request/scheduler scope, most " +
+              "likely via a fire-and-forget continuation the handler never awaited. Await it inside the " +
+              "scope instead, or run it through withCompanyScope(rawDb, ...) on its own connection.",
+          );
+        }
         const effective = walkPath(store.scopedDb, path) as Record<PropertyKey, unknown>;
         const value = effective[prop];
         if (typeof value === "function") return value.bind(effective);
