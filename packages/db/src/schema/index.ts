@@ -10,6 +10,7 @@ export { companyAgentRoles } from "./company_agent_roles.js";
 export { personas } from "./personas.js";
 export { personaGenerationCounters } from "./persona_generation_counters.js";
 export { companyMcpTools } from "./company_mcp_tools.js";
+export { companyMcpOAuthConnections } from "./company_mcp_oauth_connections.js";
 export { agents } from "./agents.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";
