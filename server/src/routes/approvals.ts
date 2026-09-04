@@ -1,5 +1,5 @@
 import { Router, type Request } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
@@ -26,6 +26,7 @@ import {
   agentService,
   escalationGrantService,
   heartbeatService,
+  isAgentInSubtree,
   issueApprovalService,
   issueThreadInteractionService,
   logActivity,
@@ -659,17 +660,72 @@ function stampOriginalIssueIds(payload: Record<string, unknown>, issueIds: strin
   payload.originalIssueIds = issueIds;
 }
 
+/**
+ * DUR-923 follow-up to DUR-252's security review of PR #169 (DUR-238 deploy-carried-issue
+ * auto-close): `originalIssueIds` (stamped above) faithfully proves "this approval was filed
+ * claiming issue X" but never that the filer had any provable connection to X's own work --
+ * `POST /companies/:id/approvals` only gates *who may file a merge_pr approval at all*
+ * (`merges:request`), not *which issues a given filer may name*. Once DUR-238 merges, an
+ * approved+deployed merge_pr approval naming issue X auto-closes X with zero action from X's
+ * actual assignee, so a filer naming an issue it has no real connection to can force a
+ * bogus auto-close.
+ *
+ * A board/user actor is left unconstrained: they're the trust anchor DUR-238's auto-close
+ * ultimately defers to anyway (mandatory human approval of the merge_pr request itself), and
+ * humans routinely file on behalf of the company at large. For an agent filer, an issue is
+ * "relevant" if the agent is its assignee, the issue has no assignee yet, or the assignee is
+ * one of the filer's own reports -- mirrors the "allow_manager_chain" convention `decide()`
+ * already uses for `tasks:manage_active_checkouts` (the same "who may act on a report's issue"
+ * question), via the same `isAgentInSubtree` reportsTo walk rather than a second implementation
+ * of it. Fails closed (unlike `assertMergePrRepoMatchesProject`'s fail-open UX check): an
+ * issueId that doesn't even resolve in this company is never "relevant" to anything, and
+ * `issueApprovalsSvc.linkManyForApproval` would reject it right after this anyway.
+ */
+async function assertMergePrIssueIdsAreRelevant(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  actor: { actorType: "agent" | "user"; actorId: string },
+) {
+  if (actor.actorType !== "agent" || issueIds.length === 0) return;
+  const rows = await db
+    .select({ id: issues.id, companyId: issues.companyId, assigneeAgentId: issues.assigneeAgentId })
+    .from(issues)
+    .where(inArray(issues.id, issueIds));
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  for (const issueId of issueIds) {
+    const issue = byId.get(issueId);
+    if (!issue || issue.companyId !== companyId) {
+      throw unprocessable(
+        `Issue ${issueId} does not exist in this company -- a merge_pr approval may only name issues the filer has provable relevance to.`,
+        { issueId },
+      );
+    }
+    if (!issue.assigneeAgentId) continue;
+    if (issue.assigneeAgentId === actor.actorId) continue;
+    if (await isAgentInSubtree(db, companyId, actor.actorId, issue.assigneeAgentId)) continue;
+    throw unprocessable(
+      `Issue ${issueId} is assigned to a different agent this filer neither is nor manages -- a merge_pr approval may only name issues the filer owns or manages.`,
+      { issueId, filedByAgentId: actor.actorId },
+    );
+  }
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
   issueIds: string[],
   payload: Record<string, unknown>,
+  actor: { actorType: "agent" | "user"; actorId: string },
   mergePrDeployBranches: ProjectDeployBranches | null = null,
 ) {
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   appendToolGrantCapabilitySummary(payload);
   stripUntrustedMergeCommitSha(payload);
   await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
+  if (payload.kind === "merge_pr") {
+    await assertMergePrIssueIdsAreRelevant(db, companyId, issueIds, actor);
+  }
   stampOriginalIssueIds(payload, issueIds);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
@@ -1047,6 +1103,7 @@ export function approvalRoutes(
         companyId,
         uniqueIssueIds,
         normalizedPayload,
+        actor,
         mergePrDeployBranches,
       );
     }
@@ -1398,6 +1455,10 @@ export function approvalRoutes(
           ? existingOriginalIssueIds.filter((value): value is string => typeof value === "string")
           : [];
         await assertMergePrRepoMatchesProject(db, existing.companyId, anchorIssueIds, normalizedPayload);
+        // DUR-923: re-validate relevance on resubmit too -- the issue's assignee (or the
+        // filer's place in the reporting chain) can change between create and resubmit, and
+        // resubmit is exactly as caller-controlled as create per the DUR-252 comment above.
+        await assertMergePrIssueIdsAreRelevant(db, existing.companyId, anchorIssueIds, getActorInfo(req));
         stampOriginalIssueIds(normalizedPayload, anchorIssueIds);
       }
     }
