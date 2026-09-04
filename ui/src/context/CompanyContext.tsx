@@ -21,6 +21,7 @@ interface CompanyContextValue {
   selectedCompany: Company | null;
   selectionSource: CompanySelectionSource;
   loading: boolean;
+  unauthorized: boolean;
   error: Error | null;
   setSelectedCompanyId: (companyId: string, options?: CompanySelectionOptions) => void;
   reloadCompanies: () => Promise<void>;
@@ -148,6 +149,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
       selectedCompany,
       selectionSource,
       loading: isLoading,
+      unauthorized: companyListUnauthorized,
       error: error as Error | null,
       setSelectedCompanyId,
       reloadCompanies,
@@ -159,6 +161,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
       selectedCompany,
       selectionSource,
       isLoading,
+      companyListUnauthorized,
       error,
       setSelectedCompanyId,
       reloadCompanies,
