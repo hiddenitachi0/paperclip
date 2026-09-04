@@ -3,6 +3,25 @@ import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerAdapterModule } from "../adapters/index.js";
 
+// This file fully mocks the service layer (mockAgentService,
+// mockAccessService, etc. below) -- it exercises route wiring, not real DB
+// company-scope enforcement. The `db` this file's createApp() passes to
+// agentRoutes() is `{}`, not a real pool, so company-scope.ts's real
+// `runInCompanyScope` -- which reserves a physical connection via
+// `rawDb.$client.reserve()` -- fails here (see 2e91a693). Mock it to
+// populate the same AsyncLocalStorage scope directly with the fake db (no
+// reservation), and use a real UUID for the companyId placeholder so
+// company-scope.ts's format validation (which still runs for real) accepts it.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   getChainOfCommand: vi.fn(async () => []),
@@ -102,7 +121,7 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["c0000001-0000-4000-8000-000000000001"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -129,7 +148,7 @@ describe("agent test-environment route", () => {
     });
     mockEnvironmentService.getById.mockResolvedValue({
       id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       name: "Sandbox QA",
       driver: "sandbox",
       config: { provider: "fake-plugin" },
@@ -173,7 +192,7 @@ describe("agent test-environment route", () => {
     const app = await createApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/adapters/external_test/test-environment")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/adapters/external_test/test-environment")
       .send({
         adapterConfig: {},
         environmentId: "11111111-1111-4111-8111-111111111111",
@@ -210,7 +229,7 @@ describe("agent test-environment route", () => {
     const app = await createApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/adapters/external_test/test-environment")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/adapters/external_test/test-environment")
       .send({
         adapterConfig: {},
         environmentId: "22222222-2222-4222-8222-222222222222",
@@ -255,7 +274,7 @@ describe("agent test-environment route", () => {
     const app = await createApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/adapters/external_test/test-environment")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/adapters/external_test/test-environment")
       .send({
         adapterConfig: {},
         environmentId: "11111111-1111-4111-8111-111111111111",
@@ -285,7 +304,7 @@ describe("agent test-environment route", () => {
     const app = await createApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/adapters/external_test/test-environment")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/adapters/external_test/test-environment")
       .send({
         adapterConfig: {},
         environmentId: "11111111-1111-4111-8111-111111111111",

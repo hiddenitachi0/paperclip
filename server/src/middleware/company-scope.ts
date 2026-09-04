@@ -1,6 +1,6 @@
 import type { Request, RequestHandler } from "express";
 import type { Db, CompanyScopeBypassOptions } from "@paperclipai/db";
-import { runInCompanyScope, runInCompanyScopeBypass } from "@paperclipai/db";
+import { ConnectionReleaseUnsafeError, runInCompanyScope, runInCompanyScopeBypass } from "@paperclipai/db";
 import { badRequest } from "../errors.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -52,9 +52,22 @@ export function companyScope(rawDb: Db, resolveCompanyId: CompanyIdResolver): Re
         }
 
         return runInCompanyScope(rawDb, companyId, () =>
-          new Promise<void>((resolve) => {
-            res.once("finish", resolve);
-            res.once("close", resolve);
+          new Promise<void>((resolve, reject) => {
+            let finished = false;
+            res.once("finish", () => {
+              finished = true;
+              resolve();
+            });
+            // `close` also fires when the underlying connection was
+            // terminated prematurely (client abort, e.g. an SPA cancelling
+            // an in-flight fetch on navigation) -- see the
+            // ConnectionReleaseUnsafeError doc comment in
+            // packages/db/src/company-scope.ts for why that case must not
+            // resolve normally.
+            res.once("close", () => {
+              if (finished) return;
+              reject(new ConnectionReleaseUnsafeError());
+            });
             next();
           }),
         );

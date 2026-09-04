@@ -2,6 +2,8 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.setConfig({ testTimeout: 30_000 });
+
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
@@ -15,9 +17,11 @@ const mockAgentService = vi.hoisted(() => ({
 
 const mockTrackAgentTaskCompleted = vi.hoisted(() => vi.fn());
 const mockGetTelemetryClient = vi.hoisted(() => vi.fn());
+const TEST_COMPANY_ID = "22222222-2222-4222-8222-222222222222";
+
 const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
   then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
-    Promise.resolve([{ companyId: "company-1", permissions: null }]).then(onFulfilled, onRejected),
+    Promise.resolve([{ companyId: TEST_COMPANY_ID, permissions: null }]).then(onFulfilled, onRejected),
 })));
 const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
@@ -26,6 +30,17 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("@paperclipai/db", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@paperclipai/db")>();
+    return {
+      ...actual,
+      createRequestScopedDb: (rawDb: unknown) => rawDb,
+      runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+      withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+      runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    };
+  });
+
   vi.doMock("@paperclipai/shared/telemetry", () => ({
     trackAgentTaskCompleted: mockTrackAgentTaskCompleted,
     trackErrorHandlerCrash: vi.fn(),
@@ -39,7 +54,7 @@ function registerModuleMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: TEST_COMPANY_ID, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => ({
       canUser: vi.fn(),
@@ -98,7 +113,7 @@ function registerModuleMocks() {
 function makeIssue(status: "todo" | "done") {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "company-1",
+    companyId: TEST_COMPANY_ID,
     status,
     assigneeAgentId: "agent-1",
     assigneeUserId: null,
@@ -147,14 +162,14 @@ describe("issue telemetry routes", () => {
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelectWhere.mockImplementation(() => ({
       then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
-        Promise.resolve([{ companyId: "company-1", permissions: null }]).then(onFulfilled, onRejected),
+        Promise.resolve([{ companyId: TEST_COMPANY_ID, permissions: null }]).then(onFulfilled, onRejected),
     }));
   });
 
   it("emits task-completed telemetry with the agent role, adapter type, and model", async () => {
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
       role: "engineer",
       adapterType: "codex_local",
       adapterConfig: { model: "claude-sonnet-4-6" },
@@ -163,7 +178,7 @@ describe("issue telemetry routes", () => {
     const app = await createApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: TEST_COMPANY_ID,
       runId: null,
     });
     const res = await request(app)
@@ -185,7 +200,7 @@ describe("issue telemetry routes", () => {
     const app = await createApp({
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: [TEST_COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     });

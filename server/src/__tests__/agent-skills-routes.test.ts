@@ -2,6 +2,34 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// This file fully mocks the service layer (mockAgentService,
+// mockAgentInstructionsService, etc. below) -- it exercises route wiring
+// and skills logic, not real DB company-scope enforcement (see the
+// embedded-Postgres agents-wakeup-company-scope.test.ts for that). The
+// `rawDb` this file's createApp()/createDb() pass to agentRoutes() are
+// plain fakes with select/from/where stubs, not a real pool, so
+// company-scope.ts's real `runInCompanyScope` -- which reserves a physical
+// connection via `rawDb.$client.reserve()` -- fails/hangs here. The
+// companyId-format validation and any `checkAccess` callback in
+// company-scope.ts still run for real: both happen inside companyScope()'s
+// resolver, strictly before runInCompanyScope is ever called, so swapping
+// out only the connection-reservation step below does not weaken that
+// check. The replacement populates the same AsyncLocalStorage scope
+// createRequestScopedDb(rawDb) reads from, using the test's own `rawDb` as
+// the "scoped" db directly (no reservation) -- which matters here in
+// particular because POST /companies/:companyId/agents calls
+// `db.select().from(companies)...` directly (not through a mocked service),
+// so it needs that call to keep resolving to this file's fake db.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   update: vi.fn(),
@@ -154,7 +182,7 @@ function createDb(requireBoardApprovalForNewAgents = false) {
       from: vi.fn(() => ({
         where: vi.fn(async () => [
           {
-            id: "company-1",
+            id: "c0000001-0000-4000-8000-000000000001",
             requireBoardApprovalForNewAgents,
           },
         ]),
@@ -174,7 +202,7 @@ async function createApp(db: Record<string, unknown> = createDb()) {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["c0000001-0000-4000-8000-000000000001"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -199,7 +227,7 @@ async function createSelfAgentActorApp(agentId: string, db: Record<string, unkno
     (req as any).actor = {
       type: "agent",
       agentId,
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       source: "agent_key",
     };
     next();
@@ -239,7 +267,7 @@ async function requestApp(
 function makeAgent(adapterType: string) {
   return {
     id: "11111111-1111-4111-8111-111111111111",
-    companyId: "company-1",
+    companyId: "c0000001-0000-4000-8000-000000000001",
     name: "Agent",
     role: "engineer",
     title: "Engineer",
@@ -345,7 +373,7 @@ describe.sequential("agent skill routes", () => {
     });
     mockApprovalService.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       type: "hire_agent",
       status: "pending",
       payload: input.payload ?? {},
@@ -383,11 +411,11 @@ describe.sequential("agent skill routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=company-1"),
+        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=c0000001-0000-4000-8000-000000000001"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("c0000001-0000-4000-8000-000000000001", expect.objectContaining({
       materializeMissing: false,
       versionSelections: expect.any(Map),
     }));
@@ -399,7 +427,14 @@ describe.sequential("agent skill routes", () => {
         }),
       }),
     );
-  }, 10_000);
+    // This is the first test in the file: vi.resetModules() in beforeEach
+    // forces a cold re-transform/re-import of the dynamically-imported
+    // "@paperclipai/db/company-scope" module inside the top-level
+    // vi.mock("@paperclipai/db", ...) factory above, which can push this
+    // specific test past a 10s budget under load even though every later
+    // test in this file reuses the now-warm module cache. Give it more room
+    // rather than the default 10s the rest of the file doesn't need.
+  }, 30_000);
 
   it("skips runtime materialization when listing Codex skills", async () => {
     mockAgentService.getById.mockResolvedValue(makeAgent("codex_local"));
@@ -415,11 +450,11 @@ describe.sequential("agent skill routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=company-1"),
+        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=c0000001-0000-4000-8000-000000000001"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("c0000001-0000-4000-8000-000000000001", expect.objectContaining({
       materializeMissing: false,
       versionSelections: expect.any(Map),
     }));
@@ -445,11 +480,11 @@ describe.sequential("agent skill routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=company-1"),
+        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=c0000001-0000-4000-8000-000000000001"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("c0000001-0000-4000-8000-000000000001", expect.objectContaining({
       materializeMissing: false,
       versionSelections: expect.any(Map),
     }));
@@ -491,7 +526,7 @@ describe.sequential("agent skill routes", () => {
     });
 
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=c0000001-0000-4000-8000-000000000001")
       .send({ desiredSkills: ["paperclip"] }));
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -533,11 +568,11 @@ describe.sequential("agent skill routes", () => {
     const res = await requestApp(
       await createApp(),
       (baseUrl) => request(baseUrl)
-        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=company-1"),
+        .get("/api/agents/11111111-1111-4111-8111-111111111111/skills?companyId=c0000001-0000-4000-8000-000000000001"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("c0000001-0000-4000-8000-000000000001", expect.objectContaining({
       materializeMissing: false,
       versionSelections: expect.any(Map),
     }));
@@ -547,7 +582,7 @@ describe.sequential("agent skill routes", () => {
     mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
 
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=c0000001-0000-4000-8000-000000000001")
       .send({ desiredSkills: ["paperclipai/paperclip/paperclip"] }));
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -560,7 +595,7 @@ describe.sequential("agent skill routes", () => {
     const res = await requestApp(
       await createSelfAgentActorApp("11111111-1111-4111-8111-111111111111"),
       (baseUrl) => request(baseUrl)
-        .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+        .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=c0000001-0000-4000-8000-000000000001")
         .send({ desiredSkills: ["paperclipai/paperclip/paperclip"] }),
     );
 
@@ -572,7 +607,7 @@ describe.sequential("agent skill routes", () => {
     mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
 
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+      .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=c0000001-0000-4000-8000-000000000001")
       .send({ desiredSkills: ["paperclip"] }));
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -591,7 +626,7 @@ describe.sequential("agent skill routes", () => {
 
   it("persists canonical desired skills when creating an agent directly", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/companies/company-1/agents")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
       .send({
         name: "QA Agent",
         role: "engineer",
@@ -603,7 +638,7 @@ describe.sequential("agent skill routes", () => {
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
     const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentService.create).toHaveBeenCalledWith(
-      "company-1",
+      "c0000001-0000-4000-8000-000000000001",
       expect.objectContaining({
         adapterConfig: expect.objectContaining({
           paperclipSkillSync: expect.objectContaining({
@@ -624,7 +659,7 @@ describe.sequential("agent skill routes", () => {
 
   it("accepts the security role on direct agent creation and preserves it in telemetry", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/companies/company-1/agents")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
       .send({
         name: "Security Engineer",
         role: "security",
@@ -638,7 +673,7 @@ describe.sequential("agent skill routes", () => {
       role: "security",
     });
     expect(mockAgentService.create).toHaveBeenCalledWith(
-      "company-1",
+      "c0000001-0000-4000-8000-000000000001",
       expect.objectContaining({
         role: "security",
       }),
@@ -655,7 +690,7 @@ describe.sequential("agent skill routes", () => {
 
   it("materializes a managed AGENTS.md for directly created local agents", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/companies/company-1/agents")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
       .send({
         name: "QA Agent",
         role: "engineer",
@@ -690,7 +725,7 @@ describe.sequential("agent skill routes", () => {
 
   it("rejects legacy prompt templates for directly created local agents", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/companies/company-1/agents")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
       .send({
         name: "QA Agent",
         role: "engineer",
@@ -710,7 +745,7 @@ describe.sequential("agent skill routes", () => {
 
   it("materializes the bundled CEO instruction set for default CEO agents", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/companies/company-1/agents")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
       .send({
         name: "CEO",
         role: "ceo",
@@ -738,7 +773,7 @@ describe.sequential("agent skill routes", () => {
 
   it("materializes the bundled default instruction set for non-CEO agents with no prompt template", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
-      .post("/api/companies/company-1/agents")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
       .send({
         name: "Engineer",
         role: "engineer",
@@ -788,7 +823,7 @@ describe.sequential("agent skill routes", () => {
     const db = createDb(true);
 
     const res = await request(await createApp(db))
-      .post("/api/companies/company-1/agent-hires")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agent-hires")
       .send({
         name: "QA Agent",
         role: "engineer",
@@ -799,7 +834,7 @@ describe.sequential("agent skill routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
+      "c0000001-0000-4000-8000-000000000001",
       expect.objectContaining({
         payload: expect.objectContaining({
           desiredSkills: ["paperclipai/paperclip/paperclip"],
@@ -816,7 +851,7 @@ describe.sequential("agent skill routes", () => {
     const sourceIssueId = "22222222-2222-4222-8222-222222222222";
 
     const res = await request(await createApp(db))
-      .post("/api/companies/company-1/agent-hires")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agent-hires")
       .send({
         name: "Security Engineer",
         role: "engineer",
@@ -829,7 +864,7 @@ describe.sequential("agent skill routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(mockAgentService.create).toHaveBeenCalledWith(
-      "company-1",
+      "c0000001-0000-4000-8000-000000000001",
       expect.objectContaining({
         icon: "crown",
         adapterConfig: expect.objectContaining({
@@ -841,7 +876,7 @@ describe.sequential("agent skill routes", () => {
       expect.anything(),
     );
     expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
+      "c0000001-0000-4000-8000-000000000001",
       expect.objectContaining({
         payload: expect.objectContaining({
           icon: "crown",
@@ -861,7 +896,7 @@ describe.sequential("agent skill routes", () => {
 
   it("uses managed AGENTS config in hire approval payloads", async () => {
     const res = await request(await createApp(createDb(true)))
-      .post("/api/companies/company-1/agent-hires")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agent-hires")
       .send({
         name: "QA Agent",
         role: "engineer",
@@ -880,7 +915,7 @@ describe.sequential("agent skill routes", () => {
       | undefined;
     const hiredAgentId = expectResponseId(approvalInput?.payload?.agentId);
     expect(mockApprovalService.create).toHaveBeenCalledWith(
-      "company-1",
+      "c0000001-0000-4000-8000-000000000001",
       expect.objectContaining({
         payload: expect.objectContaining({
           adapterConfig: expect.objectContaining({
@@ -897,7 +932,7 @@ describe.sequential("agent skill routes", () => {
 
   it("rejects legacy prompt templates for hire approval payloads", async () => {
     const res = await request(await createApp(createDb(true)))
-      .post("/api/companies/company-1/agent-hires")
+      .post("/api/companies/c0000001-0000-4000-8000-000000000001/agent-hires")
       .send({
         name: "QA Agent",
         role: "engineer",

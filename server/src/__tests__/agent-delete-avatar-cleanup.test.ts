@@ -3,6 +3,25 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageService } from "../storage/types.js";
 
+// This file fully mocks the service layer (mockAgentService,
+// mockAccessService, etc. below) -- it exercises route wiring, not real DB
+// company-scope enforcement. DELETE /api/agents/:id resolves companyId via
+// a prior lookup (mockAgentService.getById), so it reaches the real
+// runInCompanyScope even though this file's `db` is a plain fake with a
+// delete/where stub -- runInCompanyScope tries to reserve a physical
+// connection via `rawDb.$client.reserve()`, which doesn't exist on the
+// fake (see 2e91a693). Mock it to populate the same AsyncLocalStorage scope
+// directly with the fake db (no reservation).
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 

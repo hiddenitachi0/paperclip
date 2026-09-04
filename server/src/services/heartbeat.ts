@@ -56,6 +56,7 @@ import {
   routineRevisions,
   routineRuns,
   routines,
+  withCompanyScope,
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
@@ -4955,9 +4956,20 @@ export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeSe
 export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
+  /**
+   * DUR-392 (DUR-277 Wave 5b): raw (unwrapped) Db instance for the handful
+   * of db.transaction() call sites below that are reachable from a
+   * company-scoped route (routes/issues.ts) -- the request-scoped proxy
+   * `db` this service otherwise uses doesn't support .transaction(), see
+   * packages/db/src/company-scope.ts. Defaults to db, a no-op for every
+   * caller that hasn't been wired through createRequestScopedDb yet (the
+   * scheduler tick, other unmigrated routes).
+   */
+  rawDb?: Db;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
+  const rawDb = options.rawDb ?? db;
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -4972,7 +4984,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   // process-lost false negative -- see DUR-114/DUR-120). Without this, a
   // second dispatch can silently reclaim a still-live run's checkout lock
   // and start mutating the same worktree concurrently.
-  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess });
+  // DUR-381: thread `rawDb` through too. This service is constructed from
+  // the request-scoped proxy by routes/issues.ts and routes/agents.ts, and
+  // executeRun() (a fire-and-forget continuation that outlives the request
+  // scope) calls issuesSvc.checkout(), whose clearExecutionRunIfTerminal
+  // runs withCompanyScope(rawDb, ...). With no active request scope left,
+  // withCompanyScope falls through to `rawDb.transaction()` -- which the
+  // proxy deliberately refuses ("db.transaction() is not supported through
+  // the request-scoped proxy"), so every auto-checkout heartbeat run failed
+  // at setup (caught by the signoff-policy e2e suite).
+  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess, rawDb });
   const escalationGrants = escalationGrantService(db);
   const approvalsSvc = approvalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
@@ -5009,7 +5030,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     isRunLive: isHeartbeatRunLiveInThisProcess,
   });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
-  const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
+  const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup, rawDb });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
   async function releaseEnvironmentLeasesForRun(input: {
@@ -5857,7 +5878,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const staleClaimThreshold = new Date(now.getTime() - 5 * 60 * 1000);
-    const claimed = await db.transaction(async (tx) => {
+    const claimed = await withCompanyScope(rawDb, issue.companyId, async (tx) => {
       const [updated] = await tx
         .update(issues)
         .set({
@@ -7694,7 +7715,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }, "status_only");
     const now = new Date();
 
-    const retryRun = await db.transaction(async (tx) => {
+    const retryRun = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
       );
@@ -7930,7 +7951,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryReason: "process_lost",
     }, "normal_model");
 
-    const queued = await db.transaction(async (tx) => {
+    const queued = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -8551,7 +8572,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           details: Record<string, unknown>;
         };
 
-    const scheduleResult = await db.transaction(async (tx): Promise<ScheduledRetryTransactionResult> => {
+    const scheduleResult = await withCompanyScope(rawDb, run.companyId, async (tx): Promise<ScheduledRetryTransactionResult> => {
       if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON) {
         if (issueId) {
           await tx.execute(
@@ -8939,7 +8960,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryNowRequestedByActorId: input.actor?.actorId ?? null,
     };
 
-    const updated = await db.transaction(async (tx) => {
+    const updated = await withCompanyScope(rawDb, issue.companyId, async (tx) => {
       const row = await tx
         .update(heartbeatRuns)
         .set({
@@ -12990,7 +13011,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await db.transaction(async (tx) => {
+    const promotionResult = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       // Lock the context issue (if any) AND every issue that still references this run.
       //
       // A single run can hold execution locks on multiple issues: the caller's context
@@ -13934,7 +13955,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // same issue workspace while the assignee already has a live run.
       const agentNameKey = normalizeAgentNameKey(agent.name);
 
-      const outcome = await db.transaction(async (tx) => {
+      const outcome = await withCompanyScope(rawDb, agent.companyId, async (tx) => {
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
         );
@@ -14539,7 +14560,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return mergedRun;
     }
 
-    const queueOutcome = await db.transaction(async (tx) => {
+    const queueOutcome = await withCompanyScope(rawDb, agent.companyId, async (tx) => {
       await tx.execute(
         sql`select id from agents where id = ${agentId} and company_id = ${agent.companyId} for update`,
       );
