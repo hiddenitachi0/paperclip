@@ -506,20 +506,32 @@ export async function findCompletedSelfReviewPassForIssue(
 }
 
 /**
- * DUR-290: counts every self-review-pass wakeup ever requested for this issue, regardless of
- * status -- unlike findCompletedSelfReviewPassForIssue above, this deliberately does NOT filter
- * to `status: "completed"`, because the failure mode this caps is passes that never reach
- * "completed" (the corrective run crashes, runs out of turn budget, etc. before landing its
- * handoff -- see the DUR-245 comment above). Used by evaluateSelfReviewDoneGate to bound how
- * many passes it will schedule for an issue whose diff is structurally unreadable, since that
- * shape can never produce a matching `priorPass` to stop the loop on its own.
+ * DUR-290: counts self-review-pass wakeups ever requested for this issue that were scheduled
+ * for a diff that couldn't be fingerprinted at all -- unlike findCompletedSelfReviewPassForIssue
+ * above, this deliberately does NOT filter to `status: "completed"`, because the failure mode
+ * this caps is passes that never reach "completed" (the corrective run crashes, runs out of
+ * turn budget, etc. before landing its handoff -- see the DUR-245 comment above). Used by
+ * evaluateSelfReviewDoneGate to bound how many passes it will schedule for an issue whose diff
+ * is structurally unreadable, since that shape can never produce a matching `priorPass` to stop
+ * the loop on its own.
+ *
+ * DUR-290 fast-follow (flagged by DUR-3894's security review of the original cap): the
+ * idempotencyKey prefix this matches on (`self_review_pass:{issueId}:`) is shared by EVERY
+ * self-review pass this issue has ever had scheduled, including ordinary passes on a small,
+ * readable diff -- those record a real (non-null) `reviewedDiffFingerprint` in their payload
+ * (see the DUR-270 comment on the wakeup call below). Without filtering on that, unrelated
+ * ordinary passes from earlier in the issue's life would inflate this count and could trip
+ * MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF after fewer than that many real attempts at the
+ * oversized diff. Only rows whose payload recorded a null fingerprint -- this cap's own
+ * unreadable-diff shape, or the separate workspace-fully-unresolvable shape (which never
+ * actually reaches this call, since it exits via `priorPass` first) -- count toward the cap.
  */
 export async function countSelfReviewPassWakesForIssue(
   db: Db,
   input: { companyId: string; issueId: string },
 ): Promise<number> {
   const rows = await db
-    .select({ id: agentWakeupRequests.id })
+    .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
     .from(agentWakeupRequests)
     .where(
       and(
@@ -528,7 +540,9 @@ export async function countSelfReviewPassWakesForIssue(
         like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
       ),
     );
-  return rows.length;
+  return rows.filter(
+    (row) => (row.payload as { reviewedDiffFingerprint?: string | null } | null)?.reviewedDiffFingerprint === null,
+  ).length;
 }
 
 // DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /

@@ -1397,6 +1397,74 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       expect(result?.message).not.toMatch(/operator/i);
       expect(calls).toHaveLength(1);
     });
+
+    it("DUR-3894: does not count ordinary passes on an earlier, small readable diff toward the oversized-diff cap", async () => {
+      const { companyId, projectId, agentId, issueId, repoRoot } = await seedIssueWithWorkspace({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+
+      // Simulate MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF earlier, unrelated ordinary passes
+      // -- each on a small, fully readable diff (a real, non-null reviewedDiffFingerprint),
+      // nothing to do with an oversized diff at all. These must not inflate the cap counter.
+      for (let i = 0; i < MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF; i++) {
+        const priorRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: priorRunId,
+          companyId,
+          agentId,
+          invocationSource: "assignment",
+          status: "completed",
+        });
+        await db.insert(agentWakeupRequests).values({
+          companyId,
+          agentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: SELF_REVIEW_PASS_REASON,
+          payload: { reviewedDiffFingerprint: `fingerprint-${i}` },
+          status: "completed",
+          idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId, sourceRunId: priorRunId }),
+          requestedByActorType: "system",
+          requestedByActorId: "issue_self_review_gate",
+        });
+      }
+
+      // Now the diff permanently overflows for the first time on this issue.
+      await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+      const bigPath = path.join(repoRoot, "server/src/services/authorization.ts");
+      await fs.mkdir(path.dirname(bigPath), { recursive: true });
+      await fs.writeFile(bigPath, "line of generated fixture content padding text\n".repeat(150_000), "utf8");
+      await runGit(repoRoot, ["add", "server/src/services/authorization.ts"]);
+      await runGit(repoRoot, ["commit", "-m", "Large generated fixture update"]);
+
+      // The unrelated ordinary passes above must not count toward the oversized-diff cap.
+      expect(await countSelfReviewPassWakesForIssue(db, { companyId, issueId })).toBe(0);
+
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: "T-1", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      // Must still schedule a real, bounded pass at the (genuinely new) oversized diff -- not
+      // decline as if the cap had already been hit by the unrelated ordinary passes.
+      expect(result).not.toBeNull();
+      expect(result?.message).not.toMatch(/operator/i);
+      expect(calls).toHaveLength(1);
+    });
   });
 
   describe("postSelfReviewPassNoticeComment / findExistingSelfReviewPassNoticeCommentForRun", () => {
