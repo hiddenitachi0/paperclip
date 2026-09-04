@@ -99,6 +99,41 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await ensureIssueRelationsTable(db);
   }, 20_000);
 
+  function isForeignKeyViolation(error: unknown): boolean {
+    const pgError = error as { code?: string; cause?: { code?: string } } | null;
+    return pgError?.code === "23503" || pgError?.cause?.code === "23503";
+  }
+
+  async function deleteAllTestRowsWithRetry(maxAttempts = 20) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await db.delete(environmentLeases);
+        await db.delete(activityLog);
+        await db.delete(companySkills);
+        await db.delete(issueComments);
+        await db.delete(issueDocuments);
+        await db.delete(documentRevisions);
+        await db.delete(documents);
+        await db.delete(issueRelations);
+        await db.delete(issueTreeHolds);
+        await db.delete(issues);
+        await db.delete(heartbeatRunEvents);
+        await db.delete(heartbeatRuns);
+        await db.delete(agentWakeupRequests);
+        await db.delete(agentRuntimeState);
+        await db.delete(agents);
+        await db.delete(environments);
+        await db.delete(workspaceOperations);
+        await db.delete(executionWorkspaces);
+        await db.delete(companies);
+        return;
+      } catch (error) {
+        if (!isForeignKeyViolation(error) || attempt === maxAttempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+  }
+
   afterEach(async () => {
     mockAdapterExecute.mockReset();
     mockAdapterExecute.mockImplementation(async () => ({
@@ -126,29 +161,14 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await db.delete(environmentLeases);
-    await db.delete(activityLog);
-    await db.delete(companySkills);
-    await db.delete(issueComments);
-    await db.delete(issueDocuments);
-    await db.delete(documentRevisions);
-    await db.delete(documents);
-    await db.delete(issueRelations);
-    await db.delete(issueTreeHolds);
-    await db.delete(issues);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(activityLog);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
-    await db.delete(companySkills);
-    await db.delete(environments);
-    await db.delete(workspaceOperations);
-    await db.delete(executionWorkspaces);
-    await db.delete(environmentLeases);
-    await db.delete(companySkills);
-    await db.delete(companies);
+    // `startNextQueuedRunForAgentWithinSlots` dispatches `executeRun` fire-and-forget
+    // (`void executeRun(...)`), so a run can flip to a terminal status while its
+    // handoff side effects (issue comments, company_skills writes, lease inserts)
+    // are still landing a tick later. The idle-poll above only checks run status,
+    // not those stragglers, so a delete pass can race a write that's still in
+    // flight. Retry the whole cleanup pass on FK-violation instead of trying to
+    // out-guess every possible straggler ordering.
+    await deleteAllTestRowsWithRetry();
   });
 
   afterAll(async () => {
