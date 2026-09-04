@@ -552,7 +552,11 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
 
   local target_ref="${DV_COMMIT:-$DV_REPO_REF}"
   local before_commit
-  before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  # DUR-420: `--short=12` (not the 7-char default) so the logged/commented commit prefix is
+  # too long to grind a colliding vanity commit against in feasible time -- see the matching
+  # `commitsMatch()` minimum-length comment in deploy-completion-gate.ts for the full threat
+  # model this and that change close together.
+  before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
   local carried_commit
@@ -587,7 +591,10 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     return
   fi
   local after_commit
-  after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  # DUR-420: see the matching comment on before_commit above -- `--short=12` closes a
+  # short-SHA-prefix-collision hole in the server-side carried-issue/deploy-completion commit
+  # matcher.
+  after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
   run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
   local recipe_status=$?
