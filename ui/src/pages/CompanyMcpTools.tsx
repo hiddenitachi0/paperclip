@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, MoreVertical, Pencil, Plug, Plus, Trash2, X } from "lucide-react";
+import { KeyRound, LogIn, MoreVertical, Pencil, Plug, Plus, Trash2, X } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import {
+  mcpOAuthApi,
   mcpToolLibraryApi,
   type McpToolConnection,
   type McpToolLibraryEntry,
@@ -254,6 +255,7 @@ export function CompanyMcpTools() {
         }}
         initialDraft={editingTool ? draftFromTool(editingTool) : emptyDraft()}
         title={editingTool ? "Edit tool" : "Add tool"}
+        toolId={editingTool?.id ?? null}
         onSubmit={handleSubmit}
         isPending={createTool.isPending || updateTool.isPending}
       />
@@ -287,6 +289,7 @@ function ToolFormDialog({
   onOpenChange,
   initialDraft,
   title,
+  toolId,
   onSubmit,
   isPending,
 }: {
@@ -294,14 +297,21 @@ function ToolFormDialog({
   onOpenChange: (open: boolean) => void;
   initialDraft: ToolDraft;
   title: string;
+  toolId: string | null;
   onSubmit: (draft: ToolDraft) => void;
   isPending: boolean;
 }) {
   const { selectedCompanyId } = useCompany();
+  const { pushToast } = useToastActions();
+  const queryClient = useQueryClient();
   const [draft, setDraft] = useState<ToolDraft>(initialDraft);
+  const [connectState, setConnectState] = useState<"idle" | "connecting" | "connected">("idle");
 
   useEffect(() => {
-    if (open) setDraft(initialDraft);
+    if (open) {
+      setDraft(initialDraft);
+      setConnectState("idle");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -311,6 +321,54 @@ function ToolFormDialog({
     enabled: Boolean(selectedCompanyId) && open,
   });
   const secrets = secretsQuery.data ?? [];
+
+  // DUR-3909: run the OAuth handshake in a popup, then poll the session
+  // until the operator finishes (or abandons) it in that window. Only
+  // available once the tool has been saved (start() needs a real toolId to
+  // redirect back to) and only for URL-connected servers.
+  async function handleConnect() {
+    if (!toolId) return;
+    setConnectState("connecting");
+    try {
+      const { sessionId, authorizeUrl } = await mcpOAuthApi.start(toolId);
+      const popup = window.open(authorizeUrl, "_blank", "width=520,height=680");
+      const poll = window.setInterval(async () => {
+        try {
+          const session = await mcpOAuthApi.status(toolId, sessionId);
+          if (session.status === "pending") return;
+          window.clearInterval(poll);
+          if (session.status === "completed" && session.resultSecretId) {
+            popup?.close();
+            setConnectState("connected");
+            setDraft((prev) => ({
+              ...prev,
+              credentialRows: [
+                ...prev.credentialRows.filter((row) => row.key !== "Authorization"),
+                { id: "row-oauth-authorization", key: "Authorization", secretId: session.resultSecretId! },
+              ],
+            }));
+            queryClient.invalidateQueries({
+              queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "__none__"],
+            });
+            pushToast({ title: "Connected", tone: "success" });
+          } else {
+            setConnectState("idle");
+            pushToast({
+              title: "Could not connect",
+              body: session.errorMessage ?? "The sign-in did not complete.",
+              tone: "error",
+            });
+          }
+        } catch {
+          window.clearInterval(poll);
+          setConnectState("idle");
+        }
+      }, 1500);
+    } catch (error) {
+      setConnectState("idle");
+      pushToast({ title: "Could not start sign-in", body: errorMessage(error, ""), tone: "error" });
+    }
+  }
 
   const credentialFieldLabel = draft.kind === "command" ? "Environment variables" : "Headers";
   const canSubmit = draft.name.trim().length > 0 && draft.description.trim().length > 0 && draft.target.trim().length > 0;
@@ -394,6 +452,33 @@ function ToolFormDialog({
               onChange={(event) => setDraft((prev) => ({ ...prev, target: event.target.value }))}
               disabled={isPending}
             />
+            {draft.kind === "url" ? (
+              toolId ? (
+                <div className="mt-2 flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleConnect}
+                    disabled={isPending || connectState === "connecting" || !draft.target.trim()}
+                  >
+                    <LogIn className="mr-1.5 h-3.5 w-3.5" />
+                    {connectState === "connecting"
+                      ? "Waiting for sign-in…"
+                      : connectState === "connected"
+                        ? "Connected"
+                        : "Connect & sign in"}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    For servers with a browser sign-in instead of a pasted key.
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Save the tool first if it needs "Connect & sign in" instead of a pasted key.
+                </p>
+              )
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
