@@ -1255,3 +1255,204 @@ test("maybe_rollback is a no-op — no diagnostics captured, nothing printed —
     scenario.cleanup();
   }
 });
+
+// DUR-3905: deploy-runner must hold/skip a deploy whose GitHub CI is red or
+// still running, instead of shipping it and relying on health-check +
+// rollback to catch it afterward.
+
+function makeCiScenarioProject(scenario, targetPath) {
+  mkdirSync(path.join(targetPath, ".git"), { recursive: true });
+  const project = {
+    id: "proj-1",
+    deployPolicy: {
+      enabled: true,
+      workspaceId: "ws-1",
+      deployKind: "custom",
+      deployTargetPath: targetPath,
+      healthCheckUrl: "http://example.invalid/health",
+    },
+    workspaces: [{ id: "ws-1", repoUrl: "https://github.com/acme/widgets.git", repoRef: "custom" }],
+  };
+  scenario.writeJson("project-proj-1.json", project);
+  scenario.writeJson("approval-aid-1.json", {
+    id: "aid-1",
+    payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef", kind: "deploy" },
+  });
+}
+
+test("process_approval holds the deploy and never touches the checkout when GitHub CI is red", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    makeCiScenarioProject(scenario, targetPath);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      check_ci_status() { echo failure; }
+      git_fetch_reset() { echo "git_fetch_reset must not run when CI is red" >&2; exit 9; }
+      run_recipe() { echo "run_recipe must not run when CI is red" >&2; exit 9; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy held/);
+    assert.match(comments[0], /red/);
+    assert.match(scenario.readLog(), /holding — GitHub CI for deadbeef is failure/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("process_approval holds the deploy with a distinct comment when GitHub CI is still running", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    makeCiScenarioProject(scenario, targetPath);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      check_ci_status() { echo pending; }
+      git_fetch_reset() { echo "git_fetch_reset must not run while CI is pending" >&2; exit 9; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy held/);
+    assert.match(comments[0], /still running/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("process_approval still deploys when GitHub CI is unknown (no checks configured) — fail open, not fail closed", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    makeCiScenarioProject(scenario, targetPath);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      check_ci_status() { echo unknown; }
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and healthy/, "no CI configured must not itself block a deploy that would otherwise have gone through");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// check_ci_status() itself, against a real local HTTP server serving canned
+// GitHub API responses as static files (same reasoning as health_check's own
+// tests above for why this needs a real separate server process, not an
+// in-process Node listener: curl blocks this process's event loop).
+function writeGitHubFixture(webRoot, sha, { status, checkRuns }) {
+  const commitDir = path.join(webRoot, "repos", "acme", "widgets", "commits", sha);
+  mkdirSync(commitDir, { recursive: true });
+  writeFileSync(path.join(commitDir, "status"), JSON.stringify(status));
+  writeFileSync(path.join(commitDir, "check-runs"), JSON.stringify(checkRuns));
+}
+
+test("check_ci_status classifies GitHub's combined status + check-runs responses correctly", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ci-status-root-"));
+  writeGitHubFixture(webRoot, "success-sha", {
+    status: { total_count: 1, state: "success" },
+    checkRuns: { check_runs: [{ status: "completed", conclusion: "success" }] },
+  });
+  writeGitHubFixture(webRoot, "failure-sha", {
+    status: { total_count: 1, state: "failure" },
+    checkRuns: { check_runs: [] },
+  });
+  writeGitHubFixture(webRoot, "bad-check-run-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "completed", conclusion: "failure" }] },
+  });
+  writeGitHubFixture(webRoot, "pending-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "in_progress", conclusion: null }] },
+  });
+  writeGitHubFixture(webRoot, "unknown-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [] },
+  });
+
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  try {
+    const check = (sha) => {
+      const result = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\ncheck_ci_status "https://github.com/acme/widgets.git" "$1" ""`, "_", sha], {
+        env: {
+          ...process.env,
+          PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+          PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE: `http://127.0.0.1:${port}`,
+        },
+      });
+      assertSuccess(result, `check_ci_status ${sha}`);
+      return result.stdout.trim();
+    };
+
+    assert.equal(check("success-sha"), "success");
+    assert.equal(check("failure-sha"), "failure");
+    assert.equal(check("bad-check-run-sha"), "failure");
+    assert.equal(check("pending-sha"), "pending");
+    assert.equal(check("unknown-sha"), "unknown");
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
+test("github_owner_repo extracts owner/repo from both https and ssh GitHub remote URLs, and refuses non-GitHub hosts", () => {
+  const scenario = makeScenario();
+  const check = (url) => {
+    const result = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\ngithub_owner_repo "$1"`, "_", url]);
+    assertSuccess(result, `github_owner_repo ${url}`);
+    return result.stdout.trim();
+  };
+  try {
+    assert.equal(check("https://github.com/acme/widgets.git"), "acme/widgets");
+    assert.equal(check("https://github.com/acme/widgets"), "acme/widgets");
+    assert.equal(check("git@github.com:acme/widgets.git"), "acme/widgets");
+    assert.equal(check("https://gitlab.example.com/acme/widgets.git"), "", "must never guess a token audience for a non-github.com host");
+  } finally {
+    scenario.cleanup();
+  }
+});

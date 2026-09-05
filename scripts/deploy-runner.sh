@@ -21,13 +21,24 @@
 #   2. Resolve the company's read-only GITHUB_TOKEN via the
 #      instance-admin-only /companies/:id/deploy-github-token endpoint
 #      (server/src/routes/secrets.ts) — never a general secret-value read.
-#   3. In deployTargetPath: git fetch + reset --hard to payload.commit (if
+#   3. DUR-3905: before touching the checkout at all, query GitHub's combined
+#      commit status + check-runs for payload.commit (or the workspace's
+#      repoRef) via check_ci_status(). A red or still-running check holds the
+#      deploy with an explanatory comment instead of shipping it and relying
+#      on the health-check + rollback below to catch it after the fact. A repo
+#      with no CI configured at all (both endpoints empty) is treated the same
+#      as today — absence of CI is not evidence of failure, so it doesn't
+#      block a deploy that would otherwise always have gone through; likewise
+#      a GitHub API/network failure fails OPEN (unknown), matching how the
+#      merge-pr-automation service treats the same ambiguity elsewhere in this
+#      codebase, so a GitHub outage can't itself become a deploy outage.
+#   4. In deployTargetPath: git fetch + reset --hard to payload.commit (if
 #      pinned) or the workspace's repoRef, authenticating with the resolved
 #      token via the SAME credential-helper script the container image uses
 #      (paperclip-git-credential.sh) — the token is only ever passed through
 #      the process environment for that one git invocation, never written to
 #      disk or argv.
-#   4. Run the OPERATOR-configured recipe: deployKind is set by the operator
+#   5. Run the OPERATOR-configured recipe: deployKind is set by the operator
 #      in project settings only — the requesting agent can only ask for a
 #      deploy of the pre-configured recipe, never inject a command (SECURITY,
 #      ties to admin-auth-hardening). compose_recreate/compose_build_swap build
@@ -38,10 +49,10 @@
 #       - compose_recreate:    docker compose [--env-file ...] [-f ...] up -d --force-recreate [deployServices...]
 #       - compose_build_swap:  docker compose [--env-file ...] [-f ...] build [deployServices...]; docker compose [--env-file ...] [-f ...] up -d --no-build [deployServices...]
 #       - custom:               bash -c "$deployCommand"
-#   5. Health-check healthCheckUrl for HTTP 200 (retries below); auto-rollback
+#   6. Health-check healthCheckUrl for HTTP 200 (retries below); auto-rollback
 #      (git reset --hard to the pre-deploy commit + re-run the recipe) when
 #      rollback is "git_previous" and the health check never passes.
-#   6. Comment the result back on the approval.
+#   7. Comment the result back on the approval.
 #
 # Idempotent via a processed-set file; flock single-flight — same shape as
 # deploy-poller.sh today, generalized across companies/projects and
@@ -103,6 +114,9 @@ HEALTH_MAX_TIME_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_MAX_TIME:-10}"
 # and shouldn't burn through retries meant for a slow-to-become-healthy
 # process.
 PORT_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS:-30}"
+# DUR-3905: overridable so tests can point check_ci_status() at a local fake
+# HTTP server instead of the real GitHub API.
+GITHUB_API_BASE="${PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE:-https://api.github.com}"
 # Durable, on-host location for the failing container's logs, captured just
 # before a rollback recreates it and destroys them — see maybe_rollback()
 # and capture_failure_diagnostics() (DUR-163's evidence gap). Deliberately
@@ -372,6 +386,78 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
+# DUR-3905: owner/repo out of an https or ssh GitHub remote URL. Prints
+# nothing (caller treats that as "can't tell" -> unknown/fail-open) for
+# anything that isn't recognizably github.com, matching the credential
+# helper's own github.com-only scope (paperclip-git-credential.sh) — there is
+# no token that would work against any other host anyway.
+github_owner_repo() { # repo_url -> stdout: "owner/repo" or empty
+  python3 -c '
+import re, sys
+m = re.search(r"github\.com[:/]+([^/]+)/(.+?)(\.git)?/?$", sys.argv[1])
+print(f"{m.group(1)}/{m.group(2)}" if m else "")
+' "$1" 2>/dev/null
+}
+
+# DUR-3905: combined GitHub commit-status + check-runs verdict for a ref
+# (branch name or commit SHA both work against GitHub's API). Never touches
+# the local checkout. Always prints exactly one of:
+#   success  - CI configured and every status/check-run is green
+#   failure  - CI configured and at least one status/check-run is red
+#   pending  - CI configured but still running
+#   unknown  - no CI configured at all, the repo isn't github.com, or the
+#              GitHub API call itself failed -- treated as fail-open by the
+#              caller, same ambiguity-handling choice merge-pr-automation.ts
+#              makes for the equivalent merge_pr gate.
+check_ci_status() { # repo_url, ref_or_commit, github_token
+  local repo_url="$1" ref="$2" token="$3" owner_repo status_json checkruns_json
+  owner_repo="$(github_owner_repo "$repo_url")"
+  if [ -z "$owner_repo" ]; then
+    echo unknown
+    return
+  fi
+  local auth_header=()
+  [ -n "$token" ] && auth_header=(-H "authorization: Bearer $token")
+  local encoded_ref
+  encoded_ref="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ref")"
+  status_json="$(curl -s --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time 15 \
+    -H "accept: application/vnd.github+json" -H "x-github-api-version: 2022-11-28" \
+    "${auth_header[@]}" \
+    "$GITHUB_API_BASE/repos/$owner_repo/commits/$encoded_ref/status" 2>>"$LOG")"
+  checkruns_json="$(curl -s --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time 15 \
+    -H "accept: application/vnd.github+json" -H "x-github-api-version: 2022-11-28" \
+    "${auth_header[@]}" \
+    "$GITHUB_API_BASE/repos/$owner_repo/commits/$encoded_ref/check-runs" 2>>"$LOG")"
+  STATUS_JSON="$status_json" CHECKRUNS_JSON="$checkruns_json" python3 -c '
+import json, os
+
+def load(env):
+    try:
+        parsed = json.loads(os.environ.get(env) or "")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+status = load("STATUS_JSON")
+checkruns = load("CHECKRUNS_JSON")
+total_status = status.get("total_count") or 0
+runs = checkruns.get("check_runs") or []
+
+if not total_status and not runs:
+    print("unknown")
+elif total_status and status.get("state") not in ("success", "pending"):
+    print("failure")
+elif total_status and status.get("state") == "pending":
+    print("pending")
+elif any(r.get("status") != "completed" for r in runs):
+    print("pending")
+elif any(r.get("conclusion") not in ("success", "neutral", "skipped") for r in runs):
+    print("failure")
+else:
+    print("success")
+'
+}
+
 git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward, dry_run, deploy_branch_ref -> stdout: resolved target commit (refusal path only); 0 ok, 1 fetch/resolve failed, 2 refused (would move backward), 3 refused (not reachable from deploy branch)
   local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}" dry_run="${6:-}" deploy_branch_ref="${7:-}"
   (
@@ -551,6 +637,20 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   token="$(cli_json secrets deploy-github-token -C "$company_id" | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("token") or "")' 2>/dev/null)" || token=""
 
   local target_ref="${DV_COMMIT:-$DV_REPO_REF}"
+
+  # DUR-3905: check GitHub CI for $target_ref BEFORE touching the checkout at
+  # all, so a red/still-running build never gets shipped in the first place —
+  # this is a precondition, not a substitute for the health-check + rollback
+  # below (which still guards against a build that passed CI but is broken in
+  # a way CI doesn't catch).
+  local ci_status
+  ci_status="$(check_ci_status "$DV_REPO_URL" "$target_ref" "$token")"
+  if [ "$ci_status" = "failure" ] || [ "$ci_status" = "pending" ]; then
+    log "runner: $aid holding — GitHub CI for $target_ref is $ci_status"
+    comment "$aid" "$company_id" "Deploy held — GitHub CI for $target_ref is $( [ "$ci_status" = "pending" ] && echo "still running" || echo "red (failing checks)" ). Refusing to deploy an unproven build. Re-approve/re-file this deploy once CI is green."
+    return
+  fi
+
   local before_commit
   # DUR-420: `--short=12` (not the 7-char default) so the logged/commented commit prefix is
   # too long to grind a colliding vanity commit against in feasible time -- see the matching
