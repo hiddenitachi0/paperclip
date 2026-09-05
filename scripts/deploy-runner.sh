@@ -133,6 +133,16 @@ COMMENT_RETRY_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_COMMENT_RETRY_SLEEP:-5}"
 # volume the server container mounts at /paperclip — read it back with
 # GET /api/companies/:companyId/deploy-runner/status.
 STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/status.jsonl}"
+# DUR-259: how long a compose_recreate/compose_build_swap recipe waits for
+# in-flight heartbeat runs (across every company, not just this approval's)
+# to finish before recreating the shared docker-server-1 container — see
+# maybe_begin_quiet_mode_drain(). Deliberately generous: this only blocks
+# the ONE approval currently being processed, not the rest of the poll
+# cycle's dispatch, and shutdown()'s own in-process drain (DUR-257,
+# PAPERCLIP_SHUTDOWN_DRAIN_TIMEOUT_MS, default 240s) is the fallback net
+# once the recreate actually starts either way.
+QUIET_MODE_DRAIN_TIMEOUT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS:-240}"
+QUIET_MODE_DRAIN_POLL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS:-5}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -552,6 +562,106 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_b
   )
 }
 
+# DUR-259: whether $kind's run_recipe call is about to recreate the shared
+# docker-server-1 container this script (and every company's agent
+# heartbeat) talks to. "custom" is an operator-authored black box that may
+# or may not touch it, so it's deliberately excluded — draining ahead of a
+# recipe that never touches the shared container would just add latency to
+# every such deploy for no safety benefit.
+recreates_shared_container() { # kind -> 0 if yes, 1 if no
+  case "$1" in
+    compose_recreate|compose_build_swap) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+quiet_mode_field() { # json, field -> stdout: field value ("" if missing/false/unparseable)
+  printf '%s' "$1" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+v = d.get('$2')
+if isinstance(v, bool):
+    print('1' if v else '')
+elif v is not None:
+    print(v)
+" 2>/dev/null
+}
+
+# DUR-259 proactive drain: freezes new agent wakes instance-wide (the DUR-224
+# Quiet Mode mechanism, across ALL companies — not just this approval's) and
+# waits up to QUIET_MODE_DRAIN_TIMEOUT_SECONDS for heartbeat runs already in
+# flight to finish, so the `docker compose up -d --force-recreate`/`--no-build`
+# call below finds nothing running to interrupt. Sets the global
+# QUIET_MODE_OWNED_BY_RUNNER=1 iff THIS call is the one that activated quiet
+# mode (vs. it already being active — e.g. an operator's own manual
+# maintenance window), so the matching maybe_end_quiet_mode_drain call below
+# knows whether it's this call's place to deactivate it again afterward.
+# Best-effort throughout: any failure talking to the quiet-mode endpoints (or
+# a full timeout with runs still in flight) is logged and swallowed — this
+# makes a deploy's timing safer when it can, but must never block one
+# outright. A still-in-flight run that gets recreated out from under it after
+# a full timeout isn't given a dedicated status here (e.g. a "paused, will
+# resume" status distinct from failed) — doing that safely means auditing
+# every heartbeatRuns.status consumer (UI badges, success-rate/metrics,
+# HEARTBEAT_RUN_TERMINAL_STATUSES-style sets), which is its own follow-up
+# (DUR-259's child issue), not this drain wait.
+QUIET_MODE_OWNED_BY_RUNNER=0
+maybe_begin_quiet_mode_drain() { # aid, kind
+  local aid="$1" kind="$2"
+  QUIET_MODE_OWNED_BY_RUNNER=0
+  recreates_shared_container "$kind" || return 0
+
+  local status active
+  status="$(cli_json instance quiet-mode:status)" || {
+    log "runner: $aid could not read quiet-mode status before deploy — proceeding without a drain wait"
+    return 0
+  }
+  active="$(quiet_mode_field "$status" active)"
+
+  if [ -z "$active" ]; then
+    if ! cli_json instance quiet-mode:activate >/dev/null; then
+      log "runner: $aid could not activate quiet mode before deploy — proceeding without a drain wait"
+      return 0
+    fi
+    QUIET_MODE_OWNED_BY_RUNNER=1
+    log "runner: $aid activated quiet mode instance-wide before recreating the shared container"
+  else
+    log "runner: $aid quiet mode was already active (external maintenance window) — draining under it, will leave it active afterward"
+  fi
+
+  local waited=0 count
+  while [ "$waited" -lt "$QUIET_MODE_DRAIN_TIMEOUT_SECONDS" ]; do
+    status="$(cli_json instance quiet-mode:status)" || break
+    count="$(quiet_mode_field "$status" activeRunCount)"
+    case "$count" in
+      ''|*[!0-9]*) count="" ;;
+    esac
+    if [ -n "$count" ] && [ "$count" -eq 0 ]; then
+      log "runner: $aid drain complete after ${waited}s — no in-flight heartbeat runs across any company"
+      return 0
+    fi
+    sleep "$QUIET_MODE_DRAIN_POLL_SECONDS"
+    waited=$((waited + QUIET_MODE_DRAIN_POLL_SECONDS))
+  done
+
+  status="$(cli_json instance quiet-mode:status)" || status=""
+  count="$(quiet_mode_field "$status" activeRunCount)"
+  [ -z "$count" ] && count="unknown"
+  log "runner: $aid drain timed out after ${QUIET_MODE_DRAIN_TIMEOUT_SECONDS}s with $count heartbeat run(s) still in flight — proceeding with the recreate anyway (see DUR-259 follow-up: no paused-for-restart status yet, these may surface as process_lost)"
+}
+
+maybe_end_quiet_mode_drain() { # aid
+  local aid="$1"
+  [ "$QUIET_MODE_OWNED_BY_RUNNER" -eq 1 ] || return 0
+  if ! cli_json instance quiet-mode:deactivate >/dev/null; then
+    log "runner: $aid could not deactivate quiet mode after deploy — an operator may need to run \`instance quiet-mode:deactivate\` manually"
+  fi
+  QUIET_MODE_OWNED_BY_RUNNER=0
+}
+
 run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   # Exit status: 0 = ok; 3 = compose_build_swap's `build` step failed before
   # anything was swapped (the `&&` short-circuits `up --no-build`), so the
@@ -696,12 +806,21 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   # matcher.
   after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
+  # DUR-259: quiet mode stays active (if we're the one who activated it)
+  # across the recipe, health check, AND a possible rollback below — a
+  # rollback re-runs the same recipe, so the shared container can be
+  # recreated a second time for this one approval, and both need to be
+  # covered by the same drained window. Ended right before whichever
+  # comment() call reports this approval's final outcome, on every exit path.
+  maybe_begin_quiet_mode_drain "$aid" "$DV_DEPLOY_KIND"
+
   run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
   local recipe_status=$?
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    maybe_end_quiet_mode_drain "$aid"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
     comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
@@ -712,10 +831,12 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    maybe_end_quiet_mode_drain "$aid"
     comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
   fi
 
+  maybe_end_quiet_mode_drain "$aid"
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
   # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
   # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only
