@@ -9,6 +9,7 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  withCompanyScopeBypass,
 } from "@paperclipai/db";
 import { normalizeDelegateTokenScopes, type DelegateTokenScope } from "@paperclipai/shared";
 import { conflict, forbidden, notFound } from "../errors.js";
@@ -55,7 +56,14 @@ function challengeStatusForRow(row: typeof cliAuthChallenges.$inferSelect): CliA
   return "pending";
 }
 
-export function boardAuthService(db: Db) {
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db` for every unmigrated
+// caller. routes/access.ts, once wired through createRequestScopedDb, passes
+// a `db` that is the *scoped* proxy and a distinct `rawDb`, since
+// db.transaction() below is not supported through that proxy (see
+// packages/db/src/company-scope.ts) -- approveCliAuthChallenge opens its
+// connection via withCompanyScopeBypass instead (a CLI auth challenge isn't
+// scoped to a single company).
+export function boardAuthService(db: Db, rawDb: Db = db) {
   async function resolveBoardAccess(userId: string) {
     const [user, memberships, adminRole] = await Promise.all([
       db
@@ -335,7 +343,14 @@ export function boardAuthService(db: Db) {
 
   async function approveCliAuthChallenge(id: string, token: string, userId: string) {
     const access = await resolveBoardAccess(userId);
-    return db.transaction(async (tx) => {
+    return withCompanyScopeBypass(
+      rawDb,
+      {
+        reason: "CLI auth challenge approval is instance-wide, not scoped to a single company",
+        actorType: "user",
+        actorId: userId,
+      },
+      async (tx) => {
       await tx.execute(
         sql`select ${cliAuthChallenges.id} from ${cliAuthChallenges} where ${cliAuthChallenges.id} = ${id} for update`,
       );
@@ -386,7 +401,8 @@ export function boardAuthService(db: Db) {
         .then((rows) => rows[0] ?? challenge);
 
       return { status: "approved" as const, challenge: updated };
-    });
+      },
+    );
   }
 
   async function cancelCliAuthChallenge(id: string, token: string) {
