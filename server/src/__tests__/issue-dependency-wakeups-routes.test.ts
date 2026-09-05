@@ -11,6 +11,19 @@ const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 const ISSUE_1_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CHILD_1_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
+// heartbeatService(db, ...) is called exactly twice per route-module
+// construction, always in this order: `heartbeat` (request-scoped `db`,
+// first call) then `rawHeartbeat` (raw pooled `rawDb`, second call) -- see
+// routes/issues.ts. Two distinct wakeup spies pinned to that ordinal
+// position let a test tell which identity a given call site actually used,
+// which a single shared mock (and the `heartbeatServiceCalls` identity log
+// below) cannot: every route's `wakeup()` return value is the *same* mocked
+// function regardless of which service instance is used, and rawHeartbeat is
+// always constructed at module load regardless of which route handled the
+// request, so checking "was heartbeatService ever called with rawDb" cannot
+// prove any specific call site used it. mockWakeup keeps its pre-DUR-932
+// name/identity (the raw one) so existing assertions below are unaffected.
+const mockScopedWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
@@ -20,6 +33,7 @@ const mockIssueService = vi.hoisted(() => ({
   getCommentCursor: vi.fn(),
   getRelationSummaries: vi.fn(),
   update: vi.fn(),
+  checkout: vi.fn(),
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
   findMentionedAgents: vi.fn(async () => []),
@@ -58,8 +72,10 @@ vi.mock("../services/index.js", () => ({
   }),
   heartbeatService: (db: unknown) => {
     heartbeatServiceCalls.push(db);
+    // 1st call = request-scoped `heartbeat`, 2nd call = raw `rawHeartbeat`.
+    const wakeup = heartbeatServiceCalls.length === 1 ? mockScopedWakeup : mockWakeup;
     return {
-      wakeup: mockWakeup,
+      wakeup,
       reportRunActivity: vi.fn(async () => undefined),
     };
   },
@@ -141,6 +157,8 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.clearAllMocks();
     heartbeatServiceCalls.length = 0;
     issueServiceCalls.length = 0;
+    mockScopedWakeup.mockClear();
+    mockWakeup.mockClear();
     mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.getComment.mockResolvedValue(null);
     mockIssueService.getCommentCursor.mockResolvedValue({
@@ -379,5 +397,74 @@ describe("issue dependency wakeups in issue routes", () => {
     // findMentionedAgents/getWakeableParentAfterChildCompletion calls run
     // through instead of the request-scoped `svc`.
     expect(issueServiceCalls.some((db) => db === rawDb)).toBe(true);
+  }, 20_000);
+
+  // DUR-3918: POST /issues/:id/checkout had the exact same post-response
+  // connection-release hazard DUR-932 fixed for PATCH/comments -- its
+  // fire-and-forget assignee wakeup (`void heartbeat.wakeup(...)` before
+  // `res.json(updated)`) was still built on the request-scoped `heartbeat`
+  // instead of `rawHeartbeat`. Under concurrent e2e load this let a later
+  // request reuse the same physical connection while the wakeup was still
+  // issuing queries on it, corrupting the postgres wire protocol -- which,
+  // unlike a clean crash, can leave a query waiting on a response that will
+  // never parse correctly, hanging indefinitely (the checkout POST timeout
+  // reported in DUR-3918) rather than erroring fast.
+  //
+  // mockScopedWakeup/mockWakeup are pinned to construction order (1st/2nd
+  // heartbeatService() call = request-scoped/raw respectively -- see the
+  // mock factory above), so this proves which identity's `wakeup()` the
+  // checkout route actually invoked, not just that `rawHeartbeat` exists.
+  it("fires the checkout assignee wakeup from the raw pooled db, not the request-scoped proxy (DUR-3918)", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      id: ISSUE_1_ID,
+      companyId: COMPANY_ID,
+      identifier: "PAP-100",
+      title: "Do the thing",
+      description: null,
+      status: "todo",
+      priority: "medium",
+      parentId: null,
+      projectId: null,
+      assigneeAgentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      assigneeUserId: null,
+      createdByAgentId: null,
+      createdByUserId: null,
+      executionWorkspaceId: null,
+      labels: [],
+      labelIds: [],
+    });
+    mockIssueService.checkout.mockResolvedValue({
+      id: ISSUE_1_ID,
+      companyId: COMPANY_ID,
+      identifier: "PAP-100",
+      title: "Do the thing",
+      description: null,
+      status: "in_progress",
+      priority: "medium",
+      parentId: null,
+      projectId: null,
+      assigneeAgentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      assigneeUserId: null,
+      createdByAgentId: null,
+      createdByUserId: null,
+      executionWorkspaceId: null,
+      labels: [],
+      labelIds: [],
+    });
+
+    const app = await createApp();
+    const res = await request(app).post(`/api/issues/${ISSUE_1_ID}/checkout`).send({
+      agentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      expectedStatuses: ["todo"],
+    });
+    expect(res.status).toBe(200);
+
+    await vi.waitFor(() => {
+      expect(mockWakeup).toHaveBeenCalledWith(
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        expect.objectContaining({ reason: "issue_checked_out" }),
+      );
+    });
+    expect(mockScopedWakeup).not.toHaveBeenCalled();
   }, 20_000);
 });
