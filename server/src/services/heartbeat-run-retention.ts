@@ -12,6 +12,15 @@ const DEFAULT_DELETE_BATCH_SIZE = 5_000;
 const MAX_ITERATIONS = 200;
 
 /**
+ * DUR-352 (DUR-277 Wave 6): this file deliberately stays bypass-scoped
+ * forever, not a candidate for a future runInCompanyScope/per-row wave. Both
+ * `pruneHeartbeatRuns` and `startHeartbeatRunRetention` take a plain `Db`
+ * (never the request-scoped Proxy) -- the batched DELETE below has no
+ * `company_id` predicate at all (verified against the query text), by
+ * design: it prunes every company's stale heartbeat_runs rows in one sweep,
+ * not one company's. See the DUR-277 design doc §2 (one of the four
+ * consumers "no per-company boundary at all").
+ *
  * Delete `heartbeat_runs` rows older than `retentionDays`, in batches.
  *
  * DUR-319 (DUR-292 item 4): heartbeat_runs carries per-run stdout/stderr
