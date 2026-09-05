@@ -4,6 +4,7 @@ import {
   assertMergePrOnly,
   checkFundamentalPaths,
   evaluateMergePrApproval,
+  isRequiredCheckRun,
   mergePrAutomationService,
   parsePullRequestReference,
 } from "./merge-pr-automation.js";
@@ -144,6 +145,22 @@ const INDEPENDENT_APPROVAL = [
   { state: "APPROVED", commit_id: "deadbeef", user: { login: "reviewer-agent" } },
 ];
 
+describe("isRequiredCheckRun", () => {
+  it("matches the required PR/E2E/Docker job names", () => {
+    expect(isRequiredCheckRun("verify")).toBe(true);
+    expect(isRequiredCheckRun("policy")).toBe(true);
+    expect(isRequiredCheckRun("e2e")).toBe(true);
+    expect(isRequiredCheckRun("build-and-push")).toBe(true);
+    expect(isRequiredCheckRun("General tests (server (1/3))")).toBe(true);
+  });
+
+  it("does not match advisory/non-required checks like the commitperclip review bot", () => {
+    expect(isRequiredCheckRun("review")).toBe(false);
+    expect(isRequiredCheckRun("commitperclip PR Review")).toBe(false);
+    expect(isRequiredCheckRun("some-flaky-advisory-bot")).toBe(false);
+  });
+});
+
 describe("evaluateMergePrApproval", () => {
   it("is eligible when CI is green, no fundamental path is touched, and an independent review approved the head commit", async () => {
     const fetchImpl = githubFetchStub({
@@ -231,6 +248,41 @@ describe("evaluateMergePrApproval", () => {
     });
     const result = await evaluateMergePrApproval({ repo: "acme/widgets", prNumber: 42 }, { fetchImpl, token: null });
     expect(result).toMatchObject({ eligible: false, independentReview: "not_met" });
+  });
+
+  it("DUR-3912: a failing non-required check (e.g. the commitperclip review bot) does not block an otherwise-mergeable PR", async () => {
+    const fetchImpl = githubFetchStub({
+      "/pulls/42": OPEN_PR,
+      "/status": { total_count: 0 },
+      "/check-runs": {
+        check_runs: [
+          { name: "verify", status: "completed", conclusion: "success" },
+          { name: "e2e", status: "completed", conclusion: "success" },
+          { name: "review", status: "completed", conclusion: "failure" },
+        ],
+      },
+      "/files": CLEAN_FILES,
+      "/reviews": INDEPENDENT_APPROVAL,
+    });
+    const result = await evaluateMergePrApproval({ repo: "acme/widgets", prNumber: 42 }, { fetchImpl, token: null });
+    expect(result).toMatchObject({ eligible: true, ci: "met" });
+  });
+
+  it("DUR-3912: a failing required check still blocks the merge even if advisory checks are green", async () => {
+    const fetchImpl = githubFetchStub({
+      "/pulls/42": OPEN_PR,
+      "/status": { total_count: 0 },
+      "/check-runs": {
+        check_runs: [
+          { name: "verify", status: "completed", conclusion: "failure" },
+          { name: "review", status: "completed", conclusion: "success" },
+        ],
+      },
+      "/files": CLEAN_FILES,
+      "/reviews": INDEPENDENT_APPROVAL,
+    });
+    const result = await evaluateMergePrApproval({ repo: "acme/widgets", prNumber: 42 }, { fetchImpl, token: null });
+    expect(result).toMatchObject({ eligible: false, ci: "not_met" });
   });
 
   it("is not eligible for a closed/non-open PR", async () => {

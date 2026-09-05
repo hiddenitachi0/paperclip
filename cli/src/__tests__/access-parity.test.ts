@@ -93,6 +93,9 @@ describe("access parity commands", () => {
     await run(["instance", "scheduler-heartbeats"]);
     await run(["instance", "settings:general"]);
     await run(["instance", "settings:general:update", "--payload-json", "{}"]);
+    await run(["instance", "quiet-mode:status"]);
+    await run(["instance", "quiet-mode:activate"]);
+    await run(["instance", "quiet-mode:deactivate"]);
     await run(["instance", "database-backup"]);
     await run(["sidebar", "preferences"]);
     await run(["sidebar", "preferences:update", "--payload-json", "{}"]);
@@ -115,6 +118,9 @@ describe("access parity commands", () => {
       ["GET", "http://localhost:3100/api/instance/scheduler-heartbeats"],
       ["GET", "http://localhost:3100/api/instance/settings/general"],
       ["PATCH", "http://localhost:3100/api/instance/settings/general"],
+      ["GET", "http://localhost:3100/api/instance/settings/quiet-mode"],
+      ["POST", "http://localhost:3100/api/instance/settings/quiet-mode/activate"],
+      ["POST", "http://localhost:3100/api/instance/settings/quiet-mode/deactivate"],
       ["POST", "http://localhost:3100/api/instance/database-backups"],
       ["GET", "http://localhost:3100/api/sidebar-preferences/me"],
       ["PUT", "http://localhost:3100/api/sidebar-preferences/me"],
