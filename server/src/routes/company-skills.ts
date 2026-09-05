@@ -48,7 +48,7 @@ export function companySkillRoutes(rawDb: Db) {
   const db = createRequestScopedDb(rawDb);
   const agents = agentService(rawDb);
   const access = accessService(rawDb);
-  const svc = companySkillService(db);
+  const svc = companySkillService(db, rawDb);
 
   function canCreateSkills(agent: { permissions: Record<string, unknown> | null | undefined }) {
     if (!agent.permissions || typeof agent.permissions !== "object") return true;

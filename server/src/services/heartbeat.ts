@@ -4966,6 +4966,16 @@ export interface HeartbeatServiceOptions {
    * scheduler tick, other unmigrated routes).
    */
   rawDb?: Db;
+  /**
+   * DUR-927: executeRun() is dispatched fire-and-forget (it outlives the
+   * request/caller by design -- see the comment above rawDb) so tests that
+   * poll heartbeatRuns.status for idleness before tearing down the DB can
+   * still race a run's trailing writes (issue comments, cascaded wakeups
+   * for dependents). Lets a test observe every dispatched run's promise so
+   * it can drain them with Promise.allSettled before cleanup instead of
+   * guessing a wait duration. No-op when unset.
+   */
+  onRunDispatched?: (run: Promise<unknown>) => void;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -10543,9 +10553,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (claimedRuns.length === 0) return [];
 
     for (const claimedRun of claimedRuns) {
-      void executeRun(claimedRun.id).catch((err) => {
+      const dispatched = executeRun(claimedRun.id).catch((err) => {
         logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
       });
+      options.onRunDispatched?.(dispatched);
     }
     return claimedRuns;
   }

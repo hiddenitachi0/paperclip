@@ -72,6 +72,8 @@ ARGS="--api-base $API_BASE --json"
 
 HEARTBEAT_PID=""
 FAIL=0
+FAKE_GITHUB_PID=""
+FAKE_GITHUB_PORT=""
 
 # deploy-runner.sh's compose_recreate reads deployPolicy.envFile relative to
 # deployTargetPath (here, $REPO_ROOT itself -- see "wiring deployPolicy"
@@ -92,6 +94,10 @@ cleanup() {
   if [ -n "$HEARTBEAT_PID" ] && kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true
+  fi
+  if [ -n "$FAKE_GITHUB_PID" ] && kill -0 "$FAKE_GITHUB_PID" 2>/dev/null; then
+    kill "$FAKE_GITHUB_PID" 2>/dev/null || true
+    wait "$FAKE_GITHUB_PID" 2>/dev/null || true
   fi
   log "cleanup: dumping deploy-runner.log"
   cat "$DEPLOY_RUNNER_LOG" 2>/dev/null >&2 || true
@@ -147,6 +153,55 @@ wait_for_health() {
   return 1
 }
 
+# DUR-3905 added a GitHub-CI-status precondition to deploy-runner.sh's
+# run_deploy(): it now holds any deploy outright if the target commit's
+# combined GitHub status + check-runs aren't all green. This job (the one
+# running THIS script) is itself one of the required checks for the commit
+# under test, which means its status is definitionally still "pending" from
+# GitHub's point of view while this script is running -- pointing
+# deploy-runner.sh at the real GitHub API here would make it hold every
+# single time, self-referentially, and this acceptance test could never pass
+# in CI. Stand up a local stand-in instead, the same test seam
+# scripts/deploy-runner.test.mjs's own check_ci_status() tests use via
+# PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE, that always reports a green build.
+start_fake_github_ci_server() {
+  local script="$WORK_DIR/fake-github-ci.py" port_file="$WORK_DIR/fake-github-ci.port"
+  cat >"$script" <<'PY'
+import http.server
+import json
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.endswith("/check-runs"):
+            body = json.dumps({"check_runs": []}).encode()
+        else:
+            body = json.dumps({"state": "success", "total_count": 1}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PY
+  python3 "$script" >"$port_file" 2>"$LOG_DIR/fake-github-ci.log" &
+  FAKE_GITHUB_PID=$!
+  local i
+  for i in $(seq 1 30); do
+    if [ -s "$port_file" ]; then
+      FAKE_GITHUB_PORT="$(cat "$port_file")"
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
 wait_for_run_running() { # company_id, agent_id
   local company_id="$1" agent_id="$2" i status
   for i in $(seq 1 30); do
@@ -184,6 +239,13 @@ main() {
   local before_container_id
   before_container_id="$(resolve_container_id)"
   log "server container: $before_container_id"
+
+  log "starting fake GitHub CI status server (DUR-3905 precondition)"
+  if ! start_fake_github_ci_server; then
+    log "FAIL: fake GitHub CI status server never came up"
+    exit 1
+  fi
+  log "fake GitHub CI status server listening on 127.0.0.1:$FAKE_GITHUB_PORT"
 
   log "creating company/agent/project/workspace"
   local company_id project_json project_id workspace_id agent_id
@@ -285,6 +347,7 @@ print(json.dumps({
       PAPERCLIP_DEPLOY_RUNNER_LOG="$DEPLOY_RUNNER_LOG" \
       PAPERCLIP_DEPLOY_RUNNER_PROCESSED="$DEPLOY_RUNNER_PROCESSED" \
       PAPERCLIP_DEPLOY_RUNNER_FAILURE_LOG_DIR="$DEPLOY_RUNNER_FAILURE_LOG_DIR" \
+      PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE="http://127.0.0.1:$FAKE_GITHUB_PORT" \
       bash "$REPO_ROOT/scripts/deploy-runner.sh"
 
     local after_container_id
