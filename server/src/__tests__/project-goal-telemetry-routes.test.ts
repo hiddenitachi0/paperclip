@@ -95,7 +95,7 @@ async function createApp(routeType: "project" | "goal") {
     const { projectRoutes } = await vi.importActual<typeof import("../routes/projects.js")>(
       "../routes/projects.js",
     );
-    app.use("/api", projectRoutes({} as any));
+    app.use("/api", projectRoutes(withFakeCompanyScopeReserve({}) as any));
   } else {
     const { goalRoutes } = await vi.importActual<typeof import("../routes/goals.js")>(
       "../routes/goals.js",
@@ -149,7 +149,7 @@ describe("project and goal telemetry routes", () => {
   it("emits telemetry when a project is created", async () => {
     const app = await createApp("project");
     const res = await request(app)
-      .post("/api/companies/company-1/projects")
+      .post(`/api/companies/${COMPANY_ID}/projects`)
       .send({ name: "Telemetry project" });
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
