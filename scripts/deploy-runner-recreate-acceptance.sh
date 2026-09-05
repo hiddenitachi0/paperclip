@@ -39,7 +39,16 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-dur297-recreate-acceptance}"
+# Exported (not just passed via `-p` below) so that deploy-runner.sh -- run
+# as a plain `bash scripts/deploy-runner.sh` child process with no -p/project
+# flag of its own -- resolves `docker compose up -d --force-recreate` against
+# THIS SAME compose project instead of falling back to the default project
+# name docker derives from $REPO_ROOT's directory basename. Without this,
+# deploy-runner.sh's recreate silently creates/updates a different, phantom
+# project's "server" container while resolve_container_id() below keeps
+# watching this project's container, which never changes -- indistinguishable
+# from deploy-runner.sh doing nothing at all.
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-dur297-recreate-acceptance}"
 COMPOSE=(docker compose -p "$COMPOSE_PROJECT_NAME" \
   -f docker/docker-compose.yml \
   -f docker/docker-compose.prod.yml \
