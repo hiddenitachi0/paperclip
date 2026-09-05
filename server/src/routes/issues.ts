@@ -5799,7 +5799,7 @@ export function issueRoutes(
     }
 
     void queueIssueAssignmentWakeup({
-      heartbeat,
+      heartbeat: rawHeartbeat,
       issue,
       reason: "issue_assigned",
       mutation: "create",
@@ -5864,7 +5864,7 @@ export function issueRoutes(
     });
 
     void queueIssueAssignmentWakeup({
-      heartbeat,
+      heartbeat: rawHeartbeat,
       issue,
       reason: "issue_assigned",
       mutation: "create",
@@ -6054,7 +6054,7 @@ export function issueRoutes(
 
     if (!serializationContext || !currentSerializedChild) {
       void queueIssueAssignmentWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         reason: "issue_assigned",
         mutation: "create",
@@ -6256,7 +6256,7 @@ export function issueRoutes(
 
       if (!serializedBlockedChildIds.has(issue.id)) {
         void queueIssueAssignmentWakeup({
-          heartbeat,
+          heartbeat: rawHeartbeat,
           issue,
           reason: "issue_assigned",
           mutation: "accepted_plan_decomposition",
@@ -8014,7 +8014,7 @@ export function issueRoutes(
 
       for (const createdIssue of createdIssues) {
         void queueIssueAssignmentWakeup({
-          heartbeat,
+          heartbeat: rawHeartbeat,
           issue: createdIssue,
           reason: "issue_assigned",
           mutation: "interaction_accept",
@@ -8033,7 +8033,7 @@ export function issueRoutes(
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue: continuationWakeIssue,
         interaction,
         actor,
@@ -8093,7 +8093,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         interaction,
         actor,
@@ -8147,7 +8147,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         interaction,
         actor,
@@ -8201,7 +8201,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         interaction,
         actor,
