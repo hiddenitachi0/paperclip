@@ -456,6 +456,8 @@ export interface HeartbeatRunScanSummary {
   issuesFiled: number;
   cursor: HeartbeatRunCursor | null;
   truncated: boolean;
+  /** DUR-387: fields that exceeded HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS and were split-scanned. */
+  oversizedFieldsScanned: number;
 }
 
 const HEARTBEAT_RUN_SCAN_COLUMNS = ["error", "stdoutExcerpt", "stderrExcerpt"] as const;
@@ -475,6 +477,31 @@ const HEARTBEAT_RUN_MAX_BATCHES_PER_SWEEP = 100;
 // underlying column value is -- a real secret is always far shorter than
 // this cap, so detection is unaffected in the non-adversarial case.
 const HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS = 64 * 1024;
+// DUR-387 fast-follow from that same review: head-only truncation is a silent
+// blind spot -- a secret whose start position lands past the cutoff (e.g. a
+// credential appended after a large echoed request/response body in an
+// `error` field) is never scanned at all. Splitting the budget into a head
+// half and a tail half keeps the same bounded worst-case scan cost while
+// covering the two places large diagnostic dumps most often put the
+// interesting bytes: the start (the actual error) and the end (whatever was
+// still being written when the field was truncated at write time).
+const HEARTBEAT_RUN_SCAN_FIELD_HALF_MAX_CHARS = HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS / 2;
+
+/**
+ * Scan a field for secrets, splitting into head+tail halves when it exceeds
+ * HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS instead of dropping everything past the
+ * cutoff. Returns whether the field was oversized so callers can surface
+ * that count in the sweep summary (DUR-387) rather than losing the signal
+ * silently.
+ */
+function scanHeartbeatRunField(text: string): { matches: RawSecretMatch[]; oversized: boolean } {
+  if (text.length <= HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS) {
+    return { matches: scanTextForSecrets(text), oversized: false };
+  }
+  const head = text.slice(0, HEARTBEAT_RUN_SCAN_FIELD_HALF_MAX_CHARS);
+  const tail = text.slice(text.length - HEARTBEAT_RUN_SCAN_FIELD_HALF_MAX_CHARS);
+  return { matches: [...scanTextForSecrets(head), ...scanTextForSecrets(tail)], oversized: true };
+}
 
 export async function scanHeartbeatRunsForLeakedSecrets(
   db: Db,
@@ -486,6 +513,7 @@ export async function scanHeartbeatRunsForLeakedSecrets(
     issuesFiled: 0,
     cursor: opts.cursor ?? null,
     truncated: false,
+    oversizedFieldsScanned: 0,
   };
 
   for (let batch = 0; batch < HEARTBEAT_RUN_MAX_BATCHES_PER_SWEEP; batch += 1) {
@@ -526,11 +554,8 @@ export async function scanHeartbeatRunsForLeakedSecrets(
 
       for (const field of fields) {
         if (!field.text) continue;
-        const text =
-          field.text.length > HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS
-            ? field.text.slice(0, HEARTBEAT_RUN_SCAN_FIELD_MAX_CHARS)
-            : field.text;
-        const matches = scanTextForSecrets(text);
+        const { matches, oversized } = scanHeartbeatRunField(field.text);
+        if (oversized) summary.oversizedFieldsScanned += 1;
         if (matches.length === 0) continue;
         summary.matchesFound += matches.length;
         const location = `heartbeat_runs.${field.column} row ${row.id}`;
@@ -599,6 +624,15 @@ export async function runSecretSurfaceScan(
     logger.info(
       { filesystem, heartbeatRuns: heartbeatRunsResult },
       "secret-surface-scanner: sweep found matches that were already covered by open issues",
+    );
+  } else if (heartbeatRunsResult.oversizedFieldsScanned > 0) {
+    // DUR-387: no matches this sweep, but some fields exceeded the scan cap
+    // and were only partially covered (head+tail, not the full field) --
+    // surface that so the blind spot stays observable instead of a clean
+    // sweep looking identical to full coverage.
+    logger.info(
+      { heartbeatRuns: heartbeatRunsResult },
+      "secret-surface-scanner: sweep found no matches, but some heartbeat_run fields exceeded the scan size cap and were only partially covered",
     );
   }
 
