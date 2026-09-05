@@ -1002,17 +1002,39 @@ import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
+    # See the matching PARSE_ERROR handling below for approval list -- same
+    # rationale: a JSON-parse failure here is a real, loggable problem (the
+    # CLI returned something unexpected), not the ordinary "zero companies"
+    # case, and the two must not look identical in deploy-runner.log.
+    print("PARSE_ERROR")
     sys.exit(0)
 items = d if isinstance(d, list) else d.get("companies", [])
 for c in items:
     if c.get("id"):
         print(c["id"])
 ')"
+  if [ "$company_ids" = "PARSE_ERROR" ]; then
+    log "runner: company list did not parse as JSON -- aborting this poll cycle. First 200 chars: $(printf '%s' "$companies" | head -c 200)"
+    exit 0
+  fi
   [ -z "${company_ids//[[:space:]]/}" ] && exit 0
 
   local company_id list selection kind aid extra
   for company_id in $company_ids; do
-    list="$(cli_json approval list -C "$company_id" --status approved)" || continue
+    # DUR-259 follow-up: this used to be `|| continue` with zero logging on
+    # failure -- a silent no-op indistinguishable (from deploy-runner.log)
+    # from "nothing to do this cycle". That blind spot is exactly what made
+    # a real production stall look identical to normal idle behavior: if
+    # this docker-exec CLI call itself hangs or errors (host contention,
+    # auth hiccup, transient docker/API flake), main() would silently skip
+    # this company forever with no trace, and the *actual* run_recipe/drain
+    # logic below would never even be reached -- yet nothing in the log
+    # would say so. Log the failure so the next occurrence is diagnosable
+    # instead of indistinguishable from "no approvals pending".
+    if ! list="$(cli_json approval list -C "$company_id" --status approved)"; then
+      log "runner: could not list approved deploy requests for company $company_id (docker exec/CLI call failed) -- skipping this company this poll cycle"
+      continue
+    fi
     # Group approved deploy requests by (projectId, workspaceId): they
     # converge on the same git ref reset, so only the most recently
     # *approved* one in the group needs to actually run this cycle (DUR-44).
@@ -1024,6 +1046,12 @@ import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
+    # Distinguish "the CLI returned something that is not valid JSON" (a
+    # real bug worth logging -- e.g. stray stdout noise ahead of the --json
+    # payload) from "the CLI legitimately returned an empty/no-op list",
+    # which is the normal, expected, silent case every poll cycle when
+    # nothing is pending. See the PARSE_ERROR handling in the bash caller.
+    print("PARSE_ERROR")
     sys.exit(0)
 items = d if isinstance(d, list) else d.get("approvals", [])
 candidates = [
@@ -1058,6 +1086,10 @@ for group in groups.values():
         superseded_id = superseded.get("id")
         print(f"SUPERSEDED\t{superseded_id}\t{keep_id}")
 ')"
+    if [ "$selection" = "PARSE_ERROR" ]; then
+      log "runner: approval list for company $company_id did not parse as JSON -- skipping this company this poll cycle. First 200 chars: $(printf '%s' "$list" | head -c 200)"
+      continue
+    fi
     [ -z "${selection//[[:space:]]/}" ] && continue
 
     while IFS=$'\t' read -r kind aid extra; do
