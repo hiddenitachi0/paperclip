@@ -21,13 +21,24 @@
 #   2. Resolve the company's read-only GITHUB_TOKEN via the
 #      instance-admin-only /companies/:id/deploy-github-token endpoint
 #      (server/src/routes/secrets.ts) — never a general secret-value read.
-#   3. In deployTargetPath: git fetch + reset --hard to payload.commit (if
+#   3. DUR-3905: before touching the checkout at all, query GitHub's combined
+#      commit status + check-runs for payload.commit (or the workspace's
+#      repoRef) via check_ci_status(). A red or still-running check holds the
+#      deploy with an explanatory comment instead of shipping it and relying
+#      on the health-check + rollback below to catch it after the fact. A repo
+#      with no CI configured at all (both endpoints empty) is treated the same
+#      as today — absence of CI is not evidence of failure, so it doesn't
+#      block a deploy that would otherwise always have gone through; likewise
+#      a GitHub API/network failure fails OPEN (unknown), matching how the
+#      merge-pr-automation service treats the same ambiguity elsewhere in this
+#      codebase, so a GitHub outage can't itself become a deploy outage.
+#   4. In deployTargetPath: git fetch + reset --hard to payload.commit (if
 #      pinned) or the workspace's repoRef, authenticating with the resolved
 #      token via the SAME credential-helper script the container image uses
 #      (paperclip-git-credential.sh) — the token is only ever passed through
 #      the process environment for that one git invocation, never written to
 #      disk or argv.
-#   4. Run the OPERATOR-configured recipe: deployKind is set by the operator
+#   5. Run the OPERATOR-configured recipe: deployKind is set by the operator
 #      in project settings only — the requesting agent can only ask for a
 #      deploy of the pre-configured recipe, never inject a command (SECURITY,
 #      ties to admin-auth-hardening). compose_recreate/compose_build_swap build
@@ -38,10 +49,10 @@
 #       - compose_recreate:    docker compose [--env-file ...] [-f ...] up -d --force-recreate [deployServices...]
 #       - compose_build_swap:  docker compose [--env-file ...] [-f ...] build [deployServices...]; docker compose [--env-file ...] [-f ...] up -d --no-build [deployServices...]
 #       - custom:               bash -c "$deployCommand"
-#   5. Health-check healthCheckUrl for HTTP 200 (retries below); auto-rollback
+#   6. Health-check healthCheckUrl for HTTP 200 (retries below); auto-rollback
 #      (git reset --hard to the pre-deploy commit + re-run the recipe) when
 #      rollback is "git_previous" and the health check never passes.
-#   6. Comment the result back on the approval.
+#   7. Comment the result back on the approval.
 #
 # Idempotent via a processed-set file; flock single-flight — same shape as
 # deploy-poller.sh today, generalized across companies/projects and
@@ -103,6 +114,9 @@ HEALTH_MAX_TIME_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_HEALTH_MAX_TIME:-10}"
 # and shouldn't burn through retries meant for a slow-to-become-healthy
 # process.
 PORT_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS:-30}"
+# DUR-3905: overridable so tests can point check_ci_status() at a local fake
+# HTTP server instead of the real GitHub API.
+GITHUB_API_BASE="${PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE:-https://api.github.com}"
 # Durable, on-host location for the failing container's logs, captured just
 # before a rollback recreates it and destroys them — see maybe_rollback()
 # and capture_failure_diagnostics() (DUR-163's evidence gap). Deliberately
@@ -119,6 +133,16 @@ COMMENT_RETRY_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_COMMENT_RETRY_SLEEP:-5}"
 # volume the server container mounts at /paperclip — read it back with
 # GET /api/companies/:companyId/deploy-runner/status.
 STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/status.jsonl}"
+# DUR-259: how long a compose_recreate/compose_build_swap recipe waits for
+# in-flight heartbeat runs (across every company, not just this approval's)
+# to finish before recreating the shared docker-server-1 container — see
+# maybe_begin_quiet_mode_drain(). Deliberately generous: this only blocks
+# the ONE approval currently being processed, not the rest of the poll
+# cycle's dispatch, and shutdown()'s own in-process drain (DUR-257,
+# PAPERCLIP_SHUTDOWN_DRAIN_TIMEOUT_MS, default 240s) is the fallback net
+# once the recreate actually starts either way.
+QUIET_MODE_DRAIN_TIMEOUT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS:-240}"
+QUIET_MODE_DRAIN_POLL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS:-5}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -372,6 +396,78 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
+# DUR-3905: owner/repo out of an https or ssh GitHub remote URL. Prints
+# nothing (caller treats that as "can't tell" -> unknown/fail-open) for
+# anything that isn't recognizably github.com, matching the credential
+# helper's own github.com-only scope (paperclip-git-credential.sh) — there is
+# no token that would work against any other host anyway.
+github_owner_repo() { # repo_url -> stdout: "owner/repo" or empty
+  python3 -c '
+import re, sys
+m = re.search(r"github\.com[:/]+([^/]+)/(.+?)(\.git)?/?$", sys.argv[1])
+print(f"{m.group(1)}/{m.group(2)}" if m else "")
+' "$1" 2>/dev/null
+}
+
+# DUR-3905: combined GitHub commit-status + check-runs verdict for a ref
+# (branch name or commit SHA both work against GitHub's API). Never touches
+# the local checkout. Always prints exactly one of:
+#   success  - CI configured and every status/check-run is green
+#   failure  - CI configured and at least one status/check-run is red
+#   pending  - CI configured but still running
+#   unknown  - no CI configured at all, the repo isn't github.com, or the
+#              GitHub API call itself failed -- treated as fail-open by the
+#              caller, same ambiguity-handling choice merge-pr-automation.ts
+#              makes for the equivalent merge_pr gate.
+check_ci_status() { # repo_url, ref_or_commit, github_token
+  local repo_url="$1" ref="$2" token="$3" owner_repo status_json checkruns_json
+  owner_repo="$(github_owner_repo "$repo_url")"
+  if [ -z "$owner_repo" ]; then
+    echo unknown
+    return
+  fi
+  local auth_header=()
+  [ -n "$token" ] && auth_header=(-H "authorization: Bearer $token")
+  local encoded_ref
+  encoded_ref="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ref")"
+  status_json="$(curl -s --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time 15 \
+    -H "accept: application/vnd.github+json" -H "x-github-api-version: 2022-11-28" \
+    "${auth_header[@]}" \
+    "$GITHUB_API_BASE/repos/$owner_repo/commits/$encoded_ref/status" 2>>"$LOG")"
+  checkruns_json="$(curl -s --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time 15 \
+    -H "accept: application/vnd.github+json" -H "x-github-api-version: 2022-11-28" \
+    "${auth_header[@]}" \
+    "$GITHUB_API_BASE/repos/$owner_repo/commits/$encoded_ref/check-runs" 2>>"$LOG")"
+  STATUS_JSON="$status_json" CHECKRUNS_JSON="$checkruns_json" python3 -c '
+import json, os
+
+def load(env):
+    try:
+        parsed = json.loads(os.environ.get(env) or "")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+status = load("STATUS_JSON")
+checkruns = load("CHECKRUNS_JSON")
+total_status = status.get("total_count") or 0
+runs = checkruns.get("check_runs") or []
+
+if not total_status and not runs:
+    print("unknown")
+elif total_status and status.get("state") not in ("success", "pending"):
+    print("failure")
+elif total_status and status.get("state") == "pending":
+    print("pending")
+elif any(r.get("status") != "completed" for r in runs):
+    print("pending")
+elif any(r.get("conclusion") not in ("success", "neutral", "skipped") for r in runs):
+    print("failure")
+else:
+    print("success")
+'
+}
+
 git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_backward, dry_run, deploy_branch_ref -> stdout: resolved target commit (refusal path only); 0 ok, 1 fetch/resolve failed, 2 refused (would move backward), 3 refused (not reachable from deploy branch)
   local target_dir="$1" repo_url="$2" ref="$3" token="$4" allow_backward="${5:-}" dry_run="${6:-}" deploy_branch_ref="${7:-}"
   (
@@ -466,6 +562,106 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_b
   )
 }
 
+# DUR-259: whether $kind's run_recipe call is about to recreate the shared
+# docker-server-1 container this script (and every company's agent
+# heartbeat) talks to. "custom" is an operator-authored black box that may
+# or may not touch it, so it's deliberately excluded — draining ahead of a
+# recipe that never touches the shared container would just add latency to
+# every such deploy for no safety benefit.
+recreates_shared_container() { # kind -> 0 if yes, 1 if no
+  case "$1" in
+    compose_recreate|compose_build_swap) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+quiet_mode_field() { # json, field -> stdout: field value ("" if missing/false/unparseable)
+  printf '%s' "$1" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+v = d.get('$2')
+if isinstance(v, bool):
+    print('1' if v else '')
+elif v is not None:
+    print(v)
+" 2>/dev/null
+}
+
+# DUR-259 proactive drain: freezes new agent wakes instance-wide (the DUR-224
+# Quiet Mode mechanism, across ALL companies — not just this approval's) and
+# waits up to QUIET_MODE_DRAIN_TIMEOUT_SECONDS for heartbeat runs already in
+# flight to finish, so the `docker compose up -d --force-recreate`/`--no-build`
+# call below finds nothing running to interrupt. Sets the global
+# QUIET_MODE_OWNED_BY_RUNNER=1 iff THIS call is the one that activated quiet
+# mode (vs. it already being active — e.g. an operator's own manual
+# maintenance window), so the matching maybe_end_quiet_mode_drain call below
+# knows whether it's this call's place to deactivate it again afterward.
+# Best-effort throughout: any failure talking to the quiet-mode endpoints (or
+# a full timeout with runs still in flight) is logged and swallowed — this
+# makes a deploy's timing safer when it can, but must never block one
+# outright. A still-in-flight run that gets recreated out from under it after
+# a full timeout isn't given a dedicated status here (e.g. a "paused, will
+# resume" status distinct from failed) — doing that safely means auditing
+# every heartbeatRuns.status consumer (UI badges, success-rate/metrics,
+# HEARTBEAT_RUN_TERMINAL_STATUSES-style sets), which is its own follow-up
+# (DUR-259's child issue), not this drain wait.
+QUIET_MODE_OWNED_BY_RUNNER=0
+maybe_begin_quiet_mode_drain() { # aid, kind
+  local aid="$1" kind="$2"
+  QUIET_MODE_OWNED_BY_RUNNER=0
+  recreates_shared_container "$kind" || return 0
+
+  local status active
+  status="$(cli_json instance quiet-mode:status)" || {
+    log "runner: $aid could not read quiet-mode status before deploy — proceeding without a drain wait"
+    return 0
+  }
+  active="$(quiet_mode_field "$status" active)"
+
+  if [ -z "$active" ]; then
+    if ! cli_json instance quiet-mode:activate >/dev/null; then
+      log "runner: $aid could not activate quiet mode before deploy — proceeding without a drain wait"
+      return 0
+    fi
+    QUIET_MODE_OWNED_BY_RUNNER=1
+    log "runner: $aid activated quiet mode instance-wide before recreating the shared container"
+  else
+    log "runner: $aid quiet mode was already active (external maintenance window) — draining under it, will leave it active afterward"
+  fi
+
+  local waited=0 count
+  while [ "$waited" -lt "$QUIET_MODE_DRAIN_TIMEOUT_SECONDS" ]; do
+    status="$(cli_json instance quiet-mode:status)" || break
+    count="$(quiet_mode_field "$status" activeRunCount)"
+    case "$count" in
+      ''|*[!0-9]*) count="" ;;
+    esac
+    if [ -n "$count" ] && [ "$count" -eq 0 ]; then
+      log "runner: $aid drain complete after ${waited}s — no in-flight heartbeat runs across any company"
+      return 0
+    fi
+    sleep "$QUIET_MODE_DRAIN_POLL_SECONDS"
+    waited=$((waited + QUIET_MODE_DRAIN_POLL_SECONDS))
+  done
+
+  status="$(cli_json instance quiet-mode:status)" || status=""
+  count="$(quiet_mode_field "$status" activeRunCount)"
+  [ -z "$count" ] && count="unknown"
+  log "runner: $aid drain timed out after ${QUIET_MODE_DRAIN_TIMEOUT_SECONDS}s with $count heartbeat run(s) still in flight — proceeding with the recreate anyway (see DUR-259 follow-up: no paused-for-restart status yet, these may surface as process_lost)"
+}
+
+maybe_end_quiet_mode_drain() { # aid
+  local aid="$1"
+  [ "$QUIET_MODE_OWNED_BY_RUNNER" -eq 1 ] || return 0
+  if ! cli_json instance quiet-mode:deactivate >/dev/null; then
+    log "runner: $aid could not deactivate quiet mode after deploy — an operator may need to run \`instance quiet-mode:deactivate\` manually"
+  fi
+  QUIET_MODE_OWNED_BY_RUNNER=0
+}
+
 run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   # Exit status: 0 = ok; 3 = compose_build_swap's `build` step failed before
   # anything was swapped (the `&&` short-circuits `up --no-build`), so the
@@ -551,6 +747,20 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   token="$(cli_json secrets deploy-github-token -C "$company_id" | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("token") or "")' 2>/dev/null)" || token=""
 
   local target_ref="${DV_COMMIT:-$DV_REPO_REF}"
+
+  # DUR-3905: check GitHub CI for $target_ref BEFORE touching the checkout at
+  # all, so a red/still-running build never gets shipped in the first place —
+  # this is a precondition, not a substitute for the health-check + rollback
+  # below (which still guards against a build that passed CI but is broken in
+  # a way CI doesn't catch).
+  local ci_status
+  ci_status="$(check_ci_status "$DV_REPO_URL" "$target_ref" "$token")"
+  if [ "$ci_status" = "failure" ] || [ "$ci_status" = "pending" ]; then
+    log "runner: $aid holding — GitHub CI for $target_ref is $ci_status"
+    comment "$aid" "$company_id" "Deploy held — GitHub CI for $target_ref is $( [ "$ci_status" = "pending" ] && echo "still running" || echo "red (failing checks)" ). Refusing to deploy an unproven build. Re-approve/re-file this deploy once CI is green."
+    return
+  fi
+
   local before_commit
   # DUR-420: `--short=12` (not the 7-char default) so the logged/commented commit prefix is
   # too long to grind a colliding vanity commit against in feasible time -- see the matching
@@ -596,12 +806,21 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   # matcher.
   after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
+  # DUR-259: quiet mode stays active (if we're the one who activated it)
+  # across the recipe, health check, AND a possible rollback below — a
+  # rollback re-runs the same recipe, so the shared container can be
+  # recreated a second time for this one approval, and both need to be
+  # covered by the same drained window. Ended right before whichever
+  # comment() call reports this approval's final outcome, on every exit path.
+  maybe_begin_quiet_mode_drain "$aid" "$DV_DEPLOY_KIND"
+
   run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
   local recipe_status=$?
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    maybe_end_quiet_mode_drain "$aid"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
     comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
@@ -612,10 +831,12 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    maybe_end_quiet_mode_drain "$aid"
     comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
   fi
 
+  maybe_end_quiet_mode_drain "$aid"
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
   # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
   # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only

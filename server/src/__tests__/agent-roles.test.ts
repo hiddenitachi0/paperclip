@@ -194,7 +194,8 @@ describe("agent roles — security", () => {
       expect.anything(),
       agentId,
       roleId,
-      expect.objectContaining({ actor: expect.objectContaining({ type: "board" }) })
+      expect.objectContaining({ actor: expect.objectContaining({ type: "board" }) }),
+      expect.anything()
     );
   });
 
@@ -364,6 +365,7 @@ describe("agent roles — security", () => {
       "connectors",
       "zendesk",
       expect.objectContaining({ type: "board" }),
+      expect.anything(),
     );
 
     const removeRes = await request(app).delete(`/api/agents/${agentId}/role/connectors/zendesk`);
@@ -374,6 +376,7 @@ describe("agent roles — security", () => {
       "connectors",
       "zendesk",
       expect.objectContaining({ type: "board" }),
+      expect.anything(),
     );
   });
 

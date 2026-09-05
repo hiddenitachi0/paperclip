@@ -18,6 +18,7 @@ import { agentRoutes } from "./routes/agents.js";
 import { agentRoleRoutes } from "./routes/agent-roles.js";
 import { personaRoutes } from "./routes/personas.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
+import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
@@ -236,6 +237,7 @@ export async function createApp(
   api.use(agentRoleRoutes(db));
   api.use(personaRoutes(db));
   api.use(mcpToolLibraryRoutes(db));
+  api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
   api.use(issueRoutes(db, opts.storageService, {

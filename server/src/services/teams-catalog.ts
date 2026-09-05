@@ -737,10 +737,15 @@ function buildPortabilityInput(
   };
 }
 
-export function teamsCatalogService(db: Db) {
-  const portability = companyPortabilityService(db);
-  const companySkills = companySkillService(db);
-  const agents = agentService(db);
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db`; routes/teams-catalog.ts,
+// once wired through createRequestScopedDb, passes a `db` that is the
+// *scoped* proxy and a distinct `rawDb` -- installCatalogTeam below writes
+// agents/secrets through companyPortabilityService, which needs the raw
+// connection for its own withCompanyScope transactions.
+export function teamsCatalogService(db: Db, rawDb: Db = db) {
+  const portability = companyPortabilityService(db, undefined, rawDb);
+  const companySkills = companySkillService(db, rawDb);
+  const agents = agentService(db, { rawDb });
 
   async function resolveTargetManagerReference(
     companyId: string,
