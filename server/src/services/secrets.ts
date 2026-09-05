@@ -2974,5 +2974,12 @@ export function secretService(db: Db) {
       }
       return { config: resolved, secretKeys, secretValues, manifest };
     },
+
+    // Exposed for mcp-oauth.ts (DUR-3909): a completed "Connect & sign in"
+    // handshake needs to land its captured access token in Secrets exactly
+    // the same way a pasted credential does — as a normal managed_local
+    // secret, so it shows up in Settings → Secrets and resolves through the
+    // same secret_ref path as every other tool credential.
+    createManagedLocalSecret,
   };
 }
