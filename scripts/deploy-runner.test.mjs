@@ -1652,3 +1652,50 @@ test("DUR-259: a custom deployKind never touches the quiet-mode drain at all", (
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// DUR-259 follow-up (see GH Actions run 33967261346's dead-silent
+// deploy-runner.log): before this fix, `cli_json approval list ... ||
+// continue` and the JSON-parse failure branch inside its python selector
+// were both completely silent -- a main() poll cycle that hit either one
+// would look, from deploy-runner.log, IDENTICAL to "nothing to do this
+// cycle", even though process_approval (and everything downstream of it,
+// including the whole DUR-259 drain) was never even reached. That blind
+// spot is what made the recreate-acceptance CI failure impossible to
+// diagnose from its own log dump. These two tests lock in that a JSON
+// parse failure at either site is now loud, not silent.
+test("main() logs a diagnostic (not silence) when the approval list for a company fails to parse as JSON", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    // Not valid JSON -- simulates stray stdout noise ahead of (or instead
+    // of) the CLI's --json payload, e.g. a tool warning on stdout.
+    writeFileSync(path.join(scenario.dir, "approval_list.json"), "not json at all");
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main");
+    assert.match(
+      scenario.readLog(),
+      /approval list for company co-1 did not parse as JSON -- skipping this company this poll cycle/,
+      "a parse failure must be logged, not silently treated as an empty/no-op approval list",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("main() logs a diagnostic (not silence) when the company list itself fails to parse as JSON", () => {
+  const scenario = makeScenario();
+  try {
+    writeFileSync(path.join(scenario.dir, "company_list.json"), "not json at all");
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main");
+    assert.match(
+      scenario.readLog(),
+      /company list did not parse as JSON -- aborting this poll cycle/,
+      "a parse failure must be logged, not silently treated as zero companies",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
