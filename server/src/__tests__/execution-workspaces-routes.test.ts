@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { executionWorkspaceRoutes } from "../routes/execution-workspaces.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockExecutionWorkspaceService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock("../services/index.js", () => ({
   workspaceOperationService: () => mockWorkspaceOperationService,
 }));
 
-function createApp(companyIds = ["company-1"]) {
+function createApp(companyIds = ["11111111-1111-4111-8111-111111111111"]) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -43,7 +44,7 @@ function createApp(companyIds = ["company-1"]) {
     };
     next();
   });
-  app.use("/api", executionWorkspaceRoutes({} as any));
+  app.use("/api", executionWorkspaceRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }
@@ -79,7 +80,7 @@ describe.sequential("execution workspace routes", () => {
 
   it("uses summary mode for lightweight workspace lookups", async () => {
     const res = await request(createApp())
-      .get("/api/companies/company-1/execution-workspaces?summary=true&reuseEligible=true");
+      .get("/api/companies/11111111-1111-4111-8111-111111111111/execution-workspaces?summary=true&reuseEligible=true");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual([
@@ -90,7 +91,7 @@ describe.sequential("execution workspace routes", () => {
         projectWorkspaceId: null,
       },
     ]);
-    expect(mockExecutionWorkspaceService.listSummaries).toHaveBeenCalledWith("company-1", {
+    expect(mockExecutionWorkspaceService.listSummaries).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", {
       projectId: undefined,
       projectWorkspaceId: undefined,
       issueId: undefined,
@@ -102,7 +103,7 @@ describe.sequential("execution workspace routes", () => {
 
   it("delegates bounded workspace overview queries", async () => {
     const res = await request(createApp())
-      .get("/api/companies/company-1/workspace-overview?status=active,idle&limit=25&offset=10");
+      .get("/api/companies/11111111-1111-4111-8111-111111111111/workspace-overview?status=active,idle&limit=25&offset=10");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
@@ -113,7 +114,7 @@ describe.sequential("execution workspace routes", () => {
       hasMore: false,
       nextOffset: null,
     });
-    expect(mockExecutionWorkspaceService.listOverview).toHaveBeenCalledWith("company-1", {
+    expect(mockExecutionWorkspaceService.listOverview).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", {
       status: ["active", "idle"],
       limit: 25,
       offset: 10,
@@ -122,7 +123,7 @@ describe.sequential("execution workspace routes", () => {
 
   it("rejects invalid workspace overview pagination", async () => {
     const res = await request(createApp())
-      .get("/api/companies/company-1/workspace-overview?limit=1000");
+      .get("/api/companies/11111111-1111-4111-8111-111111111111/workspace-overview?limit=1000");
 
     expect(res.status).toBe(422);
     expect(mockExecutionWorkspaceService.listOverview).not.toHaveBeenCalled();
