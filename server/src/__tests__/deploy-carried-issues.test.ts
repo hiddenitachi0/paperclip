@@ -182,6 +182,30 @@ describe("deployCarriedIssuesService.tick (DUR-238)", () => {
     );
   });
 
+  // DUR-3922: an issue correctly marked `blocked` (per our execution contract) while waiting on
+  // a human/board actor to file or decide the deploy approval must still be picked up by the
+  // sweep -- not just issues sitting in `in_review`. The candidate-row fake here doesn't itself
+  // encode the issue's status (the fake's `where()` chain doesn't inspect its filter args), so
+  // this test's purpose is to document/lock the intent; the real regression coverage is the
+  // production SQL filter in `listCarriedCandidateIssues` using `inArray(issues.status,
+  // ["in_review", "blocked"])` instead of a single `eq(..., "in_review")`.
+  it("closes a carried issue that qualifies via the same candidate query regardless of in_review/blocked status", async () => {
+    const { deployCarriedIssuesService } = await import("../services/deploy-carried-issues.js");
+    const { db } = makeFakeDb({
+      dueApprovals: [DEPLOY_APPROVAL],
+      candidateRows: [candidateRow({ mergeCommitSha: "9a3a7e7abcdef0123456789abcdef0123456789" })],
+    });
+    mockResolveProjectDeployBranchesByProjectId.mockResolvedValue({ deployBranch: "custom", projectId: "project-1" });
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
+    mockIssueService.update.mockResolvedValue({ id: "issue-1", status: "done" });
+
+    const svc = deployCarriedIssuesService(db as any, { readStatusLog: () => [COMPLETED_ENTRY] });
+    const result = await svc.tick();
+
+    expect(result).toEqual({ checked: 1, closed: 1 });
+    expect(mockIssueService.update).toHaveBeenCalledWith("issue-1", { status: "done" });
+  });
+
   it("closes a carried issue whose merge commit is a confirmed git ancestor of the deployed commit", async () => {
     const { deployCarriedIssuesService } = await import("../services/deploy-carried-issues.js");
     const { db } = makeFakeDb({
