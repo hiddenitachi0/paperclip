@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockProjectService = vi.hoisted(() => ({
   create: vi.fn(),
@@ -105,7 +106,7 @@ async function createProjectApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", projectRoutes({} as any));
+  app.use("/api", projectRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }
@@ -125,7 +126,7 @@ async function createExecutionWorkspaceApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", executionWorkspaceRoutes({} as any));
+  app.use("/api", executionWorkspaceRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }
@@ -133,7 +134,7 @@ async function createExecutionWorkspaceApp(actor: Record<string, unknown>) {
 function buildProject(overrides: Record<string, unknown> = {}) {
   return {
     id: "project-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     urlKey: "project-1",
     goalId: null,
     goalIds: [],
@@ -161,7 +162,7 @@ function buildProject(overrides: Record<string, unknown> = {}) {
 function buildExecutionWorkspace(overrides: Record<string, unknown> = {}) {
   return {
     id: "workspace-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     projectId: "project-1",
     projectWorkspaceId: null,
     sourceIssueId: null,
@@ -210,7 +211,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     mockProjectService.update.mockResolvedValue(buildProject());
     mockProjectService.createWorkspace.mockResolvedValue({
       id: workspaceId,
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       projectId,
       name: "Workspace",
       sourceType: "local_path",
@@ -233,7 +234,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     });
     mockProjectService.listWorkspaces.mockResolvedValue([{
       id: workspaceId,
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       projectId,
       name: "Workspace",
       sourceType: "local_path",
@@ -256,7 +257,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     }]);
     mockProjectService.updateWorkspace.mockResolvedValue({
       id: workspaceId,
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       projectId,
       name: "Workspace",
       sourceType: "local_path",
@@ -288,7 +289,7 @@ describe.sequential("workspace runtime service route authorization", () => {
       id: projectId,
       workspaces: [{
         id: workspaceId,
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         projectId,
         name: "Workspace",
         sourceType: "local_path",
@@ -316,7 +317,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
@@ -336,7 +337,7 @@ describe.sequential("workspace runtime service route authorization", () => {
       id: projectId,
       workspaces: [{
         id: workspaceId,
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         projectId,
         name: "Workspace",
         sourceType: "local_path",
@@ -361,7 +362,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
@@ -384,13 +385,13 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
 
     const res = await request(app)
-      .post("/api/companies/company-1/projects")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/projects")
       .send({
         name: "Exploit",
         executionWorkspacePolicy: {
@@ -412,7 +413,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
@@ -433,7 +434,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
@@ -455,7 +456,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
@@ -479,7 +480,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
@@ -500,7 +501,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createProjectApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
@@ -523,7 +524,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createExecutionWorkspaceApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
@@ -543,7 +544,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createExecutionWorkspaceApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
@@ -566,7 +567,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createExecutionWorkspaceApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
@@ -591,7 +592,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createExecutionWorkspaceApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
@@ -612,7 +613,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createExecutionWorkspaceApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
@@ -635,7 +636,7 @@ describe.sequential("workspace runtime service route authorization", () => {
     const app = await createExecutionWorkspaceApp({
       type: "board",
       userId: "board-1",
-      companyIds: ["company-1"],
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
       source: "session",
       isInstanceAdmin: false,
     });
