@@ -14,6 +14,7 @@ export { personaPosts } from "./persona_posts.js";
 export { personaAccountPublishCounters } from "./persona_account_publish_counters.js";
 export { personaPublishingCompanySettings } from "./persona_publishing_company_settings.js";
 export { companyMcpTools } from "./company_mcp_tools.js";
+export { companyMcpOAuthConnections } from "./company_mcp_oauth_connections.js";
 export { agents } from "./agents.js";
 export { agentMemberships } from "./agent_memberships.js";
 export { boardApiKeys } from "./board_api_keys.js";
