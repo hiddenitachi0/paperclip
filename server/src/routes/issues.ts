@@ -4288,7 +4288,10 @@ export function issueRoutes(
       existing.status !== result.issue.status &&
       result.issue.assigneeAgentId
     ) {
-      void heartbeat.wakeup(result.issue.assigneeAgentId, {
+      // DUR-3918: same post-response connection-release hazard DUR-932
+      // fixed for PATCH/comments -- must use rawHeartbeat, not the
+      // request-scoped heartbeat, for this fire-and-forget wakeup.
+      void rawHeartbeat.wakeup(result.issue.assigneeAgentId, {
         source: "automation",
         triggerDetail: "system",
         reason: "issue_recovery_action_restored",
@@ -5796,7 +5799,7 @@ export function issueRoutes(
     }
 
     void queueIssueAssignmentWakeup({
-      heartbeat,
+      heartbeat: rawHeartbeat,
       issue,
       reason: "issue_assigned",
       mutation: "create",
@@ -5861,7 +5864,7 @@ export function issueRoutes(
     });
 
     void queueIssueAssignmentWakeup({
-      heartbeat,
+      heartbeat: rawHeartbeat,
       issue,
       reason: "issue_assigned",
       mutation: "create",
@@ -6051,7 +6054,7 @@ export function issueRoutes(
 
     if (!serializationContext || !currentSerializedChild) {
       void queueIssueAssignmentWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         reason: "issue_assigned",
         mutation: "create",
@@ -6253,7 +6256,7 @@ export function issueRoutes(
 
       if (!serializedBlockedChildIds.has(issue.id)) {
         void queueIssueAssignmentWakeup({
-          heartbeat,
+          heartbeat: rawHeartbeat,
           issue,
           reason: "issue_assigned",
           mutation: "accepted_plan_decomposition",
@@ -7641,7 +7644,11 @@ export function issueRoutes(
         checkoutRunId,
       })
     ) {
-      void heartbeat
+      // DUR-3918: fire-and-forget after res.json() below may release this
+      // request's reserved connection (see rawHeartbeat comment above) while
+      // this is still in flight -- must use the rawDb-backed rawHeartbeat,
+      // same fix shape as DUR-932's PATCH/comments wakeup fan-out.
+      void rawHeartbeat
         .wakeup(req.body.agentId, {
           source: "assignment",
           triggerDetail: "system",
@@ -8007,7 +8014,7 @@ export function issueRoutes(
 
       for (const createdIssue of createdIssues) {
         void queueIssueAssignmentWakeup({
-          heartbeat,
+          heartbeat: rawHeartbeat,
           issue: createdIssue,
           reason: "issue_assigned",
           mutation: "interaction_accept",
@@ -8026,7 +8033,7 @@ export function issueRoutes(
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue: continuationWakeIssue,
         interaction,
         actor,
@@ -8086,7 +8093,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         interaction,
         actor,
@@ -8140,7 +8147,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         interaction,
         actor,
@@ -8194,7 +8201,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
-        heartbeat,
+        heartbeat: rawHeartbeat,
         issue,
         interaction,
         actor,
