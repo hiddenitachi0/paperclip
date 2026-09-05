@@ -36,6 +36,7 @@ export interface PersonaWithAgent {
   avatarAssetId: string | null;
   status: string;
   dailyGenerationCap: number | null;
+  publishingPaused: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,6 +53,7 @@ function toPersonaWithAgent(persona: PersonaRow, agent: Pick<AgentRow, "name" | 
     avatarAssetId: agent.avatarAssetId,
     status: persona.status,
     dailyGenerationCap: persona.dailyGenerationCap,
+    publishingPaused: persona.publishingPaused,
     createdAt: persona.createdAt,
     updatedAt: persona.updatedAt,
   };
@@ -133,6 +135,7 @@ export function personaService(db: Db) {
         handle: input.handle ?? null,
         status: input.status ?? "draft",
         dailyGenerationCap: input.dailyGenerationCap ?? null,
+        publishingPaused: input.publishingPaused ?? false,
       })
       .returning();
     const finalAgent = await applyAgentIdentityFields(db, agent, input);
@@ -176,6 +179,7 @@ export function personaService(db: Db) {
         handle: input.handle !== undefined ? input.handle : existing.handle,
         status: input.status ?? existing.status,
         dailyGenerationCap: input.dailyGenerationCap !== undefined ? input.dailyGenerationCap : existing.dailyGenerationCap,
+        publishingPaused: input.publishingPaused !== undefined ? input.publishingPaused : existing.publishingPaused,
         updatedAt: new Date(),
       })
       .where(eq(personas.id, existing.id))
