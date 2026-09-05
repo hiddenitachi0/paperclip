@@ -4288,7 +4288,10 @@ export function issueRoutes(
       existing.status !== result.issue.status &&
       result.issue.assigneeAgentId
     ) {
-      void heartbeat.wakeup(result.issue.assigneeAgentId, {
+      // DUR-3918: same post-response connection-release hazard DUR-932
+      // fixed for PATCH/comments -- must use rawHeartbeat, not the
+      // request-scoped heartbeat, for this fire-and-forget wakeup.
+      void rawHeartbeat.wakeup(result.issue.assigneeAgentId, {
         source: "automation",
         triggerDetail: "system",
         reason: "issue_recovery_action_restored",
@@ -7641,7 +7644,11 @@ export function issueRoutes(
         checkoutRunId,
       })
     ) {
-      void heartbeat
+      // DUR-3918: fire-and-forget after res.json() below may release this
+      // request's reserved connection (see rawHeartbeat comment above) while
+      // this is still in flight -- must use the rawDb-backed rawHeartbeat,
+      // same fix shape as DUR-932's PATCH/comments wakeup fan-out.
+      void rawHeartbeat
         .wakeup(req.body.agentId, {
           source: "assignment",
           triggerDetail: "system",
