@@ -217,9 +217,9 @@ export function agentRoutes(
     isRunLive: isHeartbeatRunLiveInThisProcess,
   });
   const issueApprovalsSvc = issueApprovalService(db);
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
   const instructions = agentInstructionsService();
-  const companySkills = companySkillService(db);
+  const companySkills = companySkillService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
