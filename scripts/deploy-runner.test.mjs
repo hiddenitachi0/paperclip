@@ -122,6 +122,23 @@ const FAKE_DOCKER = [
   "    pid=\"$(printf '%s' \"$cmd\" | sed -n 's/.*project get \\([^ ]*\\).*/\\1/p')\"",
   '    cat "$SCENARIO_DIR/project-$pid.json"',
   '    ;;',
+  // DUR-259: fake responses for the quiet-mode CLI wrapper deploy-runner.sh
+  // polls before/after a compose_recreate|compose_build_swap recipe.
+  // activate/deactivate calls are appended to a log file so tests can assert
+  // ownership behavior (whether the runner activated it vs. found it already
+  // active) without needing a real timing-based simulation.
+  '  *"instance quiet-mode:status"*)',
+  '    fixture="$SCENARIO_DIR/quiet-mode-status.json"',
+  '    if [ -f "$fixture" ]; then cat "$fixture"; else printf \'{"active":false,"activeRunCount":0}\'; fi',
+  '    ;;',
+  '  *"instance quiet-mode:activate"*)',
+  '    echo activate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '    printf \'{"active":true}\'',
+  '    ;;',
+  '  *"instance quiet-mode:deactivate"*)',
+  '    echo deactivate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '    printf \'{"active":false}\'',
+  '    ;;',
   '  *)',
   '    echo "fake docker: unhandled command: $cmd" >&2',
   '    exit 1',
@@ -1454,5 +1471,184 @@ test("github_owner_repo extracts owner/repo from both https and ssh GitHub remot
     assert.equal(check("https://gitlab.example.com/acme/widgets.git"), "", "must never guess a token audience for a non-github.com host");
   } finally {
     scenario.cleanup();
+  }
+});
+
+// DUR-259: deploy-runner.sh must proactively drain in-flight heartbeat runs
+// (via the DUR-224 Quiet Mode mechanism) before a compose_recreate/
+// compose_build_swap recipe recreates the shared docker-server-1 container —
+// not just rely on shutdown()'s own in-process drain (DUR-257) once the
+// recreate has already started. These tests exercise process_approval()
+// directly (git_fetch_reset/run_recipe/health_check stubbed, same pattern as
+// the DUR-237 test above) against the fake docker's quiet-mode:* handlers.
+function setUpComposeRecreateScenario(scenario, { deployKind = "compose_recreate" } = {}) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-quiet-mode-test-"));
+  const targetPath = path.join(dir, "target");
+  mkdirSync(targetPath, { recursive: true });
+  spawnSync("git", ["init", "--quiet", "-b", "custom"], { cwd: targetPath });
+
+  const project = {
+    id: "proj-1",
+    deployPolicy: {
+      enabled: true,
+      workspaceId: "ws-1",
+      deployKind,
+      deployTargetPath: targetPath,
+      healthCheckUrl: "http://example.invalid/health",
+    },
+    workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+  };
+  scenario.writeJson("project-proj-1.json", project);
+  scenario.writeJson("approval-aid-1.json", {
+    id: "aid-1",
+    payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+  });
+  return { dir, targetPath };
+}
+
+function quietModeCallsLog(scenario) {
+  const file = path.join(scenario.dir, "quiet-mode-calls.log");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean);
+}
+
+test("DUR-259: a compose_recreate deploy activates quiet mode, drains immediately when nothing's in flight, then deactivates", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /is live and healthy/);
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"], "the runner activated quiet mode itself, so it must also be the one to deactivate it again");
+    assert.match(scenario.readLog(), /activated quiet mode instance-wide before recreating/);
+    assert.match(scenario.readLog(), /drain complete after 0s/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-259: quiet mode already active (external maintenance window) is left active — the runner never activates or deactivates it", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: true, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.deepEqual(quietModeCallsLog(scenario), [], "quiet mode was already active — the runner must not call activate or deactivate itself");
+    assert.match(scenario.readLog(), /quiet mode was already active \(external maintenance window\)/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-259: a drain that never reaches zero times out and still proceeds with the recreate, restoring quiet mode after", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    // Always reports 3 runs still in flight — the drain can never complete.
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 3 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS: "1",
+        PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS: "1",
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "a drain timeout must not block the deploy from resolving to a definite outcome");
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"], "even on a timeout, ownership means the runner must still restore quiet mode afterward");
+    assert.match(scenario.readLog(), /drain timed out after 1s with 3 heartbeat run\(s\) still in flight — proceeding with the recreate anyway/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-259: a custom deployKind never touches the quiet-mode drain at all", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario, { deployKind: "custom" }));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 3 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.deepEqual(quietModeCallsLog(scenario), [], "an operator-authored custom command isn't known to touch the shared container, so it must not pay for a drain wait");
+    assert.doesNotMatch(scenario.readLog(), /quiet mode/, "no quiet-mode drain logging at all for a custom deployKind");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
