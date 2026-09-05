@@ -3,6 +3,9 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const COMPANY_ID = "99999999-9999-4999-8999-999999999999";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -64,7 +67,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
       feedbackDataSharingPreference: "prompt",
     },
   })),
-  listCompanyIds: vi.fn(async () => ["company-1"]),
+  listCompanyIds: vi.fn(async () => [COMPANY_ID]),
 }));
 
 const mockIssueReferenceService = vi.hoisted(() => ({
@@ -102,7 +105,7 @@ vi.mock("../services/index.js", () => ({
   isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
   escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
   companyService: () => ({
-    getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+    getById: vi.fn(async () => ({ id: COMPANY_ID, attachmentMaxBytes: 10 * 1024 * 1024 })),
   }),
   accessService: () => mockAccessService,
   agentService: () => mockAgentService,
@@ -143,20 +146,20 @@ function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", issueRoutes(mockDb as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(mockDb) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
 
 const legacyProjectLinkedIssue = {
   id: "11111111-1111-4111-8111-111111111111",
-  companyId: "company-1",
+  companyId: COMPANY_ID,
   identifier: "PAP-581",
   title: "Legacy onboarding task",
   description: "Seed the first CEO task",
@@ -176,7 +179,7 @@ const legacyProjectLinkedIssue = {
 
 const projectGoal = {
   id: "44444444-4444-4444-8444-444444444444",
-  companyId: "company-1",
+  companyId: COMPANY_ID,
   title: "Launch the company",
   description: null,
   level: "company",
@@ -225,7 +228,7 @@ describe.sequential("issue goal context routes", () => {
     mockDb.execute.mockResolvedValue([]);
     mockProjectService.getById.mockResolvedValue({
       id: legacyProjectLinkedIssue.projectId,
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       urlKey: "onboarding",
       goalId: projectGoal.id,
       goalIds: [projectGoal.id],

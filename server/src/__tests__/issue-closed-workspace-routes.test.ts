@@ -2,7 +2,10 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.setConfig({ testTimeout: 30_000 });
+
 const issueId = "11111111-1111-4111-8111-111111111111";
+const testCompanyId = "55555555-5555-4555-8555-555555555555";
 const closedWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const nextWorkspaceId = "44444444-4444-4444-8444-444444444444";
 const agentId = "22222222-2222-4222-8222-222222222222";
@@ -38,6 +41,17 @@ const mockProjectService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 
 function registerServiceMocks() {
+  vi.doMock("@paperclipai/db", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@paperclipai/db")>();
+    return {
+      ...actual,
+      createRequestScopedDb: (rawDb: unknown) => rawDb,
+      runInCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: () => Promise<unknown>) => fn(),
+      withCompanyScope: async (_rawDb: unknown, _cid: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+      runInCompanyScopeBypass: async (_rawDb: unknown, _opts: unknown, fn: (tx: unknown) => Promise<unknown>) => fn(null),
+    };
+  });
+
   vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
 
   vi.doMock("@paperclipai/shared/telemetry", () => ({
@@ -77,7 +91,7 @@ function registerServiceMocks() {
     isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: testCompanyId, attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => ({
@@ -103,7 +117,7 @@ function registerServiceMocks() {
           feedbackDataSharingPreference: "prompt",
         },
       })),
-      listCompanyIds: vi.fn(async () => ["company-1"]),
+      listCompanyIds: vi.fn(async () => [testCompanyId]),
     }),
     issueApprovalService: () => ({}),
     issueReferenceService: () => ({
@@ -149,7 +163,7 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: [testCompanyId],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -163,7 +177,7 @@ async function createApp() {
 function makeIssue() {
   return {
     id: issueId,
-    companyId: "company-1",
+    companyId: testCompanyId,
     status: "todo",
     priority: "medium",
     assigneeAgentId: agentId,

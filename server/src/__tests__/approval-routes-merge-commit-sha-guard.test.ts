@@ -18,6 +18,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -94,8 +95,26 @@ function registerModuleMocks() {
 // Minimal DB that satisfies assertApprovalMutationAllowedByRunContext (returns no run row,
 // so the function returns true and the route continues) and any other select queries the
 // route performs outside the mocked modules.
+//
+// DUR-394: the route's real queries (including
+// assertApprovalMutationAllowedByRunContext's heartbeatRuns lookup) now run
+// against the company-scoped `db` (createRequestScopedDb(rawDb) resolved
+// through runInCompanyScope -- see middleware/company-scope.ts), which is a
+// real drizzle instance layered over withFakeCompanyScopeReserve's fake
+// reserved connection, not this select()/from()/where() chain (that chain is
+// dead code for any query reachable through the scoped db).
+//
+// DUR-923's assertMergePrIssueIdsAreRelevant issues a second real query
+// (`{id, companyId, assigneeAgentId}`) whenever a merge_pr approval is filed
+// -- every test in this suite does. A shared 3-value tuple
+// `[ISSUE_ID, companyId, null]` resolves that guard's target issue as
+// unassigned (which it always lets any agent name -- this suite is about the
+// orthogonal DUR-237 mergeCommitSha strip, not issue ownership) while still
+// giving the heartbeatRuns 4-column read a mismatched (null) `agentId`, so
+// assertApprovalMutationAllowedByRunContext keeps falling into its "not this
+// run's own row" branch and returning true (unblocked) regardless.
 function createMinimalDb() {
-  return {
+  const fakeDb = {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
         where: vi.fn(() => ({
@@ -103,7 +122,10 @@ function createMinimalDb() {
         })),
       })),
     })),
-  } as any;
+  };
+  return withFakeCompanyScopeReserve(fakeDb as any, {
+    unsafeRows: [[ISSUE_ID, "22222222-2222-4222-8222-222222222222", null]],
+  });
 }
 
 async function createAgentApp() {
@@ -117,7 +139,7 @@ async function createAgentApp() {
     (req as any).actor = {
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       runId: "run-1",
       source: "api_key",
       isInstanceAdmin: false,
@@ -164,7 +186,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
     });
   });
 
@@ -172,7 +194,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -194,7 +216,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
     const app = await createAgentApp();
 
     const res = await request(app)
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         issueIds: [ISSUE_ID],
@@ -214,7 +236,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
   it("strips a caller-supplied mergeCommitSha on resubmit", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       requestedByAgentId: "agent-1",
       type: "request_board_approval",
       status: "pending",
@@ -225,7 +247,7 @@ describe("DUR-237: merge_pr mergeCommitSha strip guard", () => {
       type: "request_board_approval",
       status: "pending",
       payload: {},
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
     });
     const app = await createAgentApp();
 

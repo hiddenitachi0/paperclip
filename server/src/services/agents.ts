@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { withCompanyScope } from "@paperclipai/db";
 import {
   agents,
   agentConfigRevisions,
@@ -16,6 +15,7 @@ import {
   issueExecutionDecisions,
   issues,
   issueComments,
+  withCompanyScope,
 } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -249,16 +249,20 @@ function assertNoPluginToolAssignmentFields(data: Record<string, unknown>) {
   }
 }
 
-// DUR-378 (DUR-277 Wave 5a): `rawDb` defaults to `db` for every unmigrated
-// caller, a no-op there -- `db` is already the raw pooled instance for them.
-// Only routes/agents.ts and routes/mcp-tool-library.ts, once wired through
-// createRequestScopedDb, pass a `db` that is the *scoped* proxy and a
-// distinct `rawDb`, since db.transaction() below is not supported through
-// that proxy (see packages/db/src/company-scope.ts) and needs the raw
-// connection via withCompanyScope instead. Same pattern as
-// services/issue-tree-control.ts (DUR-348/Wave 2).
-export function agentService(db: Db, rawDb: Db = db) {
-  const secretsSvc = secretService(db);
+export interface AgentServiceOptions {
+  // DUR-392 (DUR-277 Wave 5b): mirrors issueService's IssueServiceOptions.rawDb --
+  // defaults to `db` for every unmigrated caller, a no-op there since `db` is
+  // already the raw pooled instance. Only routes/agents.ts, once wired through
+  // createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+  // distinct `rawDb`, since db.transaction() below is not supported through
+  // that proxy (see packages/db/src/company-scope.ts) and needs the raw
+  // connection via withCompanyScope instead.
+  rawDb?: Db;
+}
+
+export function agentService(db: Db, options: AgentServiceOptions = {}) {
+  const rawDb = options.rawDb ?? db;
+  const secretsSvc = secretService(db, rawDb);
 
   function currentUtcMonthWindow(now = new Date()) {
     const year = now.getUTCFullYear();
@@ -623,9 +627,13 @@ export function agentService(db: Db, rawDb: Db = db) {
     // ever changes this column, so it always stays paired with a fresh
     // secret-binding resync via syncAgentSecretBindings.
     syncMcpToolSelection: async (agentId: string, desiredToolIds: string[]) => {
-      const existing = await getById(agentId);
-      if (!existing) throw notFound("Agent not found");
-      return withCompanyScope(rawDb, existing.companyId, async (tx) => {
+      const target = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, agentId))
+        .then((rows) => rows[0] ?? null);
+      if (!target) throw notFound("Agent not found");
+      return withCompanyScope(rawDb, target.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
           .update(agents)
@@ -797,10 +805,13 @@ export function agentService(db: Db, rawDb: Db = db) {
     },
 
     activatePendingApproval: async (id: string) => {
-      const existing = await getById(id);
-      if (!existing) return null;
-
-      const activatedAgent = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
+      const target = await db
+        .select({ companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!target) return null;
+      const activatedAgent = await withCompanyScope(rawDb, target.companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
           .update(agents)
@@ -821,7 +832,8 @@ export function agentService(db: Db, rawDb: Db = db) {
         return { agent: activatedAgent, activated: true };
       }
 
-      return { agent: existing, activated: false };
+      const existing = await getById(id);
+      return existing ? { agent: existing, activated: false } : null;
     },
 
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {

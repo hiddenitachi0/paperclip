@@ -13,6 +13,7 @@ import {
   projects,
   routines,
   secretAccessEvents,
+  withCompanyScope,
 } from "@paperclipai/db";
 import type {
   AgentEnvConfig,
@@ -361,7 +362,15 @@ function assertSelectableProviderConfig(config: {
   }
 }
 
-export function secretService(db: Db) {
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db` for every unmigrated
+// caller that hasn't been wired through createRequestScopedDb yet (the
+// scope-less background/heartbeat call sites listed at secretService's other
+// callers). routes/secrets.ts, once wired through createRequestScopedDb,
+// passes a `db` that is the *scoped* proxy and a distinct `rawDb`, since
+// db.transaction() below is not supported through that proxy (see
+// packages/db/src/company-scope.ts) -- those call sites open their
+// connection via withCompanyScope instead.
+export function secretService(db: Db, rawDb: Db = db) {
   const authorization = authorizationService(db);
 
   type NormalizeEnvOptions = {
@@ -1122,7 +1131,7 @@ export function secretService(db: Db) {
         createdByAgentId: actor?.agentId ?? null,
         createdByUserId: actor?.userId ?? null,
       });
-      return await db.transaction(async (tx) => {
+      return await withCompanyScope(rawDb, companyId, async (tx) => {
         await tx
           .update(companySecretVersions)
           .set({ status: "current" })
@@ -1506,7 +1515,7 @@ export function secretService(db: Db) {
         throw unprocessable("Only ready or warning provider vaults can be default");
       }
       const normalizedConfig = validateProviderConfigPayload(input.provider, input.config ?? {});
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         if (input.isDefault) {
           await tx
             .update(companySecretProviderConfigs)
@@ -1559,7 +1568,7 @@ export function secretService(db: Db) {
         patch.config === undefined
           ? existing.config
           : validateProviderConfigPayload(provider, patch.config);
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, existing.companyId, async (tx) => {
         if (patch.isDefault) {
           await tx
             .update(companySecretProviderConfigs)
@@ -1614,7 +1623,7 @@ export function secretService(db: Db) {
       if (existing.status === "coming_soon" || existing.status === "disabled") {
         throw unprocessable("Only ready or warning provider vaults can be default");
       }
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, existing.companyId, async (tx) => {
         const current = await tx
           .select()
           .from(companySecretProviderConfigs)
@@ -1953,7 +1962,7 @@ export function secretService(db: Db) {
             throw unprocessable("Provider rejected this external reference");
           }
           const preparedSecret = prepared;
-          const secret = await db.transaction(async (tx) => {
+          const secret = await withCompanyScope(rawDb, companyId, async (tx) => {
             const inserted = await tx
               .insert(companySecrets)
               .values({
@@ -2174,7 +2183,7 @@ export function secretService(db: Db) {
       }
 
       try {
-        return await db.transaction(async (tx) => {
+        return await withCompanyScope(rawDb, companyId, async (tx) => {
           await tx
             .update(companySecretVersions)
             .set({ status: "current" })
@@ -2301,7 +2310,7 @@ export function secretService(db: Db) {
       }
 
       try {
-        return await db.transaction(async (tx) => {
+        return await withCompanyScope(rawDb, secret.companyId, async (tx) => {
           await tx
             .update(companySecretVersions)
             .set({ status: "previous" })
@@ -2531,7 +2540,7 @@ export function secretService(db: Db) {
 
       const pathPrefixes = [...new Set(normalizedRefs.map((ref) => ref.configPath.split(".")[0]))];
 
-      await db.transaction(async (tx) => {
+      await withCompanyScope(rawDb, companyId, async (tx) => {
         if (options?.replaceAll) {
           await tx
             .delete(companySecretBindings)
@@ -2655,7 +2664,7 @@ export function secretService(db: Db) {
       if (options?.db) {
         await writeBindings(options.db);
       } else {
-        await db.transaction(async (tx) => writeBindings(tx));
+        await withCompanyScope(rawDb, companyId, async (tx) => writeBindings(tx));
       }
       return refs;
     },
@@ -2974,5 +2983,12 @@ export function secretService(db: Db) {
       }
       return { config: resolved, secretKeys, secretValues, manifest };
     },
+
+    // Exposed for mcp-oauth.ts (DUR-3909): a completed "Connect & sign in"
+    // handshake needs to land its captured access token in Secrets exactly
+    // the same way a pasted credential does — as a normal managed_local
+    // secret, so it shows up in Settings → Secrets and resolves through the
+    // same secret_ref path as every other tool credential.
+    createManagedLocalSecret,
   };
 }

@@ -4,6 +4,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { models as openCodeFallbackModels } from "@paperclipai/adapter-opencode-local";
 import type { ServerAdapterModule } from "../adapters/index.js";
 
+// This file fully mocks the service layer (mockAccessService,
+// mockEnvironmentService, etc. below) -- it exercises route wiring, not real
+// DB company-scope enforcement. The `db` this file's createApp() passes to
+// agentRoutes() is `{}`, not a real pool, so company-scope.ts's real
+// `runInCompanyScope` -- which reserves a physical connection via
+// `rawDb.$client.reserve()` -- fails here (see 2e91a693). Mock it to
+// populate the same AsyncLocalStorage scope directly with the fake db (no
+// reservation), and use a real UUID for the companyId placeholder so
+// company-scope.ts's format validation (which still runs for real) accepts it.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  const { requestCompanyScopeStorage } = await import("@paperclipai/db/company-scope");
+  return {
+    ...actual,
+    runInCompanyScope: async (rawDb: unknown, companyId: string, fn: () => Promise<unknown>) =>
+      requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb: rawDb } as never, fn),
+  };
+});
+
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
   createAgentRegistry: vi.fn(),
@@ -114,7 +133,7 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "local-board",
-      companyIds: ["company-1"],
+      companyIds: ["c0000001-0000-4000-8000-000000000001"],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -203,7 +222,7 @@ describe("adapter model refresh route", () => {
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
-      request(baseUrl).get(`/api/companies/company-1/adapters/${refreshableAdapterType}/models?refresh=1`),
+      request(baseUrl).get(`/api/companies/c0000001-0000-4000-8000-000000000001/adapters/${refreshableAdapterType}/models?refresh=1`),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -215,7 +234,7 @@ describe("adapter model refresh route", () => {
   it("skips OpenCode model discovery for non-local environments", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: "env-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       name: "Remote SSH",
       driver: "ssh",
       config: {},
@@ -223,7 +242,7 @@ describe("adapter model refresh route", () => {
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
-      request(baseUrl).get("/api/companies/company-1/adapters/opencode_local/models?environmentId=env-1"),
+      request(baseUrl).get("/api/companies/c0000001-0000-4000-8000-000000000001/adapters/opencode_local/models?environmentId=env-1"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -234,7 +253,7 @@ describe("adapter model refresh route", () => {
   it("keeps OpenCode model discovery enabled for local environments", async () => {
     mockEnvironmentService.getById.mockResolvedValue({
       id: "env-1",
-      companyId: "company-1",
+      companyId: "c0000001-0000-4000-8000-000000000001",
       name: "Local",
       driver: "local",
       config: {},
@@ -242,7 +261,7 @@ describe("adapter model refresh route", () => {
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
-      request(baseUrl).get("/api/companies/company-1/adapters/opencode_local/models?environmentId=env-1"),
+      request(baseUrl).get("/api/companies/c0000001-0000-4000-8000-000000000001/adapters/opencode_local/models?environmentId=env-1"),
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);

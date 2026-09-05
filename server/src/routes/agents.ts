@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, assets as assetsTable, companies, createRequestScopedDb, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable, createRequestScopedDb } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
@@ -63,7 +63,7 @@ import {
   workspaceOperationService,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
-import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import {
   assertBoard,
   assertBoardOrDelegate,
@@ -153,6 +153,13 @@ export function agentRoutes(
   rawDb: Db,
   options: { pluginWorkerManager?: PluginWorkerManager; storageService?: StorageService } = {},
 ) {
+  // DUR-351 (DUR-277 Wave 5a): this file's own request-scoped instance; the
+  // raw `rawDb` stays unwrapped for the pre-scope lookups the (b)-category
+  // routes below need before their companyId (and therefore their scope) is
+  // known, and for the one genuinely cross-company route
+  // (/instance/scheduler-heartbeats) that must stay bypass-scoped -- see
+  // middleware/company-scope.ts and the DUR-277 design doc §1.
+  const db = createRequestScopedDb(rawDb);
   // Legacy hardcoded maps — used as fallback when adapter module does not
   // declare capability flags explicitly.
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -192,24 +199,7 @@ export function agentRoutes(
   ] as const;
 
   const router = Router();
-  // DUR-378 (DUR-277 Wave 5a): this file's own request-scoped instance; rawDb
-  // stays unwrapped for the pre-scope lookups the (b)-category routes below
-  // need before their companyId (and therefore their scope) is known, and for
-  // heartbeatService below, which is deliberately NOT migrated to the scoped
-  // db here (see the comment on `heartbeat` a few lines down). See
-  // middleware/company-scope.ts / routes/issue-tree-control.ts (Wave 2).
-  const db = createRequestScopedDb(rawDb);
-  // agentService's own db.transaction() sites (create/update/remove/
-  // activatePendingApproval/syncMcpToolSelection) aren't supported through
-  // the scoped `db` proxy -- pass `rawDb` explicitly so it uses
-  // withCompanyScope internally instead. See services/agents.ts.
-  const svc = agentService(db, rawDb);
-  // Raw (unwrapped) instance for the pre-scope lookups below -- no
-  // AsyncLocalStorage scope exists yet at that point, so `svc` (bound to the
-  // scoped proxy) would throw if used there. Also used by
-  // normalizeAgentReference, which runs from router.param("id", ...) before
-  // any route-level middleware (including company-scope) for this router.
-  const rawSvc = agentService(rawDb);
+  const svc = agentService(db, { rawDb });
   const access = accessService(db);
   const storage = options.storageService;
   const approvalsSvc = approvalService(db);
@@ -218,32 +208,84 @@ export function agentRoutes(
   const environmentRuntime = environmentRuntimeService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
-  // DUR-277 design doc §3: heartbeat.ts's db.transaction() sites (e.g.
-  // enqueueWakeup, reachable from /agents/:id/wakeup below) are dual-reachable
-  // (route + scheduler tick) "scheduler core" sites, explicitly deferred to
-  // their own Wave 6 pass rather than migrated per-route-family -- see the
-  // design doc's §3 table and §5 rollout plan. Keeping heartbeatService bound
-  // to `rawDb` here (not the scoped `db`) is a deliberate no-op: every
-  // heartbeat.* call below behaves exactly as it did before this file's
-  // migration, whether invoked from a company-scoped route or not.
-  const heartbeat = heartbeatService(rawDb, {
+  const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
+    rawDb,
   });
   const recovery = recoveryService(db, {
     enqueueWakeup: heartbeat.wakeup,
     isRunLive: isHeartbeatRunLiveInThisProcess,
   });
   const issueApprovalsSvc = issueApprovalService(db);
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
   const instructions = agentInstructionsService();
-  const companySkills = companySkillService(db);
+  const companySkills = companySkillService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
-  // Raw instance for the one pre-scope lookup below (workspace-operations/:operationId/log).
-  const rawWorkspaceOperations = workspaceOperationService(rawDb);
-  // Raw instance for the pre-scope issue lookups below (issues/:issueId/live-runs, /active-run).
-  const rawIssuesSvc = issueService(rawDb);
   const instanceSettings = instanceSettingsService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  // DUR-351: raw-db counterparts used only for the pre-scope lookups below --
+  // never for anything that ends up in a response, so a lookup made on an
+  // unscoped connection is never mistaken for scoped data.
+  const rawSvc = agentService(rawDb);
+  const rawHeartbeat = heartbeatService(rawDb, { pluginWorkerManager: options.pluginWorkerManager });
+  const rawWorkspaceOperations = workspaceOperationService(rawDb);
+  const rawIssuesSvc = issueService(rawDb);
+
+  /** loadAgentAndScope (DUR-351): resolve `req.params[paramName]` to an agent, assert access, then scope. */
+  function scopeFromAgentParam(paramName: string = "id") {
+    return companyScope(rawDb, async (req) => {
+      const id = req.params[paramName] as string;
+      const agent = await rawSvc.getById(id);
+      if (!agent) throw notFound("Agent not found");
+      assertCompanyAccess(req, agent.companyId);
+      return agent.companyId;
+    });
+  }
+
+  // `/agents/me*` routes resolve companyId from the authenticated agent's
+  // own identity -- zero-query, no lookup needed before scope (DUR-277
+  // design doc §1).
+  function scopeFromActorCompany() {
+    return companyScope(rawDb, (req) => {
+      if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
+        throw forbidden("Agent authentication required");
+      }
+      return req.actor.companyId;
+    });
+  }
+
+  /** loadRunAndScope (DUR-351): resolve `req.params.runId` to a heartbeat run, assert access, then scope. */
+  function scopeFromRunParam(lookup: (runId: string) => Promise<{ companyId: string } | null | undefined> = rawHeartbeat.getRun) {
+    return companyScope(rawDb, async (req) => {
+      const runId = req.params.runId as string;
+      const run = await lookup(runId);
+      if (!run) throw notFound("Heartbeat run not found");
+      assertCompanyAccess(req, run.companyId);
+      return run.companyId;
+    });
+  }
+
+  function scopeFromWorkspaceOperationParam() {
+    return companyScope(rawDb, async (req) => {
+      const operationId = req.params.operationId as string;
+      const operation = await rawWorkspaceOperations.getById(operationId);
+      if (!operation) throw notFound("Workspace operation not found");
+      assertCompanyAccess(req, operation.companyId);
+      return operation.companyId;
+    });
+  }
+
+  function scopeFromIssueParam(paramName: string = "issueId") {
+    return companyScope(rawDb, async (req) => {
+      const rawId = req.params[paramName] as string;
+      const identifier = normalizeIssueIdentifier(rawId);
+      const issue = identifier ? await rawIssuesSvc.getByIdentifier(identifier) : await rawIssuesSvc.getById(rawId);
+      if (!issue) throw notFound("Issue not found");
+      assertCompanyAccess(req, issue.companyId);
+      return issue.companyId;
+    });
+  }
 
   async function assertAgentEnvironmentSelection(
     companyId: string,
@@ -1110,10 +1152,7 @@ export function agentRoutes(
       throw unprocessable("Agent shortname lookup requires companyId query parameter");
     }
 
-    // This runs from router.param("id", ...) -- before any route-level
-    // middleware, including the company-scope wiring below -- so no
-    // AsyncLocalStorage scope is active yet. Must use the raw instance.
-    const resolved = await rawSvc.resolveByReference(companyId, raw);
+    const resolved = await svc.resolveByReference(companyId, raw);
     if (resolved.ambiguous) {
       throw conflict("Agent shortname is ambiguous in this company. Use the agent ID.");
     }
@@ -1933,84 +1972,6 @@ export function agentRoutes(
     }
   });
 
-  // DUR-378 (DUR-277 Wave 5a): shared parameterized lookup + company-scope
-  // helpers, following the resolveRootIssue/scopeFromRootIssue pattern from
-  // routes/issue-tree-control.ts (DUR-348/Wave 2). `lookup` always runs
-  // against a raw (unwrapped) service -- never the scoped `db`/`svc` above --
-  // since no AsyncLocalStorage scope exists yet when the resolver itself
-  // runs, before runInCompanyScope ever reserves a connection. Each route's
-  // own handler re-resolves the same entity afterward through the scoped
-  // service, exactly as issue-tree-control.ts's routes re-call
-  // resolveRootIssue(issuesSvc, req) after scopeFromRootIssue() establishes
-  // scope.
-  function scopeFromLookup<T extends { companyId: string }>(
-    lookup: (req: Request) => Promise<T | null | undefined>,
-    notFoundMessage: string,
-  ) {
-    return companyScope(rawDb, async (req) => {
-      const entity = await lookup(req);
-      if (!entity) throw notFound(notFoundMessage);
-      assertCompanyAccess(req, entity.companyId);
-      return entity.companyId;
-    });
-  }
-
-  // Covers the dominant ~25+ site pattern this file's routes use: an
-  // `/agents/:id/*`-shaped route whose companyId is only known after looking
-  // the agent up. `paramName` covers the one route keyed on a different
-  // param name (heartbeat-runs' agentId query aside, every such route here
-  // uses "id").
-  function loadAgentAndScope(paramName: string = "id") {
-    return scopeFromLookup(
-      (req) => rawSvc.getById(req.params[paramName] as string),
-      "Agent not found",
-    );
-  }
-
-  // Covers the `/heartbeat-runs/:runId/*` route group. heartbeatService is
-  // never scoped in this file (see the comment on `heartbeat` above), so
-  // reusing it here for the pre-scope lookup is safe regardless of when it
-  // runs.
-  function loadRunAndScope(paramName: string = "runId") {
-    return scopeFromLookup(
-      (req) => heartbeat.getRun(req.params[paramName] as string),
-      "Heartbeat run not found",
-    );
-  }
-
-  // Covers `/workspace-operations/:operationId/log`, the one route in this
-  // file keyed on a workspace operation rather than an agent/run/issue.
-  function loadWorkspaceOperationAndScope(paramName: string = "operationId") {
-    return scopeFromLookup(
-      (req) => rawWorkspaceOperations.getById(req.params[paramName] as string),
-      "Workspace operation not found",
-    );
-  }
-
-  // Covers the two `/issues/:issueId/*` routes (live-runs, active-run),
-  // which accept either a UUID or an issue identifier (e.g. "ENV-13").
-  function loadIssueAndScope(paramName: string = "issueId") {
-    return scopeFromLookup(async (req) => {
-      const rawId = req.params[paramName] as string;
-      const identifier = normalizeIssueIdentifier(rawId);
-      return identifier ? rawIssuesSvc.getByIdentifier(identifier) : rawIssuesSvc.getById(rawId);
-    }, "Issue not found");
-  }
-
-  // `/agents/me*` routes resolve companyId directly from the authenticated
-  // agent's own identity (DUR-277 design doc §1) -- zero-query, no lookup
-  // needed, since the auth layer already populated req.actor.companyId from
-  // the agent's own row. The thrown `unauthorized` matches each of these
-  // routes' pre-existing inline 401 check exactly (see errors.ts).
-  function scopeFromActorAgentCompany() {
-    return companyScope(rawDb, (req) => {
-      if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
-        throw unauthorized("Agent authentication required");
-      }
-      return req.actor.companyId;
-    });
-  }
-
   router.get("/companies/:companyId/adapters/:type/models", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
     const type = assertKnownAdapterType(req.params.type as string);
@@ -2051,11 +2012,12 @@ export function agentRoutes(
 
   router.post(
     "/companies/:companyId/adapters/:type/test-environment",
-    companyScopeFromParam(rawDb, async (req, companyId) => { await assertCanCreateAgentsForCompany(req, companyId); }),
+    companyScopeFromParam(rawDb),
     validate(testAdapterEnvironmentSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       const type = assertKnownAdapterType(req.params.type as string);
+      await assertCanCreateAgentsForCompany(req, companyId);
 
       const adapter = requireServerAdapter(type);
 
@@ -2125,7 +2087,7 @@ export function agentRoutes(
     },
   );
 
-  router.get("/agents/:id/skills", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/skills", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
@@ -2167,7 +2129,7 @@ export function agentRoutes(
 
   router.post(
     "/agents/:id/skills/sync",
-    loadAgentAndScope(),
+    scopeFromAgentParam(),
     validate(agentSkillSyncSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -2316,13 +2278,13 @@ export function agentRoutes(
     res.json(result.map((agent) => redactForRestrictedAgentView(agent)));
   });
 
-  // DUR-277 design doc §1 category (c): genuinely cross-company (every
-  // company's agents, gated on assertInstanceAdmin instead of a single
-  // resolved companyId) -- uses `rawDb` directly rather than the
-  // request-scoped `db`, since no single-company scope applies here.
   router.get("/instance/scheduler-heartbeats", async (req, res) => {
     assertInstanceAdmin(req);
 
+    // DUR-351 (DUR-277 §1 category c): genuinely cross-company -- an
+    // instance-admin-only view across every company's agents -- so this
+    // stays on the raw, unscoped db rather than establishing a per-company
+    // scope. No AsyncLocalStorage context is ever needed here.
     const rows = await rawDb
       .select({
         id: agentsTable.id,
@@ -2412,13 +2374,14 @@ export function agentRoutes(
     res.send(png);
   });
 
-  router.get("/companies/:companyId/agent-configurations", companyScopeFromParam(rawDb, async (req, companyId) => { await assertCanReadConfigurations(req, companyId); }), async (req, res) => {
+  router.get("/companies/:companyId/agent-configurations", companyScopeFromParam(rawDb), async (req, res) => {
     const companyId = req.params.companyId as string;
+    await assertCanReadConfigurations(req, companyId);
     const rows = await svc.list(companyId);
     res.json(rows.map((row) => redactAgentConfiguration(row)));
   });
 
-  router.get("/agents/me", scopeFromActorAgentCompany(), async (req, res) => {
+  router.get("/agents/me", scopeFromActorCompany(), async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId) {
       res.status(401).json({ error: "Agent authentication required" });
       return;
@@ -2452,7 +2415,7 @@ export function agentRoutes(
     res.json(await buildAgentDetail(agent));
   });
 
-  router.get("/agents/me/inbox-lite", scopeFromActorAgentCompany(), async (req, res) => {
+  router.get("/agents/me/inbox-lite", scopeFromActorCompany(), async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
       res.status(401).json({ error: "Agent authentication required" });
       return;
@@ -2498,7 +2461,7 @@ export function agentRoutes(
     );
   });
 
-  router.get("/agents/me/inbox/mine", scopeFromActorAgentCompany(), async (req, res) => {
+  router.get("/agents/me/inbox/mine", scopeFromActorCompany(), async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
       res.status(401).json({ error: "Agent authentication required" });
       return;
@@ -2516,14 +2479,13 @@ export function agentRoutes(
     res.json(rows);
   });
 
-  router.get("/agents/:id", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, agent.companyId);
     if (!(await assertAgentReadAllowed(req, res, agent))) return;
     const isSelf = req.actor.type === "agent" && req.actor.agentId === id;
     if (isSelf) {
@@ -2555,7 +2517,7 @@ export function agentRoutes(
     res.json(await buildAgentDetail(agent));
   });
 
-  router.get("/agents/:id/configuration", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/configuration", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
@@ -2566,7 +2528,7 @@ export function agentRoutes(
     res.json(redactAgentConfiguration(agent));
   });
 
-  router.get("/agents/:id/config-revisions", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/config-revisions", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
@@ -2578,7 +2540,7 @@ export function agentRoutes(
     res.json(revisions.map((revision) => redactConfigRevision(revision)));
   });
 
-  router.get("/agents/:id/config-revisions/:revisionId", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/config-revisions/:revisionId", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const revisionId = req.params.revisionId as string;
     const agent = await svc.getById(id);
@@ -2595,7 +2557,7 @@ export function agentRoutes(
     res.json(redactConfigRevision(revision));
   });
 
-  router.post("/agents/:id/config-revisions/:revisionId/rollback", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/config-revisions/:revisionId/rollback", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const revisionId = req.params.revisionId as string;
     const existing = await svc.getById(id);
@@ -2638,7 +2600,7 @@ export function agentRoutes(
     res.json(updated);
   });
 
-  router.get("/agents/:id/runtime-state", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/runtime-state", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -2647,13 +2609,12 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
 
     const state = await heartbeat.getRuntimeState(id);
     res.json(state);
   });
 
-  router.get("/agents/:id/task-sessions", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/task-sessions", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -2662,7 +2623,6 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
 
     const sessions = await heartbeat.listTaskSessions(id);
     res.json(
@@ -2673,7 +2633,7 @@ export function agentRoutes(
     );
   });
 
-  router.post("/agents/:id/runtime-state/reset-session", loadAgentAndScope(), validate(resetAgentSessionSchema), async (req, res) => {
+  router.post("/agents/:id/runtime-state/reset-session", scopeFromAgentParam(), validate(resetAgentSessionSchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -2682,7 +2642,6 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
 
     const taskKey =
       typeof req.body.taskKey === "string" && req.body.taskKey.trim().length > 0
@@ -2703,8 +2662,9 @@ export function agentRoutes(
     res.json(state);
   });
 
-  router.post("/companies/:companyId/agent-hires", companyScopeFromParam(rawDb, async (req, companyId) => { await assertCanCreateAgentsForCompany(req, companyId); }), validate(createAgentHireSchema), async (req, res) => {
+  router.post("/companies/:companyId/agent-hires", companyScopeFromParam(rawDb), validate(createAgentHireSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
+    await assertCanCreateAgentsForCompany(req, companyId);
     const sourceIssueIds = parseSourceIssueIds(req.body);
     const {
       desiredSkills: requestedDesiredSkills,
@@ -2910,8 +2870,9 @@ export function agentRoutes(
     );
   });
 
-  router.post("/companies/:companyId/agents", companyScopeFromParam(rawDb, async (req, companyId) => { await assertCanCreateAgentsForCompany(req, companyId); }), validate(createAgentSchema), async (req, res) => {
+  router.post("/companies/:companyId/agents", companyScopeFromParam(rawDb), validate(createAgentSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
+    await assertCanCreateAgentsForCompany(req, companyId);
 
     const company = await db
       .select()
@@ -3035,14 +2996,13 @@ export function agentRoutes(
     res.status(201).json(mcpCredentialAdvisories.length > 0 ? { ...agent, mcpCredentialAdvisories } : agent);
   });
 
-  router.patch("/agents/:id/permissions", loadAgentAndScope(), validate(updateAgentPermissionsSchema), async (req, res) => {
+  router.patch("/agents/:id/permissions", scopeFromAgentParam(), validate(updateAgentPermissionsSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
 
     if (req.actor.type === "agent") {
       const actorAgent = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
@@ -3124,7 +3084,7 @@ export function agentRoutes(
     );
   });
 
-  router.patch("/agents/:id/instructions-path", loadAgentAndScope(), validate(updateAgentInstructionsPathSchema), async (req, res) => {
+  router.patch("/agents/:id/instructions-path", scopeFromAgentParam(), validate(updateAgentInstructionsPathSchema), async (req, res) => {
     if (req.actor.type !== "board") {
       throw forbidden("Only board-authenticated callers can manage instructions path or bundle configuration");
     }
@@ -3206,7 +3166,7 @@ export function agentRoutes(
     });
   });
 
-  router.get("/agents/:id/instructions-bundle", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/instructions-bundle", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3217,7 +3177,7 @@ export function agentRoutes(
     res.json(await instructions.getBundle(existing));
   });
 
-  router.patch("/agents/:id/instructions-bundle", loadAgentAndScope(), validate(updateAgentInstructionsBundleSchema), async (req, res) => {
+  router.patch("/agents/:id/instructions-bundle", scopeFromAgentParam(), validate(updateAgentInstructionsBundleSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3265,7 +3225,7 @@ export function agentRoutes(
     res.json(bundle);
   });
 
-  router.get("/agents/:id/instructions-bundle/file", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/instructions-bundle/file", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3283,7 +3243,7 @@ export function agentRoutes(
     res.json(await instructions.readFile(existing, relativePath));
   });
 
-  router.put("/agents/:id/instructions-bundle/file", loadAgentAndScope(), validate(upsertAgentInstructionsFileSchema), async (req, res) => {
+  router.put("/agents/:id/instructions-bundle/file", scopeFromAgentParam(), validate(upsertAgentInstructionsFileSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3338,7 +3298,7 @@ export function agentRoutes(
     res.json(result.file);
   });
 
-  router.delete("/agents/:id/instructions-bundle/file", loadAgentAndScope(), async (req, res) => {
+  router.delete("/agents/:id/instructions-bundle/file", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3372,7 +3332,7 @@ export function agentRoutes(
     res.json(result.bundle);
   });
 
-  router.patch("/agents/:id", loadAgentAndScope(), validate(updateAgentSchema), async (req, res) => {
+  router.patch("/agents/:id", scopeFromAgentParam(), validate(updateAgentSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3561,7 +3521,7 @@ export function agentRoutes(
     res.json(mcpCredentialAdvisories.length > 0 ? { ...responseAgent, mcpCredentialAdvisories } : responseAgent);
   });
 
-  router.post("/agents/:id/pause", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/pause", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
@@ -3587,7 +3547,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/resume", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/resume", scopeFromAgentParam(), async (req, res) => {
     assertBoardOrDelegate(req, "agent.resume");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3619,7 +3579,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/clear-error", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/clear-error", scopeFromAgentParam(), async (req, res) => {
     assertBoardOrDelegate(req, "agent.clear_error");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3652,7 +3612,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/approve", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/approve", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3706,7 +3666,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/terminate", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/terminate", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3776,7 +3736,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.delete("/agents/:id", loadAgentAndScope(), async (req, res) => {
+  router.delete("/agents/:id", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
@@ -3808,7 +3768,7 @@ export function agentRoutes(
     res.json({ ok: true });
   });
 
-  router.get("/agents/:id/keys", loadAgentAndScope(), async (req, res) => {
+  router.get("/agents/:id/keys", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await getAccessibleAgent(req, res, id);
@@ -3819,7 +3779,7 @@ export function agentRoutes(
     res.json(keys);
   });
 
-  router.post("/agents/:id/keys", loadAgentAndScope(), validate(createAgentKeySchema), async (req, res) => {
+  router.post("/agents/:id/keys", scopeFromAgentParam(), validate(createAgentKeySchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await getAccessibleAgent(req, res, id);
@@ -3841,7 +3801,7 @@ export function agentRoutes(
     res.status(201).json(key);
   });
 
-  router.delete("/agents/:id/keys/:keyId", loadAgentAndScope(), async (req, res) => {
+  router.delete("/agents/:id/keys/:keyId", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const keyId = req.params.keyId as string;
@@ -3900,7 +3860,6 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, agent.companyId);
 
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== id) {
@@ -3953,14 +3912,14 @@ export function agentRoutes(
     res.status(202).json(run);
   };
 
-  router.post("/agents/:id/wakeup", loadAgentAndScope(), validate(wakeAgentSchema), async (req, res) => {
+  router.post("/agents/:id/wakeup", scopeFromAgentParam(), validate(wakeAgentSchema), async (req, res) => {
     await handleWakeupRoute(req, res, {
       source: req.body.source,
       skippedResponse: (agent) => buildSkippedWakeupResponse(agent, req.body.payload ?? null),
     });
   });
 
-  router.post("/agents/:id/heartbeat/invoke", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/heartbeat/invoke", scopeFromAgentParam(), async (req, res) => {
     // Legacy endpoint. Hardcodes `source: "on_demand"` (the prior behavior
     // before the wakeup/invoke convergence). Reads scope fields directly off
     // the body without `validate(wakeAgentSchema)` because callers — including
@@ -3974,7 +3933,6 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, agent.companyId);
 
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== id) {
@@ -4044,7 +4002,7 @@ export function agentRoutes(
     res.status(202).json(run);
   });
 
-  router.post("/agents/:id/claude-login", loadAgentAndScope(), async (req, res) => {
+  router.post("/agents/:id/claude-login", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -4053,7 +4011,6 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
     if (agent.adapterType !== "claude_local") {
       res.status(400).json({ error: "Login is only supported for claude_local agents" });
       return;
@@ -4174,14 +4131,13 @@ export function agentRoutes(
     }))));
   });
 
-  router.get("/heartbeat-runs/:runId", loadRunAndScope(), async (req, res) => {
+  router.get("/heartbeat-runs/:runId", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Heartbeat run not found" });
       return;
     }
-    assertCompanyAccess(req, run.companyId);
     const retryExhaustedReason = await heartbeat.getRetryExhaustedReason(runId);
     const decoratedRun = heartbeat.decorateActiveRunStatus(run);
     res.json(
@@ -4192,7 +4148,7 @@ export function agentRoutes(
     );
   });
 
-  router.post("/heartbeat-runs/:runId/cancel", loadRunAndScope(), async (req, res) => {
+  router.post("/heartbeat-runs/:runId/cancel", scopeFromRunParam(), async (req, res) => {
     assertBoard(req);
     const runId = req.params.runId as string;
     const run = await heartbeat.cancelRun(runId);
@@ -4212,7 +4168,7 @@ export function agentRoutes(
     res.json(run);
   });
 
-  router.post("/heartbeat-runs/:runId/watchdog-decisions", loadRunAndScope(), async (req, res) => {
+  router.post("/heartbeat-runs/:runId/watchdog-decisions", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const existing = await heartbeat.getRun(runId);
     if (!existing) {
@@ -4247,7 +4203,7 @@ export function agentRoutes(
     res.json(row);
   });
 
-  router.get("/heartbeat-runs/:runId/events", loadRunAndScope(), async (req, res) => {
+  router.get("/heartbeat-runs/:runId/events", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
     if (!run) {
@@ -4268,7 +4224,7 @@ export function agentRoutes(
     res.json(redactedEvents);
   });
 
-  router.get("/heartbeat-runs/:runId/log", loadRunAndScope(), async (req, res) => {
+  router.get("/heartbeat-runs/:runId/log", scopeFromRunParam((runId) => rawHeartbeat.getRunLogAccess(runId)), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRunLogAccess(runId);
     if (!run) {
@@ -4287,7 +4243,7 @@ export function agentRoutes(
     res.json(result);
   });
 
-  router.get("/heartbeat-runs/:runId/workspace-operations", loadRunAndScope(), async (req, res) => {
+  router.get("/heartbeat-runs/:runId/workspace-operations", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
     if (!run) {
@@ -4301,7 +4257,7 @@ export function agentRoutes(
     res.json(redactCurrentUserValue(operations, await getCurrentUserRedactionOptions()));
   });
 
-  router.get("/workspace-operations/:operationId/log", loadWorkspaceOperationAndScope(), async (req, res) => {
+  router.get("/workspace-operations/:operationId/log", scopeFromWorkspaceOperationParam(), async (req, res) => {
     const operationId = req.params.operationId as string;
     const operation = await workspaceOperations.getById(operationId);
     if (!operation) {
@@ -4320,7 +4276,7 @@ export function agentRoutes(
     res.json(result);
   });
 
-  router.get("/issues/:issueId/live-runs", loadIssueAndScope(), async (req, res) => {
+  router.get("/issues/:issueId/live-runs", scopeFromIssueParam(), async (req, res) => {
     const rawId = req.params.issueId as string;
     const issueSvc = issueService(db);
     const identifier = normalizeIssueIdentifier(rawId);
@@ -4373,7 +4329,7 @@ export function agentRoutes(
     }))));
   });
 
-  router.get("/issues/:issueId/active-run", loadIssueAndScope(), async (req, res) => {
+  router.get("/issues/:issueId/active-run", scopeFromIssueParam(), async (req, res) => {
     const rawId = req.params.issueId as string;
     const issueSvc = issueService(db);
     const identifier = normalizeIssueIdentifier(rawId);

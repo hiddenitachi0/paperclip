@@ -586,6 +586,50 @@ describe.sequential("workspace runtime service route authorization", () => {
     expect(mockExecutionWorkspaceService.update).not.toHaveBeenCalled();
   });
 
+  it("rejects an update setting an execution workspace repoUrl with an embedded credential (DUR-329)", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue(buildExecutionWorkspace({ id: executionWorkspaceId }));
+    const app = await createExecutionWorkspaceApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .patch(`/api/execution-workspaces/${executionWorkspaceId}`)
+      .send({
+        repoUrl: "https://user:hunter2@github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.details)).toContain("credential helper");
+    expect(mockExecutionWorkspaceService.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts an update setting an execution workspace repoUrl with no embedded credential (DUR-329)", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue(buildExecutionWorkspace({ id: executionWorkspaceId }));
+    const app = await createExecutionWorkspaceApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .patch(`/api/execution-workspaces/${executionWorkspaceId}`)
+      .send({
+        repoUrl: "https://github.com/acme/repo.git",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockExecutionWorkspaceService.update).toHaveBeenCalledWith(
+      executionWorkspaceId,
+      expect.objectContaining({ repoUrl: "https://github.com/acme/repo.git" }),
+    );
+  });
+
   it("allows board callers through the execution workspace runtime auth gate", async () => {
     mockExecutionWorkspaceService.getById.mockResolvedValue(null);
     const app = await createExecutionWorkspaceApp({

@@ -47,10 +47,10 @@ export async function resolveProjectDeployBranches(
 }
 
 /**
- * DUR-227: same lookup as `resolveProjectDeployBranches`, but keyed directly
- * off a project id instead of walking issue links -- the deploy-approval
- * filing path (routes/approvals.ts) only ever has `payload.projectId`, not
- * an issue to resolve through.
+ * DUR-227/DUR-238: same lookup as `resolveProjectDeployBranches`, but keyed directly
+ * off a project id instead of walking issue links -- both the deploy-approval filing
+ * path (routes/approvals.ts) and the carried-issue closer only ever have a deploy
+ * approval's `payload.projectId`, not an issue to resolve through.
  */
 export async function resolveProjectDeployBranchesByProjectId(
   db: Db,

@@ -16,16 +16,19 @@ const mockCompanySkillService = vi.hoisted(() => ({
   importFromSource: vi.fn(),
 }));
 
+const companyPortabilityServiceFactory = vi.hoisted(() => vi.fn());
+const companySkillServiceFactory = vi.hoisted(() => vi.fn());
+
 vi.mock("../services/agents.js", () => ({
   agentService: () => mockAgentService,
 }));
 
 vi.mock("../services/company-portability.js", () => ({
-  companyPortabilityService: () => mockCompanyPortabilityService,
+  companyPortabilityService: companyPortabilityServiceFactory,
 }));
 
 vi.mock("../services/company-skills.js", () => ({
-  companySkillService: () => mockCompanySkillService,
+  companySkillService: companySkillServiceFactory,
 }));
 
 vi.mock("../services/activity-log.js", () => ({
@@ -61,6 +64,8 @@ function agentWithCatalogTeam(originHash: string | null, extra: Record<string, u
 describe("teamsCatalogService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    companyPortabilityServiceFactory.mockReturnValue(mockCompanyPortabilityService);
+    companySkillServiceFactory.mockReturnValue(mockCompanySkillService);
     mockAgentService.getById.mockResolvedValue({
       id: "manager-1",
       companyId: "company-1",
@@ -96,6 +101,22 @@ describe("teamsCatalogService", () => {
       imported: [],
       warnings: [],
     });
+  });
+
+  // DUR-3911 (DUR-277 sweep): prepareSkillInstalls() calls companySkills'
+  // installFromCatalog/importFromSource, which write through createVersion's
+  // withCompanyScope(rawDb, ...). routes/teams-catalog.ts constructs this
+  // service from the request-scoped `db` proxy, so companySkillService must
+  // receive the distinct raw `rawDb` too, not just companyPortabilityService,
+  // or a catalog-team install with a skill install/import 500s.
+  it("threads rawDb through to companyPortabilityService and companySkillService", () => {
+    const db = { marker: "scoped" } as any;
+    const rawDb = { marker: "raw" } as any;
+
+    teamsCatalogService(db, rawDb);
+
+    expect(companyPortabilityServiceFactory).toHaveBeenCalledWith(db, undefined, rawDb);
+    expect(companySkillServiceFactory).toHaveBeenCalledWith(db, rawDb);
   });
 
   it("builds an inline portability source with catalog skill keys and target-manager reparenting", async () => {

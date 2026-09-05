@@ -1,6 +1,6 @@
 import type { Request, RequestHandler } from "express";
-import type { Db } from "@paperclipai/db";
-import { runInCompanyScope } from "@paperclipai/db";
+import type { Db, CompanyScopeBypassOptions } from "@paperclipai/db";
+import { ConnectionReleaseUnsafeError, runInCompanyScope, runInCompanyScopeBypass } from "@paperclipai/db";
 import { badRequest } from "../errors.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -52,9 +52,22 @@ export function companyScope(rawDb: Db, resolveCompanyId: CompanyIdResolver): Re
         }
 
         return runInCompanyScope(rawDb, companyId, () =>
-          new Promise<void>((resolve) => {
-            res.once("finish", resolve);
-            res.once("close", resolve);
+          new Promise<void>((resolve, reject) => {
+            let finished = false;
+            res.once("finish", () => {
+              finished = true;
+              resolve();
+            });
+            // `close` also fires when the underlying connection was
+            // terminated prematurely (client abort, e.g. an SPA cancelling
+            // an in-flight fetch on navigation) -- see the
+            // ConnectionReleaseUnsafeError doc comment in
+            // packages/db/src/company-scope.ts for why that case must not
+            // resolve normally.
+            res.once("close", () => {
+              if (finished) return;
+              reject(new ConnectionReleaseUnsafeError());
+            });
             next();
           }),
         );
@@ -109,4 +122,63 @@ export function companyScopeFromBody(rawDb: Db, checkAccess?: CompanyAccessCheck
     if (checkAccess) await checkAccess(req, value);
     return value;
   });
+}
+
+export type CompanyScopeBypassOptionsResolver = (
+  req: Request,
+) => CompanyScopeBypassOptions | Promise<CompanyScopeBypassOptions>;
+
+/**
+ * Bypass counterpart to `companyScope` (DUR-277 §1 category (c)): for routes
+ * that are genuinely instance-wide or span multiple companies in a single
+ * request (board identity/API-key/delegate-token management, instance-admin
+ * user search, CLI device-auth challenges resolved before any company is
+ * known) -- see `runInCompanyScopeBypass` for why this is a Postgres
+ * role-membership check plus a `cross_company_access_log` row, not a
+ * silent no-op.
+ *
+ * Every route mounted on a router whose services were constructed with
+ * `createRequestScopedDb(rawDb)` MUST establish some scope (real or
+ * bypass) before touching `db` -- the Proxy throws on a missing
+ * AsyncLocalStorage context by design (DUR-275 mod #1). This is the bypass
+ * half of that "every route opts into a scope" contract for route files
+ * with genuinely mixed (a)/(b)/(c) categories.
+ */
+export function companyScopeBypass(rawDb: Db, resolveOpts: CompanyScopeBypassOptionsResolver): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve()
+      .then(() => resolveOpts(req))
+      .then((opts) =>
+        runInCompanyScopeBypass(rawDb, opts, () =>
+          new Promise<void>((resolve) => {
+            res.once("finish", resolve);
+            res.once("close", resolve);
+            next();
+          }),
+        ),
+      )
+      .catch((err) => {
+        if (!res.headersSent) next(err);
+        else console.error("company-scope middleware: error after response started", err);
+      });
+  };
+}
+
+/** `actorType`/`actorId` for a bypass log entry, tolerant of an unauthenticated ("none") actor -- unlike `getActorInfo`, never throws. */
+function lenientActorInfo(req: Request): { actorType: string | null; actorId: string | null } {
+  if (req.actor.type === "agent") return { actorType: "agent", actorId: req.actor.agentId ?? null };
+  if (req.actor.type === "board") return { actorType: "user", actorId: req.actor.userId ?? null };
+  return { actorType: req.actor.type, actorId: null };
+}
+
+/**
+ * Convenience wrapper around `companyScopeBypass` for the common case: a
+ * fixed reason string, actor/route info filled in from the request.
+ */
+export function companyScopeBypassForRoute(rawDb: Db, reason: string): RequestHandler {
+  return companyScopeBypass(rawDb, (req) => ({
+    reason,
+    ...lenientActorInfo(req),
+    route: req.path,
+  }));
 }

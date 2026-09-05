@@ -6,6 +6,7 @@ import {
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
   shouldDisableSecureAuthCookies,
+  withAdapterCallTimeout,
 } from "../auth/better-auth.js";
 
 const ORIGINAL_INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID;
@@ -182,5 +183,43 @@ describe("Better Auth cookie scoping", () => {
     ]));
     expect(trustedOrigins).not.toContain("https://board.example.test:3100");
     expect(trustedOrigins).not.toContain("http://board.example.test:3100");
+  });
+});
+
+describe("withAdapterCallTimeout (DUR-2408)", () => {
+  it("rejects a hung adapter call instead of leaving the await unbounded", async () => {
+    const hungAdapter = {
+      findOne: () => new Promise(() => {}),
+    };
+    const guarded = withAdapterCallTimeout(hungAdapter, 20);
+
+    await expect((guarded as typeof hungAdapter).findOne()).rejects.toThrow(/timed out/);
+  });
+
+  it("passes through the resolved value of a fast adapter call unaffected", async () => {
+    const fastAdapter = {
+      create: async (input: { id: string }) => ({ ...input, ok: true }),
+    };
+    const guarded = withAdapterCallTimeout(fastAdapter, 1000);
+
+    await expect((guarded as typeof fastAdapter).create({ id: "1" })).resolves.toEqual({ id: "1", ok: true });
+  });
+
+  it("propagates a rejection from the underlying call without waiting for the timeout", async () => {
+    const failingAdapter = {
+      update: async () => {
+        throw new Error("db connection reset");
+      },
+    };
+    const guarded = withAdapterCallTimeout(failingAdapter, 1000);
+
+    await expect((guarded as typeof failingAdapter).update()).rejects.toThrow("db connection reset");
+  });
+
+  it("leaves non-function properties untouched", () => {
+    const adapter = { options: { adapterId: "drizzle" } };
+    const guarded = withAdapterCallTimeout(adapter, 1000);
+
+    expect(guarded.options).toBe(adapter.options);
   });
 });

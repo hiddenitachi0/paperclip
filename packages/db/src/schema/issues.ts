@@ -68,6 +68,10 @@ export const issues = pgTable(
     // change, kept out of the approval queue. Set on the issue at close time.
     changeLogVisible: boolean("change_log_visible").notNull().default(false),
     changeLogSummary: text("change_log_summary"),
+    // DUR-313: marks this issue as a user-facing feature launch (DUR-299 point 2).
+    // Once true, evaluateFeatureLaunchDoneGate (server/src/services/feature-launch-gate.ts)
+    // requires an approved feature_launch approval before the issue can move to done.
+    featureLaunch: boolean("feature_launch").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),

@@ -11,6 +11,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/error-handler.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const agentId   = "11111111-1111-4111-8111-111111111111";
@@ -110,7 +111,7 @@ async function buildTestApp(actorType: "board" | "agent") {
 
   // Stub assertCompanyAccess — it reads req.actor which we set above
   // We patch the authz module in the route via vi.mock below
-  app.use("/api", agentRoleRoutes({} as any));
+  app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
   return app;
 }
 
@@ -155,7 +156,7 @@ describe("agent roles — security", () => {
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role`)
@@ -182,7 +183,7 @@ describe("agent roles — security", () => {
       next();
     });
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes(fakeDb));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve(fakeDb)));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role`)
@@ -190,10 +191,11 @@ describe("agent roles — security", () => {
 
     expect(res.status).toBe(200);
     expect(mockAgentRolesService.assignRoleToAgent).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       roleId,
-      expect.objectContaining({ actor: expect.objectContaining({ type: "board" }) })
+      expect.objectContaining({ actor: expect.objectContaining({ type: "board" }) }),
+      expect.anything()
     );
   });
 
@@ -210,7 +212,7 @@ describe("agent roles — security", () => {
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role/tools`)
@@ -242,7 +244,7 @@ describe("agent roles — security", () => {
       next();
     });
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes(fakeDb));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve(fakeDb)));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role/tools`)
@@ -250,7 +252,7 @@ describe("agent roles — security", () => {
 
     expect(res.status).toBe(200);
     expect(mockAgentRolesService.addAgentToolOverride).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       { name: "github-mcp", command: "github-mcp" },
       expect.objectContaining({ type: "board" })
@@ -267,7 +269,7 @@ describe("agent roles — security", () => {
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role/rights`)
@@ -287,7 +289,7 @@ describe("agent roles — security", () => {
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
 
     const res = await request(app).delete(`/api/agents/${agentId}/role/tools/github-mcp`);
 
@@ -305,7 +307,7 @@ describe("agent roles — security", () => {
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
 
     const res = await request(app).delete(`/api/agents/${agentId}/role/rights/tasks%3Aassign`);
 
@@ -325,7 +327,7 @@ describe("agent roles — security", () => {
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({}) as any));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role/skills`)
@@ -351,33 +353,40 @@ describe("agent roles — security", () => {
       next();
     });
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes(fakeDb));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve(fakeDb)));
 
     const addRes = await request(app)
       .post(`/api/agents/${agentId}/role/connectors`)
       .send({ key: "zendesk" });
     expect(addRes.status).toBe(200);
     expect(mockAgentRolesService.addAgentCatalogOverride).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       "connectors",
       "zendesk",
       expect.objectContaining({ type: "board" }),
+      expect.anything(),
     );
 
     const removeRes = await request(app).delete(`/api/agents/${agentId}/role/connectors/zendesk`);
     expect(removeRes.status).toBe(200);
     expect(mockAgentRolesService.removeAgentCatalogOverride).toHaveBeenCalledWith(
-      fakeDb,
+      expect.anything(),
       agentId,
       "connectors",
       "zendesk",
       expect.objectContaining({ type: "board" }),
+      expect.anything(),
     );
   });
 
   it("404s an unknown override category instead of silently no-op'ing", async () => {
     mockAuthz.assertBoard.mockReturnValue(undefined);
+    const mockSelect = vi.fn().mockReturnValue({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockResolvedValue([{ companyId }]),
+      }),
+    });
 
     const app = express();
     app.use(express.json());
@@ -386,7 +395,7 @@ describe("agent roles — security", () => {
       next();
     });
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes({} as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({ select: mockSelect }) as any));
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/role/not-a-real-category`)
@@ -418,7 +427,7 @@ describe("agent roles — role body validation rejects deploy-approval grants", 
     const mockSelect2 = vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }),
     });
-    app.use("/api", agentRoleRoutes({ select: mockSelect2 } as any));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve({ select: mockSelect2 }) as any));
     app.use(errorHandler);
 
     const res = await request(app)
@@ -466,13 +475,13 @@ describe("GET /agents/:agentId/role — routes to the shared role-state service 
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes(fakeDb));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve(fakeDb)));
 
     const res = await request(app).get(`/api/agents/${agentId}/role`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(state);
-    expect(mockAgentRolesService.getAgentRoleState).toHaveBeenCalledWith(fakeDb, agentId);
+    expect(mockAgentRolesService.getAgentRoleState).toHaveBeenCalledWith(expect.anything(), agentId);
   });
 
   it("404s when the agent does not exist, without calling the service", async () => {
@@ -484,7 +493,7 @@ describe("GET /agents/:agentId/role — routes to the shared role-state service 
     const app = express();
     app.use(express.json());
     const { agentRoleRoutes } = await import("../routes/agent-roles.js");
-    app.use("/api", agentRoleRoutes(fakeDb));
+    app.use("/api", agentRoleRoutes(withFakeCompanyScopeReserve(fakeDb)));
 
     const res = await request(app).get(`/api/agents/${agentId}/role`);
 

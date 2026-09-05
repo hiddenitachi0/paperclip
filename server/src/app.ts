@@ -18,6 +18,7 @@ import { agentRoutes } from "./routes/agents.js";
 import { agentRoleRoutes } from "./routes/agent-roles.js";
 import { personaRoutes } from "./routes/personas.js";
 import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
+import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
@@ -36,6 +37,7 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { deployRunnerRoutes } from "./routes/deploy-runner.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
+import { goalAdoptionRoutes } from "./routes/goal-adoption.js";
 import { activityRoutes } from "./routes/activity.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { userProfileRoutes } from "./routes/user-profiles.js";
@@ -235,6 +237,7 @@ export async function createApp(
   api.use(agentRoleRoutes(db));
   api.use(personaRoutes(db));
   api.use(mcpToolLibraryRoutes(db));
+  api.use(mcpOAuthRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
   api.use(issueRoutes(db, opts.storageService, {
@@ -257,6 +260,7 @@ export async function createApp(
   api.use(deployRunnerRoutes(db));
   api.use(secretRoutes(db));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(goalAdoptionRoutes(db));
   api.use(activityRoutes(db));
   api.use(dashboardRoutes(db));
   api.use(userProfileRoutes(db));

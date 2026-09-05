@@ -224,6 +224,13 @@ describe("redactKnownLeakedSecretPatterns", () => {
     expect(redactKnownLeakedSecretPatterns(input)).toBe(input);
   });
 
+  // DUR-1430 (DUR-954 false positive): the unanchored openai_key regex used
+  // to match "sk-notification" mid-word inside "task-notification".
+  it("does not treat the mid-word 'sk-' in 'task-notification' as a leaked openai_key", () => {
+    const input = '{"origin":{"kind":"task-notification"}}';
+    expect(redactKnownLeakedSecretPatterns(input)).toBe(input);
+  });
+
   // DUR-322 adversarial review found these GitHub/Slack token variants missing.
   it("masks the remaining GitHub token variants and the Slack user token", () => {
     const input = [
