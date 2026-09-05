@@ -70,8 +70,33 @@ export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
 // as the out-of-band access it actually is. Callers that are not the app
 // server itself should pass a distinct applicationName so they show up
 // under their own identity.
+//
+// DUR-3918: postgres.js defaults `max` to 10 when unset. That was fine
+// before DUR-269/275/277 wired runInCompanyScope/runInCompanyScopeBypass
+// into the live request path -- every companyScope()-wrapped route now
+// reserves one whole physical connection (sql.reserve()) for its entire
+// request duration, not just for the span of a single query, and dozens of
+// route families (see packages/db/src/company-scope.ts) plus background
+// schedulers now do this. reserve() has no built-in wait timeout, so once
+// concurrent in-flight requests exceed the pool size, the next reserve()
+// just hangs indefinitely instead of failing fast -- a plausible root cause
+// for the repo-wide e2e hang this ticket tracks (checkout POST and other
+// company-scoped routes timing out under concurrent load with no server-side
+// error at all). Raising the default headroom and making it configurable is
+// a low-risk mitigation regardless of the exact trigger: it doesn't change
+// any request behavior on the success path, only how many concurrent
+// reserved connections the pool can serve before contention starts.
+const DEFAULT_POOL_MAX = 20;
+
+function resolvePoolMax(): number {
+  const raw = process.env.PAPERCLIP_DB_POOL_MAX?.trim();
+  if (!raw) return DEFAULT_POOL_MAX;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_POOL_MAX;
+}
+
 export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_APP_APPLICATION_NAME) {
-  const sql = postgres(url, { connection: { application_name: applicationName } });
+  const sql = postgres(url, { max: resolvePoolMax(), connection: { application_name: applicationName } });
   return drizzlePg(sql, { schema });
 }
 
