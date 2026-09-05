@@ -174,7 +174,13 @@ export const SECRET_LEAK_PATTERNS: readonly SecretLeakPattern[] = [
   { name: "github_user_token", regex: /ghu_[A-Za-z0-9]{20,}/g },
   { name: "github_app_installation_token", regex: /ghs_[A-Za-z0-9]{20,}/g },
   { name: "github_refresh_token", regex: /ghr_[A-Za-z0-9]{20,}/g },
-  { name: "openai_key", regex: /sk-[A-Za-z0-9_-]{12,}/g },
+  // DUR-1430: DUR-954 found this unanchored regex matching "sk-notification"
+  // inside the unrelated JSON value "task-notification" (the "sk-" fell
+  // mid-word, right after "ta"). \b requires a non-word/word transition
+  // immediately before "sk-", which real keys always have (quote, `=`,
+  // whitespace, or string start) and "task-notification" does not (the
+  // preceding "a" is a word character too).
+  { name: "openai_key", regex: /\bsk-[A-Za-z0-9_-]{12,}\b/g },
   { name: "shopify_shared_secret", regex: /shpss_[A-Za-z0-9]{20,}/g },
   { name: "shopify_access_token", regex: /shpat_[A-Za-z0-9]{20,}/g },
   { name: "slack_bot_token", regex: /xoxb-[A-Za-z0-9-]{10,}/g },
