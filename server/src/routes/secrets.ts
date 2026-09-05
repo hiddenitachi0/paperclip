@@ -25,7 +25,7 @@ export function secretRoutes(rawDb: Db) {
   // routes below need before their companyId (and therefore their scope) is
   // known. See middleware/company-scope.ts.
   const db = createRequestScopedDb(rawDb);
-  const svc = secretService(db);
+  const svc = secretService(db, rawDb);
   const rawSvc = secretService(rawDb);
   const defaultProvider = getConfiguredSecretProvider();
 
