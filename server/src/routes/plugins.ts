@@ -502,6 +502,28 @@ interface PluginToolExecuteRequest {
  * @param toolDeps - Optional tool dispatcher dependencies
  * @param bridgeDeps - Optional bridge proxy dependencies for getData/performAction
  * @returns Express router with plugin routes mounted
+ *
+ * DUR-277/DUR-350 (Wave 4): confirmed as mostly-(c), deliberately staying
+ * bypass-scoped for plugin registry/lifecycle routes -- the plugin registry
+ * itself has no `companyId` column at all (a plugin is installed
+ * instance-wide, not per company), so there is no single companyId those
+ * routes could scope against.
+ *
+ * The exception (still (a)/(b), not (c)): the optional-companyId plugin
+ * bridge/data/action/tools-execute sub-paths, gated through
+ * `assertPluginBridgeScope`/`resolveScopedApiCompanyId` above, do resolve a
+ * companyId per call (from an actor's own company, an explicit body/query
+ * param, or an issue lookup) and check `assertCompanyAccess` against it --
+ * but that companyId is resolved per-plugin-route-declaration at dispatch
+ * time, not from a fixed route param this file's own middleware could scope
+ * ahead of the handler. Wiring those sub-paths through
+ * `runInCompanyScope`/`companyScope` would mean threading the resolver's
+ * result into a scope established *inside* the generic plugin-API dispatcher,
+ * which this Wave 4 documentation/confirmation pass deliberately does not
+ * attempt (per DUR-350's scope: confirm + document, not wire) -- left as a
+ * candidate for a future pass alongside plugins.ts's other (a)/(b) local-folder
+ * routes. See the DUR-277 design doc §1 (plugins.ts: category (a+b+c), mostly
+ * (c)).
  */
 export function pluginRoutes(
   db: Db,

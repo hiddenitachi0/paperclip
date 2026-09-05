@@ -34,6 +34,17 @@ async function loadCurrentUserProfile(db: Db, userId: string) {
   });
 }
 
+/**
+ * DUR-277/DUR-350 (Wave 4): deliberately stays bypass-scoped. Every route
+ * here resolves and mutates exactly one row -- `authUsers` keyed on
+ * `req.actor.userId` -- for session bootstrap / the signed-in user's own
+ * profile. `authUsers` has no `companyId` column at all: identity is
+ * instance-wide by design (the same person can belong to multiple
+ * companies), so there is no single companyId this route could scope a
+ * request-level connection claim against even in principle. See the DUR-277
+ * design doc §1 (auth.ts: category (c), "session bootstrap, actor-identity
+ * only, no company concept").
+ */
 export function authRoutes(db: Db) {
   const router = Router();
 
