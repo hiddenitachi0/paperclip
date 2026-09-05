@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, companySkillComments, companySkillStars, companySkillVersions, companySkills } from "@paperclipai/db";
+import { companies, companySkillComments, companySkillStars, companySkillVersions, companySkills, withCompanyScope } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import type { PaperclipDesiredSkillEntry, PaperclipSkillEntry } from "@paperclipai/adapter-utils/server-utils";
 import type {
@@ -2126,7 +2126,13 @@ function toCompanySkillListItem(skill: CompanySkillListRow, attachedAgentCount: 
   };
 }
 
-export function companySkillService(db: Db) {
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db`, a no-op for every
+// unmigrated caller. routes/company-skills.ts, once wired through
+// createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+// distinct `rawDb`, since `createVersion`'s db.transaction() below is not
+// supported through that proxy (see packages/db/src/company-scope.ts) --
+// it opens its connection via withCompanyScope instead.
+export function companySkillService(db: Db, rawDb: Db = db) {
   const agents = agentService(db);
   const projects = projectService(db);
 
@@ -2547,7 +2553,7 @@ export function companySkillService(db: Db) {
     const skill = await getById(companyId, skillId);
     if (!skill) throw notFound("Skill not found");
     const fileInventory = serializeVersionFileInventory(await collectVersionFileInventory(companyId, skill));
-    const versionRow = await db.transaction(async (tx) => {
+    const versionRow = await withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(sql`
         select ${companySkills.id}
         from ${companySkills}

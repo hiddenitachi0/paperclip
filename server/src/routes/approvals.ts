@@ -782,14 +782,14 @@ export function approvalRoutes(
   const db = createRequestScopedDb(rawDb);
   const svc = approvalService(db);
   const access = accessService(db);
-  const agentsSvc = agentService(db);
+  const agentsSvc = agentService(db, { rawDb });
   const instructionsSvc = agentInstructionsService();
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const interactionsSvc = issueThreadInteractionService(db);
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 

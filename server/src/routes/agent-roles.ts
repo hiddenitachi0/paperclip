@@ -222,7 +222,13 @@ export function agentRoleRoutes(rawDb: Db) {
       }
 
       const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
-      const updated = await assignRoleToAgent(db, agentId, roleId, { grantedByUserId, actor: actorFor(req) });
+      const updated = await assignRoleToAgent(
+        db,
+        agentId,
+        roleId,
+        { grantedByUserId, actor: actorFor(req) },
+        rawDb,
+      );
       res.json(updated);
     }
   );
@@ -265,14 +271,14 @@ export function agentRoleRoutes(rawDb: Db) {
     async (req, res) => {
       const agentId = req.params.agentId as string;
       const grantedByUserId = (req as { actor?: { userId?: string | null } }).actor?.userId ?? null;
-      const updated = await addAgentRightOverride(db, agentId, req.body, actorFor(req), grantedByUserId);
+      const updated = await addAgentRightOverride(db, agentId, req.body, actorFor(req), grantedByUserId, rawDb);
       res.json(updated);
     }
   );
 
   router.delete("/agents/:agentId/role/rights/:permissionKey", scopeFromAgentIdParam(true), async (req, res) => {
     const agentId = req.params.agentId as string;
-    res.json(await removeAgentRightOverride(db, agentId, req.params.permissionKey as string, actorFor(req)));
+    res.json(await removeAgentRightOverride(db, agentId, req.params.permissionKey as string, actorFor(req), rawDb));
   });
 
   // ── DUR-149: per-agent skill_key / connector_key overrides ──────────────
@@ -302,7 +308,7 @@ export function agentRoleRoutes(rawDb: Db) {
       if (!category) return;
 
       const { key } = req.body as { key: string };
-      res.json(await addAgentCatalogOverride(db, agentId, category, key, actorFor(req)));
+      res.json(await addAgentCatalogOverride(db, agentId, category, key, actorFor(req), rawDb));
     }
   );
 
@@ -311,7 +317,7 @@ export function agentRoleRoutes(rawDb: Db) {
     const category = parseCatalogCategory(req, res);
     if (!category) return;
 
-    res.json(await removeAgentCatalogOverride(db, agentId, category, req.params.key as string, actorFor(req)));
+    res.json(await removeAgentCatalogOverride(db, agentId, category, req.params.key as string, actorFor(req), rawDb));
   });
 
   return router;
