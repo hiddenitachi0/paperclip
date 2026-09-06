@@ -1,6 +1,10 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// companyScope middleware (middleware/company-scope.ts) rejects non-UUID company ids with 400.
+const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 
 // DUR-177 items 16/17: GET /approvals* tags an approval's payload with
 // `isPersonaRequest`/`personaDisplayName` when (and only when) the
@@ -60,14 +64,14 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
     (req as any).actor = {
       type: "board",
       userId: "user-1",
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_ID],
       source: "session",
       isInstanceAdmin: false,
       ...actorOverrides,
     };
     next();
   });
-  app.use("/api", approvalRoutes({} as any));
+  app.use("/api", approvalRoutes(withFakeCompanyScopeReserve({})));
   app.use(errorHandler);
   return app;
 }
@@ -96,7 +100,7 @@ describe("approval routes persona metadata (DUR-177 items 16/17)", () => {
   it("tags a persona-linked agent's approval with isPersonaRequest + personaDisplayName from the server-side lookup", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       type: "credential_request",
       status: "pending",
       requestedByAgentId: "agent-persona",
@@ -120,7 +124,7 @@ describe("approval routes persona metadata (DUR-177 items 16/17)", () => {
     // approval payloads accept arbitrary keys.
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-2",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       type: "credential_request",
       status: "pending",
       requestedByAgentId: "agent-plain",
@@ -142,7 +146,7 @@ describe("approval routes persona metadata (DUR-177 items 16/17)", () => {
   it("leaves a plain agent's ordinary approval untouched (no persona keys at all)", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-3",
-      companyId: "company-1",
+      companyId: COMPANY_ID,
       type: "request_board_approval",
       status: "pending",
       requestedByAgentId: "agent-plain",
