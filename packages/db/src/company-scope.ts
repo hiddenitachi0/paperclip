@@ -282,7 +282,12 @@ export async function withCompanyScope<T>(
     return runOnReservedScope(activeScope.scopedDb, activeScope.liveness, fn);
   }
 
-  return db.transaction(async (tx) => {
+  // No live reserved scope: open our own connection from the pool. If `db` is
+  // a request-scoped proxy whose scope has already been released, go through
+  // the raw pool behind it (DUR-257) -- the proxy itself refuses
+  // `.transaction()`, and before this every trailing executeRun step that
+  // reached here left its run stuck "running" with a dead child.
+  return unwrapRequestScopedDb(db).transaction(async (tx) => {
     await tx.execute(sql`SELECT set_config('app.current_company_id', ${companyId}, true)`);
     return fn(tx);
   });
@@ -302,7 +307,7 @@ export async function withCompanyScopeBypass<T>(
   opts: CompanyScopeBypassOptions,
   fn: (scopedDb: ScopedDb) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => {
+  return unwrapRequestScopedDb(db).transaction(async (tx) => {
     const [membership] = (await tx.execute(
       sql`SELECT pg_has_role(current_user, 'paperclip_app_bypass', 'member') AS has_bypass`,
     )) as unknown as { has_bypass: boolean }[];
@@ -876,6 +881,20 @@ function describePath(path: readonly PropertyKey[], prop: PropertyKey): string {
  * raw return value directly -- they never run inside the ALS scope this
  * proxy requires, by design.
  */
+// DUR-257/DUR-381: lets withCompanyScope()/withCompanyScopeBypass() reach the
+// raw pooled Db behind a request-scoped proxy once the proxy's scope has been
+// released, so a continuation that outlives its request (executeRun after
+// the scheduler tick, a route's fire-and-forget wakeup) can open its own
+// connection instead of hitting the proxy's `.transaction()` refusal. Direct
+// `proxy.transaction()` calls are still refused -- only these two helpers,
+// which set the company claim on the connection they open, unwrap.
+const REQUEST_SCOPED_RAW_DB = Symbol.for("paperclip.requestScopedRawDb");
+
+export function unwrapRequestScopedDb(db: Db): Db {
+  const raw = (db as unknown as Record<PropertyKey, unknown>)[REQUEST_SCOPED_RAW_DB];
+  return (raw as Db | undefined) ?? db;
+}
+
 export function createRequestScopedDb(rawDb: Db): Db {
   const build = (path: readonly PropertyKey[]): unknown => {
     const structuralTarget = (walkPath(rawDb, path) as object | null) ?? {};
@@ -894,6 +913,7 @@ export function createRequestScopedDb(rawDb: Db): Db {
         // should use withCompanyScope(rawDb, companyId, fn) /
         // withCompanyScopeBypass(rawDb, opts, fn) directly instead -- those
         // hold their own short-lived transaction, not the whole request.
+        if (path.length === 0 && prop === REQUEST_SCOPED_RAW_DB) return rawDb;
         if (path.length === 0 && prop === "transaction") {
           return () => {
             throw new Error(

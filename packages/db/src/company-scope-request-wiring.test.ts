@@ -725,4 +725,28 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
     },
     10_000,
   );
+
+  it("DUR-257: withCompanyScope on a request-scoped proxy whose scope was released opens its own pooled connection instead of throwing", async () => {
+    const companyA = await seedCompany("A");
+    const scopedDb = createRequestScopedDb(db);
+    let capturedScope: ReturnType<typeof requestCompanyScopeStorage.getStore> = undefined;
+    await runInCompanyScope(db, companyA.id, async () => {
+      capturedScope = requestCompanyScopeStorage.getStore();
+    });
+    expect(capturedScope).toBeDefined();
+
+    // The fire-and-forget continuation: still inside the (now released) ALS
+    // scope, calling the helper with the proxy -- exactly what executeRun's
+    // trailing steps did on 2026-09-06 and got "db.transaction() is not
+    // supported through the request-scoped proxy" for.
+    const rows = await requestCompanyScopeStorage.run(capturedScope as never, () =>
+      withCompanyScope(scopedDb, companyA.id, async (tx) => tx.select({ name: companies.name }).from(companies)),
+    );
+    expect(rows.map((row) => row.name)).toContain(companyA.name);
+
+    // Direct proxy.transaction() stays refused -- only the helpers unwrap.
+    await requestCompanyScopeStorage.run(capturedScope as never, async () => {
+      expect(() => scopedDb.transaction(async () => undefined)).toThrow(/not supported through the request-scoped proxy/);
+    });
+  });
 });
