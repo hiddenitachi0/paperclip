@@ -36,6 +36,29 @@ import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
 
+/**
+ * DUR-277/DUR-350 (Wave 4): confirmed as a genuine (a+c) split, NOT a
+ * mostly-instance-wide file the way the other Wave 4 files are -- flagging
+ * that explicitly rather than overstating the bypass case here.
+ *
+ * The (c) routes that must stay bypass-scoped: `GET /` and `GET /stats` list
+ * across every company by nature (then filter down to `req.actor.companyIds`
+ * in application code, not via a DB-level scope claim) -- there is no single
+ * companyId to scope a cross-company list against. `POST /` (create company)
+ * and the `/import*`/`/imports/*` family are instance-admin operations that
+ * either don't have a companyId yet (new_company import target) or span the
+ * whole import/export pipeline.
+ *
+ * The (a) routes -- the bulk of this file, every `/:companyId/*` handler --
+ * resolve their companyId directly from the route param today via
+ * `assertCompanyAccess`/`assertAgentCanManageCompanySettingsOrBoard`, but
+ * are NOT wired to `companyScopeFromParam`/`runInCompanyScope` yet. These are
+ * genuine per-company routes, not instance-wide ones, so they don't belong in
+ * this Wave 4 "confirm bypass" pass -- they're deferred to a future wave that
+ * actually wires per-company scope for this file (unlike the mostly-(c) files
+ * in this same wave, which stay bypass for good). See the DUR-277 design doc
+ * §1 (companies.ts: category (a+c), "split cleanly").
+ */
 export function companyRoutes(db: Db, storage?: StorageService) {
   const router = Router();
   const svc = companyService(db);

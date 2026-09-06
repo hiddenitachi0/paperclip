@@ -48,6 +48,28 @@ import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { environmentService } from "../services/environments.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
 
+/**
+ * DUR-277/DUR-350 (Wave 4): confirmed as mostly-(c), deliberately staying
+ * bypass-scoped for its primary CRUD -- NOT a candidate for a single
+ * `companyScope`/`runInCompanyScope` wrapper the way an (a)/(b) route family
+ * would be. The `environments` table itself is instance-wide by design (a
+ * shared sandbox pool, not partitioned per company), so the base
+ * create/list/update/delete/probe routes have no single companyId to scope
+ * against.
+ *
+ * The one nuance (still (b), not (c)): `resolveCustomImageCompanyId`,
+ * `resolveCustomImageSessionCompanyId`, and
+ * `resolveEnvironmentSecretContextCompanyId` above each resolve a companyId
+ * purely as a side channel for secret-binding / custom-image-setup access
+ * checks (`assertCustomImageCompanyAccess`) -- not to scope the environment
+ * row itself. Wiring those three call sites through `runInCompanyScope`
+ * would require re-deriving them as route-level middleware ahead of the
+ * shared CRUD handlers below, which this Wave 4 documentation/confirmation
+ * pass deliberately does not attempt (per DUR-350's scope: confirm + document,
+ * not wire). Left as a candidate for a future, separate pass if the
+ * secret-binding surface needs its own company-scope hardening. See the
+ * DUR-277 design doc §1 (environments.ts: category (b+c), mostly (c)).
+ */
 export function environmentRoutes(
   db: Db,
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
