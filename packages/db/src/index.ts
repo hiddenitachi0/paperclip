@@ -1,7 +1,9 @@
 export {
   createDb,
   DEFAULT_APP_POOL_MAX,
+  DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS,
   getAppPoolMax,
+  getAppPoolStatementTimeoutMs,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
   inspectMigrations,

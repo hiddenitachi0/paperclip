@@ -109,9 +109,31 @@ function onAppPoolNotice(notice: unknown): void {
 }
 
 // DUR-280: per-statement ceiling (ms) applied to every connection in the app
-// pool. Exported so a path that legitimately needs longer can reference the
-// baseline it is overriding rather than re-deriving the number.
-export const APP_POOL_STATEMENT_TIMEOUT_MS = 30_000;
+// pool. 30s is deliberately request-shaped: nothing a request handler or a
+// heartbeat transaction legitimately runs takes anywhere near that long, so
+// hitting it means a wedged statement (lock wait on a stuck transaction, a
+// runaway scan) that should fail rather than pin a pool slot forever.
+// Overridable via PAPERCLIP_DB_STATEMENT_TIMEOUT_MS (same strict parsing as
+// PAPERCLIP_DB_POOL_MAX); "0" disables the ceiling, matching Postgres's own
+// meaning for statement_timeout = 0. Known-long maintenance paths do not
+// need the override -- they lift the ceiling for their own transaction
+// (see heartbeat-run-retention.ts).
+export const DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS = 30_000;
+
+export function getAppPoolStatementTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS;
+  const trimmed = raw.trim();
+  const parsed = /^\d+$/.test(trimmed) ? Number.parseInt(trimmed, 10) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.error(
+      `createDb: ignoring invalid PAPERCLIP_DB_STATEMENT_TIMEOUT_MS=${JSON.stringify(raw)}; ` +
+        `falling back to ${DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS}`,
+    );
+    return DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS;
+  }
+  return parsed;
+}
 
 // DUR-294: every CLI command and one-off script that calls createDb()
 // directly against DATABASE_URL used to fall back to this same
@@ -149,7 +171,7 @@ export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_
     // runner use their own postgres() clients and are not affected at all.
     connect_timeout: 10,
     idle_timeout: 30,
-    connection: { application_name: applicationName, statement_timeout: APP_POOL_STATEMENT_TIMEOUT_MS },
+    connection: { application_name: applicationName, statement_timeout: getAppPoolStatementTimeoutMs() },
     ...(unscopedAccessHook
       ? { debug: unscopedAccessHook.debug, onclose: unscopedAccessHook.clearConnection }
       : {}),

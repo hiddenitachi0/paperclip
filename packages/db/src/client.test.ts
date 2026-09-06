@@ -5,9 +5,11 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
   DEFAULT_APP_POOL_MAX,
+  DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS,
   applyPendingMigrations,
   createDb,
   getAppPoolMax,
+  getAppPoolStatementTimeoutMs,
   inspectMigrations,
 } from "./client.js";
 import {
@@ -566,6 +568,31 @@ describe("getAppPoolMax (DUR-3931)", () => {
   it("falls back to the default for values that are not a positive integer", () => {
     for (const raw of ["0", "-3", "abc", "1.5.2"]) {
       expect(getAppPoolMax({ PAPERCLIP_DB_POOL_MAX: raw })).toBe(DEFAULT_APP_POOL_MAX);
+    }
+  });
+});
+
+// DUR-280: the app pool's statement_timeout is a request-shaped default an
+// operator can raise (or disable with "0") without patching code; a typo must
+// not silently produce a nonsense ceiling.
+describe("getAppPoolStatementTimeoutMs (DUR-280)", () => {
+  it("defaults to DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS when unset or blank", () => {
+    expect(getAppPoolStatementTimeoutMs({})).toBe(DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS);
+    expect(getAppPoolStatementTimeoutMs({ PAPERCLIP_DB_STATEMENT_TIMEOUT_MS: "  " })).toBe(
+      DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS,
+    );
+  });
+
+  it("honours a valid override, including 0 (Postgres's 'disabled')", () => {
+    expect(getAppPoolStatementTimeoutMs({ PAPERCLIP_DB_STATEMENT_TIMEOUT_MS: "120000" })).toBe(120_000);
+    expect(getAppPoolStatementTimeoutMs({ PAPERCLIP_DB_STATEMENT_TIMEOUT_MS: " 0 " })).toBe(0);
+  });
+
+  it("falls back to the default for values that are not a non-negative integer", () => {
+    for (const raw of ["-1", "abc", "1.5", "30s", "10abc"]) {
+      expect(getAppPoolStatementTimeoutMs({ PAPERCLIP_DB_STATEMENT_TIMEOUT_MS: raw })).toBe(
+        DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS,
+      );
     }
   });
 });
