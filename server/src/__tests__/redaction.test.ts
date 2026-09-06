@@ -98,6 +98,21 @@ describe("redaction", () => {
     expect(result).not.toContain(jwt);
   });
 
+  // DUR-370: a fine-grained PAT on its own line (no other secret hint, no ".")
+  // used to bypass the hint gate in redactSensitiveText entirely.
+  it("redacts a fine-grained github_pat_ token even without another secret hint", () => {
+    const pat =
+      "github_pat_11AAAAAAA0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const result = redactSensitiveText(`remote url had ${pat} in it`);
+    expect(result).toBe(`remote url had ${REDACTED_EVENT_VALUE} in it`);
+  });
+
+  it("redacts a PEM private key block from unstructured text", () => {
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----";
+    const result = redactSensitiveText(`deploy key was ${pem} oops`);
+    expect(result).toBe(`deploy key was ${REDACTED_EVENT_VALUE} oops`);
+  });
+
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
     const input = {
       command: "custom-acp --token ghp_example_secret env OPENAI_API_KEY=sk-live-example custom-acp",
