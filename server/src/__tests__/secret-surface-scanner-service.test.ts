@@ -257,6 +257,37 @@ describeEmbeddedPostgres("secret-surface-scanner", () => {
     expect(sweep.issuesFiled).toBe(1);
   });
 
+  it("DUR-387: a secret in the unscanned middle third of an oversized field is correctly not detected, but the sweep still flags the field as oversized", async () => {
+    const companyId = await seedCompany();
+    await seedAgent(companyId, { title: "Security Reviewer" });
+    const runnerAgentId = await seedAgent(companyId);
+
+    // 300KB field: the head+tail split only scans the first and last 32KB, so
+    // a secret placed at the midpoint (~150,000) sits well outside both
+    // windows -- pinning down that this is the documented residual gap
+    // (DUR-387's review), not a regression that silently grows the scanned
+    // window (e.g. an accidental head/tail overlap) or shrinks it to miss
+    // even the covered halves.
+    const secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const half = 150_000;
+    const oversizedError = `${"x".repeat(half)}token=${secret}${"x".repeat(half)}`;
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      error: oversizedError,
+    });
+
+    const sweep = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: null });
+
+    expect(sweep.rowsScanned).toBe(1);
+    expect(sweep.oversizedFieldsScanned).toBe(1);
+    expect(sweep.matchesFound).toBe(0);
+    expect(sweep.issuesFiled).toBe(0);
+  });
+
   it("walks .git/config, .env, and docker-compose files under a company path, skips excluded dirs, and attributes by path", async () => {
     const companyId = await seedCompany();
     await seedAgent(companyId, { title: "Security Reviewer" });
