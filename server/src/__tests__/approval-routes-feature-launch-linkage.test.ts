@@ -74,6 +74,7 @@ function registerModuleMocks() {
     agentInstructionsService: () => ({ readFile: vi.fn(), writeFile: vi.fn() }),
     agentService: () => mockAgentService,
     approvalService: () => mockApprovalService,
+    personaService: () => ({ getPersonaDisplayNamesByAgentIds: vi.fn(async () => new Map<string, string>()) }),
     escalationGrantService: () => mockEscalationGrantService,
     heartbeatService: () => mockHeartbeatService,
     issueApprovalService: () => mockIssueApprovalService,
