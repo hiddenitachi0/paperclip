@@ -159,4 +159,38 @@ describeEmbeddedPostgres("agentRoutes company-scope wiring (DUR-378)", () => {
       expect(resB.body.companyId).toBe(companyB);
     }
   });
+
+  // DUR-3927: GET /api/agents/:id 500'd whenever :id was a shortname (e.g.
+  // "products") rather than a UUID. router.param("id", ...) resolves the
+  // shortname via normalizeAgentReference() *before* scopeFromAgentParam()
+  // establishes company-scope for the route, so that resolution must go
+  // through the raw (unscoped) db -- using the scope-enforcing `svc` there
+  // threw because runInCompanyScope hadn't run yet.
+  it("resolves a shortname :id (not just a UUID) to the agent without 500ing", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId, "Products");
+    const app = createApp(localBoardActor([companyId]));
+
+    const res = await request(app).get(`/api/agents/products?companyId=${companyId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(agentId);
+    expect(res.body.companyId).toBe(companyId);
+  });
+
+  it("rejects a shortname :id lookup scoped to a company the actor cannot access", async () => {
+    const companyA = await seedCompany();
+    const companyB = await seedCompany();
+    await seedAgent(companyB, "Products");
+    const app = createApp({
+      type: "board",
+      source: "cloud_tenant",
+      userId: randomUUID(),
+      companyIds: [companyA],
+    });
+
+    const res = await request(app).get(`/api/agents/products?companyId=${companyB}`);
+
+    expect(res.status).toBe(403);
+  });
 });
