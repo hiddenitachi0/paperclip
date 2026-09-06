@@ -72,6 +72,25 @@ describe("company routes", () => {
     expect(toCompanyRelativePath("/PAP/artifacts")).toBe("/artifacts");
   });
 
+  // Regression for DUR-3933: /tools had no entry in the board-route
+  // allowlist, so extractCompanyPrefixFromPath misread "tools" as a company
+  // prefix and applyCompanyPrefix (used by @/lib/router's Link/Navigate)
+  // silently skipped re-prefixing bare `/tools` links to the active board.
+  it("treats /tools as a board route that needs a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/tools")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/tools")).toBeNull();
+    expect(applyCompanyPrefix("/tools", "DUR")).toBe("/DUR/tools");
+    expect(toCompanyRelativePath("/DUR/tools")).toBe("/tools");
+  });
+
+  // Same defect family as /tools above, for the Jobs section (DUR-3933).
+  it("treats /jobs as a board route that needs a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/jobs")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/jobs")).toBeNull();
+    expect(applyCompanyPrefix("/jobs", "DUR")).toBe("/DUR/jobs");
+    expect(toCompanyRelativePath("/DUR/jobs")).toBe("/jobs");
+  });
+
   it("preserves artifact deep-link anchors when applying the company prefix", () => {
     expect(applyCompanyPrefix("/issues/PAP-10205#work-product-wp-1", "PAP")).toBe(
       "/PAP/issues/PAP-10205#work-product-wp-1",

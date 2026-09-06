@@ -1,0 +1,51 @@
+name: Deploy Runner Recreate Acceptance
+
+# DUR-297 (split out of DUR-259): live docker-compose acceptance test for
+# scripts/deploy-runner.sh's compose_recreate path -- boots the real stack,
+# dispatches a real in-flight heartbeat run, and runs deploy-runner.sh for
+# real to recreate the server container mid-run. See
+# scripts/deploy-runner-recreate-acceptance.sh for the full scenario.
+#
+# workflow_dispatch/workflow_call only (like release-smoke.yml and e2e.yml)
+# -- this boots a full docker-compose stack from a fresh image build, so it
+# isn't wired into every PR's CI run.
+on:
+  workflow_dispatch: {}
+  workflow_call: {}
+  push:
+    branches:
+      - custom
+    paths:
+      - "scripts/deploy-runner.sh"
+      - "scripts/deploy-runner-recreate-acceptance.sh"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.prod.yml"
+      - "docker/docker-compose.ci-recreate-test.yml"
+      - "server/src/shutdown-drain.ts"
+      - "server/src/index.ts"
+      - "Dockerfile"
+
+jobs:
+  recreate-acceptance:
+    runs-on: ubuntu-latest
+    # `docker compose up --build` builds the real multi-stage Dockerfile
+    # (pnpm install, UI + server build, global CLI tool installs) from a
+    # cold cache -- see docker.yml's own 60-minute budget for the
+    # multi-platform equivalent of this same build.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run deploy-runner recreate acceptance test
+        run: ./scripts/deploy-runner-recreate-acceptance.sh
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-runner-recreate-acceptance
+          path: .dur297-recreate-acceptance-logs/
+          retention-days: 14
+          if-no-files-found: ignore

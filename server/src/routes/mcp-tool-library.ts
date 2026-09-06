@@ -40,7 +40,7 @@ export function mcpToolLibraryRoutes(rawDb: Db) {
   // stays unwrapped for the pre-scope lookups the agent/tool-id routes below
   // need before their companyId is known. See middleware/company-scope.ts.
   const db = createRequestScopedDb(rawDb);
-  const svc = agentService(db);
+  const svc = agentService(db, { rawDb });
 
   function scopeFromCompanyIdParam() {
     return companyScope(rawDb, (req) => {

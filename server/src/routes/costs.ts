@@ -66,8 +66,8 @@ export function costRoutes(
   const costs = costService(db, budgetHooks);
   const finance = financeService(db);
   const budgets = budgetService(db, budgetHooks);
-  const companies = companyService(db);
-  const agents = agentService(db);
+  const companies = companyService(db, rawDb);
+  const agents = agentService(db, { rawDb });
   const issues = issueService(db);
   const access = accessService(db);
   const rawIssues = issueService(rawDb);

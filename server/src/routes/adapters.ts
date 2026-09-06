@@ -11,6 +11,14 @@
  * toggle server-side adapter code for the whole Paperclip instance.
  *
  * @module server/routes/adapters
+ *
+ * DUR-277/DUR-350 (Wave 4): deliberately stays bypass-scoped -- `adapterRoutes()`
+ * takes no `Db` parameter at all (verified: no `db`/`Db` identifier appears
+ * anywhere in this file). Adapter registration/config is server-process-global
+ * (npm/local-path installs, in-memory registry, on-disk plugin store), not a
+ * database-backed, per-company resource, so there is no companyId to scope a
+ * request-level connection claim against. See the DUR-277 design doc §1
+ * (adapters.ts: category (d), "no db access at all").
  */
 
 import { execFile } from "node:child_process";

@@ -10,6 +10,7 @@ import {
   plugins,
   projectWorkspaces,
   workspaceRuntimeServices,
+  withCompanyScope,
 } from "@paperclipai/db";
 import {
   deriveProjectUrlKey,
@@ -545,7 +546,15 @@ async function ensureSinglePrimaryWorkspace(
     );
 }
 
-export function projectService(db: Db) {
+// DUR-373 (DUR-277 Wave 2 follow-up): `rawDb` defaults to `db` for every
+// unmigrated caller, a no-op there since `db` is already the raw pooled
+// instance for them. Only routes/projects.ts, once wired through
+// createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+// distinct `rawDb` -- the db.transaction() calls below are not supported
+// through that proxy (see packages/db/src/company-scope.ts) and need the
+// raw connection via withCompanyScope instead (same DUR-3911 fix as
+// services/secrets.ts).
+export function projectService(db: Db, rawDb: Db = db) {
   const createProject = async (
     companyId: string,
     data: Omit<typeof projects.$inferInsert, "companyId"> & { goalIds?: string[] },
@@ -927,7 +936,7 @@ export function projectService(db: Db) {
         .then((rows) => rows);
 
       const shouldBePrimary = data.isPrimary === true || existing.length === 0;
-      const created = await db.transaction(async (tx) => {
+      const created = await withCompanyScope(rawDb, project.companyId, async (tx) => {
         if (shouldBePrimary) {
           await tx
             .update(projectWorkspaces)
@@ -1046,7 +1055,7 @@ export function projectService(db: Db) {
             : data.metadata;
       }
 
-      const updated = await db.transaction(async (tx) => {
+      const updated = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
         if (data.isPrimary === true) {
           await tx
             .update(projectWorkspaces)
@@ -1140,7 +1149,7 @@ export function projectService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
 
-      const removed = await db.transaction(async (tx) => {
+      const removed = await withCompanyScope(rawDb, existing.companyId, async (tx) => {
         const row = await tx
           .delete(projectWorkspaces)
           .where(eq(projectWorkspaces.id, workspaceId))

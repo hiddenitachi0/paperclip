@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { companies, companySecrets, createDb } from "@paperclipai/db";
+import { activityLog, companies, companySecrets, createDb } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -50,6 +51,7 @@ describeEmbeddedPostgres("secretRoutes company-scope wiring (DUR-348)", () => {
 
   afterEach(async () => {
     await db.delete(companySecrets);
+    await db.delete(activityLog);
     await db.delete(companies);
   });
 
@@ -107,6 +109,33 @@ describeEmbeddedPostgres("secretRoutes company-scope wiring (DUR-348)", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
     expect(res.body.every((secret: { companyId: string }) => secret.companyId === companyId)).toBe(true);
+  });
+
+  // DUR-3911: createRequestScopedDb's proxy refuses db.transaction() outright
+  // ("db.transaction() is not supported through the request-scoped proxy"),
+  // and secretService(db).create() used to call it directly -- so this write
+  // 500'd on every real request even though the mocked-service route test
+  // (secrets-routes.test.ts) couldn't see it. Exercising the real service
+  // through the real scoped `db` here is the only way to catch that class of
+  // regression.
+  it("creates a secret over a real HTTP request through the scope middleware", async () => {
+    const companyId = await seedCompanyWithSecrets([]);
+    const app = createApp([companyId]);
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/secrets`)
+      .send({ name: "OPENAI_API_KEY", value: "sk-test-value" });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      companyId,
+      name: "OPENAI_API_KEY",
+      status: "active",
+    });
+
+    const rows = await db.select().from(companySecrets).where(eq(companySecrets.companyId, companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("active");
   });
 
   it("rejects a non-UUID companyId route param with 400 before ever reserving a connection", async () => {

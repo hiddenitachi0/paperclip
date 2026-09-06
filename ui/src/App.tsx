@@ -73,6 +73,8 @@ import { JoinRequestQueue } from "./pages/JoinRequestQueue";
 import { NotFoundPage } from "./pages/NotFound";
 import { SimpleMode } from "./pages/SimpleMode";
 import { useCompany } from "./context/CompanyContext";
+import { getLastBoardPrefix } from "./lib/last-board";
+import { resolveBareUrlTargetCompany } from "./lib/bare-url-redirect";
 import { useDialogActions, useDialogState } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
 import {
@@ -251,8 +253,7 @@ function LegacySettingsRedirect() {
     (companyPrefix
       ? companies.find((company) => company.issuePrefix.toUpperCase() === companyPrefix.toUpperCase())
       : null) ??
-    selectedCompany ??
-    companies[0] ??
+    resolveBareUrlTargetCompany(companies, selectedCompany, getLastBoardPrefix()) ??
     null;
 
   if (!targetCompany) {
@@ -341,7 +342,7 @@ function CompanyRootRedirect() {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
   }
 
-  const targetCompany = selectedCompany ?? companies[0] ?? null;
+  const targetCompany = resolveBareUrlTargetCompany(companies, selectedCompany, getLastBoardPrefix());
   if (!targetCompany) {
     if (
       shouldRedirectCompanylessRouteToOnboarding({
@@ -369,7 +370,7 @@ function UnprefixedBoardRedirect() {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
   }
 
-  const targetCompany = selectedCompany ?? companies[0] ?? null;
+  const targetCompany = resolveBareUrlTargetCompany(companies, selectedCompany, getLastBoardPrefix());
   if (!targetCompany) {
     if (
       shouldRedirectCompanylessRouteToOnboarding({
@@ -459,6 +460,8 @@ export function App() {
           <Route path="artifacts" element={<UnprefixedBoardRedirect />} />
           <Route path="u/:userSlug" element={<UnprefixedBoardRedirect />} />
           <Route path="skills/*" element={<UnprefixedBoardRedirect />} />
+          <Route path="jobs" element={<UnprefixedBoardRedirect />} />
+          <Route path="tools" element={<UnprefixedBoardRedirect />} />
           <Route path="settings" element={<LegacySettingsRedirect />} />
           <Route path="settings/*" element={<LegacySettingsRedirect />} />
           <Route path="agents" element={<UnprefixedBoardRedirect />} />

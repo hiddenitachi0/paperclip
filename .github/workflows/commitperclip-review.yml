@@ -43,6 +43,12 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
+        # DUR-3912: this is an advisory review job, not a required merge check.
+        # If COMMITPERCLIP_KEY is ever missing/invalid, this step must not hard-fail
+        # the job and block merges automation-wide -- let the quality/security gate
+        # steps below no-op instead (they already fail soft via their own
+        # continue-on-error).
+        continue-on-error: true
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"

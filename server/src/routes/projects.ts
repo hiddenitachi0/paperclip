@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
+import { createRequestScopedDb } from "@paperclipai/db";
 import {
   createProjectSchema,
   createProjectWorkspaceSchema,
@@ -14,10 +15,11 @@ import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } fr
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import { accessService, projectService, logActivity, workspaceOperationService } from "../services/index.js";
-import { conflict, forbidden } from "../errors.js";
+import { conflict, forbidden, notFound } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
   listConfiguredRuntimeServiceEntries,
@@ -40,14 +42,28 @@ import { secretService } from "../services/secrets.js";
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
 
-export function projectRoutes(db: Db) {
+export function projectRoutes(rawDb: Db) {
   const router = Router();
-  const svc = projectService(db);
-  const access = accessService(db);
-  const secretsSvc = secretService(db);
+  // DUR-373 (DUR-277 Wave 2 follow-up): this file's own request-scoped
+  // instance; `rawDb` stays unwrapped for the `router.param("id", ...)`
+  // shortname lookup and the per-route (b)-category companyId resolution
+  // below, both of which run before the route's companyId (and therefore its
+  // scope) is known. See middleware/company-scope.ts.
+  const db = createRequestScopedDb(rawDb);
+  const svc = projectService(db, rawDb);
+  const rawSvc = projectService(rawDb);
+  // `access` is scoped for use inside handlers (post scope-establishment);
+  // `rawAccess` is for the `decide()` call in `projectReadScope` below,
+  // which runs from inside a companyScope resolver -- i.e. before scope is
+  // established -- where the scoped Proxy has no AsyncLocalStorage context
+  // yet.
+  const access = accessService(db, rawDb);
+  const rawAccess = accessService(rawDb);
+  const secretsSvc = secretService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
   const externalObjectsSvc = externalObjectService(db, {
+    rawDb,
     enabled: async () => (await instanceSettings.getExperimental()).enableExternalObjects === true,
   });
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
@@ -88,22 +104,42 @@ export function projectRoutes(db: Db) {
     if (isUuidLike(rawId)) return rawId;
     const companyId = await resolveCompanyIdForProjectReference(req);
     if (!companyId) return rawId;
-    const resolved = await svc.resolveByReference(companyId, rawId);
+    const resolved = await rawSvc.resolveByReference(companyId, rawId);
     if (resolved.ambiguous) {
       throw conflict("Project shortname is ambiguous in this company. Use the project ID.");
     }
     return resolved.project?.id ?? rawId;
   }
 
-  async function assertProjectReadAllowed(req: Request, res: Response, project: { id: string; companyId: string }) {
-    const decision = await access.decide({
+  /** Runs from inside `projectReadScope`'s resolver, i.e. before scope is established -- must use `rawAccess`. */
+  async function assertProjectReadAllowed(req: Request, companyId: string, projectId: string) {
+    const decision = await rawAccess.decide({
       actor: req.actor,
       action: "project:read",
-      resource: { type: "project", companyId: project.companyId, projectId: project.id },
+      resource: { type: "project", companyId, projectId },
     });
-    if (decision.allowed) return true;
-    res.status(403).json({ error: "Project is outside this actor's authorization boundary" });
-    return false;
+    if (!decision.allowed) throw forbidden("Project is outside this actor's authorization boundary");
+  }
+
+  /** Shared (b)-category resolver: look up the project's companyId via the raw db, then assert access. */
+  function projectScope() {
+    return companyScope(rawDb, async (req) => {
+      const existing = await rawSvc.getById(req.params.id as string);
+      if (!existing) throw notFound("Project not found");
+      assertCompanyAccess(req, existing.companyId);
+      return existing.companyId;
+    });
+  }
+
+  /** Same as `projectScope`, plus the `project:read` decision needed by the single-project GET route. */
+  function projectReadScope() {
+    return companyScope(rawDb, async (req) => {
+      const existing = await rawSvc.getById(req.params.id as string);
+      if (!existing) throw notFound("Project not found");
+      assertCompanyAccess(req, existing.companyId);
+      await assertProjectReadAllowed(req, existing.companyId, existing.id);
+      return existing.companyId;
+    });
   }
 
   async function filterProjectsForActor<T extends { id: string; companyId: string }>(req: Request, rows: T[]) {
@@ -126,40 +162,43 @@ export function projectRoutes(db: Db) {
     }
   });
 
-  router.get("/companies/:companyId/projects", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    const result = await svc.list(companyId);
-    res.json(await filterProjectsForActor(req, result));
-  });
+  router.get(
+    "/companies/:companyId/projects",
+    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyAccess(req, companyId)),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const result = await svc.list(companyId);
+      res.json(await filterProjectsForActor(req, result));
+    },
+  );
 
-  router.get("/projects/:id", async (req, res) => {
+  router.get("/projects/:id", projectReadScope(), async (req, res) => {
     const id = req.params.id as string;
     const project = await svc.getById(id);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, project.companyId);
-    if (!(await assertProjectReadAllowed(req, res, project))) return;
     res.json(project);
   });
 
-  router.get("/projects/:id/external-object-summary", async (req, res) => {
+  router.get("/projects/:id/external-object-summary", projectScope(), async (req, res) => {
     const id = req.params.id as string;
     const project = await svc.getById(id);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, project.companyId);
     const summary = await externalObjectsSvc.getProjectSummary(project.id);
     res.json(summary);
   });
 
-  router.post("/companies/:companyId/projects", validate(createProjectSchema), async (req, res) => {
+  router.post(
+    "/companies/:companyId/projects",
+    companyScopeFromParam(rawDb, (req, companyId) => assertCompanyAccess(req, companyId)),
+    validate(createProjectSchema),
+    async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     type CreateProjectPayload = Parameters<typeof svc.create>[1] & {
       workspace?: Parameters<typeof svc.createWorkspace>[1];
     };
@@ -225,14 +264,13 @@ export function projectRoutes(db: Db) {
     res.status(201).json(hydratedProject ?? project);
   });
 
-  router.patch("/projects/:id", validate(updateProjectSchema), async (req, res) => {
+  router.patch("/projects/:id", projectScope(), validate(updateProjectSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     const body = { ...req.body };
     assertNoAgentHostWorkspaceCommandMutation(
       req,
@@ -285,26 +323,24 @@ export function projectRoutes(db: Db) {
     res.json(project);
   });
 
-  router.get("/projects/:id/workspaces", async (req, res) => {
+  router.get("/projects/:id/workspaces", projectScope(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     const workspaces = await svc.listWorkspaces(id);
     res.json(workspaces);
   });
 
-  router.post("/projects/:id/workspaces", validate(createProjectWorkspaceSchema), async (req, res) => {
+  router.post("/projects/:id/workspaces", projectScope(), validate(createProjectWorkspaceSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectProjectWorkspaceCommandPaths(req.body),
@@ -337,6 +373,7 @@ export function projectRoutes(db: Db) {
 
   router.patch(
     "/projects/:id/workspaces/:workspaceId",
+    projectScope(),
     validate(updateProjectWorkspaceSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -346,7 +383,6 @@ export function projectRoutes(db: Db) {
         res.status(404).json({ error: "Project not found" });
         return;
       }
-      assertCompanyAccess(req, existing.companyId);
       assertNoAgentHostWorkspaceCommandMutation(
         req,
         collectProjectWorkspaceCommandPaths(req.body),
@@ -395,7 +431,6 @@ export function projectRoutes(db: Db) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, project.companyId);
 
     const workspace = project.workspaces.find((entry) => entry.id === workspaceId) ?? null;
     if (!workspace) {
@@ -656,10 +691,10 @@ export function projectRoutes(db: Db) {
     });
   }
 
-  router.post("/projects/:id/workspaces/:workspaceId/runtime-services/:action", validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
-  router.post("/projects/:id/workspaces/:workspaceId/runtime-commands/:action", validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
+  router.post("/projects/:id/workspaces/:workspaceId/runtime-services/:action", projectScope(), validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
+  router.post("/projects/:id/workspaces/:workspaceId/runtime-commands/:action", projectScope(), validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
 
-  router.delete("/projects/:id/workspaces/:workspaceId", async (req, res) => {
+  router.delete("/projects/:id/workspaces/:workspaceId", projectScope(), async (req, res) => {
     const id = req.params.id as string;
     const workspaceId = req.params.workspaceId as string;
     const existing = await svc.getById(id);
@@ -667,7 +702,6 @@ export function projectRoutes(db: Db) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     const workspace = await svc.removeWorkspace(id, workspaceId);
     if (!workspace) {
       res.status(404).json({ error: "Project workspace not found" });
@@ -692,14 +726,13 @@ export function projectRoutes(db: Db) {
     res.json(workspace);
   });
 
-  router.delete("/projects/:id", async (req, res) => {
+  router.delete("/projects/:id", projectScope(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     const project = await svc.remove(id);
     if (!project) {
       res.status(404).json({ error: "Project not found" });

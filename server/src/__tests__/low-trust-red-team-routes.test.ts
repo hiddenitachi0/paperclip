@@ -522,7 +522,6 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
     await db.delete(issueApprovals);
     await db.delete(approvals);
     await db.delete(issueWorkProducts);
-    await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueComments);
@@ -535,7 +534,22 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
     await db.delete(agents);
     await db.delete(projects);
     await db.delete(companySkills);
-    await db.delete(companies);
+    // The wakeup()-driven finalization path (heartbeat.ts refreshContinuationSummaryForRun,
+    // called after a run's terminal status is persisted) keeps writing issueDocuments rows
+    // in a chain the test's `waitFor(status === succeeded|...)` doesn't await. That trailing
+    // write can land after the plain issueDocuments delete above and race the companies
+    // delete, tripping issue_documents_company_id_companies_id_fk. Retry the pair so a
+    // late-arriving row gets swept up. Same precedent as DUR-927.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await db.delete(issueDocuments);
+      try {
+        await db.delete(companies);
+        break;
+      } catch (error) {
+        if (attempt === 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
   });
 
   afterAll(async () => {

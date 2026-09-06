@@ -4966,6 +4966,16 @@ export interface HeartbeatServiceOptions {
    * scheduler tick, other unmigrated routes).
    */
   rawDb?: Db;
+  /**
+   * DUR-927: executeRun() is dispatched fire-and-forget (it outlives the
+   * request/caller by design -- see the comment above rawDb) so tests that
+   * poll heartbeatRuns.status for idleness before tearing down the DB can
+   * still race a run's trailing writes (issue comments, cascaded wakeups
+   * for dependents). Lets a test observe every dispatched run's promise so
+   * it can drain them with Promise.allSettled before cleanup instead of
+   * guessing a wait duration. No-op when unset.
+   */
+  onRunDispatched?: (run: Promise<unknown>) => void;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -10543,9 +10553,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (claimedRuns.length === 0) return [];
 
     for (const claimedRun of claimedRuns) {
-      void executeRun(claimedRun.id).catch((err) => {
+      const dispatched = executeRun(claimedRun.id).catch((err) => {
         logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
       });
+      options.onRunDispatched?.(dispatched);
     }
     return claimedRuns;
   }
@@ -15276,24 +15287,51 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
 
-        const run = await enqueueWakeup(agent.id, {
-          source: "timer",
-          triggerDetail: "system",
-          reason: "heartbeat_timer",
-          requestedByActorType: "system",
-          requestedByActorId: "heartbeat_scheduler",
-          contextSnapshot: {
-            source: "scheduler",
-            reason: "interval_elapsed",
-            now: now.toISOString(),
-          },
-        });
-        if (run) enqueued += 1;
-        else skipped += 1;
+        // DUR-3932: enqueueWakeup can throw (budget block, invokability race,
+        // inactive company, etc. -- see its `throw conflict(...)` paths) and this
+        // loop previously had no per-agent isolation. One agent stuck in a
+        // permanently-throwing state (e.g. a budget cap) would reject this
+        // iteration and silently abort the *rest* of the fleet's tick for every
+        // agent still to come in `allAgents` -- with no ORDER BY on that query,
+        // Postgres is free to reorder rows across plans/restarts, so which
+        // agents got starved (and how many) varied run to run. A restart could
+        // look like it "re-armed the fleet" purely by reshuffling row order away
+        // from the poison-pill agent, while that agent itself stayed stuck
+        // forever. Catch and log per agent so one broken agent can never take
+        // the rest of the fleet down with it, and so the failure is visible
+        // instead of a single easy-to-miss top-level "tick failed" log line.
+        try {
+          const run = await enqueueWakeup(agent.id, {
+            source: "timer",
+            triggerDetail: "system",
+            reason: "heartbeat_timer",
+            requestedByActorType: "system",
+            requestedByActorId: "heartbeat_scheduler",
+            contextSnapshot: {
+              source: "scheduler",
+              reason: "interval_elapsed",
+              now: now.toISOString(),
+            },
+          });
+          if (run) enqueued += 1;
+          else skipped += 1;
+        } catch (err) {
+          skipped += 1;
+          logger.error(
+            { err, agentId: agent.id, companyId: agent.companyId },
+            "heartbeat scheduler tick: enqueueWakeup failed for agent, continuing to next agent",
+          );
+        }
       }
 
-      const issueMonitors = await tickDueIssueMonitors(now);
-      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now);
+      const issueMonitors = await tickDueIssueMonitors(now).catch((err) => {
+        logger.error({ err }, "heartbeat scheduler tick: tickDueIssueMonitors failed");
+        return { checked: 0, triggered: 0, skipped: 0 };
+      });
+      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now).catch((err) => {
+        logger.error({ err }, "heartbeat scheduler tick: tickCustomerInboxHandoff failed");
+        return { checked: 0, reassigned: 0, skipped: 0 };
+      });
 
       return {
         checked: checked + issueMonitors.checked + customerInboxHandoffs.checked,

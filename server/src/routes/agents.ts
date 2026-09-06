@@ -217,9 +217,9 @@ export function agentRoutes(
     isRunLive: isHeartbeatRunLiveInThisProcess,
   });
   const issueApprovalsSvc = issueApprovalService(db);
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
   const instructions = agentInstructionsService();
-  const companySkills = companySkillService(db);
+  const companySkills = companySkillService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
@@ -1152,7 +1152,11 @@ export function agentRoutes(
       throw unprocessable("Agent shortname lookup requires companyId query parameter");
     }
 
-    const resolved = await svc.resolveByReference(companyId, raw);
+    // DUR-3927: this runs from router.param("id", ...), which fires before any
+    // route's scopeFromAgentParam()/company-scope middleware establishes scope --
+    // must use rawSvc (like the other pre-scope lookups in this file), never the
+    // scope-enforcing `svc`, which throws when called outside runInCompanyScope.
+    const resolved = await rawSvc.resolveByReference(companyId, raw);
     if (resolved.ambiguous) {
       throw conflict("Agent shortname is ambiguous in this company. Use the agent ID.");
     }

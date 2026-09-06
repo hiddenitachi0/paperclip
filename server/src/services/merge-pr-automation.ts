@@ -224,6 +224,34 @@ async function fetchPullRequestFacts(ref: GitHubRef, deps: GitHubDeps): Promise<
   };
 }
 
+/**
+ * DUR-3912: names of the check runs that may gate an automated merge decision.
+ * These are the jobs that make up the repo's required CI ("PR" from
+ * .github/workflows/pr.yml, "E2E" from its e2e job, and "Docker" from
+ * docker.yml) -- deliberately excluding the advisory commitperclip review bot
+ * ("review", from commitperclip-review.yml) and any other non-required check
+ * (other bots, ad-hoc workflow_dispatch runs, etc). Before this, `.every()`
+ * over every check run meant a single failing/flaky advisory check -- e.g. the
+ * commitperclip review job hard-failing because COMMITPERCLIP_KEY went
+ * missing -- could permanently block every merge in the repo. Required checks
+ * only, from here on.
+ */
+export const REQUIRED_CHECK_NAME_PATTERNS: RegExp[] = [
+  /^policy$/i,
+  /^typecheck \+ release registry$/i,
+  /^general tests\b/i,
+  /^verify$/i,
+  /^verify serialized server suites\b/i,
+  /^build$/i,
+  /^canary dry run$/i,
+  /^e2e$/i,
+  /^build-and-push$/i, // docker.yml
+];
+
+export function isRequiredCheckRun(name: string): boolean {
+  return REQUIRED_CHECK_NAME_PATTERNS.some((pattern) => pattern.test(name.trim()));
+}
+
 async function fetchCiStatus(ref: GitHubRef, headSha: string, deps: GitHubDeps): Promise<ConditionStatus> {
   const base = `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.name)}`;
   const [statusResult, checkRunsResult] = await Promise.all([
@@ -236,20 +264,21 @@ async function fetchCiStatus(ref: GitHubRef, headSha: string, deps: GitHubDeps):
   const checkRunsBody = checkRunsResult.body as Record<string, unknown>;
   const totalStatusCount = typeof statusBody.total_count === "number" ? statusBody.total_count : 0;
   const checkRuns = Array.isArray(checkRunsBody.check_runs) ? (checkRunsBody.check_runs as Array<Record<string, unknown>>) : [];
+  const requiredCheckRuns = checkRuns.filter((run) => typeof run.name === "string" && isRequiredCheckRun(run.name));
 
-  if (totalStatusCount === 0 && checkRuns.length === 0) {
-    // No CI configured at all for this commit -- absence of failure is not evidence of success.
+  if (totalStatusCount === 0 && requiredCheckRuns.length === 0) {
+    // No required CI has reported for this commit yet -- absence of failure is not evidence of success.
     return "unknown";
   }
 
   if (totalStatusCount > 0 && statusBody.state !== "success") return "not_met";
 
-  const allChecksGreen = checkRuns.every((run) => {
+  const allRequiredChecksGreen = requiredCheckRuns.every((run) => {
     const status = run.status;
     const conclusion = run.conclusion;
     return status === "completed" && (conclusion === "success" || conclusion === "neutral" || conclusion === "skipped");
   });
-  if (checkRuns.length > 0 && !allChecksGreen) return "not_met";
+  if (requiredCheckRuns.length > 0 && !allRequiredChecksGreen) return "not_met";
 
   return "met";
 }

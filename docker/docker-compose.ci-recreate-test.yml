@@ -1,0 +1,37 @@
+# CI-only override used exclusively by
+# scripts/deploy-runner-recreate-acceptance.sh (DUR-297) -- never combine
+# this with docker-compose.prod.yml for a real deploy.
+#
+# Layered on top of docker-compose.yml + docker-compose.prod.yml so the
+# acceptance test boots the stack the same way a real deploy-runner.sh
+# compose_recreate does (same base + prod overlay), with two things tuned
+# down purely for CI turnaround:
+#
+#  - PAPERCLIP_DEPLOYMENT_MODE=local_trusted + HOST=127.0.0.1 give any
+#    request with no Authorization header a zero-setup instance-admin board
+#    actor (see server/src/middleware/auth.ts's "local_implicit" actor).
+#    That lets the test script create a company/project/agent and file+
+#    approve a deploy approval without an auth-bootstrap dance -- the same
+#    pattern tests/e2e already relies on. Never used for a real deploy,
+#    where "authenticated" mode and a real board session are required.
+#  - PAPERCLIP_SHUTDOWN_DRAIN_TIMEOUT_MS + stop_grace_period are turned down
+#    from the 240s/260s production defaults (docker-compose.prod.yml) so a
+#    passing run doesn't burn minutes of CI time waiting out a drain window
+#    sized for real agent turns. Kept in the same relative order (grace
+#    period a few seconds above the drain timeout) as prod for the same
+#    reason documented there: Docker must not SIGKILL before the app's own
+#    drain wait finishes.
+#  - Ports are unpublished: every call in the test script reaches the
+#    container via `docker exec` (same network namespace as the app's own
+#    127.0.0.1 bind), exactly like scripts/deploy-runner.sh itself does, so
+#    nothing needs a host-published port.
+services:
+  server:
+    stop_grace_period: 75s
+    environment:
+      PAPERCLIP_DEPLOYMENT_MODE: "local_trusted"
+      HOST: "127.0.0.1"
+      PAPERCLIP_SHUTDOWN_DRAIN_TIMEOUT_MS: "60000"
+    ports: !override []
+  db:
+    ports: !override []

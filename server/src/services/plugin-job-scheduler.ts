@@ -1,4 +1,22 @@
 /**
+ * DUR-352 (DUR-277 Wave 6): this scheduler's tick, and the event-driven
+ * plugin job-coordinator (`app.ts`'s `jobCoordinator.start()`) that reacts
+ * to the same table, both deliberately stay bypass-scoped forever -- not a
+ * candidate for a future runInCompanyScope/per-row wave. `plugin_jobs` has no
+ * `company_id` column at all (verified against
+ * packages/db/src/schema/plugin_jobs.ts) -- job scheduling here is plugin-
+ * installation-scoped, not company-scoped, so there is no companyId to
+ * establish a per-row scope against even in principle. `plugin_job_runs`
+ * *does* have a `company_id` column (with its own index), but it's only
+ * populated via `plugin-registry.ts`'s `createJobRun()`, whose sole caller
+ * today is a test (`plugin-tenant-isolation.test.ts`) -- this scheduler
+ * creates runs via `plugin-job-store.ts`'s `createRun()`, which never sets
+ * it. So the run-history table is half-wired for company-scoping, not
+ * absent; that's still moot for this tick's write path today since nothing
+ * here populates or reads that column. See the DUR-277 design doc §2 (one
+ * of the four consumers "no per-company boundary at all" -- true for
+ * `plugin_jobs`, the table this scheduler actually keys off).
+ *
  * PluginJobScheduler — tick-based scheduler for plugin scheduled jobs.
  *
  * The scheduler is the central coordinator for all plugin cron jobs. It

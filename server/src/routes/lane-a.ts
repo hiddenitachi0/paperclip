@@ -8,11 +8,14 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 /**
  * Lane A routes (DUR-217): `POST /api/lane-a/:agentId/messages`, a direct
  * Anthropic Messages API call scoped to a single opted-in agent persona. No
- * agent runtime, no tool use, no filesystem, no CLI subprocess — contrast
- * `board-chat.ts`, which spawns a full `claude` CLI subprocess and is
- * therefore restricted to the local-trusted single-operator deployment mode.
- * Lane A is a safe multi-tenant primitive by construction: it can only read
- * the prompt + optional caller-supplied context and write text back.
+ * agent runtime, no filesystem, no CLI subprocess — contrast `board-chat.ts`,
+ * which spawns a full `claude` CLI subprocess and is therefore restricted to
+ * the local-trusted single-operator deployment mode. Lane A is a safe
+ * multi-tenant primitive by construction: it can only read the prompt +
+ * optional caller-supplied context, call the agent's own Tools-library
+ * grants through a capped synchronous tool-use loop (DUR-3910, at most
+ * `LANE_A_MAX_TOOL_CALLS` tool calls per message, no approval card), and
+ * write text back.
  */
 export function laneARoutes(db: Db) {
   const router = Router();
@@ -48,6 +51,7 @@ export function laneARoutes(db: Db) {
         companyId: targetAgent.companyId,
         name: targetAgent.name,
         laneAEnabled: targetAgent.laneAEnabled,
+        mcpToolIds: (targetAgent.mcpToolIds as string[] | null) ?? [],
       },
       requester,
       message,

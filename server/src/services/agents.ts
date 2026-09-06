@@ -262,7 +262,7 @@ export interface AgentServiceOptions {
 
 export function agentService(db: Db, options: AgentServiceOptions = {}) {
   const rawDb = options.rawDb ?? db;
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
 
   function currentUtcMonthWindow(now = new Date()) {
     const year = now.getUTCFullYear();

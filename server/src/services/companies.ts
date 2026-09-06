@@ -28,6 +28,7 @@ import {
   companyMemberships,
   companySkills,
   documents,
+  withCompanyScope,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { environmentService } from "./environments.js";
@@ -48,7 +49,13 @@ const SYSTEM_COMPANY_ACTOR: CompanyActivityActor = {
   runId: null,
 };
 
-export function companyService(db: Db) {
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db`, a no-op for every
+// unmigrated caller. routes/costs.ts, once wired through
+// createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+// distinct `rawDb`, since `update`'s db.transaction() below is not
+// supported through that proxy (see packages/db/src/company-scope.ts) --
+// it opens its connection via withCompanyScope instead.
+export function companyService(db: Db, rawDb: Db = db) {
   const ISSUE_PREFIX_FALLBACK = "CMP";
   const environmentsSvc = environmentService(db);
   const heartbeat = heartbeatService(db);
@@ -275,7 +282,7 @@ export function companyService(db: Db) {
       data: Partial<typeof companies.$inferInsert> & { logoAssetId?: string | null },
       actor: CompanyActivityActor = SYSTEM_COMPANY_ACTOR,
     ) => {
-      const result = await db.transaction(async (tx) => {
+      const result = await withCompanyScope(rawDb, id, async (tx) => {
         const existing = await getCompanyQuery(tx)
           .where(eq(companies.id, id))
           .then((rows) => rows[0] ?? null);
