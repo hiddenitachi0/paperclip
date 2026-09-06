@@ -58,6 +58,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({ decide: vi.fn() }));
 
 const mockResolveProjectDeployBranchesByProjectId = vi.hoisted(() => vi.fn());
+const mockResolveProjectDeployWorkspaceId = vi.hoisted(() => vi.fn(async () => null as string | null));
 const mockGhFetch = vi.hoisted(() => vi.fn());
 
 function registerModuleMocks() {
@@ -78,6 +79,10 @@ function registerModuleMocks() {
     resolveProjectDeployBranches: vi.fn(),
     resolveProjectDeployBranchesByProjectId: mockResolveProjectDeployBranchesByProjectId,
   }));
+  vi.doMock("../services/deploy-workspace.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/deploy-workspace.js")>("../services/deploy-workspace.js");
+    return { ...actual, resolveProjectDeployWorkspaceId: mockResolveProjectDeployWorkspaceId };
+  });
   vi.doMock("../services/github-fetch.js", () => ({
     ghFetch: mockGhFetch,
     gitHubApiBase: () => "https://api.github.com",
@@ -175,6 +180,7 @@ describe("DUR-284: deploy approval branch stamp", () => {
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../services/deploy-branches.js");
     vi.doUnmock("../services/github-fetch.js");
+    vi.doUnmock("../services/deploy-workspace.js");
     vi.doUnmock("../routes/approvals.js");
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
@@ -209,7 +215,64 @@ describe("DUR-284: deploy approval branch stamp", () => {
       mirrorBranch: "master",
       projectId: PROJECT_ID,
     });
+    mockResolveProjectDeployWorkspaceId.mockResolvedValue(null);
   });
+
+  it(
+    "DUR-3926: stamps the project's deploy workspace over a caller-supplied workspaceId",
+    async () => {
+      const DEPLOY_WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
+      mockResolveProjectDeployWorkspaceId.mockResolvedValue(DEPLOY_WORKSPACE_ID);
+      mockGhFetch
+        .mockResolvedValueOnce(new Response(JSON.stringify({ status: "ahead" }), { status: 200 }))
+        .mockResolvedValueOnce(branchesWhereHeadResponse(["custom"]));
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app)
+        .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
+        .send(deployBody({ workspaceId: "44444444-4444-4444-8444-444444444444" }));
+
+      expect(res.status).toBe(201);
+      const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
+      expect(createdPayload.workspaceId).toBe(DEPLOY_WORKSPACE_ID);
+      expect(mockResolveProjectDeployWorkspaceId).toHaveBeenCalledWith(expect.anything(), PROJECT_ID);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "DUR-3926: keeps the caller's workspaceId when the project declares no deploy workspace",
+    async () => {
+      mockResolveProjectDeployWorkspaceId.mockResolvedValue(null);
+      mockGhFetch
+        .mockResolvedValueOnce(new Response(JSON.stringify({ status: "ahead" }), { status: 200 }))
+        .mockResolvedValueOnce(branchesWhereHeadResponse(["custom"]));
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post("/api/companies/22222222-2222-4222-8222-222222222222/approvals").send(deployBody());
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create.mock.calls[0][1].payload.workspaceId).toBe(WORKSPACE_ID);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "DUR-3926: refuses a deploy-looking kind that is not \"deploy\" with a plain-language 422",
+    async () => {
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app)
+        .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
+        .send({ type: "request_board_approval", payload: { kind: "deploy_release", title: "Deploy it", note: "please" } });
+
+      expect(res.status).toBe(422);
+      expect(res.body.error).toContain('kind "deploy"');
+      expect(res.body.error).toContain("deploy_release");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
 
   it(
     "stamps sourceBranch/deployBranch when GitHub confirms the commit is the tip of the deploy branch",
