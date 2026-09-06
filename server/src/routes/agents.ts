@@ -1153,7 +1153,11 @@ export function agentRoutes(
       throw unprocessable("Agent shortname lookup requires companyId query parameter");
     }
 
-    const resolved = await svc.resolveByReference(companyId, raw);
+    // DUR-3927: this runs from router.param("id", ...), which fires before any
+    // route's scopeFromAgentParam()/company-scope middleware establishes scope --
+    // must use rawSvc (like the other pre-scope lookups in this file), never the
+    // scope-enforcing `svc`, which throws when called outside runInCompanyScope.
+    const resolved = await rawSvc.resolveByReference(companyId, raw);
     if (resolved.ambiguous) {
       throw conflict("Agent shortname is ambiguous in this company. Use the agent ID.");
     }
