@@ -40,6 +40,11 @@ const SECRET_TEXT_HINTS = [
   "ghu_",
   "ghs_",
   "ghr_",
+  // DUR-370: fine-grained GitHub PATs (`github_pat_<id>_<secret>`) contain none
+  // of the hints above, so a line carrying only that token (and no ".") would
+  // skip redactSensitiveText entirely. The matching regex lives in
+  // adapter-utils command-redaction.ts; this hint just lets it run.
+  "github_pat_",
 ] as const;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
 
