@@ -32,6 +32,7 @@ import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
 import { healthApi } from "../api/health";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { shouldSyncCompanySelectionFromRoute } from "../lib/company-selection";
+import { setLastBoardPrefix } from "../lib/last-board";
 import {
   applyMainContentScrollTop,
   NavigationScrollMemory,
@@ -194,6 +195,12 @@ export function Layout() {
       navigate(`/${matchedCompany.issuePrefix}${suffix}${location.search}`, { replace: true });
       return;
     }
+
+    // Record the board actually being viewed, independent of `selectedCompany`
+    // (which shouldSyncCompanySelectionFromRoute can deliberately leave stale
+    // after a manual switch). Bare-URL redirects (App.tsx) need this to land
+    // back on the board the operator was on, not a stale selection (DUR-3933).
+    setLastBoardPrefix(matchedCompany.issuePrefix);
 
     if (
       shouldSyncCompanySelectionFromRoute({

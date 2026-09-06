@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Layout } from "./Layout";
+import { getLastBoardPrefix } from "../lib/last-board";
 
 const mockHealthApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -252,6 +253,7 @@ describe("Layout", () => {
     mockSidebarState.collapsed = false;
     mockSidebarState.peeking = false;
     mockSetPeeking.mockClear();
+    window.localStorage.removeItem("paperclip.lastBoardPrefix");
   });
 
   afterEach(() => {
@@ -284,6 +286,34 @@ describe("Layout", () => {
     expect(container.textContent).not.toContain(
       "Sign-in is required and this instance is intended for private-network access.",
     );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  // DUR-3933: bare board URLs (e.g. a bookmarked /skills) are re-prefixed
+  // using the board the operator was last actually on, tracked separately
+  // from `selectedCompany` (which stops syncing from the route after a
+  // manual company switch — see shouldSyncCompanySelectionFromRoute).
+  it("records the current route's company prefix as the last-visited board", async () => {
+    currentPathname = "/PAP/dashboard";
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Layout />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(getLastBoardPrefix()).toBe("PAP");
 
     await act(async () => {
       root.unmount();
