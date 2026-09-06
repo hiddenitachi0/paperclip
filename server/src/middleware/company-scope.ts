@@ -68,6 +68,26 @@ export function companyScope(rawDb: Db, resolveCompanyId: CompanyIdResolver): Re
               if (finished) return;
               reject(new ConnectionReleaseUnsafeError());
             });
+            // DUR-3931: `finish`/`close` are one-shot events, so a response
+            // that already ended while this middleware was resolving the
+            // companyId (an async DB lookup for (b)-category routes) or
+            // waiting on `reserve()` for a free pool connection would never
+            // fire either listener -- leaving this promise, and the reserved
+            // connection behind it, pending forever. That is the same
+            // permanent leak the abandon-on-abort path used to cause, just
+            // reached through a narrower window (and a window that widens
+            // precisely when the pool is already contended, so it compounds).
+            // Settle from the response's current state instead of waiting
+            // for an event that has already come and gone.
+            if (res.writableFinished) {
+              finished = true;
+              resolve();
+              return;
+            }
+            if (res.closed || res.destroyed) {
+              reject(new ConnectionReleaseUnsafeError());
+              return;
+            }
             next();
           }),
         );
@@ -153,6 +173,14 @@ export function companyScopeBypass(rawDb: Db, resolveOpts: CompanyScopeBypassOpt
           new Promise<void>((resolve) => {
             res.once("finish", resolve);
             res.once("close", resolve);
+            // DUR-3931: see the matching comment in companyScope() -- both
+            // events are one-shot, so a response that already ended before
+            // these listeners were attached would leave the reserved
+            // connection pending forever.
+            if (res.writableFinished || res.closed || res.destroyed) {
+              resolve();
+              return;
+            }
             next();
           }),
         ),

@@ -5,6 +5,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createDb } from "./client.js";
 import {
+  ConnectionFencedError,
   ConnectionReleaseUnsafeError,
   createRequestScopedDb,
   requestCompanyScopeStorage,
@@ -53,7 +54,11 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
 
   /** A single-connection db, so reserve()/release() is provably the same physical connection every time. */
   function createSingleConnectionDb(): Db {
-    const sql = postgres(connectionString, { max: 1 });
+    // onnotice: the fenced-recycle path (DUR-3931) issues an unconditional
+    // ROLLBACK, which raises a harmless 25P01 notice when no transaction was
+    // open. createDb() filters it out for the app pool; this hand-rolled test
+    // pool has to do the same or it spams the test output.
+    const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
     return drizzlePg(sql, {}) as unknown as Db;
   }
 
@@ -135,34 +140,53 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
   // -- surfaced as Postgres "bind message supplies N parameters, but
   // prepared statement requires M" errors that crashed the process. This
   // proves the fix at the primitive level: when `fn` signals
-  // ConnectionReleaseUnsafeError, runInCompanyScope must abandon the
-  // connection rather than recycle it.
-  it("abandons (never releases) the reserved connection when fn() rejects with ConnectionReleaseUnsafeError", async () => {
+  // ConnectionReleaseUnsafeError, the orphaned handler must be fenced off the
+  // connection before it goes back to the pool.
+  //
+  // DUR-3931 revised what "must" means here. The original fix abandoned the
+  // connection outright -- it was never released, so it could never be
+  // interleaved with. That is safe but leaks one pool slot per aborted
+  // request, and a browser aborts every in-flight fetch on navigate/reload,
+  // so `max` reloads wedged the server permanently (postgres.js's reserve()
+  // has no timeout, so later requests hang rather than fail). The connection
+  // is now fenced -- the orphan's later queries throw instead of reaching the
+  // wire -- and then rolled back, reset and recycled. This test asserts both
+  // halves: it comes back to the pool, AND the orphan cannot touch it.
+  it("fences the orphaned handler off the reserved connection and recycles it when fn() rejects with ConnectionReleaseUnsafeError", async () => {
     const singleConnDb = createSingleConnectionDb();
     const companyA = await seedCompany("A");
 
     try {
+      let capturedScope!: NonNullable<ReturnType<typeof requestCompanyScopeStorage.getStore>>;
       const result = await runInCompanyScope(singleConnDb, companyA.id, async () => {
+        capturedScope = requestCompanyScopeStorage.getStore()!;
         throw new ConnectionReleaseUnsafeError();
       });
       expect(result).toBeUndefined();
 
-      // The pool has exactly one physical connection. If it were released
-      // (instead of abandoned), a fresh reserve() would resolve almost
-      // immediately; since it must remain abandoned, reserve() should still
-      // be pending after a short wait.
-      let resolved = false;
-      const reservePromise = singleConnDb.$client
-        .reserve()
-        .then((reserved) => {
-          resolved = true;
-          reserved.release();
-        })
-        .catch(() => {});
+      // The pool has exactly one physical connection. It must be back: a
+      // fresh reserve() resolves promptly instead of hanging forever.
+      const reserved = await Promise.race([
+        singleConnDb.$client.reserve(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+      ]);
+      expect(reserved).not.toBeNull();
+      // ...with no leftover claim from the aborted request.
+      const rows = await reserved!`select current_setting('app.current_company_id', true) as claim`;
+      expect(rows[0]?.claim ?? "").toBe("");
+      reserved!.release();
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(resolved).toBe(false);
-      void reservePromise;
+      // ...and the orphaned handler can no longer reach it.
+      const scoped = createRequestScopedDb(singleConnDb);
+      const late = await requestCompanyScopeStorage
+        .run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`))
+        .then(
+          () => null,
+          (err: unknown) => err,
+        );
+      expect(late).not.toBeNull();
+      const fenced = late instanceof ConnectionFencedError ? late : (late as { cause?: unknown }).cause;
+      expect(fenced).toBeInstanceOf(ConnectionFencedError);
     } finally {
       await singleConnDb.$client.end({ timeout: 0 });
     }
@@ -249,7 +273,11 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
   });
 
   function createSingleConnectionDb(): Db {
-    const sql = postgres(connectionString, { max: 1 });
+    // onnotice: the fenced-recycle path (DUR-3931) issues an unconditional
+    // ROLLBACK, which raises a harmless 25P01 notice when no transaction was
+    // open. createDb() filters it out for the app pool; this hand-rolled test
+    // pool has to do the same or it spams the test output.
+    const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
     return drizzlePg(sql, {}) as unknown as Db;
   }
 
