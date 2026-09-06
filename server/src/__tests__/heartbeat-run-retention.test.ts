@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -201,4 +201,75 @@ describeEmbeddedPostgres("heartbeat run retention", () => {
       .where(eq(financeEvents.agentId, agentId));
     expect(financeRow?.heartbeatRunId).toBeNull();
   });
+
+  // drizzle wraps the driver error as "Failed query: ..." and keeps Postgres's
+  // own message ("canceling statement due to statement timeout") on `cause`.
+  async function expectStatementTimeout(promise: Promise<unknown>): Promise<void> {
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeDefined();
+    const cause = caught instanceof Error ? (caught.cause ?? caught) : caught;
+    expect(String((cause as { message?: string })?.message)).toMatch(/statement timeout/i);
+  }
+
+  it("lifts the app pool's DUR-280 statement_timeout for its own batch transaction", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    const staleCreatedAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    const runIds = await Promise.all(
+      Array.from({ length: 4 }, () => seedRun(companyId, agentId, staleCreatedAt)),
+    );
+
+    // A pool whose per-statement ceiling (200ms) is far below what one batch
+    // will take once every deleted row sleeps 150ms in a BEFORE DELETE trigger
+    // (4 rows -> ~600ms). Built through createDb so the override travels the
+    // same path production would use.
+    const previousOverride = process.env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS;
+    process.env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS = "200";
+    const tightDb = createDb(tempDb!.connectionString, "paperclip-retention-test");
+    if (previousOverride === undefined) delete process.env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS;
+    else process.env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS = previousOverride;
+
+    await db.execute(sql`
+      CREATE OR REPLACE FUNCTION retention_test_slow_delete() RETURNS trigger AS $$
+      BEGIN
+        PERFORM pg_sleep(0.15);
+        RETURN OLD;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await db.execute(sql`
+      CREATE TRIGGER retention_test_slow_delete
+      BEFORE DELETE ON heartbeat_runs FOR EACH ROW
+      EXECUTE FUNCTION retention_test_slow_delete()
+    `);
+
+    try {
+      // Control: the same DELETE issued directly on the 200ms pool is killed
+      // by the ceiling -- proves the ceiling is real and the trigger is slow
+      // enough that the sweep below only succeeds because it lifts it.
+      await expectStatementTimeout(
+        tightDb.execute(sql`DELETE FROM heartbeat_runs WHERE created_at < ${new Date().toISOString()}`),
+      );
+      const stillThere = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+      expect(stillThere).toHaveLength(runIds.length);
+
+      const deleted = await pruneHeartbeatRuns(tightDb, 30, runIds.length);
+      expect(deleted).toBe(runIds.length);
+      const remaining = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+      expect(remaining).toHaveLength(0);
+
+      // The lift was transaction-local: a fresh statement on the same pool is
+      // back under the 200ms ceiling.
+      await expectStatementTimeout(tightDb.execute(sql`SELECT pg_sleep(0.5)`));
+    } finally {
+      await db.execute(sql`DROP TRIGGER IF EXISTS retention_test_slow_delete ON heartbeat_runs`);
+      await db.execute(sql`DROP FUNCTION IF EXISTS retention_test_slow_delete()`);
+      await tightDb.$client.end({ timeout: 5 });
+    }
+  }, 20_000);
 });

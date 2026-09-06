@@ -108,6 +108,33 @@ function onAppPoolNotice(notice: unknown): void {
   console.log(notice);
 }
 
+// DUR-280: per-statement ceiling (ms) applied to every connection in the app
+// pool. 30s is deliberately request-shaped: nothing a request handler or a
+// heartbeat transaction legitimately runs takes anywhere near that long, so
+// hitting it means a wedged statement (lock wait on a stuck transaction, a
+// runaway scan) that should fail rather than pin a pool slot forever.
+// Overridable via PAPERCLIP_DB_STATEMENT_TIMEOUT_MS (same strict parsing as
+// PAPERCLIP_DB_POOL_MAX); "0" disables the ceiling, matching Postgres's own
+// meaning for statement_timeout = 0. Known-long maintenance paths do not
+// need the override -- they lift the ceiling for their own transaction
+// (see heartbeat-run-retention.ts).
+export const DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS = 30_000;
+
+export function getAppPoolStatementTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS;
+  const trimmed = raw.trim();
+  const parsed = /^\d+$/.test(trimmed) ? Number.parseInt(trimmed, 10) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.error(
+      `createDb: ignoring invalid PAPERCLIP_DB_STATEMENT_TIMEOUT_MS=${JSON.stringify(raw)}; ` +
+        `falling back to ${DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS}`,
+    );
+    return DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
 // DUR-294: every CLI command and one-off script that calls createDb()
 // directly against DATABASE_URL used to fall back to this same
 // "paperclip-app" tag, making it indistinguishable from the live server's
@@ -130,7 +157,21 @@ export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_
     // noisy 25P01 "no active transaction" notices emitted on reset.
     max: getAppPoolMax(),
     onnotice: onAppPoolNotice,
-    connection: { application_name: applicationName },
+    // DUR-280: without these, a stuck/blocked query or an exhausted pool
+    // queues new requests forever with no error and no recovery -- every
+    // request handler that touches the DB (including auth) hangs
+    // indefinitely instead of failing fast. Bound every stage so a DB-side
+    // problem surfaces as an error the app can log/retry rather than an
+    // unbounded hang.
+    //
+    // statement_timeout is a per-connection *default* for this pool, not a
+    // hard ceiling: a deliberately long-running maintenance path (e.g. the
+    // heartbeat_runs retention sweep) can lift it for its own transaction with
+    // `SET LOCAL statement_timeout`. Backups/restores and the core migration
+    // runner use their own postgres() clients and are not affected at all.
+    connect_timeout: 10,
+    idle_timeout: 30,
+    connection: { application_name: applicationName, statement_timeout: getAppPoolStatementTimeoutMs() },
     ...(unscopedAccessHook
       ? { debug: unscopedAccessHook.debug, onclose: unscopedAccessHook.clearConnection }
       : {}),
