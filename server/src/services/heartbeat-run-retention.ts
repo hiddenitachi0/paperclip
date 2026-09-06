@@ -12,6 +12,26 @@ const DEFAULT_DELETE_BATCH_SIZE = 5_000;
 const MAX_ITERATIONS = 200;
 
 /**
+ * DUR-280: the app pool applies a request-shaped 30s `statement_timeout` to
+ * every connection (see createDb). One retention batch is the single
+ * legitimate app-pool statement that can exceed it: three of the five FK
+ * columns pointing at heartbeat_runs.id have no leading-column index
+ * (`agent_task_sessions.last_run_id` has none at all;
+ * `cost_events.heartbeat_run_id` and `finance_events.heartbeat_run_id` only
+ * trail `company_id` in a composite), so Postgres's `ON DELETE SET NULL`
+ * triggers do an O(N) scan of each of those tables *per deleted row*. On a
+ * busy instance a 5,000-row batch can therefore plausibly run past 30s, and
+ * if it did the sweep would fail on its first batch every hour and never
+ * make progress -- silently defeating the DUR-319 secret-retention bound.
+ *
+ * So the sweep lifts the ceiling for its own transaction only. 10 minutes is
+ * still finite -- a batch truly wedged on a lock wait is released, and the
+ * connection goes back to the pool -- but is ample for a full batch even
+ * with the per-row scans above.
+ */
+export const HEARTBEAT_RUN_RETENTION_STATEMENT_TIMEOUT_MS = 10 * 60 * 1_000;
+
+/**
  * DUR-352 (DUR-277 Wave 6): this file deliberately stays bypass-scoped
  * forever, not a candidate for a future runInCompanyScope/per-row wave. Both
  * `pruneHeartbeatRuns` and `startHeartbeatRunRetention` take a plain `Db`
@@ -56,17 +76,25 @@ export async function pruneHeartbeatRuns(
   let iterations = 0;
 
   while (iterations < MAX_ITERATIONS) {
-    const rows = await db.execute(sql`
-      WITH batch AS (
-        SELECT id FROM heartbeat_runs
-        WHERE created_at < ${cutoffIso}
-        ORDER BY created_at
-        LIMIT ${batchSize}
-      )
-      DELETE FROM heartbeat_runs
-      WHERE id IN (SELECT id FROM batch)
-      RETURNING id
-    `);
+    const rows = await db.transaction(async (tx) => {
+      // `set_config(..., is_local => true)` is SET LOCAL: it lasts until this
+      // transaction ends, so the connection returns to the pool with the
+      // DUR-280 default restored. (Plain `SET` cannot take a bind parameter.)
+      await tx.execute(
+        sql`SELECT set_config('statement_timeout', ${String(HEARTBEAT_RUN_RETENTION_STATEMENT_TIMEOUT_MS)}, true)`,
+      );
+      return tx.execute(sql`
+        WITH batch AS (
+          SELECT id FROM heartbeat_runs
+          WHERE created_at < ${cutoffIso}
+          ORDER BY created_at
+          LIMIT ${batchSize}
+        )
+        DELETE FROM heartbeat_runs
+        WHERE id IN (SELECT id FROM batch)
+        RETURNING id
+      `);
+    });
     const deleted = Array.isArray(rows) ? rows.length : 0;
 
     totalDeleted += deleted;

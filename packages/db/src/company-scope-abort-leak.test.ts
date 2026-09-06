@@ -171,8 +171,13 @@ describeEmbeddedPostgres("DUR-3931: aborted requests must not permanently burn r
       // The connection is back in the pool now, so the orphan's late query
       // must fail loudly rather than interleave with whoever holds it next.
       // drizzle wraps driver errors, so the fence shows up as the `cause`.
-      const late = await requestCompanyScopeStorage
-        .run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`))
+      // The request-scoped proxy (DUR-932) may reject this synchronously at
+      // property access; the connection-level fence (DUR-3931) rejects the
+      // query promise. Normalise both into a rejection so either fence counts.
+      const late = await Promise.resolve()
+        .then(() =>
+          requestCompanyScopeStorage.run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`)),
+        )
         .then(
           () => null,
           (err: unknown) => err,

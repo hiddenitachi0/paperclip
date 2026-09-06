@@ -178,8 +178,13 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
 
       // ...and the orphaned handler can no longer reach it.
       const scoped = createRequestScopedDb(singleConnDb);
-      const late = await requestCompanyScopeStorage
-        .run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`))
+      // The request-scoped proxy (DUR-932) may reject this synchronously at
+      // property access; the connection-level fence (DUR-3931) rejects the
+      // query promise. Normalise both into a rejection so either fence counts.
+      const late = await Promise.resolve()
+        .then(() =>
+          requestCompanyScopeStorage.run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`)),
+        )
         .then(
           () => null,
           (err: unknown) => err,
@@ -717,6 +722,43 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
           throw new Error("should never run");
         }),
       ).toThrow(/tx\.transaction\(\) was called after .* already released it/);
+    },
+    10_000,
+  );
+
+  it(
+    // DUR-932: this is the actual shape of the PR #218 e2e crash --
+    // listWakeableBlockedDependents/logActivity were called on the bare
+    // `db` proxy (createRequestScopedDb), never through
+    // withCompanyScope/tx.transaction(), from a fire-and-forget
+    // continuation (`void (async () => { ... })()` in routes/issues.ts)
+    // that the request handler never awaited. DUR-926's guard only covers
+    // the withCompanyScope/tx.transaction() reuse path (see the two tests
+    // above); the bare-proxy path had no equivalent check, so a query
+    // issued this way after release silently ran on a connection the pool
+    // may have already handed to an unrelated request, corrupting the
+    // Postgres extended-query protocol for both ("bind message supplies N
+    // parameters, but prepared statement requires M") instead of failing
+    // loudly. This proves createRequestScopedDb itself now refuses.
+    "createRequestScopedDb throws instead of reusing a connection its owning runInCompanyScope call already released",
+    async () => {
+      const companyA = await seedCompany("bare-proxy-after-release");
+      let capturedScope: unknown;
+
+      await runInCompanyScope(db, companyA.id, async () => {
+        capturedScope = requestCompanyScopeStorage.getStore();
+      });
+
+      // By now runInCompanyScope's finally has already reset+released the
+      // connection. Simulate the orphaned continuation re-entering the
+      // captured scope and calling straight through the request-scoped
+      // proxy, exactly like an un-awaited `logActivity(db, ...)` would.
+      await requestCompanyScopeStorage.run(capturedScope as never, async () => {
+        const scopedDb = createRequestScopedDb(db);
+        expect(() => scopedDb.select({ name: companies.name }).from(companies)).toThrow(
+          /already released it \(DUR-932\)/,
+        );
+      });
     },
     10_000,
   );
