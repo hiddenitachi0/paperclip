@@ -32,6 +32,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { deleteAfterLateWritesDrain } from "./helpers/late-write-teardown.js";
 import { parseWakePayloadFromMessage } from "./helpers/wake-message.js";
 import { errorHandler } from "../middleware/index.js";
 import { agentRoutes } from "../routes/agents.js";
@@ -63,19 +64,13 @@ async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 
 }
 
 async function deleteHeartbeatRunsAndWakeupsAfterActivityLogDrains(db: Db) {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    await db.delete(activityLog);
-    try {
+  await deleteAfterLateWritesDrain(
+    () => db.delete(activityLog),
+    async () => {
       await db.delete(heartbeatRuns);
       await db.delete(agentWakeupRequests);
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw lastError;
+    },
+  );
 }
 
 function expectNoCanary(value: unknown, ...markers: string[]) {
@@ -530,8 +525,19 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
     await db.delete(heartbeatRunEvents);
     await deleteHeartbeatRunsAndWakeupsAfterActivityLogDrains(db);
     await db.delete(issues);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
+    // Same DUR-927 race as the heartbeat_runs drain above, one level down: the
+    // fire-and-forget executeRun()/wakeup continuations keep writing
+    // activity_log (and agent_runtime_state, via heartbeat.ts
+    // ensureRuntimeState) after the test's waitFor() has returned, so a row can
+    // land between the two deletes below and trip
+    // activity_log_agent_id_agents_id_fk on `delete from "agents"`.
+    await deleteAfterLateWritesDrain(
+      async () => {
+        await db.delete(activityLog);
+        await db.delete(agentRuntimeState);
+      },
+      () => db.delete(agents),
+    );
     await db.delete(projects);
     await db.delete(companySkills);
     // The wakeup()-driven finalization path (heartbeat.ts refreshContinuationSummaryForRun,
@@ -540,16 +546,11 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
     // write can land after the plain issueDocuments delete above and race the companies
     // delete, tripping issue_documents_company_id_companies_id_fk. Retry the pair so a
     // late-arriving row gets swept up. Same precedent as DUR-927.
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await db.delete(issueDocuments);
-      try {
-        await db.delete(companies);
-        break;
-      } catch (error) {
-        if (attempt === 4) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    }
+    await deleteAfterLateWritesDrain(
+      () => db.delete(issueDocuments),
+      () => db.delete(companies),
+      { attempts: 5, delayMs: 50 },
+    );
   });
 
   afterAll(async () => {
