@@ -859,7 +859,13 @@ export async function startServer(): Promise<StartedServer> {
     // (e.g. server/src/routes/*.ts each build their own with the route's own
     // db) -- flipping it here does not affect route handlers.
     const schedulerDb = createRequestScopedDb(db as any);
-    const heartbeat = heartbeatService(schedulerDb as any, { pluginWorkerManager });
+    // DUR-257/DUR-381: executeRun() outlives the scheduler tick's request
+    // scope, and its trailing steps (releaseIssueExecutionAndPromote ->
+    // withCompanyScope(rawDb, ...)) must open their own connection once that
+    // scope is released. Without `rawDb` here the service falls back to the
+    // proxy, whose .transaction() refuses -- every affected run then stayed
+    // "running" forever with a dead child (11 such runs in 2h on 2026-09-06).
+    const heartbeat = heartbeatService(schedulerDb as any, { pluginWorkerManager, rawDb: db as any });
     heartbeatDrainState = {
       isDraining: false,
       getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
