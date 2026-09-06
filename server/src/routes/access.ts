@@ -2619,8 +2619,8 @@ export function accessRoutes(
   const db = createRequestScopedDb(rawDb);
   const router = Router();
   const access = accessService(db, rawDb);
-  const boardAuth = boardAuthService(db);
-  const agents = agentService(db);
+  const boardAuth = boardAuthService(db, rawDb);
+  const agents = agentService(db, { rawDb });
   const routeInviteResolutionNetwork = opts.inviteResolutionNetwork
     ? { ...defaultInviteResolutionNetwork, ...opts.inviteResolutionNetwork }
     : inviteResolutionNetwork;

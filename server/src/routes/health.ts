@@ -29,6 +29,17 @@ function hasDevServerStatusToken(providedToken: string | undefined) {
   return timingSafeEqual(expected, provided);
 }
 
+/**
+ * DUR-277/DUR-350 (Wave 4): deliberately stays bypass-scoped, not wired to
+ * `companyScope`/`runInCompanyScope*`. Every query here is instance-wide by
+ * nature -- `SELECT 1` liveness probe, `instanceUserRoles`/`invites` counts
+ * used only to compute bootstrap status, and a queued/running `heartbeatRuns`
+ * count for dev-server auto-restart gating -- none of it is scoped to, or
+ * filtered by, any single company. `/` also runs pre-auth (deploymentMode
+ * "authenticated" callers get a reduced body, but the route itself has no
+ * actor/company context to scope against at all in the unauthenticated case).
+ * See the DUR-277 design doc §1 (health.ts: category (c)).
+ */
 export function healthRoutes(
   db?: Db,
   opts: {

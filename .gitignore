@@ -55,6 +55,9 @@ diagnostics/
 /.deploy-runner-processed
 /deploy-runner.log
 
+# scripts/deploy-runner-recreate-acceptance.sh (DUR-297) diagnostics
+/.dur297-recreate-acceptance-logs/
+
 # Playwright
 tests/e2e/test-results/
 tests/e2e/playwright-report/

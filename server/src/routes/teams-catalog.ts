@@ -25,9 +25,9 @@ export function teamsCatalogRoutes(rawDb: Db) {
   // DUR-277 design doc's §1 category-(a+d) note for this file. Only the
   // `/companies/:companyId/teams/catalog/...` group is scoped.
   const db = createRequestScopedDb(rawDb);
-  const agents = agentService(db);
+  const agents = agentService(db, { rawDb });
   const access = accessService(db);
-  const svc = teamsCatalogService(db);
+  const svc = teamsCatalogService(db, rawDb);
 
   function canCreateAgents(agent: { permissions: Record<string, unknown> | null | undefined }) {
     if (!agent.permissions || typeof agent.permissions !== "object") return false;

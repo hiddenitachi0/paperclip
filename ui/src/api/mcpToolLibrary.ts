@@ -54,3 +54,22 @@ export const mcpToolLibraryApi = {
       desiredToolIds,
     }),
 };
+
+// DUR-3909: "Connect & sign in" — for tools whose server needs an interactive
+// browser OAuth handshake instead of a pasted key. start() opens a session
+// and returns a third-party authorizeUrl to pop open; status() is polled
+// until the operator finishes (or abandons) that browser flow.
+export interface McpOAuthSession {
+  id: string;
+  toolId: string;
+  status: "pending" | "completed" | "failed";
+  errorMessage: string | null;
+  resultSecretId: string | null;
+}
+
+export const mcpOAuthApi = {
+  start: (toolId: string) =>
+    api.post<{ sessionId: string; authorizeUrl: string }>(`/mcp-tools/${toolId}/oauth/start`, {}),
+  status: (toolId: string, sessionId: string) =>
+    api.get<McpOAuthSession>(`/mcp-tools/${toolId}/oauth/sessions/${sessionId}`),
+};

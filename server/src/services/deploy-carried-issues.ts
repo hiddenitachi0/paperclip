@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { approvals, issueApprovals, issues, projectWorkspaces, type Db } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { issueService } from "./issues.js";
@@ -29,10 +29,18 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
  * not left implicit):
  *
  * 1. WHICH issues qualify: same company + same project as the completed deploy approval,
- *    status is exactly `in_review` (never `todo`/`in_progress`/`blocked` -- this never
- *    initiates review, it only recognizes that an issue's OWN prior review already finished
- *    and it was waiting purely on deployment), with an approved `merge_pr` approval linked
- *    whose `base` matches the project's declared deploy branch and whose `mergeCommitSha` has
+ *    status is `in_review` OR `blocked` (never `todo`/`in_progress` -- this never initiates
+ *    review, it only recognizes that an issue's OWN prior review already finished and it was
+ *    waiting purely on deployment). `blocked` is included alongside `in_review` (DUR-3922):
+ *    our own agent execution contract instructs agents to mark an issue `blocked` with a named
+ *    owner when it is waiting on a human/board actor to file or decide a deploy approval -- the
+ *    exact state a reviewed, merged issue sits in while it waits for this sweep. Excluding
+ *    `blocked` meant that entire class of issue was silently skipped forever once its carrying
+ *    deploy approval was swept (the sweep is one-shot per approval, see Idempotency below), since
+ *    moving it back to `in_review` afterward never re-triggers a check. This does not meaningfully
+ *    widen the auto-close blast radius: candidates are still gated on an approved, origin-anchored
+ *    `merge_pr` approval into the deploy branch regardless of which of the two statuses they're in.
+ *    That approval's `base` must match the project's declared deploy branch and its `mergeCommitSha` must have
  *    been backfilled by merge-deploy-visibility.ts. That is exactly the signature
  *    deploy-completion-gate.ts's own docblock names as "the escape hatch already in wide use":
  *    an issue can only be sitting in this state because its completing action was a merge into
@@ -51,8 +59,8 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
  *    goal-condition-judge.ts, deploy-completion-gate.ts), the same "a board/human actor can
  *    always override" authority a human operator already exercises by flipping status in the
  *    UI. This tick exercises that identical, pre-existing authority class -- it does not invent
- *    a new one -- and only ever does so for an issue already sitting in `in_review`, i.e. one
- *    whose own review already concluded through whatever path put it there.
+ *    a new one -- and only ever does so for an issue already sitting in `in_review` or `blocked`,
+ *    i.e. one whose own review already concluded through whatever path put it there.
  *
  * 3. AUDIT TRAIL: a system-authored comment naming the exact deploy approval and commit that
  *    proved liveness is posted BEFORE the status flip, and the resulting status change is
@@ -68,7 +76,15 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
  * `payload.carriedIssuesSwept` on the approval row itself (the same "state lives on the
  * approval, no new columns" convention `deployVisibilityNoted` already established) -- an issue
  * that qualifies gets closed the first time its carrying deploy is swept, and re-running the
- * sweep is a guaranteed no-op afterward (the issue no longer matches `status = 'in_review'`).
+ * sweep is a guaranteed no-op afterward (the issue no longer matches `status IN ('in_review',
+ * 'blocked')`). This is still per-approval, not per-issue (DUR-3922): a candidate that exists
+ * but doesn't yet qualify at the moment ITS carrying approval is swept (e.g. its own merge_pr
+ * approval isn't approved/backfilled yet) is not retried against that same approval later --
+ * only a *different*, later deploy approval's own tick would pick it up. Left as a known,
+ * intentionally-deferred gap rather than fixed here: unlike the blocked/in_review status gap
+ * this addresses, retrying indefinitely for candidates that may never resolve (e.g. a
+ * permanently unresolvable repo) needs its own bounded-retry design, not a blanket "always
+ * retry" change.
  */
 
 const CANDIDATE_ISSUE_LIMIT = 200;
@@ -116,13 +132,13 @@ function issueMatchesApprovalOrigin(payload: Record<string, unknown>, issueId: s
 }
 
 /**
- * Every `in_review` issue in the given project with an approved merge_pr approval into the
- * declared deploy branch whose merge commit has been backfilled -- the exact candidate pool
- * item 1 of this file's docblock names. An issue with more than one such approval linked (a
- * re-review loop) contributes its first matching row; which one is immaterial since they all
- * carry the same issue toward the same conclusion. Rows whose linked approval was not
- * originally filed for that issue (see `issueMatchesApprovalOrigin`) never qualify, regardless
- * of what the mutable `issueApprovals` link table currently says.
+ * Every `in_review` OR `blocked` (DUR-3922) issue in the given project with an approved
+ * merge_pr approval into the declared deploy branch whose merge commit has been backfilled --
+ * the exact candidate pool item 1 of this file's docblock names. An issue with more than one
+ * such approval linked (a re-review loop) contributes its first matching row; which one is
+ * immaterial since they all carry the same issue toward the same conclusion. Rows whose linked
+ * approval was not originally filed for that issue (see `issueMatchesApprovalOrigin`) never
+ * qualify, regardless of what the mutable `issueApprovals` link table currently says.
  */
 async function listCarriedCandidateIssues(
   db: Db,
@@ -143,7 +159,7 @@ async function listCarriedCandidateIssues(
       and(
         eq(issues.companyId, companyId),
         eq(issues.projectId, projectId),
-        eq(issues.status, "in_review"),
+        inArray(issues.status, ["in_review", "blocked"]),
         eq(approvals.type, "request_board_approval"),
         eq(approvals.status, "approved"),
         sql`${approvals.payload} ->> 'kind' = 'merge_pr'`,

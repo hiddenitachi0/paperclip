@@ -70,15 +70,56 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 5_000) {
   return fn();
 }
 
+/**
+ * DUR-3904 (same root cause as DUR-927): executeRun() is fire-and-forget and can
+ * itself dispatch further fire-and-forget runs (dependency wake re-check) that
+ * keep writing to child tables (e.g. company_skills) after heartbeatRuns.status
+ * looks idle. Retrying the idempotent delete chain rides out whichever trailing
+ * write hasn't settled yet, instead of trying to out-order it.
+ */
+async function deleteAllTestDataWithRetry(db: ReturnType<typeof createDb>, maxAttempts = 5) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await db.delete(environmentLeases);
+      await db.delete(activityLog);
+      await db.delete(companySkills);
+      await db.delete(issueDocuments);
+      await db.delete(issueAttachments);
+      await db.delete(documents);
+      await db.delete(issueComments);
+      await db.delete(issues);
+      await db.delete(heartbeatRunEvents);
+      await db.delete(heartbeatRuns);
+      await db.delete(agentWakeupRequests);
+      await db.delete(agentRuntimeState);
+      await db.delete(agents);
+      await db.delete(workspaceOperations);
+      await db.delete(executionWorkspaces);
+      await db.delete(companySkills);
+      await db.delete(companies);
+      return;
+    } catch (err) {
+      const isForeignKeyRace = err instanceof Error && /violates foreign key constraint/.test(err.message);
+      if (!isForeignKeyRace || attempt === maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+    }
+  }
+}
+
 describeEmbeddedPostgres("heartbeat whole-instance concurrency ceiling (DUR-151)", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let pendingDispatchedRuns: Promise<unknown>[] = [];
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-global-concurrency-");
     db = createDb(tempDb.connectionString);
-    heartbeat = heartbeatService(db);
+    heartbeat = heartbeatService(db, {
+      onRunDispatched: (run) => {
+        pendingDispatchedRuns.push(run);
+      },
+    });
   }, 20_000);
 
   afterEach(async () => {
@@ -93,6 +134,13 @@ describeEmbeddedPostgres("heartbeat whole-instance concurrency ceiling (DUR-151)
       model: "test-model",
     }));
     runningProcesses.clear();
+    // DUR-927/DUR-3904: drain in a loop, not a single Promise.allSettled snapshot,
+    // since new promises can land on the array while we're awaiting it.
+    while (pendingDispatchedRuns.length > 0) {
+      const batch = pendingDispatchedRuns;
+      pendingDispatchedRuns = [];
+      await Promise.allSettled(batch);
+    }
     let idlePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
@@ -106,22 +154,7 @@ describeEmbeddedPostgres("heartbeat whole-instance concurrency ceiling (DUR-151)
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await db.delete(environmentLeases);
-    await db.delete(activityLog);
-    await db.delete(companySkills);
-    await db.delete(issueDocuments);
-    await db.delete(issueAttachments);
-    await db.delete(documents);
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
-    await db.delete(workspaceOperations);
-    await db.delete(executionWorkspaces);
-    await db.delete(companies);
+    await deleteAllTestDataWithRetry(db);
     await instanceSettingsService(db).updateGeneral({
       globalMaxConcurrentRuns: 4,
     });

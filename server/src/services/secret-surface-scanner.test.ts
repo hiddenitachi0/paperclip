@@ -64,6 +64,15 @@ describe("scanTextForSecrets", () => {
     expect(matches).toHaveLength(0);
   });
 
+  // DUR-1430: DUR-954 was filed as a critical openai_key finding against a
+  // heartbeat_runs row whose resultJson just contained
+  // {"origin":{"kind":"task-notification"}} -- the unanchored sk- regex
+  // matched "sk-notification" mid-word inside "task-notification".
+  it("does not match the mid-word 'sk-' in 'task-notification' (DUR-954 false positive)", () => {
+    const matches = scanTextForSecrets('{"origin":{"kind":"task-notification"}}');
+    expect(matches).toHaveLength(0);
+  });
+
   it("excludes redacted / placeholder / example values", () => {
     const lines = [
       "token=ghp_REDACTEDREDACTEDREDACTEDRE",

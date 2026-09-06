@@ -169,6 +169,25 @@ const RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1024 * 1024;
 const RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
 /**
+ * DUR-290: bounds how many self-review passes evaluateSelfReviewDoneGate will schedule for a
+ * single issue whose diff is structurally unreadable -- changedFilePaths resolves (a real
+ * workspace and diff exist) but diffContent permanently overflows
+ * RISKY_SURFACE_GIT_DIFF_CONTENT_MAX_BUFFER_BYTES, e.g. because the diff touches one large
+ * generated/vendored file (lockfile, snapshot fixture, bundle) that isn't going away.
+ *
+ * Per the DUR-286 fingerprint contract on computeReviewedDiffFingerprint/
+ * findCompletedSelfReviewPassForIssue above, that shape always produces a `null` fingerprint,
+ * which always misses -- correctly, since no prior pass can be proven to have reviewed this
+ * exact content. But it also means this diff shape can never earn a `priorPass` exit: every
+ * evaluation schedules a fresh pass, forever, if that pass's own corrective run doesn't land
+ * its handoff in the same run (see the DUR-245 comment above -- turn-budget exhaustion, crash).
+ * Once MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF passes have already been scheduled for the
+ * issue, stop scheduling more and fail loud instead: decline the transition with an
+ * operator-facing message rather than silently retrying forever.
+ */
+export const MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF = 3;
+
+/**
  * Resolves the issue's current execution workspace to a local, on-disk git checkout
  * (local_fs/git_worktree with a base ref recorded) that getChangedFilePathsForIssueWorkspace
  * and getChangedDiffContentForIssueWorkspace can run `git diff` against. Returns null
@@ -486,6 +505,46 @@ export async function findCompletedSelfReviewPassForIssue(
   );
 }
 
+/**
+ * DUR-290: counts self-review-pass wakeups ever requested for this issue that were scheduled
+ * for a diff that couldn't be fingerprinted at all -- unlike findCompletedSelfReviewPassForIssue
+ * above, this deliberately does NOT filter to `status: "completed"`, because the failure mode
+ * this caps is passes that never reach "completed" (the corrective run crashes, runs out of
+ * turn budget, etc. before landing its handoff -- see the DUR-245 comment above). Used by
+ * evaluateSelfReviewDoneGate to bound how many passes it will schedule for an issue whose diff
+ * is structurally unreadable, since that shape can never produce a matching `priorPass` to stop
+ * the loop on its own.
+ *
+ * DUR-290 fast-follow (flagged by DUR-3894's security review of the original cap): the
+ * idempotencyKey prefix this matches on (`self_review_pass:{issueId}:`) is shared by EVERY
+ * self-review pass this issue has ever had scheduled, including ordinary passes on a small,
+ * readable diff -- those record a real (non-null) `reviewedDiffFingerprint` in their payload
+ * (see the DUR-270 comment on the wakeup call below). Without filtering on that, unrelated
+ * ordinary passes from earlier in the issue's life would inflate this count and could trip
+ * MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF after fewer than that many real attempts at the
+ * oversized diff. Only rows whose payload recorded a null fingerprint -- this cap's own
+ * unreadable-diff shape, or the separate workspace-fully-unresolvable shape (which never
+ * actually reaches this call, since it exits via `priorPass` first) -- count toward the cap.
+ */
+export async function countSelfReviewPassWakesForIssue(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<number> {
+  const rows = await db
+    .select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload })
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.reason, SELF_REVIEW_PASS_REASON),
+        like(agentWakeupRequests.idempotencyKey, `${SELF_REVIEW_PASS_REASON}:${input.issueId}:%`),
+      ),
+    );
+  return rows.filter(
+    (row) => (row.payload as { reviewedDiffFingerprint?: string | null } | null)?.reviewedDiffFingerprint === null,
+  ).length;
+}
+
 // DUR-293: mirrors heartbeat.ts's WakeupNotScheduledInfo. `wakeup` (heartbeat.wakeup /
 // enqueueWakeup) has many legitimate no-throw skip paths -- company inactive, heartbeat
 // disabled, an unresolved dependency blocker, etc -- that just write a "skipped" wakeup
@@ -609,6 +668,41 @@ export async function evaluateSelfReviewDoneGate(input: {
     matchingDiffFingerprint: workspaceFullyUnresolvable ? undefined : reviewedDiffFingerprint,
   });
   if (priorPass) return null;
+
+  // DUR-290: `changedFilePaths !== null && diffContent === null` means a diff genuinely exists
+  // (the workspace resolved and the cheaper path-only read succeeded) but couldn't be fully
+  // read -- routinely the diff-content buffer permanently overflowing on a large
+  // generated/vendored file that isn't going away, not a transient failure. That shape can
+  // never earn a `priorPass` match above (see the DUR-286 comment on
+  // findCompletedSelfReviewPassForIssue), so left unchecked this would schedule a fresh pass on
+  // every single attempt, forever, whenever a scheduled pass's own corrective run doesn't land
+  // its handoff. Cap it instead of looping silently.
+  const diffStructurallyUnreadable = changedFilePaths !== null && diffContent === null;
+  if (diffStructurallyUnreadable) {
+    const priorPassCount = await countSelfReviewPassWakesForIssue(input.db, {
+      companyId: input.issue.companyId,
+      issueId: input.issue.id,
+    });
+    if (priorPassCount >= MAX_SELF_REVIEW_PASSES_FOR_UNREADABLE_DIFF) {
+      const capMessage =
+        "This task's diff is too large for me to fully read and review (it likely touches a " +
+        `large generated/vendored file), and ${priorPassCount} self-review pass(es) have already ` +
+        "been scheduled for it without resolving that. I'm not scheduling another one -- this " +
+        "needs an operator to look at it directly (e.g. split the diff, exclude the oversized " +
+        'file from review, or set this issue\'s execution policy to {"selfReview": false}).';
+      try {
+        await postSelfReviewPassNoticeComment(input.db, {
+          companyId: input.issue.companyId,
+          issueId: input.issue.id,
+          sourceRunId,
+          body: capMessage,
+        });
+      } catch {
+        // Best-effort — the blocking return below is what actually matters.
+      }
+      return { message: capMessage };
+    }
+  }
 
   const riskySurfaceNote =
     riskySurfaceCategories.length > 0

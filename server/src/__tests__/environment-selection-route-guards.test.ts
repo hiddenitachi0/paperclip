@@ -131,7 +131,7 @@ let issueServer: Server | null = null;
 
 function createProjectApp() {
   projectServer ??= buildApp((expressApp) => {
-    expressApp.use("/api", projectRoutes({} as any));
+    expressApp.use("/api", projectRoutes(withFakeCompanyScopeReserve({}) as any));
   }).listen(0);
   return projectServer;
 }

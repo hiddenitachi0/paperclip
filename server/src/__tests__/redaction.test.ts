@@ -4,6 +4,7 @@ import {
   redactEventPayload,
   redactHeartbeatRunPatchSecrets,
   redactKnownLeakedSecretPatterns,
+  redactKnownLeakedSecretPatternsDeep,
   redactKnownSecretValues,
   redactSensitiveText,
   sanitizeRecord,
@@ -224,6 +225,13 @@ describe("redactKnownLeakedSecretPatterns", () => {
     expect(redactKnownLeakedSecretPatterns(input)).toBe(input);
   });
 
+  // DUR-1430 (DUR-954 false positive): the unanchored openai_key regex used
+  // to match "sk-notification" mid-word inside "task-notification".
+  it("does not treat the mid-word 'sk-' in 'task-notification' as a leaked openai_key", () => {
+    const input = '{"origin":{"kind":"task-notification"}}';
+    expect(redactKnownLeakedSecretPatterns(input)).toBe(input);
+  });
+
   // DUR-322 adversarial review found these GitHub/Slack token variants missing.
   it("masks the remaining GitHub token variants and the Slack user token", () => {
     const input = [
@@ -246,6 +254,28 @@ describe("redactKnownLeakedSecretPatterns", () => {
     expect(result).not.toContain("ghs_1234567890abcdefghijklmnopqrstuvwxyz");
     expect(result).not.toContain("ghr_1234567890abcdefghijklmnopqrstuvwxyz");
     expect(result).not.toContain("xoxp-test-fixture-not-a-real-token-000000");
+  });
+});
+
+// DUR-372: exported so workspace-operations.ts can scrub its own
+// arbitrary-shaped `metadata` JSON with the same deep-walk used internally
+// by redactHeartbeatRunPatchSecrets below.
+describe("redactKnownLeakedSecretPatternsDeep", () => {
+  it("redacts a matching pattern nested inside arrays and objects", () => {
+    const input = {
+      remoteUrl: "https://x-access-token:ghp_1234567890abcdefghijklmnopqrstuvwxyz@github.com/acme/app.git",
+      history: ["clean line", { note: "AKIAABCDEFGHIJKLMNOP leaked here" }],
+    };
+
+    expect(redactKnownLeakedSecretPatternsDeep(input)).toEqual({
+      remoteUrl: "https://x-access-token:[REDACTED:github_token]@github.com/acme/app.git",
+      history: ["clean line", { note: "[REDACTED:aws_access_key_id] leaked here" }],
+    });
+  });
+
+  it("leaves non-string primitives and clean values untouched", () => {
+    const input = { count: 3, ok: true, nested: { safe: "no secret here" } };
+    expect(redactKnownLeakedSecretPatternsDeep(input)).toEqual(input);
   });
 });
 

@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentInstructionsRevisions, approvalComments, approvals } from "@paperclipai/db";
+import { agentInstructionsRevisions, approvalComments, approvals, personaPosts } from "@paperclipai/db";
 import {
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
@@ -31,6 +31,18 @@ function isToolGrantApproval(approval: Pick<typeof approvals.$inferSelect, "type
  */
 function isInstructionsChangeApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
   return approval.type === "request_board_approval" && approval.payload?.kind === "instructions_change";
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries
+ * `kind:"persona_publish"` (DUR-134) -- filed by persona-publisher.ts's
+ * autonomy gate, never by the persona's own agent. Approving/rejecting one
+ * only moves the linked persona_posts row to approved/rejected; it does NOT
+ * publish anything itself -- the next publisher pass still re-checks the
+ * kill switch and daily cap before it actually goes out.
+ */
+function isPersonaPublishApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "persona_publish";
 }
 
 export interface InstructionsChangeApplyResult {
@@ -402,6 +414,22 @@ export function approvalService(db: Db) {
         }
       }
 
+      if (applied && isPersonaPublishApproval(updated)) {
+        // Approving clears the gate for the NEXT publisher pass -- it does
+        // not publish anything here. Only touches a row still sitting in
+        // pending_approval so an already-published/failed/cancelled post
+        // (e.g. the operator approved late, after a kill switch or a
+        // separate cancellation already resolved it) is left alone.
+        const payload = updated.payload as Record<string, unknown>;
+        const personaPostId = typeof payload.personaPostId === "string" ? payload.personaPostId : null;
+        if (personaPostId) {
+          await db
+            .update(personaPosts)
+            .set({ status: "approved", updatedAt: new Date() })
+            .where(and(eq(personaPosts.id, personaPostId), eq(personaPosts.status, "pending_approval")));
+        }
+      }
+
       return { approval: updated, applied, toolGrant, instructionsChange };
     },
 
@@ -418,6 +446,23 @@ export function approvalService(db: Db) {
         const payloadAgentId = typeof payload.agentId === "string" ? payload.agentId : null;
         if (payloadAgentId) {
           await agentsSvc.terminate(payloadAgentId);
+        }
+      }
+
+      if (applied && isPersonaPublishApproval(updated)) {
+        // Terminal: a rejected persona_publish approval's post is never
+        // retried automatically (see persona_posts' schema comment).
+        const payload = updated.payload as Record<string, unknown>;
+        const personaPostId = typeof payload.personaPostId === "string" ? payload.personaPostId : null;
+        if (personaPostId) {
+          await db
+            .update(personaPosts)
+            .set({
+              status: "rejected",
+              failureReason: decisionNote ?? "Rejected by board",
+              updatedAt: new Date(),
+            })
+            .where(and(eq(personaPosts.id, personaPostId), eq(personaPosts.status, "pending_approval")));
         }
       }
 

@@ -2993,9 +2993,15 @@ export function parseGitHubSourceUrl(rawUrl: string) {
 }
 
 
-export function companyPortabilityService(db: Db, storage?: StorageService) {
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db` for every unmigrated
+// caller, a no-op there since `db` is already the raw pooled instance. Only
+// callers wired through createRequestScopedDb (e.g. teamsCatalogService, once
+// threaded) pass a `db` that is the *scoped* proxy and a distinct `rawDb`,
+// since agentService/secretService below open transactions via
+// withCompanyScope(rawDb, ...) that require the real connection.
+export function companyPortabilityService(db: Db, storage?: StorageService, rawDb: Db = db) {
   const companies = companyService(db);
-  const agents = agentService(db);
+  const agents = agentService(db, { rawDb });
   const assetRecords = assetService(db);
   const instructions = agentInstructionsService();
   const companyInstructionsSvc = companyInstructionsService();
@@ -3003,7 +3009,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const projects = projectService(db);
   const issues = issueService(db);
   const companySkills = companySkillService(db);
-  const secrets = secretService(db);
+  const secrets = secretService(db, rawDb);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
   const defaultSecretProvider = getConfiguredSecretProvider();
 

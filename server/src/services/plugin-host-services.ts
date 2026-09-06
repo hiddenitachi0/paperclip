@@ -427,6 +427,19 @@ interface BufferedLogEntry {
 const _logBuffer: BufferedLogEntry[] = [];
 
 /**
+ * DUR-352 (DUR-277 Wave 6): this flush path deliberately stays bypass-scoped
+ * forever, not a candidate for a future runInCompanyScope/per-row wave.
+ * Unlike a single-row write, `plugin_logs.company_id` being present per-row
+ * doesn't make this scopable: entries accumulate in `_logBuffer` from
+ * whichever request/tick context called the buffering helper (any company,
+ * or null for instance-scope), and one flush batch-inserts all of them --
+ * possibly several different companies' rows -- in a single `INSERT`, which
+ * a single company-scope claim cannot represent. The flush interval itself
+ * (`_logFlushInterval` below) starts at module-import time, before the app's
+ * `db` singleton is even constructed, so it could never have participated in
+ * per-request scoping regardless. See the DUR-277 design doc §2 (one of the
+ * four consumers "no per-company boundary at all").
+ *
  * Flush all buffered log entries to the database in a single batch insert per
  * unique db instance. Errors are swallowed with a console.error fallback so
  * flushing never crashes the process.

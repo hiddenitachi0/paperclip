@@ -6,6 +6,7 @@ import {
   agents,
   companyAgentRoles,
   principalPermissionGrants,
+  withCompanyScope,
 } from "@paperclipai/db";
 import type { PermissionKey } from "@paperclipai/shared";
 import { PERMISSION_KEYS } from "@paperclipai/shared";
@@ -211,11 +212,18 @@ interface AssignRoleOptions {
 
 // Apply a role to an agent once at assignment time. This is NOT continuous
 // reconciliation — changes to the role after assignment do not affect the agent.
+// DUR-3911 (DUR-277 sweep): `rawDb` defaults to `db` for every unmigrated
+// caller. routes/agent-roles.ts, once wired through createRequestScopedDb,
+// passes a `db` that is the *scoped* proxy and a distinct `rawDb`, since
+// db.transaction() below is not supported through that proxy (see
+// packages/db/src/company-scope.ts) -- these call sites open their
+// connection via withCompanyScope instead.
 export async function assignRoleToAgent(
   db: Db,
   agentId: string,
   roleId: string | null,
-  options: AssignRoleOptions
+  options: AssignRoleOptions,
+  rawDb: Db = db
 ) {
   assertBoardActorForRoleMutation(options.actor, agentId);
 
@@ -231,7 +239,7 @@ export async function assignRoleToAgent(
 
     const appliedKeys = (agent.roleAppliedPermissionKeys as string[] | null) ?? [];
 
-    await db.transaction(async (tx) => {
+    await withCompanyScope(rawDb, agent.companyId, async (tx) => {
       await tx
         .update(agents)
         .set({
@@ -255,7 +263,7 @@ export async function assignRoleToAgent(
       }
     });
 
-    await resolveAgentRoleProvisioning(db, agentId);
+    await resolveAgentRoleProvisioning(db, agentId, rawDb);
     const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!updated) throw notFound("Agent not found");
     return updated;
@@ -294,7 +302,7 @@ export async function assignRoleToAgent(
 
   const now = new Date();
 
-  await db.transaction(async (tx) => {
+  await withCompanyScope(rawDb, agent.companyId, async (tx) => {
     // Apply default instructions as the agent's instructions bootstrap prompt,
     // by merging into adapterConfig if the role provides instructions.
     const newAdapterConfig: Record<string, unknown> = {
@@ -361,7 +369,7 @@ export async function assignRoleToAgent(
     }
   });
 
-  await resolveAgentRoleProvisioning(db, agentId);
+  await resolveAgentRoleProvisioning(db, agentId, rawDb);
 
   // Return the updated agent row
   const [updated] = await db
@@ -401,7 +409,7 @@ function effectiveSet(
   return { effective: [...effectiveSetValue], operatorAddKeys: new Set(operatorAdd) };
 }
 
-export async function resolveAgentRoleProvisioning(db: Db, agentId: string) {
+export async function resolveAgentRoleProvisioning(db: Db, agentId: string, rawDb: Db = db) {
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
   if (!agent) throw notFound("Agent not found");
 
@@ -434,7 +442,7 @@ export async function resolveAgentRoleProvisioning(db: Db, agentId: string) {
 
   const now = new Date();
 
-  await db.transaction(async (tx) => {
+  await withCompanyScope(rawDb, agent.companyId, async (tx) => {
     if (toRevoke.length > 0) {
       await tx
         .delete(principalPermissionGrants)
@@ -517,7 +525,8 @@ export async function addAgentCatalogOverride(
   agentId: string,
   category: "skills" | "connectors",
   key: string,
-  actor: RoleMutationActor
+  actor: RoleMutationActor,
+  rawDb: Db = db
 ) {
   assertBoardActorForRoleMutation(actor, agentId);
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
@@ -527,7 +536,7 @@ export async function addAgentCatalogOverride(
 
   const overrides = addToOverrideCategory((agent.roleOverrides as RoleOverridesShape | null) ?? {}, category, sanitized[0]!);
   await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: new Date() }).where(eq(agents.id, agentId));
-  return resolveAgentRoleProvisioning(db, agentId);
+  return resolveAgentRoleProvisioning(db, agentId, rawDb);
 }
 
 export async function removeAgentCatalogOverride(
@@ -535,7 +544,8 @@ export async function removeAgentCatalogOverride(
   agentId: string,
   category: "skills" | "connectors",
   key: string,
-  actor: RoleMutationActor
+  actor: RoleMutationActor,
+  rawDb: Db = db
 ) {
   assertBoardActorForRoleMutation(actor, agentId);
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
@@ -543,7 +553,7 @@ export async function removeAgentCatalogOverride(
 
   const overrides = removeFromOverrideCategory((agent.roleOverrides as RoleOverridesShape | null) ?? {}, category, key);
   await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: new Date() }).where(eq(agents.id, agentId));
-  return resolveAgentRoleProvisioning(db, agentId);
+  return resolveAgentRoleProvisioning(db, agentId, rawDb);
 }
 
 // ── Role state + per-agent overrides on top of an assigned job ─────────────
@@ -670,7 +680,8 @@ export async function addAgentRightOverride(
   agentId: string,
   grant: { permissionKey: string; scope: Record<string, unknown> | null },
   actor: RoleMutationActor,
-  grantedByUserId: string | null = null
+  grantedByUserId: string | null = null,
+  rawDb: Db = db
 ) {
   assertBoardActorForRoleMutation(actor, agentId);
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
@@ -719,7 +730,7 @@ export async function addAgentRightOverride(
   overrides.rights = { add: [...existingAdd, sanitized], remove: existingRemove };
   await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: now }).where(eq(agents.id, agentId));
 
-  await resolveAgentRoleProvisioning(db, agentId);
+  await resolveAgentRoleProvisioning(db, agentId, rawDb);
   return getAgentRoleState(db, agentId);
 }
 
@@ -727,7 +738,8 @@ export async function removeAgentRightOverride(
   db: Db,
   agentId: string,
   permissionKey: string,
-  actor: RoleMutationActor
+  actor: RoleMutationActor,
+  rawDb: Db = db
 ) {
   assertBoardActorForRoleMutation(actor, agentId);
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
@@ -753,6 +765,6 @@ export async function removeAgentRightOverride(
   overrides.rights = { add: existingAdd, remove: [...existingRemove] };
   await db.update(agents).set({ roleOverrides: overrides as Record<string, unknown>, updatedAt: new Date() }).where(eq(agents.id, agentId));
 
-  await resolveAgentRoleProvisioning(db, agentId);
+  await resolveAgentRoleProvisioning(db, agentId, rawDb);
   return getAgentRoleState(db, agentId);
 }

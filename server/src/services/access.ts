@@ -180,7 +180,7 @@ export function accessService(db: Db, rawDb: Db = db) {
     },
     grantedByUserId: string | null,
   ) {
-    return db.transaction(async (tx) => {
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(sql`
         select ${companyMemberships.id}
         from ${companyMemberships}
@@ -739,7 +739,7 @@ export function accessService(db: Db, rawDb: Db = db) {
       status?: "pending" | "active" | "suspended";
     },
   ) {
-    return db.transaction(async (tx) => {
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(sql`
         select ${companyMemberships.id}
         from ${companyMemberships}
