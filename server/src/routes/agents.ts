@@ -215,6 +215,7 @@ export function agentRoutes(
   const recovery = recoveryService(db, {
     enqueueWakeup: heartbeat.wakeup,
     isRunLive: isHeartbeatRunLiveInThisProcess,
+    rawDb,
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db, rawDb);

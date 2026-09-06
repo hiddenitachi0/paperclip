@@ -5038,6 +5038,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const recovery = recoveryService(db, {
     enqueueWakeup,
     isRunLive: isHeartbeatRunLiveInThisProcess,
+    rawDb,
   });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup, rawDb });
