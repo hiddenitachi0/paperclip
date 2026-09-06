@@ -18,6 +18,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  postgresFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
@@ -84,6 +85,24 @@ async function getAvailablePort(): Promise<number> {
   );
 }
 
+// These clusters live in a `mkdtemp` directory that is deleted a few seconds
+// later, so crash durability is worthless here and we only pay for it. Turning
+// the durability machinery off keeps the cost of a shutdown out of teardown:
+// `instance.stop()` SIGINTs the postmaster, which is a Postgres *fast
+// shutdown* and therefore runs a shutdown checkpoint that fsyncs every dirty
+// buffer the suite wrote. With fsync on, that single call was measured at
+// 5-36s on a write-heavy suite and was the direct cause of CI teardown-hook
+// timeouts. None of these settings change query semantics or visibility; they
+// only change what happens if the machine loses power mid-test.
+const EMBEDDED_POSTGRES_TEST_FLAGS = [
+  "-c",
+  "fsync=off",
+  "-c",
+  "synchronous_commit=off",
+  "-c",
+  "full_page_writes=off",
+];
+
 async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), tempDirPrefix));
   const port = await getAvailablePort();
@@ -95,6 +114,7 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+    postgresFlags: EMBEDDED_POSTGRES_TEST_FLAGS,
     onLog: () => {},
     onError: () => {},
   });
