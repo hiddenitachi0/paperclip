@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { withCompanyScope } from "@paperclipai/db";
 import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
@@ -555,8 +556,17 @@ export function recoveryService(
     // unrelated dispatch then freely claims the now-unlocked issue while the
     // "terminal" run is still mutating its worktree.
     isRunLive?: (runId: string) => boolean;
+    // Background-timer callers (heartbeat.ts) have no active request scope,
+    // so a raw `db.transaction()` on the request-scoped `db` proxy throws
+    // ("db.transaction() is not supported through the request-scoped
+    // proxy"). `rawDb` lets the two transactional paths below go through
+    // withCompanyScope(rawDb, ...) instead, matching the fix already applied
+    // to issueService (DUR-379). Defaults to `db` for callers that pass a
+    // plain (non-scoped) connection.
+    rawDb?: Db;
   },
 ) {
+  const rawDb = deps.rawDb ?? db;
   const issuesSvc = issueService(db, { isRunLive: deps.isRunLive });
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -1356,7 +1366,7 @@ export function recoveryService(
         cleanup,
       },
     };
-    const finalizedRun = await db.transaction(async (tx) => {
+    const finalizedRun = await withCompanyScope(rawDb, input.run.companyId, async (tx) => {
       const [updatedRun] = await tx
         .update(heartbeatRuns)
         .set({
@@ -1783,7 +1793,7 @@ export function recoveryService(
     // on (companyId, runId, decision), so the advisory lock is the serialization point.
     const closedEvaluation = await findClosedStaleRunEvaluation(input.run.companyId, input.run.id);
     if (closedEvaluation) {
-      const autoDismissed = await db.transaction(async (tx) => {
+      const autoDismissed = await withCompanyScope(rawDb, input.run.companyId, async (tx) => {
         await tx.execute(
           sql`SELECT pg_advisory_xact_lock(hashtextextended(${`watchdog_dismiss:${input.run.companyId}:${input.run.id}`}, 0))`,
         );

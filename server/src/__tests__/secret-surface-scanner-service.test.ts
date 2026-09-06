@@ -226,6 +226,68 @@ describeEmbeddedPostgres("secret-surface-scanner", () => {
     expect(elapsedMs).toBeLessThan(2_000);
   });
 
+  it("DUR-387: still catches a secret positioned past the old head-only 64KB cutoff, via the tail half", async () => {
+    const companyId = await seedCompany();
+    await seedAgent(companyId, { title: "Security Reviewer" });
+    const runnerAgentId = await seedAgent(companyId);
+
+    // 150KB of filler followed by a real-shaped secret near the very end.
+    // Under the old head-only truncation (slice(0, 64KB)) this secret's
+    // start position (~150,000) is well past the cutoff and would never be
+    // scanned at all -- the sweep would report clean with no signal that
+    // coverage was incomplete. It also lands within the last 32KB, so the
+    // head+tail split must catch it via the tail half.
+    const filler = "x".repeat(150_000);
+    const secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const oversizedError = `${filler}\ntoken=${secret}`;
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      error: oversizedError,
+    });
+
+    const sweep = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: null });
+
+    expect(sweep.rowsScanned).toBe(1);
+    expect(sweep.oversizedFieldsScanned).toBe(1);
+    expect(sweep.matchesFound).toBe(1);
+    expect(sweep.issuesFiled).toBe(1);
+  });
+
+  it("DUR-387: a secret in the unscanned middle third of an oversized field is correctly not detected, but the sweep still flags the field as oversized", async () => {
+    const companyId = await seedCompany();
+    await seedAgent(companyId, { title: "Security Reviewer" });
+    const runnerAgentId = await seedAgent(companyId);
+
+    // 300KB field: the head+tail split only scans the first and last 32KB, so
+    // a secret placed at the midpoint (~150,000) sits well outside both
+    // windows -- pinning down that this is the documented residual gap
+    // (DUR-387's review), not a regression that silently grows the scanned
+    // window (e.g. an accidental head/tail overlap) or shrinks it to miss
+    // even the covered halves.
+    const secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const half = 150_000;
+    const oversizedError = `${"x".repeat(half)}token=${secret}${"x".repeat(half)}`;
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      error: oversizedError,
+    });
+
+    const sweep = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: null });
+
+    expect(sweep.rowsScanned).toBe(1);
+    expect(sweep.oversizedFieldsScanned).toBe(1);
+    expect(sweep.matchesFound).toBe(0);
+    expect(sweep.issuesFiled).toBe(0);
+  });
+
   it("walks .git/config, .env, and docker-compose files under a company path, skips excluded dirs, and attributes by path", async () => {
     const companyId = await seedCompany();
     await seedAgent(companyId, { title: "Security Reviewer" });
