@@ -246,10 +246,19 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token
           -c "credential.https://github.com.helper=$GIT_CREDENTIAL_HELPER" \
           -c "credential.https://github.com.useHttpPath=false" \
           fetch --quiet origin 2>>"$LOG" || exit 1
-    if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
-      git reset --hard --quiet "$ref"
-    else
+    # DUR-53: prefer the just-fetched remote-tracking ref (origin/$ref) when
+    # $ref names a branch. Checking bare "$ref" first is a trap when this
+    # checkout already has a local branch of the same name (the normal case
+    # for a long-lived deploy target) — `git fetch origin custom` never moves
+    # a local `custom` branch pointer, only `refs/remotes/origin/custom`, so
+    # resolving "custom" hits the STALE local branch and `reset --hard`
+    # becomes a silent no-op that still reports success at the old commit.
+    # Only fall back to bare "$ref" for a pinned commit SHA, which has no
+    # origin/<sha> equivalent.
+    if git rev-parse --verify --quiet "origin/$ref^{commit}" >/dev/null; then
       git reset --hard --quiet "origin/$ref"
+    else
+      git reset --hard --quiet "$ref"
     fi
   )
 }

@@ -124,7 +124,7 @@ describe("PATCH /api/companies/:companyId/branding", () => {
       .send({ logoAssetId: "11111111-1111-4111-8111-111111111111" });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage company branding");
     expect(mockCompanyService.update).not.toHaveBeenCalled();
   });
 
@@ -147,8 +147,63 @@ describe("PATCH /api/companies/:companyId/branding", () => {
       .send({ status: "archived" });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage company branding");
     expect(mockCompanyService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a CEO-titled agent whose canManageCompanySettings capability has been explicitly revoked", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      id: "agent-1",
+      companyId: "company-1",
+      role: "ceo",
+      permissions: { canManageCompanySettings: false },
+    });
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .patch("/api/companies/company-1/branding")
+      .send({ logoAssetId: "11111111-1111-4111-8111-111111111111" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Missing permission to manage company branding");
+    expect(mockCompanyService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows a non-CEO agent explicitly granted canManageCompanySettings to update branding fields", async () => {
+    const company = createCompany();
+    mockAgentService.getById.mockResolvedValue({
+      id: "agent-1",
+      companyId: "company-1",
+      role: "engineering-manager",
+      permissions: { canManageCompanySettings: true },
+    });
+    mockCompanyService.update.mockResolvedValue(company);
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .patch("/api/companies/company-1/branding")
+      .send({
+        logoAssetId: "11111111-1111-4111-8111-111111111111",
+        brandColor: "#123456",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockCompanyService.update).toHaveBeenCalledWith("company-1", {
+      logoAssetId: "11111111-1111-4111-8111-111111111111",
+      brandColor: "#123456",
+    });
   });
 
   it("allows CEO agent callers to update branding fields", async () => {
@@ -157,6 +212,7 @@ describe("PATCH /api/companies/:companyId/branding", () => {
       id: "agent-1",
       companyId: "company-1",
       role: "ceo",
+      permissions: { canManageCompanySettings: true },
     });
     mockCompanyService.update.mockResolvedValue(company);
     const app = await createApp({
@@ -268,7 +324,7 @@ describe("PATCH /api/companies/:companyId", () => {
       .send({ status: "archived" });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to manage company settings");
     expect(mockCompanyService.getById).not.toHaveBeenCalled();
     expect(mockCompanyService.update).not.toHaveBeenCalled();
   });
@@ -279,6 +335,7 @@ describe("PATCH /api/companies/:companyId", () => {
       id: "agent-1",
       companyId: "company-1",
       role: "ceo",
+      permissions: { canManageCompanySettings: true },
     });
     mockCompanyService.getById.mockResolvedValue(company);
     mockCompanyService.update.mockResolvedValue({
@@ -310,6 +367,7 @@ describe("PATCH /api/companies/:companyId", () => {
       id: "agent-1",
       companyId: "company-1",
       role: "ceo",
+      permissions: { canManageCompanySettings: true },
     });
     mockCompanyService.getById.mockResolvedValue(company);
     const app = await createApp({

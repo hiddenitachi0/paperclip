@@ -1,7 +1,12 @@
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import { promisify } from "node:util";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
+import { agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueComments, projectWorkspaces } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * DUR-22 slice 1: a bounded, one-time "review your own diff before handing off" pass
@@ -82,7 +87,139 @@ export function buildSelfReviewPassIdempotencyKey(input: { issueId: string; sour
   return [SELF_REVIEW_PASS_REASON, input.issueId, input.sourceRunId].join(":");
 }
 
-export function buildSelfReviewPassInstruction(input: { issueIdentifier: string | null; alreadyHandedOff: boolean }) {
+/**
+ * DUR-71: a change touching one of these surfaces gets a second, adversarial set of
+ * questions appended to the ordinary self-review instruction (see
+ * buildSelfReviewPassInstruction below). Detection runs against the actual changed file
+ * paths (detectRiskySurfaceFromDiff), not the agent's own judgment of whether its work is
+ * risky — see getChangedFilePathsForIssueWorkspace for where those paths come from.
+ */
+export type RiskySurfaceCategory =
+  | "authorization_or_permissions"
+  | "agent_configuration"
+  | "secrets_or_credentials"
+  | "migrations"
+  | "outbound_or_spend";
+
+export const RISKY_SURFACE_CATEGORY_LABELS: Record<RiskySurfaceCategory, string> = {
+  authorization_or_permissions: "authorization or permissions",
+  agent_configuration: "agent configuration",
+  secrets_or_credentials: "secrets or credentials",
+  migrations: "database migrations",
+  outbound_or_spend: "publishing outward or spending money",
+};
+
+const RISKY_SURFACE_PATTERNS: Array<{ category: RiskySurfaceCategory; pattern: RegExp }> = [
+  { category: "authorization_or_permissions", pattern: /authoriz|permission|\bacl\b|\brbac\b|access-control/i },
+  {
+    category: "agent_configuration",
+    pattern: /adapterConfig|agent-permissions|agent-instructions|agent-secret-bindings|\bagents\.ts$|mcp[-_]?servers?|plugin-managed-agents/i,
+  },
+  { category: "secrets_or_credentials", pattern: /secret|credential|\btoken\b|api[-_]?key|\.env(\.|$)/i },
+  { category: "migrations", pattern: /\/migrations\// },
+  {
+    category: "outbound_or_spend",
+    pattern:
+      /deploy-runner|deploy-policy|deploy-branches|merge-deploy|webhook|notification|\bslack\b|\btelegram\b|\bemail\b|billing|\bcosts?\.ts$|\bbudgets?\.ts$|approvals?\.ts/i,
+  },
+];
+
+/**
+ * Pure, testable core of surface detection: given the paths changed by a diff, returns
+ * which risky-surface categories they touch (empty array for an ordinary change). Takes
+ * plain strings so it can be exercised without any git/DB access.
+ */
+export function detectRiskySurfaceFromDiff(changedFilePaths: readonly string[]): RiskySurfaceCategory[] {
+  const found = new Set<RiskySurfaceCategory>();
+  for (const rawPath of changedFilePaths) {
+    if (!rawPath) continue;
+    for (const { category, pattern } of RISKY_SURFACE_PATTERNS) {
+      if (pattern.test(rawPath)) found.add(category);
+    }
+  }
+  return [...found];
+}
+
+const RISKY_SURFACE_GIT_MAX_BUFFER_BYTES = 1024 * 1024;
+
+/**
+ * Looks up the issue's current execution workspace and, if it's a local, on-disk checkout
+ * (local_fs/git_worktree with a base ref recorded), runs `git diff --name-only` against it
+ * to get the paths changed since the base ref. Returns null (not an empty array) whenever
+ * the diff genuinely can't be read -- cloud/adapter-managed workspaces, a missing path, a
+ * missing base ref, or the git command failing -- so callers can tell "no risky surface
+ * detected" apart from "couldn't check" and fall back to the ordinary-only prompt rather
+ * than guessing.
+ *
+ * DUR-83: resolves the workspace by execution_workspaces.sourceIssueId (set only by the
+ * server when a workspace is realized, never writable by an issue PATCH) rather than by
+ * trusting issues.executionWorkspaceId. That field is a plain, ungated column an issue's
+ * own assignee can PATCH to null on an unrelated field-only update -- doing so right before
+ * a status transition would silently skip risk detection (and any adversarial questions)
+ * without ever tripping the self-review gate itself.
+ */
+export async function getChangedFilePathsForIssueWorkspace(
+  db: Db,
+  input: { companyId: string; issueId: string | null | undefined },
+): Promise<string[] | null> {
+  if (!input.issueId) return null;
+  const workspace = await db
+    .select({
+      cwd: executionWorkspaces.cwd,
+      providerRef: executionWorkspaces.providerRef,
+      providerType: executionWorkspaces.providerType,
+      baseRef: executionWorkspaces.baseRef,
+    })
+    .from(executionWorkspaces)
+    .where(and(eq(executionWorkspaces.sourceIssueId, input.issueId), eq(executionWorkspaces.companyId, input.companyId)))
+    .orderBy(desc(executionWorkspaces.lastUsedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!workspace) return null;
+  if (workspace.providerType !== "local_fs" && workspace.providerType !== "git_worktree") return null;
+
+  const workspacePath = workspace.providerRef ?? workspace.cwd;
+  if (!workspacePath || !workspace.baseRef) return null;
+
+  try {
+    await fs.access(workspacePath);
+  } catch {
+    return null;
+  }
+
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", workspacePath, "diff", "--name-only", `${workspace.baseRef}...HEAD`],
+      { cwd: workspacePath, maxBuffer: RISKY_SURFACE_GIT_MAX_BUFFER_BYTES },
+    );
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+function buildAdversarialSurfaceLines(categories: readonly RiskySurfaceCategory[]): string[] {
+  const categoryLabels = categories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ");
+  return [
+    `This change touches a risky surface (${categoryLabels}). On top of the check above, also ask yourself these questions -- they're adversarial on purpose, not another way of confirming you did what the ticket asked:`,
+    "- If a dishonest agent wanted to abuse this change, what would it do? Actually try to find the path -- don't just assert there is none.",
+    "- Does this add a field, route, or setting that an agent could set on itself? If so, say who is allowed to set it, and go verify the check that enforces that actually exists -- don't assume it does.",
+    "- Does this only work because something elsewhere is configured a particular way? If so, check right now whether that configuration is actually set that way -- don't assume it.",
+    "- What did the ticket NOT ask for that a reasonable person would still expect anyway (the obvious abuse case, the missing guard, the config nobody wired up)?",
+    "",
+    'If this turns up a real security or correctness gap -- even one outside what the ticket asked for -- report it in a comment. "Do not invent extra scope" above is about not padding the work, not about staying quiet on a genuine finding; fixing it can be its own follow-up issue, but don\'t suppress it.',
+  ];
+}
+
+export function buildSelfReviewPassInstruction(input: {
+  issueIdentifier: string | null;
+  alreadyHandedOff: boolean;
+  riskySurfaceCategories?: readonly RiskySurfaceCategory[];
+}) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   const lines = [
     `Before ${issueLabel} moves on, take one pass over your own work first.`,
@@ -91,8 +228,12 @@ export function buildSelfReviewPassInstruction(input: { issueIdentifier: string 
     "- Check that every requirement in the description is actually met, not just partially addressed.",
     "- Look for bugs, mistakes, or loose ends you may have missed the first time.",
     "- Fix anything real that you find. Do not invent extra scope beyond the task.",
-    "",
   ];
+  const riskySurfaceCategories = input.riskySurfaceCategories ?? [];
+  if (riskySurfaceCategories.length > 0) {
+    lines.push("", ...buildAdversarialSurfaceLines(riskySurfaceCategories));
+  }
+  lines.push("");
   if (input.alreadyHandedOff) {
     lines.push(
       "This issue already shows as handed off. If your review finds nothing wrong, leave the status as-is — no further action is required. If you find a real problem, fix it and leave a short comment describing what you fixed.",
@@ -228,14 +369,31 @@ export async function evaluateSelfReviewDoneGate(input: {
     idempotencyKey,
   });
 
-  const message =
+  const baseMessage =
     "This task needs one more self-check before it can move to review or done. I've asked the assignee to double-check their own work first, then try again.";
 
-  if (existingWake) return { message };
+  if (existingWake) return { message: baseMessage };
+
+  // DUR-71: detection is driven by the actual changed file paths, not by asking the agent
+  // whether its own work is risky. changedFilePaths is null (not []) when the diff genuinely
+  // couldn't be read (e.g. a non-local workspace) -- that degrades to the ordinary-only
+  // prompt rather than guessing at risk. Only computed here (once we know we're actually
+  // about to schedule a new pass), not on every duplicate/retry hit of this gate.
+  const changedFilePaths = await getChangedFilePathsForIssueWorkspace(input.db, {
+    companyId: input.issue.companyId,
+    issueId: input.issue.id,
+  });
+  const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
+  const riskySurfaceNote =
+    riskySurfaceCategories.length > 0
+      ? ` This one also touches ${riskySurfaceCategories.map((category) => RISKY_SURFACE_CATEGORY_LABELS[category]).join(", ")}, so I've included some adversarial questions on top of the usual check.`
+      : "";
+  const message = baseMessage + riskySurfaceNote;
 
   const instruction = buildSelfReviewPassInstruction({
     issueIdentifier: input.issue.identifier,
     alreadyHandedOff: false,
+    riskySurfaceCategories,
   });
 
   try {

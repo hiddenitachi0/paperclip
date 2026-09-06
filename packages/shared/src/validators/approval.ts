@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { APPROVAL_TYPES, ESCALATION_GRANT_MAX_DURATION_MINUTES } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
+import { mcpServerConfigSchema } from "./agent.js";
 
 export const createApprovalSchema = z.object({
   type: z.enum(APPROVAL_TYPES),
@@ -80,3 +81,30 @@ export const modelBoostRequestPayloadSchema = z
   });
 
 export type ModelBoostRequestPayload = z.infer<typeof modelBoostRequestPayloadSchema>;
+
+/**
+ * `request_board_approval` payload convention for an agent requesting a new
+ * tool connection (MCP server) for itself. This is the only path an
+ * agent-authenticated caller has to gain a new tool connection at all --
+ * `assertNoAgentToolConnectionMutation` in server/src/routes/agents.ts refuses
+ * the direct PATCH path unconditionally. `capabilitySummary` is always
+ * recomputed server-side from `server` when the approval is filed (see
+ * appendToolGrantCapabilitySummary in server/src/routes/approvals.ts) rather
+ * than trusted from the requester, since that is exactly the plain-language
+ * "what can this reach, what would it be allowed to do" text the operator
+ * relies on to decide.
+ */
+export const toolGrantRequestPayloadSchema = z
+  .object({
+    kind: z.literal("tool_grant"),
+    agentId: z.string().uuid(),
+    server: mcpServerConfigSchema,
+    reason: multilineTextSchema.pipe(z.string().trim().min(1)),
+    title: z.string().min(1),
+    summary: multilineTextSchema.optional(),
+    capabilitySummary: z.string().optional(),
+    risks: z.array(z.string()).optional(),
+  })
+  .strict();
+
+export type ToolGrantRequestPayload = z.infer<typeof toolGrantRequestPayloadSchema>;

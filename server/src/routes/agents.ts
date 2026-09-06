@@ -27,6 +27,8 @@ import {
   updateAgentSchema,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
+  extractSorteringsreglerBlock,
+  parseSorteringsreglerRuleTargetNames,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -35,6 +37,12 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { trackAgentCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
+import {
+  agentSelfUpdateDisallowedFields,
+  agentSelfUpdateDisallowedRuntimeConfigKeys,
+  computeChangedConfigFields,
+  configPatchFromSnapshot,
+} from "../services/agent-self-update-policy.js";
 import {
   agentService,
   agentInstructionsService,
@@ -103,6 +111,7 @@ import { recoveryService } from "../services/recovery/service.js";
 import { resolveCoreTrustPreset } from "../services/trust-preset-resolver.js";
 import { readObject } from "../lib/objects.js";
 import { listInvalidOrgChainDescendantIds } from "../services/agent-invokability.js";
+import { describeToolCapability, diffMcpServers } from "../services/agent-tool-audit.js";
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
@@ -519,15 +528,10 @@ export function agentRoutes(
       : [];
     const hasExplicitTaskAssignGrant = grants.some((grant) => grant.permissionKey === "tasks:assign");
 
-    if (agent.role === "ceo") {
-      return {
-        canAssignTasks: true,
-        taskAssignSource: "ceo_role" as const,
-        membership,
-        grants,
-      };
-    }
-
+    // Agents with a "ceo" job title used to get an unconditional bypass here.
+    // `svc.getById` already normalizes `agent.permissions.canCreateAgents` to
+    // `true` by default for the "ceo" role (see normalizeAgentPermissions),
+    // so a CEO agent still lands in this branch without a direct role check.
     if (canCreateAgents(agent)) {
       return {
         canAssignTasks: true,
@@ -834,6 +838,62 @@ export function agentRoutes(
     });
     if (decision.allowed) return;
     throw forbidden(decision.explanation);
+  }
+
+  // DUR-57: single allow-list-based gate for an agent-authenticated
+  // self-update. `patch` is checked against AGENT_SELF_UPDATE_ALLOWED_FIELDS
+  // (server/src/services/agent-self-update-policy.ts) — every field not on
+  // that list is refused, including role (DUR-56), reportsTo, budgetMonthlyCents, and any
+  // field added to updateAgentSchema after this guard was written. This
+  // replaces the old per-field deny checks that each newly-sensitive field
+  // had to remember to add to by hand.
+  //
+  // Both PATCH /agents/:id and the config-revision rollback route call this
+  // SAME function (see assertAgentSelfUpdateRollbackAllowed below, which
+  // reduces a rollback to the equivalent patch and calls through here) so a
+  // field's allow-listed status is enforced identically on both paths.
+  function assertAgentSelfUpdateAllowed(req: Request, patch: Record<string, unknown>) {
+    if (req.actor.type !== "agent") return;
+    const disallowedFields = agentSelfUpdateDisallowedFields(patch);
+    if (disallowedFields.length > 0) {
+      throw forbidden(
+        `Agent-authenticated callers cannot set ${disallowedFields.map((field) => `"${field}"`).join(", ")} on their own agent record. Only board-authenticated callers can.`,
+      );
+    }
+    if (hasOwn(patch, "adapterConfig")) {
+      assertNoAgentAdapterConfigMutation(req, asRecord(patch.adapterConfig) ?? {});
+    }
+    if (hasOwn(patch, "runtimeConfig")) {
+      const runtimeConfig = asRecord(patch.runtimeConfig) ?? {};
+      const disallowedRuntimeConfigKeys = agentSelfUpdateDisallowedRuntimeConfigKeys(runtimeConfig);
+      if (disallowedRuntimeConfigKeys.length > 0) {
+        throw forbidden(
+          `Agent-authenticated callers cannot set ${disallowedRuntimeConfigKeys.map((key) => `"runtimeConfig.${key}"`).join(", ")} on their own agent record. Only board-authenticated callers can.`,
+        );
+      }
+      assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
+    }
+  }
+
+  // DUR-68: Filip's sorting rules live in a fenced block inside the
+  // secretary's AGENTS.md, one line per rule, each ending in the name of the
+  // agent it routes to (after the line's last colon). Saving a rule whose
+  // trailing name doesn't resolve to exactly one live (non-terminated) agent
+  // in the company blocks the write so a typo can't silently misroute
+  // customer messages to nobody.
+  async function assertSorteringsreglerRuleNamesResolve(companyId: string, content: string) {
+    const block = extractSorteringsreglerBlock(content);
+    if (block == null) return;
+
+    const liveAgents = await svc.list(companyId);
+    const liveNames = new Set(liveAgents.map((agent) => agent.name));
+
+    for (const { ruleIndex, name } of parseSorteringsreglerRuleTargetNames(block)) {
+      if (liveNames.has(name)) continue;
+      throw unprocessable(
+        `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
+      );
+    }
   }
 
   async function assertCanReadAgent(req: Request, targetAgent: { companyId: string }) {
@@ -1350,16 +1410,56 @@ export function agentRoutes(
     return KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) => adapterConfig[key] !== undefined);
   }
 
+  // DUR-55: an agent-authenticated caller must never be able to add, change, or
+  // remove a tool connection (MCP server) on any agent's adapterConfig,
+  // including its own — that is a command run on the host or a URL data gets
+  // sent to, and today nothing else gates it. Only board-authenticated callers
+  // may set this.
+  function assertNoAgentToolConnectionMutation(
+    req: Request,
+    adapterConfig: Record<string, unknown>,
+    path = "adapterConfig",
+  ) {
+    if (req.actor.type !== "agent") return;
+    if (adapterConfig.mcpServers === undefined) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot modify tool connections (${path}.mcpServers). Only board-authenticated callers can.`,
+    );
+  }
+
   function assertNoAgentAdapterConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown>,
     path = "adapterConfig",
   ) {
     assertNoAgentInstructionsConfigMutation(req, adapterConfig, path);
+    assertNoAgentToolConnectionMutation(req, adapterConfig, path);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectAgentAdapterWorkspaceCommandPaths(adapterConfig, path),
     );
+  }
+
+  // DUR-55 / DUR-56 / DUR-57: rolling back to a config revision restores
+  // that revision's snapshot wholesale, bypassing the PATCH-path allow-list
+  // above entirely unless it is re-applied here. configPatchFromSnapshot
+  // normalizes the revision snapshot the exact same way
+  // agentService(db).rollbackConfigRevision itself does before persisting
+  // it, and computeChangedConfigFields narrows that down to only the fields
+  // the rollback would actually change against the agent's current row — a
+  // rollback that leaves every field unchanged is not "setting" any of
+  // them. The result is handed to the SAME assertAgentSelfUpdateAllowed the
+  // PATCH route uses, so a field's allow-listed status can never diverge
+  // between the two paths.
+  function assertAgentSelfUpdateRollbackAllowed(
+    req: Request,
+    existing: Record<string, unknown>,
+    snapshot: Record<string, unknown>,
+  ) {
+    if (req.actor.type !== "agent") return;
+    const patch = configPatchFromSnapshot(snapshot);
+    const changedFields = computeChangedConfigFields(existing, patch);
+    assertAgentSelfUpdateAllowed(req, changedFields);
   }
 
   function summarizeAgentUpdateDetails(patch: Record<string, unknown>) {
@@ -1376,6 +1476,40 @@ export function agentRoutes(
       details.changedRuntimeConfigKeys = Object.keys(runtimeConfigPatch).sort();
     }
 
+    return details;
+  }
+
+  // Any change to an agent's job title (role), display title, or tool
+  // connections (adapterConfig.mcpServers) must be operator-visible in plain
+  // language regardless of who made it -- an agent-authenticated caller can
+  // no longer touch role or mcpServers at all (see assertNoAgentRoleMutation
+  // / assertNoAgentToolConnectionMutation above), but a board-authenticated
+  // (human) caller still can, and today's `changedTopLevelKeys` /
+  // `changedAdapterConfigKeys` summaries only name the fields that changed,
+  // not what actually changed. This attaches the old -> new values (and, for
+  // tool connections, what each added/removed server can reach) so the
+  // activity feed can render a sentence a non-technical operator can read
+  // without opening the diff. Computed from the persisted before/after agent
+  // records rather than the raw patch, so it is correct even when the patch
+  // only partially overlaps the change (e.g. a merge into adapterConfig).
+  function appendAgentAuditDetails(
+    details: Record<string, unknown>,
+    before: { role: string; title: string | null; adapterConfig: unknown },
+    after: { role: string; title: string | null; adapterConfig: unknown },
+  ) {
+    if (before.role !== after.role) {
+      details.roleChange = { from: before.role, to: after.role };
+    }
+    if (before.title !== after.title) {
+      details.titleChange = { from: before.title, to: after.title };
+    }
+    const { added, removed } = diffMcpServers(before.adapterConfig, after.adapterConfig);
+    if (added.length > 0 || removed.length > 0) {
+      details.toolConnectionChange = {
+        added: added.map((server) => ({ name: server.name, capability: describeToolCapability(server) })),
+        removed: removed.map((server) => ({ name: server.name })),
+      };
+    }
     return details;
   }
 
@@ -2106,6 +2240,14 @@ export function agentRoutes(
     }
     await assertCanUpdateAgent(req, existing);
 
+    const targetRevision = await svc.getConfigRevision(id, revisionId);
+    if (!targetRevision) {
+      res.status(404).json({ error: "Revision not found" });
+      return;
+    }
+    const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
+    assertAgentSelfUpdateRollbackAllowed(req, existing, targetSnapshot);
+
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
       agentId: actor.agentId,
@@ -2125,7 +2267,7 @@ export function agentRoutes(
       action: "agent.config_rolled_back",
       entityType: "agent",
       entityId: updated.id,
-      details: { revisionId },
+      details: appendAgentAuditDetails({ revisionId }, existing, updated),
     });
 
     res.json(updated);
@@ -2258,7 +2400,11 @@ export function agentRoutes(
       return;
     }
 
-    const requiresApproval = company.requireBoardApprovalForNewAgents;
+    // An agent-authenticated hire must always land as pending_approval: hiring
+    // spends the company's money every month, and that decision belongs to a
+    // human board member, never to another agent, regardless of how this
+    // company has configured requireBoardApprovalForNewAgents (DUR-81).
+    const requiresApproval = req.actor.type === "agent" || company.requireBoardApprovalForNewAgents;
     const status = requiresApproval ? "pending_approval" : "idle";
     const createdAgent = await svc.create(companyId, {
       id: hiredAgentId,
@@ -2328,6 +2474,22 @@ export function agentRoutes(
           userId: actor.actorType === "user" ? actor.actorId : null,
         });
       }
+    } else if (agent.budgetMonthlyCents > 0) {
+      // When requireBoardApprovalForNewAgents is off, the agent goes live
+      // immediately with no approval to attach a budget policy to later
+      // (approvalsSvc.approve() is what does that on the approval path).
+      // Without this, budgetMonthlyCents is persisted on the agent row as
+      // display-only metadata and the hire has no enforced spending cap.
+      await budgets.upsertPolicy(
+        companyId,
+        {
+          scopeType: "agent",
+          scopeId: agent.id,
+          amount: agent.budgetMonthlyCents,
+          windowKind: "calendar_month_utc",
+        },
+        actor.actorType === "user" ? actor.actorId : null,
+      );
     }
 
     await logActivity(db, {
@@ -2389,7 +2551,11 @@ export function agentRoutes(
       res.status(404).json({ error: "Company not found" });
       return;
     }
-    if (company.requireBoardApprovalForNewAgents) {
+    // Agent actors can never use direct (live, unapproved) creation, regardless
+    // of requireBoardApprovalForNewAgents: hiring always requires a human
+    // decision in between, so an agent must go through /agent-hires, which
+    // now forces pending_approval for agent-authenticated requests (DUR-81).
+    if (company.requireBoardApprovalForNewAgents || req.actor.type === "agent") {
       throw conflict(
         "Direct agent creation requires board approval. Use POST /api/companies/:companyId/agent-hires to create a pending hire approval.",
       );
@@ -2510,13 +2676,31 @@ export function agentRoutes(
         res.status(403).json({ error: "Forbidden" });
         return;
       }
-      if (actorAgent.role !== "ceo") {
-        res.status(403).json({ error: "Only CEO can manage permissions" });
+      if (!actorAgent.permissions?.canManageOtherAgentsPermissions) {
+        res.status(403).json({ error: "Missing permission to manage other agents' permissions" });
         return;
       }
     } else {
       await assertBoardCanManageAgentsForCompany(req, existing.companyId);
     }
+
+    // Capture the pre-change values before mutating so a change to an
+    // agent's rights (permissions) can be reported old value -> new value,
+    // not just the resulting state.
+    const previousExplicitTaskAssignGrant = await access.hasPermission(
+      existing.companyId,
+      "agent",
+      existing.id,
+      "tasks:assign",
+    );
+    const previousCanAssignTasks =
+      existing.role === "ceo" || Boolean(existing.permissions?.canCreateAgents) || previousExplicitTaskAssignGrant;
+    const previousPermissions = {
+      canCreateAgents: existing.permissions?.canCreateAgents ?? false,
+      canCreateSkills: existing.permissions?.canCreateSkills ?? true,
+      canAssignTasks: previousCanAssignTasks,
+      trustPreset: existing.permissions?.trustPreset ?? "standard",
+    };
 
     const agent = await svc.updatePermissions(id, req.body);
     if (!agent) {
@@ -2525,7 +2709,7 @@ export function agentRoutes(
     }
 
     const effectiveCanAssignTasks =
-      agent.role === "ceo" || Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
+      Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
     await access.ensureMembership(agent.companyId, "agent", agent.id, "member", "active");
     await access.setPrincipalPermission(
       agent.companyId,
@@ -2551,6 +2735,7 @@ export function agentRoutes(
         canCreateSkills: agent.permissions?.canCreateSkills ?? true,
         canAssignTasks: effectiveCanAssignTasks,
         trustPreset: agent.permissions?.trustPreset ?? "standard",
+        _previous: previousPermissions,
       },
     });
 
@@ -2724,6 +2909,7 @@ export function agentRoutes(
       return;
     }
     await assertCanManageInstructionsPath(req, existing);
+    await assertSorteringsreglerRuleNamesResolve(existing.companyId, req.body.content as string);
 
     const actor = getActorInfo(req);
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
@@ -2816,13 +3002,13 @@ export function agentRoutes(
     const patchData = { ...(req.body as Record<string, unknown>) };
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
+    assertAgentSelfUpdateAllowed(req, patchData);
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {
         res.status(422).json({ error: "adapterConfig must be an object" });
         return;
       }
-      assertNoAgentAdapterConfigMutation(req, adapterConfig);
       const changingInstructionsConfig = adapterConfigTouchesInstructionsConfig(adapterConfig);
       if (changingInstructionsConfig) {
         await assertCanManageInstructionsPath(req, existing);
@@ -2840,7 +3026,6 @@ export function agentRoutes(
         res.status(422).json({ error: "runtimeConfig must be an object" });
         return;
       }
-      assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
       requestedRuntimeConfig = runtimeConfig;
     }
     const touchesAdapterConfiguration =
@@ -2944,7 +3129,7 @@ export function agentRoutes(
       action: "agent.updated",
       entityType: "agent",
       entityId: agent.id,
-      details: summarizeAgentUpdateDetails(patchData),
+      details: appendAgentAuditDetails(summarizeAgentUpdateDetails(patchData), existing, agent),
     });
 
     res.json(agent);

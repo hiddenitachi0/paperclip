@@ -39,6 +39,7 @@ describe("routine validators", () => {
         publicId: "routine_webhook_123",
         signingMode: "bearer",
         replayWindowSec: 300,
+        customerInboxChannel: null,
       }],
     });
 
@@ -73,6 +74,7 @@ describe("routine validators", () => {
         publicId: "routine_webhook_123",
         signingMode: "bearer",
         replayWindowSec: 300,
+        customerInboxChannel: null,
         secretId: "55555555-5555-4555-8555-555555555555",
       }],
     })).toThrow();

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
+import { sanitizeSharedCodexConfigToml } from "./runtime-config.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
@@ -172,10 +173,19 @@ export async function ensureSymlink(target: string, source: string): Promise<voi
   await createExpectedSymlink(target, source);
 }
 
-async function ensureCopiedFile(target: string, source: string): Promise<void> {
+async function ensureCopiedFile(
+  target: string,
+  source: string,
+  options: { sanitize?: (raw: string) => string } = {},
+): Promise<void> {
   const existing = await fs.lstat(target).catch(() => null);
   if (existing) return;
   await ensureParentDir(target);
+  if (options.sanitize) {
+    const raw = await fs.readFile(source, "utf8");
+    await fs.writeFile(target, options.sanitize(raw), "utf8");
+    return;
+  }
   await fs.copyFile(source, target);
 }
 
@@ -235,7 +245,11 @@ export async function seedManagedCodexHome(
     for (const name of COPIED_SHARED_FILES) {
       const source = path.join(sourceHome, name);
       if (!(await pathExists(source))) continue;
-      await ensureCopiedFile(path.join(targetHome, name), source);
+      await ensureCopiedFile(
+        path.join(targetHome, name),
+        source,
+        name === "config.toml" ? { sanitize: sanitizeSharedCodexConfigToml } : undefined,
+      );
     }
 
     await onLog(

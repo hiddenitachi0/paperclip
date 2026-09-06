@@ -34,6 +34,25 @@ export interface RestoreRoutineRevisionResponse {
   secretMaterials: RestoreRoutineRevisionSecretMaterial[];
 }
 
+export interface CustomerInboxDelivery {
+  id: string;
+  channel: string | null;
+  fromAddress: string | null;
+  fromName: string | null;
+  subject: string | null;
+  receivedAt: string | null;
+  outcome: string;
+  createdAt: string;
+  linkedIssueId: string | null;
+  issueIdentifier: string | null;
+}
+
+export interface CustomerInboxTestMessageResult {
+  outcome: string;
+  routineRunId: string | null;
+  issueId: string | null;
+}
+
 export const routinesApi = {
   list: (companyId: string, filters?: { projectId?: string | null }) => {
     const params = new URLSearchParams();
@@ -56,6 +75,13 @@ export const routinesApi = {
       body,
     ),
   listRuns: (id: string, limit: number = 50) => api.get<RoutineRunSummary[]>(`/routines/${id}/runs?limit=${limit}`),
+  customerInboxDeliveries: (id: string, limit: number = 100) =>
+    api.get<CustomerInboxDelivery[]>(`/routines/${id}/customer-inbox-deliveries?limit=${limit}`),
+  sendCustomerInboxTestMessage: (id: string, triggerId: string) =>
+    api.post<CustomerInboxTestMessageResult>(
+      `/routines/${id}/triggers/${triggerId}/customer-inbox-test-message`,
+      {},
+    ),
   createTrigger: (id: string, data: Record<string, unknown>) =>
     api.post<RoutineTriggerResponse>(`/routines/${id}/triggers`, data),
   updateTrigger: (id: string, data: Record<string, unknown>) =>

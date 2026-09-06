@@ -15,6 +15,7 @@ import {
 import { ScheduleEditor } from "./ScheduleEditor";
 import { buildRoutineTriggerPatch } from "../lib/routine-trigger-patch";
 import { describeCron } from "../lib/cron-readable";
+import { CustomerInboxDeliveries } from "./CustomerInboxDeliveries";
 
 const signingModes = ["bearer", "hmac_sha256", "github_hmac", "none"];
 const SIGNING_MODES_WITHOUT_REPLAY_WINDOW = new Set(["github_hmac", "none"]);
@@ -33,12 +34,14 @@ function getLocalTimezone(): string {
  */
 export function RoutineTriggerCard({
   trigger,
+  routineId,
   onSave,
   onRotate,
   onDelete,
   disabled,
 }: {
   trigger: RoutineTrigger;
+  routineId?: string;
   onSave: (id: string, patch: Record<string, unknown>) => void;
   onRotate: (id: string) => void;
   onDelete: (id: string) => void;
@@ -188,6 +191,10 @@ export function RoutineTriggerCard({
             Save trigger
           </Button>
         </div>
+      )}
+
+      {trigger.customerInboxChannel && routineId && (
+        <CustomerInboxDeliveries routineId={routineId} triggerId={trigger.id} />
       )}
     </form>
   );

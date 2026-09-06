@@ -461,6 +461,40 @@ export function routineRoutes(
     res.json(result);
   });
 
+  router.get("/routines/:id/customer-inbox-deliveries", async (req, res) => {
+    const routine = await svc.get(req.params.id as string);
+    if (!routine) {
+      res.status(404).json({ error: "Routine not found" });
+      return;
+    }
+    assertCompanyAccess(req, routine.companyId);
+    const limit = Number(req.query.limit ?? 100);
+    const result = await svc.listCustomerInboxDeliveries(routine.id, Number.isFinite(limit) ? limit : 100);
+    res.json(result);
+  });
+
+  router.post("/routines/:id/triggers/:triggerId/customer-inbox-test-message", async (req, res) => {
+    const routine = await assertCanManageExistingRoutine(req, req.params.id as string);
+    if (!routine) {
+      res.status(404).json({ error: "Routine not found" });
+      return;
+    }
+    const result = await svc.sendCustomerInboxTestMessage(routine.id, req.params.triggerId as string);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: routine.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "routine.customer_inbox_test_message_sent",
+      entityType: "routine_trigger",
+      entityId: req.params.triggerId as string,
+      details: { routineId: routine.id, outcome: result.outcome },
+    });
+    res.status(202).json(result);
+  });
+
   router.post("/routines/:id/triggers", validate(createRoutineTriggerSchema), async (req, res) => {
     const routine = await assertCanManageExistingRoutine(req, req.params.id as string);
     if (!routine) {

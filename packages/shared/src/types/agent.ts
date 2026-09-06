@@ -67,7 +67,11 @@ export interface AgentInstructionsBundle {
 
 export interface AgentAccessState {
   canAssignTasks: boolean;
-  taskAssignSource: "simple_default" | "explicit_grant" | "agent_creator" | "ceo_role" | "none";
+  // "ceo_role" was a distinct source for the old `role === "ceo"` bypass in
+  // buildAgentAccessState (server/src/routes/agents.ts). A "ceo" agent still
+  // gets canAssignTasks by default, but now via the same `agent_creator`
+  // path any agent with an explicit canCreateAgents grant takes.
+  taskAssignSource: "simple_default" | "explicit_grant" | "agent_creator" | "none";
   membership: CompanyMembership | null;
   grants: PrincipalPermissionGrant[];
 }

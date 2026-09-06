@@ -549,6 +549,23 @@ export type RoutineTriggerSigningMode = (typeof ROUTINE_TRIGGER_SIGNING_MODES)[n
 export const ROUTINE_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select", "date"] as const;
 export type RoutineVariableType = (typeof ROUTINE_VARIABLE_TYPES)[number];
 
+// DUR-68: a webhook trigger with a non-null customerInboxChannel is owned by
+// the generic customer-inbox door (POST /api/customer-inbox/:publicId)
+// rather than the old generic fire route. "Any source that can push a
+// message" — not tied to any specific mailbox provider.
+export const CUSTOMER_INBOX_CHANNELS = ["email", "contact_form"] as const;
+export type CustomerInboxChannel = (typeof CUSTOMER_INBOX_CHANNELS)[number];
+
+export const CUSTOMER_INBOX_DELIVERY_OUTCOMES = [
+  "accepted",
+  "duplicate",
+  "rejected_signature",
+  "rejected_shape",
+  "failed",
+  "unknown_target",
+] as const;
+export type CustomerInboxDeliveryOutcome = (typeof CUSTOMER_INBOX_DELIVERY_OUTCOMES)[number];
+
 export const ROUTINE_RUN_STATUSES = [
   "received",
   "coalesced",

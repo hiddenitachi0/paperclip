@@ -5,5 +5,37 @@
       "description": "Get started by creating a company.",
       "newCompany": "New Company"
     }
+  },
+  "routines": {
+    "customerInbox": {
+      "deliveries": {
+        "title": "Deliveries",
+        "empty": "No deliveries yet.",
+        "columns": {
+          "time": "Time",
+          "channel": "Channel",
+          "sender": "Sender",
+          "outcome": "Outcome"
+        },
+        "outcome": {
+          "accepted": "Accepted",
+          "duplicate": "Duplicate",
+          "rejected_signature": "Rejected (invalid credentials)",
+          "rejected_shape": "Rejected (unreadable message)",
+          "failed": "Failed",
+          "unknown_target": "Unknown address"
+        },
+        "channel": {
+          "email": "Email",
+          "contact_form": "Contact form"
+        }
+      },
+      "testMessage": {
+        "button": "Send test message",
+        "sending": "Sending…",
+        "success": "Test message sent.",
+        "error": "Could not send test message."
+      }
+    }
   }
 }

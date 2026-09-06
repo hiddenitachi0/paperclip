@@ -1932,7 +1932,11 @@ export function issueRoutes(
       res.status(403).json({ error: "Forbidden" });
       return false;
     }
-    if (actorAgent.role === "ceo" || Boolean(actorAgent.permissions?.canCreateAgents)) return true;
+    // `canCreateAgents` already defaults to `true` for the "ceo" role (see
+    // normalizeAgentPermissions), so no separate `role === "ceo"` check is
+    // needed -- and none of these authorization checks should ever compare
+    // role to a title string directly.
+    if (Boolean(actorAgent.permissions?.canCreateAgents)) return true;
     // An agent that requested an approval is always allowed to link/unlink it to
     // an issue in its own company, even without canCreateAgents — requesting the
     // approval is already the stronger permission (DUR-43).

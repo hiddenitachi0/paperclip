@@ -1134,6 +1134,170 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
+  // DUR-72: the Goal field used to be invisible — reachable only by opening the three-dot
+  // overflow menu and clicking a "Goal condition" item with no visible label of its own.
+  // These tests prove the field is now on the form by default (no menu interaction at all),
+  // uses one consistent "Goal" label, and offers an editable suggestion pulled from the
+  // description's own acceptance criteria.
+  it("shows the Goal field directly on the form without opening any menu", async () => {
+    const { root } = renderDialog(container);
+    await flush();
+
+    // No interaction with the overflow ("...") menu happens anywhere in this test — if the
+    // field only rendered after opening that menu, this query would find nothing.
+    const goalTextarea = container.querySelector(
+      'textarea[placeholder="e.g. All tests pass and the PR is merged"]',
+    );
+    expect(goalTextarea).not.toBeNull();
+    expect(container.textContent).toContain("Goal");
+
+    // The old hidden entry point is gone: no "Goal condition" item in the overflow menu, and
+    // the naming is unified on "Goal" everywhere (no leftover "Finish line" / "Goal condition").
+    const overflowMenuItems = Array.from(container.querySelectorAll("button")).map((button) => button.textContent?.trim());
+    expect(overflowMenuItems).not.toContain("Goal condition");
+    expect(container.textContent).not.toContain("Goal condition");
+    expect(container.textContent).not.toContain("Finish line");
+
+    act(() => root.unmount());
+  });
+
+  it("is optional — a task can be created with no goal set", async () => {
+    const { root } = renderDialog(container);
+    await flush();
+
+    const titleInput = container.querySelector('textarea[placeholder="Task title"]') as HTMLTextAreaElement | null;
+    await typeTextareaValue(titleInput!, "Task without a goal");
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Task"));
+    await vi.waitFor(() => {
+      expect(submitButton?.hasAttribute("disabled")).toBe(false);
+    });
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ title: "Task without a goal" }),
+    );
+    const createCall = mockIssuesApi.create.mock.calls[0]?.[1] as { executionPolicy?: { monitor?: unknown } | null };
+    expect(createCall.executionPolicy?.monitor).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it("suggests a goal from the description's acceptance criteria and submits it when accepted", async () => {
+    const { root } = renderDialog(container);
+    await flush();
+
+    const titleInput = container.querySelector('textarea[placeholder="Task title"]') as HTMLTextAreaElement | null;
+    const descriptionInput = container.querySelector('textarea[aria-label="Add description..."]') as HTMLTextAreaElement | null;
+    await typeTextareaValue(titleInput!, "Ship the thing");
+    await typeTextareaValue(
+      descriptionInput!,
+      ["Some context.", "", "## Acceptance Criteria", "- All tests pass", "- The PR is merged"].join("\n"),
+    );
+
+    const suggestButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Suggest from description");
+    expect(suggestButton).not.toBeUndefined();
+
+    await act(async () => {
+      suggestButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(container.textContent).toContain("Suggested from description");
+    expect(container.textContent).toContain("All tests pass; The PR is merged");
+
+    const useButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Use");
+    expect(useButton).not.toBeUndefined();
+
+    await act(async () => {
+      useButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const goalTextarea = container.querySelector(
+      'textarea[placeholder="e.g. All tests pass and the PR is merged"]',
+    ) as HTMLTextAreaElement | null;
+    expect(goalTextarea?.value).toBe("All tests pass; The PR is merged");
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Task"));
+    await vi.waitFor(() => {
+      expect(submitButton?.hasAttribute("disabled")).toBe(false);
+    });
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        executionPolicy: expect.objectContaining({
+          monitor: expect.objectContaining({
+            kind: "goal_condition",
+            condition: "All tests pass; The PR is merged",
+          }),
+        }),
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("lets the operator dismiss a suggested goal without setting it, and edit or clear a goal that is set", async () => {
+    const { root } = renderDialog(container);
+    await flush();
+
+    const descriptionInput = container.querySelector('textarea[aria-label="Add description..."]') as HTMLTextAreaElement | null;
+    await typeTextareaValue(descriptionInput!, ["## Acceptance", "- Ship it"].join("\n"));
+
+    const suggestButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Suggest from description");
+    await act(async () => {
+      suggestButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(container.textContent).toContain("Suggested from description");
+
+    const dismissButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Dismiss");
+    await act(async () => {
+      dismissButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain("Suggested from description");
+    const goalTextarea = container.querySelector(
+      'textarea[placeholder="e.g. All tests pass and the PR is merged"]',
+    ) as HTMLTextAreaElement | null;
+    expect(goalTextarea?.value ?? "").toBe("");
+
+    // Editable: typing directly into the field works without going through a suggestion.
+    await typeTextareaValue(goalTextarea!, "All tests pass and the PR is merged");
+    expect(goalTextarea!.value).toBe("All tests pass and the PR is merged");
+
+    // Clearable: an explicit "Clear" affordance appears once a goal is set, and empties it.
+    const clearButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Clear");
+    expect(clearButton).not.toBeUndefined();
+    await act(async () => {
+      clearButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(goalTextarea!.value).toBe("");
+
+    act(() => root.unmount());
+  });
+
   describe("graduated work-mode labels and status hues", () => {
     function workModeOption(value: string) {
       return container.querySelector(`[data-issue-work-mode="${value}"]`);

@@ -81,7 +81,7 @@ Response:
 }
 ```
 
-If company setting disables required approval, `approval` is `null` and the agent is created as `idle`.
+An agent-authenticated hire always comes back `pending_approval` with a `hire_agent` approval, regardless of the company's `requireBoardApprovalForNewAgents` setting — an agent can never make a hire go live on its own. Only a board/user-authenticated call is affected by that company setting; when it's off for a board-initiated hire, `approval` is `null` and the agent is created as `idle` directly.
 
 `desiredSkills` accepts company skill ids, canonical keys, or a unique slug. The server resolves and stores canonical company skill keys.
 Leave timer heartbeats disabled by default. Only set `runtimeConfig.heartbeat.enabled=true` and include an `intervalSec` when the role truly needs scheduled recurring work or the user explicitly requested it.

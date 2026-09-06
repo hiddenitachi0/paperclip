@@ -2104,6 +2104,24 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/routines/{id}/customer-inbox-deliveries",
+  tags: ["routines"],
+  summary: "List customer-inbox deliveries for a routine",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/routines/{id}/triggers/{triggerId}/customer-inbox-test-message",
+  tags: ["routines"],
+  summary: "Send a customer-inbox test message through a routine's trigger",
+  request: { params: z.object({ id: z.string(), triggerId: z.string() }) },
+  responses: { 202: r.ok(), 401: r.unauthorized, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/routines/{id}/run",
   tags: ["routines"],
@@ -2167,6 +2185,15 @@ registry.registerPath({
   summary: "Fire a public routine trigger",
   request: { params: z.object({ publicId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/customer-inbox/{publicId}",
+  tags: ["routines"],
+  summary: "Receive a customer-inbox message (email, contact form, ...)",
+  request: { params: z.object({ publicId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 409: r.conflict, 422: r.badRequest },
 });
 
 // ─── Goals ───────────────────────────────────────────────────────────────────

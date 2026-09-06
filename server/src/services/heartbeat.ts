@@ -109,6 +109,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
 import { issueApprovalService } from "./issue-approvals.js";
@@ -168,12 +169,14 @@ import {
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import {
+  buildSelfReviewPassInstruction,
+  detectRiskySurfaceFromDiff,
   findExistingSelfReviewPassNoticeCommentForRun,
+  getChangedFilePathsForIssueWorkspace,
   issueExecutionPolicyOptsOutOfSelfReview,
   issueProjectHasGitWorkspace,
   isSelfReviewPassRun,
   postSelfReviewPassNoticeComment,
-  SELF_REVIEW_PASS_NOTICE_COMMENT,
   SELF_REVIEW_PASS_REASON,
 } from "./self-review-gate.js";
 import {
@@ -7010,19 +7013,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           try {
             // Best-effort, deduped-by-run notice so the agent actually sees plain-language
             // instructions on wake (the generic wake payload doesn't surface an arbitrary
-            // instruction field — see self-review-gate.ts for details).
+            // instruction field — see self-review-gate.ts for details). DUR-71: this backstop
+            // (for handoffs that skip the synchronous PATCH gate) gets the same diff-driven
+            // adversarial questions on a risky surface as the synchronous gate does — otherwise
+            // a risky change that lands via this path would only ever get the confirmatory
+            // prompt.
+            const changedFilePaths = await getChangedFilePathsForIssueWorkspace(db, {
+              companyId: issue.companyId,
+              issueId: issue.id,
+            });
+            const riskySurfaceCategories = changedFilePaths ? detectRiskySurfaceFromDiff(changedFilePaths) : [];
+            const noticeBody = buildSelfReviewPassInstruction({
+              issueIdentifier: issue.identifier,
+              alreadyHandedOff: true,
+              riskySurfaceCategories,
+            });
             const existingNotice = await findExistingSelfReviewPassNoticeCommentForRun(db, {
               companyId: issue.companyId,
               issueId: issue.id,
               sourceRunId: run.id,
-              body: SELF_REVIEW_PASS_NOTICE_COMMENT,
+              body: noticeBody,
             });
             if (!existingNotice) {
               await postSelfReviewPassNoticeComment(db, {
                 companyId: issue.companyId,
                 issueId: issue.id,
                 sourceRunId: run.id,
-                body: SELF_REVIEW_PASS_NOTICE_COMMENT,
+                body: noticeBody,
               });
             }
           } catch {
@@ -14836,11 +14853,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       const issueMonitors = await tickDueIssueMonitors(now);
+      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now);
 
       return {
-        checked: checked + issueMonitors.checked,
-        enqueued: enqueued + issueMonitors.triggered,
-        skipped: skipped + issueMonitors.skipped,
+        checked: checked + issueMonitors.checked + customerInboxHandoffs.checked,
+        enqueued: enqueued + issueMonitors.triggered + customerInboxHandoffs.reassigned,
+        skipped: skipped + issueMonitors.skipped + customerInboxHandoffs.skipped,
       };
     },
 

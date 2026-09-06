@@ -154,6 +154,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       id: "agent-1",
       companyId: "company-1",
       role: "engineer",
+      permissions: {},
     });
     const app = createApp(
       {
@@ -170,7 +171,33 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       .send({});
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("Only CEO agents");
+    expect(res.body.error).toContain("Missing permission to generate OpenClaw invite prompts");
+  });
+
+  it("rejects a ceo-titled agent once canManageCompanySettings is explicitly revoked", async () => {
+    const db = createDbStub();
+    mockAgentService.getById.mockResolvedValue({
+      id: "agent-1",
+      companyId: "company-1",
+      role: "ceo",
+      permissions: { canManageCompanySettings: false },
+    });
+    const app = createApp(
+      {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        source: "agent_key",
+      },
+      db,
+    );
+
+    const res = await request(app)
+      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Missing permission to generate OpenClaw invite prompts");
   });
 
   it("rejects CEO agent callers outside the target company scope", async () => {
@@ -201,6 +228,7 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
       id: "agent-1",
       companyId: "company-1",
       role: "ceo",
+      permissions: { canManageCompanySettings: true },
     });
     const app = createApp(
       {
@@ -226,6 +254,31 @@ describe.sequential("POST /companies/:companyId/openclaw/invite-prompt", () => {
         allowedJoinTypes: "agent",
       }),
     );
+  });
+
+  it("allows a non-ceo agent with an explicit canManageCompanySettings grant", async () => {
+    const db = createDbStub([companyBranding], [logoAsset]);
+    mockAgentService.getById.mockResolvedValue({
+      id: "agent-1",
+      companyId: "company-1",
+      role: "engineering-manager",
+      permissions: { canManageCompanySettings: true },
+    });
+    const app = createApp(
+      {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        source: "agent_key",
+      },
+      db,
+    );
+
+    const res = await request(app)
+      .post("/api/companies/company-1/openclaw/invite-prompt")
+      .send({ agentMessage: "Join and configure OpenClaw gateway." });
+
+    expect([200, 201]).toContain(res.status);
   });
 
   it("includes companyName in invite summary responses", async () => {

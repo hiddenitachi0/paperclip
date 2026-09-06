@@ -62,6 +62,9 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
   "agent.runtime_session_reset": "reset session for",
+  "agent.permissions_updated": "updated rights for",
+  "agent.config_rolled_back": "rolled back configuration for",
+  "agent.tool_connection_granted": "granted a tool connection to",
   "heartbeat.invoked": "invoked heartbeat for",
   "heartbeat.cancelled": "cancelled heartbeat for",
   "heartbeat.output_stale_source_resolved": "system-folded stale run on",
@@ -242,6 +245,90 @@ function formatIssueUpdatedVerb(details: ActivityDetails): string | null {
   return null;
 }
 
+function formatToolNameList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const entry of value) {
+    const record = asRecord(entry);
+    const name = typeof record?.name === "string" ? record.name : null;
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+function formatToolConnectionChangeVerb(value: unknown): string | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const added = formatToolNameList(record.added);
+  const removed = formatToolNameList(record.removed);
+  if (added.length > 0 && removed.length === 0) {
+    return `added the "${added.join(", ")}" tool connection to`;
+  }
+  if (removed.length > 0 && added.length === 0) {
+    return `removed the "${removed.join(", ")}" tool connection from`;
+  }
+  if (added.length > 0 && removed.length > 0) {
+    return `changed tool connections (added "${added.join(", ")}", removed "${removed.join(", ")}") on`;
+  }
+  return null;
+}
+
+// Role (job title) and tool-connection changes must be plain-language and
+// operator-visible regardless of who made them — see appendAgentAuditDetails
+// in server/src/routes/agents.ts, which is what attaches roleChange /
+// titleChange / toolConnectionChange to agent.updated and
+// agent.config_rolled_back activity entries.
+function formatAgentAuditVerb(details: ActivityDetails): string | null {
+  if (!details) return null;
+  const roleChange = asRecord(details.roleChange);
+  if (roleChange) {
+    const from = typeof roleChange.from === "string" ? roleChange.from : null;
+    const to = typeof roleChange.to === "string" ? roleChange.to : null;
+    if (to) {
+      return from
+        ? `changed the job title from ${humanizeValue(from)} to ${humanizeValue(to)} on`
+        : `changed the job title to ${humanizeValue(to)} on`;
+    }
+  }
+  const titleChange = asRecord(details.titleChange);
+  if (titleChange) {
+    const from = typeof titleChange.from === "string" ? titleChange.from : null;
+    const to = typeof titleChange.to === "string" ? titleChange.to : null;
+    if (from || to) {
+      return `changed the title from ${humanizeValue(from ?? "none")} to ${humanizeValue(to ?? "none")} on`;
+    }
+  }
+  const toolChange = formatToolConnectionChangeVerb(details.toolConnectionChange);
+  if (toolChange) return toolChange;
+  return null;
+}
+
+function formatAgentPermissionsVerb(details: ActivityDetails): string | null {
+  if (!details) return null;
+  const previous = asRecord(details._previous);
+  if (!previous) return null;
+  const changes: string[] = [];
+  if (typeof details.canCreateAgents === "boolean" && previous.canCreateAgents !== details.canCreateAgents) {
+    changes.push(details.canCreateAgents ? "granted agent-creation rights to" : "revoked agent-creation rights from");
+  }
+  if (typeof details.canCreateSkills === "boolean" && previous.canCreateSkills !== details.canCreateSkills) {
+    changes.push(details.canCreateSkills ? "granted skill-creation rights to" : "revoked skill-creation rights from");
+  }
+  if (typeof details.canAssignTasks === "boolean" && previous.canAssignTasks !== details.canAssignTasks) {
+    changes.push(details.canAssignTasks ? "granted task-assignment rights to" : "revoked task-assignment rights from");
+  }
+  if (typeof details.trustPreset === "string" && previous.trustPreset !== details.trustPreset) {
+    changes.push(`changed the trust preset from ${humanizeValue(previous.trustPreset)} to ${humanizeValue(details.trustPreset)} on`);
+  }
+  return changes.length > 0 ? changes.join(", ") : null;
+}
+
+function formatToolConnectionGrantedVerb(details: ActivityDetails): string | null {
+  if (!details) return null;
+  const name = typeof details.serverName === "string" ? details.serverName : null;
+  return name ? `granted the "${name}" tool connection to` : null;
+}
+
 function formatAssigneeName(details: ActivityDetails, options: ActivityFormatOptions): string | null {
   if (!details) return null;
   const agentId = details.assigneeAgentId;
@@ -336,6 +423,21 @@ export function formatActivityVerb(
   if (action === "issue.updated") {
     const issueUpdatedVerb = formatIssueUpdatedVerb(details);
     if (issueUpdatedVerb) return issueUpdatedVerb;
+  }
+
+  if (action === "agent.updated" || action === "agent.config_rolled_back") {
+    const agentAuditVerb = formatAgentAuditVerb(details);
+    if (agentAuditVerb) return agentAuditVerb;
+  }
+
+  if (action === "agent.permissions_updated") {
+    const permissionsVerb = formatAgentPermissionsVerb(details);
+    if (permissionsVerb) return permissionsVerb;
+  }
+
+  if (action === "agent.tool_connection_granted") {
+    const grantedVerb = formatToolConnectionGrantedVerb(details);
+    if (grantedVerb) return grantedVerb;
   }
 
   const structuredChange = formatStructuredIssueChange({

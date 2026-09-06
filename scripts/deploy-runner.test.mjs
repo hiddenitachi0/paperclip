@@ -268,6 +268,61 @@ test("an approval whose comment can never be delivered is left unprocessed for t
   }
 });
 
+// DUR-53 regression: when payload.commit is unset, target_ref falls back to
+// the branch name (e.g. "custom"). A long-lived deploy checkout already has
+// a local branch of that same name, which `git fetch origin custom` never
+// moves — only `refs/remotes/origin/custom` advances. The old code resolved
+// bare "$ref" first, silently resetting to the stale local branch tip (a
+// no-op) while still reporting success at the old commit.
+test("git_fetch_reset advances a branch-name deploy to the freshly fetched commit, not a stale same-named local branch", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    const commitA = g(targetDir, ["rev-parse", "HEAD"]);
+
+    // origin advances past what the target checkout has cloned/cached locally.
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+    const commitB = g(originDir, ["rev-parse", "HEAD"]);
+    assert.notEqual(commitA, commitB);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "custom" ""
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assertSuccess(result, "git_fetch_reset");
+
+    const targetHead = g(targetDir, ["rev-parse", "HEAD"]);
+    assert.equal(targetHead, commitB, "target checkout must advance to origin's new tip, not stay pinned to the stale local branch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run_one_approval's crash-fallback comment does not double-comment when the real outcome comment already delivered", () => {
   const scenario = makeScenario();
   try {

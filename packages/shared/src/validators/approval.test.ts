@@ -4,6 +4,7 @@ import {
   deployRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
+  toolGrantRequestPayloadSchema,
 } from "./approval.js";
 
 describe("approval validators", () => {
@@ -45,5 +46,26 @@ describe("approval validators", () => {
     expect(() => deployRequestPayloadSchema.parse({ ...payload, extra: "nope" })).toThrow();
     const { title: _title, ...missingTitle } = payload;
     expect(() => deployRequestPayloadSchema.parse(missingTitle)).toThrow();
+  });
+
+  it("validates the tool-grant request approval payload convention", () => {
+    const payload = {
+      kind: "tool_grant" as const,
+      agentId: "11111111-1111-4111-8111-111111111111",
+      server: { name: "search", url: "https://search.example.com/mcp", transport: "http" as const },
+      reason: "Needs to look up current docs while writing the integration.",
+      title: "Grant Builder access to the search tool",
+    };
+    expect(toolGrantRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(() => toolGrantRequestPayloadSchema.parse({ ...payload, kind: "other" })).toThrow();
+    expect(() => toolGrantRequestPayloadSchema.parse({ ...payload, extra: "nope" })).toThrow();
+    const { reason: _reason, ...missingReason } = payload;
+    expect(() => toolGrantRequestPayloadSchema.parse(missingReason)).toThrow();
+    expect(() =>
+      toolGrantRequestPayloadSchema.parse({
+        ...payload,
+        server: { name: "search", command: "echo", url: "https://x" },
+      }),
+    ).toThrow();
   });
 });

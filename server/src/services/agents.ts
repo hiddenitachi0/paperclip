@@ -30,6 +30,11 @@ import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
+import {
+  CONFIG_REVISION_FIELDS,
+  configPatchFromSnapshot,
+  type ConfigRevisionField,
+} from "./agent-self-update-policy.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -39,21 +44,6 @@ function createToken() {
   return `pcp_${randomBytes(24).toString("hex")}`;
 }
 
-const CONFIG_REVISION_FIELDS = [
-  "name",
-  "role",
-  "title",
-  "reportsTo",
-  "capabilities",
-  "adapterType",
-  "adapterConfig",
-  "runtimeConfig",
-  "defaultEnvironmentId",
-  "budgetMonthlyCents",
-  "metadata",
-] as const;
-
-type ConfigRevisionField = (typeof CONFIG_REVISION_FIELDS)[number];
 type AgentConfigSnapshot = Pick<typeof agents.$inferSelect, ConfigRevisionField>;
 
 interface RevisionMetadata {
@@ -150,44 +140,6 @@ function diffConfigSnapshot(
   after: AgentConfigSnapshot,
 ): string[] {
   return CONFIG_REVISION_FIELDS.filter((field) => !jsonEqual(before[field], after[field]));
-}
-
-function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$inferInsert> {
-  if (!isPlainRecord(snapshot)) throw unprocessable("Invalid revision snapshot");
-
-  if (typeof snapshot.name !== "string" || snapshot.name.length === 0) {
-    throw unprocessable("Invalid revision snapshot: name");
-  }
-  if (typeof snapshot.role !== "string" || snapshot.role.length === 0) {
-    throw unprocessable("Invalid revision snapshot: role");
-  }
-  if (typeof snapshot.adapterType !== "string" || snapshot.adapterType.length === 0) {
-    throw unprocessable("Invalid revision snapshot: adapterType");
-  }
-  if (typeof snapshot.budgetMonthlyCents !== "number" || !Number.isFinite(snapshot.budgetMonthlyCents)) {
-    throw unprocessable("Invalid revision snapshot: budgetMonthlyCents");
-  }
-
-  return {
-    name: snapshot.name,
-    role: snapshot.role,
-    title: typeof snapshot.title === "string" || snapshot.title === null ? snapshot.title : null,
-    reportsTo:
-      typeof snapshot.reportsTo === "string" || snapshot.reportsTo === null ? snapshot.reportsTo : null,
-    capabilities:
-      typeof snapshot.capabilities === "string" || snapshot.capabilities === null
-        ? snapshot.capabilities
-        : null,
-    adapterType: snapshot.adapterType,
-    adapterConfig: isPlainRecord(snapshot.adapterConfig) ? snapshot.adapterConfig : {},
-    runtimeConfig: isPlainRecord(snapshot.runtimeConfig) ? snapshot.runtimeConfig : {},
-    defaultEnvironmentId:
-      typeof snapshot.defaultEnvironmentId === "string" || snapshot.defaultEnvironmentId === null
-        ? snapshot.defaultEnvironmentId
-        : null,
-    budgetMonthlyCents: Math.max(0, Math.floor(snapshot.budgetMonthlyCents)),
-    metadata: isPlainRecord(snapshot.metadata) || snapshot.metadata === null ? snapshot.metadata : null,
-  };
 }
 
 export function hasAgentShortnameCollision(

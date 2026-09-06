@@ -545,6 +545,7 @@ export function TriggersSection() {
             <RoutineTriggerCard
               key={trigger.id}
               trigger={trigger}
+              routineId={routine.id}
               onSave={(id, patch) => updateTrigger.mutate({ id, patch })}
               onRotate={(id) => rotateTrigger.mutate(id)}
               onDelete={(id) => deleteTrigger.mutate(id)}

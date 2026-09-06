@@ -805,6 +805,77 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("forces agent-authenticated hires to pending_approval even when the company disables required approval (DUR-81)", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockApprovalService.create.mockResolvedValue({
+      id: "approval-1",
+      companyId,
+      type: "hire_agent",
+      status: "pending",
+      payload: {},
+    });
+
+    const app = await createApp(
+      {
+        type: "agent",
+        agentId,
+        companyId,
+        source: "agent_key",
+        runId: "run-1",
+      },
+      { requireBoardApprovalForNewAgents: false },
+    );
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "New Hire",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockAgentService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({ status: "pending_approval" }),
+    );
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({ type: "hire_agent", status: "pending" }),
+    );
+    expect(res.body.approval).toBeTruthy();
+  });
+
+  it("blocks agent-authenticated direct agent creation even when the company disables required approval (DUR-81)", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+
+    const app = await createApp(
+      {
+        type: "agent",
+        agentId,
+        companyId,
+        source: "agent_key",
+        runId: "run-1",
+      },
+      { requireBoardApprovalForNewAgents: false },
+    );
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agents`)
+      .send({
+        name: "New Hire",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+      }));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("/agent-hires");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
   it("blocks direct agent creation for authenticated company members without agent create permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 
@@ -1096,6 +1167,71 @@ describe.sequential("agent permission routes", () => {
         },
       }),
     );
+  });
+
+  it("creates a budget policy for an immediately-live hire when board approval is not required", async () => {
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, budgetMonthlyCents: 17000 });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "Backend Engineer",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+        budgetMonthlyCents: 17000,
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
+      companyId,
+      {
+        scopeType: "agent",
+        scopeId: agentId,
+        amount: 17000,
+        windowKind: "calendar_month_utc",
+      },
+      "board-user",
+    );
+  });
+
+  it("does not create a budget policy for a hire that is still pending board approval", async () => {
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, budgetMonthlyCents: 17000 });
+    mockApprovalService.create.mockResolvedValue({ id: "approval-1" });
+
+    const app = await createApp(
+      {
+        type: "board",
+        userId: "board-user",
+        source: "local_implicit",
+        isInstanceAdmin: true,
+        companyIds: [companyId],
+      },
+      { requireBoardApprovalForNewAgents: true },
+    );
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "Backend Engineer",
+        role: "engineer",
+        adapterType: "process",
+        adapterConfig: {},
+        budgetMonthlyCents: 17000,
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockApprovalService.create).toHaveBeenCalled();
+    expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
   });
 
   it("allows board users to directly approve pending agents", async () => {
@@ -1637,6 +1773,65 @@ describe.sequential("agent permission routes", () => {
     expect(res.body.error).toContain("another company");
     expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
     expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
+  });
+
+  it("denies a same-company agent-authenticated caller without canManageOtherAgentsPermissions, even if it once would have been CEO-gated", async () => {
+    // baseAgent has role "engineer" and permissions.canCreateAgents: false --
+    // i.e. no named capability that should grant this. Confirms there is no
+    // remaining `role === "ceo"` fallback path left to trip.
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Missing permission to manage other agents' permissions");
+    expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+    expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent-authenticated caller with an explicit canManageOtherAgentsPermissions grant, regardless of job title", async () => {
+    const managerAgentId = "55555555-5555-4555-8555-555555555555";
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === managerAgentId) {
+        return {
+          ...baseAgent,
+          id: managerAgentId,
+          role: "engineering-manager",
+          permissions: { canCreateAgents: false, canManageOtherAgentsPermissions: true },
+        };
+      }
+      return baseAgent;
+    });
+    mockAgentService.updatePermissions.mockResolvedValue({
+      ...baseAgent,
+      permissions: { canCreateAgents: true },
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: managerAgentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ canCreateAgents: true, canAssignTasks: true }));
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.updatePermissions).toHaveBeenCalledWith(agentId, {
+      canCreateAgents: true,
+      canAssignTasks: true,
+    });
   });
 
   it("exposes a dedicated agent route for the inbox mine view", async () => {
