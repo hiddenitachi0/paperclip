@@ -650,7 +650,19 @@ maybe_begin_quiet_mode_drain() { # aid, kind
   status="$(cli_json instance quiet-mode:status)" || status=""
   count="$(quiet_mode_field "$status" activeRunCount)"
   [ -z "$count" ] && count="unknown"
-  log "runner: $aid drain timed out after ${QUIET_MODE_DRAIN_TIMEOUT_SECONDS}s with $count heartbeat run(s) still in flight — proceeding with the recreate anyway (see DUR-259 follow-up: no paused-for-restart status yet, these may surface as process_lost)"
+  log "runner: $aid drain timed out after ${QUIET_MODE_DRAIN_TIMEOUT_SECONDS}s with $count heartbeat run(s) still in flight — marking them paused_for_restart before the recreate"
+  # DUR-257 / DUR-296: the server can mark every in-flight run
+  # paused_for_restart in one transaction (agents go idle, each affected
+  # issue gets a continuation wake queued behind quiet mode). Without this
+  # call the recreate kills the children and the runs surface as
+  # process_lost failures with their agents stuck in "error" -- which is
+  # exactly what happened on every deploy on 2026-09-06.
+  local paused
+  if paused="$(cli_json instance heartbeat-runs:pause-for-restart --reason "'"Paused for the platform deploy of approval $aid -- will resume automatically after the restart."'")"; then
+    log "runner: $aid paused in-flight heartbeat runs for the restart: $(printf '%s' "$paused" | tr -d '\n' | cut -c1-200)"
+  else
+    log "runner: $aid could not mark in-flight runs paused_for_restart — proceeding anyway; they may surface as process_lost and be retried by the reaper"
+  fi
 }
 
 maybe_end_quiet_mode_drain() { # aid
