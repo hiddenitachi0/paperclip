@@ -209,7 +209,7 @@ export function redactKnownLeakedSecretPatterns(input: string): string {
   return output;
 }
 
-function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
+export function redactKnownLeakedSecretPatternsDeep(value: unknown): unknown {
   if (typeof value === "string") return redactKnownLeakedSecretPatterns(value);
   if (Array.isArray(value)) return value.map(redactKnownLeakedSecretPatternsDeep);
   if (isPlainObject(value)) {

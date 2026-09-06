@@ -4,7 +4,9 @@ import { workspaceOperations } from "@paperclipai/db";
 import type { WorkspaceOperation, WorkspaceOperationPhase, WorkspaceOperationStatus } from "@paperclipai/shared";
 import { asc, desc, eq, inArray, isNull, or, and } from "drizzle-orm";
 import { notFound } from "../errors.js";
+import type { CurrentUserRedactionOptions } from "../log-redaction.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { redactKnownLeakedSecretPatterns, redactKnownLeakedSecretPatternsDeep } from "../redaction.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getWorkspaceOperationLogStore } from "./workspace-operation-log-store.js";
 
@@ -39,6 +41,30 @@ function toWorkspaceOperation(row: WorkspaceOperationRow): WorkspaceOperation {
 
 function appendExcerpt(current: string, chunk: string) {
   return `${current}${chunk}`.slice(-4096);
+}
+
+// DUR-372: workspace_operations has the same stdoutExcerpt/stderrExcerpt
+// leak surface as heartbeat_runs (DUR-317/redactHeartbeatRunPatchSecrets) --
+// a failing command (e.g. `git clone https://x-access-token:<PAT>@...`)
+// writes raw process output straight into this table. Username/homedir
+// masking alone (redactCurrentUserText) does not catch that; this layers
+// the same fixed-shape leaked-secret-pattern gate on top before anything
+// reaches the DB or the log store.
+export function sanitizeWorkspaceOperationChunk(
+  chunk: string,
+  currentUserRedactionOptions?: CurrentUserRedactionOptions,
+): string {
+  return redactKnownLeakedSecretPatterns(redactCurrentUserText(chunk, currentUserRedactionOptions));
+}
+
+export function sanitizeWorkspaceOperationMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  currentUserRedactionOptions?: CurrentUserRedactionOptions,
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  return redactKnownLeakedSecretPatternsDeep(
+    redactCurrentUserValue(metadata, currentUserRedactionOptions),
+  ) as Record<string, unknown>;
 }
 
 function combineMetadata(
@@ -123,7 +149,7 @@ export function workspaceOperationService(db: Db) {
           let stderrExcerpt = "";
           const append = async (stream: "stdout" | "stderr" | "system", chunk: string | null | undefined) => {
             if (!chunk) return;
-            const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
+            const sanitizedChunk = sanitizeWorkspaceOperationChunk(chunk, currentUserRedactionOptions);
             if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
             if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
             await logStore.append(handle, {
@@ -145,10 +171,7 @@ export function workspaceOperationService(db: Db) {
             status: "running",
             logStore: handle.store,
             logRef: handle.logRef,
-            metadata: redactCurrentUserValue(
-              recordInput.metadata ?? null,
-              currentUserRedactionOptions,
-            ) as Record<string, unknown> | null,
+            metadata: sanitizeWorkspaceOperationMetadata(recordInput.metadata, currentUserRedactionOptions),
             startedAt,
           });
           createdIds.push(id);
@@ -171,10 +194,10 @@ export function workspaceOperationService(db: Db) {
                 logBytes: finalized.bytes,
                 logSha256: finalized.sha256,
                 logCompressed: finalized.compressed,
-                metadata: redactCurrentUserValue(
+                metadata: sanitizeWorkspaceOperationMetadata(
                   combineMetadata(recordInput.metadata, result.metadata),
                   currentUserRedactionOptions,
-                ) as Record<string, unknown> | null,
+                ),
                 finishedAt,
                 updatedAt: finishedAt,
               })
