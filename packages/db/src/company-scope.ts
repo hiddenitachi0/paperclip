@@ -933,7 +933,10 @@ export function createRequestScopedDb(rawDb: Db): Db {
         // Thrown as ConnectionFencedError so it is the same error type the
         // connection-level fence (DUR-3931, fenceReservedConnection) raises:
         // this proxy check simply fires first, with a more precise message.
-        if (store.liveness.released) {
+        // `liveness` is optional-chained: server test doubles enter the ALS
+        // with a bare `{ kind, companyId, scopedDb }` store, and a missing
+        // liveness must mean "not released", not a TypeError-turned-500.
+        if (store.liveness?.released) {
           throw new ConnectionFencedError(
             `createRequestScopedDb: attempted to use "${describePath(path, prop)}" after the ` +
               "runInCompanyScope/runInCompanyScopeBypass call that reserved this connection already " +
