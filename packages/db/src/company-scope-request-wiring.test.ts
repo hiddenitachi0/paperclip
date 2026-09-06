@@ -178,8 +178,13 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
 
       // ...and the orphaned handler can no longer reach it.
       const scoped = createRequestScopedDb(singleConnDb);
-      const late = await requestCompanyScopeStorage
-        .run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`))
+      // The request-scoped proxy (DUR-932) may reject this synchronously at
+      // property access; the connection-level fence (DUR-3931) rejects the
+      // query promise. Normalise both into a rejection so either fence counts.
+      const late = await Promise.resolve()
+        .then(() =>
+          requestCompanyScopeStorage.run(capturedScope, () => scoped.execute(drizzleSql`select 1 as one`)),
+        )
         .then(
           () => null,
           (err: unknown) => err,

@@ -523,12 +523,19 @@ export class ConnectionReleaseUnsafeError extends Error {
  * remove.
  */
 export class ConnectionFencedError extends Error {
-  constructor() {
+  /**
+   * @param detail Optional caller-specific message. When omitted, the generic
+   *   connection-level fence message (DUR-3931) is used. The request-scoped
+   *   proxy passes its own DUR-932 wording so both fences surface as the same
+   *   error type (callers/tests match on `instanceof ConnectionFencedError`).
+   */
+  constructor(detail?: string) {
     super(
-      "company-scope: this query was issued on a reserved connection after its owning request scope ended " +
-        "(the response was closed/aborted before the handler finished). The connection has been recycled back " +
-        "to the pool, so the query was not sent -- do not keep using a scopedDb/tx reference past the request " +
-        "that created it.",
+      detail ??
+        "company-scope: this query was issued on a reserved connection after its owning request scope ended " +
+          "(the response was closed/aborted before the handler finished). The connection has been recycled back " +
+          "to the pool, so the query was not sent -- do not keep using a scopedDb/tx reference past the request " +
+          "that created it.",
     );
     this.name = "ConnectionFencedError";
   }
@@ -923,8 +930,11 @@ export function createRequestScopedDb(rawDb: Db): Db {
         // lands, corrupting Postgres's extended-query protocol for both
         // (surfaced as "bind message supplies N parameters, but prepared
         // statement requires M") instead of failing loudly here.
+        // Thrown as ConnectionFencedError so it is the same error type the
+        // connection-level fence (DUR-3931, fenceReservedConnection) raises:
+        // this proxy check simply fires first, with a more precise message.
         if (store.liveness.released) {
-          throw new Error(
+          throw new ConnectionFencedError(
             `createRequestScopedDb: attempted to use "${describePath(path, prop)}" after the ` +
               "runInCompanyScope/runInCompanyScopeBypass call that reserved this connection already " +
               "released it (DUR-932) -- this db reference outlived its request/scheduler scope, most " +
