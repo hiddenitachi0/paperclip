@@ -83,6 +83,15 @@ interface ConnectionClaimState {
 export interface UnscopedTenantAccessDebugHook {
   readonly debug: (connectionId: number, query: string, parameters: readonly unknown[]) => void;
   setTenantTables(tableNames: readonly string[]): void;
+  // postgres.js's `onclose` option fires with a connection's numeric id
+  // whenever its socket closes, including an involuntary drop (idle
+  // timeout, network blip, backend restart/OOM-kill) that postgres.js then
+  // silently reconnects on the same id/object -- see connection.js's
+  // `onclose`/`reconnect`. The backend session (and any
+  // app.current_company_id it held) does not survive that; wiring this in
+  // as `onclose` in createDb keeps this hook's in-memory claim state from
+  // going stale and reporting a false negative for the reused id.
+  clearConnection(connectionId: number): void;
 }
 
 // Exposed for tests: the whole detector is pure/synchronous and never
@@ -157,6 +166,9 @@ export function createUnscopedTenantAccessDebugHook(applicationName: string): Un
     debug,
     setTenantTables(tableNames: readonly string[]) {
       tenantTableRegex = buildTenantTableRegex(tableNames);
+    },
+    clearConnection(connectionId: number) {
+      connectionStates.delete(connectionId);
     },
   };
 }

@@ -84,7 +84,9 @@ export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_
     : null;
   const sql = postgres(url, {
     connection: { application_name: applicationName },
-    ...(unscopedAccessHook ? { debug: unscopedAccessHook.debug } : {}),
+    ...(unscopedAccessHook
+      ? { debug: unscopedAccessHook.debug, onclose: unscopedAccessHook.clearConnection }
+      : {}),
   });
   if (unscopedAccessHook) {
     void loadTenantTableNames(sql)

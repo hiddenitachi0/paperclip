@@ -127,4 +127,38 @@ describe("createUnscopedTenantAccessDebugHook", () => {
     hook.debug(1, 'select * from "issues"', []);
     expect(warnSpy).not.toHaveBeenCalled();
   });
+
+  it("forgets a stale claim once clearConnection fires for that connection id (involuntary reconnect)", () => {
+    const hook = hookWithTables("paperclip-app", ["issues"]);
+    hook.debug(1, "select set_config('app.current_company_id', $1, false)", ["company-a"]);
+    hook.debug(1, 'select * from "issues"', []);
+    // postgres.js reuses the connection id across an involuntary reconnect
+    // (idle timeout / dropped backend), which wipes the real session's
+    // app.current_company_id without ever running RESET/COMMIT on it -- the
+    // pool wires clearConnection into its `onclose` option for exactly this.
+    hook.clearConnection(1);
+    hook.debug(1, 'select * from "issues"', []);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('tenant table "issues"');
+  });
+
+  it("logs again for a table already logged pre-reconnect once a fresh connection id reuses it after clearConnection", () => {
+    const hook = hookWithTables("paperclip-app", ["issues"]);
+    hook.debug(1, 'select * from "issues"', []);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    hook.clearConnection(1);
+    hook.debug(1, "select set_config('app.current_company_id', $1, false)", ["company-a"]);
+    hook.debug(1, 'select * from "issues"', []);
+    // Still only once: the (applicationName, table) key is logged once per
+    // process lifetime regardless of connection churn -- clearConnection
+    // resets claim tracking, not the dedup key.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("is a no-op for a connection id with no tracked state", () => {
+    const hook = hookWithTables("paperclip-app", ["issues"]);
+    expect(() => hook.clearConnection(99)).not.toThrow();
+    hook.debug(99, 'select * from "issues"', []);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
 });
