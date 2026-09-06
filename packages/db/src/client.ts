@@ -61,6 +61,48 @@ export type MigrationState =
 // through the service layer -- as legitimate.
 export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
 
+// DUR-3931: the app pool used to take postgres.js's *implicit* default pool
+// size (`max: 10` -- verified against the pinned postgres@3.4.9, src/index.js
+// `max: globalThis.Cloudflare ? 3 : 10`). A cap that small being inherited by
+// accident rather than chosen is what turned a per-request connection leak
+// into a whole-server outage: postgres.js's `reserve()` awaits a promise with
+// no timeout, so the 11th concurrent reservation does not fail, it hangs
+// forever. The cap is now explicit and tunable, so it can be reasoned about
+// (and raised) deliberately.
+export const DEFAULT_APP_POOL_MAX = 10;
+
+export function getAppPoolMax(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PAPERCLIP_DB_POOL_MAX;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_APP_POOL_MAX;
+  // Strict: Number.parseInt would happily read "1.5.2" as 1 and "10abc" as
+  // 10, silently sizing the pool from a typo.
+  const trimmed = raw.trim();
+  const parsed = /^\d+$/.test(trimmed) ? Number.parseInt(trimmed, 10) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    console.error(
+      `createDb: ignoring invalid PAPERCLIP_DB_POOL_MAX=${JSON.stringify(raw)}; ` +
+        `falling back to ${DEFAULT_APP_POOL_MAX}`,
+    );
+    return DEFAULT_APP_POOL_MAX;
+  }
+  return parsed;
+}
+
+// Postgres raises a 25P01 ("there is no transaction in progress") WARNING for
+// a ROLLBACK issued outside a transaction. company-scope.ts's fenced-recycle
+// path (DUR-3931) issues exactly such an unconditional ROLLBACK on every
+// aborted request -- it cannot know whether the orphaned handler left a
+// transaction open, and guessing wrong in the other direction would return a
+// mid-transaction connection to the pool. Dropping just that one notice keeps
+// the fix from spamming the logs; every other notice still reaches the
+// console exactly as postgres.js's built-in default (`console.log`) does.
+const NO_ACTIVE_TRANSACTION_NOTICE_CODE = "25P01";
+
+function onAppPoolNotice(notice: unknown): void {
+  if ((notice as { code?: string } | null)?.code === NO_ACTIVE_TRANSACTION_NOTICE_CODE) return;
+  console.log(notice);
+}
+
 // DUR-294: every CLI command and one-off script that calls createDb()
 // directly against DATABASE_URL used to fall back to this same
 // "paperclip-app" tag, making it indistinguishable from the live server's
@@ -71,7 +113,11 @@ export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
 // server itself should pass a distinct applicationName so they show up
 // under their own identity.
 export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_APP_APPLICATION_NAME) {
-  const sql = postgres(url, { connection: { application_name: applicationName } });
+  const sql = postgres(url, {
+    max: getAppPoolMax(),
+    onnotice: onAppPoolNotice,
+    connection: { application_name: applicationName },
+  });
   return drizzlePg(sql, { schema });
 }
 

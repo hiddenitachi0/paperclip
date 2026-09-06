@@ -401,10 +401,12 @@ export interface ReservedScopeLiveness {
 // connection. Bounded, not unbounded -- an in-flight fire-and-forget call
 // that itself never resolves (e.g. it's stuck on a downstream call with no
 // timeout of its own) must not block this request's connection from ever
-// being released. If the bound is hit, the connection is abandoned instead
-// of released (same "never recycle with unknown/unsafe state" precedent as
-// resetClaimAndRelease's own catch branch below) rather than risk handing a
-// connection with a still-open transaction to an unrelated request.
+// being released. DUR-3931: if the bound is hit, the still-in-flight calls
+// are fenced off the connection (fenceReservedConnection) and it is rolled
+// back, reset and recycled anyway -- it used to be abandoned outright, which
+// meant a single stuck fire-and-forget call cost a pool slot permanently.
+// Fencing gives the same "never hand a connection with a still-open
+// transaction to an unrelated request" guarantee without the leak.
 const IN_FLIGHT_DRAIN_TIMEOUT_MS = 10_000;
 
 async function waitForInFlightDrain(liveness: ReservedScopeLiveness): Promise<void> {
@@ -485,9 +487,21 @@ function withDrizzleCompatibleClient(reserved: ReservedSql, rawDb: Db): Reserved
 // it, interleaving both requests' wire traffic and corrupting the Postgres
 // extended-query protocol for both (surfaced in production as e.g. "bind
 // message supplies N parameters, but prepared statement requires M").
-// Throwing this from `fn` signals runInCompanyScope to abandon the
-// connection instead -- same "never recycle with unknown state" precedent as
-// resetClaimAndRelease's own catch branch below.
+// Throwing this from `fn` signals runInCompanyScope that the connection
+// cannot simply be handed back to the pool -- see fenceReservedConnection
+// below for how it is fenced off from the orphaned handler and then
+// recycled safely.
+//
+// DUR-3931: this used to make runInCompanyScope *abandon* the connection --
+// log and return without ever calling `reserved.release()`. That is a
+// permanent, unbounded leak on a completely routine event: a browser
+// aborts every in-flight fetch when the user navigates or reloads, so each
+// reload burned one pool slot for the lifetime of the process. Once `max`
+// (10 by default, see createDb) slots were burned the server was wedged
+// forever -- postgres.js's `reserve()` awaits a promise with no timeout, so
+// every subsequent company-scoped request hung rather than erroring. The
+// connection is now fenced and recycled instead; see the finally block of
+// runInCompanyScope.
 export class ConnectionReleaseUnsafeError extends Error {
   constructor() {
     super(
@@ -495,6 +509,176 @@ export class ConnectionReleaseUnsafeError extends Error {
         "connection, so it will not be recycled back to the pool",
     );
     this.name = "ConnectionReleaseUnsafeError";
+  }
+}
+
+/**
+ * DUR-3931: thrown when an orphaned handler tries to issue a query on a
+ * connection whose owning request scope has already ended (client abort, or
+ * an in-flight call that blew the drain bound). The request it belongs to is
+ * already over -- its response socket is gone -- so failing its late query
+ * loudly is strictly better than the alternatives: letting it run risks
+ * interleaving with whatever request gets this physical connection next, and
+ * refusing to ever recycle the connection is the leak this class exists to
+ * remove.
+ */
+export class ConnectionFencedError extends Error {
+  constructor() {
+    super(
+      "company-scope: this query was issued on a reserved connection after its owning request scope ended " +
+        "(the response was closed/aborted before the handler finished). The connection has been recycled back " +
+        "to the pool, so the query was not sent -- do not keep using a scopedDb/tx reference past the request " +
+        "that created it.",
+    );
+    this.name = "ConnectionFencedError";
+  }
+}
+
+interface ReservedConnectionFence {
+  /** The client handed to drizzle. Identical to the reserved client until `close()`; every query throws afterwards. */
+  readonly client: ReservedSql;
+  /** Synchronously stop any *further* query from reaching the wire. Already-issued queries are unaffected. */
+  close(): void;
+}
+
+// Every postgres.js entry point that can put traffic on the wire. The tagged
+// template call itself is covered by the proxy's `apply` trap; drizzle's
+// postgres-js session only ever uses `client.unsafe(...)` (verified against
+// the pinned drizzle-orm@0.45.2 -- see its postgres-js/session.js), but the
+// rest are trapped too so a future drizzle version or a hand-written call
+// site can't quietly slip past the fence.
+const FENCED_QUERY_METHODS = new Set<PropertyKey>([
+  "unsafe",
+  "begin",
+  "savepoint",
+  "prepare",
+  "file",
+  "reserve",
+  "listen",
+  "notify",
+  "subscribe",
+  "cursor",
+]);
+
+/**
+ * DUR-3931: wrap a reserved connection so that all query traffic through it
+ * can be stopped synchronously, in one turn, with no `await` in between.
+ *
+ * This is what makes recycling an aborted request's connection safe. The
+ * hazard the old abandon-forever behaviour was avoiding is real: Express's
+ * `next()` is fire-and-forget, so when the response closes early the handler
+ * chain may still be running and still issuing queries. Releasing underneath
+ * it would let an unrelated request reserve the same physical connection and
+ * interleave with the orphan's traffic. Fencing removes the hazard at the
+ * source instead of paying for it with a leaked connection: the orphan
+ * cannot issue anything more, so once the queries it *already* issued have
+ * drained the connection is provably idle and safe to reset and release.
+ *
+ * The drain barrier is postgres.js's own per-connection ordering, not a
+ * timer: a reserved connection executes its queries in order, so a `ROLLBACK`
+ * enqueued after fencing necessarily completes after everything the orphan
+ * had already put on the wire. See fenceAndRecycle below.
+ *
+ * The one case the `fenced` flag does not cover by itself is a query object
+ * the orphan constructed just *before* fencing but that postgres.js has not
+ * enqueued yet -- its Query only reaches the connection a microtask or two
+ * later (postgres@3.4.9 src/query.js: `handle()` is async and awaits once
+ * before calling the handler). That is still safe: microtasks all drain
+ * before the next macrotask, and fenceAndRecycle's release only happens two
+ * network round-trips (ROLLBACK, then RESET) later, so such a query is
+ * always enqueued strictly before the connection goes back to the pool --
+ * at worst it runs between the ROLLBACK and the RESET, which both still
+ * follow it.
+ */
+function fenceReservedConnection(reserved: ReservedSql): ReservedConnectionFence {
+  let fenced = false;
+  const assertOpen = () => {
+    if (fenced) throw new ConnectionFencedError();
+  };
+  const target = reserved as unknown as (...args: unknown[]) => unknown;
+  const client = new Proxy(target, {
+    apply(_target, _thisArg, args) {
+      assertOpen();
+      return Reflect.apply(target, reserved, args);
+    },
+    get(_target, prop) {
+      const value = Reflect.get(target, prop);
+      if (typeof value === "function" && FENCED_QUERY_METHODS.has(prop)) {
+        return (...args: unknown[]) => {
+          assertOpen();
+          return (value as (...a: unknown[]) => unknown).apply(reserved, args);
+        };
+      }
+      return value;
+    },
+  }) as unknown as ReservedSql;
+  return {
+    client,
+    close: () => {
+      fenced = true;
+    },
+  };
+}
+
+// DUR-3931: how long fenceAndRecycle waits for the fenced connection to
+// quiesce before it stops blocking the (already-finished) request scope.
+// Only reached when the orphaned handler had a genuinely long-running query
+// on the wire at abort time -- the teardown is queued behind it. Hitting the
+// bound does NOT abandon the connection: the teardown keeps running in the
+// background and releases it as soon as that query finishes, so the worst
+// case is a delayed reclaim rather than the permanent leak this replaces.
+const FENCED_TEARDOWN_TIMEOUT_MS = 30_000;
+
+/**
+ * DUR-3931: fence the connection, then roll back and reset it behind
+ * whatever the orphaned handler already had in flight, then release it.
+ *
+ * `ROLLBACK` is unconditional: the orphan may have been inside a
+ * runOnReservedScope() BEGIN/SAVEPOINT, and a connection must never go back
+ * to the pool mid-transaction. On a connection with no open transaction it is
+ * a no-op that emits a 25P01 notice, which createDb() filters out (see
+ * client.ts).
+ */
+async function fenceAndRecycle(fence: ReservedConnectionFence, reserved: ReservedSql, reason: string): Promise<void> {
+  // Synchronous, before anything is enqueued: from here on the orphan's
+  // queries throw instead of reaching the wire, so the statements below are
+  // guaranteed to be the last traffic this connection ever sees under this
+  // scope.
+  fence.close();
+
+  let settled = false;
+  const teardown = (async () => {
+    try {
+      await reserved`ROLLBACK`;
+      await reserved`RESET app.current_company_id`;
+      reserved.release();
+    } catch (err) {
+      // Same "never recycle with unknown state" precedent as
+      // resetClaimAndRelease's catch branch: the claim state is unknown, so
+      // the connection is abandoned rather than handed to another tenant.
+      // postgres.js destroys a connection whose query errored at the
+      // transport level anyway, so this is not the routine path.
+      console.error(`company-scope: ${reason}: failed to reset the fenced connection before recycling it`, err);
+    } finally {
+      settled = true;
+    }
+  })();
+
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    teardown,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, FENCED_TEARDOWN_TIMEOUT_MS);
+      timer.unref?.();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+
+  if (!settled) {
+    console.error(
+      `company-scope: ${reason}: the fenced connection is still queued behind an in-flight query after ` +
+        `${FENCED_TEARDOWN_TIMEOUT_MS}ms; it will be reset and released in the background once that query finishes`,
+    );
   }
 }
 
@@ -537,11 +721,12 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
   }
 
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  const fence = fenceReservedConnection(reserved);
   const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
   let unsafeToRelease = false;
   try {
     await reserved`select set_config('app.current_company_id', ${companyId}, false)`;
-    const scopedDb = drizzlePg(reserved, { schema });
+    const scopedDb = drizzlePg(fence.client, { schema });
     return await requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb, liveness }, fn);
   } catch (err) {
     if (err instanceof ConnectionReleaseUnsafeError) {
@@ -550,40 +735,42 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
     }
     throw err;
   } finally {
+    // Flip this before the connection actually goes back to the pool, not
+    // after -- withCompanyScope reads it from other (possibly still
+    // in-flight) continuations of this same scope, and must never see
+    // "still safe to reuse" once release has been kicked off. New calls
+    // stop reusing this connection right here; DUR-920: any call that
+    // already committed to reusing it (read `released === false` a moment
+    // earlier, e.g. a fire-and-forget continuation) is tracked in
+    // `liveness.inFlight` and must be waited out -- bounded -- before the
+    // connection actually goes back to the pool, or it could be handed to
+    // an unrelated request while still mid-transaction.
+    //
+    // DUR-3931: this is now also set on the aborted-response path. It used
+    // to deliberately stay `false` there so an orphaned continuation could
+    // keep using the (permanently abandoned) connection. That traded a
+    // guaranteed connection leak for the convenience of an orphan whose
+    // response socket is already gone -- not a trade worth making, and the
+    // reason ten browser reloads could wedge the server.
+    liveness.released = true;
     if (unsafeToRelease) {
-      // The connection is abandoned, never handed back to the pool -- so
-      // it remains exclusively (if unsafely) available to whatever is still
-      // using it, and `liveness.released` deliberately stays `false`: a
-      // still-running orphaned continuation may keep issuing queries/nested
-      // withCompanyScope calls on it safely, since nothing else can acquire
-      // this same physical connection out from under it.
-      console.error(
-        "company-scope: response closed before its handler finished; abandoning the reserved connection " +
-          "instead of recycling it, since the handler may still be using it",
-      );
+      // The response was aborted while the handler chain may still be
+      // running. Fence the connection so the orphan can issue nothing more,
+      // then roll back/reset it behind whatever it already had in flight and
+      // recycle it. See fenceAndRecycle.
+      await fenceAndRecycle(fence, reserved, "response closed before its handler finished");
     } else {
-      // Flip this before the connection actually goes back to the pool, not
-      // after -- withCompanyScope reads it from other (possibly still
-      // in-flight) continuations of this same scope, and must never see
-      // "still safe to reuse" once release has been kicked off. New calls
-      // stop reusing this connection right here; DUR-920: any call that
-      // already committed to reusing it (read `released === false` a moment
-      // earlier, e.g. a fire-and-forget continuation) is tracked in
-      // `liveness.inFlight` and must be waited out -- bounded -- before the
-      // connection actually goes back to the pool, or it could be handed to
-      // an unrelated request while still mid-transaction.
-      liveness.released = true;
       await waitForInFlightDrain(liveness);
       if (liveness.inFlight > 0) {
-        // Bound hit while calls were still in flight -- same "never recycle
-        // with unknown/unsafe state" precedent as resetClaimAndRelease's own
-        // catch branch: abandon the connection (one lost pool slot) instead
-        // of risking cross-tenant transaction corruption.
+        // Bound hit while calls were still in flight. DUR-3931: fence and
+        // recycle rather than abandon -- the fence is what makes recycling
+        // safe here, exactly as on the aborted-response path above.
         console.error(
           `company-scope: ${liveness.inFlight} runOnReservedScope() call(s) still in flight ` +
-            `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; abandoning the reserved connection ` +
-            "instead of recycling it, since it may still be mid-transaction",
+            `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; fencing them off the reserved ` +
+            "connection so it can be reset and recycled instead of leaked",
         );
+        await fenceAndRecycle(fence, reserved, "in-flight calls blew the drain bound");
       } else {
         await resetClaimAndRelease(reserved);
       }
@@ -605,6 +792,7 @@ export async function runInCompanyScopeBypass<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  const fence = fenceReservedConnection(reserved);
   const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
   try {
     const [membership] = (await reserved`
@@ -619,7 +807,7 @@ export async function runInCompanyScopeBypass<T>(
       );
     }
 
-    const scopedDb = drizzlePg(reserved, { schema });
+    const scopedDb = drizzlePg(fence.client, { schema });
     await scopedDb.insert(crossCompanyAccessLog).values({
       reason: opts.reason,
       actorType: opts.actorType ?? null,
@@ -636,11 +824,14 @@ export async function runInCompanyScopeBypass<T>(
     liveness.released = true;
     await waitForInFlightDrain(liveness);
     if (liveness.inFlight > 0) {
+      // DUR-3931: fence and recycle rather than abandon -- see the matching
+      // branch in runInCompanyScope.
       console.error(
         `company-scope: ${liveness.inFlight} runOnReservedScope() call(s) still in flight ` +
-          `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; abandoning the reserved connection ` +
-          "instead of recycling it, since it may still be mid-transaction",
+          `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; fencing them off the reserved ` +
+          "connection so it can be reset and recycled instead of leaked",
       );
+      await fenceAndRecycle(fence, reserved, "in-flight bypass calls blew the drain bound");
     } else {
       await resetClaimAndRelease(reserved);
     }
