@@ -67,6 +67,10 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({ decide: vi.fn() }));
 
 function registerModuleMocks() {
+const mockPersonaService = vi.hoisted(() => ({
+  getPersonaDisplayNamesByAgentIds: vi.fn(async () => new Map()),
+}));
+
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
     agentInstructionsService: () => mockInstructionsService,
@@ -77,6 +81,7 @@ function registerModuleMocks() {
     issueApprovalService: () => mockIssueApprovalService,
     issueThreadInteractionService: () => mockIssueThreadInteractionService,
     logActivity: mockLogActivity,
+    personaService: () => mockPersonaService,
     secretService: () => mockSecretService,
   }));
 }

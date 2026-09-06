@@ -29,6 +29,7 @@ import {
   isAgentInSubtree,
   issueApprovalService,
   issueThreadInteractionService,
+  personaService,
   logActivity,
   secretService,
 } from "../services/index.js";
@@ -51,6 +52,53 @@ function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(a
   return {
     ...approval,
     payload: redactEventPayload(approval.payload) ?? {},
+  };
+}
+
+/**
+ * DUR-177 (items 16/17): tag an approval's payload as persona-related and
+ * attach the requesting persona's plain display name, so ApprovalDetail.tsx
+ * can render a human-language request name instead of raw plumbing (the
+ * secret's `envKey`, the approval UUID, the raw JSON payload) for a
+ * non-technical operator reviewing a persona's request.
+ *
+ * `personaDisplayNameByAgentId` deliberately only contains an entry when
+ * `requestedByAgentId` names an agent with a `personas` row (see
+ * personaService.getPersonaDisplayNamesByAgentIds) -- a plain agent's
+ * approval is left untouched, matching current behavior exactly.
+ *
+ * Security note: `payload` is agent-controlled at creation time
+ * (`createApprovalSchema` accepts `payload: z.record(z.string(),
+ * z.unknown())`), and `redactApprovalPayload`/`redactEventPayload` only
+ * blacklists secret-shaped values -- it does not strip arbitrary unknown
+ * keys. Without the `delete` below, an agent could self-set
+ * `isPersonaRequest: true` / `personaDisplayName: "..."` on ANY approval
+ * (not just genuine persona requests) to get ApprovalDetail.tsx to hide
+ * that approval's UUID and raw JSON payload behind "Advanced" by default --
+ * exactly the kind of internal-plumbing surface item 17 exists to
+ * *reveal* to a human reviewer when something looks off, not something an
+ * agent should be able to opt itself out of showing. So both keys are
+ * always stripped from whatever the agent submitted, and only reinstated
+ * here from the trusted server-side lookup.
+ */
+function withPersonaMetadata<T extends { payload: Record<string, unknown>; requestedByAgentId: string | null }>(
+  approval: T,
+  personaDisplayNameByAgentId: Map<string, string>,
+): T {
+  const redacted = redactApprovalPayload(approval);
+  const { isPersonaRequest: _ignoredIsPersonaRequest, personaDisplayName: _ignoredPersonaDisplayName, ...safePayload } =
+    redacted.payload;
+  const personaDisplayName = approval.requestedByAgentId
+    ? personaDisplayNameByAgentId.get(approval.requestedByAgentId) ?? null
+    : null;
+  if (!personaDisplayName) return { ...redacted, payload: safePayload };
+  return {
+    ...redacted,
+    payload: {
+      ...safePayload,
+      isPersonaRequest: true,
+      personaDisplayName,
+    },
   };
 }
 
@@ -791,6 +839,17 @@ export function approvalRoutes(
   const interactionsSvc = issueThreadInteractionService(db);
   const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
+  const personasSvc = personaService(db);
+
+  /** Look up persona display names for one or more approvals in a single query. */
+  async function personaDisplayNamesFor(
+    approvals: Array<{ requestedByAgentId: string | null }>,
+  ): Promise<Map<string, string>> {
+    const agentIds = approvals
+      .map((approval) => approval.requestedByAgentId)
+      .filter((agentId): agentId is string => !!agentId);
+    return personasSvc.getPersonaDisplayNamesByAgentIds(agentIds);
+  }
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   const rawSvc = approvalService(rawDb);
@@ -935,7 +994,8 @@ export function approvalRoutes(
     const companyId = req.params.companyId as string;
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
-    res.json(result.map((approval) => redactApprovalPayload(approval)));
+    const personaNames = await personaDisplayNamesFor(result);
+    res.json(result.map((approval) => withPersonaMetadata(approval, personaNames)));
   });
 
   router.get("/approvals/:id", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
@@ -945,7 +1005,8 @@ export function approvalRoutes(
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    res.json(redactApprovalPayload(approval));
+    const personaNames = await personaDisplayNamesFor([approval]);
+    res.json(withPersonaMetadata(approval, personaNames));
   });
 
   router.post(
@@ -1164,7 +1225,8 @@ export function approvalRoutes(
       details: { type: approval.type, issueIds: uniqueIssueIds },
     });
 
-    res.status(201).json(redactApprovalPayload(approval));
+    const personaNames = await personaDisplayNamesFor([approval]);
+    res.status(201).json(withPersonaMetadata(approval, personaNames));
   });
 
   router.get("/approvals/:id/issues", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
@@ -1328,7 +1390,8 @@ export function approvalRoutes(
       }
     }
 
-    res.json(redactApprovalPayload(approval));
+    const approvePersonaNames = await personaDisplayNamesFor([approval]);
+    res.json(withPersonaMetadata(approval, approvePersonaNames));
   });
 
   router.post(
@@ -1358,7 +1421,8 @@ export function approvalRoutes(
       });
     }
 
-    res.json(redactApprovalPayload(approval));
+    const rejectPersonaNames = await personaDisplayNamesFor([approval]);
+    res.json(withPersonaMetadata(approval, rejectPersonaNames));
   });
 
   router.post(
@@ -1380,7 +1444,8 @@ export function approvalRoutes(
         details: { type: approval.type },
       });
 
-      res.json(redactApprovalPayload(approval));
+      const revisionPersonaNames = await personaDisplayNamesFor([approval]);
+      res.json(withPersonaMetadata(approval, revisionPersonaNames));
     },
   );
 
@@ -1507,7 +1572,8 @@ export function approvalRoutes(
       entityId: approval.id,
       details: { type: approval.type },
     });
-    res.json(redactApprovalPayload(approval));
+    const resubmitPersonaNames = await personaDisplayNamesFor([approval]);
+    res.json(withPersonaMetadata(approval, resubmitPersonaNames));
   });
 
   // DUR-141: agent-only self-serve withdraw. Unlike approve/reject/request-
@@ -1557,7 +1623,8 @@ export function approvalRoutes(
       details: { type: approval.type },
     });
 
-    res.json(redactApprovalPayload(approval));
+    const withdrawPersonaNames = await personaDisplayNamesFor([approval]);
+    res.json(withPersonaMetadata(approval, withdrawPersonaNames));
   });
 
   router.get("/approvals/:id/comments", scopeFromApprovalIdParam(checkCompanyAccess), async (req, res) => {
