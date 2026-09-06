@@ -10166,33 +10166,55 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const staleForMs = now.getTime() - progressRefTime;
 
       if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) {
-        // DUR-257 observability: an execution this process still claims but
-        // that never got a child pid and has produced no output for a long
-        // time (6x the reap threshold) is almost certainly wedged in-process
-        // (seen 2026-09-06 21:00: four such rows, cleared only by a container
-        // restart). Not reaped here -- that would race the live execution --
-        // but logged loudly so an operator can restart or investigate.
-        const tracksLocalChildForLog = isTrackedLocalChildProcessAdapter(adapterType);
-        if (
-          staleThresholdMs > 0 &&
-          tracksLocalChildForLog &&
-          !run.processPid &&
-          !run.processGroupId &&
-          !runningProcesses.has(run.id) &&
-          staleForMs >= staleThresholdMs * 6
-        ) {
+        const tracksLocalChildHeld = isTrackedLocalChildProcessAdapter(adapterType);
+        // DUR-257: the recorded child is dead but this process still holds
+        // the run's handle -- its exit/close never surfaced (typically a
+        // grandchild such as an MCP server kept the stdio pipe open after the
+        // CLI died). Seen twice on 2026-09-06 21:31 with no deploy or restart
+        // in between; the rows sat "running" until reaped by hand. Once the
+        // run has also been silent past the threshold, stop trusting the
+        // in-memory handle and reap it like any other orphan (the process
+        // group is terminated below, which also clears lingering
+        // grandchildren).
+        const recordedPidDead = tracksLocalChildHeld && !!run.processPid && !isProcessAlive(run.processPid);
+        if (recordedPidDead && staleThresholdMs > 0 && staleForMs >= staleThresholdMs) {
           logger.warn(
             {
               runId: run.id,
               agentId: run.agentId,
+              processPid: run.processPid,
               staleForMs,
-              startedAt: run.startedAt,
               lastOutputAt: run.lastOutputAt,
             },
-            "heartbeat run is claimed by an in-process execution but has no child pid and no output; likely wedged in-process (DUR-257)",
+            "heartbeat run's recorded child pid is dead while this process still holds its handle; reaping it (DUR-257)",
           );
+        } else {
+          // Observability only: an execution this process claims that never
+          // got a child pid and has produced no output for 6x the threshold
+          // is almost certainly wedged in-process (seen 2026-09-06 21:00: four
+          // such rows, cleared only by a container restart). Not reaped --
+          // that would race a possibly-live execution -- but logged loudly.
+          if (
+            staleThresholdMs > 0 &&
+            tracksLocalChildHeld &&
+            !run.processPid &&
+            !run.processGroupId &&
+            !runningProcesses.has(run.id) &&
+            staleForMs >= staleThresholdMs * 6
+          ) {
+            logger.warn(
+              {
+                runId: run.id,
+                agentId: run.agentId,
+                staleForMs,
+                startedAt: run.startedAt,
+                lastOutputAt: run.lastOutputAt,
+              },
+              "heartbeat run is claimed by an in-process execution but has no child pid and no output; likely wedged in-process (DUR-257)",
+            );
+          }
+          continue;
         }
-        continue;
       }
 
       // Apply staleness threshold to avoid false positives
