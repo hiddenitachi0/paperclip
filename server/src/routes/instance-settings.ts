@@ -23,6 +23,17 @@ function assertCanManageInstanceSettings(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
+/**
+ * DUR-277/DUR-350 (Wave 4): deliberately stays bypass-scoped for the whole
+ * file. `instance_settings` is a single instance-wide row, not a per-company
+ * resource -- every route reads/writes it directly with no companyId in the
+ * path, body, or query at all. Writes additionally fan out an activity-log
+ * row to *every* company via `svc.listCompanyIds()` (`instance.settings.*`
+ * actions), which is itself a cross-company write that a single company-scope
+ * claim could not represent. See the DUR-277 design doc §1
+ * (instance-settings.ts: category (c), "instance-wide settings; writes fan
+ * out activity logs across every company").
+ */
 export function instanceSettingsRoutes(db: Db) {
   const router = Router();
   const svc = instanceSettingsService(db);
