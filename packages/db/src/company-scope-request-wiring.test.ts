@@ -6,6 +6,7 @@ import postgres from "postgres";
 import { createDb } from "./client.js";
 import {
   ConnectionReleaseUnsafeError,
+  ReservedConnectionRevokedError,
   createRequestScopedDb,
   requestCompanyScopeStorage,
   runInCompanyScope,
@@ -135,9 +136,9 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
   // -- surfaced as Postgres "bind message supplies N parameters, but
   // prepared statement requires M" errors that crashed the process. This
   // proves the fix at the primitive level: when `fn` signals
-  // ConnectionReleaseUnsafeError, runInCompanyScope must abandon the
-  // connection rather than recycle it.
-  it("abandons (never releases) the reserved connection when fn() rejects with ConnectionReleaseUnsafeError", async () => {
+  // ConnectionReleaseUnsafeError, runInCompanyScope must not recycle the
+  // connection while the orphaned handler may still be on it.
+  it("does not recycle the reserved connection while an orphaned handler may still be using it", async () => {
     const singleConnDb = createSingleConnectionDb();
     const companyA = await seedCompany("A");
 
@@ -148,9 +149,8 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
       expect(result).toBeUndefined();
 
       // The pool has exactly one physical connection. If it were released
-      // (instead of abandoned), a fresh reserve() would resolve almost
-      // immediately; since it must remain abandoned, reserve() should still
-      // be pending after a short wait.
+      // straight away, a fresh reserve() would resolve almost immediately;
+      // during the quarantine window it must still be pending.
       let resolved = false;
       const reservePromise = singleConnDb.$client
         .reserve()
@@ -167,6 +167,120 @@ describeEmbeddedPostgres("DUR-269: request-scoped db wiring (Proxy/ALS/reserved 
       await singleConnDb.$client.end({ timeout: 0 });
     }
   });
+
+  // DUR-3941: the DUR-421 fix above bought protocol safety with a permanent
+  // leak -- the connection was never released at all, and postgres.js cannot
+  // replace a reserved connection that is never given back, so each client
+  // abort cost the process one of its `max` pool slots for good. A browser
+  // SPA aborting in-flight fetches on navigation hits that branch as routine
+  // behaviour, so the slots drained until reserve() blocked forever and every
+  // company-scoped route stopped answering (CI: the last e2e spec file failed
+  // 25/25 runs, 9 abandoned connections logged against the cap of 10).
+  //
+  // The connection must therefore come back -- without ever being shared with
+  // the orphaned handler that made it unsafe in the first place.
+  it("reclaims the reserved connection after the quarantine, with the company claim cleared", async () => {
+    const singleConnDb = createSingleConnectionDb();
+    const companyA = await seedCompany("A");
+
+    try {
+      await runInCompanyScope(singleConnDb, companyA.id, async () => {
+        throw new ConnectionReleaseUnsafeError();
+      });
+
+      // The one physical connection this pool has must become reservable
+      // again. Without the reclaim this hangs until the test times out.
+      const reserved = await singleConnDb.$client.reserve();
+      try {
+        // ...and it must come back clean: no inherited company claim, and no
+        // transaction left open by whatever was still running on it.
+        const [claim] = await reserved`select current_setting('app.current_company_id', true) as claim`;
+        expect(claim?.claim ?? "").toBe("");
+        const [tx] = await reserved`select txid_current_if_assigned() is not null as in_tx`;
+        expect(tx?.in_tx).toBe(false);
+      } finally {
+        reserved.release();
+      }
+    } finally {
+      await singleConnDb.$client.end({ timeout: 0 });
+    }
+  }, 30_000);
+
+  // DUR-3941: the failure this actually fixes. One leaked connection is
+  // survivable; the leak being unbounded is not. Repeated client aborts used
+  // to walk the pool down to zero usable connections, at which point every
+  // company-scoped request blocked on reserve() forever and the server stopped
+  // answering -- which is how a browser navigating around the app during a
+  // single e2e run took the whole suite down.
+  it("keeps serving after more client aborts than the pool has connections", async () => {
+    const smallPoolSql = postgres(connectionString, { max: 2 });
+    const smallPoolDb = drizzlePg(smallPoolSql, {}) as unknown as Db;
+    const requestDb = createRequestScopedDb(smallPoolDb);
+    const companyA = await seedCompany("A");
+
+    try {
+      // Twice the pool's capacity. Before the reclaim, connections 1 and 2
+      // were gone for good and this loop deadlocked on the third iteration.
+      for (let abort = 0; abort < 4; abort += 1) {
+        await runInCompanyScope(smallPoolDb, companyA.id, async () => {
+          throw new ConnectionReleaseUnsafeError();
+        });
+      }
+
+      const stillWorks = await runInCompanyScope(smallPoolDb, companyA.id, async () =>
+        requestDb.execute(drizzleSql`select 1 as ok`),
+      );
+      expect(stillWorks).toBeTruthy();
+    } finally {
+      await smallPoolSql.end({ timeout: 0 });
+    }
+  }, 120_000);
+
+  // DUR-3941: the reclaim is only safe because the orphaned handler loses its
+  // ability to reach the connection at the same moment the pool gets it back.
+  // A continuation that outlived its request must fail loudly rather than put
+  // a query on a connection that now belongs to somebody else -- that is the
+  // exact interleaving DUR-421 was chasing.
+  it("refuses queries from a handler that outlived the scope, once the connection is reclaimed", async () => {
+    const singleConnDb = createSingleConnectionDb();
+    const requestDb = createRequestScopedDb(singleConnDb);
+    const companyA = await seedCompany("A");
+
+    let releaseOrphan!: () => void;
+    const orphanMayResume = new Promise<void>((resolve) => {
+      releaseOrphan = resolve;
+    });
+    let orphanQuery!: Promise<unknown>;
+
+    try {
+      await runInCompanyScope(singleConnDb, companyA.id, async () => {
+        // The exact shape DUR-421 describes: a fire-and-forget continuation
+        // still running (AsyncLocalStorage carries the scope into it) when the
+        // client aborts the response mid-handler.
+        orphanQuery = orphanMayResume.then(() => requestDb.select().from(companies));
+        throw new ConnectionReleaseUnsafeError();
+      });
+
+      // Wait until the connection is genuinely back in the pool -- i.e. it
+      // could now be serving an unrelated company.
+      const reserved = await singleConnDb.$client.reserve();
+      reserved.release();
+
+      releaseOrphan();
+      // drizzle wraps whatever the driver threw in a DrizzleQueryError, so the
+      // refusal shows up as the `cause`.
+      const orphanError = await orphanQuery.then(
+        () => null,
+        (err: unknown) => err as { cause?: unknown },
+      );
+      expect(orphanError).not.toBeNull();
+      expect(orphanError?.cause ?? orphanError).toBeInstanceOf(ReservedConnectionRevokedError);
+    } finally {
+      releaseOrphan();
+      await orphanQuery?.catch(() => {});
+      await singleConnDb.$client.end({ timeout: 0 });
+    }
+  }, 30_000);
 
   it("runInCompanyScopeBypass throws when the connection's role is not a member of paperclip_app_bypass", async () => {
     // pg_has_role() always returns true for the migration-running superuser

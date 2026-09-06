@@ -41,6 +41,7 @@ export {
   runInCompanyScopeBypass,
   createRequestScopedDb,
   ConnectionReleaseUnsafeError,
+  ReservedConnectionRevokedError,
   type CompanyScopeBypassOptions,
   type RequestScope,
   type RequestCompanyScope,

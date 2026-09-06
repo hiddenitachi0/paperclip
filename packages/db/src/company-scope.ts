@@ -394,6 +394,79 @@ export interface ReservedScopeLiveness {
   // finally block waits), but nulled out immediately after firing/timing out
   // either way so a stale reference can't be double-invoked.
   onDrained: (() => void) | null;
+  // DUR-3941: set when this scope's reserved connection has been taken away
+  // from everything that could still reach it (see gateReservedConnection).
+  // `released` says "do not START new work on this connection"; `revoked`
+  // says "this connection is gone -- every query issued through this scope
+  // from here on fails loudly instead of reaching the wire", which is what
+  // makes a connection whose safety is unknown reclaimable rather than
+  // permanently leaked. See reclaimUnsafeConnection.
+  revoked: boolean;
+}
+
+function newReservedScopeLiveness(): ReservedScopeLiveness {
+  return { released: false, inFlight: 0, onDrained: null, revoked: false };
+}
+
+/**
+ * DUR-3941: thrown when anything tries to issue a query on a reserved
+ * connection after that connection has been revoked and handed back to the
+ * pool. Only reachable from code that outlived the request/tick whose scope
+ * reserved the connection (an orphaned handler continuation after a client
+ * abort, or a captured `tx`/`scopedDb` reference) -- exactly the code whose
+ * queries must never land on a connection somebody else now owns.
+ */
+export class ReservedConnectionRevokedError extends Error {
+  constructor() {
+    super(
+      "company-scope: this query was issued on a reserved connection that its owning request/tick scope has " +
+        "already given up (the response was aborted, or the scope could not be closed cleanly). The physical " +
+        "connection has been reclaimed by the pool and may now be serving an unrelated company, so the query " +
+        "is refused instead of being put on that connection's wire. Do not keep using a request's db/tx " +
+        "reference after the request itself is over.",
+    );
+    this.name = "ReservedConnectionRevokedError";
+  }
+}
+
+/**
+ * DUR-3941: wraps the reserved connection handed to drizzle so that every
+ * query issued through this scope -- by the createRequestScopedDb proxy, by
+ * withCompanyScope's reuse of `scopedDb`, or by a `tx` reference somebody
+ * captured -- passes through one chokepoint that can be shut off.
+ *
+ * That chokepoint is what makes reclaiming an unsafe connection possible at
+ * all. Before it existed, "an orphaned handler might still issue queries on
+ * this connection" could only be answered by never handing the connection
+ * back (see reclaimUnsafeConnection for why that was worse). With it, the
+ * answer is "it cannot -- it gets a ReservedConnectionRevokedError instead."
+ *
+ * `reserved` itself (the ungated handle) stays private to this module, so
+ * runInCompanyScope can still issue its own close-out statements after the
+ * gate is shut.
+ */
+function gateReservedConnection(reserved: ReservedSql, liveness: ReservedScopeLiveness): ReservedSql {
+  const assertUsable = (): void => {
+    if (liveness.revoked) throw new ReservedConnectionRevokedError();
+  };
+  return new Proxy(reserved as unknown as (...args: unknown[]) => unknown, {
+    // Tagged-template calls: sql`select ...`
+    apply(target, thisArg, args: unknown[]) {
+      assertUsable();
+      return Reflect.apply(target, thisArg === undefined ? reserved : thisArg, args);
+    },
+    // Everything drizzle's postgres-js driver reaches for: `.unsafe(...)`,
+    // `.options`, `.types`, ... Data properties pass straight through;
+    // callables are wrapped so they cannot fire after the revoke.
+    get(_target, prop) {
+      const value = (reserved as unknown as Record<PropertyKey, unknown>)[prop];
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        assertUsable();
+        return (value as (...args: unknown[]) => unknown).apply(reserved, args);
+      };
+    },
+  }) as unknown as ReservedSql;
 }
 
 // DUR-920: how long runInCompanyScope's finally block waits for in-flight
@@ -498,30 +571,114 @@ export class ConnectionReleaseUnsafeError extends Error {
   }
 }
 
-async function resetClaimAndRelease(reserved: ReservedSql): Promise<void> {
+async function resetClaimAndRelease(
+  reserved: ReservedSql,
+  liveness: ReservedScopeLiveness,
+): Promise<void> {
   try {
     await reserved`RESET app.current_company_id`;
     reserved.release();
   } catch (err) {
     // The connection's claim state is now unknown and must never go back to
-    // the pool for something else to inherit. The reviewed design (DUR-275)
-    // called for sql.end()'ing just this one connection in that case, but
-    // ReservedSql has no such per-connection close at runtime in the pinned
-    // postgres@3.4.9 (.end()/.close() only exist on the pool-wide client,
-    // and calling them here would tear down every other in-flight request's
-    // connection too) -- verified while building this, a real divergence
-    // from what DUR-275 assumed. The only safe option with the API this
-    // library actually exposes is to never call .release(): an
-    // unreleased reserved connection can never be handed to another
-    // request, so it can never leak this claim to another tenant. It is
-    // simply abandoned (one permanently lost pool slot) instead of being
-    // recycled with unknown claim state. This never throws -- it must not
-    // mask fn()'s own result or error from the caller's finally block.
+    // the pool for something else to inherit. Hand it to the reclaim path
+    // rather than dropping it on the floor -- see reclaimUnsafeConnection.
+    // This never throws: it must not mask fn()'s own result or error from
+    // the caller's finally block.
     console.error(
-      "company-scope: failed to reset session claim before release; abandoning the connection instead of recycling it",
+      "company-scope: failed to reset session claim before release; quarantining the connection instead of recycling it as-is",
       err,
     );
+    reclaimUnsafeConnection(reserved, liveness, "the session-claim reset before release failed");
   }
+}
+
+// DUR-3941: how long a connection that cannot be recycled *right now* is left
+// alone before it is taken away and reclaimed.
+//
+// The one case this window exists for is a client abort (see
+// ConnectionReleaseUnsafeError): the response is gone but the route handler
+// chain may still be running, and cutting it off mid-write for no reason
+// would be gratuitous. Every handler wired through company scope is a plain
+// request/response handler -- none of the long-lived SSE routes go through
+// this middleware -- so a few seconds is far more than any of them needs to
+// finish the work it had already started.
+//
+// Note what this window is NOT: it is not what makes the reclaim safe. Safety
+// comes from revoking the connection (gateReservedConnection) before it is
+// handed back, which holds no matter how long or short the window is. The
+// window only decides how much of an aborted handler's remaining work still
+// gets to happen.
+const UNSAFE_CONNECTION_QUARANTINE_MS = 5_000;
+
+/**
+ * DUR-3941: reclaim a reserved connection that could not be released on the
+ * normal path, instead of leaking it.
+ *
+ * Every "this connection is not safe to recycle" branch used to resolve the
+ * same way: never call `.release()`. That is safe in isolation -- an
+ * unreleased connection can never be handed to another request, so it can
+ * never leak a claim or interleave wire traffic -- but it is also permanent.
+ * postgres.js opens exactly `max` physical connections (10 by default) and
+ * has no way to replace one that is simply never given back, so every such
+ * branch costs the process one connection *for its whole lifetime*. A browser
+ * SPA aborting in-flight fetches on navigation walks straight into that
+ * branch as routine behaviour, so the slots drain one by one until
+ * `sql.reserve()` blocks forever and the server stops answering any
+ * company-scoped request at all -- a far worse failure than the interleaving
+ * it was avoiding. (Observed in CI as the last e2e spec file failing 25/25
+ * runs, with 3-10 abandoned connections logged per run against the cap of 10.)
+ *
+ * The blocker was never the connection, it was the orphaned code that might
+ * still use it. So take that ability away instead of taking the connection
+ * away from the pool:
+ *
+ *   1. wait out a short quarantine so an orphaned handler that is simply
+ *      finishing normally gets to finish (UNSAFE_CONNECTION_QUARANTINE_MS);
+ *   2. revoke the scope's gated handle -- from here on every query issued
+ *      through this scope throws ReservedConnectionRevokedError instead of
+ *      reaching the wire, so nothing can touch this connection again;
+ *   3. flip `released` so withCompanyScope acquires its own pooled
+ *      connection rather than trying to reuse this scope's;
+ *   4. close the connection out and release it.
+ *
+ * Step 4 needs no in-flight bookkeeping: Postgres answers the statements on
+ * one connection in the order it received them, so the `rollback`/`RESET`
+ * issued in step 4 can only resolve after every statement already issued on
+ * this connection has resolved. Awaiting them is therefore proof that the
+ * connection is idle -- and, thanks to step 2, proof that it will stay idle.
+ * The `rollback` is there because a revoked call may have been mid-transaction
+ * (its own COMMIT/ROLLBACK now throws), and a connection must never go back
+ * to the pool with a transaction still open; outside a transaction it is a
+ * no-op.
+ *
+ * If even that fails the connection is genuinely unusable and is dropped the
+ * way it always was -- no worse than before, just no longer the default.
+ */
+function reclaimUnsafeConnection(
+  reserved: ReservedSql,
+  liveness: ReservedScopeLiveness,
+  reason: string,
+): void {
+  const timer = setTimeout(() => {
+    liveness.revoked = true;
+    liveness.released = true;
+    void (async () => {
+      try {
+        await reserved`rollback`;
+        await reserved`RESET app.current_company_id`;
+        reserved.release();
+      } catch (err) {
+        console.error(
+          `company-scope: could not reclaim the reserved connection quarantined because ${reason}; ` +
+            "dropping it (one lost pool slot) rather than recycling it in an unknown state",
+          err,
+        );
+      }
+    })();
+  }, UNSAFE_CONNECTION_QUARANTINE_MS);
+  // Never hold the process open just to reclaim a connection: on shutdown the
+  // whole pool goes away anyway.
+  timer.unref?.();
 }
 
 /**
@@ -537,11 +694,13 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
   }
 
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
-  const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
+  const liveness = newReservedScopeLiveness();
   let unsafeToRelease = false;
   try {
     await reserved`select set_config('app.current_company_id', ${companyId}, false)`;
-    const scopedDb = drizzlePg(reserved, { schema });
+    // DUR-3941: drizzle (and therefore everything downstream of it) only ever
+    // sees the gated handle, never `reserved` itself.
+    const scopedDb = drizzlePg(gateReservedConnection(reserved, liveness), { schema });
     return await requestCompanyScopeStorage.run({ kind: "scoped", companyId, scopedDb, liveness }, fn);
   } catch (err) {
     if (err instanceof ConnectionReleaseUnsafeError) {
@@ -551,16 +710,19 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
     throw err;
   } finally {
     if (unsafeToRelease) {
-      // The connection is abandoned, never handed back to the pool -- so
-      // it remains exclusively (if unsafely) available to whatever is still
-      // using it, and `liveness.released` deliberately stays `false`: a
-      // still-running orphaned continuation may keep issuing queries/nested
-      // withCompanyScope calls on it safely, since nothing else can acquire
-      // this same physical connection out from under it.
+      // The connection cannot be recycled right now: the response is gone but
+      // the handler chain may still be running on it, so `liveness.released`
+      // deliberately stays `false` for the length of the quarantine and the
+      // orphaned continuation keeps working on a connection nothing else can
+      // acquire. DUR-3941: it is then revoked and reclaimed rather than lost
+      // forever -- see reclaimUnsafeConnection for why leaking it was the
+      // worse of the two failures.
       console.error(
-        "company-scope: response closed before its handler finished; abandoning the reserved connection " +
-          "instead of recycling it, since the handler may still be using it",
+        "company-scope: response closed before its handler finished; quarantining the reserved connection " +
+          `for ${UNSAFE_CONNECTION_QUARANTINE_MS}ms instead of recycling it now, since the handler may still ` +
+          "be using it",
       );
+      reclaimUnsafeConnection(reserved, liveness, "the response closed before its handler finished");
     } else {
       // Flip this before the connection actually goes back to the pool, not
       // after -- withCompanyScope reads it from other (possibly still
@@ -575,17 +737,17 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
       liveness.released = true;
       await waitForInFlightDrain(liveness);
       if (liveness.inFlight > 0) {
-        // Bound hit while calls were still in flight -- same "never recycle
-        // with unknown/unsafe state" precedent as resetClaimAndRelease's own
-        // catch branch: abandon the connection (one lost pool slot) instead
-        // of risking cross-tenant transaction corruption.
+        // Bound hit while calls were still in flight: recycling now could hand
+        // an unrelated request a connection that is still mid-transaction.
+        // DUR-3941: quarantine and reclaim it instead of losing the pool slot.
         console.error(
           `company-scope: ${liveness.inFlight} runOnReservedScope() call(s) still in flight ` +
-            `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; abandoning the reserved connection ` +
-            "instead of recycling it, since it may still be mid-transaction",
+            `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; quarantining the reserved connection ` +
+            "instead of recycling it now, since it may still be mid-transaction",
         );
+        reclaimUnsafeConnection(reserved, liveness, "in-flight calls did not drain before release");
       } else {
-        await resetClaimAndRelease(reserved);
+        await resetClaimAndRelease(reserved, liveness);
       }
     }
   }
@@ -605,7 +767,7 @@ export async function runInCompanyScopeBypass<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
-  const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
+  const liveness = newReservedScopeLiveness();
   try {
     const [membership] = (await reserved`
       select pg_has_role(current_user, 'paperclip_app_bypass', 'member') as has_bypass
@@ -619,7 +781,8 @@ export async function runInCompanyScopeBypass<T>(
       );
     }
 
-    const scopedDb = drizzlePg(reserved, { schema });
+    // DUR-3941: see runInCompanyScope -- drizzle only ever sees the gated handle.
+    const scopedDb = drizzlePg(gateReservedConnection(reserved, liveness), { schema });
     await scopedDb.insert(crossCompanyAccessLog).values({
       reason: opts.reason,
       actorType: opts.actorType ?? null,
@@ -638,11 +801,12 @@ export async function runInCompanyScopeBypass<T>(
     if (liveness.inFlight > 0) {
       console.error(
         `company-scope: ${liveness.inFlight} runOnReservedScope() call(s) still in flight ` +
-          `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; abandoning the reserved connection ` +
-          "instead of recycling it, since it may still be mid-transaction",
+          `${IN_FLIGHT_DRAIN_TIMEOUT_MS}ms after release was requested; quarantining the reserved connection ` +
+          "instead of recycling it now, since it may still be mid-transaction",
       );
+      reclaimUnsafeConnection(reserved, liveness, "in-flight calls did not drain before release");
     } else {
-      await resetClaimAndRelease(reserved);
+      await resetClaimAndRelease(reserved, liveness);
     }
   }
 }
