@@ -38,6 +38,7 @@ import {
   resolveProjectDeployBranchesByProjectId,
   type ProjectDeployBranches,
 } from "../services/deploy-branches.js";
+import { describeUnknownDeployLikeKind, resolveProjectDeployWorkspaceId } from "../services/deploy-workspace.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
@@ -1027,10 +1028,36 @@ export function approvalRoutes(
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, dryRun, ...approvalInput } = req.body;
     const actor = getActorInfo(req);
+    // DUR-3926: a deploy-looking kind that is not exactly "deploy" produces a
+    // card nothing acts on. Refuse it here with a plain-language reason.
+    if (approvalInput.type === "request_board_approval" && approvalInput.payload && typeof approvalInput.payload === "object") {
+      const unknownKindMessage = describeUnknownDeployLikeKind((approvalInput.payload as Record<string, unknown>).kind);
+      if (unknownKindMessage) {
+        res.status(422).json({ error: unknownKindMessage });
+        return;
+      }
+    }
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
-      const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
-      await assertDeployRequestProjectExists(db, companyId, deployPayload);
+      const parsedDeployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
+      await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
+      // DUR-3926: stamp the project's real deploy workspace over whatever the
+      // filer supplied -- the runner silently refuses any other workspace.
+      const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
+      if (deployWorkspaceId && deployWorkspaceId !== parsedDeployPayload.workspaceId) {
+        logger.warn(
+          {
+            companyId,
+            projectId: parsedDeployPayload.projectId,
+            suppliedWorkspaceId: parsedDeployPayload.workspaceId,
+            deployWorkspaceId,
+          },
+          "deploy approval filed with a workspaceId that is not the project's deploy workspace; stamping the deploy workspace (DUR-3926)",
+        );
+      }
+      const deployPayload = deployWorkspaceId
+        ? { ...parsedDeployPayload, workspaceId: deployWorkspaceId }
+        : parsedDeployPayload;
       await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
       const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
       approvalInput.payload = deployRequestPayloadSchema.parse({
@@ -1473,8 +1500,13 @@ export function approvalRoutes(
     }
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
-      const deployPayload = deployRequestPayloadSchema.parse(req.body.payload);
-      await assertDeployRequestProjectExists(db, existing.companyId, deployPayload);
+      const parsedDeployPayload = deployRequestPayloadSchema.parse(req.body.payload);
+      await assertDeployRequestProjectExists(db, existing.companyId, parsedDeployPayload);
+      // DUR-3926: same deploy-workspace stamp as the filing path above.
+      const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
+      const deployPayload = deployWorkspaceId
+        ? { ...parsedDeployPayload, workspaceId: deployWorkspaceId }
+        : parsedDeployPayload;
       await assertDeployCommitIsAncestorOfDeployBranch(db, existing.companyId, deployPayload);
       const branchStamp = await resolveDeployApprovalBranchStamp(db, existing.companyId, deployPayload);
       req.body.payload = deployRequestPayloadSchema.parse({
