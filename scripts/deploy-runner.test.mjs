@@ -139,6 +139,14 @@ const FAKE_DOCKER = [
   '    echo deactivate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
   '    printf \'{"active":false}\'',
   '    ;;',
+  // DUR-257: the pause-for-restart call the runner makes once the drain
+  // times out. Logged into the same calls file so ordering can be asserted;
+  // a `pause-for-restart-fail` marker file in the scenario makes it fail.
+  '  *"instance heartbeat-runs:pause-for-restart"*)',
+  '    echo pause-for-restart >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '    if [ -f "$SCENARIO_DIR/pause-for-restart-fail" ]; then echo "fake: pause-for-restart failed" >&2; exit 1; fi',
+  '    printf \'{"paused":3,"runIds":["r1","r2","r3"]}\'',
+  '    ;;',
   '  *)',
   '    echo "fake docker: unhandled command: $cmd" >&2',
   '    exit 1',
@@ -1611,8 +1619,51 @@ test("DUR-259: a drain that never reaches zero times out and still proceeds with
     assertSuccess(result, "process_approval");
 
     assert.equal(scenario.commentsFor("aid-1").length, 1, "a drain timeout must not block the deploy from resolving to a definite outcome");
-    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"], "even on a timeout, ownership means the runner must still restore quiet mode afterward");
-    assert.match(scenario.readLog(), /drain timed out after 1s with 3 heartbeat run\(s\) still in flight — proceeding with the recreate anyway/);
+    assert.deepEqual(
+      quietModeCallsLog(scenario),
+      ["activate", "pause-for-restart", "deactivate"],
+      "on a timeout the runner pauses the in-flight runs (DUR-257) before the recreate, and still restores quiet mode afterward",
+    );
+    assert.match(scenario.readLog(), /drain timed out after 1s with 3 heartbeat run\(s\) still in flight — marking them paused_for_restart before the recreate/);
+    assert.match(scenario.readLog(), /paused in-flight heartbeat runs for the restart: .*"paused":3/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-257: when pause-for-restart itself fails, the runner logs it and still proceeds with the recreate", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 3 });
+    writeFileSync(path.join(scenario.dir, "pause-for-restart-fail"), "");
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS: "1",
+        PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS: "1",
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "a failed pause call must not block the deploy from resolving");
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "pause-for-restart", "deactivate"]);
+    assert.match(scenario.readLog(), /could not mark in-flight runs paused_for_restart — proceeding anyway/);
+    assert.match(scenario.readLog(), /deployed OK/);
   } finally {
     scenario.cleanup();
     if (dir) rmSync(dir, { recursive: true, force: true });

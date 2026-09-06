@@ -10146,12 +10146,80 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const reaped: string[] = [];
 
     for (const { run, adapterType, adapterConfig } of activeRuns) {
-      if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+      // DUR-257: staleness must key on evidence the run is actually making
+      // progress (adapter output, process start, run start) -- NOT on
+      // `updatedAt`. Every periodic pass that classifies liveness or patches
+      // a running row bumps `updatedAt` (setRunStatus,
+      // classifyAndPersistRunLiveness, ...), so a run whose child died at
+      // the 17:44 / 19:15 deploy swaps on 2026-09-06 kept reading as "fresh"
+      // for over an hour and was never reaped, while its agent's only
+      // concurrency slot stayed held. Five agents sat idle that way.
+      const progressRefTime = Math.max(
+        run.lastOutputAt ? new Date(run.lastOutputAt).getTime() : 0,
+        run.processStartedAt ? new Date(run.processStartedAt).getTime() : 0,
+        run.startedAt ? new Date(run.startedAt).getTime() : 0,
+        // Only when the row carries none of the above (legacy rows).
+        !run.lastOutputAt && !run.processStartedAt && !run.startedAt && run.updatedAt
+          ? new Date(run.updatedAt).getTime()
+          : 0,
+      );
+      const staleForMs = now.getTime() - progressRefTime;
+
+      if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) {
+        const tracksLocalChildHeld = isTrackedLocalChildProcessAdapter(adapterType);
+        // DUR-257: the recorded child is dead but this process still holds
+        // the run's handle -- its exit/close never surfaced (typically a
+        // grandchild such as an MCP server kept the stdio pipe open after the
+        // CLI died). Seen twice on 2026-09-06 21:31 with no deploy or restart
+        // in between; the rows sat "running" until reaped by hand. Once the
+        // run has also been silent past the threshold, stop trusting the
+        // in-memory handle and reap it like any other orphan (the process
+        // group is terminated below, which also clears lingering
+        // grandchildren).
+        const recordedPidDead = tracksLocalChildHeld && !!run.processPid && !isProcessAlive(run.processPid);
+        if (recordedPidDead && staleThresholdMs > 0 && staleForMs >= staleThresholdMs) {
+          logger.warn(
+            {
+              runId: run.id,
+              agentId: run.agentId,
+              processPid: run.processPid,
+              staleForMs,
+              lastOutputAt: run.lastOutputAt,
+            },
+            "heartbeat run's recorded child pid is dead while this process still holds its handle; reaping it (DUR-257)",
+          );
+        } else {
+          // Observability only: an execution this process claims that never
+          // got a child pid and has produced no output for 6x the threshold
+          // is almost certainly wedged in-process (seen 2026-09-06 21:00: four
+          // such rows, cleared only by a container restart). Not reaped --
+          // that would race a possibly-live execution -- but logged loudly.
+          if (
+            staleThresholdMs > 0 &&
+            tracksLocalChildHeld &&
+            !run.processPid &&
+            !run.processGroupId &&
+            !runningProcesses.has(run.id) &&
+            staleForMs >= staleThresholdMs * 6
+          ) {
+            logger.warn(
+              {
+                runId: run.id,
+                agentId: run.agentId,
+                staleForMs,
+                startedAt: run.startedAt,
+                lastOutputAt: run.lastOutputAt,
+              },
+              "heartbeat run is claimed by an in-process execution but has no child pid and no output; likely wedged in-process (DUR-257)",
+            );
+          }
+          continue;
+        }
+      }
 
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
-        const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
-        if (now.getTime() - refTime < staleThresholdMs) continue;
+        if (staleForMs < staleThresholdMs) continue;
       }
 
       const tracksLocalChild = isTrackedLocalChildProcessAdapter(adapterType);
@@ -10245,7 +10313,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
 
-      await finalizeAgentStatus(run.agentId, "failed", baseMessage);
+      // DUR-257: losing the child process (deploy swap, container restart,
+      // OOM) is an infrastructure event, not the agent's fault. When a retry
+      // has been queued, or when there was never a pid to lose (the "server
+      // may have restarted" case), leave the agent idle so the scheduler
+      // keeps ticking it. Only an exhausted process-loss retry surfaces as
+      // agent "error" -- that is the case that genuinely needs an operator.
+      // (Before this, every deploy on 2026-09-06 left 3-5 agents dead in
+      // "error" until someone reset them by hand.)
+      const agentOutcome = shouldRetry || !(run.processPid || run.processGroupId) ? "cancelled" : "failed";
+      await finalizeAgentStatus(run.agentId, agentOutcome, baseMessage);
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);

@@ -1208,6 +1208,140 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
   });
 
+  it("DUR-257: reaps a dead-pid run even when updated_at was just touched (staleness keys on output/start, not updated_at)", async () => {
+    const { agentId, runId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: 999_999_999,
+      includeIssue: false,
+    });
+    // Simulate the periodic liveness classifier / watchdog bumping updated_at
+    // on a run whose child died at a deploy swap an hour ago: the row looks
+    // "fresh" by updated_at but has produced no output since it started.
+    await db
+      .update(heartbeatRuns)
+      .set({
+        startedAt: new Date(Date.now() - 60 * 60 * 1000),
+        processStartedAt: new Date(Date.now() - 60 * 60 * 1000),
+        lastOutputAt: new Date(Date.now() - 60 * 60 * 1000),
+        updatedAt: new Date(),
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+
+    const failedRun = await heartbeat.getRun(runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+
+    // A process-loss retry was queued, so the agent must NOT be parked in
+    // "error" -- it stays schedulable.
+    const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
+    expect(agent?.status).not.toBe("error");
+  });
+
+  it("DUR-257: reaps a run whose in-memory handle is still held when its recorded pid is dead and it has been silent past the threshold", async () => {
+    const { runId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: 999_999_999,
+      includeIssue: false,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        startedAt: new Date(Date.now() - 60 * 60 * 1000),
+        processStartedAt: new Date(Date.now() - 60 * 60 * 1000),
+        lastOutputAt: new Date(Date.now() - 40 * 60 * 1000),
+        updatedAt: new Date(),
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    // The server still thinks it owns this child (exit/close never surfaced).
+    runningProcesses.set(runId, {
+      child: { pid: 999_999_999 } as ChildProcess,
+      graceSec: 1,
+      processGroupId: null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(1);
+    expect(result.runIds).toEqual([runId]);
+    expect(runningProcesses.has(runId)).toBe(false);
+
+    const failedRun = await heartbeat.getRun(runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+  });
+
+  it("DUR-257: leaves a held run alone while its recorded pid is dead but it was silent for less than the threshold", async () => {
+    const { runId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: 999_999_999,
+      includeIssue: false,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ lastOutputAt: new Date(Date.now() - 30 * 1000) })
+      .where(eq(heartbeatRuns.id, runId));
+    runningProcesses.set(runId, {
+      child: { pid: 999_999_999 } as ChildProcess,
+      graceSec: 1,
+      processGroupId: null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(0);
+    expect(runningProcesses.has(runId)).toBe(true);
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+  });
+
+  it("DUR-257: does not reap a run that produced output within the staleness window, even if updated_at is old", async () => {
+    const { runId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: 999_999_999,
+      includeIssue: false,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        startedAt: new Date(Date.now() - 60 * 60 * 1000),
+        lastOutputAt: new Date(Date.now() - 30 * 1000),
+        updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.reaped).toBe(0);
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+  });
+
+  it("DUR-257: a run lost to a server restart (no pid ever recorded) leaves its agent idle, not in error", async () => {
+    const { agentId, runId } = await seedRunFixture({
+      agentStatus: "running",
+      processPid: null,
+      processGroupId: null,
+      includeIssue: false,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+
+    const failedRun = await heartbeat.getRun(runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.error).toContain("server may have restarted");
+
+    const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
+    expect(agent?.status).toBe("idle");
+    expect(agent?.errorReason ?? null).toBeNull();
+  });
+
   it("releases active environment leases when an orphaned run is reaped", async () => {
     const { runId, issueId, companyId } = await seedRunFixture({
       processPid: 999_999_999,
