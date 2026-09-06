@@ -3,7 +3,9 @@ import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import {
+  DEFAULT_APP_POOL_MAX,
   applyPendingMigrations,
+  getAppPoolMax,
   inspectMigrations,
 } from "./client.js";
 import {
@@ -541,4 +543,27 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
     },
     20_000,
   );
+});
+
+// DUR-3931: the app pool's size used to be postgres.js's implicit default,
+// which is what turned a per-request connection leak into a whole-server
+// hang. It is now explicit and overridable, so an operator can raise it
+// without patching code -- and a bad value must not silently produce a
+// nonsense pool.
+describe("getAppPoolMax (DUR-3931)", () => {
+  it("defaults to DEFAULT_APP_POOL_MAX when unset or blank", () => {
+    expect(getAppPoolMax({})).toBe(DEFAULT_APP_POOL_MAX);
+    expect(getAppPoolMax({ PAPERCLIP_DB_POOL_MAX: "   " })).toBe(DEFAULT_APP_POOL_MAX);
+  });
+
+  it("honours a valid override", () => {
+    expect(getAppPoolMax({ PAPERCLIP_DB_POOL_MAX: "25" })).toBe(25);
+    expect(getAppPoolMax({ PAPERCLIP_DB_POOL_MAX: " 1 " })).toBe(1);
+  });
+
+  it("falls back to the default for values that are not a positive integer", () => {
+    for (const raw of ["0", "-3", "abc", "1.5.2"]) {
+      expect(getAppPoolMax({ PAPERCLIP_DB_POOL_MAX: raw })).toBe(DEFAULT_APP_POOL_MAX);
+    }
+  });
 });

@@ -1,5 +1,7 @@
 export {
   createDb,
+  DEFAULT_APP_POOL_MAX,
+  getAppPoolMax,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
   inspectMigrations,
@@ -41,6 +43,7 @@ export {
   runInCompanyScopeBypass,
   createRequestScopedDb,
   ConnectionReleaseUnsafeError,
+  ConnectionFencedError,
   type CompanyScopeBypassOptions,
   type RequestScope,
   type RequestCompanyScope,
