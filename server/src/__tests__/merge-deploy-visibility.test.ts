@@ -227,6 +227,35 @@ describe("mergeDeployVisibilityService.tick (DUR-40 / DUR-46)", () => {
     expect(updateCalls[0].payload.deployVisibilityNoted).toBe(true);
   });
 
+  it("DUR-237: does NOT mark noted on a transient verification failure, so it is retried on the next tick", async () => {
+    const { mergeDeployVisibilityService } = await import("../services/merge-deploy-visibility.js");
+    const dueApproval = {
+      id: "approval-3c",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "approved",
+      payload: { kind: "merge_pr", base: "custom", prNumber: 154, repo: "acme/paperclip" },
+      decidedAt: new Date("2026-08-19T00:00:00Z"),
+    };
+    const { db, updateCalls } = makeFakeDb([dueApproval]);
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-3c" }]);
+    mockResolveProjectDeployBranches.mockResolvedValue({ deployBranch: "custom", mirrorBranch: "master" });
+    const verifyMerge = vi.fn().mockResolvedValue({ status: "unknown", reason: "github_http_502" });
+
+    const svc = mergeDeployVisibilityService(db as any, { verifyMerge });
+    const result = await svc.tick(new Date("2026-08-19T01:00:00Z"));
+
+    expect(result).toEqual({ checked: 1, flagged: 0 });
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    // A transient failure (GitHub unreachable, rate limited, auth not ready
+    // yet) must NOT be marked noted -- unlike "missing_pr_reference", this
+    // could resolve differently next tick, and DUR-237 hit exactly this
+    // live: a one-shot "unknown" permanently blocked the done-gate's
+    // cross-issue ancestry match from ever seeing a real merge commit.
+    expect(updateCalls).toHaveLength(0);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
   it("does not post a note when a deploy approval already exists for the issue", async () => {
     const { mergeDeployVisibilityService } = await import("../services/merge-deploy-visibility.js");
     const dueApproval = {

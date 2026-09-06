@@ -205,6 +205,11 @@ export function mergeDeployVisibilityService(
         : [];
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       let mergeCommitSha: string | undefined;
+      // DUR-237: whether it's safe to permanently stop re-checking this approval.
+      // Default true (matches every branch below that reaches a final answer, or
+      // never had enough on the payload to check at all); flipped to false only
+      // for a verification result that might resolve differently on a later tick.
+      let shouldMarkNoted = true;
 
       if (base && linkedIssueIds.length > 0) {
         const branches = await resolveProjectDeployBranches(db, linkedIssueIds);
@@ -243,13 +248,25 @@ export function mergeDeployVisibilityService(
               );
             }
           }
-          // verification.status === "unknown": no evidence either way (missing
-          // PR reference, GitHub unreachable, auth failure) — say nothing
-          // rather than guess.
+          // verification.status === "unknown": no evidence either way. Say
+          // nothing rather than guess -- and if the cause could plausibly
+          // resolve on a later tick (network blip, rate limit, an auth token
+          // that wasn't provisioned yet), leave it un-noted so this approval
+          // is picked up again instead of being silently stuck forever. Only
+          // a structurally unresolvable payload (no PR reference at all) is
+          // final: DUR-237 hit exactly this live -- a transient GitHub check
+          // failure got treated as final and permanently prevented the
+          // done-gate's cross-issue ancestry match from ever seeing this
+          // approval's merge commit.
+          else if (verification.status === "unknown" && verification.reason !== "missing_pr_reference") {
+            shouldMarkNoted = false;
+          }
         }
       }
 
-      await markNoted(approval.id, payload, mergeCommitSha ? { mergeCommitSha } : {});
+      if (shouldMarkNoted) {
+        await markNoted(approval.id, payload, mergeCommitSha ? { mergeCommitSha } : {});
+      }
     }
 
     return { checked, flagged };
