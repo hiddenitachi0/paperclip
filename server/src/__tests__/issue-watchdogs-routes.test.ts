@@ -23,6 +23,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { deleteAfterLateWritesDrain } from "./helpers/late-write-teardown.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
@@ -63,7 +64,20 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await db.delete(issueRelations);
     await db.delete(issueWatchdogs);
     await db.delete(issues);
-    await db.delete(agents);
+    // Assigning an issue dispatches a heartbeat run fire-and-forget, and the
+    // tests above only wait for the run *row* to appear -- executeRun() is
+    // still going when this hook starts (observed here: a live `running` run
+    // at teardown entry that lands its ensureRuntimeState() insert ~840ms
+    // later, see heartbeat.ts:6541). If that insert commits after the
+    // agent_runtime_state delete above, `delete from "agents"` trips
+    // agent_runtime_state_agent_id_agents_id_fk. Re-drain and retry.
+    await deleteAfterLateWritesDrain(
+      async () => {
+        await db.delete(activityLog);
+        await db.delete(agentRuntimeState);
+      },
+      () => db.delete(agents),
+    );
     await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(companies);

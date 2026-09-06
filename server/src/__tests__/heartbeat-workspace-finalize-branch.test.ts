@@ -34,6 +34,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { deleteAfterLateWritesDrain } from "./helpers/late-write-teardown.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
@@ -286,7 +287,17 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     await db.delete(projects);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
-    await db.delete(agents);
+    // DUR-927 race: executeRun() is dispatched fire-and-forget, so its trailing
+    // activity_log / agent_runtime_state writes can land after the two deletes
+    // above and trip activity_log_agent_id_agents_id_fk here. Re-drain the
+    // child tables and retry until `agents` deletes cleanly.
+    await deleteAfterLateWritesDrain(
+      async () => {
+        await db.delete(activityLog);
+        await db.delete(agentRuntimeState);
+      },
+      () => db.delete(agents),
+    );
     await db.delete(workspaceOperations);
     await db.delete(executionWorkspaces);
     await db.delete(environments);
