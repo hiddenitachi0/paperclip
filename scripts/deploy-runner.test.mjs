@@ -122,6 +122,23 @@ const FAKE_DOCKER = [
   "    pid=\"$(printf '%s' \"$cmd\" | sed -n 's/.*project get \\([^ ]*\\).*/\\1/p')\"",
   '    cat "$SCENARIO_DIR/project-$pid.json"',
   '    ;;',
+  // DUR-259: fake responses for the quiet-mode CLI wrapper deploy-runner.sh
+  // polls before/after a compose_recreate|compose_build_swap recipe.
+  // activate/deactivate calls are appended to a log file so tests can assert
+  // ownership behavior (whether the runner activated it vs. found it already
+  // active) without needing a real timing-based simulation.
+  '  *"instance quiet-mode:status"*)',
+  '    fixture="$SCENARIO_DIR/quiet-mode-status.json"',
+  '    if [ -f "$fixture" ]; then cat "$fixture"; else printf \'{"active":false,"activeRunCount":0}\'; fi',
+  '    ;;',
+  '  *"instance quiet-mode:activate"*)',
+  '    echo activate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '    printf \'{"active":true}\'',
+  '    ;;',
+  '  *"instance quiet-mode:deactivate"*)',
+  '    echo deactivate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '    printf \'{"active":false}\'',
+  '    ;;',
   '  *)',
   '    echo "fake docker: unhandled command: $cmd" >&2',
   '    exit 1',
@@ -547,6 +564,120 @@ test("git_fetch_reset allows an explicit backward reset when payload.allowBackwa
   }
 });
 
+test("git_fetch_reset refuses a sideways reset to a commit that only exists on a different branch than the configured deploy branch", () => {
+  // DUR-229 / DUR-221 regression: the DUR-137 backward guard only compares
+  // target_commit against whatever is currently checked out, so a commit
+  // that lives on an unrelated branch (never an ancestor OR a descendant of
+  // the current HEAD) sails straight through it. This must be caught by an
+  // independent check against the *configured* deploy branch's remote tip.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-sideways-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+
+    // master diverges from custom right after A: master gets a commit of its
+    // own, custom independently advances with a different commit — neither
+    // is an ancestor of the other, simulating DUR-221's "custom has 244
+    // commits master doesn't, and vice versa" situation.
+    g(originDir, ["branch", "master"]);
+    g(originDir, ["checkout", "--quiet", "master"]);
+    writeFileSync(path.join(originDir, "f.txt"), "M");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "only on master"]);
+    const commitM = g(originDir, ["rev-parse", "HEAD"]);
+
+    g(originDir, ["checkout", "--quiet", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "C");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "only on custom"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+    const targetHeadBefore = g(targetDir, ["rev-parse", "HEAD"]);
+
+    // A deploy approval pinned to master's commit (DV_COMMIT), while this
+    // project's configured deploy branch (DV_REPO_REF) is "custom" — exactly
+    // the DUR-221 near-miss shape.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitM}" "" "" "" "custom"
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assert.equal(result.status, 3, `expected refusal exit code 3\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), commitM, "refusal path should still print the resolved (refused) commit, matching the DUR-137 refusal convention");
+
+    const targetHeadAfter = g(targetDir, ["rev-parse", "HEAD"]);
+    assert.equal(targetHeadAfter, targetHeadBefore, "target checkout must never be reset onto a commit from an unrelated branch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("git_fetch_reset still allows a pinned-commit deploy that is genuinely on the configured deploy branch", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-git-sideways-ok-test-"));
+  try {
+    const originDir = path.join(dir, "origin.git");
+    const targetDir = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (repoDir, args) => {
+      const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${repoDir}\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+
+    mkdirSync(originDir, { recursive: true });
+    g(originDir, ["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(originDir, "f.txt"), "A");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "A"]);
+    const commitA = g(originDir, ["rev-parse", "HEAD"]);
+
+    writeFileSync(path.join(originDir, "f.txt"), "B");
+    g(originDir, ["add", "f.txt"]);
+    g(originDir, ["commit", "--quiet", "-m", "B"]);
+
+    g(dir, ["clone", "--quiet", "-b", "custom", originDir, targetDir]);
+
+    // Pinned to A, an ancestor of custom's (now-advanced) tip B — a
+    // legitimate forward-pinned deploy that must not be caught by the new
+    // sideways guard just because it isn't equal to the branch tip.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset "${targetDir}" "${originDir}" "${commitA}" "" "1" "" "custom"
+    `;
+    const result = run("bash", ["-c", script], { env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "log") } });
+    assertSuccess(result, "git_fetch_reset for an on-branch pinned commit");
+    assert.equal(g(targetDir, ["rev-parse", "HEAD"]), commitA);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("process_approval posts a skip comment (not a false success) when the backward-deploy guard fires", () => {
   const scenario = makeScenario();
   try {
@@ -590,6 +721,55 @@ test("process_approval posts a skip comment (not a false success) when the backw
     assert.match(comments[0], /Deploy skipped/);
     assert.match(comments[0], /backward/);
     assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("process_approval posts a failure comment (not a false success) when the sideways-lineage guard fires", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    mkdirSync(path.join(targetPath, ".git"), { recursive: true });
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef", kind: "deploy" },
+    });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 3; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy failed/);
+    assert.match(comments[0], /not reachable from/);
+    assert.match(comments[0], /"custom"/);
+    assert.doesNotMatch(comments[0], /is live and healthy/, "a refused sideways deploy must never read like a successful one");
   } finally {
     scenario.cleanup();
   }
@@ -656,6 +836,92 @@ test("DUR-152: process_approval records outcome=carried with the resolved commit
     assert.equal(entry.commit, carriedCommit);
   } finally {
     scenario.cleanup();
+  }
+});
+
+// DUR-237: a plain successful deploy (not superseded/carried) previously only ever named its
+// commit in the free-text comment body -- deploy-completion-gate.ts's broader "did this commit
+// ship under ANY project deploy approval" check needs the structured field populated here too,
+// not only on the "carried" outcome.
+test("DUR-237: a successful deploy also records the deployed commit as a structured status-log field", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-success-commit-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+    // DUR-420: deploy-runner.sh logs `--short=12`, not git's 7-char default -- match it here so
+    // this asserts against what the script actually produces (see commitsMatch()'s matching
+    // 12-char minimum in deploy-completion-gate.ts for the full threat model this closes).
+    const expectedCommit = g(["rev-parse", "--short=12", "HEAD"]);
+
+    const project = {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    };
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and healthy/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entry = statusLines.find((e) => e.approvalId === "aid-1");
+    assert.ok(entry, "expected a status-log entry for aid-1");
+    assert.equal(
+      entry.commit,
+      expectedCommit,
+      "deploy-completion-gate.ts needs the structured commit field on a plain success too, not only 'carried' (DUR-237)",
+    );
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1002,6 +1268,433 @@ test("maybe_rollback is a no-op — no diagnostics captured, nothing printed —
     assertSuccess(result, "maybe_rollback");
     assert.equal(result.stdout.trim(), "", "no rollback configured means no diagnostics path to report");
     assert.ok(!existsSync(path.join(scenario.dir, "failure-logs")), "capture_failure_diagnostics must never run when DV_ROLLBACK isn't git_previous");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3905: deploy-runner must hold/skip a deploy whose GitHub CI is red or
+// still running, instead of shipping it and relying on health-check +
+// rollback to catch it afterward.
+
+function makeCiScenarioProject(scenario, targetPath) {
+  mkdirSync(path.join(targetPath, ".git"), { recursive: true });
+  const project = {
+    id: "proj-1",
+    deployPolicy: {
+      enabled: true,
+      workspaceId: "ws-1",
+      deployKind: "custom",
+      deployTargetPath: targetPath,
+      healthCheckUrl: "http://example.invalid/health",
+    },
+    workspaces: [{ id: "ws-1", repoUrl: "https://github.com/acme/widgets.git", repoRef: "custom" }],
+  };
+  scenario.writeJson("project-proj-1.json", project);
+  scenario.writeJson("approval-aid-1.json", {
+    id: "aid-1",
+    payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef", kind: "deploy" },
+  });
+}
+
+test("process_approval holds the deploy and never touches the checkout when GitHub CI is red", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    makeCiScenarioProject(scenario, targetPath);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      check_ci_status() { echo failure; }
+      git_fetch_reset() { echo "git_fetch_reset must not run when CI is red" >&2; exit 9; }
+      run_recipe() { echo "run_recipe must not run when CI is red" >&2; exit 9; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy held/);
+    assert.match(comments[0], /red/);
+    assert.match(scenario.readLog(), /holding — GitHub CI for deadbeef is failure/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("process_approval holds the deploy with a distinct comment when GitHub CI is still running", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    makeCiScenarioProject(scenario, targetPath);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      check_ci_status() { echo pending; }
+      git_fetch_reset() { echo "git_fetch_reset must not run while CI is pending" >&2; exit 9; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /Deploy held/);
+    assert.match(comments[0], /still running/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("process_approval still deploys when GitHub CI is unknown (no checks configured) — fail open, not fail closed", () => {
+  const scenario = makeScenario();
+  try {
+    const targetPath = path.join(scenario.dir, "target-repo");
+    makeCiScenarioProject(scenario, targetPath);
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      check_ci_status() { echo unknown; }
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and healthy/, "no CI configured must not itself block a deploy that would otherwise have gone through");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// check_ci_status() itself, against a real local HTTP server serving canned
+// GitHub API responses as static files (same reasoning as health_check's own
+// tests above for why this needs a real separate server process, not an
+// in-process Node listener: curl blocks this process's event loop).
+function writeGitHubFixture(webRoot, sha, { status, checkRuns }) {
+  const commitDir = path.join(webRoot, "repos", "acme", "widgets", "commits", sha);
+  mkdirSync(commitDir, { recursive: true });
+  writeFileSync(path.join(commitDir, "status"), JSON.stringify(status));
+  writeFileSync(path.join(commitDir, "check-runs"), JSON.stringify(checkRuns));
+}
+
+test("check_ci_status classifies GitHub's combined status + check-runs responses correctly", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ci-status-root-"));
+  writeGitHubFixture(webRoot, "success-sha", {
+    status: { total_count: 1, state: "success" },
+    checkRuns: { check_runs: [{ status: "completed", conclusion: "success" }] },
+  });
+  writeGitHubFixture(webRoot, "failure-sha", {
+    status: { total_count: 1, state: "failure" },
+    checkRuns: { check_runs: [] },
+  });
+  writeGitHubFixture(webRoot, "bad-check-run-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "completed", conclusion: "failure" }] },
+  });
+  writeGitHubFixture(webRoot, "pending-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "in_progress", conclusion: null }] },
+  });
+  writeGitHubFixture(webRoot, "unknown-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [] },
+  });
+
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  try {
+    const check = (sha) => {
+      const result = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\ncheck_ci_status "https://github.com/acme/widgets.git" "$1" ""`, "_", sha], {
+        env: {
+          ...process.env,
+          PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+          PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE: `http://127.0.0.1:${port}`,
+        },
+      });
+      assertSuccess(result, `check_ci_status ${sha}`);
+      return result.stdout.trim();
+    };
+
+    assert.equal(check("success-sha"), "success");
+    assert.equal(check("failure-sha"), "failure");
+    assert.equal(check("bad-check-run-sha"), "failure");
+    assert.equal(check("pending-sha"), "pending");
+    assert.equal(check("unknown-sha"), "unknown");
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
+test("github_owner_repo extracts owner/repo from both https and ssh GitHub remote URLs, and refuses non-GitHub hosts", () => {
+  const scenario = makeScenario();
+  const check = (url) => {
+    const result = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\ngithub_owner_repo "$1"`, "_", url]);
+    assertSuccess(result, `github_owner_repo ${url}`);
+    return result.stdout.trim();
+  };
+  try {
+    assert.equal(check("https://github.com/acme/widgets.git"), "acme/widgets");
+    assert.equal(check("https://github.com/acme/widgets"), "acme/widgets");
+    assert.equal(check("git@github.com:acme/widgets.git"), "acme/widgets");
+    assert.equal(check("https://gitlab.example.com/acme/widgets.git"), "", "must never guess a token audience for a non-github.com host");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-259: deploy-runner.sh must proactively drain in-flight heartbeat runs
+// (via the DUR-224 Quiet Mode mechanism) before a compose_recreate/
+// compose_build_swap recipe recreates the shared docker-server-1 container —
+// not just rely on shutdown()'s own in-process drain (DUR-257) once the
+// recreate has already started. These tests exercise process_approval()
+// directly (git_fetch_reset/run_recipe/health_check stubbed, same pattern as
+// the DUR-237 test above) against the fake docker's quiet-mode:* handlers.
+function setUpComposeRecreateScenario(scenario, { deployKind = "compose_recreate" } = {}) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-quiet-mode-test-"));
+  const targetPath = path.join(dir, "target");
+  mkdirSync(targetPath, { recursive: true });
+  spawnSync("git", ["init", "--quiet", "-b", "custom"], { cwd: targetPath });
+
+  const project = {
+    id: "proj-1",
+    deployPolicy: {
+      enabled: true,
+      workspaceId: "ws-1",
+      deployKind,
+      deployTargetPath: targetPath,
+      healthCheckUrl: "http://example.invalid/health",
+    },
+    workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+  };
+  scenario.writeJson("project-proj-1.json", project);
+  scenario.writeJson("approval-aid-1.json", {
+    id: "aid-1",
+    payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+  });
+  return { dir, targetPath };
+}
+
+function quietModeCallsLog(scenario) {
+  const file = path.join(scenario.dir, "quiet-mode-calls.log");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean);
+}
+
+test("DUR-259: a compose_recreate deploy activates quiet mode, drains immediately when nothing's in flight, then deactivates", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /is live and healthy/);
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"], "the runner activated quiet mode itself, so it must also be the one to deactivate it again");
+    assert.match(scenario.readLog(), /activated quiet mode instance-wide before recreating/);
+    assert.match(scenario.readLog(), /drain complete after 0s/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-259: quiet mode already active (external maintenance window) is left active — the runner never activates or deactivates it", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: true, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.deepEqual(quietModeCallsLog(scenario), [], "quiet mode was already active — the runner must not call activate or deactivate itself");
+    assert.match(scenario.readLog(), /quiet mode was already active \(external maintenance window\)/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-259: a drain that never reaches zero times out and still proceeds with the recreate, restoring quiet mode after", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    // Always reports 3 runs still in flight — the drain can never complete.
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 3 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS: "1",
+        PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS: "1",
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "a drain timeout must not block the deploy from resolving to a definite outcome");
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"], "even on a timeout, ownership means the runner must still restore quiet mode afterward");
+    assert.match(scenario.readLog(), /drain timed out after 1s with 3 heartbeat run\(s\) still in flight — proceeding with the recreate anyway/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-259: a custom deployKind never touches the quiet-mode drain at all", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario, { deployKind: "custom" }));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 3 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.deepEqual(quietModeCallsLog(scenario), [], "an operator-authored custom command isn't known to touch the shared container, so it must not pay for a drain wait");
+    assert.doesNotMatch(scenario.readLog(), /quiet mode/, "no quiet-mode drain logging at all for a custom deployKind");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-259 follow-up (see GH Actions run 33967261346's dead-silent
+// deploy-runner.log): before this fix, `cli_json approval list ... ||
+// continue` and the JSON-parse failure branch inside its python selector
+// were both completely silent -- a main() poll cycle that hit either one
+// would look, from deploy-runner.log, IDENTICAL to "nothing to do this
+// cycle", even though process_approval (and everything downstream of it,
+// including the whole DUR-259 drain) was never even reached. That blind
+// spot is what made the recreate-acceptance CI failure impossible to
+// diagnose from its own log dump. These two tests lock in that a JSON
+// parse failure at either site is now loud, not silent.
+test("main() logs a diagnostic (not silence) when the approval list for a company fails to parse as JSON", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    // Not valid JSON -- simulates stray stdout noise ahead of (or instead
+    // of) the CLI's --json payload, e.g. a tool warning on stdout.
+    writeFileSync(path.join(scenario.dir, "approval_list.json"), "not json at all");
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main");
+    assert.match(
+      scenario.readLog(),
+      /approval list for company co-1 did not parse as JSON -- skipping this company this poll cycle/,
+      "a parse failure must be logged, not silently treated as an empty/no-op approval list",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("main() logs a diagnostic (not silence) when the company list itself fails to parse as JSON", () => {
+  const scenario = makeScenario();
+  try {
+    writeFileSync(path.join(scenario.dir, "company_list.json"), "not json at all");
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main");
+    assert.match(
+      scenario.readLog(),
+      /company list did not parse as JSON -- aborting this poll cycle/,
+      "a parse failure must be logged, not silently treated as zero companies",
+    );
   } finally {
     scenario.cleanup();
   }

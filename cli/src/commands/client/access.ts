@@ -268,6 +268,13 @@ export function registerAccessCommands(program: Command): void {
   addJsonPatch(instance, "settings:general:update", "Update general instance settings", "/api/instance/settings/general");
   addSimpleGet(instance, "settings:experimental", "Get experimental instance settings", "/api/instance/settings/experimental");
   addJsonPatch(instance, "settings:experimental:update", "Update experimental instance settings", "/api/instance/settings/experimental");
+  // DUR-259: CLI wrapper for the DUR-224 Quiet Mode mechanism (previously
+  // API-only), so scripts like deploy-runner.sh can freeze new agent wakes
+  // instance-wide — without touching runs already in flight — before a
+  // container recreate, then restore prior heartbeat flags afterward.
+  addSimpleGet(instance, "quiet-mode:status", "Get instance-wide quiet mode status (includes activeRunCount)", "/api/instance/settings/quiet-mode");
+  addSimplePost(instance, "quiet-mode:activate", "Activate quiet mode instance-wide (freezes new agent wakes, does not touch in-flight runs)", "/api/instance/settings/quiet-mode/activate");
+  addSimplePost(instance, "quiet-mode:deactivate", "Deactivate quiet mode instance-wide (restores each agent's prior heartbeat flags)", "/api/instance/settings/quiet-mode/deactivate");
   addCommonClientOptions(
     instance
       .command("database-backup")
@@ -276,6 +283,27 @@ export function registerAccessCommands(program: Command): void {
         try {
           const ctx = resolveCommandContext(opts);
           printOutput(await ctx.api.post("/api/instance/database-backups", {}), { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+  // DUR-296: called by deploy-runner.sh once its proactive drain wait
+  // (DUR-259) times out with heartbeat runs still in flight, right before a
+  // compose_recreate/compose_build_swap recipe recreates the shared
+  // container out from under them.
+  addCommonClientOptions(
+    instance
+      .command("heartbeat-runs:pause-for-restart")
+      .description("Transactionally mark every in-flight heartbeat run paused_for_restart ahead of a planned restart")
+      .option("--reason <text>", "Optional note recorded on each paused run")
+      .action(async (opts: BaseClientOptions & { reason?: string }) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          printOutput(
+            await ctx.api.post("/api/instance/heartbeat-runs/pause-for-restart", { reason: opts.reason }),
+            { json: ctx.json },
+          );
         } catch (err) {
           handleCommandError(err);
         }
@@ -390,6 +418,17 @@ function addSimpleGet(parent: Command, name: string, description: string, path: 
     try {
       const ctx = resolveCommandContext(opts);
       printOutput(await ctx.api.get(path), { json: ctx.json });
+    } catch (err) {
+      handleCommandError(err);
+    }
+  }));
+}
+
+function addSimplePost(parent: Command, name: string, description: string, path: string): void {
+  addCommonClientOptions(parent.command(name).description(description).action(async (opts: BaseClientOptions) => {
+    try {
+      const ctx = resolveCommandContext(opts);
+      printOutput(await ctx.api.post(path, {}), { json: ctx.json });
     } catch (err) {
       handleCommandError(err);
     }

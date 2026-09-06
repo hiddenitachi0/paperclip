@@ -42,7 +42,7 @@ async function main() {
     throw new Error(`Could not resolve database connection from ${configPath}`);
   }
 
-  const db = createDb(dbUrl);
+  const db = createDb(dbUrl, "paperclip-script-create-auth-bootstrap-invite");
   const closableDb = db as typeof db & {
     $client?: {
       end?: (options?: { timeout?: number }) => Promise<void>;

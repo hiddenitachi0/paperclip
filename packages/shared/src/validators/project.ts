@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { PROJECT_STATUSES, PROJECT_ICON_NAMES } from "../constants.js";
+import { EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE, hasEmbeddedGitCredential } from "../git-remote-url.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema } from "./trust-policy.js";
+
+const gitRemoteUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => !hasEmbeddedGitCredential(value), { message: EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE });
 
 const executionWorkspaceStrategySchema = z
   .object({
@@ -73,7 +79,7 @@ const projectWorkspaceFields = {
   name: z.string().min(1).optional(),
   sourceType: projectWorkspaceSourceTypeSchema.optional(),
   cwd: z.string().min(1).optional().nullable(),
-  repoUrl: z.string().url().optional().nullable(),
+  repoUrl: gitRemoteUrlSchema.optional().nullable(),
   repoRef: z.string().optional().nullable(),
   defaultRef: z.string().optional().nullable(),
   visibility: projectWorkspaceVisibilitySchema.optional(),

@@ -28,7 +28,16 @@ const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
 const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
-const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
+// DUR-296: "paused_for_restart" is terminal but never a failure -- a
+// watchdog run interrupted by a planned restart isn't a stuck/needs-review
+// outcome.
+const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+] as const;
 // Grace window after an issue is created/assigned during which its first
 // assignment run/wake may have been enqueued but is not yet visible to a
 // watchdog evaluation (the eval can race the issue's own assignment run).
@@ -110,7 +119,6 @@ export type TaskWatchdogStoppedLeaf = {
   blockerIssueIds: string[];
   pendingInteractionIds: string[];
   pendingApprovalIds: string[];
-  updatedAt: string;
   latestCommentAt: string | null;
   latestDocumentAt: string | null;
   latestWorkProductAt: string | null;
@@ -188,6 +196,12 @@ type TaskWatchdogWakeup = (
 
 export type TaskWatchdogServiceDeps = {
   enqueueWakeup?: TaskWatchdogWakeup;
+  // DUR-414: mirrors IssueServiceOptions.rawDb -- callers on the request
+  // path (routes/issues.ts) pass the scoped proxy as `db` and must supply
+  // the raw pooled instance here so issueService's withCompanyScope() calls
+  // (e.g. ensureReusableWatchdogIssue's issuesSvc.create()) don't try to
+  // open a transaction through the request-scoped proxy, which throws.
+  rawDb?: Db;
 };
 
 function normalizeInstructions(value: string | null | undefined): string | null {
@@ -225,12 +239,6 @@ function toIssueWatchdog(row: IssueWatchdogRow): IssueWatchdog {
     updatedByUserId: row.updatedByUserId,
     updatedByRunId: row.updatedByRunId,
   };
-}
-
-function issueUpdatedAtIso(issue: Pick<TaskWatchdogClassifierIssue, "updatedAt">) {
-  return issue.updatedAt instanceof Date
-    ? issue.updatedAt.toISOString()
-    : new Date(String(issue.updatedAt)).toISOString();
 }
 
 function optionalIso(value: Date | string | null | undefined): string | null {
@@ -392,7 +400,6 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
       blockerIssueIds: [...new Set(blockersByIssueId.get(issue.id) ?? [])].sort(),
       pendingInteractionIds: waitingPathIds(input.pendingInteractions, input.watchdog.companyId, issue.id),
       pendingApprovalIds: waitingPathIds(input.pendingApprovals, input.watchdog.companyId, issue.id),
-      updatedAt: issueUpdatedAtIso(issue),
       latestCommentAt: optionalIso(issue.latestCommentAt),
       latestDocumentAt: optionalIso(issue.latestDocumentAt),
       latestWorkProductAt: optionalIso(issue.latestWorkProductAt),
@@ -503,7 +510,7 @@ function buildStoppedFingerprintComment(input: {
   resumed: boolean;
 }) {
   const leafLines = input.stoppedLeaves.slice(0, 12).map((leaf) =>
-    `- ${leaf.identifier ?? leaf.issueId}: ${leaf.status} (updated ${leaf.updatedAt})`
+    `- ${leaf.identifier ?? leaf.issueId}: ${leaf.status}`
   );
   const more = input.stoppedLeaves.length > leafLines.length
     ? `\n- ...and ${input.stoppedLeaves.length - leafLines.length} more stopped leaves`
@@ -718,7 +725,7 @@ export async function upsertIssueWatchdogForIssue(
 }
 
 export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) {
-  const issuesSvc = issueService(db);
+  const issuesSvc = issueService(db, { rawDb: deps.rawDb });
 
   async function loadWatchdogSubtreeIssues(companyId: string, watchedIssueId: string) {
     const rows = await db.execute(sql`

@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -44,7 +45,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", teamsCatalogRoutes({} as any));
+  app.use("/api", teamsCatalogRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }

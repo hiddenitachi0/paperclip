@@ -398,7 +398,7 @@ describeEmbeddedPostgres("externalObjectService", () => {
     const { companyId, issueId } = await createIssue();
     const svc = externalObjectService(db);
 
-    await svc.syncIssue(issueId);
+    await svc.syncIssue(issueId, companyId);
 
     const [objectRows, mentionRows] = await Promise.all([
       db.select().from(externalObjects),
@@ -426,10 +426,10 @@ describeEmbeddedPostgres("externalObjectService", () => {
   });
 
   it("no-ops detection and summaries when external objects are disabled", async () => {
-    const { issueId } = await createIssue();
+    const { companyId, issueId } = await createIssue();
     const svc = externalObjectService(db, { enabled: false });
 
-    await svc.syncIssue(issueId);
+    await svc.syncIssue(issueId, companyId);
 
     const [objectRows, mentionRows, summary] = await Promise.all([
       db.select().from(externalObjects),
@@ -480,7 +480,7 @@ describeEmbeddedPostgres("externalObjectService", () => {
         }),
     };
     const svc = externalObjectService(db, { resolvers: [resolver], github: false });
-    await svc.syncIssue(issueId);
+    await svc.syncIssue(issueId, companyId);
     const object = await db.select().from(externalObjects).then((rows) => rows[0]!);
 
     await svc.refreshObject(object.id, { companyId, force: true });
@@ -518,7 +518,7 @@ describeEmbeddedPostgres("externalObjectService", () => {
       resolve,
     };
     const svc = externalObjectService(db, { resolvers: [resolver], github: false });
-    await svc.syncIssue(issueId);
+    await svc.syncIssue(issueId, companyId);
     const object = await db.select().from(externalObjects).then((rows) => rows[0]!);
 
     expect(object.nextRefreshAt).toBeInstanceOf(Date);
@@ -542,11 +542,11 @@ describeEmbeddedPostgres("externalObjectService", () => {
     });
     const svc = externalObjectService(db, { github: false });
 
-    await svc.syncComment(commentId);
+    await svc.syncComment(commentId, companyId);
     expect(await db.select().from(externalObjectMentions)).toHaveLength(1);
 
     await db.delete(issueComments).where(eq(issueComments.id, commentId));
-    await svc.syncComment(commentId);
+    await svc.syncComment(commentId, companyId);
 
     expect(await db.select().from(externalObjectMentions)).toHaveLength(0);
   });
@@ -570,7 +570,7 @@ describeEmbeddedPostgres("externalObjectService", () => {
       resolve,
     };
     const svc = externalObjectService(db, { resolvers: [resolver], github: false });
-    await svc.syncIssue(issueId);
+    await svc.syncIssue(issueId, companyId);
     const object = await db.select().from(externalObjects).then((rows) => rows[0]!);
 
     await svc.refreshObject(object.id, { companyId, force: true });
@@ -590,8 +590,8 @@ describeEmbeddedPostgres("externalObjectService", () => {
     const second = await createIssue();
     const svc = externalObjectService(db);
 
-    await svc.syncIssue(first.issueId);
-    await svc.syncIssue(second.issueId);
+    await svc.syncIssue(first.issueId, first.companyId);
+    await svc.syncIssue(second.issueId, second.companyId);
 
     const objectRows = await db.select().from(externalObjects);
     expect(objectRows).toHaveLength(2);
@@ -676,7 +676,7 @@ describeEmbeddedPostgres("externalObjectService", () => {
     } as unknown as PluginWorkerManager;
 
     const svc = externalObjectService(db, { pluginWorkerManager: workerManager });
-    await svc.syncIssue(issueId);
+    await svc.syncIssue(issueId, companyId);
 
     const object = await db.select().from(externalObjects).then((rows) => rows[0]!);
     expect(object).toMatchObject({

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   toolGrantRequestPayloadSchema,
@@ -81,5 +82,25 @@ describe("approval validators", () => {
         server: { name: "search", command: "echo", url: "https://x" },
       }),
     ).toThrow();
+  });
+
+  it("validates the feature-launch request approval payload convention (DUR-313)", () => {
+    const payload = {
+      kind: "feature_launch" as const,
+      issueId: "11111111-1111-4111-8111-111111111111",
+      whatIsNew: "Operators can now filter the changelog by company.",
+      whereToFindIt: "Changelog page, top-right company dropdown.",
+      whatToTest: "Pick a company and confirm only its entries show.",
+      whatIfItFails: "Filter silently shows all companies -- tell the team, filter is non-blocking.",
+      title: "Changelog company filter is ready to go live",
+    };
+    expect(featureLaunchRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(() => featureLaunchRequestPayloadSchema.parse({ ...payload, kind: "other" })).toThrow();
+    expect(() => featureLaunchRequestPayloadSchema.parse({ ...payload, extra: "nope" })).toThrow();
+    for (const field of ["whatIsNew", "whereToFindIt", "whatToTest", "whatIfItFails"] as const) {
+      const { [field]: _omitted, ...missing } = payload;
+      expect(() => featureLaunchRequestPayloadSchema.parse(missing)).toThrow();
+      expect(() => featureLaunchRequestPayloadSchema.parse({ ...payload, [field]: "  " })).toThrow();
+    }
   });
 });

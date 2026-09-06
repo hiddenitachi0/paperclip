@@ -59,6 +59,10 @@ const mockProjectsApi = vi.hoisted(() => ({
   list: vi.fn(),
 }));
 
+const mockGoalsApi = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
 const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(),
   adapterModels: vi.fn(),
@@ -98,6 +102,10 @@ vi.mock("../api/execution-workspaces", () => ({
 
 vi.mock("../api/projects", () => ({
   projectsApi: mockProjectsApi,
+}));
+
+vi.mock("../api/goals", () => ({
+  goalsApi: mockGoalsApi,
 }));
 
 vi.mock("../api/agents", () => ({
@@ -332,6 +340,9 @@ describe("NewIssueDialog", () => {
         color: "#445566",
       },
     ]);
+    mockGoalsApi.list.mockResolvedValue([
+      { id: "goal-1", companyId: "company-1", title: "Increase adoption", description: null },
+    ]);
     mockAgentsApi.list.mockResolvedValue([]);
     mockAgentsApi.adapterModels.mockResolvedValue([]);
     mockAuthApi.getSession.mockResolvedValue({ user: { id: "user-1" } });
@@ -452,6 +463,70 @@ describe("NewIssueDialog", () => {
         executionWorkspaceId: "workspace-1",
         workMode: "standard",
       }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("shows a Goal selector and omits goalId from the create payload when none is selected", async () => {
+    const { root } = renderDialog(container);
+    await flush();
+
+    await waitForAssertion(() => {
+      expect(mockGoalsApi.list).toHaveBeenCalledWith("company-1");
+    });
+
+    const titleTextarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Title"]')
+      ?? container.querySelector<HTMLTextAreaElement>("textarea");
+    expect(titleTextarea).not.toBeUndefined();
+    await typeTextareaValue(titleTextarea!, "New task");
+
+    const goalTrigger = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Goal"),
+    );
+    expect(goalTrigger).not.toBeUndefined();
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Task"));
+    await waitForAssertion(() => {
+      expect(submitButton?.hasAttribute("disabled")).toBe(false);
+    });
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalled();
+    const payload = mockIssuesApi.create.mock.calls[0]?.[1];
+    expect(payload).not.toHaveProperty("goalId");
+
+    act(() => root.unmount());
+  });
+
+  it("includes goalId in the create payload when a goal default is seeded", async () => {
+    dialogState.newIssueDefaults = {
+      title: "Goal-linked task",
+      goalId: "goal-1",
+    };
+
+    const { root } = renderDialog(container);
+    await flush();
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Task"));
+    await waitForAssertion(() => {
+      expect(submitButton?.hasAttribute("disabled")).toBe(false);
+    });
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ title: "Goal-linked task", goalId: "goal-1" }),
     );
 
     act(() => root.unmount());

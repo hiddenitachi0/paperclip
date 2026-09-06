@@ -7,6 +7,7 @@ import {
   issueDocuments,
   issueReferenceMentions,
   issues,
+  withCompanyScope,
 } from "@paperclipai/db";
 import type {
   IssueReferenceSource,
@@ -113,7 +114,11 @@ function diffIssueSummaries(
   };
 }
 
-export function issueReferenceService(db: Db) {
+export function issueReferenceService(db: Db, options: { rawDb?: Db } = {}) {
+  // DUR-379 (DUR-277 Wave 5b): see the matching comment in
+  // services/issues.ts -- rawDb defaults to db for every unmigrated caller,
+  // a no-op there.
+  const rawDb = options.rawDb ?? db;
   async function replaceSourceMentions(
     input: {
       companyId: string;
@@ -211,7 +216,10 @@ export function issueReferenceService(db: Db) {
       }, tx);
     };
 
-    return dbOrTx === db ? db.transaction(runSync) : runSync(dbOrTx);
+    if (dbOrTx !== db) return runSync(dbOrTx);
+    const issue = await issueById(issueId, rawDb);
+    if (!issue) throw notFound("Issue not found");
+    return withCompanyScope(rawDb, issue.companyId, runSync);
   }
 
   async function syncComment(commentId: string, dbOrTx: any = db) {

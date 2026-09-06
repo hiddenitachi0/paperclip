@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
   ExecutionWorkspace,
+  Goal,
   IssueExecutionPolicy,
   IssueExecutionState,
   IssueLabel,
@@ -24,6 +25,10 @@ const mockAgentsApi = vi.hoisted(() => ({
 }));
 
 const mockProjectsApi = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
+const mockGoalsApi = vi.hoisted(() => ({
   list: vi.fn(),
 }));
 
@@ -59,6 +64,10 @@ vi.mock("../api/agents", () => ({
 
 vi.mock("../api/projects", () => ({
   projectsApi: mockProjectsApi,
+}));
+
+vi.mock("../api/goals", () => ({
+  goalsApi: mockGoalsApi,
 }));
 
 vi.mock("../api/execution-workspaces", () => ({
@@ -358,6 +367,22 @@ function createProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
+function createGoal(overrides: Partial<Goal> = {}): Goal {
+  return {
+    id: "goal-1",
+    companyId: "company-1",
+    title: "Increase adoption",
+    description: null,
+    level: "company",
+    status: "active",
+    parentId: null,
+    ownerAgentId: null,
+    createdAt: new Date("2026-04-06T12:00:00.000Z"),
+    updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+    ...overrides,
+  };
+}
+
 function createExecutionPolicy(overrides: Partial<IssueExecutionPolicy> = {}): IssueExecutionPolicy {
   return {
     mode: "normal",
@@ -415,6 +440,7 @@ describe("IssueProperties", () => {
     mockAgentsApi.adapterModels.mockResolvedValue([]);
     mockAgentsApi.adapterModelProfiles.mockResolvedValue([]);
     mockProjectsApi.list.mockResolvedValue([]);
+    mockGoalsApi.list.mockResolvedValue([]);
     mockExecutionWorkspacesApi.controlRuntimeCommands.mockReset();
     mockIssuesApi.list.mockResolvedValue([]);
     mockIssuesApi.listLabels.mockResolvedValue([]);
@@ -1176,6 +1202,67 @@ describe("IssueProperties", () => {
     expect(container.textContent).not.toContain("View workspace tasks");
     expect(workspaceLink).not.toBeUndefined();
     expect(workspaceLink?.getAttribute("href")).toBe("/execution-workspaces/workspace-1");
+
+    act(() => root.unmount());
+  });
+
+  it("sets the goal via the Goal picker and clears it via the None option", async () => {
+    mockGoalsApi.list.mockResolvedValue([createGoal(), createGoal({ id: "goal-2", title: "Reduce churn" })]);
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({ goalId: null }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    let trigger: HTMLButtonElement | undefined;
+    await waitForAssertion(() => {
+      trigger = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("No goal"),
+      );
+      expect(trigger).toBeTruthy();
+    });
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    let option: HTMLButtonElement | undefined;
+    await waitForAssertion(() => {
+      option = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.trim() === "Reduce churn",
+      );
+      expect(option).toBeTruthy();
+    });
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(onUpdate).toHaveBeenCalledWith({ goalId: "goal-2" });
+
+    act(() => root.unmount());
+  });
+
+  it("falls back to No goal when the linked goal is missing or deleted", async () => {
+    mockGoalsApi.list.mockResolvedValue([createGoal()]);
+    const root = renderProperties(container, {
+      issue: createIssue({ goalId: "deleted-goal" }),
+      childIssues: [],
+      onUpdate: vi.fn(),
+      inline: true,
+    });
+    await flush();
+
+    await waitForAssertion(() => {
+      const trigger = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("No goal"),
+      );
+      expect(trigger).toBeTruthy();
+    });
+    expect(container.textContent).not.toContain("deleted-goal");
 
     act(() => root.unmount());
   });

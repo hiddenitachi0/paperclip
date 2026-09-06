@@ -5,6 +5,7 @@ import type { WorkspaceOperation, WorkspaceOperationPhase, WorkspaceOperationSta
 import { asc, desc, eq, inArray, isNull, or, and } from "drizzle-orm";
 import { notFound } from "../errors.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { redactKnownLeakedSecretPatterns, redactKnownLeakedSecretPatternsDeep } from "../redaction.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getWorkspaceOperationLogStore } from "./workspace-operation-log-store.js";
 
@@ -50,6 +51,17 @@ function combineMetadata(
     ...(base ?? {}),
     ...(patch ?? {}),
   };
+}
+
+function sanitizeMetadata(
+  metadata: Record<string, unknown> | null,
+  currentUserRedactionOptions: Parameters<typeof redactCurrentUserValue>[1],
+): Record<string, unknown> | null {
+  const currentUserRedacted = redactCurrentUserValue(metadata, currentUserRedactionOptions);
+  // DUR-372: metadata is caller-supplied and can carry process output (e.g.
+  // a resolved command's env or exit context) that the same known-leaked-
+  // secret-pattern gate applied to stdout/stderr above must also cover.
+  return redactKnownLeakedSecretPatternsDeep(currentUserRedacted) as Record<string, unknown> | null;
 }
 
 export interface WorkspaceOperationRecorder {
@@ -123,7 +135,12 @@ export function workspaceOperationService(db: Db) {
           let stderrExcerpt = "";
           const append = async (stream: "stdout" | "stderr" | "system", chunk: string | null | undefined) => {
             if (!chunk) return;
-            const sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
+            // DUR-372: same write-time gate DUR-317 added for heartbeat_runs --
+            // a failing command (e.g. `git clone https://x-access-token:<PAT>@...`)
+            // must not persist a raw credential into workspace_operations either.
+            const sanitizedChunk = redactKnownLeakedSecretPatterns(
+              redactCurrentUserText(chunk, currentUserRedactionOptions),
+            );
             if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
             if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
             await logStore.append(handle, {
@@ -145,10 +162,7 @@ export function workspaceOperationService(db: Db) {
             status: "running",
             logStore: handle.store,
             logRef: handle.logRef,
-            metadata: redactCurrentUserValue(
-              recordInput.metadata ?? null,
-              currentUserRedactionOptions,
-            ) as Record<string, unknown> | null,
+            metadata: sanitizeMetadata(recordInput.metadata ?? null, currentUserRedactionOptions),
             startedAt,
           });
           createdIds.push(id);
@@ -171,10 +185,10 @@ export function workspaceOperationService(db: Db) {
                 logBytes: finalized.bytes,
                 logSha256: finalized.sha256,
                 logCompressed: finalized.compressed,
-                metadata: redactCurrentUserValue(
+                metadata: sanitizeMetadata(
                   combineMetadata(recordInput.metadata, result.metadata),
                   currentUserRedactionOptions,
-                ) as Record<string, unknown> | null,
+                ),
                 finishedAt,
                 updatedAt: finishedAt,
               })

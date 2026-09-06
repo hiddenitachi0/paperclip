@@ -1,6 +1,23 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// DUR-379: GET /invites/:token/test-resolution now runs through the
+// company-scope middleware (scopeFromInviteToken), which reserves a real
+// connection via runInCompanyScope -- this test's hand-rolled db stub isn't
+// a real Db, so it can't back that reservation. Bypass the reservation
+// machinery in tests, running the callback with the test's own db as the
+// "scoped" db directly, no real connection involved.
+vi.mock("@paperclipai/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/db")>();
+  return {
+    ...actual,
+    createRequestScopedDb: (rawDb: unknown) => rawDb,
+    runInCompanyScope: async (_rawDb: unknown, _companyId: string, fn: () => unknown) => fn(),
+    withCompanyScope: async (rawDb: any, _companyId: string, fn: (tx: unknown) => unknown) => rawDb.transaction(fn),
+  };
+});
 
 function createSelectChain(rows: unknown[]) {
   const query = {
@@ -29,7 +46,7 @@ function createDbStub(inviteRows: unknown[]) {
 function createInvite(overrides: Record<string, unknown> = {}) {
   return {
     id: "invite-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     inviteType: "company_join",
     allowedJoinTypes: "agent",
     tokenHash: "hash",
@@ -44,8 +61,30 @@ function createInvite(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// DUR-381: matches the `invites` table's schema-definition column order
+// (packages/db/src/schema/invites.ts) -- drizzle's postgres-js driver maps
+// a no-explicit-fields `db.select()` by tuple position, not by object key.
+const INVITE_COLUMN_ORDER = [
+  "id",
+  "companyId",
+  "inviteType",
+  "tokenHash",
+  "allowedJoinTypes",
+  "defaultsPayload",
+  "expiresAt",
+  "invitedByUserId",
+  "revokedAt",
+  "acceptedAt",
+  "createdAt",
+  "updatedAt",
+] as const;
+
+function toInviteTuple(invite: Record<string, unknown>): unknown[] {
+  return INVITE_COLUMN_ORDER.map((key) => invite[key] ?? null);
+}
+
 async function createApp(
-  db: Record<string, unknown>,
+  inviteRows: Record<string, unknown>[],
   network: {
     lookup: ReturnType<typeof vi.fn>;
     requestHead: ReturnType<typeof vi.fn>;
@@ -60,6 +99,14 @@ async function createApp(
     (req as any).actor = { type: "anon" };
     next();
   });
+  // DUR-381: scopeFromInviteToken() resolves scope from a rawDb lookup
+  // (served by createDbStub's mocked select chain below), then the route
+  // handler re-queries the invite through the *scoped* db proxy -- a real
+  // drizzle instance over this fake reserved connection -- so both need to
+  // agree on the same invite row.
+  const db = withFakeCompanyScopeReserve(createDbStub(inviteRows), {
+    unsafeRows: inviteRows.map(toInviteTuple),
+  });
   app.use(
     "/api",
     access.accessRoutes(db as any, {
@@ -73,6 +120,12 @@ async function createApp(
   app.use(middleware.errorHandler);
   return app;
 }
+
+// DUR-381: every request through this route now does a real reserve/set-claim/
+// release round trip (see scopeFromInviteToken() in routes/access.ts) -- real
+// latency the default 5s test timeout doesn't leave much room for, especially
+// for the 12-case loop below.
+vi.setConfig({ testTimeout: 15_000 });
 
 describe.sequential("GET /invites/:token/test-resolution", () => {
   beforeEach(() => {
@@ -98,7 +151,7 @@ describe.sequential("GET /invites/:token/test-resolution", () => {
     for (const [label, url, address] of cases) {
       const lookup = vi.fn().mockResolvedValue([{ address, family: address.includes(":") ? 6 : 4 }]);
       const requestHead = vi.fn();
-      const app = await createApp(createDbStub([createInvite()]), { lookup, requestHead });
+      const app = await createApp([createInvite()], { lookup, requestHead });
 
       const res = await request(app)
         .get("/api/invites/pcp_invite_test/test-resolution")
@@ -110,12 +163,12 @@ describe.sequential("GET /invites/:token/test-resolution", () => {
       );
       expect(requestHead).not.toHaveBeenCalled();
     }
-  }, 20_000);
+  }, 40_000);
 
   it.sequential("rejects hostnames that resolve to private addresses", async () => {
     const lookup = vi.fn().mockResolvedValue([{ address: "10.1.2.3", family: 4 }]);
     const requestHead = vi.fn();
-    const app = await createApp(createDbStub([createInvite()]), { lookup, requestHead });
+    const app = await createApp([createInvite()], { lookup, requestHead });
 
     const res = await request(app)
       .get("/api/invites/pcp_invite_test/test-resolution")
@@ -135,7 +188,7 @@ describe.sequential("GET /invites/:token/test-resolution", () => {
       { address: "93.184.216.34", family: 4 },
     ]);
     const requestHead = vi.fn();
-    const app = await createApp(createDbStub([createInvite()]), { lookup, requestHead });
+    const app = await createApp([createInvite()], { lookup, requestHead });
 
     const res = await request(app)
       .get("/api/invites/pcp_invite_test/test-resolution")
@@ -148,7 +201,7 @@ describe.sequential("GET /invites/:token/test-resolution", () => {
   it.sequential("allows public HTTPS targets through the resolved and pinned probe path", async () => {
     const lookup = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
     const requestHead = vi.fn().mockResolvedValue({ httpStatus: 204 });
-    const app = await createApp(createDbStub([createInvite()]), { lookup, requestHead });
+    const app = await createApp([createInvite()], { lookup, requestHead });
 
     const res = await request(app)
       .get("/api/invites/pcp_invite_test/test-resolution")
@@ -181,7 +234,7 @@ describe.sequential("GET /invites/:token/test-resolution", () => {
   ])("returns not found for %s tokens before DNS lookup", async (_label, inviteRows) => {
     const lookup = vi.fn();
     const requestHead = vi.fn();
-    const app = await createApp(createDbStub(inviteRows), { lookup, requestHead });
+    const app = await createApp(inviteRows, { lookup, requestHead });
 
     const res = await request(app)
       .get("/api/invites/pcp_invite_test/test-resolution")

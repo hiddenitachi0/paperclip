@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Agent } from "@paperclipai/shared";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, ClipboardCheck, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import {
@@ -202,6 +202,145 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
         badge: "border-violet-500/60 bg-violet-500/10 text-violet-900 dark:bg-violet-500/15 dark:text-violet-100",
         label: "In review",
         Icon: FileText,
+      };
+  }
+}
+
+// DUR-337: `payload.factCheck` alone is a self-declared boolean with no
+// server-side consumer (DUR-340 confirmed it's backend-inert) — an agent
+// could set it on a genuine decision-ask ("should I drop orders_2024?") and
+// get the reassuring "this isn't a decision" card for free. The flag is
+// still required (it's what DUR-339 added the field for), but it's no longer
+// sufficient on its own: `detailsMarkdown` must also contain the NOR-307-
+// shaped numbered claims a fact check actually is, and neither field may
+// read like a decision/action request (the DUR-320/DUR-323 checks). The flag
+// narrows false negatives; the content-shape floor stops it from laundering
+// an unrelated decision-ask into the low-stakes styling.
+//
+// DUR-341: the original list only covered explicit permission-asking verbs
+// and destructive/infra actions. It missed money-movement (wire, transfer,
+// refund, reimburse, pay out) and outbound-communication (send, email,
+// notify, share, post, publish, message) verbs, so a numbered-claims block
+// that actually instructs a wire transfer + external notification still
+// slipped through as a "fact check". Past-tense/inflected forms (sent,
+// notified, posted, emailed, wired, transferred, ...) are covered too —
+// a spoof only needs to phrase the instruction as already-done to dodge a
+// present-tense-only match. Deliberately does NOT include bare nouns like
+// "invoice" or "payment" that show up constantly in legitimate fact-check
+// content (e.g. "confirm invoice #1042 totals $18,400") — only verb forms
+// that read as an instruction to move money or contact someone.
+// DUR-341 follow-up review: also missed debit/withdraw/charge/route
+// funds/disburse/deposit/remit/forward — added below for the same reason.
+// This is a denylist and will always be a step behind a determined spoof —
+// see the issue for the allowlist alternative — but closing the reported
+// verb gap raises the bar for the common case. Text-normalization gaps
+// (e.g. zero-width-character insertion defeating a matched word) are a
+// separate, more structural problem tracked as a follow-up, not fixable by
+// extending this list.
+// DUR-408 (DUR-405/DUR-407 security review follow-up): still missed
+// release/credit/disclose/cash out (money-movement) and reach out/text/
+// alert/contact (outbound-comms, same family as notify/message). Also
+// widened "route funds" to "route ... proceeds" since routing sale
+// proceeds elsewhere is the same instruction without the literal word
+// "funds".
+const DECISION_ASK_PATTERN =
+  /\b(should i|shall i|can i|may i|is it (?:ok|okay|fine|safe) to|ok(?:ay)? to proceed|do you want me to|proceed|go ahead|approve|authoriz(?:e|ation)|delete|drop|remove|disable|revoke|deploy|merge|rollback|migrat(?:e|ion)|execute|launch|spend|purchase|pay(?:s|ing|out|ed)?|wire[ds]?|wiring|transfer(?:s|red|ring)?|refund(?:s|ed|ing)?|reimburse(?:s|d|ing)?|debit(?:s|ed|ing)?|withdraw(?:s|n|ing)?|withdrew|charge(?:s|d|ing)?|rout(?:e|es|ed|ing) (?:the )?(?:funds|proceeds)|disburse(?:s|d|ing|ment)?|deposit(?:s|ed|ing)?|remit(?:s|ted|ting|tance)?|forward(?:s|ed|ing)?|releas(?:e|es|ed|ing)|credit(?:s|ed|ing)?|disclos(?:e|es|ed|ing)|cash(?:es|ed|ing)?[- ]?out|send(?:s|ing)?|sent|email(?:s|ed|ing)?|notify|notifies|notified|notifying|share(?:s|d|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|message(?:s|d|ing)?|dm(?:s|med|ming)?|reach(?:es|ed|ing)? out|text(?:s|ed|ing)?|alert(?:s|ed|ing)?|contact(?:s|ed|ing)?|kan jeg|skal jeg|bør jeg|greit (?:at|for meg) (?:å|at jeg)|fortsett(?:e|er)?|slett(?:e|er)?|fjern(?:e|er)?|deaktiver(?:e|er)?|kjør(?:e|er)|betal(?:e|er)|kjøp(?:e|er)|godkjenn(?:e|er)?|overfør(?:e|er|ing|te)?|varsl(?:e|er|et)?|publiser(?:e|er|te)?)\b/i;
+
+// DUR-405: a zero-width or other invisible codepoint inserted inside an
+// already-covered word (e.g. "W\u200Bire") reads as the plain word to a
+// human (and to any renderer that doesn't surface invisible characters) but
+// defeats DECISION_ASK_PATTERN's literal match. Strip Unicode format/control
+// characters (zero-width spaces/joiners, bidi marks/overrides, BOM, C0/C1
+// controls) and apply compatibility normalization (folds fullwidth/other
+// compatibility variants of ASCII letters) before running the pattern
+// against any operator-facing field this heuristic scans.
+// DUR-408 (DUR-407 security review follow-up): variation selectors
+// (U+FE00-U+FE0F, plus the U+E0100-U+E01EF IVS supplement) were not
+// covered -- e.g. inserting VS-16 inside "Wire" still bypassed the pattern
+// after normalization. The `u` flag is needed to address the supplement
+// range by code point.
+const INVISIBLE_CHAR_PATTERN =
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFE00-\uFE0F\u{E0100}-\u{E01EF}\uFEFF]/gu;
+
+// DUR-413: a combining diacritical mark (Unicode general category Mn)
+// inserted between the letters of a covered verb -- e.g. "w" + \u0301 +
+// "ire" -- renders as "ẃire" to a human but is not the literal "wire"
+// text, and NFKC *composes* the sequence into a single precomposed
+// character instead of stripping it, so neither the raw nor the
+// NFKC-normalized string contains the matched word. Decompose first (NFD)
+// so every combining mark -- whether it arrived already split or as a
+// precomposed character -- is broken back out to a base letter plus a
+// stripped mark codepoint, then fold compatibility variants (NFKC) as before.
+// DUR-416: Mn's sibling categories Mc (spacing combining marks, e.g.
+// Devanagari vowel signs) and Me (enclosing marks, e.g. combining enclosing
+// circle) attach to the preceding base letter the same way Mn does and were
+// missed by the Mn-only strip -- widen to \p{M}, the general combining-mark
+// superclass (Mn + Mc + Me), so all three are stripped.
+function normalizeForDecisionScan(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(INVISIBLE_CHAR_PATTERN, "")
+    .normalize("NFKC")
+    .replace(INVISIBLE_CHAR_PATTERN, "");
+}
+
+function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
+  if (interaction.kind !== "request_confirmation") return false;
+  if (isPlanConfirmation(interaction)) return false;
+  if (interaction.payload.factCheck !== true) return false;
+  const details = interaction.payload.detailsMarkdown;
+  if (!details) return false;
+  const numberedClaims = details
+    .split("\n")
+    .filter((line) => /^\s*\d+[.)]\s+\S/.test(line));
+  if (numberedClaims.length < 2) return false;
+  const prompt = interaction.payload.prompt ?? "";
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(prompt))) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(details))) return false;
+  // DUR-341 follow-up: `title`/`summary` are base interaction fields, set
+  // independently of `payload`, and render directly on the card (title even
+  // overrides the "Fact check" heading). An innocuous prompt/detailsMarkdown
+  // pair paired with a title/summary carrying the real instruction ("Wire
+  // $18,500 to ...") would otherwise slip the fact-check styling on an actual
+  // decision. Scan them the same way.
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(interaction.title ?? ""))) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(interaction.summary ?? ""))) return false;
+  return true;
+}
+
+function factCheckStatusClasses(status: IssueThreadInteraction["status"]) {
+  switch (status) {
+    case "accepted":
+    case "answered":
+      return {
+        shell: "border-2 border-teal-500/80 bg-transparent",
+        badge: "border-teal-500/60 bg-teal-500/10 text-teal-900 dark:bg-teal-500/15 dark:text-teal-100",
+        label: "Confirmed correct",
+        Icon: CheckCircle2,
+      };
+    case "rejected":
+    case "cancelled":
+      return {
+        shell: "border-2 border-red-500/80 bg-transparent",
+        badge: "border-red-500/60 bg-red-500/10 text-red-900 dark:bg-red-500/15 dark:text-red-100",
+        label: "Doesn't match",
+        Icon: XCircle,
+      };
+    case "failed":
+    case "expired":
+      return {
+        shell: "border-2 border-amber-500/70 bg-transparent",
+        badge: "border-amber-500/60 bg-amber-500/10 text-amber-900 dark:bg-amber-500/15 dark:text-amber-100",
+        label: "Expired",
+        Icon: AlertTriangle,
+      };
+    default:
+      return {
+        shell: "border-2 border-teal-500/60 bg-transparent",
+        badge: "border-teal-500/50 bg-teal-500/10 text-teal-900 dark:bg-teal-500/15 dark:text-teal-100",
+        label: "Needs your check",
+        Icon: ClipboardCheck,
       };
   }
 }
@@ -1912,9 +2051,11 @@ export function IssueThreadInteractionCard({
   externalReferences,
 }: IssueThreadInteractionCardProps) {
   const isPlan = isPlanConfirmation(interaction);
+  const isFactCheck = !isPlan && isFactCheckConfirmation(interaction);
   const planStyles = isPlan ? planStatusClasses(interaction.status) : null;
-  const StatusIcon = planStyles ? planStyles.Icon : statusIcon(interaction.status);
-  const styles = planStyles ?? statusClasses(interaction.status);
+  const factCheckStyles = isFactCheck ? factCheckStatusClasses(interaction.status) : null;
+  const StatusIcon = planStyles?.Icon ?? factCheckStyles?.Icon ?? statusIcon(interaction.status);
+  const styles = planStyles ?? factCheckStyles ?? statusClasses(interaction.status);
   const createdByLabel = resolveActorLabel({
     agentId: interaction.createdByAgentId,
     userId: interaction.createdByUserId,
@@ -1940,9 +2081,9 @@ export function IssueThreadInteractionCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className={cn("inline-flex items-center gap-1 rounded-sm border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]", styles.badge)}>
               <StatusIcon className="h-3.5 w-3.5" />
-              {isPlan ? "Plan" : interactionKindLabel(interaction.kind)}
+              {isPlan ? "Plan" : isFactCheck ? "Fact check" : interactionKindLabel(interaction.kind)}
               <span className="text-current/60">/</span>
-              {planStyles ? planStyles.label : statusLabel(interaction.status)}
+              {planStyles?.label ?? factCheckStyles?.label ?? statusLabel(interaction.status)}
             </span>
             {interaction.continuationPolicy === "wake_assignee"
               || interaction.continuationPolicy === "wake_assignee_on_accept" ? (
@@ -1965,8 +2106,15 @@ export function IssueThreadInteractionCard({
                   ? "Checkbox confirmation requested"
                   : isPlan
                     ? "Plan review"
-                    : "Confirmation requested")}
+                    : isFactCheck
+                      ? "Check these against what you know"
+                      : "Confirmation requested")}
           </div>
+          {isFactCheck ? (
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-teal-800 dark:text-teal-200">
+              Read this carefully and only confirm if it matches what you actually know — don't confirm based on the label alone.
+            </p>
+          ) : null}
           {interaction.summary ? (
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
               {interaction.summary}

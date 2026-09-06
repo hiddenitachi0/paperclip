@@ -17,6 +17,7 @@ import {
   issueComments,
   issueDocuments,
   issues,
+  withCompanyScope,
 } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { claudeConfigDir, parseClaudeStreamJson } from "@paperclipai/adapter-claude-local/server";
@@ -114,6 +115,7 @@ type FeedbackTraceShareClient = {
 
 type FeedbackServiceOptions = {
   shareClient?: FeedbackTraceShareClient;
+  rawDb?: Db;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1700,6 +1702,22 @@ async function buildFeedbackTraceBundleFromRow(
 }
 
 export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
+  // DUR-392 (DUR-277 Wave 5b): `rawDb` defaults to `db` for every caller that
+  // doesn't pass one (tests, and routes/companies.ts's unscoped usage).
+  // routes/issues.ts's scoped `db` proxy can't run db.transaction() directly
+  // (see services/issues.ts's companyIdForIssue comment for why), so
+  // saveIssueVote below looks the issue's companyId up via `rawDb` first,
+  // then opens its transaction through withCompanyScope instead.
+  const rawDb = options.rawDb ?? db;
+  async function companyIdForIssue(issueId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
+
   return {
     listIssueVotesForUser: async (issueId: string, authorUserId: string) =>
       db
@@ -1895,8 +1913,10 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
       authorUserId: string;
       reason?: string | null;
       allowSharing?: boolean;
-    }) =>
-      db.transaction(async (tx) => {
+    }) => {
+      const companyId = await companyIdForIssue(input.issueId);
+      if (!companyId) throw notFound("Issue not found");
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const issue = await tx
           .select({
             id: issues.id,
@@ -2112,6 +2132,7 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
           persistedSharingPreference,
           sharingEnabled: sharedWithLabs,
         };
-      }),
+      });
+    },
   };
 }

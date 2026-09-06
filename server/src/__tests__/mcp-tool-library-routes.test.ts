@@ -13,6 +13,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/error-handler.js";
 import { forbidden } from "../errors.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const otherCompanyId = "99999999-9999-4999-8999-999999999999";
@@ -60,11 +61,11 @@ vi.mock("../routes/authz.js", () => ({
   assertCompanyAccess: mockAuthz.assertCompanyAccess,
 }));
 
-async function buildApp(fakeDb: unknown = {}) {
+async function buildApp(fakeDb: object = {}, opts: { unsafeRows?: unknown[] } = {}) {
   const { mcpToolLibraryRoutes } = await import("../routes/mcp-tool-library.js");
   const app = express();
   app.use(express.json());
-  app.use("/api", mcpToolLibraryRoutes(fakeDb as never));
+  app.use("/api", mcpToolLibraryRoutes(withFakeCompanyScopeReserve(fakeDb, opts) as never));
   app.use(errorHandler);
   return app;
 }
@@ -119,7 +120,7 @@ describe("mcp tool library routes — board-only", () => {
 
     expect(res.status).toBe(201);
     expect(mockToolLibraryService.createMcpTool).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       companyId,
       expect.objectContaining({ name: "Fal.ai", description: "Makes images" }),
     );
@@ -175,7 +176,7 @@ describe("mcp tool library routes — board-only", () => {
         from: () => ({ where: () => Promise.resolve([{ id: agentId, companyId }]) }),
       }),
     };
-    const app = await buildApp(fakeDb);
+    const app = await buildApp(fakeDb, { unsafeRows: [[agentId, companyId]] });
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/mcp-tools/sync`)
@@ -194,7 +195,7 @@ describe("mcp tool library routes — board-only", () => {
         from: () => ({ where: () => Promise.resolve([{ id: agentId, companyId }]) }),
       }),
     };
-    const app = await buildApp(fakeDb);
+    const app = await buildApp(fakeDb, { unsafeRows: [[agentId, companyId]] });
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/mcp-tools/sync`)
@@ -214,7 +215,7 @@ describe("mcp tool library routes — board-only", () => {
         }),
       }),
     };
-    const app = await buildApp(fakeDb);
+    const app = await buildApp(fakeDb, { unsafeRows: [[agentId, companyId, [toolId]]] });
 
     const res = await request(app).get(`/api/agents/${agentId}/mcp-tools`);
 

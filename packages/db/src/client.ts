@@ -61,8 +61,17 @@ export type MigrationState =
 // through the service layer -- as legitimate.
 export const UNTRACKED_WRITE_APP_APPLICATION_NAME = "paperclip-app";
 
-export function createDb(url: string) {
-  const sql = postgres(url, { connection: { application_name: UNTRACKED_WRITE_APP_APPLICATION_NAME } });
+// DUR-294: every CLI command and one-off script that calls createDb()
+// directly against DATABASE_URL used to fall back to this same
+// "paperclip-app" tag, making it indistinguishable from the live server's
+// own request-serving pool in untracked_write_incidents (DUR-130) and
+// pg_stat_activity -- a CLI-driven mutation to a monitored table was
+// silently exempted from untracked-write alerting instead of being flagged
+// as the out-of-band access it actually is. Callers that are not the app
+// server itself should pass a distinct applicationName so they show up
+// under their own identity.
+export function createDb(url: string, applicationName: string = UNTRACKED_WRITE_APP_APPLICATION_NAME) {
+  const sql = postgres(url, { connection: { application_name: applicationName } });
   return drizzlePg(sql, { schema });
 }
 

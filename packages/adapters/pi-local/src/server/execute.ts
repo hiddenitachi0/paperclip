@@ -834,7 +834,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (
         canResumeSession &&
         initialFailed &&
-        isPiUnknownSessionError(initial.proc.stdout, initial.rawStderr)
+        isPiUnknownSessionError(initial.rawStderr)
       ) {
         await onLog(
           "stdout",

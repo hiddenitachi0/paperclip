@@ -35,7 +35,7 @@ async function main() {
   }
 
   const apply = process.argv.includes("--apply");
-  const db = createDb(dbUrl);
+  const db = createDb(dbUrl, "paperclip-script-migrate-inline-env-secrets");
   const secrets = secretService(db);
 
   const allAgents = await db.select().from(agents);

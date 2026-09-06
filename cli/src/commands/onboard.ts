@@ -493,7 +493,7 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
       s.start("Testing database connection...");
       try {
         const { createDb } = await import("@paperclipai/db");
-        const db = createDb(database.connectionString);
+        const db = createDb(database.connectionString, "paperclip-cli-onboard");
         await db.execute("SELECT 1");
         s.stop("Database connection successful");
       } catch {

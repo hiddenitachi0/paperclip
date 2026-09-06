@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { documents, externalObjectMentions, externalObjects, issueComments, issueDocuments, issues, plugins } from "@paperclipai/db";
+import { documents, externalObjectMentions, externalObjects, issueComments, issueDocuments, issues, plugins, withCompanyScope } from "@paperclipai/db";
 import {
   formatExternalObjectMentionSourceLabel,
   type ExternalObjectCanonicalUrl,
@@ -357,8 +357,18 @@ export function externalObjectService(
     pluginWorkerManager?: PluginWorkerManager;
     github?: GitHubExternalObjectProviderOptions | false;
     enabled?: boolean | (() => boolean | Promise<boolean>);
+    // DUR-379 (DUR-277 Wave 5b): defaults to `db` for every unmigrated
+    // caller (projects.ts, ...), a no-op there since `db` is already the
+    // raw pooled instance. Only routes/issues.ts, once wired through
+    // createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+    // distinct `rawDb` -- the sync* functions below need it because
+    // db.transaction() isn't supported through that proxy (see
+    // packages/db/src/company-scope.ts) and must use withCompanyScope
+    // instead.
+    rawDb?: Db;
   } = {},
 ) {
+  const rawDb = opts.rawDb ?? db;
   const githubProvider = opts.github === false ? null : createGitHubExternalObjectProvider(db, opts.github);
   const pluginProviderDetector = opts.pluginWorkerManager
     ? createPluginProviderDetector(db, opts.pluginWorkerManager)
@@ -487,7 +497,13 @@ export function externalObjectService(
     }
   }
 
-  async function syncIssue(issueId: string, dbOrTx: any = db) {
+  // DUR-379: `companyId` is required for the default (no explicit `dbOrTx`)
+  // path -- withCompanyScope needs it to open its own transaction, and the
+  // synced entity may already be gone (e.g. syncDocumentSafely is called
+  // after the document row was deleted), so it can't always be recovered
+  // from inside the transaction the way the old db.transaction() call did.
+  // Every call site already has the owning issue's companyId in hand.
+  async function syncIssue(issueId: string, companyId: string, dbOrTx: any = db) {
     if (!(await isEnabled())) return;
     const runSync = async (tx: any) => {
       const issue = await issueById(issueId, tx);
@@ -511,10 +527,10 @@ export function externalObjectService(
         text: issue.description,
       }, tx);
     };
-    return dbOrTx === db ? db.transaction(runSync) : runSync(dbOrTx);
+    return dbOrTx === db ? withCompanyScope(rawDb, companyId, runSync) : runSync(dbOrTx);
   }
 
-  async function syncComment(commentId: string, dbOrTx: any = db) {
+  async function syncComment(commentId: string, companyId: string, dbOrTx: any = db) {
     const runSync = async (tx: any) => {
       if (!(await isEnabled())) return;
       const comment = await tx
@@ -543,10 +559,10 @@ export function externalObjectService(
         text: comment.body,
       }, tx);
     };
-    return dbOrTx === db ? db.transaction(runSync) : runSync(dbOrTx);
+    return dbOrTx === db ? withCompanyScope(rawDb, companyId, runSync) : runSync(dbOrTx);
   }
 
-  async function syncDocument(documentId: string, dbOrTx: any = db) {
+  async function syncDocument(documentId: string, companyId: string, dbOrTx: any = db) {
     const runSync = async (tx: any) => {
       if (!(await isEnabled())) return;
       const document = await tx
@@ -577,7 +593,7 @@ export function externalObjectService(
         text: document.body,
       }, tx);
     };
-    return dbOrTx === db ? db.transaction(runSync) : runSync(dbOrTx);
+    return dbOrTx === db ? withCompanyScope(rawDb, companyId, runSync) : runSync(dbOrTx);
   }
 
   async function safeSync(label: string, fn: () => Promise<void>) {
@@ -588,16 +604,16 @@ export function externalObjectService(
     }
   }
 
-  async function syncIssueSafely(issueId: string) {
-    await safeSync("issue", () => syncIssue(issueId));
+  async function syncIssueSafely(issueId: string, companyId: string) {
+    await safeSync("issue", () => syncIssue(issueId, companyId));
   }
 
-  async function syncCommentSafely(commentId: string, dbOrTx: any = db) {
-    await safeSync("comment", () => syncComment(commentId, dbOrTx));
+  async function syncCommentSafely(commentId: string, companyId: string, dbOrTx: any = db) {
+    await safeSync("comment", () => syncComment(commentId, companyId, dbOrTx));
   }
 
-  async function syncDocumentSafely(documentId: string) {
-    await safeSync("document", () => syncDocument(documentId));
+  async function syncDocumentSafely(documentId: string, companyId: string) {
+    await safeSync("document", () => syncDocument(documentId, companyId));
   }
 
   function toObjectPayload(object: ExternalObjectRecord, now = new Date()) {

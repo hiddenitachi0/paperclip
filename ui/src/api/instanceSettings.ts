@@ -6,8 +6,11 @@ import type {
   PatchInstanceSettings,
   PatchInstanceGeneralSettings,
   PatchInstanceExperimentalSettings,
+  QuietModeState,
 } from "@paperclipai/shared";
 import { api } from "./client";
+
+export type QuietModeStatus = QuietModeState & { activeRunCount: number };
 
 export const instanceSettingsApi = {
   get: () =>
@@ -22,6 +25,12 @@ export const instanceSettingsApi = {
     api.get<InstanceExperimentalSettings>("/instance/settings/experimental"),
   updateExperimental: (patch: PatchInstanceExperimentalSettings) =>
     api.patch<InstanceExperimentalSettings>("/instance/settings/experimental", patch),
+  getQuietMode: () =>
+    api.get<QuietModeStatus>("/instance/settings/quiet-mode"),
+  activateQuietMode: () =>
+    api.post<QuietModeStatus>("/instance/settings/quiet-mode/activate", undefined),
+  deactivateQuietMode: () =>
+    api.post<QuietModeStatus>("/instance/settings/quiet-mode/deactivate", undefined),
   previewIssueGraphLivenessAutoRecovery: (input: { lookbackHours?: number }) =>
     api.post<IssueGraphLivenessAutoRecoveryPreview>(
       "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",

@@ -923,6 +923,22 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
   "environmentDeleteTemplate",
 ] as const;
 
+/**
+ * Result of `personas.reserveDailyGeneration` — whether one generation was
+ * allowed (and, if so, atomically reserved) against the calling agent's
+ * persona daily cap.
+ *
+ * @see PLUGIN_SPEC.md — Personas generation cap (DUR-177)
+ */
+export interface PluginPersonaGenerationCapReservation {
+  /** Whether this generation may proceed. */
+  allowed: boolean;
+  /** The persona's configured daily cap, or null if unlimited (no persona for this agent, or no cap set). */
+  cap: number | null;
+  /** Generations already recorded today for this persona, before this call. */
+  usedToday: number;
+}
+
 // ---------------------------------------------------------------------------
 // Worker → Host Method Signatures (SDK client calls)
 // ---------------------------------------------------------------------------
@@ -1610,6 +1626,21 @@ export interface WorkerToHostMethods {
       offset?: number;
     },
     result: PluginAuthorizationAuditEntry[],
+  ];
+
+  // Personas
+  "personas.reserveDailyGeneration": [
+    params: {
+      companyId: string;
+      /**
+       * The invoking tool call's run id. Required and host-enforced: the
+       * host resolves the calling agent from this run (not from any
+       * plugin-supplied agent id), so a plugin cannot reserve or evade
+       * another persona's cap by claiming a different identity.
+       */
+      runId: string;
+    },
+    result: PluginPersonaGenerationCapReservation,
   ];
 }
 

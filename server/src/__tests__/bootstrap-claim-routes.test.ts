@@ -1,10 +1,13 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash, randomUUID } from "node:crypto";
 import { accessRoutes } from "../routes/access.js";
 import { boardMutationGuard } from "../middleware/board-mutation-guard.js";
 import { errorHandler } from "../middleware/index.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+import { createDb as createRealDb, invites } from "@paperclipai/db";
+import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const claimFirstInstanceAdminMock = vi.hoisted(() => vi.fn());
 const accessServiceMock = vi.hoisted(() => ({
@@ -39,14 +42,14 @@ function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function createDb(invite?: Record<string, unknown>) {
-  return {
-    select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => Promise.resolve(invite ? [invite] : [])),
-      })),
-    })),
-  } as any;
+// DUR-381: every route in this file now establishes company-scope bypass
+// (companyScopeBypassForRoute) before it runs, which reserves a real
+// connection (rawDb.$client.reserve()) -- this fake db needs that lifecycle
+// satisfied even though it never issues a real query itself (POST
+// /bootstrap/claim never touches `db` directly; claimFirstInstanceAdmin is
+// mocked below). See helpers/fake-scoped-db.ts.
+function createDb() {
+  return withFakeCompanyScopeReserve({}) as any;
 }
 
 function createApp(input: {
@@ -165,14 +168,47 @@ describe("POST /bootstrap/claim", () => {
   });
 });
 
-describe("bootstrap invite first-admin acceptance", () => {
+// DUR-381: unlike POST /bootstrap/claim above, POST /invites/:token/accept
+// makes a real inline `db.select()` against the *scoped* connection (see
+// access.ts's accept handler) after companyScopeBypassForRoute has entered
+// bypass scope for this bootstrap_ceo (companyId-less) invite -- the fake
+// reserved connection from helpers/fake-scoped-db.ts only satisfies the
+// reserve/claim/release lifecycle, not a real query, so this describe block
+// needs a real embedded Postgres invites row instead.
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres bootstrap invite acceptance tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+  );
+}
+
+describeEmbeddedPostgres("bootstrap invite first-admin acceptance", () => {
+  let realDb!: ReturnType<typeof createRealDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-bootstrap-claim-routes-");
+    realDb = createRealDb(tempDb.connectionString);
+  }, 30_000);
+
+  afterEach(async () => {
+    await realDb.delete(invites);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  function createBootstrapInvite() {
-    return {
-      id: "invite-1",
+  async function seedBootstrapInvite() {
+    const inviteId = randomUUID();
+    await realDb.insert(invites).values({
+      id: inviteId,
       companyId: null,
       inviteType: "bootstrap_ceo",
       allowedJoinTypes: "human",
@@ -180,21 +216,18 @@ describe("bootstrap invite first-admin acceptance", () => {
       defaultsPayload: {},
       expiresAt: new Date("2027-03-10T00:00:00.000Z"),
       invitedByUserId: null,
-      revokedAt: null,
-      acceptedAt: null,
-      createdAt: new Date("2026-03-07T00:00:00.000Z"),
-      updatedAt: new Date("2026-03-07T00:00:00.000Z"),
-    };
+    });
+    return inviteId;
   }
 
   it("uses the shared first-admin helper for bootstrap invite acceptance", async () => {
-    const invite = createBootstrapInvite();
+    const inviteId = await seedBootstrapInvite();
     claimFirstInstanceAdminMock.mockResolvedValueOnce({
       status: "claimed",
       userId: "user-1",
-      value: { ...invite, acceptedAt: new Date("2026-03-07T00:01:00.000Z") },
+      value: { id: inviteId, inviteType: "bootstrap_ceo", acceptedAt: new Date("2026-03-07T00:01:00.000Z") },
     });
-    const app = createApp({ db: createDb(invite) });
+    const app = createApp({ db: realDb as any });
 
     const res = await request(app)
       .post("/api/invites/pcp_invite_test/accept")
@@ -202,7 +235,7 @@ describe("bootstrap invite first-admin acceptance", () => {
 
     expect(res.status).toBe(202);
     expect(res.body).toMatchObject({
-      inviteId: "invite-1",
+      inviteId,
       inviteType: "bootstrap_ceo",
       bootstrapAccepted: true,
       userId: "user-1",
@@ -214,12 +247,13 @@ describe("bootstrap invite first-admin acceptance", () => {
   });
 
   it("conflicts cleanly when browser claim already won before invite acceptance", async () => {
+    await seedBootstrapInvite();
     claimFirstInstanceAdminMock.mockResolvedValueOnce({
       status: "already_claimed",
       existingUserId: "user-2",
       value: null,
     });
-    const app = createApp({ db: createDb(createBootstrapInvite()) });
+    const app = createApp({ db: realDb as any });
 
     const res = await request(app)
       .post("/api/invites/pcp_invite_test/accept")

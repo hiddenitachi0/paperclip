@@ -1,6 +1,13 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+// `vi.resetModules()` in beforeEach re-transforms the large issues.ts
+// dependency graph on every test; the first test in this file eats that
+// cold-start cost and can exceed the default 5s budget (see
+// lane-b-message-routes.test.ts for the same pattern).
+vi.setConfig({ testTimeout: 20_000 });
 
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
@@ -55,7 +62,7 @@ const mockRoutineService = vi.hoisted(() => ({
 
 const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
   then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
-    Promise.resolve([{ companyId: "company-1", agentId: "agent-1", contextSnapshot: null }]).then(
+    Promise.resolve([{ companyId: "11111111-1111-4111-8111-111111111111", agentId: "agent-1", contextSnapshot: null }]).then(
       onFulfilled,
       onRejected,
     ),
@@ -104,9 +111,10 @@ function registerRouteMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     companyService: () => ({
-      getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
+      getById: vi.fn(async () => ({ id: "11111111-1111-4111-8111-111111111111", attachmentMaxBytes: 10 * 1024 * 1024 })),
     }),
     accessService: () => mockAccessService,
     agentService: () => mockAgentService,
@@ -159,7 +167,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes(mockDb as any, {} as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve(mockDb) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -167,7 +175,7 @@ async function createApp(actor: Record<string, unknown>) {
 function makeIssue(overrides: Record<string, unknown> = {}) {
   return {
     id: "issue-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     status: "todo",
     priority: "medium",
     projectId: null,
@@ -208,7 +216,13 @@ describe("issue workspace command authorization", () => {
     mockIssueService.create.mockResolvedValue(makeIssue());
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
     mockIssueService.getById.mockResolvedValue(makeIssue());
-    mockIssueService.getByIdentifier.mockResolvedValue(null);
+    // The test's plain "issue-1" id happens to match the PREFIX-N issue
+    // identifier shape (see packages/shared/src/issue-references.ts's
+    // ISSUE_REFERENCE_IDENTIFIER_RE), so router.param("id", ...) and
+    // scopeFromIssueParam() (both DUR-379) resolve it via getByIdentifier
+    // rather than getById -- mirror getById's default here so that lookup
+    // succeeds the same way it would for a real "PAP-N"-style identifier.
+    mockIssueService.getByIdentifier.mockResolvedValue(makeIssue());
     mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
@@ -224,7 +238,7 @@ describe("issue workspace command authorization", () => {
     mockAccessService.hasPermission.mockResolvedValue(true);
     mockAgentService.getById.mockResolvedValue({
       id: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       permissions: null,
     });
     mockExecutionWorkspaceService.getById.mockResolvedValue(null);
@@ -246,14 +260,14 @@ describe("issue workspace command authorization", () => {
         feedbackDataSharingPreference: "prompt",
       },
     });
-    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["11111111-1111-4111-8111-111111111111"]);
     mockLogActivity.mockResolvedValue(undefined);
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelectWhere.mockImplementation(() => ({
       then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
-        Promise.resolve([{ companyId: "company-1", agentId: "agent-1", contextSnapshot: null }]).then(
+        Promise.resolve([{ companyId: "11111111-1111-4111-8111-111111111111", agentId: "agent-1", contextSnapshot: null }]).then(
           onFulfilled,
           onRejected,
         ),
@@ -264,13 +278,13 @@ describe("issue workspace command authorization", () => {
     const app = await createApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });
 
     const res = await request(app)
-      .post("/api/companies/company-1/issues")
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
       .send({
         title: "Exploit",
         executionWorkspaceSettings: {
@@ -286,12 +300,153 @@ describe("issue workspace command authorization", () => {
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
+  it("rejects an agent setting changeLogVisible/changeLogSummary on issue creation", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
+      .send({
+        title: "Self-published bugfix",
+        status: "done",
+        changeLogVisible: true,
+        changeLogSummary: "Fixed a critical payment bug",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("changeLogVisible/changeLogSummary");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent setting changeLogVisible/changeLogSummary on child issue creation", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ id: "issue-1" }));
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({
+        title: "Self-published bugfix",
+        status: "done",
+        changeLogVisible: true,
+        changeLogSummary: "Fixed a critical payment bug",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("changeLogVisible/changeLogSummary");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set changeLogVisible/changeLogSummary on issue creation", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
+      .send({
+        title: "Backfilled bugfix",
+        status: "done",
+        changeLogVisible: true,
+        changeLogSummary: "Fixed a critical payment bug",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ changeLogVisible: true, changeLogSummary: "Fixed a critical payment bug" }),
+    );
+  });
+
+  it("rejects an agent setting featureLaunch on issue creation (DUR-313 create-path bypass)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
+      .send({
+        title: "Self-published launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("featureLaunch");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an agent setting featureLaunch on child issue creation (DUR-313 create-path bypass)", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ id: "issue-1" }));
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/issue-1/children")
+      .send({
+        title: "Self-published launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("featureLaunch");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows a board user to set featureLaunch on issue creation", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["11111111-1111-4111-8111-111111111111"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/11111111-1111-4111-8111-111111111111/issues")
+      .send({
+        title: "Board-filed launch",
+        status: "done",
+        featureLaunch: true,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ featureLaunch: true }),
+    );
+  });
+
   it("rejects agent callers that patch assignee adapter workspace teardown commands", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue());
     const app = await createApp({
       type: "agent",
       agentId: "agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       source: "agent_key",
       runId: "run-1",
     });

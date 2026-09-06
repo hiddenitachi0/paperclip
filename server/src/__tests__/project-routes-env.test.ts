@@ -1,6 +1,9 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
+
+const COMPANY_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 const mockProjectService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -92,13 +95,13 @@ async function createApp() {
     (req as any).actor = {
       type: "board",
       userId: "board-user",
-      companyIds: ["company-1"],
+      companyIds: [COMPANY_ID],
       source: "local_implicit",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", projectRoutes({} as any));
+  app.use("/api", projectRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }
@@ -106,7 +109,7 @@ async function createApp() {
 function buildProject(overrides: Record<string, unknown> = {}) {
   return {
     id: "project-1",
-    companyId: "company-1",
+    companyId: COMPANY_ID,
     urlKey: "project-1",
     goalId: null,
     goalIds: [],
@@ -178,7 +181,7 @@ describe("project env routes", () => {
 
     const app = await createApp();
     const res = await request(app)
-      .post("/api/companies/company-1/projects")
+      .post(`/api/companies/${COMPANY_ID}/projects`)
       .send({
         name: "Project",
         env: normalizedEnv,
@@ -186,12 +189,12 @@ describe("project env routes", () => {
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
     expect(mockSecretService.normalizeEnvBindingsForPersistence).toHaveBeenCalledWith(
-      "company-1",
+      COMPANY_ID,
       normalizedEnv,
       expect.objectContaining({ fieldPath: "env" }),
     );
     expect(mockProjectService.create).toHaveBeenCalledWith(
-      "company-1",
+      COMPANY_ID,
       expect.objectContaining({ env: normalizedEnv }),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(

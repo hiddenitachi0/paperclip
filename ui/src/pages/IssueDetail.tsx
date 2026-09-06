@@ -1063,7 +1063,7 @@ type IssueDetailActivityTabProps = {
   currentUserId: string | null;
   userProfileMap: Map<string, import("../lib/company-members").CompanyUserProfile>;
   pendingApprovalAction: { approvalId: string; action: "approve" | "reject" } | null;
-  onApprovalAction: (approvalId: string, action: "approve" | "reject") => void;
+  onApprovalAction: (approvalId: string, action: "approve" | "reject", note?: string) => void;
   onCheckMonitorNow: () => void;
   checkingMonitorNow: boolean;
   handoffFocusSignal?: number;
@@ -1300,7 +1300,7 @@ function IssueDetailActivityTab({
               approval={approval}
               requesterAgent={approval.requestedByAgentId ? agentMap.get(approval.requestedByAgentId) ?? null : null}
               onApprove={() => onApprovalAction(approval.id, "approve")}
-              onReject={() => onApprovalAction(approval.id, "reject")}
+              onReject={(note) => onApprovalAction(approval.id, "reject", note)}
               detailLink={`/approvals/${approval.id}`}
               isPending={pendingApprovalAction?.approvalId === approval.id}
               pendingAction={
@@ -2192,11 +2192,11 @@ export function IssueDetail() {
   });
 
   const approvalDecision = useMutation({
-    mutationFn: async ({ approvalId, action }: { approvalId: string; action: "approve" | "reject" }) => {
+    mutationFn: async ({ approvalId, action, note }: { approvalId: string; action: "approve" | "reject"; note?: string }) => {
       if (action === "approve") {
         return approvalsApi.approve(approvalId);
       }
-      return approvalsApi.reject(approvalId);
+      return approvalsApi.reject(approvalId, note);
     },
     onMutate: ({ approvalId, action }) => {
       setPendingApprovalAction({ approvalId, action });
@@ -4396,8 +4396,8 @@ export function IssueDetail() {
               userProfileMap={userProfileMap}
               pendingApprovalAction={pendingApprovalAction}
               handoffFocusSignal={handoffFocusSignal}
-              onApprovalAction={(approvalId, action) => {
-                approvalDecision.mutate({ approvalId, action });
+              onApprovalAction={(approvalId, action, note) => {
+                approvalDecision.mutate({ approvalId, action, note });
               }}
               onCheckMonitorNow={() => checkIssueMonitorNow.mutate()}
               checkingMonitorNow={checkIssueMonitorNow.isPending}

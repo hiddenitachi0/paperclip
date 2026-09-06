@@ -23,6 +23,17 @@ function assertCanManageInstanceSettings(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
+/**
+ * DUR-277/DUR-350 (Wave 4): deliberately stays bypass-scoped for the whole
+ * file. `instance_settings` is a single instance-wide row, not a per-company
+ * resource -- every route reads/writes it directly with no companyId in the
+ * path, body, or query at all. Writes additionally fan out an activity-log
+ * row to *every* company via `svc.listCompanyIds()` (`instance.settings.*`
+ * actions), which is itself a cross-company write that a single company-scope
+ * claim could not represent. See the DUR-277 design doc §1
+ * (instance-settings.ts: category (c), "instance-wide settings; writes fan
+ * out activity logs across every company").
+ */
 export function instanceSettingsRoutes(db: Db) {
   const router = Router();
   const svc = instanceSettingsService(db);
@@ -145,6 +156,99 @@ export function instanceSettingsRoutes(db: Db) {
       res.json(updated.experimental);
     },
   );
+
+  router.get("/instance/settings/quiet-mode", async (req, res) => {
+    // Readable by any org member so a non-admin can see "quiet -- nothing
+    // running" without needing instance-admin; only activate/deactivate
+    // (below) are admin-gated.
+    assertBoardOrgAccess(req);
+    res.json(await svc.getQuietMode());
+  });
+
+  router.post("/instance/settings/quiet-mode/activate", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const actor = getActorInfo(req);
+    const result = await svc.activateQuietMode({
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+    });
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.settings.quiet_mode_activated",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: { agentCount: result.snapshot?.length ?? 0 },
+        }),
+      ),
+    );
+    res.json(result);
+  });
+
+  router.post("/instance/settings/quiet-mode/deactivate", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const actor = getActorInfo(req);
+    const result = await svc.deactivateQuietMode({
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+    });
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.settings.quiet_mode_deactivated",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: {},
+        }),
+      ),
+    );
+    res.json(result);
+  });
+
+  // DUR-296: called by deploy-runner.sh right after its proactive drain
+  // wait (maybe_begin_quiet_mode_drain, DUR-259) times out with heartbeat
+  // runs still in flight -- transactionally marks all of them
+  // paused_for_restart, instance-wide, in one atomic update, instead of
+  // letting them fall through to being reaped as "failed"/process_lost on
+  // next boot. Admin-gated like the quiet-mode endpoints above, since it's
+  // an instance-wide maintenance action.
+  router.post("/instance/heartbeat-runs/pause-for-restart", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+    const result = await heartbeat.markInFlightRunsPausedForRestart({ reason });
+    const actor = getActorInfo(req);
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.heartbeat_runs.paused_for_restart",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: { pausedCount: result.paused },
+        }),
+      ),
+    );
+    res.json(result);
+  });
 
   router.post(
     "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",

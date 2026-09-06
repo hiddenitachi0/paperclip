@@ -10,6 +10,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projects } from "@paperclipai/db";
 import { getTableName } from "drizzle-orm";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const TEST_TIMEOUT = 20_000;
 
@@ -65,15 +66,26 @@ function registerModuleMocks() {
   }));
 }
 
+// DUR-394: routes under company-scope middleware run their real db.select()
+// calls against createRequestScopedDb(rawDb)'s AsyncLocalStorage-resolved
+// scoped db (a real drizzle instance over withFakeCompanyScopeReserve's fake
+// reserved connection -- see middleware/company-scope.ts), not this
+// select()/from()/where() chain. None of this suite's request-permission-gate
+// cases reach a route path that actually executes a real query (the
+// deploy-specific project/workspace lookups only run after the
+// deploys:request check passes, and every case here is denied before that or
+// uses merge_pr/hire_agent payloads that never touch those queries), so the
+// default `unsafeRows: []` withFakeCompanyScopeReserve provides is enough --
+// this chain is kept only in case that changes.
 function createRouteDb() {
-  return {
+  const fakeDb = {
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => ({
         where: vi.fn(() => ({
           then: async (resolve: (rows: unknown[]) => unknown) =>
             resolve(
               getTableName(table as any) === getTableName(projects)
-                ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "company-1" }]
+                ? [{ id: "11111111-1111-4111-8111-111111111111", companyId: "22222222-2222-4222-8222-222222222222" }]
                 : [],
             ),
           limit: vi.fn(() => ({
@@ -83,7 +95,8 @@ function createRouteDb() {
       })),
     })),
     insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })),
-  } as any;
+  };
+  return withFakeCompanyScopeReserve(fakeDb as any);
 }
 
 async function createApp(actor: Record<string, unknown>) {
@@ -105,7 +118,7 @@ async function createApp(actor: Record<string, unknown>) {
 const agentActor = {
   type: "agent",
   agentId: "agent-1",
-  companyId: "company-1",
+  companyId: "22222222-2222-4222-8222-222222222222",
   source: "agent_jwt",
 };
 
@@ -132,7 +145,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     mockApprovalService.findOpenDeployApproval.mockResolvedValue(null);
     mockApprovalService.create.mockResolvedValue({
       id: "new-approval-1",
-      companyId: "company-1",
+      companyId: "22222222-2222-4222-8222-222222222222",
       type: "request_board_approval",
       status: "pending",
       payload: {},
@@ -149,7 +162,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     }));
 
     const res = await request(await createApp(agentActor))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         payload: { kind: "merge_pr", repo: "org/repo", prNumber: 42, title: "Merge PR #42" },
@@ -168,7 +181,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     }));
 
     const res = await request(await createApp(agentActor))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         payload: {
@@ -193,7 +206,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     });
 
     const res = await request(await createApp(agentActor))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         payload: { kind: "merge_pr", repo: "org/repo", prNumber: 42, title: "Merge PR #42" },
@@ -212,7 +225,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     }));
 
     const res = await request(await createApp(agentActor))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         dryRun: true,
@@ -238,7 +251,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     });
 
     const res = await request(await createApp(agentActor))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "request_board_approval",
         dryRun: true,
@@ -259,7 +272,7 @@ describe("approval-request permission gate (DUR-146)", () => {
     }));
 
     const res = await request(await createApp(agentActor))
-      .post("/api/companies/company-1/approvals")
+      .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
       .send({
         type: "hire_agent",
         payload: { role: "designer", title: "Hire designer" },

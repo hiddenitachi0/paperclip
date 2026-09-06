@@ -411,6 +411,64 @@ describe("runChildProcess", () => {
     expect(result.stdout).toBe("done");
   });
 
+  it("DUR-294/DUR-347: never inherits the server's own DATABASE_URL/DATABASE_MIGRATION_URL/DATABASE_BYPASS_URL into a spawned agent process", async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+    const originalMigrationUrl = process.env.DATABASE_MIGRATION_URL;
+    const originalBypassUrl = process.env.DATABASE_BYPASS_URL;
+    process.env.DATABASE_URL = "postgres://owner:secret@db:5432/paperclip";
+    process.env.DATABASE_MIGRATION_URL = "postgres://migrator:secret@db:5432/paperclip";
+    process.env.DATABASE_BYPASS_URL = "postgres://bypass:secret@db:5432/paperclip";
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        [
+          "-e",
+          "process.stdout.write(JSON.stringify({DATABASE_URL: process.env.DATABASE_URL ?? null, DATABASE_MIGRATION_URL: process.env.DATABASE_MIGRATION_URL ?? null, DATABASE_BYPASS_URL: process.env.DATABASE_BYPASS_URL ?? null}))",
+        ],
+        {
+          cwd: process.cwd(),
+          env: {},
+          timeoutSec: 5,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        DATABASE_URL: null,
+        DATABASE_MIGRATION_URL: null,
+        DATABASE_BYPASS_URL: null,
+      });
+    } finally {
+      if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDatabaseUrl;
+      if (originalMigrationUrl === undefined) delete process.env.DATABASE_MIGRATION_URL;
+      else process.env.DATABASE_MIGRATION_URL = originalMigrationUrl;
+      if (originalBypassUrl === undefined) delete process.env.DATABASE_BYPASS_URL;
+      else process.env.DATABASE_BYPASS_URL = originalBypassUrl;
+    }
+  });
+
+  it("DUR-294: still honors an explicitly configured DATABASE_URL in opts.env", async () => {
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", "process.stdout.write(process.env.DATABASE_URL ?? '')"],
+      {
+        cwd: process.cwd(),
+        env: { DATABASE_URL: "postgres://scoped:secret@db:5432/paperclip" },
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => {},
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("postgres://scoped:secret@db:5432/paperclip");
+  });
+
   it("waits for onSpawn before sending stdin to the child", async () => {
     const spawnDelayMs = 150;
     const startedAt = Date.now();
@@ -600,6 +658,85 @@ describe("runChildProcess", () => {
         }
       }
     }
+  });
+
+  // DUR-213: nothing stopped a single run from making unbounded model calls
+  // and burning unbounded spend. `usageCap` lets an adapter kill the run
+  // mid-flight once its own live accounting crosses a threshold.
+  it.skipIf(process.platform === "win32")("kills the process once usageCap.onChunk reports the cap exceeded", async () => {
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      [
+        "-e",
+        [
+          "process.stdout.write('first\\n');",
+          "setInterval(() => process.stdout.write('still going\\n'), 30);",
+        ].join(" "),
+      ],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 0,
+        graceSec: 1,
+        onLog: async () => {},
+        usageCap: {
+          graceMs: 50,
+          onChunk: (chunk) => chunk.includes("first"),
+        },
+      },
+    );
+
+    expect(result.usageCapped).toBe(true);
+    expect(result.timedOut).toBe(false);
+    expect(result.signal).toBe("SIGTERM");
+  });
+
+  it("does not kill the process while usageCap.onChunk keeps returning false", async () => {
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", "process.stdout.write('done');"],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => {},
+        usageCap: {
+          onChunk: () => false,
+        },
+      },
+    );
+
+    expect(result.usageCapped).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("done");
+  });
+
+  it("does not let a usageCap check throw take down the run", async () => {
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", "process.stdout.write('done');"],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => {},
+        onLogError: () => {},
+        usageCap: {
+          onChunk: () => {
+            throw new Error("boom");
+          },
+        },
+      },
+    );
+
+    expect(result.usageCapped).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("done");
   });
 });
 

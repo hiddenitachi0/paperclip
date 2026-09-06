@@ -14,6 +14,7 @@ import {
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   MIN_GLOBAL_MAX_CONCURRENT_RUNS,
   MAX_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_QUIET_MODE_STATE,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
 
@@ -29,6 +30,27 @@ export const backupRetentionPolicySchema = z.object({
   weeklyWeeks: presetSchema(WEEKLY_RETENTION_PRESETS, "weeklyWeeks").default(DEFAULT_BACKUP_RETENTION.weeklyWeeks),
   monthlyMonths: presetSchema(MONTHLY_RETENTION_PRESETS, "monthlyMonths").default(DEFAULT_BACKUP_RETENTION.monthlyMonths),
 });
+
+export const quietModeActorSchema = z.object({
+  actorType: z.string(),
+  actorId: z.string().nullable(),
+  agentId: z.string().nullable(),
+}).strict();
+
+export const quietModeAgentSnapshotEntrySchema = z.object({
+  agentId: z.string(),
+  companyId: z.string(),
+  enabled: z.boolean(),
+  wakeOnDemand: z.boolean(),
+}).strict();
+
+export const quietModeStateSchema = z.object({
+  active: z.boolean().default(false),
+  activatedAt: z.string().nullable().default(null),
+  activatedBy: quietModeActorSchema.nullable().default(null),
+  deactivatedAt: z.string().nullable().default(null),
+  snapshot: z.array(quietModeAgentSnapshotEntrySchema).nullable().default(null),
+}).strict();
 
 export const instanceGeneralSettingsSchema = z.object({
   censorUsernameInLogs: z.boolean().default(false),
@@ -55,9 +77,20 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_GLOBAL_MAX_CONCURRENT_RUNS)
     .max(MAX_GLOBAL_MAX_CONCURRENT_RUNS)
     .default(DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS),
+  // DUR-224. Managed exclusively by the quiet-mode activate/deactivate
+  // service functions (they need to read+write the `agents` table
+  // atomically with the flip), not by the generic general-settings patch --
+  // see patchInstanceGeneralSettingsSchema below, which omits it.
+  quietMode: quietModeStateSchema.default(DEFAULT_QUIET_MODE_STATE),
+  // DUR-299 point 6 / DUR-314: live kill switch for the delegated
+  // merge_pr-approval automation (server/src/services/merge-pr-automation.ts).
+  // Defaults to false -- the automation ships dormant and an operator must
+  // explicitly opt in via a normal PATCH here (no redeploy needed either way
+  // to turn it on or back off).
+  mergePrAutomationEnabled: z.boolean().default(false),
 }).strict();
 
-export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
+export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.omit({ quietMode: true }).partial();
 
 export const instanceExperimentalSettingsSchema = z.object({
   enableEnvironments: z.boolean().default(false),

@@ -79,7 +79,7 @@ export async function bootstrapCeoInvite(opts: {
     return;
   }
 
-  const db = createDb(dbUrl);
+  const db = createDb(dbUrl, "paperclip-cli-auth-bootstrap-ceo");
   const closableDb = db as typeof db & {
     $client?: {
       end?: (options?: { timeout?: number }) => Promise<void>;

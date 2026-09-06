@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, assets as assetsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
+import { agents as agentsTable, assets as assetsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable, createRequestScopedDb } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
@@ -53,6 +53,7 @@ import {
   companySkillService,
   budgetService,
   heartbeatService,
+  isHeartbeatRunLiveInThisProcess,
   ISSUE_LIST_DEFAULT_LIMIT,
   issueApprovalService,
   issueRecoveryActionService,
@@ -71,6 +72,7 @@ import {
   assertInstanceAdmin,
   getActorInfo,
 } from "./authz.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectAgentAdapterWorkspaceCommandPaths,
@@ -148,9 +150,16 @@ function readRunIssueId(context: Record<string, unknown> | null) {
 }
 
 export function agentRoutes(
-  db: Db,
+  rawDb: Db,
   options: { pluginWorkerManager?: PluginWorkerManager; storageService?: StorageService } = {},
 ) {
+  // DUR-351 (DUR-277 Wave 5a): this file's own request-scoped instance; the
+  // raw `rawDb` stays unwrapped for the pre-scope lookups the (b)-category
+  // routes below need before their companyId (and therefore their scope) is
+  // known, and for the one genuinely cross-company route
+  // (/instance/scheduler-heartbeats) that must stay bypass-scoped -- see
+  // middleware/company-scope.ts and the DUR-277 design doc §1.
+  const db = createRequestScopedDb(rawDb);
   // Legacy hardcoded maps — used as fallback when adapter module does not
   // declare capability flags explicitly.
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
@@ -190,7 +199,7 @@ export function agentRoutes(
   ] as const;
 
   const router = Router();
-  const svc = agentService(db);
+  const svc = agentService(db, { rawDb });
   const access = accessService(db);
   const storage = options.storageService;
   const approvalsSvc = approvalService(db);
@@ -201,15 +210,82 @@ export function agentRoutes(
   });
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
+    rawDb,
   });
-  const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
+  const recovery = recoveryService(db, {
+    enqueueWakeup: heartbeat.wakeup,
+    isRunLive: isHeartbeatRunLiveInThisProcess,
+  });
   const issueApprovalsSvc = issueApprovalService(db);
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
   const instructions = agentInstructionsService();
-  const companySkills = companySkillService(db);
+  const companySkills = companySkillService(db, rawDb);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  // DUR-351: raw-db counterparts used only for the pre-scope lookups below --
+  // never for anything that ends up in a response, so a lookup made on an
+  // unscoped connection is never mistaken for scoped data.
+  const rawSvc = agentService(rawDb);
+  const rawHeartbeat = heartbeatService(rawDb, { pluginWorkerManager: options.pluginWorkerManager });
+  const rawWorkspaceOperations = workspaceOperationService(rawDb);
+  const rawIssuesSvc = issueService(rawDb);
+
+  /** loadAgentAndScope (DUR-351): resolve `req.params[paramName]` to an agent, assert access, then scope. */
+  function scopeFromAgentParam(paramName: string = "id") {
+    return companyScope(rawDb, async (req) => {
+      const id = req.params[paramName] as string;
+      const agent = await rawSvc.getById(id);
+      if (!agent) throw notFound("Agent not found");
+      assertCompanyAccess(req, agent.companyId);
+      return agent.companyId;
+    });
+  }
+
+  // `/agents/me*` routes resolve companyId from the authenticated agent's
+  // own identity -- zero-query, no lookup needed before scope (DUR-277
+  // design doc §1).
+  function scopeFromActorCompany() {
+    return companyScope(rawDb, (req) => {
+      if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
+        throw forbidden("Agent authentication required");
+      }
+      return req.actor.companyId;
+    });
+  }
+
+  /** loadRunAndScope (DUR-351): resolve `req.params.runId` to a heartbeat run, assert access, then scope. */
+  function scopeFromRunParam(lookup: (runId: string) => Promise<{ companyId: string } | null | undefined> = rawHeartbeat.getRun) {
+    return companyScope(rawDb, async (req) => {
+      const runId = req.params.runId as string;
+      const run = await lookup(runId);
+      if (!run) throw notFound("Heartbeat run not found");
+      assertCompanyAccess(req, run.companyId);
+      return run.companyId;
+    });
+  }
+
+  function scopeFromWorkspaceOperationParam() {
+    return companyScope(rawDb, async (req) => {
+      const operationId = req.params.operationId as string;
+      const operation = await rawWorkspaceOperations.getById(operationId);
+      if (!operation) throw notFound("Workspace operation not found");
+      assertCompanyAccess(req, operation.companyId);
+      return operation.companyId;
+    });
+  }
+
+  function scopeFromIssueParam(paramName: string = "issueId") {
+    return companyScope(rawDb, async (req) => {
+      const rawId = req.params[paramName] as string;
+      const identifier = normalizeIssueIdentifier(rawId);
+      const issue = identifier ? await rawIssuesSvc.getByIdentifier(identifier) : await rawIssuesSvc.getById(rawId);
+      if (!issue) throw notFound("Issue not found");
+      assertCompanyAccess(req, issue.companyId);
+      return issue.companyId;
+    });
+  }
 
   async function assertAgentEnvironmentSelection(
     companyId: string,
@@ -1076,7 +1152,11 @@ export function agentRoutes(
       throw unprocessable("Agent shortname lookup requires companyId query parameter");
     }
 
-    const resolved = await svc.resolveByReference(companyId, raw);
+    // DUR-3927: this runs from router.param("id", ...), which fires before any
+    // route's scopeFromAgentParam()/company-scope middleware establishes scope --
+    // must use rawSvc (like the other pre-scope lookups in this file), never the
+    // scope-enforcing `svc`, which throws when called outside runInCompanyScope.
+    const resolved = await rawSvc.resolveByReference(companyId, raw);
     if (resolved.ambiguous) {
       throw conflict("Agent shortname is ambiguous in this company. Use the agent ID.");
     }
@@ -1482,6 +1562,23 @@ export function agentRoutes(
     await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
   }
 
+  // DUR-217: laneAEnabled opts an agent into Lane A (direct-model-call text
+  // endpoint). Board-settable only, same shape as assertCanManageInstructionsPath.
+  async function assertCanManageLaneAFlag(req: Request, targetAgent: { id: string; companyId: string }) {
+    assertCompanyAccess(req, targetAgent.companyId);
+    if (req.actor.type !== "board") {
+      throw forbidden("Only board-authenticated callers can enable Lane A for an agent");
+    }
+    await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
+  }
+
+  // Mirrors assertNoAgentInstructionsConfigMutation: an agent PATCHing its own
+  // config cannot flip its own laneAEnabled flag, even to false.
+  function assertNoAgentLaneAFlagMutation(req: Request, patchData: Record<string, unknown>) {
+    if (req.actor.type !== "agent" || !hasOwn(patchData, "laneAEnabled")) return;
+    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled");
+  }
+
   function assertNoAgentInstructionsConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown> | null | undefined,
@@ -1879,9 +1976,8 @@ export function agentRoutes(
     }
   });
 
-  router.get("/companies/:companyId/adapters/:type/models", async (req, res) => {
+  router.get("/companies/:companyId/adapters/:type/models", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const type = assertKnownAdapterType(req.params.type as string);
     const refresh = typeof req.query.refresh === "string"
       ? ["1", "true", "yes"].includes(req.query.refresh.toLowerCase())
@@ -1903,17 +1999,15 @@ export function agentRoutes(
     res.json(models);
   });
 
-  router.get("/companies/:companyId/adapters/:type/model-profiles", async (req, res) => {
+  router.get("/companies/:companyId/adapters/:type/model-profiles", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const type = assertKnownAdapterType(req.params.type as string);
     const profiles = await listAdapterModelProfiles(type);
     res.json(profiles);
   });
 
-  router.get("/companies/:companyId/adapters/:type/detect-model", async (req, res) => {
+  router.get("/companies/:companyId/adapters/:type/detect-model", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const type = assertKnownAdapterType(req.params.type as string);
 
     const detected = await detectAdapterModel(type);
@@ -1922,6 +2016,7 @@ export function agentRoutes(
 
   router.post(
     "/companies/:companyId/adapters/:type/test-environment",
+    companyScopeFromParam(rawDb),
     validate(testAdapterEnvironmentSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -1996,7 +2091,7 @@ export function agentRoutes(
     },
   );
 
-  router.get("/agents/:id/skills", async (req, res) => {
+  router.get("/agents/:id/skills", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
@@ -2038,6 +2133,7 @@ export function agentRoutes(
 
   router.post(
     "/agents/:id/skills/sync",
+    scopeFromAgentParam(),
     validate(agentSkillSyncSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -2149,9 +2245,8 @@ export function agentRoutes(
     },
   );
 
-  router.get("/companies/:companyId/agents", async (req, res) => {
+  router.get("/companies/:companyId/agents", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const unsupportedQueryParams = Object.keys(req.query).sort();
     if (unsupportedQueryParams.length > 0) {
       res.status(400).json({
@@ -2190,7 +2285,11 @@ export function agentRoutes(
   router.get("/instance/scheduler-heartbeats", async (req, res) => {
     assertInstanceAdmin(req);
 
-    const rows = await db
+    // DUR-351 (DUR-277 §1 category c): genuinely cross-company -- an
+    // instance-admin-only view across every company's agents -- so this
+    // stays on the raw, unscoped db rather than establishing a per-company
+    // scope. No AsyncLocalStorage context is ever needed here.
+    const rows = await rawDb
       .select({
         id: agentsTable.id,
         companyId: agentsTable.companyId,
@@ -2250,17 +2349,15 @@ export function agentRoutes(
     res.json(items);
   });
 
-  router.get("/companies/:companyId/org", async (req, res) => {
+  router.get("/companies/:companyId/org", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const tree = await filterAgentsForActor(req, await svc.orgForCompany(companyId), companyId);
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
     res.json(leanTree);
   });
 
-  router.get("/companies/:companyId/org.svg", async (req, res) => {
+  router.get("/companies/:companyId/org.svg", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const style = (ORG_CHART_STYLES.includes(req.query.style as OrgChartStyle) ? req.query.style : "warmth") as OrgChartStyle;
     const tree = await filterAgentsForActor(req, await svc.orgForCompany(companyId), companyId);
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
@@ -2270,9 +2367,8 @@ export function agentRoutes(
     res.send(svg);
   });
 
-  router.get("/companies/:companyId/org.png", async (req, res) => {
+  router.get("/companies/:companyId/org.png", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const style = (ORG_CHART_STYLES.includes(req.query.style as OrgChartStyle) ? req.query.style : "warmth") as OrgChartStyle;
     const tree = await filterAgentsForActor(req, await svc.orgForCompany(companyId), companyId);
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
@@ -2282,14 +2378,14 @@ export function agentRoutes(
     res.send(png);
   });
 
-  router.get("/companies/:companyId/agent-configurations", async (req, res) => {
+  router.get("/companies/:companyId/agent-configurations", companyScopeFromParam(rawDb), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanReadConfigurations(req, companyId);
     const rows = await svc.list(companyId);
     res.json(rows.map((row) => redactAgentConfiguration(row)));
   });
 
-  router.get("/agents/me", async (req, res) => {
+  router.get("/agents/me", scopeFromActorCompany(), async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId) {
       res.status(401).json({ error: "Agent authentication required" });
       return;
@@ -2323,7 +2419,7 @@ export function agentRoutes(
     res.json(await buildAgentDetail(agent));
   });
 
-  router.get("/agents/me/inbox-lite", async (req, res) => {
+  router.get("/agents/me/inbox-lite", scopeFromActorCompany(), async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
       res.status(401).json({ error: "Agent authentication required" });
       return;
@@ -2369,7 +2465,7 @@ export function agentRoutes(
     );
   });
 
-  router.get("/agents/me/inbox/mine", async (req, res) => {
+  router.get("/agents/me/inbox/mine", scopeFromActorCompany(), async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
       res.status(401).json({ error: "Agent authentication required" });
       return;
@@ -2387,14 +2483,13 @@ export function agentRoutes(
     res.json(rows);
   });
 
-  router.get("/agents/:id", async (req, res) => {
+  router.get("/agents/:id", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, agent.companyId);
     if (!(await assertAgentReadAllowed(req, res, agent))) return;
     const isSelf = req.actor.type === "agent" && req.actor.agentId === id;
     if (isSelf) {
@@ -2426,7 +2521,7 @@ export function agentRoutes(
     res.json(await buildAgentDetail(agent));
   });
 
-  router.get("/agents/:id/configuration", async (req, res) => {
+  router.get("/agents/:id/configuration", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
@@ -2437,7 +2532,7 @@ export function agentRoutes(
     res.json(redactAgentConfiguration(agent));
   });
 
-  router.get("/agents/:id/config-revisions", async (req, res) => {
+  router.get("/agents/:id/config-revisions", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
@@ -2449,7 +2544,7 @@ export function agentRoutes(
     res.json(revisions.map((revision) => redactConfigRevision(revision)));
   });
 
-  router.get("/agents/:id/config-revisions/:revisionId", async (req, res) => {
+  router.get("/agents/:id/config-revisions/:revisionId", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const revisionId = req.params.revisionId as string;
     const agent = await svc.getById(id);
@@ -2466,7 +2561,7 @@ export function agentRoutes(
     res.json(redactConfigRevision(revision));
   });
 
-  router.post("/agents/:id/config-revisions/:revisionId/rollback", async (req, res) => {
+  router.post("/agents/:id/config-revisions/:revisionId/rollback", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const revisionId = req.params.revisionId as string;
     const existing = await svc.getById(id);
@@ -2509,7 +2604,7 @@ export function agentRoutes(
     res.json(updated);
   });
 
-  router.get("/agents/:id/runtime-state", async (req, res) => {
+  router.get("/agents/:id/runtime-state", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -2518,13 +2613,12 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
 
     const state = await heartbeat.getRuntimeState(id);
     res.json(state);
   });
 
-  router.get("/agents/:id/task-sessions", async (req, res) => {
+  router.get("/agents/:id/task-sessions", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -2533,7 +2627,6 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
 
     const sessions = await heartbeat.listTaskSessions(id);
     res.json(
@@ -2544,7 +2637,7 @@ export function agentRoutes(
     );
   });
 
-  router.post("/agents/:id/runtime-state/reset-session", validate(resetAgentSessionSchema), async (req, res) => {
+  router.post("/agents/:id/runtime-state/reset-session", scopeFromAgentParam(), validate(resetAgentSessionSchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -2553,7 +2646,6 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
 
     const taskKey =
       typeof req.body.taskKey === "string" && req.body.taskKey.trim().length > 0
@@ -2574,7 +2666,7 @@ export function agentRoutes(
     res.json(state);
   });
 
-  router.post("/companies/:companyId/agent-hires", validate(createAgentHireSchema), async (req, res) => {
+  router.post("/companies/:companyId/agent-hires", companyScopeFromParam(rawDb), validate(createAgentHireSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
     const sourceIssueIds = parseSourceIssueIds(req.body);
@@ -2782,7 +2874,7 @@ export function agentRoutes(
     );
   });
 
-  router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
+  router.post("/companies/:companyId/agents", companyScopeFromParam(rawDb), validate(createAgentSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
 
@@ -2908,14 +3000,13 @@ export function agentRoutes(
     res.status(201).json(mcpCredentialAdvisories.length > 0 ? { ...agent, mcpCredentialAdvisories } : agent);
   });
 
-  router.patch("/agents/:id/permissions", validate(updateAgentPermissionsSchema), async (req, res) => {
+  router.patch("/agents/:id/permissions", scopeFromAgentParam(), validate(updateAgentPermissionsSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
 
     if (req.actor.type === "agent") {
       const actorAgent = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
@@ -2997,7 +3088,7 @@ export function agentRoutes(
     );
   });
 
-  router.patch("/agents/:id/instructions-path", validate(updateAgentInstructionsPathSchema), async (req, res) => {
+  router.patch("/agents/:id/instructions-path", scopeFromAgentParam(), validate(updateAgentInstructionsPathSchema), async (req, res) => {
     if (req.actor.type !== "board") {
       throw forbidden("Only board-authenticated callers can manage instructions path or bundle configuration");
     }
@@ -3079,7 +3170,7 @@ export function agentRoutes(
     });
   });
 
-  router.get("/agents/:id/instructions-bundle", async (req, res) => {
+  router.get("/agents/:id/instructions-bundle", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3090,7 +3181,7 @@ export function agentRoutes(
     res.json(await instructions.getBundle(existing));
   });
 
-  router.patch("/agents/:id/instructions-bundle", validate(updateAgentInstructionsBundleSchema), async (req, res) => {
+  router.patch("/agents/:id/instructions-bundle", scopeFromAgentParam(), validate(updateAgentInstructionsBundleSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3138,7 +3229,7 @@ export function agentRoutes(
     res.json(bundle);
   });
 
-  router.get("/agents/:id/instructions-bundle/file", async (req, res) => {
+  router.get("/agents/:id/instructions-bundle/file", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3156,7 +3247,7 @@ export function agentRoutes(
     res.json(await instructions.readFile(existing, relativePath));
   });
 
-  router.put("/agents/:id/instructions-bundle/file", validate(upsertAgentInstructionsFileSchema), async (req, res) => {
+  router.put("/agents/:id/instructions-bundle/file", scopeFromAgentParam(), validate(upsertAgentInstructionsFileSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3211,7 +3302,7 @@ export function agentRoutes(
     res.json(result.file);
   });
 
-  router.delete("/agents/:id/instructions-bundle/file", async (req, res) => {
+  router.delete("/agents/:id/instructions-bundle/file", scopeFromAgentParam(), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3245,7 +3336,7 @@ export function agentRoutes(
     res.json(result.bundle);
   });
 
-  router.patch("/agents/:id", validate(updateAgentSchema), async (req, res) => {
+  router.patch("/agents/:id", scopeFromAgentParam(), validate(updateAgentSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -3280,6 +3371,10 @@ export function agentRoutes(
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };
+    assertNoAgentLaneAFlagMutation(req, patchData);
+    if (hasOwn(patchData, "laneAEnabled")) {
+      await assertCanManageLaneAFlag(req, existing);
+    }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
     assertAgentSelfUpdateAllowed(req, patchData);
@@ -3430,7 +3525,7 @@ export function agentRoutes(
     res.json(mcpCredentialAdvisories.length > 0 ? { ...responseAgent, mcpCredentialAdvisories } : responseAgent);
   });
 
-  router.post("/agents/:id/pause", async (req, res) => {
+  router.post("/agents/:id/pause", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
@@ -3456,7 +3551,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/resume", async (req, res) => {
+  router.post("/agents/:id/resume", scopeFromAgentParam(), async (req, res) => {
     assertBoardOrDelegate(req, "agent.resume");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3488,7 +3583,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/clear-error", async (req, res) => {
+  router.post("/agents/:id/clear-error", scopeFromAgentParam(), async (req, res) => {
     assertBoardOrDelegate(req, "agent.clear_error");
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3521,7 +3616,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/approve", async (req, res) => {
+  router.post("/agents/:id/approve", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3575,7 +3670,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.post("/agents/:id/terminate", async (req, res) => {
+  router.post("/agents/:id/terminate", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
@@ -3645,7 +3740,7 @@ export function agentRoutes(
     res.json(agent);
   });
 
-  router.delete("/agents/:id", async (req, res) => {
+  router.delete("/agents/:id", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     if (!(await getAccessibleAgent(req, res, id))) {
@@ -3677,7 +3772,7 @@ export function agentRoutes(
     res.json({ ok: true });
   });
 
-  router.get("/agents/:id/keys", async (req, res) => {
+  router.get("/agents/:id/keys", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await getAccessibleAgent(req, res, id);
@@ -3688,7 +3783,7 @@ export function agentRoutes(
     res.json(keys);
   });
 
-  router.post("/agents/:id/keys", validate(createAgentKeySchema), async (req, res) => {
+  router.post("/agents/:id/keys", scopeFromAgentParam(), validate(createAgentKeySchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await getAccessibleAgent(req, res, id);
@@ -3710,7 +3805,7 @@ export function agentRoutes(
     res.status(201).json(key);
   });
 
-  router.delete("/agents/:id/keys/:keyId", async (req, res) => {
+  router.delete("/agents/:id/keys/:keyId", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const keyId = req.params.keyId as string;
@@ -3769,7 +3864,6 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, agent.companyId);
 
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== id) {
@@ -3822,14 +3916,14 @@ export function agentRoutes(
     res.status(202).json(run);
   };
 
-  router.post("/agents/:id/wakeup", validate(wakeAgentSchema), async (req, res) => {
+  router.post("/agents/:id/wakeup", scopeFromAgentParam(), validate(wakeAgentSchema), async (req, res) => {
     await handleWakeupRoute(req, res, {
       source: req.body.source,
       skippedResponse: (agent) => buildSkippedWakeupResponse(agent, req.body.payload ?? null),
     });
   });
 
-  router.post("/agents/:id/heartbeat/invoke", async (req, res) => {
+  router.post("/agents/:id/heartbeat/invoke", scopeFromAgentParam(), async (req, res) => {
     // Legacy endpoint. Hardcodes `source: "on_demand"` (the prior behavior
     // before the wakeup/invoke convergence). Reads scope fields directly off
     // the body without `validate(wakeAgentSchema)` because callers — including
@@ -3843,7 +3937,6 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    assertCompanyAccess(req, agent.companyId);
 
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== id) {
@@ -3913,7 +4006,7 @@ export function agentRoutes(
     res.status(202).json(run);
   });
 
-  router.post("/agents/:id/claude-login", async (req, res) => {
+  router.post("/agents/:id/claude-login", scopeFromAgentParam(), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
@@ -3922,7 +4015,6 @@ export function agentRoutes(
       return;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
-    assertCompanyAccess(req, agent.companyId);
     if (agent.adapterType !== "claude_local") {
       res.status(400).json({ error: "Login is only supported for claude_local agents" });
       return;
@@ -3945,20 +4037,22 @@ export function agentRoutes(
     res.json(result);
   });
 
-  router.get("/companies/:companyId/heartbeat-runs", async (req, res) => {
+  router.get("/companies/:companyId/heartbeat-runs", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
     const agentId = req.query.agentId as string | undefined;
     const limitParam = req.query.limit as string | undefined;
-    const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : undefined;
+    // Always bound this query: callers that omit `limit` (e.g. AgentDetail's
+    // history view) would otherwise pull and sort an agent's/company's entire
+    // heartbeat_runs history on every load, which is the query pattern behind
+    // the DUR-271 thundering-herd incident.
+    const limit = Math.max(1, Math.min(1000, parseInt(limitParam ?? "", 10) || 200));
     const summary = req.query.summary === "true" || req.query.summary === "1";
     const runs = await heartbeat.list(companyId, agentId, limit, { summary });
     res.json(runs);
   });
 
-  router.get("/companies/:companyId/live-runs", async (req, res) => {
+  router.get("/companies/:companyId/live-runs", companyScopeFromParam(rawDb, assertCompanyAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
 
     // `minCount` is a padding floor for callers that want a minimum number of
     // recent runs to render (e.g. dashboard cards). It must default to 0 so
@@ -4041,14 +4135,13 @@ export function agentRoutes(
     }))));
   });
 
-  router.get("/heartbeat-runs/:runId", async (req, res) => {
+  router.get("/heartbeat-runs/:runId", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Heartbeat run not found" });
       return;
     }
-    assertCompanyAccess(req, run.companyId);
     const retryExhaustedReason = await heartbeat.getRetryExhaustedReason(runId);
     const decoratedRun = heartbeat.decorateActiveRunStatus(run);
     res.json(
@@ -4059,13 +4152,9 @@ export function agentRoutes(
     );
   });
 
-  router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
+  router.post("/heartbeat-runs/:runId/cancel", scopeFromRunParam(), async (req, res) => {
     assertBoard(req);
     const runId = req.params.runId as string;
-    const existing = await heartbeat.getRun(runId);
-    if (existing) {
-      assertCompanyAccess(req, existing.companyId);
-    }
     const run = await heartbeat.cancelRun(runId);
 
     if (run) {
@@ -4083,14 +4172,13 @@ export function agentRoutes(
     res.json(run);
   });
 
-  router.post("/heartbeat-runs/:runId/watchdog-decisions", async (req, res) => {
+  router.post("/heartbeat-runs/:runId/watchdog-decisions", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const existing = await heartbeat.getRun(runId);
     if (!existing) {
       res.status(404).json({ error: "Heartbeat run not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     const decision = typeof req.body?.decision === "string" ? req.body.decision : "";
     if (!["snooze", "continue", "dismissed_false_positive"].includes(decision)) {
       res.status(400).json({ error: "Unsupported watchdog decision" });
@@ -4119,14 +4207,13 @@ export function agentRoutes(
     res.json(row);
   });
 
-  router.get("/heartbeat-runs/:runId/events", async (req, res) => {
+  router.get("/heartbeat-runs/:runId/events", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Heartbeat run not found" });
       return;
     }
-    assertCompanyAccess(req, run.companyId);
 
     const afterSeq = Number(req.query.afterSeq ?? 0);
     const limit = Number(req.query.limit ?? 200);
@@ -4141,14 +4228,13 @@ export function agentRoutes(
     res.json(redactedEvents);
   });
 
-  router.get("/heartbeat-runs/:runId/log", async (req, res) => {
+  router.get("/heartbeat-runs/:runId/log", scopeFromRunParam((runId) => rawHeartbeat.getRunLogAccess(runId)), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRunLogAccess(runId);
     if (!run) {
       res.status(404).json({ error: "Heartbeat run not found" });
       return;
     }
-    assertCompanyAccess(req, run.companyId);
 
     const offset = Number(req.query.offset ?? 0);
     const limitBytes = readRunLogLimitBytes(req.query.limitBytes);
@@ -4161,14 +4247,13 @@ export function agentRoutes(
     res.json(result);
   });
 
-  router.get("/heartbeat-runs/:runId/workspace-operations", async (req, res) => {
+  router.get("/heartbeat-runs/:runId/workspace-operations", scopeFromRunParam(), async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Heartbeat run not found" });
       return;
     }
-    assertCompanyAccess(req, run.companyId);
 
     const context = asRecord(run.contextSnapshot);
     const executionWorkspaceId = asNonEmptyString(context?.executionWorkspaceId);
@@ -4176,14 +4261,13 @@ export function agentRoutes(
     res.json(redactCurrentUserValue(operations, await getCurrentUserRedactionOptions()));
   });
 
-  router.get("/workspace-operations/:operationId/log", async (req, res) => {
+  router.get("/workspace-operations/:operationId/log", scopeFromWorkspaceOperationParam(), async (req, res) => {
     const operationId = req.params.operationId as string;
     const operation = await workspaceOperations.getById(operationId);
     if (!operation) {
       res.status(404).json({ error: "Workspace operation not found" });
       return;
     }
-    assertCompanyAccess(req, operation.companyId);
 
     const offset = Number(req.query.offset ?? 0);
     const limitBytes = readRunLogLimitBytes(req.query.limitBytes);
@@ -4196,7 +4280,7 @@ export function agentRoutes(
     res.json(result);
   });
 
-  router.get("/issues/:issueId/live-runs", async (req, res) => {
+  router.get("/issues/:issueId/live-runs", scopeFromIssueParam(), async (req, res) => {
     const rawId = req.params.issueId as string;
     const issueSvc = issueService(db);
     const identifier = normalizeIssueIdentifier(rawId);
@@ -4205,7 +4289,6 @@ export function agentRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    assertCompanyAccess(req, issue.companyId);
 
     const liveRuns = await db
       .select({
@@ -4250,7 +4333,7 @@ export function agentRoutes(
     }))));
   });
 
-  router.get("/issues/:issueId/active-run", async (req, res) => {
+  router.get("/issues/:issueId/active-run", scopeFromIssueParam(), async (req, res) => {
     const rawId = req.params.issueId as string;
     const issueSvc = issueService(db);
     const identifier = normalizeIssueIdentifier(rawId);
@@ -4259,7 +4342,6 @@ export function agentRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    assertCompanyAccess(req, issue.companyId);
 
     let run = issue.executionRunId ? await heartbeat.getRunIssueSummary(issue.executionRunId) : null;
     if (

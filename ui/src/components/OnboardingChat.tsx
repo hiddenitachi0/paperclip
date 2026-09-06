@@ -74,6 +74,10 @@ function getRunStatusMessage(status: string, agentName: string, elapsed: number)
       return `${agentName}'s run was cancelled`;
     case "timed_out":
       return `${agentName}'s run timed out`;
+    // DUR-296: interrupted by a planned restart, will resume automatically --
+    // must not read as "thinking" (stale) or an error.
+    case "paused_for_restart":
+      return `${agentName}'s run was paused for a platform restart and will resume shortly`;
     default:
       return `${agentName} is thinking...`;
   }

@@ -27,7 +27,7 @@ async function main() {
     || config.databaseUrl
     || `postgres://paperclip:paperclip@127.0.0.1:${config.embeddedPostgresPort}/paperclip`;
 
-  const db = createDb(dbUrl);
+  const db = createDb(dbUrl, "paperclip-script-backfill-dur29-orphaned-interactions");
   const interactionsSvc = issueThreadInteractionService(db);
   const companyId = parseFlag("--company");
   const companyRows = companyId

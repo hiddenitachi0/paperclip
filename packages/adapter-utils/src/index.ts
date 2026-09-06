@@ -74,6 +74,17 @@ export type {
   RuntimeStatusUpdate,
 } from "./runtime-progress.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";
+export { classifyAdapterOutcome } from "./execution-classification.js";
+export type {
+  AdapterCliVerdict,
+  AdapterErrorPattern,
+  ClassifyAdapterOutcomeInput,
+  AdapterOutcome,
+} from "./execution-classification.js";
+export {
+  ADVERSARIAL_SUCCESS_TRANSCRIPT,
+  ADVERSARIAL_SUCCESS_TRANSCRIPT_LINES,
+} from "./execution-classification-test-kit.js";
 // Keep the root adapter-utils entry browser-safe because the UI imports it.
 // The sandbox callback bridge stays available via its dedicated subpath export.
 export type {

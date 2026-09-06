@@ -104,3 +104,51 @@ describe("ApprovalCard ticket identification (DUR-211)", () => {
     expect(text.indexOf("DUR-204")).toBeLessThan(text.indexOf("pull request #131"));
   });
 });
+
+describe("ApprovalCard deploy branch warning (DUR-226)", () => {
+  it("warns in the title row when the commit is not on the project's deploy branch", () => {
+    renderCard({
+      linkedIssues: [issue("DUR-217")],
+      approval: makeApproval({
+        type: "request_board_approval",
+        payload: {
+          title: "DUR-217 merged via PR #143",
+          kind: "deploy",
+          commit: "d55e5704",
+          sourceBranch: "master",
+          deployBranch: "custom",
+        },
+      }),
+    });
+    expect(container.textContent).toContain("Not on custom");
+    expect(container.textContent).toContain("this commit is on master");
+  });
+
+  it("shows a plain 'deploys from' badge when the branch matches, with no warning", () => {
+    renderCard({
+      linkedIssues: [issue("DUR-217")],
+      approval: makeApproval({
+        payload: {
+          title: "DUR-217 merged via PR #143",
+          kind: "deploy",
+          commit: "abc1234",
+          sourceBranch: "custom",
+          deployBranch: "custom",
+        },
+      }),
+    });
+    expect(container.textContent).toContain("Deploys from custom");
+    expect(container.textContent).not.toContain("Not on");
+  });
+
+  it("shows nothing when the backend hasn't resolved a source branch yet", () => {
+    renderCard({
+      linkedIssues: [issue("DUR-217")],
+      approval: makeApproval({
+        payload: { title: "DUR-217 merged via PR #143", kind: "deploy", commit: "abc1234" },
+      }),
+    });
+    expect(container.textContent).not.toContain("Deploys from");
+    expect(container.textContent).not.toContain("Not on");
+  });
+});

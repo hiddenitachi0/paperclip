@@ -3,7 +3,10 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { issueRoutes } from "../routes/issues.js";
 import { createCompanySearchRateLimiter } from "../services/company-search-rate-limit.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 import type { CompanySearchQuery, CompanySearchResponse } from "@paperclipai/shared";
+
+const companyId = "11111111-1111-4111-8111-111111111111";
 
 function createSearchResponse(query: CompanySearchQuery): CompanySearchResponse {
   return {
@@ -26,13 +29,13 @@ describe("company search route rate limiting", () => {
       req.actor = {
         type: "board",
         userId: "user-1",
-        companyIds: ["company-1"],
+        companyIds: [companyId],
         source: "local_implicit",
         isInstanceAdmin: true,
       };
       next();
     });
-    app.use("/api", issueRoutes({} as never, {} as never, {
+    app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as never, {} as never, {
       searchService: { search },
       searchRateLimiter: createCompanySearchRateLimiter({
         maxRequests: 1,
@@ -41,8 +44,8 @@ describe("company search route rate limiting", () => {
       }),
     }));
 
-    await request(app).get("/api/companies/company-1/search?q=wizard").expect(200);
-    const limited = await request(app).get("/api/companies/company-1/search?q=wizard").expect(429);
+    await request(app).get(`/api/companies/${companyId}/search?q=wizard`).expect(200);
+    const limited = await request(app).get(`/api/companies/${companyId}/search?q=wizard`).expect(429);
 
     expect(search).toHaveBeenCalledTimes(1);
     expect(limited.body).toMatchObject({

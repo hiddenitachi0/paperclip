@@ -294,7 +294,7 @@ async function main(argv: string[]): Promise<void> {
   }
   const claudeConfigDir = resolveClaudeConfigDir(process.env, args.claudeConfigDir ?? undefined);
 
-  const db = createDb(databaseUrl);
+  const db = createDb(databaseUrl, "paperclip-script-clean-poisoned-claude-sessions");
   const closableDb = db as typeof db & {
     $client?: { end?: (options?: { timeout?: number }) => Promise<void> };
   };

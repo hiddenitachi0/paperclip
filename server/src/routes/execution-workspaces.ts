@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
-import { issues, projects, projectWorkspaces } from "@paperclipai/db";
+import { createRequestScopedDb, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import {
   findWorkspaceCommandDefinition,
   matchWorkspaceRuntimeServiceToCommand,
@@ -33,44 +33,52 @@ import { assertCanManageExecutionWorkspaceRuntimeServices } from "./workspace-ru
 import { appendWithCap } from "../adapters/utils.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
+import { forbidden, notFound } from "../errors.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 
-export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: PluginWorkerManager } = {}) {
+export function executionWorkspaceRoutes(rawDb: Db, opts: { pluginWorkerManager?: PluginWorkerManager } = {}) {
   const router = Router();
+  // DUR-373 (DUR-277 Wave 2 follow-up): this file's own request-scoped
+  // instance; `rawDb` stays unwrapped for the pre-scope lookups the
+  // (b)-category routes below need before their companyId (and therefore
+  // their scope) is known, and for `access` since its `decide()` calls run
+  // from inside a companyScope resolver -- i.e. before scope is
+  // established -- where the scoped Proxy has no AsyncLocalStorage context
+  // yet. See middleware/company-scope.ts.
+  const db = createRequestScopedDb(rawDb);
   const svc = executionWorkspaceService(db);
-  const access = accessService(db);
+  const rawSvc = executionWorkspaceService(rawDb);
+  const access = accessService(rawDb);
   const workspaceOperationsSvc = workspaceOperationService(db);
   const environmentRuntime = environmentRuntimeService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
 
-  async function assertExecutionWorkspaceReadAllowed(req: Request, res: Response, companyId: string) {
+  async function assertExecutionWorkspaceReadAllowed(req: Request, companyId: string) {
     const decision = await access.decide({
       actor: req.actor,
       action: "company_scope:read",
       resource: { type: "company", companyId },
     });
-    if (decision.allowed) return true;
-    res.status(403).json({ error: "Execution workspaces are outside this actor's authorization boundary" });
-    return false;
+    if (!decision.allowed) throw forbidden("Execution workspaces are outside this actor's authorization boundary");
   }
 
-  async function assertRuntimeManageAllowed(req: Request, res: Response, companyId: string) {
+  async function assertRuntimeManageAllowed(req: Request, companyId: string) {
     const decision = await access.decide({
       actor: req.actor,
       action: "runtime:manage",
       resource: { type: "company", companyId },
     });
-    if (decision.allowed) return true;
-    res.status(403).json({ error: "Runtime service control is outside this actor's authorization boundary" });
-    return false;
+    if (!decision.allowed) throw forbidden("Runtime service control is outside this actor's authorization boundary");
   }
 
-  router.get("/companies/:companyId/execution-workspaces", async (req, res) => {
-    const companyId = req.params.companyId as string;
+  router.get("/companies/:companyId/execution-workspaces", companyScopeFromParam(rawDb, async (req, companyId) => {
     assertCompanyAccess(req, companyId);
-    if (!(await assertExecutionWorkspaceReadAllowed(req, res, companyId))) return;
+    await assertExecutionWorkspaceReadAllowed(req, companyId);
+  }), async (req, res) => {
+    const companyId = req.params.companyId as string;
     const filters = {
       projectId: req.query.projectId as string | undefined,
       projectWorkspaceId: req.query.projectWorkspaceId as string | undefined,
@@ -84,10 +92,11 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     res.json(workspaces);
   });
 
-  router.get("/companies/:companyId/workspace-overview", async (req, res) => {
-    const companyId = req.params.companyId as string;
+  router.get("/companies/:companyId/workspace-overview", companyScopeFromParam(rawDb, async (req, companyId) => {
     assertCompanyAccess(req, companyId);
-    if (!(await assertExecutionWorkspaceReadAllowed(req, res, companyId))) return;
+    await assertExecutionWorkspaceReadAllowed(req, companyId);
+  }), async (req, res) => {
+    const companyId = req.params.companyId as string;
 
     const parsed = workspaceOverviewQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -102,27 +111,30 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     res.json(overview);
   });
 
-  router.get("/execution-workspaces/:id", async (req, res) => {
+  router.get("/execution-workspaces/:id", companyScope(rawDb, async (req) => {
+    const workspace = await rawSvc.getById(req.params.id as string);
+    if (!workspace) throw notFound("Execution workspace not found");
+    assertCompanyAccess(req, workspace.companyId);
+    await assertExecutionWorkspaceReadAllowed(req, workspace.companyId);
+    return workspace.companyId;
+  }), async (req, res) => {
     const id = req.params.id as string;
     const workspace = await svc.getById(id);
     if (!workspace) {
       res.status(404).json({ error: "Execution workspace not found" });
       return;
     }
-    assertCompanyAccess(req, workspace.companyId);
-    if (!(await assertExecutionWorkspaceReadAllowed(req, res, workspace.companyId))) return;
     res.json(workspace);
   });
 
-  router.get("/execution-workspaces/:id/close-readiness", async (req, res) => {
-    const id = req.params.id as string;
-    const workspace = await svc.getById(id);
-    if (!workspace) {
-      res.status(404).json({ error: "Execution workspace not found" });
-      return;
-    }
+  router.get("/execution-workspaces/:id/close-readiness", companyScope(rawDb, async (req) => {
+    const workspace = await rawSvc.getById(req.params.id as string);
+    if (!workspace) throw notFound("Execution workspace not found");
     assertCompanyAccess(req, workspace.companyId);
-    if (!(await assertExecutionWorkspaceReadAllowed(req, res, workspace.companyId))) return;
+    await assertExecutionWorkspaceReadAllowed(req, workspace.companyId);
+    return workspace.companyId;
+  }), async (req, res) => {
+    const id = req.params.id as string;
     const readiness = await svc.getCloseReadiness(id);
     if (!readiness) {
       res.status(404).json({ error: "Execution workspace not found" });
@@ -131,17 +143,28 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     res.json(readiness);
   });
 
-  router.get("/execution-workspaces/:id/workspace-operations", async (req, res) => {
-    const id = req.params.id as string;
-    const workspace = await svc.getById(id);
-    if (!workspace) {
-      res.status(404).json({ error: "Execution workspace not found" });
-      return;
-    }
+  router.get("/execution-workspaces/:id/workspace-operations", companyScope(rawDb, async (req) => {
+    const workspace = await rawSvc.getById(req.params.id as string);
+    if (!workspace) throw notFound("Execution workspace not found");
     assertCompanyAccess(req, workspace.companyId);
-    if (!(await assertExecutionWorkspaceReadAllowed(req, res, workspace.companyId))) return;
+    await assertExecutionWorkspaceReadAllowed(req, workspace.companyId);
+    return workspace.companyId;
+  }), async (req, res) => {
+    const id = req.params.id as string;
     const operations = await workspaceOperationsSvc.listForExecutionWorkspace(id);
     res.json(operations);
+  });
+
+  const runtimeCommandScope = companyScope(rawDb, async (req) => {
+    const action = String(req.params.action ?? "").trim().toLowerCase();
+    if (action !== "start" && action !== "stop" && action !== "restart" && action !== "run") {
+      throw notFound("Workspace command action not found");
+    }
+    const existing = await rawSvc.getById(req.params.id as string);
+    if (!existing) throw notFound("Execution workspace not found");
+    assertCompanyAccess(req, existing.companyId);
+    await assertRuntimeManageAllowed(req, existing.companyId);
+    return existing.companyId;
   });
 
   async function handleExecutionWorkspaceRuntimeCommand(req: Request, res: Response) {
@@ -157,8 +180,6 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
       res.status(404).json({ error: "Execution workspace not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
-    if (!(await assertRuntimeManageAllowed(req, res, existing.companyId))) return;
 
     await assertCanManageExecutionWorkspaceRuntimeServices(db, req, {
       companyId: existing.companyId,
@@ -488,18 +509,22 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     });
   }
 
-  router.post("/execution-workspaces/:id/runtime-services/:action", validate(workspaceRuntimeControlTargetSchema), handleExecutionWorkspaceRuntimeCommand);
-  router.post("/execution-workspaces/:id/runtime-commands/:action", validate(workspaceRuntimeControlTargetSchema), handleExecutionWorkspaceRuntimeCommand);
+  router.post("/execution-workspaces/:id/runtime-services/:action", validate(workspaceRuntimeControlTargetSchema), runtimeCommandScope, handleExecutionWorkspaceRuntimeCommand);
+  router.post("/execution-workspaces/:id/runtime-commands/:action", validate(workspaceRuntimeControlTargetSchema), runtimeCommandScope, handleExecutionWorkspaceRuntimeCommand);
 
-  router.patch("/execution-workspaces/:id", validate(updateExecutionWorkspaceSchema), async (req, res) => {
+  router.patch("/execution-workspaces/:id", validate(updateExecutionWorkspaceSchema), companyScope(rawDb, async (req) => {
+    const existing = await rawSvc.getById(req.params.id as string);
+    if (!existing) throw notFound("Execution workspace not found");
+    assertCompanyAccess(req, existing.companyId);
+    await assertRuntimeManageAllowed(req, existing.companyId);
+    return existing.companyId;
+  }), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Execution workspace not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
-    if (!(await assertRuntimeManageAllowed(req, res, existing.companyId))) return;
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectExecutionWorkspaceCommandPaths({

@@ -264,10 +264,10 @@ describe("parsePiJsonl", () => {
 
 describe("isPiUnknownSessionError", () => {
   it("detects unknown session errors", () => {
-    expect(isPiUnknownSessionError("session not found: s_123", "")).toBe(true);
-    expect(isPiUnknownSessionError("", "unknown session id")).toBe(true);
-    expect(isPiUnknownSessionError("", "no session available")).toBe(true);
-    expect(isPiUnknownSessionError("all good", "")).toBe(false);
-    expect(isPiUnknownSessionError("working fine", "no errors")).toBe(false);
+    expect(isPiUnknownSessionError("session not found: s_123")).toBe(true);
+    expect(isPiUnknownSessionError("unknown session id")).toBe(true);
+    expect(isPiUnknownSessionError("no session available")).toBe(true);
+    expect(isPiUnknownSessionError("all good")).toBe(false);
+    expect(isPiUnknownSessionError("no errors")).toBe(false);
   });
 });

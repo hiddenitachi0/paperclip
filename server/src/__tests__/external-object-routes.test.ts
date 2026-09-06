@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
@@ -48,6 +49,7 @@ function registerRouteMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    isHeartbeatRunLiveInThisProcess: vi.fn(() => false),
     escalationGrantService: () => ({ getForIssue: vi.fn(async () => null) }),
     accessService: () => mockAccessService,
     agentService: () => mockAgentService,
@@ -110,7 +112,7 @@ async function createApp(actor: Express.Request["actor"]) {
     req.actor = actor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, { provider: "local_disk" } as any));
+  app.use("/api", issueRoutes(withFakeCompanyScopeReserve({}) as any, { provider: "local_disk" } as any));
   app.use(errorHandler);
   return app;
 }
@@ -151,6 +153,13 @@ function peerActor(): Express.Request["actor"] {
 }
 
 describe("external object routes", () => {
+  // Dynamically importing routes/issues.ts (a very large file) after vi.resetModules() pays a
+  // real esbuild transform cost the first time this process hits it, and DUR-379's
+  // company-scope wiring adds real reserve/set-claim/reset/release work on top of that for
+  // every request -- see the identical rationale in deploy-completion-gate-routes.test.ts.
+  // Default 5s is too tight for that cold path.
+  vi.setConfig({ testTimeout: 30000 });
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../routes/issues.js");

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import type { BudgetPolicySummary } from "@paperclipai/shared";
+import type { BudgetPolicySummary, BudgetWindowKind } from "@paperclipai/shared";
 import { AlertTriangle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
 import { cn, formatCents } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
 
 function centsInputValue(value: number) {
   return (value / 100).toFixed(2);
@@ -19,7 +20,8 @@ function parseDollarInput(value: string) {
 }
 
 function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
-  return windowKind === "lifetime" ? "Lifetime budget" : "Monthly UTC budget";
+  if (windowKind === "lifetime") return "Lifetime budget";
+  return windowKind === "calendar_day_utc" ? "Daily UTC budget" : "Monthly UTC budget";
 }
 
 function statusTone(status: BudgetPolicySummary["status"]) {
@@ -36,22 +38,32 @@ export function BudgetPolicyCard({
   variant = "card",
 }: {
   summary: BudgetPolicySummary;
-  onSave?: (amountCents: number) => void;
+  onSave?: (amountCents: number, windowKind: BudgetWindowKind) => void;
   isSaving?: boolean;
   compact?: boolean;
   variant?: "card" | "plain";
 }) {
   const [draftBudget, setDraftBudget] = useState(centsInputValue(summary.amount));
+  // Cadence is only choosable while creating the first policy for this scope
+  // -- an existing policy's window is locked, since switching it would orphan
+  // the amount already tracked against the old window's cost_events sum.
+  const isNewPolicy = !summary.policyId;
+  const [draftWindowKind, setDraftWindowKind] = useState<BudgetWindowKind>(summary.windowKind);
 
   useEffect(() => {
     setDraftBudget(centsInputValue(summary.amount));
-  }, [summary.amount]);
+    setDraftWindowKind(summary.windowKind);
+  }, [summary.amount, summary.windowKind]);
 
   const parsedDraft = parseDollarInput(draftBudget);
-  const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
+  const canSave =
+    typeof parsedDraft === "number" &&
+    (parsedDraft !== summary.amount || draftWindowKind !== summary.windowKind) &&
+    Boolean(onSave);
   const progress = summary.amount > 0 ? Math.min(100, summary.utilizationPercent) : 0;
   const StatusIcon = summary.status === "hard_stop" ? ShieldAlert : summary.status === "warning" ? AlertTriangle : Wallet;
   const isPlain = variant === "plain";
+  const displayWindowKind = isNewPolicy ? draftWindowKind : summary.windowKind;
 
   const observedBudgetGrid = isPlain ? (
     <div className="grid gap-6 sm:grid-cols-2">
@@ -127,27 +139,40 @@ export function BudgetPolicyCard({
   ) : null;
 
   const saveSection = onSave ? (
-    <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-end", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
-      <div className="min-w-0 flex-1">
-        <label className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-          Budget (USD)
-        </label>
-        <Input
-          value={draftBudget}
-          onChange={(event) => setDraftBudget(event.target.value)}
-          className="mt-2"
-          inputMode="decimal"
-          placeholder="0.00"
-        />
+    <div className={cn("flex flex-col gap-3", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
+      {isNewPolicy ? (
+        <div className="flex items-center justify-between gap-3">
+          <label className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            Reset daily (instead of monthly)
+          </label>
+          <ToggleSwitch
+            checked={draftWindowKind === "calendar_day_utc"}
+            onCheckedChange={(checked) => setDraftWindowKind(checked ? "calendar_day_utc" : "calendar_month_utc")}
+          />
+        </div>
+      ) : null}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <div className="min-w-0 flex-1">
+          <label className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            Budget (USD)
+          </label>
+          <Input
+            value={draftBudget}
+            onChange={(event) => setDraftBudget(event.target.value)}
+            className="mt-2"
+            inputMode="decimal"
+            placeholder="0.00"
+          />
+        </div>
+        <Button
+          onClick={() => {
+            if (typeof parsedDraft === "number" && onSave) onSave(parsedDraft, draftWindowKind);
+          }}
+          disabled={!canSave || isSaving || parsedDraft === null}
+        >
+          {isSaving ? "Saving..." : summary.amount > 0 ? "Update budget" : "Set budget"}
+        </Button>
       </div>
-      <Button
-        onClick={() => {
-          if (typeof parsedDraft === "number" && onSave) onSave(parsedDraft);
-        }}
-        disabled={!canSave || isSaving || parsedDraft === null}
-      >
-        {isSaving ? "Saving..." : summary.amount > 0 ? "Update budget" : "Set budget"}
-      </Button>
     </div>
   ) : null;
 
@@ -160,7 +185,7 @@ export function BudgetPolicyCard({
               {summary.scopeType}
             </div>
             <div className="mt-2 text-xl font-semibold">{summary.scopeName}</div>
-            <div className="mt-2 text-sm text-muted-foreground">{windowLabel(summary.windowKind)}</div>
+            <div className="mt-2 text-sm text-muted-foreground">{windowLabel(displayWindowKind)}</div>
           </div>
           <div
             className={cn(
@@ -197,7 +222,7 @@ export function BudgetPolicyCard({
               {summary.scopeType}
             </div>
             <CardTitle className="mt-1 text-base">{summary.scopeName}</CardTitle>
-            <CardDescription className="mt-1">{windowLabel(summary.windowKind)}</CardDescription>
+            <CardDescription className="mt-1">{windowLabel(displayWindowKind)}</CardDescription>
           </div>
           <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.18em]", statusTone(summary.status))}>
             <StatusIcon className="h-3.5 w-3.5" />

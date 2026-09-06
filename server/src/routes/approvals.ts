@@ -1,10 +1,11 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { companies, heartbeatRuns, issues, projects, type Db } from "@paperclipai/db";
+import { and, eq, inArray } from "drizzle-orm";
+import { companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
   deployRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   formatApprovalTechnicalReference,
   formatApprovalTitle,
   type InstructionsChangeRequestPayload,
@@ -25,19 +26,26 @@ import {
   agentService,
   escalationGrantService,
   heartbeatService,
+  isAgentInSubtree,
   issueApprovalService,
   issueThreadInteractionService,
   logActivity,
   secretService,
 } from "../services/index.js";
-import { resolveProjectDeployBranches, type ProjectDeployBranches } from "../services/deploy-branches.js";
+import {
+  resolveProjectDeployBranches,
+  resolveProjectDeployBranchesByProjectId,
+  type ProjectDeployBranches,
+} from "../services/deploy-branches.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
-import { conflict, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
+import { ghFetch, gitHubApiBase } from "../services/github-fetch.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -90,6 +98,213 @@ async function assertDeployRequestProjectExists(
   }
 }
 
+function parseGitHubRepoFromUrl(repoUrl: string | null | undefined): { owner: string; name: string } | null {
+  if (!repoUrl) return null;
+  try {
+    const parsed = new URL(repoUrl);
+    if (parsed.protocol !== "https:") return null;
+    const host = parsed.host.toLowerCase();
+    if (host !== "github.com" && host !== "www.github.com") return null;
+    const [owner, rawName] = parsed.pathname.replace(/^\/+/, "").split("/");
+    if (!owner || !rawName) return null;
+    return { owner, name: rawName.replace(/\.git$/i, "") };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * DUR-227: DUR-221 near-miss -- a deploy approval was filed for commit d55e5704, which
+ * lived on master, while the project's declared deploy branch was custom. Nothing checked
+ * that the commit was even reachable from the deploy branch before it reached the
+ * operator's approval queue; the card looked identical to a normal, safe deploy. Confirms
+ * via GitHub's compare API (the same mechanism merge-deploy-visibility.ts already uses to
+ * check merge status) that `payload.commit` is actually `git merge-base --is-ancestor
+ * <commit> <deployBranch>` before the approval can be filed.
+ *
+ * base=commit, head=deployBranch: deployBranch's compare `status` is "ahead" or
+ * "identical" exactly when commit is an ancestor of (or equal to) deployBranch --
+ * "behind"/"diverged" mean the branch does not contain that commit.
+ *
+ * Deliberately fails OPEN whenever ancestry can't be determined at all (no pinned commit
+ * on the payload, project declares no deploy branch, the workspace isn't a github.com repo,
+ * GitHub is unreachable, or the response can't be parsed) -- mirrors the "unknown must
+ * never be treated as evidence" rule merge-deploy-visibility.ts already established for the
+ * same GitHub-availability tradeoff. Only a GitHub-confirmed "behind"/"diverged" ever
+ * blocks filing.
+ */
+async function assertDeployCommitIsAncestorOfDeployBranch(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string },
+  deps: {
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+  } = {},
+) {
+  const commit = payload.commit?.trim();
+  if (!commit) return;
+
+  const branches = await resolveProjectDeployBranchesByProjectId(db, payload.projectId);
+  const deployBranch = branches?.deployBranch;
+  if (!deployBranch) return;
+
+  const workspaceRow = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(
+      and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)),
+    )
+    .then((rows) => rows[0] ?? null);
+  const repo = parseGitHubRepoFromUrl(workspaceRow?.repoUrl);
+  if (!repo) return;
+
+  const fetchImpl = deps.fetchImpl ?? ghFetch;
+  const resolveGitHubToken =
+    deps.resolveGitHubToken ??
+    ((cid: string) =>
+      secretService(db).resolveGitHubToken(cid, {
+        consumerType: "system",
+        consumerId: "deploy-approval-ancestry-precheck",
+      }));
+  const token = await resolveGitHubToken(companyId).catch(() => null);
+
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "paperclip-deploy-approval-ancestry-precheck",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(
+      `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/compare/${encodeURIComponent(commit)}...${encodeURIComponent(deployBranch)}`,
+      { headers },
+    );
+  } catch {
+    return;
+  }
+  if (!response.ok) return;
+
+  let body: Record<string, unknown> | null = null;
+  try {
+    body = (await response.json()) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const status = typeof body?.status === "string" ? body.status : null;
+  if (status !== "behind" && status !== "diverged") return;
+
+  const actualBranches = await lookupBranchesForCommitHead(fetchImpl, headers, repo, commit);
+  const locationClause =
+    actualBranches.length > 0
+      ? `it is on ${actualBranches.map((b) => `"${b}"`).join(", ")} instead`
+      : "confirm which branch this commit actually lives on before filing the approval";
+
+  throw unprocessable(
+    `Deploy approval targets commit ${commit}, which is not reachable from "${deployBranch}", the branch ` +
+      `${repo.owner}/${repo.name} deploys from -- ${locationClause}. Deploying it would not ship what ` +
+      "production expects.",
+    { commit, deployBranch, repo: `${repo.owner}/${repo.name}`, compareStatus: status, actualBranches },
+  );
+}
+
+/**
+ * Best-effort lookup of which branch(es) `commit` is the tip of, so the rejection error can
+ * name where the commit actually lives, not just where it doesn't. Uses GitHub's
+ * "branches-where-head" endpoint, which only reports branches where `commit` is the current
+ * HEAD -- it won't find every branch that merely contains the commit as an ancestor, but it
+ * reliably catches the DUR-221 shape (a deploy approval filed right after the commit landed
+ * as the tip of the wrong branch). Never throws; returns [] on any failure so this stays a
+ * pure error-message enhancement and never affects whether filing is blocked.
+ */
+async function lookupBranchesForCommitHead(
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+  headers: Record<string, string>,
+  repo: { owner: string; name: string },
+  commit: string,
+): Promise<string[]> {
+  try {
+    const response = await fetchImpl(
+      `${gitHubApiBase("github.com")}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits/${encodeURIComponent(commit)}/branches-where-head`,
+      { headers },
+    );
+    if (!response.ok) return [];
+    const body = (await response.json()) as unknown;
+    if (!Array.isArray(body)) return [];
+    return body
+      .map((entry) => (entry && typeof entry === "object" ? (entry as Record<string, unknown>).name : null))
+      .filter((name): name is string => typeof name === "string");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * DUR-284: best-effort resolution of `payload.sourceBranch`/`payload.deployBranch`
+ * for a `kind:"deploy"` approval, so DUR-226's UI has real data for its "Deploys
+ * from <branch>" badge and mismatch warning instead of rendering nothing. Runs
+ * after assertDeployCommitIsAncestorOfDeployBranch already confirmed (or
+ * deliberately failed open on) the commit -- never throws, and leaves a field
+ * unset rather than guess when it can't be determined via GitHub.
+ *
+ * `deployBranch` is the project's declared deploy branch (same lookup the
+ * ancestry guard uses). `sourceBranch` is the branch GitHub reports the pinned
+ * commit is the current tip of; when that can't be pinned down (commit isn't a
+ * branch tip, no GitHub repo, GitHub unreachable) it's left unset rather than
+ * assumed equal to deployBranch, even though the ancestry guard makes that the
+ * common case.
+ */
+async function resolveDeployApprovalBranchStamp(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string },
+  deps: {
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+  } = {},
+): Promise<{ sourceBranch?: string; deployBranch?: string }> {
+  const branches = await resolveProjectDeployBranchesByProjectId(db, payload.projectId);
+  const deployBranch = branches?.deployBranch;
+  if (!deployBranch) return {};
+
+  const commit = payload.commit?.trim();
+  if (!commit) return { deployBranch };
+
+  const workspaceRow = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(
+      and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)),
+    )
+    .then((rows) => rows[0] ?? null);
+  const repo = parseGitHubRepoFromUrl(workspaceRow?.repoUrl);
+  if (!repo) return { deployBranch };
+
+  const fetchImpl = deps.fetchImpl ?? ghFetch;
+  const resolveGitHubToken =
+    deps.resolveGitHubToken ??
+    ((cid: string) =>
+      secretService(db).resolveGitHubToken(cid, {
+        consumerType: "system",
+        consumerId: "deploy-approval-branch-stamp",
+      }));
+  const token = await resolveGitHubToken(companyId).catch(() => null);
+
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "paperclip-deploy-approval-branch-stamp",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const actualBranches = await lookupBranchesForCommitHead(fetchImpl, headers, repo, commit);
+  if (actualBranches.includes(deployBranch)) return { deployBranch, sourceBranch: deployBranch };
+  if (actualBranches.length > 0) return { deployBranch, sourceBranch: actualBranches[0] };
+  return { deployBranch };
+}
+
 /**
  * `request_board_approval` approvals whose payload carries `kind:"model_boost"`
  * follow the temporary model/effort escalation convention (DUR-31) and must
@@ -135,6 +350,17 @@ function isToolGrantRequestApproval(type: unknown, payload: Record<string, unkno
  */
 function isInstructionsChangeRequestApproval(type: unknown, payload: Record<string, unknown>) {
   return type === "request_board_approval" && payload.kind === "instructions_change";
+}
+
+/**
+ * `request_board_approval` approvals whose payload carries `kind:"feature_launch"`
+ * are DUR-313 (DUR-299 point 2)'s mandatory launch card: the one plain-language
+ * approval an operator makes for a finished, user-facing feature, instead of the
+ * merges that preceded it. Approving one is the only thing that clears
+ * evaluateFeatureLaunchDoneGate for an issue marked `featureLaunch`.
+ */
+function isFeatureLaunchRequestApproval(type: unknown, payload: Record<string, unknown>) {
+  return type === "request_board_approval" && payload.kind === "feature_launch";
 }
 
 /**
@@ -224,6 +450,12 @@ async function findDuplicateOpenApproval(
     return existing
       ? { id: existing.id, targetDescription: "an instructions change proposal for this agent" }
       : null;
+  }
+  if (isFeatureLaunchRequestApproval(type, payload)) {
+    const issueId = typeof payload.issueId === "string" ? payload.issueId : "";
+    if (!issueId) return null;
+    const existing = await svc.findOpenFeatureLaunchApproval(companyId, issueId);
+    return existing ? { id: existing.id, targetDescription: "a feature launch card for this issue" } : null;
   }
   return null;
 }
@@ -319,15 +551,182 @@ function appendToolGrantCapabilitySummary(payload: Record<string, unknown>) {
   payload.risks = existingRisks.includes(capability) ? existingRisks : [...existingRisks, capability];
 }
 
+/**
+ * DUR-237: `payload.mergeCommitSha` on a `kind:"merge_pr"` approval is read by
+ * deploy-completion-gate.ts as proof the underlying PR merged as a specific commit --
+ * ground truth that's only trustworthy when merge-deploy-visibility.ts wrote it after
+ * independently verifying the merge via GitHub's API (see that file's markNoted). The
+ * create/resubmit payload is otherwise caller-controlled, so without this, a requester
+ * could hand-write any sha it likes -- including one already known to be live from an
+ * unrelated deploy -- and short-circuit the completion gate without this approval's PR
+ * ever merging. Always strip it on the way in; the backfill job's own `db.update` is the
+ * only writer allowed to set it.
+ */
+function stripUntrustedMergeCommitSha(payload: Record<string, unknown>) {
+  if (payload.kind === "merge_pr") delete payload.mergeCommitSha;
+}
+
+function parseOwnerSlashRepo(repo: unknown): { owner: string; name: string } | null {
+  if (typeof repo !== "string") return null;
+  const [owner, rawName] = repo.split("/");
+  if (!owner || !rawName) return null;
+  return { owner, name: rawName.replace(/\.git$/i, "") };
+}
+
+async function resolveProjectIdForIssues(db: Db, issueIds: string[]): Promise<string | null> {
+  for (const issueId of issueIds) {
+    const row = await db
+      .select({ projectId: issues.projectId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    if (row?.projectId) return row.projectId;
+  }
+  return null;
+}
+
+async function resolveProjectPrimaryRepo(
+  db: Db,
+  companyId: string,
+  projectId: string,
+): Promise<{ owner: string; name: string } | null> {
+  const row = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(
+      and(
+        eq(projectWorkspaces.projectId, projectId),
+        eq(projectWorkspaces.companyId, companyId),
+        eq(projectWorkspaces.isPrimary, true),
+      ),
+    )
+    .then((rows) => rows[0] ?? null);
+  return parseGitHubRepoFromUrl(row?.repoUrl);
+}
+
+/**
+ * DUR-252 security review finding #1: `payload.repo`/`payload.prNumber` on a `kind:"merge_pr"`
+ * approval are caller-supplied and, before this, never cross-checked against the project's own
+ * registered GitHub repo anywhere in the pipeline -- `merge-deploy-visibility.ts` hits whatever
+ * repo the payload names directly to verify a PR merged. Only rejects on a *proven* mismatch
+ * (both the claimed repo and the project's registered repo resolve, and they disagree) -- an
+ * unresolvable claim or project is let through unchanged, the same fail-open-on-unknown posture
+ * `appendMergeConsequenceSentence` above already takes, since this is a filing-time UX/integrity
+ * check, not the fail-closed ancestry gate in deploy-carried-issues.ts.
+ *
+ * This alone does not close the finding's full misuse scenario (an attacker can still cite an
+ * unrelated already-merged PR *within the correct repo*) -- see `originalIssueIds` below, which
+ * is what actually anchors an approval to the issue(s) it was filed for regardless of repo.
+ */
+async function assertMergePrRepoMatchesProject(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  payload: Record<string, unknown>,
+) {
+  if (payload.kind !== "merge_pr") return;
+  const claimed = parseOwnerSlashRepo(payload.repo);
+  if (!claimed) return;
+  const projectId = await resolveProjectIdForIssues(db, issueIds);
+  if (!projectId) return;
+  const registered = await resolveProjectPrimaryRepo(db, companyId, projectId);
+  if (!registered) return;
+  if (
+    claimed.owner.toLowerCase() !== registered.owner.toLowerCase() ||
+    claimed.name.toLowerCase() !== registered.name.toLowerCase()
+  ) {
+    throw unprocessable(
+      `"${payload.repo}" does not match this project's registered GitHub repository ` +
+        `(${registered.owner}/${registered.name}) -- a merge_pr approval must reference the project's own repo.`,
+      { claimedRepo: payload.repo, registeredRepo: `${registered.owner}/${registered.name}` },
+    );
+  }
+}
+
+/**
+ * DUR-252 security review finding: the ONLY thing anchoring a `merge_pr` approval to a
+ * particular issue, once approved, is the mutable `issueApprovals` link table -- and
+ * `assertCanManageIssueApprovalLinks` lets whichever agent requested an approval relink it to
+ * ANY issue in the company at any later time. `deploy-carried-issues.ts`'s sweep trusts that
+ * link alone to auto-close an issue with zero further authorization check. Stamping the issue
+ * id(s) an approval was actually filed for, once, at creation, and never letting the request
+ * body overwrite it afterward (mirrors `stripUntrustedMergeCommitSha`'s "only one code path may
+ * ever write this" pattern) gives `listCarriedCandidateIssues` an immutable ground truth to
+ * check a candidate issue against instead of trusting the link table by itself.
+ */
+function stampOriginalIssueIds(payload: Record<string, unknown>, issueIds: string[]) {
+  if (payload.kind !== "merge_pr") return;
+  delete payload.originalIssueIds;
+  payload.originalIssueIds = issueIds;
+}
+
+/**
+ * DUR-923 follow-up to DUR-252's security review of PR #169 (DUR-238 deploy-carried-issue
+ * auto-close): `originalIssueIds` (stamped above) faithfully proves "this approval was filed
+ * claiming issue X" but never that the filer had any provable connection to X's own work --
+ * `POST /companies/:id/approvals` only gates *who may file a merge_pr approval at all*
+ * (`merges:request`), not *which issues a given filer may name*. Once DUR-238 merges, an
+ * approved+deployed merge_pr approval naming issue X auto-closes X with zero action from X's
+ * actual assignee, so a filer naming an issue it has no real connection to can force a
+ * bogus auto-close.
+ *
+ * A board/user actor is left unconstrained: they're the trust anchor DUR-238's auto-close
+ * ultimately defers to anyway (mandatory human approval of the merge_pr request itself), and
+ * humans routinely file on behalf of the company at large. For an agent filer, an issue is
+ * "relevant" if the agent is its assignee, the issue has no assignee yet, or the assignee is
+ * one of the filer's own reports -- mirrors the "allow_manager_chain" convention `decide()`
+ * already uses for `tasks:manage_active_checkouts` (the same "who may act on a report's issue"
+ * question), via the same `isAgentInSubtree` reportsTo walk rather than a second implementation
+ * of it. Fails closed (unlike `assertMergePrRepoMatchesProject`'s fail-open UX check): an
+ * issueId that doesn't even resolve in this company is never "relevant" to anything, and
+ * `issueApprovalsSvc.linkManyForApproval` would reject it right after this anyway.
+ */
+async function assertMergePrIssueIdsAreRelevant(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  actor: { actorType: "agent" | "user"; actorId: string },
+) {
+  if (actor.actorType !== "agent" || issueIds.length === 0) return;
+  const rows = await db
+    .select({ id: issues.id, companyId: issues.companyId, assigneeAgentId: issues.assigneeAgentId })
+    .from(issues)
+    .where(inArray(issues.id, issueIds));
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  for (const issueId of issueIds) {
+    const issue = byId.get(issueId);
+    if (!issue || issue.companyId !== companyId) {
+      throw unprocessable(
+        `Issue ${issueId} does not exist in this company -- a merge_pr approval may only name issues the filer has provable relevance to.`,
+        { issueId },
+      );
+    }
+    if (!issue.assigneeAgentId) continue;
+    if (issue.assigneeAgentId === actor.actorId) continue;
+    if (await isAgentInSubtree(db, companyId, actor.actorId, issue.assigneeAgentId)) continue;
+    throw unprocessable(
+      `Issue ${issueId} is assigned to a different agent this filer neither is nor manages -- a merge_pr approval may only name issues the filer owns or manages.`,
+      { issueId, filedByAgentId: actor.actorId },
+    );
+  }
+}
+
 async function normalizeRequestBoardApprovalPayload(
   db: Db,
   companyId: string,
   issueIds: string[],
   payload: Record<string, unknown>,
+  actor: { actorType: "agent" | "user"; actorId: string },
   mergePrDeployBranches: ProjectDeployBranches | null = null,
 ) {
   appendMergeConsequenceSentence(payload, mergePrDeployBranches);
   appendToolGrantCapabilitySummary(payload);
+  stripUntrustedMergeCommitSha(payload);
+  await assertMergePrRepoMatchesProject(db, companyId, issueIds, payload);
+  if (payload.kind === "merge_pr") {
+    await assertMergePrIssueIdsAreRelevant(db, companyId, issueIds, actor);
+  }
+  stampOriginalIssueIds(payload, issueIds);
   if (typeof payload.title !== "string" || !payload.title.trim()) return payload;
   const projectLabel = await resolveApprovalProjectLabel(db, companyId, issueIds);
   payload.title = formatApprovalTitle(projectLabel, payload.title);
@@ -373,41 +772,78 @@ function describeApprovalMutationForEscalation(body: unknown): string {
 }
 
 export function approvalRoutes(
-  db: Db,
+  rawDb: Db,
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
 ) {
   const router = Router();
+  // DUR-394 (DUR-277 Wave 3): this file's own request-scoped instance; rawDb
+  // stays unwrapped for the pre-scope approval lookups and access decisions
+  // below (see middleware/company-scope.ts).
+  const db = createRequestScopedDb(rawDb);
   const svc = approvalService(db);
   const access = accessService(db);
-  const agentsSvc = agentService(db);
+  const agentsSvc = agentService(db, { rawDb });
   const instructionsSvc = agentInstructionsService();
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const interactionsSvc = issueThreadInteractionService(db);
-  const secretsSvc = secretService(db);
+  const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
-  async function requireApprovalAccess(req: Request, id: string) {
-    const approval = await svc.getById(id);
-    if (!approval) {
-      return null;
-    }
-    assertCompanyAccess(req, approval.companyId);
-    return approval;
+  const rawSvc = approvalService(rawDb);
+  const rawAccess = accessService(rawDb);
+
+  /** Pre-scope companyId resolution (b): look up the approval by :id, 404 if missing. */
+  async function resolveApprovalCompanyId(req: Request): Promise<string> {
+    const id = req.params.id as string;
+    const approval = await rawSvc.getById(id);
+    if (!approval) throw notFound("Approval not found");
+    return approval.companyId;
   }
 
-  async function assertApprovalAccessAllowed(req: Request, res: any, companyId: string) {
-    const decision = await access.decide({
+  /** The plain company-membership check every approval route requires. */
+  function checkCompanyAccess(req: Request, companyId: string) {
+    assertCompanyAccess(req, companyId);
+  }
+
+  /** Board-only routes (approve/reject/request-revision). */
+  function checkBoardCompanyAccess(req: Request, companyId: string) {
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+  }
+
+  /**
+   * Read routes additionally require the `company_scope:read` policy
+   * decision on top of plain company membership (DUR-146 Stage 1's
+   * `assertApprovalAccessAllowed`, folded into the pre-scope checkAccess
+   * callback so an unauthorized read is refused before scope is ever
+   * established -- see middleware/company-scope.ts's checkAccess doc).
+   */
+  async function checkApprovalReadAccess(req: Request, companyId: string) {
+    assertCompanyAccess(req, companyId);
+    const decision = await rawAccess.decide({
       actor: req.actor,
       action: "company_scope:read",
       resource: { type: "company", companyId },
     });
-    if (decision.allowed) return true;
-    res.status(403).json({ error: "Approvals are outside this actor's authorization boundary" });
-    return false;
+    if (!decision.allowed) {
+      throw forbidden("Approvals are outside this actor's authorization boundary");
+    }
+  }
+
+  function scopeFromCompanyIdParam(checkAccess: (req: Request, companyId: string) => void | Promise<void>) {
+    return companyScopeFromParam(rawDb, checkAccess);
+  }
+
+  function scopeFromApprovalIdParam(checkAccess: (req: Request, companyId: string) => void | Promise<void>) {
+    return companyScope(rawDb, async (req) => {
+      const companyId = await resolveApprovalCompanyId(req);
+      await checkAccess(req, companyId);
+      return companyId;
+    });
   }
 
   // DUR-146 Stage 1: filing a deploy or merge request approval requires the
@@ -495,31 +931,29 @@ export function approvalRoutes(
     return false;
   }
 
-  router.get("/companies/:companyId/approvals", async (req, res) => {
+  router.get("/companies/:companyId/approvals", scopeFromCompanyIdParam(checkApprovalReadAccess), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
     res.json(result.map((approval) => redactApprovalPayload(approval)));
   });
 
-  router.get("/approvals/:id", async (req, res) => {
+  router.get("/approvals/:id", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
     const id = req.params.id as string;
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, approval.companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, approval.companyId))) return;
     res.json(redactApprovalPayload(approval));
   });
 
-  router.post("/companies/:companyId/approvals", validate(createApprovalSchema), async (req, res) => {
+  router.post(
+    "/companies/:companyId/approvals",
+    scopeFromCompanyIdParam(checkApprovalReadAccess),
+    validate(createApprovalSchema),
+    async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
     if (
       !(await assertApprovalMutationAllowedByRunContext(req, res, companyId, {
         describeBlockedAction: () => describeApprovalMutationForEscalation(req.body),
@@ -536,6 +970,13 @@ export function approvalRoutes(
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
       const deployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
       await assertDeployRequestProjectExists(db, companyId, deployPayload);
+      await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
+      const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
+      approvalInput.payload = deployRequestPayloadSchema.parse({
+        ...deployPayload,
+        sourceBranch: branchStamp.sourceBranch,
+        deployBranch: branchStamp.deployBranch,
+      });
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "merges:request"))) return;
@@ -609,6 +1050,30 @@ export function approvalRoutes(
         ),
       });
     }
+    if (isFeatureLaunchRequestApproval(approvalInput.type, approvalInput.payload)) {
+      const launchPayload = featureLaunchRequestPayloadSchema.parse(approvalInput.payload);
+      // Must be linked to EXACTLY the issue it names, and nothing else. linkManyForApproval
+      // links this approval to every id in issueIds, and evaluateFeatureLaunchDoneGate treats
+      // any approved feature_launch approval linked to an issue as covering that issue -- it
+      // never cross-checks payload.issueId. A loose `.includes()` check here would let a filer
+      // pad issueIds with an extra issue (e.g. issueIds: [X, Y] with payload.issueId: X) and
+      // get Y silently approved as a launch riding on a card the operator only reviewed for X.
+      if (uniqueIssueIds.length !== 1 || uniqueIssueIds[0] !== launchPayload.issueId) {
+        res.status(422).json({
+          error: "A feature launch approval must be linked (issueIds) to exactly the one issue named in payload.issueId",
+        });
+        return;
+      }
+      const targetIssue = await db
+        .select({ id: issues.id, companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, launchPayload.issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!targetIssue || targetIssue.companyId !== companyId) {
+        res.status(422).json({ error: "Feature launch approval must target an issue in this company" });
+        return;
+      }
+    }
     let mergePrDeployBranches: ProjectDeployBranches | null = null;
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
       const base =
@@ -638,6 +1103,7 @@ export function approvalRoutes(
         companyId,
         uniqueIssueIds,
         normalizedPayload,
+        actor,
         mergePrDeployBranches,
       );
     }
@@ -701,26 +1167,18 @@ export function approvalRoutes(
     res.status(201).json(redactApprovalPayload(approval));
   });
 
-  router.get("/approvals/:id/issues", async (req, res) => {
+  router.get("/approvals/:id/issues", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
     const id = req.params.id as string;
-    const approval = await svc.getById(id);
-    if (!approval) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
-    assertCompanyAccess(req, approval.companyId);
-    if (!(await assertApprovalAccessAllowed(req, res, approval.companyId))) return;
     const issues = await issueApprovalsSvc.listIssuesForApproval(id);
     res.json(issues);
   });
 
-  router.post("/approvals/:id/approve", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
+  router.post(
+    "/approvals/:id/approve",
+    scopeFromApprovalIdParam(checkBoardCompanyAccess),
+    validate(resolveApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
-    if (!(await requireApprovalAccess(req, id))) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied, toolGrant, instructionsChange } = await svc.approve(
       id,
@@ -873,13 +1331,12 @@ export function approvalRoutes(
     res.json(redactApprovalPayload(approval));
   });
 
-  router.post("/approvals/:id/reject", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
+  router.post(
+    "/approvals/:id/reject",
+    scopeFromApprovalIdParam(checkBoardCompanyAccess),
+    validate(resolveApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
-    if (!(await requireApprovalAccess(req, id))) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
 
@@ -906,14 +1363,10 @@ export function approvalRoutes(
 
   router.post(
     "/approvals/:id/request-revision",
+    scopeFromApprovalIdParam(checkBoardCompanyAccess),
     validate(requestApprovalRevisionSchema),
     async (req, res) => {
-      assertBoard(req);
       const id = req.params.id as string;
-      if (!(await requireApprovalAccess(req, id))) {
-        res.status(404).json({ error: "Approval not found" });
-        return;
-      }
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
 
@@ -931,14 +1384,17 @@ export function approvalRoutes(
     },
   );
 
-  router.post("/approvals/:id/resubmit", validate(resubmitApprovalSchema), async (req, res) => {
+  router.post(
+    "/approvals/:id/resubmit",
+    scopeFromApprovalIdParam(checkCompanyAccess),
+    validate(resubmitApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     if (
       !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
         describeBlockedAction: () => "resubmit an approval",
@@ -954,6 +1410,13 @@ export function approvalRoutes(
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
       const deployPayload = deployRequestPayloadSchema.parse(req.body.payload);
       await assertDeployRequestProjectExists(db, existing.companyId, deployPayload);
+      await assertDeployCommitIsAncestorOfDeployBranch(db, existing.companyId, deployPayload);
+      const branchStamp = await resolveDeployApprovalBranchStamp(db, existing.companyId, deployPayload);
+      req.body.payload = deployRequestPayloadSchema.parse({
+        ...deployPayload,
+        sourceBranch: branchStamp.sourceBranch,
+        deployBranch: branchStamp.deployBranch,
+      });
     }
     let normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
@@ -975,6 +1438,28 @@ export function approvalRoutes(
       if (typeof existingKind === "string" && normalizedPayload.kind !== existingKind) {
         res.status(422).json({ error: "Cannot change an approval's payload kind on resubmit" });
         return;
+      }
+      // DUR-237: resubmit's payload is just as caller-controlled as create's -- see
+      // stripUntrustedMergeCommitSha's docblock for why this can never come from the request body.
+      stripUntrustedMergeCommitSha(normalizedPayload);
+      if (normalizedPayload.kind === "merge_pr") {
+        // DUR-252: resubmit is exactly as caller-controlled as create -- re-validate any new
+        // `repo` claim, and, critically, never let resubmit overwrite `originalIssueIds` with
+        // anything but what creation already anchored (stampOriginalIssueIds ignores its
+        // issueIds argument's provenance and always wins, so feeding it the EXISTING persisted
+        // value here rather than re-deriving from the current, mutable issueApprovals links is
+        // what keeps this immutable across a relink).
+        const existingOriginalIssueIds = (existing.payload as Record<string, unknown> | null)
+          ?.originalIssueIds;
+        const anchorIssueIds = Array.isArray(existingOriginalIssueIds)
+          ? existingOriginalIssueIds.filter((value): value is string => typeof value === "string")
+          : [];
+        await assertMergePrRepoMatchesProject(db, existing.companyId, anchorIssueIds, normalizedPayload);
+        // DUR-923: re-validate relevance on resubmit too -- the issue's assignee (or the
+        // filer's place in the reporting chain) can change between create and resubmit, and
+        // resubmit is exactly as caller-controlled as create per the DUR-252 comment above.
+        await assertMergePrIssueIdsAreRelevant(db, existing.companyId, anchorIssueIds, getActorInfo(req));
+        stampOriginalIssueIds(normalizedPayload, anchorIssueIds);
       }
     }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
@@ -1031,14 +1516,17 @@ export function approvalRoutes(
   // merge_pr request whose PR was closed) instead of leaving a dead entry in
   // the board's pending queue indefinitely with only a "please ignore this"
   // comment as mitigation.
-  router.post("/approvals/:id/withdraw", validate(withdrawApprovalSchema), async (req, res) => {
+  router.post(
+    "/approvals/:id/withdraw",
+    scopeFromApprovalIdParam(checkCompanyAccess),
+    validate(withdrawApprovalSchema),
+    async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
     if (
       !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
         describeBlockedAction: () => "withdraw an approval",
@@ -1072,26 +1560,23 @@ export function approvalRoutes(
     res.json(redactApprovalPayload(approval));
   });
 
-  router.get("/approvals/:id/comments", async (req, res) => {
+  router.get("/approvals/:id/comments", scopeFromApprovalIdParam(checkCompanyAccess), async (req, res) => {
     const id = req.params.id as string;
-    const approval = await svc.getById(id);
-    if (!approval) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
-    }
-    assertCompanyAccess(req, approval.companyId);
     const comments = await svc.listComments(id);
     res.json(comments);
   });
 
-  router.post("/approvals/:id/comments", validate(addApprovalCommentSchema), async (req, res) => {
+  router.post(
+    "/approvals/:id/comments",
+    scopeFromApprovalIdParam(checkCompanyAccess),
+    validate(addApprovalCommentSchema),
+    async (req, res) => {
     const id = req.params.id as string;
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    assertCompanyAccess(req, approval.companyId);
     if (
       !(await assertApprovalMutationAllowedByRunContext(req, res, approval.companyId, {
         describeBlockedAction: () => "comment on an approval",

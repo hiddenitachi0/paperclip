@@ -19,6 +19,7 @@ const apiPrefixes: Record<string, string> = {
   "assets.ts": "/api",
   "auth.ts": "/api/auth",
   "board-chat.ts": "/api",
+  "chat-router.ts": "/api",
   "cloud-upstreams.ts": "/api",
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
@@ -36,6 +37,7 @@ const apiPrefixes: Record<string, string> = {
   "instance-settings.ts": "/api",
   "issues.ts": "/api",
   "issue-tree-control.ts": "/api",
+  "lane-a.ts": "/api",
   "llms.ts": "/api",
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
@@ -62,6 +64,14 @@ const explicitOpenApiCoverageExclusions = new Set([
   "mcp-tool-library.ts",
   // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
   "personas.ts",
+  // Persona publishing routes (DUR-134) are board/instance-admin-only and not yet in the public OpenAPI document.
+  "persona-accounts.ts",
+  // Operator change-log routes (DUR-312) are a new backend feature not yet in the public OpenAPI document.
+  "change-log.ts",
+  // Goal adoption dashboard routes (DUR-375) are a new backend feature not yet in the public OpenAPI document.
+  "goal-adoption.ts",
+  // MCP OAuth "Connect & sign in" routes (DUR-3909) are a new backend feature not yet in the public OpenAPI document.
+  "mcp-oauth.ts",
 ]);
 
 function createApp() {

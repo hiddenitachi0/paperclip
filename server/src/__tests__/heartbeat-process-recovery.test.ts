@@ -3805,13 +3805,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments[0]?.body).not.toContain("- Failure: none recorded");
   });
 
-  it("keeps retrying transient adapter_failed continuation runs before the cap", async () => {
+  it("keeps retrying transient upstream continuation runs before the cap", async () => {
+    // DUR-257 removed adapter_failed from the transient-infra retry list (see
+    // service.adapter-failed-retry.test.ts), so this now exercises a code that
+    // still carries the transient_infra retry budget.
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "failed",
       retryReason: "issue_continuation_needed",
-      runErrorCode: "adapter_failed",
-      runError: "ssh: connection reset",
+      runErrorCode: "codex_transient_upstream",
+      runError: "upstream request failed",
     });
     const heartbeat = heartbeatService(db);
 
@@ -3903,8 +3906,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       status: "in_progress",
       runStatus: "failed",
       retryReason: "issue_continuation_needed",
-      runErrorCode: "adapter_failed",
-      runError: "ssh: connection reset",
+      runErrorCode: "codex_transient_upstream",
+      runError: "upstream request failed",
     });
 
     await db.insert(heartbeatRuns).values([
@@ -3964,8 +3967,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           retryReason: "issue_continuation_needed",
           source: "issue.continuation_recovery",
         },
-        errorCode: "adapter_failed",
-        error: "ssh: connection reset",
+        errorCode: "codex_transient_upstream",
+        error: "upstream request failed",
         startedAt: new Date("2026-03-18T23:55:00.000Z"),
         finishedAt: new Date("2026-03-18T23:55:00.000Z"),
         createdAt: new Date("2026-03-18T23:55:00.000Z"),

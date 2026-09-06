@@ -57,6 +57,27 @@ For normal issue implementation plans, use the issue-thread confirmation surface
 4. Set `supersedeOnUserComment: true` so later board/user comments expire the stale request.
 5. Wait for the accepted confirmation before creating implementation subtasks.
 
+## Fact-Check Confirmations (BEKREFT)
+
+Some `request_confirmation` cards are not asking the board/user to authorize an action — they are asking the board/user to verify a fact that only they can check (numbers in an external system like accounting software, whether phrasing reads naturally, whether a described workflow matches how the business is actually run). This is the BEKREFT pattern: it grants no new authority and settles no permission gate, it only surfaces something the agent cannot verify on its own.
+
+Set `payload.factCheck: true` explicitly on these cards so the UI renders them as visually distinct from an ordinary accept/reject decision card:
+
+```
+POST /api/issues/{issueId}/interactions
+{
+  "kind": "request_confirmation",
+  "payload": {
+    "version": 1,
+    "prompt": "Do these figures match your records?",
+    "detailsMarkdown": "1. orders_2024 has 40,201 rows.\n2. orders_2024_backup has 40,201 rows.",
+    "factCheck": true
+  }
+}
+```
+
+Do not try to signal this through `prompt` or `detailsMarkdown` wording (e.g. a numbered list of claims) and rely on the UI to infer it — that inference was spoofable and has been replaced by this explicit field. Omit `factCheck` (or set it `false`) for a normal decision-ask; it defaults to `false`.
+
 ## Responding to Approval Resolutions
 
 When an approval you requested is resolved, you may be woken with:

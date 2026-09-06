@@ -31,6 +31,9 @@ export type {
   BackupRetentionPolicy,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
+  QuietModeActor,
+  QuietModeAgentSnapshotEntry,
+  QuietModeState,
 } from "./instance.js";
 export {
   DAILY_RETENTION_PRESETS,
@@ -40,6 +43,8 @@ export {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_QUIET_MODE_STATE,
+  QUIET_MODE_STALE_AFTER_MS,
 } from "./instance.js";
 export {
   TRUST_PRESETS,
@@ -463,6 +468,7 @@ export type {
   RoutineListItem,
 } from "./routine.js";
 export type { CostEvent, CostSummary, IssueCostSummary, CostByAgent, CostByProviderModel, CostByBiller, CostByAgentModel, CostWindowSpendRow, CostByProject } from "./cost.js";
+export type { GoalAdoptionSnapshot, GoalAdoptionTrendPoint } from "./goal-adoption.js";
 export type { FinanceEvent, FinanceSummary, FinanceByBiller, FinanceByKind } from "./finance.js";
 export type {
   AgentWakeupResponse,

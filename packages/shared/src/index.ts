@@ -400,6 +400,15 @@ export {
   type CustomerInboxChannel,
   CUSTOMER_INBOX_DELIVERY_OUTCOMES,
   type CustomerInboxDeliveryOutcome,
+  PERSONA_ACCOUNT_PLATFORMS,
+  type PersonaAccountPlatform,
+  PERSONA_ACCOUNT_AUTONOMY_MODES,
+  type PersonaAccountAutonomyMode,
+  PERSONA_ACCOUNT_CONNECTION_STATUSES,
+  type PersonaAccountConnectionStatus,
+  PERSONA_POST_STATUSES,
+  type PersonaPostStatus,
+  PERSONA_POST_AI_DISCLOSURE_TEXT,
 } from "./constants.js";
 export {
   KNOWN_INTEGRATION_ENV_KEYS,
@@ -534,6 +543,9 @@ export type {
   InstanceSettings,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
+  QuietModeActor,
+  QuietModeAgentSnapshotEntry,
+  QuietModeState,
   BackupRetentionPolicy,
   Agent,
   AgentAccessState,
@@ -953,6 +965,8 @@ export type {
   PluginWebhookDeliveryRecord,
   QuotaWindow,
   ProviderQuotaResult,
+  GoalAdoptionSnapshot,
+  GoalAdoptionTrendPoint,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES } from "./types/index.js";
 export { agentAvatarUrl } from "./types/index.js";
@@ -1049,6 +1063,8 @@ export {
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   MIN_GLOBAL_MAX_CONCURRENT_RUNS,
   MAX_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_QUIET_MODE_STATE,
+  QUIET_MODE_STALE_AFTER_MS,
 } from "./types/instance.js";
 
 export type {
@@ -1073,6 +1089,13 @@ export {
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
 } from "./execution-workspace-guards.js";
+
+export {
+  assertNoEmbeddedGitCredential,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
+  hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
+} from "./git-remote-url.js";
 
 export {
   instanceSettingsSchema,
@@ -1176,6 +1199,8 @@ export {
   createDelegateTokenSchema,
   type DelegateTokenScope,
   type CreateDelegateToken,
+  sendLaneAMessageSchema,
+  type SendLaneAMessage,
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
@@ -1349,6 +1374,8 @@ export {
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
+  personaPublishRequestPayloadSchema,
+  featureLaunchRequestPayloadSchema,
   type CreateApproval,
   type UpsertBudgetPolicy,
   type ResolveBudgetIncident,
@@ -1361,6 +1388,8 @@ export {
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
+  type PersonaPublishRequestPayload,
+  type FeatureLaunchRequestPayload,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingSchema,

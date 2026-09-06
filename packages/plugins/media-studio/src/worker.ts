@@ -103,6 +103,18 @@ const plugin = definePlugin({
         if (!input.prompt) return { error: "prompt is required" };
         const issueId = typeof rawParams.issueId === "string" ? rawParams.issueId : "";
         if (!issueId) return { error: "issueId is required" };
+
+        // DUR-177: enforce the persona's daily generation cap in code, at
+        // the moment of this action -- not as prompt guidance. Reserved
+        // *before* calling the provider so a capped-out persona never
+        // spends generation cost/quota on a call that would just be
+        // rejected afterward. No-ops (always allowed) for agents that
+        // aren't a persona, or a persona with no cap set.
+        const reservation = await ctx.personas.reserveDailyGeneration(runCtx.companyId, { runId: runCtx.runId });
+        if (!reservation.allowed) {
+          return { error: `Daily image generation cap (${reservation.cap}) reached for this persona today.` };
+        }
+
         try {
           const result = await runGeneration(ctx, input);
           const { contentBase64, contentType } = await toAttachmentBytes(ctx, result);

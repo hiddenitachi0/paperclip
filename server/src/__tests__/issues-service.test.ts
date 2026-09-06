@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   activityLog,
@@ -3179,6 +3179,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(activityLog);
     await db.delete(issues);
     await db.delete(workspaceOperations);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -3696,6 +3697,88 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
       isDependencyReady: true,
       pendingFinalizeBlockerIssueIds: [],
+    });
+  });
+
+  it("does not gate forever when the blocker's latest op belongs to a run that already terminated without finalizing (DUR-289)", async () => {
+    // Mirrors the recurrence: a run crashes/fails during workspace setup
+    // (e.g. after recording workspace_config_freshness) before ever reaching
+    // its own finalize-recording step. That run is dead and will never
+    // record a workspace_finalize row, so the barrier must not hold the
+    // dependent hostage forever even though the blocker issue is done.
+    const {
+      companyId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+      assigneeAgentId,
+    } = await seedSharedWorkspaceDependency();
+
+    const deadRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: deadRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "failed",
+      startedAt: new Date("2026-08-25T16:58:00.000Z"),
+      finishedAt: new Date("2026-08-25T17:04:15.000Z"),
+    });
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: blockerId,
+      heartbeatRunId: deadRunId,
+      phase: "workspace_config_freshness",
+      status: "succeeded",
+      startedAt: new Date("2026-08-25T16:58:28.000Z"),
+    });
+
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: true,
+      pendingFinalizeBlockerIssueIds: [],
+      unresolvedBlockerIssueIds: [],
+    });
+    await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
+      expect.objectContaining({
+        id: dependentId,
+        assigneeAgentId,
+        blockerIssueIds: [blockerId],
+      }),
+    ]);
+  });
+
+  it("still holds the finalize barrier while the blocker's latest op belongs to a live (running) run", async () => {
+    const {
+      companyId,
+      executionWorkspaceId,
+      blockerId,
+      dependentId,
+      assigneeAgentId,
+    } = await seedSharedWorkspaceDependency();
+
+    const liveRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: liveRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      startedAt: new Date("2026-08-25T16:58:00.000Z"),
+    });
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: blockerId,
+      heartbeatRunId: liveRunId,
+      phase: "workspace_config_freshness",
+      status: "succeeded",
+      startedAt: new Date("2026-08-25T16:58:28.000Z"),
+    });
+
+    expect(await svc.listWakeableBlockedDependents(blockerId)).toEqual([]);
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: false,
+      pendingFinalizeBlockerIssueIds: [blockerId],
+      unresolvedBlockerIssueIds: [blockerId],
     });
   });
 
@@ -5369,6 +5452,156 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
   });
 });
 
+// DUR-240: DUR-120 only surfaced a warning when a run's lock got silently
+// reclaimed from a different run whose heartbeatRuns.status looked terminal
+// -- it never stopped the reclaim itself. These tests exercise the actual
+// dispatch-time guard: when the caller supplies an isRunLive check (as
+// heartbeat.ts and the checkout route now do), a lock must not be treated as
+// stale/reclaimable while that check reports the owning run as still alive,
+// even though its DB status looks terminal.
+describeEmbeddedPostgres("issueService lock adoption honors isRunLive override", () => {
+  let db!: ReturnType<typeof createDb>;
+  let liveRunIds!: Set<string>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-lock-liveness-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  beforeEach(() => {
+    liveRunIds = new Set();
+    svc = issueService(db, { isRunLive: (runId) => liveRunIds.has(runId) });
+  });
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(goals);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedIssueWithExecutionRun(status: string) {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status,
+      invocationSource: "manual",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Execution lock",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    return { issueId, agentId, runId };
+  }
+
+  it("does not clear an execution lock whose DB status looks terminal but isRunLive reports it alive", async () => {
+    const { issueId, runId } = await seedIssueWithExecutionRun("failed");
+    liveRunIds.add(runId);
+
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(false);
+
+    const row = await db
+      .select({ executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.executionRunId).toBe(runId);
+  });
+
+  it("still clears an execution lock whose DB status looks terminal when isRunLive reports it dead", async () => {
+    const { issueId } = await seedIssueWithExecutionRun("failed");
+
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(true);
+
+    const row = await db
+      .select({ executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.executionRunId).toBeNull();
+  });
+
+  it("does not clear a checkout lock whose DB status looks terminal but isRunLive reports it alive", async () => {
+    const { issueId, runId } = await seedIssueWithExecutionRun("timed_out");
+    liveRunIds.add(runId);
+
+    await expect(svc.clearCheckoutRunIfTerminal(issueId)).resolves.toBe(false);
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.checkoutRunId).toBe(runId);
+    expect(row?.executionRunId).toBe(runId);
+  });
+
+  it("refuses to dispatch a second run's checkout while the first run's lock is confirmed still alive", async () => {
+    const { issueId, agentId, runId } = await seedIssueWithExecutionRun("failed");
+    liveRunIds.add(runId);
+    const secondRunId = randomUUID();
+
+    await expect(
+      svc.checkout(issueId, agentId, ["todo", "in_progress"], secondRunId),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.checkoutRunId).toBe(runId);
+    expect(row?.executionRunId).toBe(runId);
+  });
+});
+
 describeEmbeddedPostgres("accepted plan decomposition", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;
@@ -6292,4 +6525,129 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     });
   });
 
+});
+
+describeEmbeddedPostgres("issueService.listChangeLog", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-change-log-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedCompany() {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    return companyId;
+  }
+
+  it("only surfaces done issues explicitly marked changeLogVisible, not every done issue", async () => {
+    const companyId = await seedCompany();
+    const marked = await svc.create(companyId, {
+      title: "Fixed a bug",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    const unmarked = await svc.create(companyId, {
+      title: "Also done but not flagged",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    await svc.update(marked.id, {
+      status: "done",
+      changeLogVisible: true,
+      changeLogSummary: "Login errors are fixed; see the login page.",
+    });
+    await svc.update(unmarked.id, { status: "done" });
+
+    const entries = await svc.listChangeLog(companyId);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: marked.id,
+      changeLogSummary: "Login errors are fixed; see the login page.",
+    });
+  });
+
+  it("excludes changeLogVisible issues that are not yet done", async () => {
+    const companyId = await seedCompany();
+    const issue = await svc.create(companyId, {
+      title: "Still in progress",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    await svc.update(issue.id, { changeLogVisible: true, changeLogSummary: "Not shipped yet" });
+
+    const entries = await svc.listChangeLog(companyId);
+
+    expect(entries).toHaveLength(0);
+  });
+
+  it("sorts newest-first and filters by projectId and companyId", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany();
+    const projectId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Project A",
+    });
+
+    const older = await svc.create(companyId, {
+      title: "Older fix",
+      description: null,
+      status: "todo",
+      priority: "medium",
+      projectId,
+    });
+    const newer = await svc.create(companyId, {
+      title: "Newer fix",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+    const otherCompanyIssue = await svc.create(otherCompanyId, {
+      title: "Different company fix",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+
+    await svc.update(older.id, { status: "done", changeLogVisible: true, changeLogSummary: "Older fix summary" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await svc.update(newer.id, { status: "done", changeLogVisible: true, changeLogSummary: "Newer fix summary" });
+    await svc.update(otherCompanyIssue.id, {
+      status: "done",
+      changeLogVisible: true,
+      changeLogSummary: "Should never show up for companyId",
+    });
+
+    const all = await svc.listChangeLog(companyId);
+    expect(all.map((entry) => entry.id)).toEqual([newer.id, older.id]);
+
+    const filtered = await svc.listChangeLog(companyId, { projectId });
+    expect(filtered.map((entry) => entry.id)).toEqual([older.id]);
+  });
 });

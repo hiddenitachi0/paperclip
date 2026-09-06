@@ -1438,6 +1438,150 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
+  // DUR-240: DUR-120 recurrence -- the self-review gate schedules a fresh
+  // follow-up wake when an in-progress run's PATCH-to-in_review gets declined.
+  // Before this fix, evaluateQueuedRunStaleness only checked lock ownership for
+  // MAX_TURN_CONTINUATION_RETRY_REASON, so this follow-up run was claimed and
+  // executed even though the original run was still alive in-process (this
+  // server's runningProcesses/activeRunExecutions handles) despite its
+  // heartbeatRuns row looking terminal -- a process-lost false negative (see
+  // DUR-114/DUR-120) -- letting two live runs share one worktree. Note this
+  // owner-status-terminal case is the one the per-agent maxConcurrentRuns slot
+  // gate in startNextQueuedRunForAgentWithinSlots does NOT catch either, since
+  // that gate also counts by heartbeatRuns.status === "running" alone.
+  it("cancels a queued self-review follow-up run when the original run is still live in-process despite a terminal-looking status", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const lockOwnerRunId = randomUUID();
+
+    await db.insert(heartbeatRuns).values({
+      id: lockOwnerRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "failed",
+    });
+    runningProcesses.set(lockOwnerRunId, {
+      child: {} as import("node:child_process").ChildProcess,
+      graceSec: 1,
+      processGroupId: null,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Self-review in flight",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      executionRunId: lockOwnerRunId,
+      executionAgentNameKey: "claudecoder",
+      executionLockedAt: new Date("2026-08-26T19:15:00.000Z"),
+    });
+
+    const { runId, wakeupRequestId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "self_review_pass",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "cancelled";
+    });
+
+    const [run, wakeup, issue] = await Promise.all([
+      db
+        .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ status: agentWakeupRequests.status, error: agentWakeupRequests.error })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_execution_lock_held_by_live_run");
+    expect(wakeup?.status).toBe("skipped");
+    expect(issue?.executionRunId).toBe(lockOwnerRunId);
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  it("still runs a queued mention-wake run even while a different run actively holds the issue's execution lock", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const lockOwnerRunId = randomUUID();
+
+    await db.insert(heartbeatRuns).values({
+      id: lockOwnerRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "failed",
+    });
+    runningProcesses.set(lockOwnerRunId, {
+      child: {} as import("node:child_process").ChildProcess,
+      graceSec: 1,
+      processGroupId: null,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Mention while execution lock held",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      executionRunId: lockOwnerRunId,
+      executionAgentNameKey: "claudecoder",
+      executionLockedAt: new Date("2026-08-26T19:15:00.000Z"),
+    });
+
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "issue_comment_mentioned",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded";
+    });
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.errorCode).toBeNull();
+    expect(countExecuteCallsForRun(runId)).toBe(1);
+  });
+
   it("cancels queued in_review runs when the current participant changes before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const otherAgentId = randomUUID();

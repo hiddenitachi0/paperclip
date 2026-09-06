@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { withCompanyScope } from "@paperclipai/db";
 import {
   agentWakeupRequests,
   heartbeatRuns,
@@ -408,7 +409,15 @@ function restoreStatusFromCancelSnapshot(status: IssueStatus): IssueStatus | nul
   return status;
 }
 
-export function issueTreeControlService(db: Db) {
+// DUR-348 (DUR-277 Wave 2): `rawDb` defaults to `db` for every unmigrated
+// caller (heartbeat.ts, issues.ts, recovery/*), which is a no-op there --
+// `db` is already the raw pooled instance for them. Only
+// routes/issue-tree-control.ts, once wired through
+// createRequestScopedDb, passes a `db` that is the *scoped* proxy and a
+// distinct `rawDb`, since db.transaction() below is not supported through
+// that proxy (see packages/db/src/company-scope.ts) and needs the raw
+// connection via withCompanyScope instead.
+export function issueTreeControlService(db: Db, rawDb: Db = db) {
   async function listTreeIssues(companyId: string, rootIssueId: string): Promise<TreeIssue[]> {
     const root = await db
       .select()
@@ -724,7 +733,7 @@ export function issueTreeControlService(db: Db) {
       const activePauseHolds = await activePauseHoldsForIssueIds(companyId, issueIds);
       const releaseReason = input.reason ?? "Subtree resume applied.";
 
-      const { hold: resumeHold } = await db.transaction(async (tx) => {
+      const { hold: resumeHold } = await withCompanyScope(rawDb, companyId, async (tx) => {
         const [createdHold] = await tx
           .insert(issueTreeHolds)
           .values({
@@ -802,7 +811,7 @@ export function issueTreeControlService(db: Db) {
       };
     }
 
-    const { hold, members } = await db.transaction(async (tx) => {
+    const { hold, members } = await withCompanyScope(rawDb, companyId, async (tx) => {
       const [createdHold] = await tx
         .insert(issueTreeHolds)
         .values({
@@ -956,7 +965,7 @@ export function issueTreeControlService(db: Db) {
 
     const now = new Date();
     const releasedCancelHoldIds = activeCancelHolds.map((hold) => hold.id);
-    const updatedIssues = await db.transaction(async (tx) => {
+    const updatedIssues = await withCompanyScope(rawDb, companyId, async (tx) => {
       const restored: TreeStatusUpdateResult["updatedIssues"] = [];
       for (const [status, issueIdsForStatus] of issueIdsByStatus) {
         if (issueIdsForStatus.length === 0) continue;

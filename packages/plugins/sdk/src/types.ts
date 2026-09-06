@@ -48,7 +48,7 @@ import type {
   PrincipalPermissionGrant,
   PrincipalType,
 } from "@paperclipai/shared";
-import type { PluginPerformActionContext } from "./protocol.js";
+import type { PluginPerformActionContext, PluginPersonaGenerationCapReservation } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports from @paperclipai/shared (plugin authors import from one place)
@@ -1783,6 +1783,36 @@ export interface PluginAuthorizationClient {
   };
 }
 
+/**
+ * `ctx.personas` — persona-scoped enforcement helpers.
+ *
+ * Requires `personas.generation_cap.enforce`.
+ *
+ * @see PLUGIN_SPEC.md — Personas generation cap (DUR-177)
+ */
+export interface PluginPersonasClient {
+  /**
+   * Atomically check-and-reserve one image generation against the calling
+   * agent's persona daily cap (`personas.dailyGenerationCap`), if it has
+   * one. Call this *before* running the actual generation, so a capped-out
+   * persona never reaches the provider.
+   *
+   * Only callable from a tool handler: pass the invoking `ToolRunContext.runId`
+   * as `options.runId` — the host resolves the calling agent from this run
+   * (never from a plugin-supplied agent id), so a plugin cannot reserve or
+   * evade another persona's cap by claiming a different identity.
+   *
+   * Returns `{ allowed: false }` once the persona's cap is reached for the
+   * current UTC day, without granting a reservation. If the agent has no
+   * persona, or the persona has no cap set, always returns
+   * `{ allowed: true, cap: null }` (unlimited).
+   */
+  reserveDailyGeneration(
+    companyId: string,
+    options: { runId: string },
+  ): Promise<PluginPersonaGenerationCapReservation>;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming (worker → UI push channel)
 // ---------------------------------------------------------------------------
@@ -1928,6 +1958,9 @@ export interface PluginContext {
 
   /** Read and manage authorization grants, policy summaries, previews, and audit entries. Requires `authorization.*` capabilities. */
   authorization: PluginAuthorizationClient;
+
+  /** Persona-scoped enforcement helpers. Requires `personas.generation_cap.enforce`. */
+  personas: PluginPersonasClient;
 
   /** Register getData handlers for the plugin's UI components. */
   data: PluginDataClient;

@@ -10,10 +10,14 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
   updateGeneral: vi.fn(),
   updateExperimental: vi.fn(),
   listCompanyIds: vi.fn(),
+  getQuietMode: vi.fn(),
+  activateQuietMode: vi.fn(),
+  deactivateQuietMode: vi.fn(),
 }));
 const mockHeartbeatService = vi.hoisted(() => ({
   buildIssueGraphLivenessAutoRecoveryPreview: vi.fn(),
   reconcileIssueGraphLiveness: vi.fn(),
+  markInFlightRunsPausedForRestart: vi.fn(),
 }));
 const mockEnvironmentService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -63,8 +67,12 @@ describe("instance settings routes", () => {
     mockInstanceSettingsService.updateGeneral.mockReset();
     mockInstanceSettingsService.updateExperimental.mockReset();
     mockInstanceSettingsService.listCompanyIds.mockReset();
+    mockInstanceSettingsService.getQuietMode.mockReset();
+    mockInstanceSettingsService.activateQuietMode.mockReset();
+    mockInstanceSettingsService.deactivateQuietMode.mockReset();
     mockHeartbeatService.buildIssueGraphLivenessAutoRecoveryPreview.mockReset();
     mockHeartbeatService.reconcileIssueGraphLiveness.mockReset();
+    mockHeartbeatService.markInFlightRunsPausedForRestart.mockReset();
     mockEnvironmentService.getById.mockReset();
     mockLogActivity.mockReset();
     mockInstanceSettingsService.get.mockResolvedValue({
@@ -154,6 +162,28 @@ describe("instance settings routes", () => {
       },
     });
     mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1", "company-2"]);
+    mockInstanceSettingsService.getQuietMode.mockResolvedValue({
+      active: false,
+      activatedAt: null,
+      activatedBy: null,
+      deactivatedAt: null,
+      snapshot: null,
+      activeRunCount: 0,
+    });
+    mockInstanceSettingsService.activateQuietMode.mockResolvedValue({
+      active: true,
+      activatedAt: "2026-08-26T13:00:00.000Z",
+      activatedBy: { actorType: "board", actorId: "local-board", agentId: null },
+      deactivatedAt: null,
+      snapshot: [{ agentId: "agent-1", companyId: "company-1", enabled: true, wakeOnDemand: true }],
+    });
+    mockInstanceSettingsService.deactivateQuietMode.mockResolvedValue({
+      active: false,
+      activatedAt: "2026-08-26T13:00:00.000Z",
+      activatedBy: { actorType: "board", actorId: "local-board", agentId: null },
+      deactivatedAt: "2026-08-26T15:00:00.000Z",
+      snapshot: null,
+    });
     mockHeartbeatService.buildIssueGraphLivenessAutoRecoveryPreview.mockResolvedValue({
       lookbackHours: 24,
       cutoff: "2026-04-26T12:00:00.000Z",
@@ -180,6 +210,10 @@ describe("instance settings routes", () => {
       driver: "local",
       status: "active",
       config: {},
+    });
+    mockHeartbeatService.markInFlightRunsPausedForRestart.mockResolvedValue({
+      paused: 2,
+      runIds: ["run-1", "run-2"],
     });
   });
 
@@ -531,5 +565,163 @@ describe("instance settings routes", () => {
 
     expect(res.status).toBe(403);
     expect(mockInstanceSettingsService.updateGeneral).not.toHaveBeenCalled();
+  });
+
+  it("allows non-admin board users to read quiet mode status", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).get("/api/instance/settings/quiet-mode");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      active: false,
+      activatedAt: null,
+      activatedBy: null,
+      deactivatedAt: null,
+      snapshot: null,
+      activeRunCount: 0,
+    });
+  });
+
+  it("lets an instance admin activate quiet mode and fans the audit log out to every company", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app).post("/api/instance/settings/quiet-mode/activate").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockInstanceSettingsService.activateQuietMode).toHaveBeenCalledWith({
+      actorType: "user",
+      actorId: "local-board",
+      agentId: null,
+    });
+    expect(res.body.active).toBe(true);
+    expect(res.body.snapshot).toEqual([
+      { agentId: "agent-1", companyId: "company-1", enabled: true, wakeOnDemand: true },
+    ]);
+    expect(mockLogActivity).toHaveBeenCalledTimes(2);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "instance.settings.quiet_mode_activated", companyId: "company-1" }),
+    );
+  });
+
+  it("lets an instance admin deactivate quiet mode", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app).post("/api/instance/settings/quiet-mode/deactivate").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockInstanceSettingsService.deactivateQuietMode).toHaveBeenCalledWith({
+      actorType: "user",
+      actorId: "local-board",
+      agentId: null,
+    });
+    expect(res.body.active).toBe(false);
+    expect(mockLogActivity).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects non-admin board users from activating or deactivating quiet mode", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const activateRes = await request(app).post("/api/instance/settings/quiet-mode/activate").send({});
+    const deactivateRes = await request(app).post("/api/instance/settings/quiet-mode/deactivate").send({});
+
+    expect(activateRes.status).toBe(403);
+    expect(deactivateRes.status).toBe(403);
+    expect(mockInstanceSettingsService.activateQuietMode).not.toHaveBeenCalled();
+    expect(mockInstanceSettingsService.deactivateQuietMode).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent callers from activating quiet mode", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app).post("/api/instance/settings/quiet-mode/activate").send({});
+
+    expect(res.status).toBe(403);
+    expect(mockInstanceSettingsService.activateQuietMode).not.toHaveBeenCalled();
+  });
+
+  it("lets an instance admin pause in-flight heartbeat runs for a planned restart and fans the audit log out to every company", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app)
+      .post("/api/instance/heartbeat-runs/pause-for-restart")
+      .send({ reason: "planned compose_recreate" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.markInFlightRunsPausedForRestart).toHaveBeenCalledWith({
+      reason: "planned compose_recreate",
+    });
+    expect(res.body).toEqual({ paused: 2, runIds: ["run-1", "run-2"] });
+    expect(mockLogActivity).toHaveBeenCalledTimes(2);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "instance.heartbeat_runs.paused_for_restart",
+        companyId: "company-1",
+        details: { pausedCount: 2 },
+      }),
+    );
+  });
+
+  it("rejects non-admin board users from pausing in-flight heartbeat runs", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).post("/api/instance/heartbeat-runs/pause-for-restart").send({});
+
+    expect(res.status).toBe(403);
+    expect(mockHeartbeatService.markInFlightRunsPausedForRestart).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent callers from pausing in-flight heartbeat runs", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_key",
+    });
+
+    const res = await request(app).post("/api/instance/heartbeat-runs/pause-for-restart").send({});
+
+    expect(res.status).toBe(403);
+    expect(mockHeartbeatService.markInFlightRunsPausedForRestart).not.toHaveBeenCalled();
   });
 });

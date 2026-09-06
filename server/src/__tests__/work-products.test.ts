@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { workProductService } from "../services/work-products.ts";
 
+const COMPANY_ID = "11111111-1111-1111-1111-111111111111";
+
 function createWorkProductRow(overrides: Partial<Record<string, unknown>> = {}) {
   const now = new Date("2026-03-17T00:00:00.000Z");
   return {
     id: "work-product-1",
-    companyId: "company-1",
+    companyId: COMPANY_ID,
     projectId: "project-1",
     issueId: "issue-1",
     executionWorkspaceId: null,
@@ -39,14 +41,16 @@ describe("workProductService", () => {
     const insertValues = vi.fn(() => ({ returning: insertReturning }));
     const txInsert = vi.fn(() => ({ values: insertValues }));
 
+    const txExecute = vi.fn(async () => undefined);
     const tx = {
       update: txUpdate,
       insert: txInsert,
+      execute: txExecute,
     };
     const transaction = vi.fn(async (callback: (input: typeof tx) => Promise<unknown>) => await callback(tx));
 
     const svc = workProductService({ transaction } as any);
-    const result = await svc.createForIssue("issue-1", "company-1", {
+    const result = await svc.createForIssue("issue-1", COMPANY_ID, {
       type: "pull_request",
       provider: "github",
       title: "PR 1",
@@ -64,9 +68,16 @@ describe("workProductService", () => {
   it("uses a transaction when promoting an existing work product to primary", async () => {
     const existingRow = createWorkProductRow({ isPrimary: false });
 
-    const selectWhere = vi.fn(async () => [existingRow]);
-    const selectFrom = vi.fn(() => ({ where: selectWhere }));
-    const txSelect = vi.fn(() => ({ from: selectFrom }));
+    // The pre-check read (rawDb.select) that resolves the row's companyId
+    // before withCompanyScope opens its transaction.
+    const preCheckWhere = vi.fn(async () => [{ companyId: COMPANY_ID }]);
+    const preCheckFrom = vi.fn(() => ({ where: preCheckWhere }));
+    const preCheckSelect = vi.fn(() => ({ from: preCheckFrom }));
+
+    const txExecute = vi.fn(async () => undefined);
+    const txSelectWhere = vi.fn(async () => [existingRow]);
+    const txSelectFrom = vi.fn(() => ({ where: txSelectWhere }));
+    const txSelect = vi.fn(() => ({ from: txSelectFrom }));
 
     const updateReturning = vi
       .fn()
@@ -78,15 +89,17 @@ describe("workProductService", () => {
     const tx = {
       select: txSelect,
       update: txUpdate,
+      execute: txExecute,
     };
     const transaction = vi.fn(async (callback: (input: typeof tx) => Promise<unknown>) => await callback(tx));
 
-    const svc = workProductService({ transaction } as any);
+    const svc = workProductService({ select: preCheckSelect, transaction } as any);
     const result = await svc.update("work-product-1", {
       isPrimary: true,
       reviewState: "ready_for_review",
     });
 
+    expect(preCheckSelect).toHaveBeenCalledTimes(1);
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(txSelect).toHaveBeenCalledTimes(1);
     expect(txUpdate).toHaveBeenCalledTimes(2);

@@ -120,6 +120,37 @@ describe("createAgentSchema adapterConfig.subscriptionQuotaExhaustedAt (DUR-210)
   });
 });
 
+// DUR-213: the operator needs to be able to set a per-run token cap on an
+// agent's adapterConfig so a single run can't burn unbounded spend.
+describe("createAgentSchema adapterConfig.maxTokensPerRun (DUR-213)", () => {
+  it("accepts an agent with no maxTokensPerRun key at all", () => {
+    expect(createAgentSchema.safeParse(baseAgent({})).success).toBe(true);
+  });
+
+  it("accepts a non-negative integer, including 0 (disabled)", () => {
+    expect(createAgentSchema.safeParse(baseAgent({ maxTokensPerRun: 0 })).success).toBe(true);
+    expect(createAgentSchema.safeParse(baseAgent({ maxTokensPerRun: 20_000_000 })).success).toBe(true);
+  });
+
+  it("rejects a negative maxTokensPerRun", () => {
+    const result = createAgentSchema.safeParse(baseAgent({ maxTokensPerRun: -1 }));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some((issue) => issue.path.join(".").includes("maxTokensPerRun")),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects a non-integer maxTokensPerRun", () => {
+    expect(createAgentSchema.safeParse(baseAgent({ maxTokensPerRun: 1.5 })).success).toBe(false);
+  });
+
+  it("rejects a non-numeric maxTokensPerRun", () => {
+    expect(createAgentSchema.safeParse(baseAgent({ maxTokensPerRun: "unlimited" })).success).toBe(false);
+  });
+});
+
 describe("updateAgentSchema avatarAssetId", () => {
   it("rejects a patch that sets avatarAssetId", () => {
     const result = updateAgentSchema.safeParse({ avatarAssetId: "11111111-1111-4111-8111-111111111111" });

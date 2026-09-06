@@ -35,7 +35,15 @@ function readString(value: unknown): string | null {
 }
 
 function isTerminalStatus(status: string): boolean {
-  return status === "failed" || status === "timed_out" || status === "cancelled" || status === "succeeded";
+  return (
+    status === "failed" ||
+    status === "timed_out" ||
+    status === "cancelled" ||
+    status === "succeeded" ||
+    // DUR-296: interrupted by a planned restart, will resume -- terminal
+    // (stop streaming/polling it), but never a failure.
+    status === "paused_for_restart"
+  );
 }
 
 function runKnownLogBytes(run: RunTranscriptSource): number | null {
@@ -338,7 +346,10 @@ export function useLiveRunTranscripts({
           const status = readString(payload["status"]) ?? "updated";
           appendChunks(runId, [{
             ts: event.createdAt,
-            stream: isTerminalStatus(status) && status !== "succeeded" ? "stderr" : "system",
+            stream:
+              isTerminalStatus(status) && status !== "succeeded" && status !== "paused_for_restart"
+                ? "stderr"
+                : "system",
             chunk: `run ${status}`,
             dedupeKey: `socket:status:${runId}:${status}:${readString(payload["finishedAt"]) ?? ""}`,
           }]);

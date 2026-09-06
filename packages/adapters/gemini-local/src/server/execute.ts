@@ -51,6 +51,7 @@ import { DEFAULT_GEMINI_LOCAL_MODEL, SANDBOX_INSTALL_COMMAND } from "../index.js
 import {
   describeGeminiFailure,
   detectGeminiAuthRequired,
+  isGeminiResultError,
   isGeminiTransientNetworkError,
   isGeminiTurnLimitResult,
   isGeminiSessionUnrecoverableError,
@@ -616,14 +617,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     clearSessionOnMissingSession = false,
     isRetry = false,
   ): AdapterExecutionResult => {
-    const authMeta = detectGeminiAuthRequired({
-      parsed: attempt.parsed.resultEvent,
-      stdout: attempt.proc.stdout,
-      stderr: attempt.proc.stderr,
-    });
-    const networkUnavailable = isGeminiTransientNetworkError(attempt.proc.stdout, attempt.proc.stderr);
-
+    // DUR-258: word-search only over `stderr` (a crashed/rejected process's
+    // own short error text) — never `stdout`, which in stream-json mode is
+    // the full multi-turn transcript. See detectGeminiAuthRequired's doc
+    // comment in parse.ts.
     if (attempt.proc.timedOut) {
+      const authMeta = detectGeminiAuthRequired({
+        parsed: null,
+        stderr: attempt.proc.stderr,
+      });
+      const networkUnavailable = isGeminiTransientNetworkError("", attempt.proc.stderr);
       return {
         exitCode: attempt.proc.exitCode,
         signal: attempt.proc.signal,
@@ -648,7 +651,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       structuredFailure ||
       stderrLine ||
       `Gemini exited with code ${attempt.proc.exitCode ?? -1}`;
-    const failed = (attempt.proc.exitCode ?? 0) !== 0;
+    // DUR-258 (rule 1): trust the CLI's own structured verdict whenever a
+    // terminal "result" event exists — a harness-level kill delivered
+    // *after* a genuine success (a nonzero exit code from a post-completion
+    // signal) must never flip an already-successful run to failed. Only
+    // fall back to the exit code when there is no structured result at all
+    // to trust. Mirrors the DUR-41 fix already applied to claude-local.
+    const failed = attempt.parsed.resultEvent
+      ? isGeminiResultError(attempt.parsed.resultEvent)
+      : (attempt.proc.exitCode ?? 0) !== 0;
+    const authMeta = detectGeminiAuthRequired({
+      parsed: attempt.parsed.resultEvent,
+      stderr: attempt.proc.stderr,
+    });
+    const networkUnavailable = isGeminiTransientNetworkError(parsedError, attempt.proc.stderr);
     const clearSessionForTurnLimit = isGeminiTurnLimitResult(
       attempt.parsed.resultEvent,
       attempt.proc.exitCode,
@@ -714,7 +730,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionId &&
       !initial.proc.timedOut &&
       (initial.proc.exitCode ?? 0) !== 0 &&
-      isGeminiSessionUnrecoverableError(initial.proc.stdout, initial.proc.stderr)
+      isGeminiSessionUnrecoverableError(
+        typeof initial.parsed.errorMessage === "string" ? initial.parsed.errorMessage : "",
+        initial.proc.stderr,
+      )
     ) {
       await onLog(
         "stdout",

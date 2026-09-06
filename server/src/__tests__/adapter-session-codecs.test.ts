@@ -155,65 +155,31 @@ describe("adapter session codecs", () => {
 });
 
 describe("codex resume recovery detection", () => {
-  it("detects unknown session errors from codex output", () => {
+  it("detects unknown session errors from codex's own error text", () => {
     expect(
-      isCodexUnknownSessionError(
-        '{"type":"error","message":"Unknown session id abc"}',
-        "",
-      ),
+      isCodexUnknownSessionError('{"type":"error","message":"Unknown session id abc"}'),
     ).toBe(true);
-    expect(
-      isCodexUnknownSessionError(
-        "",
-        "thread 123 not found",
-      ),
-    ).toBe(true);
-    expect(
-      isCodexUnknownSessionError(
-        '{"type":"result","ok":true}',
-        "",
-      ),
-    ).toBe(false);
+    expect(isCodexUnknownSessionError("thread 123 not found")).toBe(true);
+    expect(isCodexUnknownSessionError('{"type":"result","ok":true}')).toBe(false);
   });
 });
 
 describe("opencode resume recovery detection", () => {
-  it("detects unknown session errors from opencode output", () => {
+  it("detects unknown session errors from opencode's own error text", () => {
     expect(
       isOpenCodeUnknownSessionError(
-        "",
         "NotFoundError: Resource not found: /Users/test/.local/share/opencode/storage/session/proj/ses_missing.json",
       ),
     ).toBe(true);
-    expect(
-      isOpenCodeUnknownSessionError(
-        "{\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\"}}",
-        "",
-      ),
-    ).toBe(false);
+    expect(isOpenCodeUnknownSessionError('{"type":"step_finish","part":{"reason":"stop"}}')).toBe(false);
   });
 });
 
 describe("cursor resume recovery detection", () => {
-  it("detects unknown session errors from cursor output", () => {
-    expect(
-      isCursorUnknownSessionError(
-        "",
-        "Error: unknown session id abc",
-      ),
-    ).toBe(true);
-    expect(
-      isCursorUnknownSessionError(
-        "",
-        "chat abc not found",
-      ),
-    ).toBe(true);
-    expect(
-      isCursorUnknownSessionError(
-        "{\"type\":\"result\",\"subtype\":\"success\"}",
-        "",
-      ),
-    ).toBe(false);
+  it("detects unknown session errors from cursor's own error text", () => {
+    expect(isCursorUnknownSessionError("Error: unknown session id abc")).toBe(true);
+    expect(isCursorUnknownSessionError("chat abc not found")).toBe(true);
+    expect(isCursorUnknownSessionError('{"type":"result","subtype":"success"}')).toBe(false);
   });
 });
 

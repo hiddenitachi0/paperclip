@@ -1,6 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueWorkProducts } from "@paperclipai/db";
+import { issueWorkProducts, withCompanyScope } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
@@ -31,7 +31,11 @@ function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
   };
 }
 
-export function workProductService(db: Db) {
+export function workProductService(db: Db, options: { rawDb?: Db } = {}) {
+  // DUR-379 (DUR-277 Wave 5b): see the matching comment in
+  // services/issues.ts -- rawDb defaults to db for every unmigrated
+  // caller, a no-op there.
+  const rawDb = options.rawDb ?? db;
   return {
     listForIssue: async (issueId: string) => {
       const rows = await db
@@ -52,7 +56,7 @@ export function workProductService(db: Db) {
     },
 
     createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
-      const row = await db.transaction(async (tx) => {
+      const row = await withCompanyScope(rawDb, companyId, async (tx) => {
         if (data.isPrimary) {
           await tx
             .update(issueWorkProducts)
@@ -79,7 +83,13 @@ export function workProductService(db: Db) {
     },
 
     update: async (id: string, patch: Partial<typeof issueWorkProducts.$inferInsert>) => {
-      const row = await db.transaction(async (tx) => {
+      const preCheck = await rawDb
+        .select({ companyId: issueWorkProducts.companyId })
+        .from(issueWorkProducts)
+        .where(eq(issueWorkProducts.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!preCheck) return null;
+      const row = await withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
         const existing = await tx
           .select()
           .from(issueWorkProducts)

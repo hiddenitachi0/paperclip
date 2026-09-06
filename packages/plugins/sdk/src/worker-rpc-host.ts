@@ -1228,6 +1228,15 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      personas: {
+        async reserveDailyGeneration(companyId: string, options: { runId: string }) {
+          if (!options?.runId) {
+            throw new Error("reserveDailyGeneration requires options.runId (the invoking tool call's run id)");
+          }
+          return callHost("personas.reserveDailyGeneration", { companyId, runId: options.runId });
+        },
+      },
+
       data: {
         register(key: string, handler: (params: Record<string, unknown>) => Promise<unknown>): void {
           dataHandlers.set(key, handler);

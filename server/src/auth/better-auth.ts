@@ -76,6 +76,41 @@ export function shouldDisableSecureAuthCookies(input: {
   );
 }
 
+// better-auth holds an internal in-process lock/queue around each auth
+// request (e.g. sign-in) that is only released once the awaited DB adapter
+// call settles. If that DB call hangs (dead connection, stuck pool, etc.)
+// the await never settles, the lock is never released, and every later
+// sign-in blocks on it forever -- the only recovery today is restarting the
+// process. We cannot patch better-auth's own lock-release code from here, so
+// instead we bound every DB adapter call it awaits: past the timeout we
+// force that awaited promise to reject, which unblocks better-auth's own
+// control flow (and its lock/finally handling) even though the underlying
+// query may still be running in the background.
+export const AUTH_DB_ADAPTER_TIMEOUT_MS = 5000;
+
+export function withAdapterCallTimeout<TAdapter extends object>(adapter: TAdapter, timeoutMs: number): TAdapter {
+  return new Proxy(adapter, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const result: unknown = Reflect.apply(value as (...a: unknown[]) => unknown, target, args);
+        if (!(result instanceof Promise)) return result;
+        return Promise.race([result, adapterCallTimeout(String(prop), timeoutMs, result)]);
+      };
+    },
+  });
+}
+
+function adapterCallTimeout(methodName: string, timeoutMs: number, settle: Promise<unknown>): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`better-auth DB adapter call "${methodName}" timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    settle.finally(() => clearTimeout(timer)).catch(() => {});
+  });
+}
+
 function headersFromNodeHeaders(rawHeaders: IncomingHttpHeaders): Headers {
   const headers = new Headers();
   for (const [key, raw] of Object.entries(rawHeaders)) {
@@ -144,15 +179,19 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     baseURL: baseUrl,
     secret,
     trustedOrigins,
-    database: drizzleAdapter(db, {
-      provider: "pg",
-      schema: {
-        user: authUsers,
-        session: authSessions,
-        account: authAccounts,
-        verification: authVerifications,
-      },
-    }),
+    database: (() => {
+      const buildAdapter = drizzleAdapter(db, {
+        provider: "pg",
+        schema: {
+          user: authUsers,
+          session: authSessions,
+          account: authAccounts,
+          verification: authVerifications,
+        },
+      });
+      return (options: Parameters<typeof buildAdapter>[0]) =>
+        withAdapterCallTimeout(buildAdapter(options), AUTH_DB_ADAPTER_TIMEOUT_MS);
+    })(),
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,

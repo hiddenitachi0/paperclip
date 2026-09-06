@@ -204,12 +204,10 @@ export async function testEnvironment(
       const detail = summarizeProbeDetail(probe.stdout, probe.stderr, parsed.errorMessage);
       const authMeta = detectGeminiAuthRequired({
         parsed: parsed.resultEvent,
-        stdout: probe.stdout,
         stderr: probe.stderr,
       });
       const quotaMeta = detectGeminiQuotaExhausted({
         parsed: parsed.resultEvent,
-        stdout: probe.stdout,
         stderr: probe.stderr,
       });
 

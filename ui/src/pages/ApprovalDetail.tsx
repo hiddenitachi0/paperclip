@@ -9,8 +9,9 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
-import { approvalLabel, approvalTechnicalReference, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
+import { approvalLabel, approvalTechnicalReference, approvalDeployBranchInfo, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer, credentialRequestFields } from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { DecisionReasonDialog, type DecisionReasonAction } from "../components/DecisionReasonDialog";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
@@ -28,6 +29,7 @@ export function ApprovalDetail() {
   const [error, setError] = useState<string | null>(null);
   const [showRawPayload, setShowRawPayload] = useState(false);
   const [credentialValue, setCredentialValue] = useState("");
+  const [decisionDialogAction, setDecisionDialogAction] = useState<DecisionReasonAction | null>(null);
 
   const { data: approval, isLoading } = useQuery({
     queryKey: queryKeys.approvals.detail(approvalId!),
@@ -97,18 +99,20 @@ export function ApprovalDetail() {
   });
 
   const rejectMutation = useMutation({
-    mutationFn: () => approvalsApi.reject(approvalId!),
+    mutationFn: (note: string) => approvalsApi.reject(approvalId!, note),
     onSuccess: () => {
       setError(null);
+      setDecisionDialogAction(null);
       refresh();
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Reject failed"),
   });
 
   const revisionMutation = useMutation({
-    mutationFn: () => approvalsApi.requestRevision(approvalId!),
+    mutationFn: (note: string) => approvalsApi.requestRevision(approvalId!, note),
     onSuccess: () => {
       setError(null);
+      setDecisionDialogAction(null);
       refresh();
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Revision request failed"),
@@ -179,6 +183,7 @@ export function ApprovalDetail() {
   const isCredentialRequest = approval.type === "credential_request";
   const credentialFields = isCredentialRequest ? credentialRequestFields(payload) : null;
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
+  const branchInfo = approvalDeployBranchInfo(payload);
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
   const primaryLinkedIssue = linkedIssues?.[0] ?? null;
   const resolvedCta =
@@ -238,6 +243,19 @@ export function ApprovalDetail() {
               {approvalTechnicalReference(approval.payload as Record<string, unknown> | null) && (
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {approvalTechnicalReference(approval.payload as Record<string, unknown> | null)}
+                </p>
+              )}
+              {branchInfo && (
+                <p
+                  className={
+                    branchInfo.mismatch
+                      ? "mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400"
+                      : "text-xs text-muted-foreground mt-0.5"
+                  }
+                >
+                  {branchInfo.mismatch
+                    ? `Not on ${branchInfo.deployBranch} — this commit is on ${branchInfo.sourceBranch}`
+                    : `Deploys from ${branchInfo.sourceBranch}`}
                 </p>
               )}
             </div>
@@ -337,7 +355,7 @@ export function ApprovalDetail() {
               <Button
                 variant="destructive"
                 size="sm"
-                onClick={() => rejectMutation.mutate()}
+                onClick={() => setDecisionDialogAction("reject")}
                 disabled={rejectMutation.isPending}
               >
                 Reject
@@ -353,7 +371,7 @@ export function ApprovalDetail() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => revisionMutation.mutate()}
+              onClick={() => setDecisionDialogAction("revision")}
               disabled={revisionMutation.isPending}
             >
               Request revision
@@ -426,6 +444,18 @@ export function ApprovalDetail() {
           </Button>
         </div>
       </div>
+      {decisionDialogAction && (
+        <DecisionReasonDialog
+          open={Boolean(decisionDialogAction)}
+          onOpenChange={(open) => !open && setDecisionDialogAction(null)}
+          action={decisionDialogAction}
+          isPending={decisionDialogAction === "reject" ? rejectMutation.isPending : revisionMutation.isPending}
+          onSubmit={(note) => {
+            if (decisionDialogAction === "reject") rejectMutation.mutate(note);
+            else revisionMutation.mutate(note);
+          }}
+        />
+      )}
     </div>
   );
 }

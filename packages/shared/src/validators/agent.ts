@@ -132,6 +132,19 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
       });
     }
   }
+  // DUR-213: per-run spend cap, counted in total tokens (input + output +
+  // cache) across every model call in the run. 0/unset means uncapped.
+  const maxTokensPerRunValue = value.maxTokensPerRun;
+  if (maxTokensPerRunValue !== undefined) {
+    const parsedCap = z.number().int().nonnegative().safeParse(maxTokensPerRunValue);
+    if (!parsedCap.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.maxTokensPerRun must be a non-negative integer",
+        path: ["maxTokensPerRun"],
+      });
+    }
+  }
 });
 
 export const createAgentInstructionsBundleSchema = z.object({
@@ -226,6 +239,9 @@ export const updateAgentSchema = createAgentSchema
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
+    // Lane A (DUR-217) opt-in — board-settable only, enforced in
+    // server/src/routes/agents.ts (assertCanManageLaneAFlag), not here.
+    laneAEnabled: z.boolean().optional(),
   });
 
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;

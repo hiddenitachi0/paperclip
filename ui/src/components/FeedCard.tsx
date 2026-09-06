@@ -100,6 +100,8 @@ function formatVerb(
       return "started a run on";
     case "heartbeat.cancelled":
       return "cancelled a run on";
+    case "run.cost_anomaly_detected":
+      return "flagged a run costing much more than usual on";
 
     case "project.created":
       return "created project";
@@ -173,6 +175,10 @@ function getIconSpec(
   isActive: boolean,
 ): IconSpec {
   const action = event.action;
+
+  if (action === "run.cost_anomaly_detected") {
+    return { kind: "lucide", Icon: CircleAlert, color: "text-amber-600 dark:text-amber-400" };
+  }
 
   // Heartbeat — animated when active, static otherwise
   if (action.startsWith("heartbeat.")) {

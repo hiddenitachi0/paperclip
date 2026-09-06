@@ -699,8 +699,56 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "issue",
   "run",
   "system",
+  // DUR-134: the publish credential for a persona_accounts row. Never
+  // resolved by the persona's own agent directly -- only via the narrowly
+  // scoped GET .../persona-accounts/:accountId/publish-token route, modelled
+  // on the deploy-github-token pattern.
+  "persona_account",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
+
+// DUR-134: platforms a persona_accounts row can target. Fanvue only for now
+// (23 August operator decision) -- Instagram/Meta and Twitter/X are
+// deliberately not listed; adding one later is additive here, and
+// PERSONA_ACCOUNT_AUTONOMY_MODES' default keeps any unrecognized/future
+// platform safe (requires_approval) without a code change.
+export const PERSONA_ACCOUNT_PLATFORMS = ["fanvue"] as const;
+export type PersonaAccountPlatform = (typeof PERSONA_ACCOUNT_PLATFORMS)[number];
+
+// DUR-134 operator decision: autonomy is per-persona-per-channel, and a
+// channel with no configured setting must default to requires_approval --
+// never autonomous-by-omission. See persona_accounts.autonomyMode.
+export const PERSONA_ACCOUNT_AUTONOMY_MODES = ["autonomous", "requires_approval"] as const;
+export type PersonaAccountAutonomyMode = (typeof PERSONA_ACCOUNT_AUTONOMY_MODES)[number];
+
+export const PERSONA_ACCOUNT_CONNECTION_STATUSES = ["pending", "connected", "disconnected", "error"] as const;
+export type PersonaAccountConnectionStatus = (typeof PERSONA_ACCOUNT_CONNECTION_STATUSES)[number];
+
+// DUR-134: appended to a post's caption when the target persona_accounts row
+// has aiDisclosureEnabled -- Fanvue's own Acceptable Use Policy requires
+// AI-disclosure on AI-generated media (not optional, platform-mandated; see
+// the ticket body), so this exists independent of any Paperclip-side
+// default. A single fixed string rather than per-persona/per-post copy: the
+// operator decision was "on or off", not "wording", and a fixed string
+// keeps every disclosed post auditable against the exact same text.
+export const PERSONA_POST_AI_DISCLOSURE_TEXT = "This content was created with AI assistance.";
+
+// DUR-134: persona_posts lifecycle. "queued" -> (autonomy gate) ->
+// "pending_approval" (requires_approval channel or still in warm-up) or
+// straight to "publishing" (autonomous, warm-up cleared) -> "published" |
+// "failed". A board rejection of the linked approval moves a
+// "pending_approval" post to "rejected", a terminal state (never retried).
+export const PERSONA_POST_STATUSES = [
+  "queued",
+  "pending_approval",
+  "approved",
+  "publishing",
+  "published",
+  "failed",
+  "rejected",
+  "cancelled",
+] as const;
+export type PersonaPostStatus = (typeof PERSONA_POST_STATUSES)[number];
 
 export const SECRET_ACCESS_OUTCOMES = ["success", "failure"] as const;
 export type SecretAccessOutcome = (typeof SECRET_ACCESS_OUTCOMES)[number];
@@ -757,10 +805,10 @@ export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
-export const BUDGET_METRICS = ["billed_cents"] as const;
+export const BUDGET_METRICS = ["billed_cents", "total_tokens"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 
-export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
+export const BUDGET_WINDOW_KINDS = ["calendar_day_utc", "calendar_month_utc", "lifetime"] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
 
 export const BUDGET_THRESHOLD_TYPES = ["soft", "hard"] as const;
@@ -806,6 +854,13 @@ export const HEARTBEAT_RUN_STATUSES = [
   "failed",
   "cancelled",
   "timed_out",
+  // DUR-296: set transactionally (never by the run itself) when a run is
+  // still in flight once a planned server restart's drain wait times out --
+  // reads as "interrupted by a planned restart, will resume" and must never
+  // be treated as a failure. See HEARTBEAT_RUN_TERMINAL_STATUSES in
+  // heartbeat.ts (terminal, but deliberately excluded from
+  // UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES).
+  "paused_for_restart",
 ] as const;
 export type HeartbeatRunStatus = (typeof HEARTBEAT_RUN_STATUSES)[number];
 
@@ -1017,6 +1072,8 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.read",
   "external.objects.write",
   "external.objects.refresh",
+  // Personas
+  "personas.generation_cap.enforce",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",

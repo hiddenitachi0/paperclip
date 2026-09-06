@@ -7,9 +7,12 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte,
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   MODEL_PROFILE_KEYS,
   envBindingSchema,
+  hasEmbeddedGitCredential,
+  redactEmbeddedGitCredentials,
   isEnvironmentDriverSupportedForAdapter,
   type BillingType,
   type EnvironmentLeaseStatus,
@@ -53,6 +56,7 @@ import {
   routineRevisions,
   routineRuns,
   routines,
+  withCompanyScope,
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
@@ -108,7 +112,7 @@ import {
   type RealizedExecutionWorkspace,
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
-import { issueService } from "./issues.js";
+import { isHeartbeatRunLockStale, issueService } from "./issues.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
@@ -227,7 +231,12 @@ import {
   redactCurrentUserValue,
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
-import { redactEventPayload, redactKnownSecretValues, redactSensitiveText } from "../redaction.js";
+import {
+  redactEventPayload,
+  redactHeartbeatRunPatchSecrets,
+  redactKnownSecretValues,
+  redactSensitiveText,
+} from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -309,7 +318,17 @@ const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
 const execFile = promisify(execFileCallback);
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
-const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
+// DUR-296: "paused_for_restart" is terminal (the run's process is gone for
+// good, a fresh run will continue the issue) but deliberately excluded from
+// UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES -- it must never be counted,
+// displayed, or retried against as a failure.
+const HEARTBEAT_RUN_TERMINAL_STATUSES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
 // DUR-42: an issue only stops being "actionable" for a timer wake-up once
 // it's done or cancelled — anything else (including in_review/blocked) may
@@ -486,6 +505,17 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
 // Routes and the scheduler construct separate heartbeatService instances, but
 // they must agree on in-process adapter executions when reaping stale runs.
 const activeRunExecutions = new Set<string>();
+
+// DUR-240: shared in-process liveness check, usable by any module (not just
+// this one) that constructs its own issueService(db) and needs to know
+// whether a run this server instance still has a handle for is actually
+// alive -- even when heartbeatRuns.status looks terminal because of a
+// process-lost false negative (see DUR-114/DUR-120). Exported at module
+// scope for the same reason activeRunExecutions is: routes and the
+// scheduler build separate service instances but share this process.
+export function isHeartbeatRunLiveInThisProcess(runId: string): boolean {
+  return runningProcesses.has(runId) || activeRunExecutions.has(runId);
+}
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
 
 type RuntimeConfigSecretResolver = Pick<
@@ -1225,6 +1255,13 @@ async function ensureManagedProjectWorkspace(input: {
     return { cwd, warning: null };
   }
 
+  if (hasEmbeddedGitCredential(input.repoUrl)) {
+    // Do not interpolate input.repoUrl into this message: the whole point of
+    // this check is that the URL carries a live secret, and this error text
+    // is exactly the kind of string that gets persisted to heartbeat_runs.
+    throw new Error(`Refusing to clone: ${EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE}`);
+  }
+
   const gitDirExists = await fs
     .stat(path.resolve(cwd, ".git"))
     .then((entry) => entry.isDirectory())
@@ -1265,8 +1302,12 @@ async function ensureManagedProjectWorkspace(input: {
     });
     return { cwd, warning: null };
   } catch (error) {
+    // Don't interpolate input.repoUrl here, and scrub `reason` (git's own
+    // stderr) before including it: on some failure modes git's error text
+    // itself echoes back embedded credentials (e.g. an auth-rejected URL),
+    // so it must be treated as untrusted even though the guard above passed.
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
+    throw new Error(`Failed to prepare managed checkout at "${cwd}": ${redactEmbeddedGitCredentials(reason)}`);
   }
 }
 
@@ -1849,6 +1890,18 @@ function normalizeMaxConcurrentRuns(value: unknown) {
   return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_MIN, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
 }
 
+// DUR-293: enqueueWakeup collapses every non-throwing no-op (a genuine "skipped, nothing
+// will ever run" outcome as well as "deferred, will run once the active run finishes") to
+// a plain `null` return, indistinguishable from each other or from a real throw. Most
+// callers only care that the call didn't throw, so that collapse is preserved for the
+// default `run | null` return. Callers that need to tell a true no-op apart from a real
+// (even if delayed) schedule -- e.g. the self-review gate deciding whether it's honest to
+// tell the agent "a follow-up run is scheduled" -- can pass onNotScheduled to observe the
+// actual outcome without changing what enqueueWakeup returns to everyone else.
+type WakeupNotScheduledInfo =
+  | { kind: "skipped"; reason: string; unresolvedBlockerIssueIds?: string[] }
+  | { kind: "deferred"; reason: string };
+
 interface WakeupOptions {
   source?: "timer" | "assignment" | "on_demand" | "automation";
   triggerDetail?: "manual" | "ping" | "callback" | "system";
@@ -1858,6 +1911,7 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  onNotScheduled?: (info: WakeupNotScheduledInfo) => void;
 }
 
 type UsageTotals = {
@@ -2257,8 +2311,10 @@ function resolveLedgerBiller(result: AdapterExecutionResult): string {
   return readNonEmptyString(result.biller) ?? readNonEmptyString(result.provider) ?? "unknown";
 }
 
-function normalizeBilledCostCents(costUsd: number | null | undefined, billingType: BillingType): number {
-  if (billingType === "subscription_included") return 0;
+function normalizeBilledCostCents(costUsd: number | null | undefined): number {
+  // The Claude CLI reports a real notional cost (total_cost_usd) for every run
+  // regardless of billing type; forcing it to 0 for subscription_included hid
+  // actual spend once the included quota was exhausted (DUR-210).
   if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
   return Math.max(0, Math.round(costUsd * 100));
 }
@@ -4900,9 +4956,30 @@ export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeSe
 export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
+  /**
+   * DUR-392 (DUR-277 Wave 5b): raw (unwrapped) Db instance for the handful
+   * of db.transaction() call sites below that are reachable from a
+   * company-scoped route (routes/issues.ts) -- the request-scoped proxy
+   * `db` this service otherwise uses doesn't support .transaction(), see
+   * packages/db/src/company-scope.ts. Defaults to db, a no-op for every
+   * caller that hasn't been wired through createRequestScopedDb yet (the
+   * scheduler tick, other unmigrated routes).
+   */
+  rawDb?: Db;
+  /**
+   * DUR-927: executeRun() is dispatched fire-and-forget (it outlives the
+   * request/caller by design -- see the comment above rawDb) so tests that
+   * poll heartbeatRuns.status for idleness before tearing down the DB can
+   * still race a run's trailing writes (issue comments, cascaded wakeups
+   * for dependents). Lets a test observe every dispatched run's promise so
+   * it can drain them with Promise.allSettled before cleanup instead of
+   * guessing a wait duration. No-op when unset.
+   */
+  onRunDispatched?: (run: Promise<unknown>) => void;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
+  const rawDb = options.rawDb ?? db;
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -4911,7 +4988,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
-  const issuesSvc = issueService(db);
+  // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
+  // run this server instance still has an in-memory process handle for is
+  // actually alive, even when heartbeatRuns.status looks terminal (a
+  // process-lost false negative -- see DUR-114/DUR-120). Without this, a
+  // second dispatch can silently reclaim a still-live run's checkout lock
+  // and start mutating the same worktree concurrently.
+  // DUR-381: thread `rawDb` through too. This service is constructed from
+  // the request-scoped proxy by routes/issues.ts and routes/agents.ts, and
+  // executeRun() (a fire-and-forget continuation that outlives the request
+  // scope) calls issuesSvc.checkout(), whose clearExecutionRunIfTerminal
+  // runs withCompanyScope(rawDb, ...). With no active request scope left,
+  // withCompanyScope falls through to `rawDb.transaction()` -- which the
+  // proxy deliberately refuses ("db.transaction() is not supported through
+  // the request-scoped proxy"), so every auto-checkout heartbeat run failed
+  // at setup (caught by the signoff-policy e2e suite).
+  const issuesSvc = issueService(db, { isRunLive: isHeartbeatRunLiveInThisProcess, rawDb });
   const escalationGrants = escalationGrantService(db);
   const approvalsSvc = approvalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
@@ -4930,14 +5022,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     has(id: string) {
       return runningProcesses.has(id) || activeRunExecutions.has(id);
     },
+    // DUR-257: union size of both in-memory "this run is actually executing right
+    // now" registries. Used by shutdown()'s drain wait -- 0 means it's safe to let
+    // the process exit without anything getting booked as process_lost on next boot.
+    count() {
+      const ids = new Set<string>(activeRunExecutions);
+      for (const id of runningProcesses.keys()) ids.add(id);
+      return ids.size;
+    },
   };
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
-  const recovery = recoveryService(db, { enqueueWakeup });
+  const recovery = recoveryService(db, {
+    enqueueWakeup,
+    isRunLive: isHeartbeatRunLiveInThisProcess,
+  });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
-  const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
+  const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup, rawDb });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
   async function releaseEnvironmentLeasesForRun(input: {
@@ -5785,7 +5888,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const staleClaimThreshold = new Date(now.getTime() - 5 * 60 * 1000);
-    const claimed = await db.transaction(async (tx) => {
+    const claimed = await withCompanyScope(rawDb, issue.companyId, async (tx) => {
       const [updated] = await tx
         .update(issues)
         .set({
@@ -6466,9 +6569,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const sanitizedPatch = patch ? redactHeartbeatRunPatchSecrets(patch) : patch;
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ status, ...sanitizedPatch, updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -6503,9 +6607,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const sanitizedPatch = patch ? redactHeartbeatRunPatchSecrets(patch) : patch;
     const updated = await db
       .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
+      .set({ status, ...sanitizedPatch, updatedAt: new Date() })
       .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -7620,7 +7725,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }, "status_only");
     const now = new Date();
 
-    const retryRun = await db.transaction(async (tx) => {
+    const retryRun = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
       );
@@ -7856,7 +7961,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryReason: "process_lost",
     }, "normal_model");
 
-    const queued = await db.transaction(async (tx) => {
+    const queued = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -8477,7 +8582,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           details: Record<string, unknown>;
         };
 
-    const scheduleResult = await db.transaction(async (tx): Promise<ScheduledRetryTransactionResult> => {
+    const scheduleResult = await withCompanyScope(rawDb, run.companyId, async (tx): Promise<ScheduledRetryTransactionResult> => {
       if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON) {
         if (issueId) {
           await tx.execute(
@@ -8865,7 +8970,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryNowRequestedByActorId: input.actor?.actorId ?? null,
     };
 
-    const updated = await db.transaction(async (tx) => {
+    const updated = await withCompanyScope(rawDb, issue.companyId, async (tx) => {
       const row = await tx
         .update(heartbeatRuns)
         .set({
@@ -9499,7 +9604,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
-          | "issue_continuation_waiting_on_review";
+          | "issue_continuation_waiting_on_review"
+          | "issue_execution_lock_held_by_live_run";
         details: Record<string, unknown>;
       };
 
@@ -9610,6 +9716,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           currentExecutionRunId: issue.executionRunId,
         },
       };
+    }
+
+    // DUR-240: the check above only ever covered MAX_TURN_CONTINUATION_RETRY_REASON --
+    // every other queued-run wake reason (including the self-review gate's follow-up
+    // wake) was claimed and executed with zero check that a *different* run still
+    // actively owns this issue's execution lock. That let two live runs share one
+    // worktree (see DUR-120/DUR-237 recurrence). Mirror the same isRunLive-aware
+    // staleness test issueService's lock-adoption paths now use, scoped to exactly
+    // the wake reasons that would have gone through auto-checkout anyway
+    // (shouldAutoCheckoutIssueForWake's own exclusions), so mention replies and
+    // recovery-action runs -- which never need the lock -- are unaffected.
+    if (
+      issue.assigneeAgentId === run.agentId &&
+      issue.executionRunId &&
+      issue.executionRunId !== run.id &&
+      wakeReason &&
+      wakeReason !== "issue_comment_mentioned" &&
+      wakeReason !== "source_scoped_recovery_action" &&
+      !wakeReason.startsWith("execution_")
+    ) {
+      const lockOwnerRun = await db
+        .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, issue.executionRunId))
+        .then((rows) => rows[0] ?? null);
+      const lockOwnerStillLive =
+        !isHeartbeatRunLockStale(lockOwnerRun) || isHeartbeatRunLiveInThisProcess(issue.executionRunId);
+      if (lockOwnerStillLive) {
+        return {
+          stale: true,
+          errorCode: "issue_execution_lock_held_by_live_run",
+          reason:
+            "Cancelled because another run still actively holds this issue's execution lock; dispatching this run would let two runs mutate the same worktree concurrently",
+          details: {
+            issueId,
+            expectedExecutionRunId: run.id,
+            currentExecutionRunId: issue.executionRunId,
+          },
+        };
+      }
     }
 
     if (issue.status === "in_review") {
@@ -10110,6 +10256,87 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  // DUR-296: called (via the CLI/API, instance-wide, across every company)
+  // by deploy-runner.sh right when its proactive drain wait times out with
+  // heartbeat runs still in flight -- just before a
+  // compose_recreate/compose_build_swap recipe kills the shared container
+  // out from under them (see maybe_begin_quiet_mode_drain in
+  // scripts/deploy-runner.sh, DUR-259). Marking every affected run in one
+  // atomic UPDATE keeps this a clean snapshot-and-mark rather than a
+  // read-then-write race, and keeps them out of reapOrphanedRuns' "failed" /
+  // process_lost path on next boot: paused_for_restart reads as "planned,
+  // will resume" everywhere (never as a failure -- see
+  // HEARTBEAT_RUN_TERMINAL_STATUSES/UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES
+  // above) and immediately queues a continuation wake for each affected
+  // issue, the same as a failed/timed_out/cancelled run would. That queued
+  // wake just sits behind quiet mode (already active for the drain that
+  // produced this call) until the restart completes.
+  async function markInFlightRunsPausedForRestart(opts?: { reason?: string }) {
+    const now = new Date();
+    const note =
+      opts?.reason?.trim() ||
+      "Paused for a planned platform restart -- will resume automatically.";
+
+    const paused = await db
+      .update(heartbeatRuns)
+      .set({ status: "paused_for_restart", finishedAt: now, updatedAt: now })
+      .where(inArray(heartbeatRuns.status, ["queued", "running"]))
+      .returning();
+
+    for (const run of paused) {
+      clearHeartbeatRunRuntimeStatus(run.id);
+      publishLiveEvent({
+        companyId: run.companyId,
+        type: "heartbeat.run.status",
+        payload: {
+          runId: run.id,
+          agentId: run.agentId,
+          status: run.status,
+          invocationSource: run.invocationSource,
+          triggerDetail: run.triggerDetail,
+          error: run.error ?? null,
+          errorCode: run.errorCode ?? null,
+          startedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
+          finishedAt: run.finishedAt ? new Date(run.finishedAt).toISOString() : null,
+        },
+      });
+      publishRunLifecyclePluginEvent(run);
+
+      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+        finishedAt: now,
+        error: note,
+      });
+
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: note,
+      });
+
+      await releaseEnvironmentLeasesForRun({
+        runId: run.id,
+        companyId: run.companyId,
+        agentId: run.agentId,
+        status: run.status,
+      });
+
+      // "cancelled" (-> agent status "idle"), not "failed" (-> "error") --
+      // this is a clean, deliberate stop, not a crash.
+      await finalizeAgentStatus(run.agentId, "cancelled", null);
+      await releaseIssueExecutionAndPromote(run);
+    }
+
+    if (paused.length > 0) {
+      logger.warn(
+        { pausedCount: paused.length, runIds: paused.map((r) => r.id) },
+        "paused in-flight heartbeat runs for a planned restart",
+      );
+    }
+
+    return { paused: paused.length, runIds: paused.map((r) => r.id) };
+  }
+
   async function resumeQueuedRuns() {
     const queuedRuns = await db
       .select({ agentId: heartbeatRuns.agentId })
@@ -10194,7 +10421,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const outputTokens = usage?.outputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
-    const additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType);
+    const additionalCostCents = normalizeBilledCostCents(result.costUsd);
     const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
@@ -10326,9 +10553,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (claimedRuns.length === 0) return [];
 
     for (const claimedRun of claimedRuns) {
-      void executeRun(claimedRun.id).catch((err) => {
+      const dispatched = executeRun(claimedRun.id).catch((err) => {
         logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
       });
+      options.onRunDispatched?.(dispatched);
     }
     return claimedRuns;
   }
@@ -12033,6 +12261,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterFinalizeOutcome = status;
       };
 
+      // DUR-215: warn the operator while a run is already unusually expensive,
+      // instead of only after it finishes. Threshold is loaded lazily (only
+      // once, on the first usage tick) so runs that never accumulate much
+      // usage never pay for the history query. Fires at most once per run.
+      let costAnomalyThreshold:
+        | Awaited<ReturnType<ReturnType<typeof costService>["runTokenAnomalyThreshold"]>>
+        | undefined;
+      let costAnomalyNotified = false;
+
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
         adapterResult = await adapter.execute({
@@ -12050,6 +12287,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           onMeta: onAdapterMeta,
           onRuntimeProgress: async (progress) => {
             await recordCurrentHeartbeatRunRuntimeProgress(run, progress, issueId);
+          },
+          onUsageProgress: async (usage) => {
+            if (costAnomalyNotified) return;
+            if (costAnomalyThreshold === undefined) {
+              costAnomalyThreshold = await costService(db, budgetHooks).runTokenAnomalyThreshold(agent.id);
+            }
+            if (!costAnomalyThreshold) return;
+            const totalTokens = usage.inputTokens + (usage.cachedInputTokens ?? 0) + usage.outputTokens;
+            if (totalTokens < costAnomalyThreshold.threshold) return;
+            costAnomalyNotified = true;
+            await logActivity(db, {
+              companyId: agent.companyId,
+              actorType: "system",
+              actorId: "cost_anomaly_monitor",
+              action: "run.cost_anomaly_detected",
+              entityType: "heartbeat_run",
+              entityId: run.id,
+              agentId: agent.id,
+              runId: run.id,
+              details: {
+                issueId,
+                tokensObserved: totalTokens,
+                threshold: costAnomalyThreshold.threshold,
+                median: costAnomalyThreshold.median,
+                stddev: costAnomalyThreshold.stddev,
+                sampleSize: costAnomalyThreshold.sampleSize,
+              },
+            });
           },
           onSpawn: async (meta) => {
             await persistRunProcessMetadata(run.id, {
@@ -12138,7 +12403,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       let outcome: RunSessionOutcome;
       const latestRun = await getRun(run.id);
-      if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
+      if (
+        // `paused_for_restart` means the DB row was flipped out from under
+        // this still-running process by a concurrent drain -- it is not a
+        // real outcome of *this* execution, and `setRunStatusIfRunning`
+        // below will no-op the write anyway since the row is no longer
+        // "running". Fall through to the adapter-result-based outcome so
+        // this run's own session/error bookkeeping reflects what actually
+        // happened, instead of forcing an outcome value paused_for_restart
+        // was deliberately kept out of. See DUR-296.
+        isHeartbeatRunTerminalStatus(latestRun?.status) &&
+        latestRun.status !== "paused_for_restart"
+      ) {
         outcome = latestRun.status;
       } else if (adapterResult.timedOut) {
         outcome = "timed_out";
@@ -12746,7 +13022,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await db.transaction(async (tx) => {
+    const promotionResult = await withCompanyScope(rawDb, run.companyId, async (tx) => {
       // Lock the context issue (if any) AND every issue that still references this run.
       //
       // A single run can hold execution locks on multiple issues: the caller's context
@@ -13256,7 +13532,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         (issue.status === "todo" || issue.status === "in_progress") &&
         !issue.assigneeUserId &&
         issue.assigneeAgentId === run.agentId &&
-        (run.status === "failed" || run.status === "timed_out" || run.status === "cancelled");
+        // DUR-296: a paused_for_restart run gets the same immediate
+        // continuation dispatch as a failed/timed_out/cancelled one -- the
+        // queued wakeup this creates just sits behind quiet mode (already
+        // active for the drain that produced this status) until the
+        // restart completes, which is exactly the "will resume
+        // automatically" promise of the status.
+        (run.status === "failed" ||
+          run.status === "timed_out" ||
+          run.status === "cancelled" ||
+          run.status === "paused_for_restart");
 
       if (!issueNeedsImmediateRecovery) {
         return { kind: "released" as const };
@@ -13511,6 +13796,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await writeSkippedRequest("company.inactive", {
         error: `Wake suppressed because company status is ${companyStatus}`,
       });
+      opts.onNotScheduled?.({ kind: "skipped", reason: "company.inactive" });
       return null;
     }
 
@@ -13602,10 +13888,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     if (source === "timer" && !policy.enabled) {
       await writeSkippedRequest("heartbeat.disabled");
+      opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.disabled" });
       return null;
     }
     if (source !== "timer" && !policy.wakeOnDemand) {
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled");
+      opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.wakeOnDemand.disabled" });
       return null;
     }
 
@@ -13620,6 +13908,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         reason: "No assigned todo or in_progress issue requires this agent before timer adapter invocation.",
       });
       await markTimerHeartbeatChecked(agentId, source);
+      opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.timer.no_actionable_work" });
       return null;
     }
 
@@ -13655,6 +13944,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               securityPrinciples: ["Complete Mediation", "Fail Securely", "Secure Defaults"],
             },
           });
+          opts.onNotScheduled?.({ kind: "skipped", reason: "issue_tree_hold_active" });
           return null;
         }
 
@@ -13676,7 +13966,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // same issue workspace while the assignee already has a live run.
       const agentNameKey = normalizeAgentNameKey(agent.name);
 
-      const outcome = await db.transaction(async (tx) => {
+      const outcome = await withCompanyScope(rawDb, agent.companyId, async (tx) => {
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
         );
@@ -13708,7 +13998,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             idempotencyKey: opts.idempotencyKey ?? null,
             finishedAt: new Date(),
           });
-          return { kind: "skipped" as const };
+          return { kind: "skipped" as const, reason: "issue_execution_issue_not_found" };
         }
 
         const cancelStaleScheduledRetry = async (scheduledRun: typeof heartbeatRuns.$inferSelect) => {
@@ -13964,7 +14254,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             idempotencyKey: opts.idempotencyKey ?? null,
             finishedAt: new Date(),
           });
-          return { kind: "skipped" as const };
+          return {
+            kind: "skipped" as const,
+            reason: "issue_dependencies_blocked",
+            unresolvedBlockerIssueIds: dependencyReadiness.unresolvedBlockerIssueIds,
+          };
         }
 
         if (activeExecutionRun) {
@@ -14077,7 +14371,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 })
                 .where(eq(agentWakeupRequests.id, existingDeferred.id));
 
-              return { kind: "deferred" as const };
+              return { kind: "deferred" as const, reason: "issue_execution_deferred" };
             }
 
             await tx.insert(agentWakeupRequests).values({
@@ -14093,7 +14387,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               idempotencyKey: opts.idempotencyKey ?? null,
             });
 
-            return { kind: "deferred" as const };
+            return { kind: "deferred" as const, reason: "issue_execution_deferred" };
           }
         }
 
@@ -14129,7 +14423,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               })
               .where(eq(agents.id, agentId));
           }
-          return { kind: "skipped" as const };
+          return { kind: "skipped" as const, reason: dailyCapBlock.reason };
         }
 
         const wakeupRequest = await tx
@@ -14180,7 +14474,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "queued" as const, run: newRun };
       });
 
-      if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
+      if (outcome.kind === "deferred") {
+        opts.onNotScheduled?.({ kind: "deferred", reason: outcome.reason });
+        return null;
+      }
+      if (outcome.kind === "skipped") {
+        opts.onNotScheduled?.({
+          kind: "skipped",
+          reason: outcome.reason,
+          ...(outcome.unresolvedBlockerIssueIds ? { unresolvedBlockerIssueIds: outcome.unresolvedBlockerIssueIds } : {}),
+        });
+        return null;
+      }
       if (outcome.kind === "coalesced") {
         await startNextQueuedRunForAgent(agent.id);
         return outcome.run;
@@ -14266,7 +14571,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return mergedRun;
     }
 
-    const queueOutcome = await db.transaction(async (tx) => {
+    const queueOutcome = await withCompanyScope(rawDb, agent.companyId, async (tx) => {
       await tx.execute(
         sql`select id from agents where id = ${agentId} and company_id = ${agent.companyId} for update`,
       );
@@ -14303,7 +14608,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             })
             .where(eq(agents.id, agentId));
         }
-        return { kind: "skipped" as const };
+        return { kind: "skipped" as const, reason: dailyCapBlock.reason };
       }
 
       const wakeupRequest = await tx
@@ -14350,7 +14655,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { kind: "queued" as const, run: newRun };
     });
 
-    if (queueOutcome.kind === "skipped") return null;
+    if (queueOutcome.kind === "skipped") {
+      opts.onNotScheduled?.({ kind: "skipped", reason: queueOutcome.reason });
+      return null;
+    }
     const newRun = queueOutcome.run;
 
     publishLiveEvent({
@@ -14916,6 +15224,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+    markInFlightRunsPausedForRestart,
 
     promoteDueScheduledRetries,
     retryScheduledRetryNow,
@@ -14978,24 +15287,51 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
 
-        const run = await enqueueWakeup(agent.id, {
-          source: "timer",
-          triggerDetail: "system",
-          reason: "heartbeat_timer",
-          requestedByActorType: "system",
-          requestedByActorId: "heartbeat_scheduler",
-          contextSnapshot: {
-            source: "scheduler",
-            reason: "interval_elapsed",
-            now: now.toISOString(),
-          },
-        });
-        if (run) enqueued += 1;
-        else skipped += 1;
+        // DUR-3932: enqueueWakeup can throw (budget block, invokability race,
+        // inactive company, etc. -- see its `throw conflict(...)` paths) and this
+        // loop previously had no per-agent isolation. One agent stuck in a
+        // permanently-throwing state (e.g. a budget cap) would reject this
+        // iteration and silently abort the *rest* of the fleet's tick for every
+        // agent still to come in `allAgents` -- with no ORDER BY on that query,
+        // Postgres is free to reorder rows across plans/restarts, so which
+        // agents got starved (and how many) varied run to run. A restart could
+        // look like it "re-armed the fleet" purely by reshuffling row order away
+        // from the poison-pill agent, while that agent itself stayed stuck
+        // forever. Catch and log per agent so one broken agent can never take
+        // the rest of the fleet down with it, and so the failure is visible
+        // instead of a single easy-to-miss top-level "tick failed" log line.
+        try {
+          const run = await enqueueWakeup(agent.id, {
+            source: "timer",
+            triggerDetail: "system",
+            reason: "heartbeat_timer",
+            requestedByActorType: "system",
+            requestedByActorId: "heartbeat_scheduler",
+            contextSnapshot: {
+              source: "scheduler",
+              reason: "interval_elapsed",
+              now: now.toISOString(),
+            },
+          });
+          if (run) enqueued += 1;
+          else skipped += 1;
+        } catch (err) {
+          skipped += 1;
+          logger.error(
+            { err, agentId: agent.id, companyId: agent.companyId },
+            "heartbeat scheduler tick: enqueueWakeup failed for agent, continuing to next agent",
+          );
+        }
       }
 
-      const issueMonitors = await tickDueIssueMonitors(now);
-      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now);
+      const issueMonitors = await tickDueIssueMonitors(now).catch((err) => {
+        logger.error({ err }, "heartbeat scheduler tick: tickDueIssueMonitors failed");
+        return { checked: 0, triggered: 0, skipped: 0 };
+      });
+      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now).catch((err) => {
+        logger.error({ err }, "heartbeat scheduler tick: tickCustomerInboxHandoff failed");
+        return { checked: 0, reassigned: 0, skipped: 0 };
+      });
 
       return {
         checked: checked + issueMonitors.checked + customerInboxHandoffs.checked,
@@ -15056,5 +15392,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .limit(1);
       return run ?? null;
     },
+
+    // DUR-257: count of runs this process is actually executing right now (per
+    // liveRunExecutions above). Graceful shutdown polls this to wait for in-flight
+    // runs to finish before exiting, instead of letting a deploy's container kill
+    // orphan them into process_lost failures.
+    getInFlightRunCount: () => liveRunExecutions.count(),
   };
 }

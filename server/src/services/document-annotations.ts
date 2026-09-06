@@ -8,6 +8,7 @@ import {
   issueComments,
   issueDocuments,
   routineDocuments,
+  withCompanyScope,
 } from "@paperclipai/db";
 import {
   anchorSnapshotToSelector,
@@ -111,7 +112,11 @@ function snapshotFromThread(thread: Pick<DocumentAnnotationThread, "selectedText
   };
 }
 
-export function documentAnnotationService(db: Db) {
+export function documentAnnotationService(db: Db, options: { rawDb?: Db } = {}) {
+  // DUR-379 (DUR-277 Wave 5b): see the matching comment in
+  // services/issues.ts -- rawDb defaults to db for every unmigrated caller,
+  // a no-op there.
+  const rawDb = options.rawDb ?? db;
   async function getIssueDocument(issueId: string, key: string, dbOrTx: any = db): Promise<IssueDocumentRow | null> {
     return dbOrTx
       .select({
@@ -311,7 +316,10 @@ export function documentAnnotationService(db: Db) {
       key: string,
       input: CreateDocumentAnnotationThread,
       actor: ActorInput,
-    ) => db.transaction(async (tx) => {
+    ) => {
+      const preCheck = await getIssueDocument(issueId, key, rawDb);
+      if (!preCheck) throw notFound("Document not found");
+      return withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
       await tx.execute(sql`
         select ${documents.id}
         from ${issueDocuments}
@@ -391,14 +399,18 @@ export function documentAnnotationService(db: Db) {
         .returning(commentSelect);
 
       return { ...thread, comments: [comment] };
-    }),
+      });
+    },
 
     createRoutineThread: async (
       routineId: string,
       key: string,
       input: CreateDocumentAnnotationThread,
       actor: ActorInput,
-    ) => db.transaction(async (tx) => {
+    ) => {
+      const preCheck = await getRoutineDocument(routineId, key, rawDb);
+      if (!preCheck) throw notFound("Document not found");
+      return withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
       await tx.execute(sql`
         select ${documents.id}
         from ${routineDocuments}
@@ -479,7 +491,8 @@ export function documentAnnotationService(db: Db) {
         .returning(commentSelect);
 
       return { ...thread, comments: [comment] };
-    }),
+      });
+    },
 
     addComment: async (
       issueId: string,
@@ -487,7 +500,10 @@ export function documentAnnotationService(db: Db) {
       threadId: string,
       input: CreateDocumentAnnotationComment,
       actor: ActorInput,
-    ) => db.transaction(async (tx) => {
+    ) => {
+      const preCheck = await getThreadForIssue(issueId, key, threadId, rawDb);
+      if (!preCheck) throw notFound("Annotation thread not found");
+      return withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
       const thread = await getThreadForIssue(issueId, key, threadId, tx);
       if (!thread) throw notFound("Annotation thread not found");
       const now = new Date();
@@ -514,7 +530,8 @@ export function documentAnnotationService(db: Db) {
         .set({ updatedAt: now })
         .where(eq(documentAnnotationThreads.id, thread.id));
       return comment;
-    }),
+      });
+    },
 
     addRoutineComment: async (
       routineId: string,
@@ -522,7 +539,10 @@ export function documentAnnotationService(db: Db) {
       threadId: string,
       input: CreateDocumentAnnotationComment,
       actor: ActorInput,
-    ) => db.transaction(async (tx) => {
+    ) => {
+      const routineDoc = await getRoutineDocument(routineId, key, rawDb);
+      if (!routineDoc) throw notFound("Document not found");
+      return withCompanyScope(rawDb, routineDoc.companyId, async (tx) => {
       const doc = await getRoutineDocument(routineId, key, tx);
       if (!doc) throw notFound("Document not found");
       const thread = await getThreadForRoutine(routineId, key, threadId, doc.companyId, doc.documentId, tx);
@@ -551,7 +571,8 @@ export function documentAnnotationService(db: Db) {
         .set({ updatedAt: now })
         .where(eq(documentAnnotationThreads.id, thread.id));
       return comment;
-    }),
+      });
+    },
 
     cleanupForIssueCommentDeletion: async (
       issueId: string,
@@ -615,7 +636,14 @@ export function documentAnnotationService(db: Db) {
         return { deletedCommentIds, resolvedThreadIds: [] };
       };
 
-      return dbOrTx === db ? db.transaction(runCleanup) : runCleanup(dbOrTx);
+      if (dbOrTx !== db) return runCleanup(dbOrTx);
+      const companyId = await rawDb
+        .select({ companyId: issueComments.companyId })
+        .from(issueComments)
+        .where(eq(issueComments.id, issueCommentId))
+        .then((rows) => rows[0]?.companyId ?? null);
+      if (!companyId) return { deletedCommentIds: [], resolvedThreadIds: [] };
+      return withCompanyScope(rawDb, companyId, runCleanup);
     },
 
     updateThread: async (
@@ -624,7 +652,10 @@ export function documentAnnotationService(db: Db) {
       threadId: string,
       input: UpdateDocumentAnnotationThread,
       actor: ActorInput,
-    ) => db.transaction(async (tx) => {
+    ) => {
+      const preCheck = await getThreadForIssue(issueId, key, threadId, rawDb);
+      if (!preCheck) throw notFound("Annotation thread not found");
+      return withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
       const thread = await getThreadForIssue(issueId, key, threadId, tx);
       if (!thread) throw notFound("Annotation thread not found");
       if (!input.status || input.status === thread.status) return thread;
@@ -650,7 +681,8 @@ export function documentAnnotationService(db: Db) {
         .where(eq(documentAnnotationThreads.id, thread.id))
         .returning(threadSelect);
       return updated;
-    }),
+      });
+    },
 
     updateRoutineThread: async (
       routineId: string,
@@ -658,7 +690,10 @@ export function documentAnnotationService(db: Db) {
       threadId: string,
       input: UpdateDocumentAnnotationThread,
       actor: ActorInput,
-    ) => db.transaction(async (tx) => {
+    ) => {
+      const routineDoc = await getRoutineDocument(routineId, key, rawDb);
+      if (!routineDoc) throw notFound("Document not found");
+      return withCompanyScope(rawDb, routineDoc.companyId, async (tx) => {
       const doc = await getRoutineDocument(routineId, key, tx);
       if (!doc) throw notFound("Document not found");
       const thread = await getThreadForRoutine(routineId, key, threadId, doc.companyId, doc.documentId, tx);
@@ -686,7 +721,8 @@ export function documentAnnotationService(db: Db) {
         .where(eq(documentAnnotationThreads.id, thread.id))
         .returning(threadSelect);
       return updated;
-    }),
+      });
+    },
 
     remapOpenThreadsForDocument: async (input: {
       issueId: string;
@@ -695,7 +731,10 @@ export function documentAnnotationService(db: Db) {
       nextRevisionId: string | null;
       nextRevisionNumber: number;
       nextBody: string;
-    }) => db.transaction(async (tx) => {
+    }) => {
+      const preCheck = await getIssueDocument(input.issueId, input.key, rawDb);
+      if (!preCheck) return [];
+      return withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
       const threads: DocumentAnnotationThread[] = await tx
         .select(threadSelect)
         .from(documentAnnotationThreads)
@@ -761,7 +800,8 @@ export function documentAnnotationService(db: Db) {
       }
 
       return changed;
-    }),
+      });
+    },
 
     remapOpenThreadsForRoutineDocument: async (input: {
       routineId: string;
@@ -770,7 +810,10 @@ export function documentAnnotationService(db: Db) {
       nextRevisionId: string | null;
       nextRevisionNumber: number;
       nextBody: string;
-    }) => db.transaction(async (tx) => {
+    }) => {
+      const preCheck = await getRoutineDocument(input.routineId, input.key, rawDb);
+      if (!preCheck) return [];
+      return withCompanyScope(rawDb, preCheck.companyId, async (tx) => {
       const threads: DocumentAnnotationThread[] = await tx
         .select(threadSelect)
         .from(documentAnnotationThreads)
@@ -836,7 +879,8 @@ export function documentAnnotationService(db: Db) {
       }
 
       return changed;
-    }),
+      });
+    },
 
     selectorToAnchorSnapshot,
   };

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
+import { companies, companyMemberships, instanceUserRoles, withCompanyScopeBypass } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { ensureHumanRoleDefaultGrants } from "./services/principal-access-compatibility.js";
 
@@ -84,14 +84,20 @@ export function inspectBoardClaimChallenge(token: string, code: string | undefin
 }
 
 export async function claimBoardOwnership(
-  db: Db,
+  // DUR-381 (DUR-277 Wave 5b): must be the RAW (unwrapped) db -- this
+  // deliberately spans every company in the instance (granting the new
+  // owner membership in all of them), so it runs under company-scope
+  // bypass rather than any single company's scope.
+  rawDb: Db,
   opts: { token: string; code: string | undefined; userId: string },
 ): Promise<{ status: ChallengeStatus; claimedByUserId?: string }> {
   const status = getChallengeStatus(opts.token, opts.code);
   if (status !== "available") return { status };
 
   const claimedCompanyIds: string[] = [];
-  await db.transaction(async (tx) => {
+  await withCompanyScopeBypass(rawDb, {
+    reason: "board ownership claim grants membership across every company in the instance",
+  }, async (tx) => {
     const existingTargetAdmin = await tx
       .select({ id: instanceUserRoles.id })
       .from(instanceUserRoles)
@@ -144,7 +150,7 @@ export async function claimBoardOwnership(
   });
 
   for (const companyId of claimedCompanyIds) {
-    await ensureHumanRoleDefaultGrants(db, {
+    await ensureHumanRoleDefaultGrants(rawDb, {
       companyId,
       principalId: opts.userId,
       membershipRole: "owner",

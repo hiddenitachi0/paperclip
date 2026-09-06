@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ApprovalPayloadRenderer,
+  approvalDeployBranchInfo,
   approvalDuplicateKey,
   approvalLabel,
   approvalTargetBadge,
@@ -79,6 +80,29 @@ describe("approvalDuplicateKey", () => {
   });
 });
 
+describe("approvalDeployBranchInfo", () => {
+  it("flags a mismatch when the commit's branch differs from the deploy branch (DUR-221/DUR-226)", () => {
+    expect(
+      approvalDeployBranchInfo({ kind: "deploy", commit: "d55e5704", sourceBranch: "master", deployBranch: "custom" }),
+    ).toEqual({ sourceBranch: "master", deployBranch: "custom", mismatch: true });
+  });
+
+  it("reports no mismatch when the commit's branch matches the deploy branch", () => {
+    expect(
+      approvalDeployBranchInfo({ kind: "deploy", commit: "abc123", sourceBranch: "custom", deployBranch: "custom" }),
+    ).toEqual({ sourceBranch: "custom", deployBranch: "custom", mismatch: false });
+  });
+
+  it("returns null when the backend hasn't resolved a source branch yet", () => {
+    expect(approvalDeployBranchInfo({ kind: "deploy", commit: "abc123" })).toBeNull();
+  });
+
+  it("returns null for non-deploy approvals", () => {
+    expect(approvalDeployBranchInfo({ kind: "merge_pr", sourceBranch: "master" })).toBeNull();
+    expect(approvalDeployBranchInfo(null)).toBeNull();
+  });
+});
+
 describe("ApprovalPayloadRenderer", () => {
   let container: HTMLDivElement;
 
@@ -141,6 +165,44 @@ describe("ApprovalPayloadRenderer", () => {
 
     expect(container.textContent).toContain("Board asked for approval before posting the frog.");
     expect(container.textContent).not.toContain("TitleReply with an ASCII frog");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("renders feature_launch payload fields as a plain-language card, not raw JSON", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "feature_launch",
+            issueId: "8e6f9a2e-9e2a-4f7a-9c8b-1a2b3c4d5e6f",
+            title: "Operator changelog page",
+            whatIsNew: "A read-only changelog page that lists finished, user-facing changes.",
+            whereToFindIt: "New \"Changelog\" link in the sidebar, next to Approvals.",
+            whatToTest: "Open the Changelog page and confirm recent launches show up in order.",
+            whatIfItFails: "Hide the sidebar link; the underlying data is unaffected.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Operator changelog page");
+    expect(container.textContent).toContain(
+      "A read-only changelog page that lists finished, user-facing changes.",
+    );
+    expect(container.textContent).toContain(
+      "New \"Changelog\" link in the sidebar, next to Approvals.",
+    );
+    expect(container.textContent).toContain(
+      "Open the Changelog page and confirm recent launches show up in order.",
+    );
+    expect(container.textContent).toContain("Hide the sidebar link; the underlying data is unaffected.");
+    expect(container.textContent).not.toContain("\"whatIsNew\"");
 
     act(() => {
       root.unmount();

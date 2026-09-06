@@ -30,6 +30,7 @@ import {
   runChildProcess,
   type RunProcessResult,
   type TerminalResultCleanupOptions,
+  type UsageCapOptions,
 } from "./server-utils.js";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
@@ -98,6 +99,7 @@ export interface AdapterExecutionTargetProcessOptions {
   onRuntimeProgress?: RuntimeStatusSink;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
   terminalResultCleanup?: TerminalResultCleanupOptions;
+  usageCap?: UsageCapOptions;
   /**
    * Sandbox-only: factory from the Paperclip bridge handle that streams the
    * CLI's stdout/stderr during the run. When provided, the batched provider
@@ -484,6 +486,7 @@ export async function runAdapterExecutionTargetProcess(
     onLog: options.onLog,
     onSpawn: options.onSpawn,
     terminalResultCleanup: options.terminalResultCleanup,
+    usageCap: options.usageCap,
     remoteExecution: adapterExecutionTargetToRemoteSpec(target),
   });
 }

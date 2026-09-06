@@ -29,6 +29,9 @@ import {
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
+import { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
+
+export { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
 
 export function resolveShell(): string {
   const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
@@ -293,19 +296,6 @@ export async function ensureServerWorkspaceLinksCurrent(
   throw new Error(
     `Workspace relink did not repair all server package links: ${remainingMismatches.map((item) => item.packageName).join(", ")}`,
   );
-}
-
-export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
-      delete env[key];
-    }
-  }
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
-  return env;
 }
 
 function stableRuntimeServiceId(input: {
@@ -1341,7 +1331,7 @@ function terminateChildProcess(child: ChildProcess) {
   }
 }
 
-function buildWorkspaceCommandEnv(input: {
+export function buildWorkspaceCommandEnv(input: {
   base: ExecutionWorkspaceInput;
   repoRoot: string;
   worktreePath: string;
@@ -1350,7 +1340,22 @@ function buildWorkspaceCommandEnv(input: {
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
 }) {
+  // Unlike sanitizeRuntimeServiceBaseEnv (used for independent long-running
+  // runtime services, which get an intentionally minimal env), workspace
+  // provision/setup commands legitimately need to inherit the ambient
+  // PAPERCLIP_HOME / PAPERCLIP_WORKTREES_DIR / PAPERCLIP_INSTANCE_ID /
+  // PAPERCLIP_CONFIG this process was started with -- stripping every
+  // PAPERCLIP_* var here (as sanitizeRuntimeServiceBaseEnv does) broke
+  // provisioning scripts that resolve their config/worktree paths from
+  // those. Only DATABASE_URL/DATABASE_MIGRATION_URL/DATABASE_BYPASS_URL (and
+  // the two npm auth flags, for consistency with the other spawn sites)
+  // needs to be kept out.
   const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.DATABASE_URL;
+  delete env.DATABASE_MIGRATION_URL;
+  delete env.DATABASE_BYPASS_URL;
+  delete env.npm_config_tailscale_auth;
+  delete env.npm_config_authenticated_private;
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;

@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNull, like, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -32,6 +32,7 @@ import {
   labels,
   projectWorkspaces,
   projects,
+  withCompanyScope,
   workspaceOperations,
 } from "@paperclipai/db";
 import type {
@@ -100,6 +101,12 @@ const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "bloc
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 export const ISSUE_LIST_DEFAULT_LIMIT = 500;
 export const ISSUE_LIST_MAX_LIMIT = 1000;
+// DUR-312: the operator changelog is meant to be read in ~30 seconds each
+// morning, not paged through -- keep the window and page size small.
+export const CHANGE_LOG_DEFAULT_DAYS = 30;
+export const CHANGE_LOG_MAX_DAYS = 180;
+export const CHANGE_LOG_DEFAULT_LIMIT = 100;
+export const CHANGE_LOG_MAX_LIMIT = 500;
 const ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE = 500;
 export const MAX_CHILD_ISSUES_CREATED_BY_HELPER = 25;
 const MAX_CHILD_COMPLETION_SUMMARIES = 20;
@@ -462,7 +469,16 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   return checkoutRunId == null;
 }
 
-export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+// DUR-296: "paused_for_restart" is terminal (the run's process is gone for
+// good) but never a failure -- see HEARTBEAT_RUN_TERMINAL_STATUSES in
+// heartbeat.ts.
+export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "paused_for_restart",
+]);
 
 // DUR-129: a `scheduled_retry` run is neither terminal nor active — it is
 // normally promoted back to `queued` within one heartbeat scheduler tick
@@ -839,8 +855,11 @@ async function listPendingFinalizeBlockerIssueIds(
       phase: workspaceOperations.phase,
       status: workspaceOperations.status,
       startedAt: workspaceOperations.startedAt,
+      heartbeatRunId: workspaceOperations.heartbeatRunId,
+      heartbeatRunStatus: heartbeatRuns.status,
     })
     .from(workspaceOperations)
+    .leftJoin(heartbeatRuns, eq(workspaceOperations.heartbeatRunId, heartbeatRuns.id))
     .where(
       and(
         eq(workspaceOperations.companyId, companyId),
@@ -849,8 +868,9 @@ async function listPendingFinalizeBlockerIssueIds(
       ),
     );
 
-  const latestAttributedByBlockerWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
-  const latestUnattributedByWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
+  type LatestOp = { phase: string; status: string; startedAt: Date; heartbeatRunId: string | null; heartbeatRunStatus: string | null };
+  const latestAttributedByBlockerWorkspace = new Map<string, LatestOp>();
+  const latestUnattributedByWorkspace = new Map<string, LatestOp>();
   for (const row of rows) {
     if (!row.executionWorkspaceId) continue;
     if (row.issueId) {
@@ -864,6 +884,8 @@ async function listPendingFinalizeBlockerIssueIds(
             phase: row.phase,
             status: row.status,
             startedAt: row.startedAt,
+            heartbeatRunId: row.heartbeatRunId,
+            heartbeatRunStatus: row.heartbeatRunStatus,
           });
         }
       }
@@ -876,6 +898,8 @@ async function listPendingFinalizeBlockerIssueIds(
         phase: row.phase,
         status: row.status,
         startedAt: row.startedAt,
+        heartbeatRunId: row.heartbeatRunId,
+        heartbeatRunStatus: row.heartbeatRunStatus,
       });
     }
   }
@@ -885,6 +909,19 @@ async function listPendingFinalizeBlockerIssueIds(
       ?? latestUnattributedByWorkspace.get(pair.executionWorkspaceId);
     if (!latest) continue; // no ops recorded -> nothing to finalize for this blocker
     if (latest.phase === "workspace_finalize" && latest.status === "succeeded") continue;
+    // The op holding the barrier belongs to a run that has already reached a
+    // terminal status (e.g. it crashed/failed during workspace setup, before
+    // ever reaching its own finalize-recording step). That run will never
+    // record a workspace_finalize row, so waiting for one would gate the
+    // dependent forever even though the blocker issue itself is done — only
+    // hold the barrier while the run that produced this op is still live.
+    if (
+      latest.heartbeatRunId
+      && latest.heartbeatRunStatus
+      && !BLOCKER_ATTENTION_ACTIVE_RUN_STATUSES.includes(latest.heartbeatRunStatus)
+    ) {
+      continue;
+    }
     pending.add(pair.blockerIssueId);
   }
 
@@ -2331,6 +2368,9 @@ const issueListSelect = {
   executionWorkspacePreference: issues.executionWorkspacePreference,
   executionWorkspaceSettings: sql<null>`null`,
   sourceTrust: issues.sourceTrust,
+  changeLogVisible: issues.changeLogVisible,
+  changeLogSummary: issues.changeLogSummary,
+  featureLaunch: issues.featureLaunch,
   startedAt: issues.startedAt,
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
@@ -3058,6 +3098,11 @@ async function listIssueBlockedInboxAttentionMap(
     if (!approvalByIssueId.has(row.issueId)) approvalByIssueId.set(row.issueId, row);
   }
 
+  // Computed once for the whole page rather than per-row inside the loop below:
+  // per-row calls here previously re-ran the full chunked blocker-graph BFS once
+  // per blocked issue, turning an N-issue list into N sequential query batches.
+  const blockerAttentionMap = await listIssueBlockerAttentionMap(dbOrTx, companyId, issueRows);
+
   for (const row of issueRows) {
     if (row.companyId !== companyId || BLOCKED_INBOX_TERMINAL_STATUSES.includes(row.status as typeof BLOCKED_INBOX_TERMINAL_STATUSES[number]) || row.hiddenAt) {
       continue;
@@ -3243,8 +3288,7 @@ async function listIssueBlockedInboxAttentionMap(
       continue;
     }
 
-    const blockerAttention = await listIssueBlockerAttentionMap(dbOrTx, companyId, [row]);
-    const blockerState = blockerAttention.get(row.id);
+    const blockerState = blockerAttentionMap.get(row.id);
     if (row.status === "blocked" && (blockerState?.state === "needs_attention" || blockerState?.state === "stalled")) {
       result.set(row.id, attentionBase({
         state: "needs_attention",
@@ -3524,9 +3568,69 @@ async function countBlockedInboxIssues(dbOrTx: any, companyId: string, filters?:
   }, 0);
 }
 
-export function issueService(db: Db) {
+export interface IssueServiceOptions {
+  // DUR-240: an optional in-process liveness check. `heartbeatRuns.status`
+  // can look terminal while the run is a process-lost false negative --
+  // e.g. its process is still alive but detection wrongly declared it dead
+  // (see DUR-114/DUR-120). When provided, lock-adoption paths below refuse
+  // to reclaim a checkout/execution lock from a run this check reports as
+  // still live, even if its DB status says otherwise.
+  isRunLive?: (runId: string) => boolean;
+  // DUR-379 (DUR-277 Wave 5b): `rawDb` defaults to `db` for every unmigrated
+  // caller (heartbeat.ts, recovery/service.ts, ...), a no-op there since
+  // `db` is already the raw pooled instance for them. Only
+  // routes/issues.ts, once wired through createRequestScopedDb, passes a
+  // `db` that is the *scoped* proxy and a distinct `rawDb`, since
+  // db.transaction() below is not supported through that proxy (see
+  // packages/db/src/company-scope.ts) and needs the raw connection via
+  // withCompanyScope instead.
+  rawDb?: Db;
+}
+
+export function issueService(db: Db, options: IssueServiceOptions = {}) {
+  const rawDb = options.rawDb ?? db;
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
+
+  // DUR-379: a handful of mutation methods below (lock-adoption,
+  // release/force-release, comment/attachment removal) only take a narrow
+  // entity id, not a companyId -- by the time any of them run through a
+  // route, the caller has already resolved and access-checked the
+  // relevant issue's companyId (see routes/issues.ts's per-route scope
+  // middleware), so this is plumbing to learn the RLS claim value for
+  // withCompanyScope's transaction, not a new authorization decision. Reads
+  // via `rawDb` directly (not withCompanyScopeBypass) since it exposes
+  // nothing beyond the single row's companyId that the caller's own id
+  // already targets -- no different in reach than the raw connection reads
+  // these transactions already performed today. Returns null (not a thrown
+  // error) on a missing row so callers can preserve their existing
+  // "row already gone" return contract instead of a new thrown error.
+  async function companyIdForIssue(issueId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
+
+  async function companyIdForComment(commentId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issueComments.companyId })
+      .from(issueComments)
+      .where(eq(issueComments.id, commentId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
+
+  async function companyIdForAttachment(attachmentId: string): Promise<string | null> {
+    const row = await rawDb
+      .select({ companyId: issueAttachments.companyId })
+      .from(issueAttachments)
+      .where(eq(issueAttachments.id, attachmentId))
+      .then((rows) => rows[0] ?? null);
+    return row?.companyId ?? null;
+  }
 
   // DUR-101: DUR-98 Class D found duplicate implementation tickets filed for
   // work that was already open (in one case a paid agent was assigned to
@@ -4280,13 +4384,24 @@ export function issueService(db: Db) {
     );
   }
 
+  // DUR-240: wraps isHeartbeatRunLockStale with the optional in-process
+  // liveness override from IssueServiceOptions -- see its doc comment.
+  function isLockRunActuallyStale(
+    runId: string,
+    run: { status: string; scheduledRetryAt?: Date | string | null } | null | undefined,
+  ): boolean {
+    if (!isHeartbeatRunLockStale(run)) return false;
+    if (options.isRunLive?.(runId)) return false;
+    return true;
+  }
+
   async function isTerminalOrMissingHeartbeatRun(runId: string, dbOrTx: DbReader = db) {
     const run = await dbOrTx
       .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
-    return isHeartbeatRunLockStale(run);
+    return isLockRunActuallyStale(runId, run);
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -4295,7 +4410,9 @@ export function issueService(db: Db) {
     actorRunId: string;
     expectedCheckoutRunId: string;
   }) {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(input.issueId);
+    if (!companyId) return { adopted: null, latest: null };
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       const lockedIssue = await tx
         .select({
           id: issues.id,
@@ -4340,7 +4457,7 @@ export function issueService(db: Db) {
           .where(eq(heartbeatRuns.id, input.actorRunId))
           .then((rows) => rows[0] ?? null),
       ]);
-      const stale = isHeartbeatRunLockStale(existingRun);
+      const stale = isLockRunActuallyStale(input.expectedCheckoutRunId, existingRun);
       const actorLive = actorRun && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status);
       if (!stale || !actorLive) {
         return { adopted: null, latest: lockedIssue };
@@ -4395,7 +4512,9 @@ export function issueService(db: Db) {
     actorAgentId: string;
     actorRunId: string;
   }) {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(input.issueId);
+    if (!companyId) return null;
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
       );
@@ -4438,7 +4557,9 @@ export function issueService(db: Db) {
   }
 
   async function clearExecutionRunIfTerminal(issueId: string): Promise<boolean> {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(issueId);
+    if (!companyId) return false;
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(
         sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
       );
@@ -4457,7 +4578,7 @@ export function issueService(db: Db) {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.executionRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !isHeartbeatRunLockStale(run)) return false;
+      if (!isLockRunActuallyStale(issue.executionRunId, run)) return false;
 
       const updated = await tx
         .update(issues)
@@ -4486,7 +4607,9 @@ export function issueService(db: Db) {
   // precondition: a terminal run holds no real claim regardless of who is
   // assigned or what status the issue is currently in.
   async function clearCheckoutRunIfTerminal(issueId: string): Promise<boolean> {
-    return db.transaction(async (tx) => {
+    const companyId = await companyIdForIssue(issueId);
+    if (!companyId) return false;
+    return withCompanyScope(rawDb, companyId, async (tx) => {
       await tx.execute(
         sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
       );
@@ -4505,7 +4628,7 @@ export function issueService(db: Db) {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.checkoutRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !isHeartbeatRunLockStale(run)) return false;
+      if (!isLockRunActuallyStale(issue.checkoutRunId, run)) return false;
 
       if (issue.executionRunId && issue.executionRunId !== issue.checkoutRunId) {
         await tx.execute(
@@ -4516,7 +4639,7 @@ export function issueService(db: Db) {
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, issue.executionRunId))
           .then((rows) => rows[0] ?? null);
-        if (executionRun && !isHeartbeatRunLockStale(executionRun)) return false;
+        if (!isLockRunActuallyStale(issue.executionRunId, executionRun)) return false;
       }
 
       const updated = await tx
@@ -5161,7 +5284,7 @@ export function issueService(db: Db) {
       // it defaults the child's override only when this call left
       // assigneeAdapterOverrides unset entirely (explicit values, including
       // explicit null, always win).
-      let child = await issueService(db).create(parent.companyId, {
+      let child = await issueService(db, { rawDb }).create(parent.companyId, {
         ...issueData,
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
@@ -5214,7 +5337,7 @@ export function issueService(db: Db) {
         children: data.children,
       });
 
-      const initialClaim = await db.transaction(async (tx) => {
+      const initialClaim = await withCompanyScope(rawDb, sourceIssue.companyId, async (tx) => {
         await tx.execute(sql`select ${issues.id} from ${issues} where ${issues.id} = ${sourceIssue.id} for update`);
 
         const belongsToPlanDocument = await tx
@@ -5286,7 +5409,7 @@ export function issueService(db: Db) {
       const newlyCreatedIssues: Array<typeof issues.$inferSelect> = [];
 
       while (true) {
-        const step = await db.transaction(async (tx) => {
+        const step = await withCompanyScope(rawDb, sourceIssue.companyId, async (tx) => {
           await tx.execute(
             sql`select ${issuePlanDecompositions.id}
                 from ${issuePlanDecompositions}
@@ -5522,7 +5645,7 @@ export function issueService(db: Db) {
           titleSimilarityDuplicate = duplicate.ticket;
         }
       }
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
@@ -5968,7 +6091,7 @@ export function issueService(db: Db) {
           // DUR-29: closing the issue settles any decision it was waiting on — resolve
           // still-pending issue-thread interactions so they don't linger in the operator's
           // "needs you" list for work that already shipped.
-          await issueThreadInteractionService(db).resolveAllPendingForIssueClosed(
+          await issueThreadInteractionService(db, { rawDb }).resolveAllPendingForIssueClosed(
             { id: updated.id, companyId: existing.companyId, status: updated.status },
             { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
             tx,
@@ -5996,7 +6119,7 @@ export function issueService(db: Db) {
         return enriched;
       };
 
-      return dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx);
+      return dbOrTx === db ? withCompanyScope(rawDb, existing.companyId, runUpdate) : runUpdate(dbOrTx);
     },
 
     clearExecutionWorkspaceEnvironmentSelection: async (companyId: string, environmentId: string) => {
@@ -6035,8 +6158,10 @@ export function issueService(db: Db) {
     // detaches those rows (and their underlying assets/documents) rather
     // than destroying them; they resurface under the "No task" group on the
     // Files page (see company-artifacts.ts).
-    remove: (id: string) =>
-      db.transaction(async (tx) => {
+    remove: async (id: string) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const removedIssue = await tx
           .delete(issues)
           .where(eq(issues.id, id))
@@ -6046,7 +6171,8 @@ export function issueService(db: Db) {
         if (!removedIssue) return null;
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;
-      }),
+      });
+    },
 
     checkout: async (id: string, agentId: string, expectedStatuses: string[], checkoutRunId: string | null) => {
       const issueCompany = await db
@@ -6389,8 +6515,10 @@ export function issueService(db: Db) {
       });
     },
 
-    release: async (id: string, actorAgentId?: string, actorRunId?: string | null) =>
-      db.transaction(async (tx) => {
+    release: async (id: string, actorAgentId?: string, actorRunId?: string | null) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         await tx.execute(
           sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
         );
@@ -6439,10 +6567,13 @@ export function issueService(db: Db) {
         if (!updated) return null;
         const [enriched] = await withIssueLabels(tx, [updated]);
         return enriched;
-      }),
+      });
+    },
 
-    adminForceRelease: async (id: string, options: { clearAssignee?: boolean } = {}) =>
-      db.transaction(async (tx) => {
+    adminForceRelease: async (id: string, options: { clearAssignee?: boolean } = {}) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         await tx.execute(
           sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
         );
@@ -6484,7 +6615,8 @@ export function issueService(db: Db) {
             executionRunId: existing.executionRunId,
           },
         };
-      }),
+      });
+    },
 
     // Narrow self-serve escape hatch for DUR-86: an issue can get permanently
     // deadlocked when one of its blockedByIssueIds points at a *cancelled*
@@ -6495,8 +6627,10 @@ export function issueService(db: Db) {
     // lets the issue's own current assignee unlink specifically the terminal
     // (done/cancelled) blockers — never a still-open one — without needing
     // that boundary access, breaking the cycle.
-    clearTerminalBlockers: async (id: string) =>
-      db.transaction(async (tx) => {
+    clearTerminalBlockers: async (id: string) => {
+      const companyId = await companyIdForIssue(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         await tx.execute(
           sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
         );
@@ -6538,10 +6672,59 @@ export function issueService(db: Db) {
         if (!updated) return null;
         const [enriched] = await withIssueLabels(tx, [updated]);
         return { issue: enriched, clearedBlockerIssueIds };
-      }),
+      });
+    },
 
     listLabels: (companyId: string) =>
       db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
+
+    // DUR-312: read-only operator changelog -- issue-level (not commit-level)
+    // rows for fixed bugs/small changes, deliberately excluded from the
+    // approval queue. Only issues an agent explicitly marked
+    // changeLogVisible surface here; being `done` alone is not enough.
+    listChangeLog: async (
+      companyId: string,
+      params: { projectId?: string | null; days?: number; limit?: number } = {},
+    ) => {
+      const days = Math.min(
+        CHANGE_LOG_MAX_DAYS,
+        Math.max(1, Math.floor(params.days ?? CHANGE_LOG_DEFAULT_DAYS)),
+      );
+      const limit = Math.min(
+        CHANGE_LOG_MAX_LIMIT,
+        Math.max(1, Math.floor(params.limit ?? CHANGE_LOG_DEFAULT_LIMIT)),
+      );
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+      const conditions = [
+        eq(issues.companyId, companyId),
+        eq(issues.changeLogVisible, true),
+        eq(issues.status, "done"),
+        isNull(issues.hiddenAt),
+        isNotNull(issues.completedAt),
+        gte(issues.completedAt, since),
+      ];
+      if (params.projectId) {
+        conditions.push(eq(issues.projectId, params.projectId));
+      }
+
+      return db
+        .select({
+          id: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          changeLogSummary: issues.changeLogSummary,
+          completedAt: issues.completedAt,
+          priority: issues.priority,
+          projectId: issues.projectId,
+          projectName: projects.name,
+        })
+        .from(issues)
+        .leftJoin(projects, eq(projects.id, issues.projectId))
+        .where(and(...conditions))
+        .orderBy(desc(issues.completedAt))
+        .limit(limit);
+    },
 
     getLabelById: (id: string) =>
       db
@@ -6678,8 +6861,10 @@ export function issueService(db: Db) {
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
+      const companyId = await companyIdForComment(commentId);
+      if (!companyId) return null;
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const [comment] = await tx
           .delete(issueComments)
           .where(eq(issueComments.id, commentId))
@@ -6711,8 +6896,10 @@ export function issueService(db: Db) {
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
+      const companyId = await companyIdForComment(commentId);
+      if (!companyId) return null;
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const now = new Date();
         const [comment] = await tx
           .update(issueComments)
@@ -6833,7 +7020,7 @@ export function issueService(db: Db) {
         }
       }
 
-      return db.transaction(async (tx) => {
+      return withCompanyScope(rawDb, issue.companyId, async (tx) => {
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -6927,8 +7114,10 @@ export function issueService(db: Db) {
         .where(eq(issueAttachments.id, id))
         .then((rows) => rows[0] ?? null),
 
-    removeAttachment: async (id: string) =>
-      db.transaction(async (tx) => {
+    removeAttachment: async (id: string) => {
+      const companyId = await companyIdForAttachment(id);
+      if (!companyId) return null;
+      return withCompanyScope(rawDb, companyId, async (tx) => {
         const existing = await tx
           .select({
             id: issueAttachments.id,
@@ -6956,7 +7145,8 @@ export function issueService(db: Db) {
         await tx.delete(issueAttachments).where(eq(issueAttachments.id, id));
         await tx.delete(assets).where(eq(assets.id, existing.assetId));
         return existing;
-      }),
+      });
+    },
 
     findMentionedAgents: async (companyId: string, body: string) => {
       const explicitAgentMentionIds = extractAgentMentionIds(body);

@@ -152,6 +152,13 @@ export interface AdapterExecutionContext {
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
   onRuntimeProgress?: RuntimeStatusSink;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
+  /**
+   * DUR-215: live running token total for the current run, reported as it
+   * streams in (adapter-opt-in; today only claude-local sends this). Lets
+   * the caller flag an in-progress run as abnormally expensive before it
+   * finishes, instead of only after the terminal usage is known.
+   */
+  onUsageProgress?: (usage: UsageSummary) => Promise<void>;
   authToken?: string;
 }
 

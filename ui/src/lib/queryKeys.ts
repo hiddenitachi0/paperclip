@@ -207,6 +207,10 @@ export const queryKeys = {
   budgets: {
     overview: (companyId: string) => ["budgets", "overview", companyId] as const,
   },
+  changeLog: {
+    list: (companyId: string, projectId?: string, days?: number) =>
+      ["change-log", companyId, projectId, days] as const,
+  },
   approvals: {
     list: (companyId: string, status?: string) =>
       ["approvals", companyId, status] as const,
@@ -245,6 +249,7 @@ export const queryKeys = {
     generalSettings: ["instance", "general-settings"] as const,
     schedulerHeartbeats: ["instance", "scheduler-heartbeats"] as const,
     experimentalSettings: ["instance", "experimental-settings"] as const,
+    quietMode: ["instance", "quiet-mode"] as const,
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,
@@ -291,6 +296,10 @@ export const queryKeys = {
     ["usage-window-spend", companyId] as const,
   usageQuotaWindows: (companyId: string) =>
     ["usage-quota-windows", companyId] as const,
+  goalAdoptionSnapshot: (companyId: string) =>
+    ["goal-adoption-snapshot", companyId] as const,
+  goalAdoptionTrend: (companyId: string, days?: number) =>
+    ["goal-adoption-trend", companyId, days] as const,
   heartbeats: (companyId: string, agentId?: string) =>
     ["heartbeats", companyId, agentId] as const,
   runDetail: (runId: string) => ["heartbeat-run", runId] as const,

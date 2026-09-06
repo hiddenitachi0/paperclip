@@ -858,6 +858,7 @@ export interface RequestConfirmationPayload {
   detailsMarkdown?: string | null;
   supersedeOnUserComment?: boolean;
   target?: RequestConfirmationTarget | null;
+  factCheck?: boolean;
 }
 
 export interface RequestCheckboxConfirmationOption {

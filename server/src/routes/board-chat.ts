@@ -7,6 +7,7 @@ import type { Db } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { instanceSettingsService, issueService } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { sanitizeRuntimeServiceBaseEnv } from "../services/runtime-env.js";
 
 /**
  * Strip structured action signals (`%%ACTIONS%%{...}%%/ACTIONS%%`) from a
@@ -248,7 +249,7 @@ export function boardChatRoutes(
       stdio: ["pipe", "pipe", "pipe"],
       cwd: "/tmp",
       env: {
-        ...process.env,
+        ...sanitizeRuntimeServiceBaseEnv(process.env),
         PAPERCLIP_API_URL: apiUrl,
         PAPERCLIP_COMPANY_ID: companyId,
       },

@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 const mockActivityService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -41,7 +42,7 @@ async function createApp(
   actor: Record<string, unknown> = {
     type: "board",
     userId: "user-1",
-    companyIds: ["company-1"],
+    companyIds: ["11111111-1111-4111-8111-111111111111"],
     source: "session",
     isInstanceAdmin: false,
   },
@@ -60,7 +61,7 @@ async function createApp(
     };
     next();
   });
-  app.use("/api", activityRoutes({} as any));
+  app.use("/api", activityRoutes(withFakeCompanyScopeReserve({}) as any));
   app.use(errorHandler);
   return app;
 }
@@ -110,11 +111,11 @@ describe.sequential("activity routes", () => {
     mockActivityService.list.mockResolvedValue([]);
 
     const app = await createApp();
-    const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/companies/company-1/activity"));
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/companies/11111111-1111-4111-8111-111111111111/activity"));
 
     expect(res.status).toBe(200);
     expect(mockActivityService.list).toHaveBeenCalledWith({
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       agentId: undefined,
       entityType: undefined,
       entityId: undefined,
@@ -127,12 +128,12 @@ describe.sequential("activity routes", () => {
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
-      request(baseUrl).get("/api/companies/company-1/activity?limit=5000&entityType=issue"),
+      request(baseUrl).get("/api/companies/11111111-1111-4111-8111-111111111111/activity?limit=5000&entityType=issue"),
     );
 
     expect(res.status).toBe(200);
     expect(mockActivityService.list).toHaveBeenCalledWith({
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       agentId: undefined,
       entityType: "issue",
       entityId: undefined,
@@ -143,7 +144,7 @@ describe.sequential("activity routes", () => {
   it("resolves alphanumeric issue identifiers before loading runs", async () => {
     mockIssueService.getByIdentifier.mockResolvedValue({
       id: "issue-uuid-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
     });
     mockActivityService.runsForIssue.mockResolvedValue([
       {
@@ -158,7 +159,7 @@ describe.sequential("activity routes", () => {
     expect(res.status).toBe(200);
     expect(mockIssueService.getByIdentifier).toHaveBeenCalledWith("PC1A2-475");
     expect(mockIssueService.getById).not.toHaveBeenCalled();
-    expect(mockActivityService.runsForIssue).toHaveBeenCalledWith("company-1", "issue-uuid-1");
+    expect(mockActivityService.runsForIssue).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "issue-uuid-1");
     expect(res.body).toEqual([{ runId: "run-1", adapterType: "codex_local" }]);
   });
 
