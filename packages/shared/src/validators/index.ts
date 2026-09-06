@@ -277,6 +277,21 @@ export {
 } from "./persona.js";
 
 export {
+  personaAccountPlatformSchema,
+  personaAccountAutonomyModeSchema,
+  createPersonaAccountSchema,
+  updatePersonaAccountSchema,
+  connectPersonaAccountCredentialSchema,
+  enqueuePersonaPostSchema,
+  updatePersonaPublishingCompanySettingsSchema,
+  type CreatePersonaAccountInput,
+  type UpdatePersonaAccountInput,
+  type ConnectPersonaAccountCredentialInput,
+  type EnqueuePersonaPostInput,
+  type UpdatePersonaPublishingCompanySettingsInput,
+} from "./persona-account.js";
+
+export {
   mcpToolLibraryConnectionSchema,
   mcpToolLibraryEntryBodySchema,
   mcpToolLibraryEntryUpdateSchema,
@@ -502,6 +517,7 @@ export {
   modelBoostRequestPayloadSchema,
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
+  personaPublishRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
   type CreateApproval,
   type ResolveApproval,
@@ -513,6 +529,7 @@ export {
   type ModelBoostRequestPayload,
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
+  type PersonaPublishRequestPayload,
   type FeatureLaunchRequestPayload,
 } from "./approval.js";
 
