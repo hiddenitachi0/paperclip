@@ -822,7 +822,11 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     # phrased as a skip, not a success — DUR-137's own guard exists because
     # this script never actually re-ran the health check against THIS
     # approval's target, only against what an earlier deploy already proved.
-    comment "$aid" "$company_id" "Deploy skipped — approval target ($target_ref, commit ${carried_commit:-unknown}) is an ancestor of the currently live commit ($before_commit): its change has already shipped as part of an earlier or concurrent deploy, so applying this approval directly would only reset production backward and silently discard whatever has shipped since (DUR-137 guard). If a rollback is genuinely intended, re-file the deploy approval with payload.allowBackwardDeploy: true to confirm that explicitly." "carried" "$carried_commit"
+    # Operator-facing: no payload field names here. A person who genuinely
+    # wants an older version back uses the project page's "Roll back to
+    # previous version" button (ui/src/components/ProjectDeployHistoryCard.tsx),
+    # which files a rollback card with the opt-in already set.
+    comment "$aid" "$company_id" "Deploy skipped — this approval points at $target_ref (commit ${carried_commit:-unknown}), which is older than what is already live ($before_commit). Its change already shipped as part of an earlier deploy, so nothing is missing. Applying it now would move production backward and undo everything that has shipped since, so the deploy runner left production untouched. If you really do want to go back to an older version, open the project page and use the \"Roll back to previous version\" button — that files a rollback card for you to approve. This card can be left as it is." "carried" "$carried_commit"
     return
   elif [ "$fetch_reset_status" -eq 3 ]; then
     log "runner: $aid refused — $target_ref (commit ${carried_commit:-unknown}) is not reachable from $DV_REPO_REF, this project's configured deploy branch"
