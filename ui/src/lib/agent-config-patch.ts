@@ -26,6 +26,10 @@ const ADAPTER_AGNOSTIC_KEYS = [
   "cwd",
   "timeoutSec",
   "graceSec",
+  // Polish round 3: per-agent run time limits are read by the heartbeat
+  // watchdog for every local adapter, so they survive an adapter switch.
+  "maxRunDurationMinutes",
+  "silentRunTimeoutMinutes",
   "bootstrapPromptTemplate",
 ] as const;
 

@@ -56,6 +56,10 @@ export const help: Record<string, string> = {
   intervalSec: "Seconds between automatic heartbeat invocations.",
   timeoutSec: "Maximum seconds a run can take before being terminated. 0 means no timeout.",
   graceSec: "Seconds to wait after sending interrupt before force-killing the process.",
+  maxRunDurationMinutes:
+    "Minutes a run may go on before Paperclip stops it and retries once. Leave empty to use the instance-wide limit under Settings > Instance settings > General > Run time limits. 0 switches this limit off for this agent only.",
+  silentRunTimeoutMinutes:
+    "Minutes a run may print nothing before Paperclip stops it and retries once. Leave empty to use the instance-wide limit under Settings > Instance settings > General > Run time limits. 0 switches this limit off for this agent only.",
   wakeOnDemand: "Allow this agent to be woken by assignments, API calls, UI actions, or automated systems.",
   cooldownSec: "Minimum seconds between consecutive heartbeat runs.",
   maxConcurrentRuns: "Maximum number of heartbeat runs that can execute simultaneously for this agent.",
