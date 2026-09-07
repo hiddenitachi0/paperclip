@@ -1101,6 +1101,28 @@ export {
   type SaveInstanceClaudeAuthTokenInput,
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./validators/instance-claude-auth.js";
+export {
+  ADMIN_AUTH_CHECK_STATUSES,
+  ADMIN_AUTH_CHECK_TRIGGERS,
+  SIGN_OUT_EVERYWHERE_SCOPES,
+  describeUserAgent,
+} from "./types/instance-security.js";
+export type {
+  AdminAuthCheckResult,
+  AdminAuthCheckStatus,
+  AdminAuthCheckTrigger,
+  AdminAuthLastCheck,
+  InstanceSecurityAdmin,
+  InstanceSecurityOverview,
+  InstanceSecuritySession,
+  RevokeSessionResult,
+  SignOutEverywhereResult,
+  SignOutEverywhereScope,
+} from "./types/instance-security.js";
+export {
+  signOutEverywhereSchema,
+  type SignOutEverywhereInput,
+} from "./validators/instance-security.js";
 
 export type {
   CloudUpstreamConnectStartResponse,

@@ -1,6 +1,7 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth, type Auth } from "better-auth";
+import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import type { Db } from "@paperclipai/db";
@@ -157,7 +158,90 @@ export function deriveAuthTrustedOrigins(config: Config, opts?: { listenPort?: n
   return Array.from(trustedOrigins);
 }
 
-export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]): BetterAuthInstance {
+/**
+ * Security audit hooks (admin auth hardening). Each is best-effort: it is
+ * awaited by better-auth after the row is written, but any error it throws is
+ * swallowed here so a logging problem can never break sign-in or a password
+ * change. The login flow itself is untouched.
+ */
+export interface BetterAuthAuditHooks {
+  onSessionCreated?: (session: { id: string; userId: string; ipAddress?: string | null; userAgent?: string | null }) => Promise<void>;
+  onUserUpdated?: (user: { id: string; email?: string | null; name?: string | null }) => Promise<void>;
+  /** Fired after better-auth's change-password / set-password / reset-password endpoints succeed. */
+  onPasswordChanged?: (input: { userId: string | null; path: string }) => Promise<void>;
+}
+
+const PASSWORD_CHANGE_PATHS = new Set(["/change-password", "/set-password", "/reset-password"]);
+
+/**
+ * better-auth runs `hooks.after` even when the endpoint threw: the APIError is
+ * caught and stored as `ctx.context.returned` before the after hooks run. A
+ * rejected change-password (wrong current password -- exactly what someone
+ * probing an admin account produces) must therefore never look like a
+ * successful change. Only a non-error result counts as "the password changed".
+ */
+export function endpointSucceeded(returned: unknown): boolean {
+  if (returned === undefined || returned === null) return true;
+  if (isAPIError(returned) || returned instanceof Error) return false;
+  if (typeof Response !== "undefined" && returned instanceof Response) return returned.ok;
+  return true;
+}
+
+function swallow(label: string, fn: () => Promise<void>): Promise<void> {
+  return fn().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[better-auth audit hook] ${label} failed:`, err);
+  });
+}
+
+export function buildBetterAuthDatabaseHooks(hooks: BetterAuthAuditHooks | undefined) {
+  if (!hooks) return {};
+  return {
+    databaseHooks: {
+      session: {
+        create: {
+          after: async (session: { id: string; userId: string; ipAddress?: string | null; userAgent?: string | null }) => {
+            if (!hooks.onSessionCreated) return;
+            await swallow("onSessionCreated", () =>
+              hooks.onSessionCreated!({
+                id: session.id,
+                userId: session.userId,
+                ipAddress: session.ipAddress ?? null,
+                userAgent: session.userAgent ?? null,
+              }),
+            );
+          },
+        },
+      },
+      user: {
+        update: {
+          after: async (user: { id: string; email?: string | null; name?: string | null }) => {
+            if (!hooks.onUserUpdated || !user?.id) return;
+            await swallow("onUserUpdated", () =>
+              hooks.onUserUpdated!({ id: user.id, email: user.email ?? null, name: user.name ?? null }),
+            );
+          },
+        },
+      },
+    },
+    hooks: {
+      after: createAuthMiddleware(async (ctx) => {
+        if (!hooks.onPasswordChanged || !PASSWORD_CHANGE_PATHS.has(ctx.path)) return;
+        if (!endpointSucceeded((ctx.context as { returned?: unknown }).returned)) return;
+        const session = (ctx.context as { session?: { user?: { id?: string } } | null }).session;
+        const userId = typeof session?.user?.id === "string" ? session.user.id : null;
+        await swallow("onPasswordChanged", () => hooks.onPasswordChanged!({ userId, path: ctx.path }));
+      }),
+    },
+  };
+}
+
+export function createBetterAuthInstance(
+  db: Db,
+  config: Config,
+  trustedOrigins: string[],
+  auditHooks?: BetterAuthAuditHooks,
+): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
   const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET;
@@ -198,6 +282,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       disableSignUp: config.authDisableSignUp,
     },
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies }),
+    ...buildBetterAuthDatabaseHooks(auditHooks),
   };
 
   if (!baseUrl) {

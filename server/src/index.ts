@@ -73,6 +73,13 @@ import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
+import {
+  reconcileAdminAuthSnapshot,
+  recordAdminSessionCreated,
+  recordPasswordChangedViaApp,
+  recordUserUpdatedViaApp,
+  resolveAdminAuthSigningSecret,
+} from "./services/admin-auth-audit.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
@@ -601,7 +608,27 @@ export async function startServer(): Promise<StartedServer> {
       },
       "Authenticated mode auth origin configuration",
     );
-    const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
+    // Admin auth hardening: better-auth tells us when a session is created,
+    // a user row is updated, or a password changes through its endpoints;
+    // each becomes an operator notice (see services/admin-auth-audit.ts).
+    // The hooks are best-effort and never interrupt the login flow.
+    const adminAuthSecret = resolveAdminAuthSigningSecret();
+    const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins, {
+      onSessionCreated: async (session) => {
+        await recordAdminSessionCreated(db as any, session);
+      },
+      onUserUpdated: async (user) => {
+        await recordUserUpdatedViaApp(db as any, { secret: adminAuthSecret, userId: user.id, email: user.email, name: user.name });
+      },
+      onPasswordChanged: async ({ userId }) => {
+        if (userId) {
+          await recordPasswordChangedViaApp(db as any, { secret: adminAuthSecret, userId });
+        } else {
+          // reset-password has no session; the periodic check attributes it.
+          await reconcileAdminAuthSnapshot(db as any, { secret: adminAuthSecret, trigger: "app_change" });
+        }
+      },
+    });
     betterAuthHandler = createBetterAuthHandler(auth);
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
@@ -712,6 +739,7 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: config.host,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
+    adminAuthCheckIntervalMinutes: config.adminAuthCheckIntervalMinutes,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
@@ -1384,6 +1412,38 @@ export async function startServer(): Promise<StartedServer> {
     // settled and the first report does not describe a restart in progress.
     setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
     setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
+
+    // Admin auth hardening: periodically compare the live instance-admin
+    // set (plus each admin's email and password fingerprint) against the
+    // signed record and report anything that changed outside the app. The
+    // first run after boot takes the baseline if there is none. Bypass
+    // scope like the check-up above: reads auth tables, writes one notice
+    // per company.
+    const adminAuthSecret = resolveAdminAuthSigningSecret();
+    const tickAdminAuthCheck = (trigger: "startup" | "scheduled") => {
+      if (heartbeatDrainState?.isDraining) return;
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: admin auth record check",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:adminAuthCheck",
+        },
+        () => reconcileAdminAuthSnapshot(schedulerDb as any, { secret: adminAuthSecret, trigger }),
+      )
+        .then((result) => {
+          if (result.status !== "unchanged") {
+            logger.warn({ ...result }, "admin auth record check found something to report");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "admin auth record check failed");
+        });
+    };
+    setTimeout(() => tickAdminAuthCheck("startup"), 90 * 1000).unref?.();
+    if (config.adminAuthCheckIntervalMinutes > 0) {
+      setInterval(() => tickAdminAuthCheck("scheduled"), config.adminAuthCheckIntervalMinutes * 60 * 1000);
+    }
 
     // Polish round 3: re-test the shared Claude sign-in once a day. The tick
     // is hourly but the service only makes a CLI call when the last check is

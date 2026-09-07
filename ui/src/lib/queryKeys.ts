@@ -253,6 +253,7 @@ export const queryKeys = {
     experimentalSettings: ["instance", "experimental-settings"] as const,
     quietMode: ["instance", "quiet-mode"] as const,
     claudeAuth: ["instance", "claude-auth"] as const,
+    security: ["instance", "security"] as const,
     claudeSignIn: (sessionId: string) => ["instance", "claude-auth", "sign-in", sessionId] as const,
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,

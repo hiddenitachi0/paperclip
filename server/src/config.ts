@@ -103,6 +103,11 @@ export interface Config {
   weeklyCheckupTickMinutes: number;
   // Empty = every active company (when enabled). Otherwise only these company ids.
   weeklyCheckupCompanyIds: string[];
+  // Admin auth hardening: how often the server re-checks the instance-admin
+  // set (and admin emails/passwords) against its signed record and reports
+  // any change made outside the app. 0 disables the periodic check (startup
+  // and the "Check now" button still work).
+  adminAuthCheckIntervalMinutes: number;
   heartbeatRunRetentionEnabled: boolean;
   heartbeatRunRetentionDays: number;
   heartbeatRunRetentionIntervalMinutes: number;
@@ -141,6 +146,17 @@ function detectTailnetBindHost(): string | undefined {
  * unit-testable without exercising the rest of loadConfig()'s filesystem/
  * tailscale/git side effects.
  */
+// Admin auth hardening: PAPERCLIP_ADMIN_AUTH_CHECK_MINUTES. Unset/invalid =>
+// every 10 minutes; "0" disables the periodic check (startup + "Check now"
+// still run). Anything below 1 minute is treated as 0.
+export const DEFAULT_ADMIN_AUTH_CHECK_MINUTES = 10;
+export function resolveAdminAuthCheckIntervalMinutes(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_ADMIN_AUTH_CHECK_MINUTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1) return 0;
+  return Math.floor(parsed);
+}
+
 export function resolveHeartbeatRunRetentionEnabled(
   env: { PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED?: string } = process.env,
 ): boolean {
@@ -433,6 +449,7 @@ export function loadConfig(): Config {
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean),
+    adminAuthCheckIntervalMinutes: resolveAdminAuthCheckIntervalMinutes(process.env.PAPERCLIP_ADMIN_AUTH_CHECK_MINUTES),
     heartbeatRunRetentionEnabled: resolveHeartbeatRunRetentionEnabled(),
     heartbeatRunRetentionDays: Math.max(
       1,
