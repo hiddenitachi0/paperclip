@@ -141,8 +141,9 @@ export const instanceGeneralSettingsSchema = z.object({
     .max(MAX_MAX_TURNS_PER_RUN)
     .default(DEFAULT_MAX_TURNS_PER_RUN),
   // DUR-3943 item 5: saved-session reset policy for sessioned local agents.
-  // 0 = never reset on that criterion. Per-agent override lives in
-  // runtimeConfig.heartbeat.sessionCompaction.
+  // 0 (default) = keep the agent type's built-in behaviour on that
+  // criterion; above 0 = the operator's own limit. Per-agent override lives
+  // in runtimeConfig.heartbeat.sessionCompaction.
   sessionResetAfterRuns: z
     .number()
     .int()

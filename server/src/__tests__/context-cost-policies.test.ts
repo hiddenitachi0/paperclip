@@ -103,16 +103,26 @@ describe("max turns per run (DUR-3943 item 4): plain-language notes", () => {
     );
   });
 
-  it("says why the work was not continued", () => {
-    expect(
-      buildTurnCapContinuationNote({
-        turns: 60,
-        outcome: "not_continued",
-        reason: "Scheduled max-turn continuation suppressed because issue is no longer in_progress (current status: done)",
-      }),
-    ).toBe(
-      "Stopped after 60 turns, the limit for one run; the work was not continued because scheduled max-turn continuation suppressed because issue is no longer in_progress (current status: done).",
+  it("says why the work was not continued, in plain words rather than the internal gate code", () => {
+    const note = (reasonCode: string | null) => buildTurnCapContinuationNote({ turns: 60, outcome: "not_continued", reasonCode });
+    expect(note("issue_not_in_progress")).toBe(
+      "Stopped after 60 turns, the limit for one run; the work was not continued because the task is no longer in progress.",
     );
+    expect(note("issue_terminal_status")).toBe(
+      "Stopped after 60 turns, the limit for one run; the work was not continued because the task was finished in the meantime.",
+    );
+    expect(note("issue_cancelled")).toContain("because the task was cancelled in the meantime.");
+    expect(note("issue_reassigned")).toContain("because the task was handed to someone else.");
+    expect(note("issue_execution_lock_changed")).toContain("because another run has taken over the task.");
+    expect(note("agent_not_invokable")).toContain("because the agent is not available to run right now");
+    expect(note("budget_blocked")).toContain("because the agent's budget does not allow another run right now.");
+    expect(note("policy_disabled")).toContain("because automatic continuation is switched off for this agent.");
+    // Unknown codes and missing codes never leak into the note.
+    expect(note("some_new_gate_code")).toBe(
+      "Stopped after 60 turns, the limit for one run; the work was not continued because the task could not be picked up again automatically.",
+    );
+    expect(note(null)).toContain("because the task could not be picked up again automatically.");
+    expect(note("issue_not_in_progress")).not.toMatch(/suppressed|in_progress|errorCode/);
   });
 
   it("writes the operator notice in plain words with the task named", () => {
@@ -137,35 +147,73 @@ describe("max turns per run (DUR-3943 item 4): plain-language notes", () => {
 describe("session reset policy (DUR-3943 item 5): precedence", () => {
   const agent = (adapterType: string, runtimeConfig: Record<string, unknown> = {}) => ({ adapterType, runtimeConfig });
 
-  it("gives a Claude agent the instance-wide run and age limits (its adapter default was never)", () => {
-    expect(parseSessionCompactionPolicy(agent("claude_local"), general())).toEqual({
+  it("ships with session resets off: the defaults are 0 and every adapter keeps its built-in behaviour", () => {
+    expect(DEFAULT_SESSION_RESET_AFTER_RUNS).toBe(0);
+    expect(DEFAULT_SESSION_RESET_AFTER_HOURS).toBe(0);
+    // Adapters with native context management: never reset by Paperclip.
+    for (const adapterType of ["claude_local", "codex_local", "acpx_local", "hermes_local"]) {
+      expect(parseSessionCompactionPolicy(agent(adapterType), general()), adapterType).toEqual({
+        enabled: true,
+        maxSessionRuns: 0,
+        maxRawInputTokens: 0,
+        maxSessionAgeHours: 0,
+      });
+    }
+    // Adapters whose upstream default already rotates keep 200 runs / 72 hours.
+    for (const adapterType of ["cursor", "cursor_cloud", "gemini_local", "opencode_local", "pi_local"]) {
+      expect(parseSessionCompactionPolicy(agent(adapterType), general()), adapterType).toEqual({
+        enabled: true,
+        maxSessionRuns: 200,
+        maxRawInputTokens: 2_000_000,
+        maxSessionAgeHours: 72,
+      });
+    }
+  });
+
+  it("applies the instance-wide run and age limits to a Claude agent once the operator opts in", () => {
+    expect(parseSessionCompactionPolicy(agent("claude_local"), general({ sessionResetAfterRuns: 8, sessionResetAfterHours: 24 }))).toEqual({
       enabled: true,
       maxSessionRuns: 8,
       maxRawInputTokens: 0,
       maxSessionAgeHours: 24,
     });
+    // Each criterion is opted into on its own; 0 keeps the adapter's default for that one.
     expect(parseSessionCompactionPolicy(agent("claude_local"), general({ sessionResetAfterRuns: 3, sessionResetAfterHours: 0 }))).toEqual({
       enabled: true,
       maxSessionRuns: 3,
       maxRawInputTokens: 0,
       maxSessionAgeHours: 0,
     });
+    expect(parseSessionCompactionPolicy(agent("codex_local"), general({ sessionResetAfterRuns: 0, sessionResetAfterHours: 12 }))).toEqual({
+      enabled: true,
+      maxSessionRuns: 0,
+      maxRawInputTokens: 0,
+      maxSessionAgeHours: 12,
+    });
   });
 
   it("keeps the adapter's raw-token threshold and replaces only the run/age limits for other sessioned adapters", () => {
-    expect(parseSessionCompactionPolicy(agent("cursor"), general())).toEqual({
+    expect(parseSessionCompactionPolicy(agent("cursor"), general({ sessionResetAfterRuns: 8, sessionResetAfterHours: 24 }))).toEqual({
       enabled: true,
       maxSessionRuns: 8,
       maxRawInputTokens: 2_000_000,
       maxSessionAgeHours: 24,
     });
+    // 0 on one criterion keeps that adapter's own limit, it does not switch it off.
+    expect(parseSessionCompactionPolicy(agent("gemini_local"), general({ sessionResetAfterRuns: 8, sessionResetAfterHours: 0 }))).toEqual({
+      enabled: true,
+      maxSessionRuns: 8,
+      maxRawInputTokens: 2_000_000,
+      maxSessionAgeHours: 72,
+    });
   });
 
   it("lets the agent's own override win over the instance setting, field by field", () => {
+    const optedIn = general({ sessionResetAfterRuns: 8, sessionResetAfterHours: 24 });
     expect(
       parseSessionCompactionPolicy(
         agent("claude_local", { heartbeat: { sessionCompaction: { maxSessionRuns: 20 } } }),
-        general(),
+        optedIn,
       ),
     ).toEqual({
       enabled: true,
@@ -176,7 +224,7 @@ describe("session reset policy (DUR-3943 item 5): precedence", () => {
     expect(
       parseSessionCompactionPolicy(
         agent("claude_local", { heartbeat: { sessionCompaction: { enabled: false, maxSessionAgeHours: 0 } } }),
-        general(),
+        optedIn,
       ),
     ).toEqual({
       enabled: false,
@@ -372,10 +420,10 @@ describeEmbeddedPostgres("context-cost policies against the database", () => {
   it("ships both policies with the approved defaults and saves changes through the general settings", async () => {
     const settings = instanceSettingsService(db);
     const initial = await settings.getGeneral();
-    expect(initial).toMatchObject({ maxTurnsPerRun: 60, sessionResetAfterRuns: 8, sessionResetAfterHours: 24 });
+    expect(initial).toMatchObject({ maxTurnsPerRun: 60, sessionResetAfterRuns: 0, sessionResetAfterHours: 0 });
 
-    const updated = await settings.updateGeneral({ maxTurnsPerRun: 80, sessionResetAfterRuns: 0, sessionResetAfterHours: 48 });
-    expect(updated.general).toMatchObject({ maxTurnsPerRun: 80, sessionResetAfterRuns: 0, sessionResetAfterHours: 48 });
+    const updated = await settings.updateGeneral({ maxTurnsPerRun: 80, sessionResetAfterRuns: 8, sessionResetAfterHours: 48 });
+    expect(updated.general).toMatchObject({ maxTurnsPerRun: 80, sessionResetAfterRuns: 8, sessionResetAfterHours: 48 });
     // Untouched fields keep their values.
     expect(updated.general.silentRunTimeoutMinutes).toBe(initial.silentRunTimeoutMinutes);
     expect((await settings.getGeneral()).maxTurnsPerRun).toBe(80);
@@ -474,14 +522,40 @@ describeEmbeddedPostgres("context-cost policies against the database", () => {
     const { runId } = await seedMaxTurnRun({ companyId, agentId, now, issueStatus: "done" });
 
     const result = await heartbeat.continueAfterTurnCap(runId, { turnCap: 60, now });
-    expect(result.outcome).toBe("not_scheduled");
+    expect(result).toMatchObject({ outcome: "not_scheduled", reasonCode: "issue_terminal_status" });
     const run = await db.select({ error: heartbeatRuns.error }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]);
-    expect(run?.error).toMatch(/^Stopped after 60 turns, the limit for one run; the work was not continued because /);
+    expect(run?.error).toBe(
+      "Stopped after 60 turns, the limit for one run; the work was not continued because the task was finished in the meantime.",
+    );
   });
 
-  it("resets a Claude agent's saved session after the instance-wide number of runs on the same task", async () => {
+  it("leaves a Claude agent's saved session alone by default, however many runs it has had", async () => {
+    const sessionId = "99999999-2222-4333-8444-555555555555";
+    const now = new Date("2026-09-07T12:00:00.000Z");
+    const { companyId, agentId } = await seedCompanyAndAgent({ runtimeConfig: { heartbeat: { wakeOnDemand: true } } });
+    for (let index = 0; index < 12; index += 1) {
+      const createdAt = new Date(now.getTime() - (72 - index) * 60 * 60 * 1000);
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(),
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "succeeded",
+        sessionIdAfter: sessionId,
+        finishedAt: createdAt,
+        usageJson: { rawInputTokens: 10 },
+        createdAt,
+        updatedAt: createdAt,
+      });
+    }
+    expect(await heartbeat.evaluateSessionReset({ agentId, sessionId, now })).toMatchObject({ rotate: false, reason: null });
+  });
+
+  it("resets a Claude agent's saved session after the instance-wide number of runs on the same task once the operator opts in", async () => {
     const sessionId = "11111111-2222-4333-8444-555555555555";
     const now = new Date("2026-09-07T12:00:00.000Z");
+    await instanceSettingsService(db).updateGeneral({ sessionResetAfterRuns: 8, sessionResetAfterHours: 24 });
     const { companyId, agentId } = await seedCompanyAndAgent({ runtimeConfig: { heartbeat: { wakeOnDemand: true } } });
     const seedRuns = async (count: number, startedAt: Date) => {
       for (let index = 0; index < count; index += 1) {
@@ -519,6 +593,7 @@ describeEmbeddedPostgres("context-cost policies against the database", () => {
   it("resets a saved session that is older than the instance-wide limit even if it was used recently", async () => {
     const sessionId = "66666666-7777-4888-9999-aaaaaaaaaaaa";
     const now = new Date("2026-09-07T12:00:00.000Z");
+    await instanceSettingsService(db).updateGeneral({ sessionResetAfterRuns: 8, sessionResetAfterHours: 24 });
     const { companyId, agentId } = await seedCompanyAndAgent({ runtimeConfig: { heartbeat: { wakeOnDemand: true } } });
     for (const hoursAgo of [30, 2]) {
       const createdAt = new Date(now.getTime() - hoursAgo * 60 * 60 * 1000);
@@ -549,6 +624,7 @@ describeEmbeddedPostgres("context-cost policies against the database", () => {
   it("lets an agent's own session policy win over the instance setting", async () => {
     const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     const now = new Date("2026-09-07T12:00:00.000Z");
+    await instanceSettingsService(db).updateGeneral({ sessionResetAfterRuns: 8, sessionResetAfterHours: 24 });
     const { companyId, agentId } = await seedCompanyAndAgent({
       runtimeConfig: { heartbeat: { wakeOnDemand: true, sessionCompaction: { maxSessionRuns: 2, maxSessionAgeHours: 0 } } },
     });

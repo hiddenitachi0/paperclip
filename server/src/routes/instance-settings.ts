@@ -121,12 +121,17 @@ export function instanceSettingsRoutes(db: Db) {
 
   // DUR-3943 item 4: which agents carry their own "max turns per run" (their
   // number wins over the instance setting), and a one-click way to make every
-  // agent follow the instance setting instead. Admin-gated like the general
-  // settings PATCH; the listing is readable by any org member so the settings
-  // page can show it.
+  // agent follow the instance setting instead. The clear action is
+  // admin-gated like the general settings PATCH. The listing is readable by
+  // any org member so the settings page can show it, but a member only
+  // sees the agents of the companies they belong to; instance admins (and
+  // the implicit local operator) see the whole fleet.
   router.get("/instance/settings/general/max-turns-per-run/agent-overrides", async (req, res) => {
     assertBoardOrgAccess(req);
-    const agents = await svc.listMaxTurnsPerRunAgentOverrides();
+    const allAgents = await svc.listMaxTurnsPerRunAgentOverrides();
+    const seesWholeFleet = req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true;
+    const memberCompanyIds = new Set(Array.isArray(req.actor.companyIds) ? req.actor.companyIds : []);
+    const agents = seesWholeFleet ? allAgents : allAgents.filter((agent) => memberCompanyIds.has(agent.companyId));
     res.json({ agentCount: agents.length, agents });
   });
 

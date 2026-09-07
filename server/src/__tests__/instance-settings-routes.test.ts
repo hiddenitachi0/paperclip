@@ -10,6 +10,8 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
   updateGeneral: vi.fn(),
   updateExperimental: vi.fn(),
   listCompanyIds: vi.fn(),
+  listMaxTurnsPerRunAgentOverrides: vi.fn(),
+  clearMaxTurnsPerRunAgentOverrides: vi.fn(),
   getQuietMode: vi.fn(),
   activateQuietMode: vi.fn(),
   deactivateQuietMode: vi.fn(),
@@ -67,6 +69,8 @@ describe("instance settings routes", () => {
     mockInstanceSettingsService.updateGeneral.mockReset();
     mockInstanceSettingsService.updateExperimental.mockReset();
     mockInstanceSettingsService.listCompanyIds.mockReset();
+    mockInstanceSettingsService.listMaxTurnsPerRunAgentOverrides.mockReset();
+    mockInstanceSettingsService.clearMaxTurnsPerRunAgentOverrides.mockReset();
     mockInstanceSettingsService.getQuietMode.mockReset();
     mockInstanceSettingsService.activateQuietMode.mockReset();
     mockInstanceSettingsService.deactivateQuietMode.mockReset();
@@ -532,6 +536,65 @@ describe("instance settings routes", () => {
 
     expect(res.status).toBe(403);
     expect(mockInstanceSettingsService.getGeneral).not.toHaveBeenCalled();
+  });
+
+  // DUR-3943 item 4: the per-agent turn-cap listing spans every company, so
+  // a member only sees the agents of their own companies; admins see all.
+  it("shows a company member only their own companies' turn-cap overrides", async () => {
+    mockInstanceSettingsService.listMaxTurnsPerRunAgentOverrides.mockResolvedValue([
+      { agentId: "agent-a", agentName: "A", companyId: "company-1", adapterType: "claude_local", maxTurnsPerRun: 120 },
+      { agentId: "agent-b", agentName: "B", companyId: "company-2", adapterType: "claude_local", maxTurnsPerRun: 1000 },
+    ]);
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).get("/api/instance/settings/general/max-turns-per-run/agent-overrides");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      agentCount: 1,
+      agents: [{ agentId: "agent-a", agentName: "A", companyId: "company-1", adapterType: "claude_local", maxTurnsPerRun: 120 }],
+    });
+  });
+
+  it("shows an instance admin every company's turn-cap overrides", async () => {
+    mockInstanceSettingsService.listMaxTurnsPerRunAgentOverrides.mockResolvedValue([
+      { agentId: "agent-a", agentName: "A", companyId: "company-1", adapterType: "claude_local", maxTurnsPerRun: 120 },
+      { agentId: "agent-b", agentName: "B", companyId: "company-2", adapterType: "claude_local", maxTurnsPerRun: 1000 },
+    ]);
+    const app = await createApp({
+      type: "board",
+      userId: "admin-1",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).get("/api/instance/settings/general/max-turns-per-run/agent-overrides");
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentCount).toBe(2);
+    expect(res.body.agents.map((agent: { agentId: string }) => agent.agentId)).toEqual(["agent-a", "agent-b"]);
+  });
+
+  it("rejects non-admin board users from clearing every agent's turn-cap override", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).post("/api/instance/settings/general/max-turns-per-run/clear-agent-overrides");
+
+    expect(res.status).toBe(403);
+    expect(mockInstanceSettingsService.clearMaxTurnsPerRunAgentOverrides).not.toHaveBeenCalled();
   });
 
   it("rejects non-admin board users from updating general settings", async () => {

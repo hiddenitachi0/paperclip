@@ -61,17 +61,22 @@ export const DEFAULT_MAX_TURNS_PER_RUN = 60;
 export const MIN_MAX_TURNS_PER_RUN = 1;
 export const MAX_MAX_TURNS_PER_RUN = 1000;
 
-// DUR-3943 item 5: a saved (resumable) session used to be resumed forever,
-// so its transcript grew without bound and every later turn paid for it.
-// Instance-wide reset policy for sessioned local agents: the saved session
-// is dropped after this many runs on the same task, or once it is older
-// than this many hours, and the next run starts fresh with the full task
-// block. 0 = never reset on that criterion. Per-agent override:
+// DUR-3943 item 5: instance-wide reset policy for saved (resumable)
+// sessions. When set above 0, a saved session is dropped after this many
+// runs on the same task, or once it is older than this many hours, and the
+// next run starts fresh with the full task block. 0 (the default) means
+// "leave it to the agent type": Claude, Codex, Hermes and ACP agents manage
+// their own context and are never reset by Paperclip; Cursor, Gemini,
+// OpenCode and Pi agents keep their built-in reset (200 runs / 72 hours).
+// Off by default on purpose: the ticket's own measurements show a resumed
+// session costs about a third of a fresh one in cached tokens, so resetting
+// is something the operator opts into, not something the platform imposes.
+// Per-agent override (wins over both):
 // runtimeConfig.heartbeat.sessionCompaction.{maxSessionRuns,maxSessionAgeHours}.
-export const DEFAULT_SESSION_RESET_AFTER_RUNS = 8;
+export const DEFAULT_SESSION_RESET_AFTER_RUNS = 0;
 export const MIN_SESSION_RESET_AFTER_RUNS = 0;
 export const MAX_SESSION_RESET_AFTER_RUNS = 1000;
-export const DEFAULT_SESSION_RESET_AFTER_HOURS = 24;
+export const DEFAULT_SESSION_RESET_AFTER_HOURS = 0;
 export const MIN_SESSION_RESET_AFTER_HOURS = 0;
 export const MAX_SESSION_RESET_AFTER_HOURS = 24 * 30;
 
@@ -203,14 +208,14 @@ export interface InstanceGeneralSettings {
   maxTurnsPerRun: number;
   /**
    * DUR-3943 item 5: drop an agent's saved session after this many runs on
-   * the same task (0 = never on this criterion). Per-agent override:
-   * runtimeConfig.heartbeat.sessionCompaction.maxSessionRuns.
+   * the same task (0 = keep the agent type's built-in behaviour). Per-agent
+   * override: runtimeConfig.heartbeat.sessionCompaction.maxSessionRuns.
    */
   sessionResetAfterRuns: number;
   /**
    * DUR-3943 item 5: drop an agent's saved session once it is older than
-   * this many hours (0 = never on this criterion). Per-agent override:
-   * runtimeConfig.heartbeat.sessionCompaction.maxSessionAgeHours.
+   * this many hours (0 = keep the agent type's built-in behaviour). Per-agent
+   * override: runtimeConfig.heartbeat.sessionCompaction.maxSessionAgeHours.
    */
   sessionResetAfterHours: number;
   /** DUR-224 quiet-mode state; not settable via the general-settings patch route. */

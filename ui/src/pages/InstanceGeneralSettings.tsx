@@ -152,7 +152,9 @@ function MaxTurnsAgentOverridesPanel(props: { instanceMaxTurns: number; onError:
           {clearMutation.isPending ? "Updating agents..." : `Use ${instanceMaxTurns} turns for every agent`}
         </Button>
         <span className="text-xs text-muted-foreground">
-          Removes the per-agent limits so all agents follow this setting. You can give any agent its own limit again later.
+          Removes the per-agent limits so all agents follow this setting. Because this changes each of those agents'
+          settings, their next run starts a fresh session (a one-off extra cost). You can give any agent its own
+          limit again later.
         </span>
       </div>
     </div>
@@ -441,11 +443,14 @@ export function InstanceGeneralSettings() {
               Most of what an agent run costs is the context it re-reads on every turn, not what it writes.
               These two limits keep that in check. A run that reaches the turn limit stops with a plain note
               and the work continues in a fresh run; only if the same task hits the limit three times in a row
-              are you told about it. A saved session (the conversation an agent picks up again on its next run
-              on the same task) is dropped after the number of runs or hours below, so it stops growing without
-              bound; the next run then starts fresh with the full task description. Defaults{" "}
-              {DEFAULT_MAX_TURNS_PER_RUN} turns, {DEFAULT_SESSION_RESET_AFTER_RUNS} runs and{" "}
-              {DEFAULT_SESSION_RESET_AFTER_HOURS} hours. Changing these does not touch runs already going.
+              are you told about it. A saved session is the conversation an agent picks up again on its next run
+              on the same task; picking it up again is usually much cheaper than starting over, because most of
+              it is already cached. If you want, you can still have saved sessions dropped after a number of runs
+              or hours, so the next run starts fresh with the full task description. Leave both at 0 to keep each
+              agent type's built-in behaviour (Claude, Codex and similar agents manage their own context and are
+              never reset; Cursor, Gemini, OpenCode and Pi agents reset after 200 runs or 3 days). Default{" "}
+              {DEFAULT_MAX_TURNS_PER_RUN} turns; session resets are off ({DEFAULT_SESSION_RESET_AFTER_RUNS} runs,{" "}
+              {DEFAULT_SESSION_RESET_AFTER_HOURS} hours). Changing these does not touch runs already going.
             </p>
           </div>
           <MinutesLimitField
@@ -468,7 +473,7 @@ export function InstanceGeneralSettings() {
             max={MAX_SESSION_RESET_AFTER_RUNS}
             pending={updateGeneralMutation.isPending}
             onSave={(runs) => updateGeneralMutation.mutate({ sessionResetAfterRuns: runs })}
-            unit="runs on the same task (0 = never)"
+            unit="runs on the same task (0 = keep the agent type's built-in behaviour)"
           />
           <MinutesLimitField
             label="Reset a saved session older than"
@@ -477,7 +482,7 @@ export function InstanceGeneralSettings() {
             max={MAX_SESSION_RESET_AFTER_HOURS}
             pending={updateGeneralMutation.isPending}
             onSave={(hours) => updateGeneralMutation.mutate({ sessionResetAfterHours: hours })}
-            unit="hours (0 = never)"
+            unit="hours (0 = keep the agent type's built-in behaviour)"
           />
         </div>
       </section>

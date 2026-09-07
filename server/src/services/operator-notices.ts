@@ -95,8 +95,46 @@ export interface TurnCapContinuationNoteInput {
   outcome: "continued" | "exhausted" | "not_continued";
   /** For "exhausted": how many cap hits in a row this made on the same task. */
   timesInARow?: number;
-  /** For "not_continued": why no fresh run was queued, in plain words. */
-  reason?: string | null;
+  /**
+   * For "not_continued": the retry gate's error code (for example
+   * "issue_not_in_progress" from scheduleBoundedRetryForRun, or
+   * "policy_disabled"). It is translated to a plain sentence here; the
+   * internal code never reaches the operator.
+   */
+  reasonCode?: string | null;
+}
+
+/**
+ * DUR-3943 item 4: plain-language reasons for "the work was not continued",
+ * keyed by the error code the retry gate reports. Anything unknown falls
+ * back to a generic sentence rather than leaking the code.
+ */
+const TURN_CAP_NOT_CONTINUED_REASONS: Record<string, string> = {
+  policy_disabled: "automatic continuation is switched off for this agent",
+  issue_not_in_progress: "the task is no longer in progress",
+  issue_terminal_status: "the task was finished in the meantime",
+  issue_cancelled: "the task was cancelled in the meantime",
+  issue_not_found: "the task no longer exists",
+  issue_reassigned: "the task was handed to someone else",
+  issue_assignee_changed: "the task was handed to someone else",
+  lock_released_on_reassignment: "the task was handed to someone else",
+  issue_execution_lock_changed: "another run has taken over the task",
+  issue_execution_lock_held_by_live_run: "another run is already working on the task",
+  issue_review_participant_changed: "the task is waiting on someone else's review",
+  issue_continuation_waiting_on_review: "the task is waiting on someone else's review",
+  issue_paused: "the task is paused",
+  issue_dependencies_blocked: "the task is waiting on other tasks that are not done yet",
+  agent_not_invokable: "the agent is not available to run right now (it may be paused or switched off)",
+  agent_not_found: "the agent no longer exists",
+  budget_blocked: "the agent's budget does not allow another run right now",
+};
+
+const TURN_CAP_NOT_CONTINUED_FALLBACK_REASON = "the task could not be picked up again automatically";
+
+export function describeTurnCapNotContinuedReason(reasonCode: string | null | undefined): string {
+  const code = reasonCode?.trim();
+  if (!code) return TURN_CAP_NOT_CONTINUED_FALLBACK_REASON;
+  return TURN_CAP_NOT_CONTINUED_REASONS[code] ?? TURN_CAP_NOT_CONTINUED_FALLBACK_REASON;
 }
 
 /**
@@ -114,8 +152,7 @@ export function buildTurnCapContinuationNote(input: TurnCapContinuationNoteInput
     const times = input.timesInARow && input.timesInARow > 1 ? `${input.timesInARow} times in a row` : "again";
     return `${stopped}. This task has hit the limit ${times}, so no further fresh run was queued; it needs a look.`;
   }
-  const reason = input.reason?.trim();
-  return `${stopped}; the work was not continued${reason ? ` because ${lowerFirst(reason)}` : ""}.`;
+  return `${stopped}; the work was not continued because ${describeTurnCapNotContinuedReason(input.reasonCode)}.`;
 }
 
 export interface TurnCapRepeatedOperatorNoticeInput {
@@ -145,10 +182,6 @@ export function buildTurnCapRepeatedOperatorNotice(input: TurnCapRepeatedOperato
     `Paperclip stopped queuing fresh runs for it, because a task that keeps running out of turns is usually stuck, too big, or unclear. ` +
     `Have a look at the task, then split it, clarify it, or wake the agent again when it is ready to continue.`
   );
-}
-
-function lowerFirst(text: string): string {
-  return text.length > 0 ? text[0].toLowerCase() + text.slice(1) : text;
 }
 
 export interface StoppedRunOperatorNoticeInput extends FrozenRunStopWordingInput {

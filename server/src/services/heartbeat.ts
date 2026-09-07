@@ -2558,8 +2558,13 @@ function formatCount(value: number | null | undefined) {
  *
  * Precedence, per field: the agent's own runtimeConfig.heartbeat.sessionCompaction
  * override, then (DUR-3943 item 5) the instance-wide "reset a saved session
- * after N runs / H hours" settings when they are passed in, then the adapter
- * default. The instance settings only cover the run-count and age
+ * after N runs / H hours" setting when it is above 0, then the adapter
+ * default. An instance value of 0 (the shipped default) leaves the adapter
+ * default alone, so adapters with native context management (claude_local,
+ * codex_local, acpx_local, hermes_local: never reset) and adapters that
+ * already rotate (cursor, cursor_cloud, gemini_local, opencode_local,
+ * pi_local: 200 runs / 72 hours) behave exactly as before until the
+ * operator opts in. The instance settings only cover the run-count and age
  * criteria; the raw-token criterion keeps its adapter default unless the
  * agent overrides it.
  */
@@ -2569,14 +2574,18 @@ export function parseSessionCompactionPolicy(
 ): SessionCompactionPolicy {
   const resolved = resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig);
   if (!general) return resolved.policy;
-  const clampCount = (value: unknown) => {
+  const instanceLimit = (value: unknown, adapterDefault: number) => {
     const parsed = Math.floor(Number(value));
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : adapterDefault;
   };
   return {
     ...resolved.policy,
-    maxSessionRuns: resolved.explicitOverride.maxSessionRuns ?? clampCount(general.sessionResetAfterRuns),
-    maxSessionAgeHours: resolved.explicitOverride.maxSessionAgeHours ?? clampCount(general.sessionResetAfterHours),
+    maxSessionRuns:
+      resolved.explicitOverride.maxSessionRuns ??
+      instanceLimit(general.sessionResetAfterRuns, resolved.policy.maxSessionRuns),
+    maxSessionAgeHours:
+      resolved.explicitOverride.maxSessionAgeHours ??
+      instanceLimit(general.sessionResetAfterHours, resolved.policy.maxSessionAgeHours),
   };
 }
 
@@ -9659,6 +9668,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     timesInARow: number;
     note: string;
     reason?: string;
+    reasonCode?: string;
   }> {
     const policy = parseMaxTurnContinuationPolicy(agent);
     const resultJson = parseObject(run.resultJson);
@@ -9687,7 +9697,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
 
     if (!policy.enabled || policy.maxAttempts <= 0) {
-      const note = buildTurnCapContinuationNote({ turns, outcome: "not_continued", reason: "automatic continuation is switched off for this agent" });
+      const note = buildTurnCapContinuationNote({ turns, outcome: "not_continued", reasonCode: "policy_disabled" });
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
         eventType: "lifecycle",
         stream: "system",
@@ -9699,7 +9709,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
       await writeNote(note);
-      return { outcome: "not_scheduled", timesInARow, note, reason: "policy_disabled" };
+      return { outcome: "not_scheduled", timesInARow, note, reason: "policy_disabled", reasonCode: "policy_disabled" };
     }
 
     const scheduled = await scheduleBoundedRetryForRun(run, agent, {
@@ -9773,13 +9783,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { outcome: "retry_exhausted", timesInARow, note };
     }
 
+    // scheduled.reason is the internal gate wording (for the run events);
+    // the note the operator sees is built from the error code instead.
     const note = buildTurnCapContinuationNote({
       turns,
       outcome: "not_continued",
-      reason: scheduled.reason,
+      reasonCode: scheduled.errorCode,
     });
     await writeNote(note);
-    return { outcome: "not_scheduled", timesInARow, note, reason: scheduled.reason };
+    return { outcome: "not_scheduled", timesInARow, note, reason: scheduled.reason, reasonCode: scheduled.errorCode };
   }
 
   function issueRunPriorityRank(priority: string | null | undefined) {
