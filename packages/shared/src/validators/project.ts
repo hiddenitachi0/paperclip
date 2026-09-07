@@ -37,18 +37,25 @@ export const projectExecutionWorkspacePolicySchema = z
   })
   .strict();
 
+/**
+ * Shape check only. The operator fills these fields in one at a time from the
+ * project page, so a half-finished policy must be storable while `enabled`
+ * is false; whether the policy is COMPLETE enough to switch on is decided
+ * server-side with plain-language messages (see
+ * server/src/services/deploy-policy-validation.ts), not by this schema.
+ */
 export const deployPolicySchema = z
   .object({
     enabled: z.boolean(),
     requestingAgentId: z.string().uuid().nullable(),
-    workspaceId: z.string().uuid(),
-    deployTargetPath: z.string().min(1),
+    workspaceId: z.union([z.string().uuid(), z.literal("")]),
+    deployTargetPath: z.string(),
     deployKind: z.enum(["compose_recreate", "compose_build_swap", "custom"]),
     deployServices: z.array(z.string()).optional(),
     deployCommand: z.string().optional(),
     composeFiles: z.array(z.string()).optional(),
     envFile: z.string().optional(),
-    healthCheckUrl: z.string().min(1),
+    healthCheckUrl: z.string(),
     rollback: z.enum(["git_previous", "none"]),
     /**
      * The branch a merge must land on to ever reach this deploy (DUR-40).

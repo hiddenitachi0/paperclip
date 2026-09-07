@@ -38,6 +38,16 @@ import { appendWithCap } from "../adapters/utils.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { environmentService } from "../services/environments.js";
 import { secretService } from "../services/secrets.js";
+import {
+  describeDeployPolicyProblems,
+  formatDeployPolicyProblems,
+  type DeployPolicyValidationContext,
+} from "../services/deploy-policy-validation.js";
+import { checkGitHubTokenForRepo, GitHubTokenCheckError } from "../services/github-token-check.js";
+import { GITHUB_TOKEN_SECRET_NAMES } from "@paperclipai/shared";
+import { agents, projectWorkspaces } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { HttpError, unprocessable } from "../errors.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
@@ -82,6 +92,69 @@ export function projectRoutes(rawDb: Db) {
     }
     const environmentId = (policy as { environmentId?: unknown }).environmentId;
     return typeof environmentId === "string" || environmentId === null ? environmentId : undefined;
+  }
+
+  /**
+   * Deploy settings are validated here, in plain language, rather than by the
+   * zod schema: the operator saves the form one field at a time, so the shape
+   * check must tolerate a half-filled draft while this check decides whether
+   * the settings are complete and consistent (see deploy-policy-validation.ts).
+   */
+  async function loadDeployPolicyValidationContext(
+    companyId: string,
+    projectId: string | null,
+  ): Promise<DeployPolicyValidationContext> {
+    const [workspaceRows, agentRows] = await Promise.all([
+      projectId
+        ? db
+            .select({ id: projectWorkspaces.id, name: projectWorkspaces.name, repoUrl: projectWorkspaces.repoUrl })
+            .from(projectWorkspaces)
+            .where(eq(projectWorkspaces.projectId, projectId))
+        : Promise.resolve([]),
+      db.select({ id: agents.id, name: agents.name, status: agents.status }).from(agents).where(eq(agents.companyId, companyId)),
+    ]);
+    return { workspaces: workspaceRows, agents: agentRows };
+  }
+
+  async function assertDeployPolicyMakesSense(deployPolicy: unknown, companyId: string, projectId: string | null) {
+    if (!deployPolicy || typeof deployPolicy !== "object" || Array.isArray(deployPolicy)) return;
+    const context = await loadDeployPolicyValidationContext(companyId, projectId);
+    const problems = describeDeployPolicyProblems(deployPolicy as Parameters<typeof describeDeployPolicyProblems>[0], context);
+    if (problems.length > 0) {
+      throw unprocessable(formatDeployPolicyProblems(problems), { code: "deploy_policy_invalid", problems });
+    }
+  }
+
+  /**
+   * The GitHub token agents actually push with, by the same convention as
+   * managed clones and the deploy runner: a GITHUB_TOKEN/GH_TOKEN/
+   * PAPERCLIP_GITHUB_TOKEN entry in the project's Env first, then the company
+   * secret of that name. Returns where it came from so the report can say so;
+   * the value itself never leaves this route.
+   */
+  async function resolveProjectGitHubToken(
+    companyId: string,
+    env: Record<string, unknown> | null | undefined,
+  ): Promise<{ token: string; source: string } | null> {
+    if (env && typeof env === "object") {
+      const tokenEnv: Record<string, unknown> = {};
+      for (const name of GITHUB_TOKEN_SECRET_NAMES) {
+        if (env[name] !== undefined) tokenEnv[name] = env[name];
+      }
+      if (Object.keys(tokenEnv).length > 0) {
+        const resolved = await secretsSvc.resolveEnvBindings(companyId, tokenEnv);
+        for (const name of GITHUB_TOKEN_SECRET_NAMES) {
+          const value = resolved.env[name]?.trim();
+          if (value) return { token: value, source: `the project's Env setting ${name}` };
+        }
+      }
+    }
+    const fromCompany = await secretsSvc.resolveGitHubToken(companyId, {
+      consumerType: "system",
+      consumerId: "github-token-check",
+    });
+    if (fromCompany) return { token: fromCompany, source: "the company's GitHub token secret" };
+    return null;
   }
 
   async function resolveCompanyIdForProjectReference(req: Request) {
@@ -222,6 +295,7 @@ export function projectRoutes(rawDb: Db) {
         { strictMode: strictSecretsMode, fieldPath: "env" },
       );
     }
+    await assertDeployPolicyMakesSense(projectData.deployPolicy, companyId, null);
     const project = await svc.create(companyId, projectData);
     if (project.env) {
       await secretsSvc.syncEnvBindingsForTarget?.(
@@ -289,6 +363,7 @@ export function projectRoutes(rawDb: Db) {
         fieldPath: "env",
       });
     }
+    await assertDeployPolicyMakesSense(body.deployPolicy, existing.companyId, existing.id);
     const project = await svc.update(id, body);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -321,6 +396,41 @@ export function projectRoutes(rawDb: Db) {
     });
 
     res.json(project);
+  });
+
+  /**
+   * "Check token": does the GitHub token this project pushes with have the
+   * scopes the project needs? Board-only -- it resolves a secret value on the
+   * operator's behalf -- and the response never contains the token, only
+   * scope names, statuses and the GitHub login it belongs to.
+   */
+  router.post("/projects/:id/github-token-check", projectScope(), async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    if (req.actor.type === "agent") {
+      throw forbidden("Only a person on the board can check the GitHub token.");
+    }
+    const repoUrl = existing.codebase?.repoUrl ?? existing.primaryWorkspace?.repoUrl ?? null;
+    if (!repoUrl) {
+      throw unprocessable("This project has no GitHub repository set yet, so there is no token to check. Set the repo first.");
+    }
+    const resolved = await resolveProjectGitHubToken(existing.companyId, existing.env as Record<string, unknown> | null);
+    if (!resolved) {
+      throw unprocessable(
+        "No GitHub token is set for this project yet. Add one under Env as GITHUB_TOKEN (or as a company secret named GITHUB_TOKEN), then check again.",
+      );
+    }
+    try {
+      const report = await checkGitHubTokenForRepo({ token: resolved.token, repoUrl });
+      res.json({ ...report, tokenSource: resolved.source });
+    } catch (err) {
+      if (err instanceof GitHubTokenCheckError) throw new HttpError(err.status, err.message, { code: "github_token_check_failed" });
+      throw err;
+    }
   });
 
   router.get("/projects/:id/workspaces", projectScope(), async (req, res) => {

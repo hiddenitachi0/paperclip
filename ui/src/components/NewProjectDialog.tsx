@@ -290,8 +290,10 @@ export function NewProjectDialog() {
                 </TooltipTrigger>
                 <TooltipContent side="top" className="max-w-[240px] text-xs">
                   Link a GitHub repository so agents can clone, read, and push code for this project. After
-                  creating the project, add a GitHub token with write access to this repo (and "workflow"
-                  permission too, if you want agents to be able to fix files under .github/workflows/).
+                  creating the project, add a GitHub token under Env as GITHUB_TOKEN. Create it with the
+                  "repo" scope (read and write to this repo's files), and tick "workflow" as well if the repo
+                  has CI files under .github/workflows/ — without it GitHub blocks every push that touches them.
+                  The project page has a "Check token" button that tells you what is missing.
                 </TooltipContent>
               </Tooltip>
             </div>

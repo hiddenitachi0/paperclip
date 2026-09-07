@@ -175,6 +175,10 @@ export interface ProjectDeployPolicy {
   envFile?: string;
   healthCheckUrl: string;
   rollback: ProjectDeployRollbackStrategy;
+  /** Branch a merge must land on before it can be deployed (DUR-40). */
+  deployBranch?: string;
+  /** Read-only upstream mirror branch that is never deployed (DUR-40). */
+  mirrorBranch?: string;
 }
 
 export interface IssueExecutionWorkspaceSettings {

@@ -1,4 +1,5 @@
 import type {
+  GitHubTokenCheckReport,
   Project,
   ProjectWorkspace,
   WorkspaceOperation,
@@ -24,6 +25,9 @@ export const projectsApi = {
     api.post<Project>(`/companies/${companyId}/projects`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>
     api.patch<Project>(projectPath(id, companyId), data),
+  /** Board-only: asks GitHub which of the scopes this project needs its token has. Never returns the token. */
+  checkGitHubToken: (id: string, companyId?: string) =>
+    api.post<GitHubTokenCheckReport>(projectPath(id, companyId, "/github-token-check"), {}),
   listWorkspaces: (projectId: string, companyId?: string) =>
     api.get<ProjectWorkspace[]>(projectPath(projectId, companyId, "/workspaces")),
   createWorkspace: (projectId: string, data: Record<string, unknown>, companyId?: string) =>
