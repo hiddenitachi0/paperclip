@@ -710,3 +710,10 @@ export {
   type SetPluginState,
   type ListPluginState,
 } from "./plugin.js";
+export {
+  CLAUDE_OAUTH_TOKEN_PATTERN,
+  saveInstanceClaudeAuthTokenSchema,
+  submitInstanceClaudeSignInCodeSchema,
+  type SaveInstanceClaudeAuthTokenInput,
+  type SubmitInstanceClaudeSignInCodeInput,
+} from "./instance-claude-auth.js";
