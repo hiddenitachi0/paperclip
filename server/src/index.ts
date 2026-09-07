@@ -16,6 +16,7 @@ import {
   createDb,
   createRequestScopedDb,
   runInCompanyScopeBypass,
+  setCompanyScopeBypassPool,
   ensurePostgresDatabase,
   formatEmbeddedPostgresError,
   getPostgresDataDirectory,
@@ -74,6 +75,7 @@ import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { singleFlight } from "./services/single-flight.js";
+import { resolveDatabaseRolePreflightMode, runDatabaseRolePreflight } from "./services/database-role-preflight.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -518,6 +520,56 @@ export async function startServer(): Promise<StartedServer> {
   // fn_flag_untracked_write trigger (DUR-130) still recognizes writes made
   // through it as service-layer, not out-of-band.
   const bypassDb = createDb(config.databaseBypassUrl || activeDatabaseConnectionString);
+  // DUR-3945: when DATABASE_BYPASS_URL names a different credential than the
+  // request pool, every withCompanyScopeBypass/runInCompanyScopeBypass call
+  // site in the app (board claim, first-admin bootstrap, CLI auth, cross-
+  // company access lists, the scheduler) must open its connection on THAT
+  // pool -- after the cutover the request pool's role cannot bypass at all.
+  // See setCompanyScopeBypassPool in packages/db/src/company-scope.ts.
+  const bypassCredentialIsShared =
+    !config.databaseBypassUrl || config.databaseBypassUrl === activeDatabaseConnectionString;
+  if (!bypassCredentialIsShared) {
+    setCompanyScopeBypassPool(bypassDb as any);
+  }
+
+  // DUR-3945: say out loud which database credentials this process is
+  // running with, and refuse to start (PAPERCLIP_DB_ROLE_PREFLIGHT=strict) or
+  // at least shout (default) when the combination cannot work -- an app role
+  // with no scope membership shows an empty instance rather than an error,
+  // and a bypass role without bypass membership fails every scheduler tick.
+  {
+    const preflightMode = resolveDatabaseRolePreflightMode();
+    try {
+      const preflight = await runDatabaseRolePreflight({
+        appDb: db as any,
+        bypassDb: bypassDb as any,
+        sharedCredential: bypassCredentialIsShared,
+      });
+      logger.info(
+        {
+          appRole: preflight.app.role,
+          appPosture: preflight.app.posture,
+          bypassRole: preflight.bypass.role,
+          bypassPosture: preflight.bypass.posture,
+          rlsBindsAppPool: preflight.rlsBindsAppPool,
+          sharedCredential: preflight.sharedCredential,
+        },
+        "Database credential check (RLS cutover posture)",
+      );
+      for (const note of preflight.notes) logger.info(note);
+      for (const problem of preflight.problems) logger.error(problem);
+      if (preflight.problems.length > 0 && preflightMode === "strict") {
+        throw new Error(
+          `Refusing to start: the database credentials cannot work together (${preflight.problems.length} problem(s) ` +
+            "listed above). Fix DATABASE_URL/DATABASE_BYPASS_URL as docs/rls-cutover-runbook.md describes, or unset " +
+            "PAPERCLIP_DB_ROLE_PREFLIGHT=strict to start anyway.",
+        );
+      }
+    } catch (err) {
+      if (preflightMode === "strict") throw err;
+      logger.error({ err }, "Database credential check could not run; continuing without it");
+    }
+  }
 
   if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(
@@ -643,8 +695,13 @@ export async function startServer(): Promise<StartedServer> {
       const generalSettings = await backupSettingsSvc.getGeneral();
       const retention = generalSettings.backupRetention;
 
+      // DUR-3945: pg_dump needs a credential that can read every row of every
+      // table -- RLS applies to pg_dump too, and it errors (rather than
+      // silently dumping less) on a role that cannot bypass. After the
+      // cutover that is the owner credential in DATABASE_MIGRATION_URL, not
+      // the app's request pool.
       const result = await runDatabaseBackup({
-        connectionString: activeDatabaseConnectionString,
+        connectionString: config.databaseMigrationUrl ?? activeDatabaseConnectionString,
         backupDir: config.databaseBackupDir,
         retention,
         filenamePrefix: "paperclip",

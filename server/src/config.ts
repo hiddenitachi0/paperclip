@@ -377,7 +377,10 @@ export function loadConfig(): Config {
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
     databaseUrl: resolvedDatabaseUrl,
-    databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
+    // Empty string counts as unset: docker-compose.prod.yml passes
+    // `${DATABASE_MIGRATION_URL:-}` through, which is "" until the operator
+    // sets it in .env (DUR-3945 runbook step 2).
+    databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL?.trim() || undefined,
     databaseBypassUrl,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
