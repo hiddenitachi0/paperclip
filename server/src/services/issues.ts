@@ -5689,9 +5689,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (data.assigneeUserId) {
         await assertAssignableUser(companyId, data.assigneeUserId);
       }
+      // projectId included: the update path already refused a project from
+      // another company, but create only checked parent and goal (found by
+      // the isolation audit once its seed stopped masking the probe).
       await assertIssueReferencesInCompany(db, companyId, {
         parentId: issueData.parentId,
         goalId: issueData.goalId,
+        projectId: issueData.projectId,
       });
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");

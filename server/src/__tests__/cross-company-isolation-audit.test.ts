@@ -13,10 +13,12 @@ import {
   companySecrets,
   companySkills,
   createDb,
+  crossCompanyInstructions,
   documents,
   executionWorkspaces,
   goals,
   heartbeatRuns,
+  instanceSettings,
   issueComments,
   issueDocuments,
   issues,
@@ -49,6 +51,19 @@ vi.mock("../services/plugin-registry.js", () => ({
 vi.mock("../services/plugin-lifecycle.js", () => ({
   pluginLifecycleManager: () => ({ load: vi.fn(), unload: vi.fn() }),
 }));
+// Approving a cross-company instruction wakes the receiving liaison through
+// the real heartbeat service; the audit only needs the approval to go
+// through, not an agent run. Everything else on the service is left real.
+vi.mock("../services/heartbeat.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
+  return {
+    ...actual,
+    heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) => ({
+      ...actual.heartbeatService(...args),
+      wakeup: vi.fn(async () => ({ id: randomUUID() })),
+    }),
+  };
+});
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -167,6 +182,9 @@ async function seedCompany(db: Db, label: "A" | "B"): Promise<SeededCompany> {
     .insert(issues)
     .values({
       companyId,
+      // issueNumber matches the identifier so the real create path (which
+      // allocates max(issue_number)+1) never collides with this seed row.
+      issueNumber: 1,
       identifier: `${issuePrefix}-1`,
       title: `Issue ${marker}`,
       description: `Issue description ${marker}`,
@@ -476,12 +494,17 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
     return failures;
   }
 
-  /** A successful company-A response must still carry nothing from company B. */
-  function expectOkAndClean(res: request.Response, label: string) {
+  /**
+   * A successful company-A response must still carry nothing from company B.
+   * `allowIds` is for the one legitimate exception: once A has addressed an
+   * instruction to B, B's company id is part of A's own record.
+   */
+  function expectOkAndClean(res: request.Response, label: string, opts: { allowIds?: string[]; okStatus?: number } = {}) {
     const body = JSON.stringify(res.body ?? {});
-    expect(res.status, `${label}: ${body.slice(0, 300)}`).toBe(200);
+    expect(res.status, `${label}: ${body.slice(0, 300)}`).toBe(opts.okStatus ?? 200);
     expect(body, `${label}: company B marker leaked into a company A response`).not.toContain(B.marker);
     for (const id of B.ids) {
+      if (opts.allowIds?.includes(id)) continue;
       expect(body, `${label}: company B id ${id} leaked into a company A response`).not.toContain(id);
     }
   }
@@ -659,6 +682,11 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
       expect(aIssue.goalId).toBe(A.goalId);
       const aIssues = await db.select().from(issues).where(eq(issues.companyId, A.id));
       expect(aIssues).toHaveLength(1);
+      // The refused approval link must not have left a card behind in A
+      // (it used to: the card was written, titled with B's project name,
+      // before the link to B's issue was refused).
+      const aApprovals = await db.select().from(approvals).where(eq(approvals.companyId, A.id));
+      expect(aApprovals.map((row) => row.id)).toEqual([A.approvalId]);
     });
   });
 
@@ -718,6 +746,90 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
       expect(bAgent.status).toBe("active");
       const bSecrets = await db.select().from(companySecrets).where(eq(companySecrets.companyId, B.id));
       expect(bSecrets).toHaveLength(1);
+    });
+  });
+
+  describe("the guarded instruction channel, end to end: a decided instruction shows company A only the outcome", () => {
+    /** Company B's board, the only actor that may decide B's card. */
+    let boardBApp!: express.Express;
+    const boardBUserId = randomUUID();
+    /** Everything on B's side of the decision that must never reach A. */
+    let decisionNote!: string;
+    let approvalId!: string;
+    let deliveredIssueId!: string;
+
+    beforeAll(async () => {
+      boardBApp = await buildApp((req, _res, next) => {
+        req.actor = {
+          type: "board",
+          source: "session",
+          userId: boardBUserId,
+          companyIds: [B.id],
+          memberships: [{ companyId: B.id, membershipRole: "admin", status: "active" }],
+          isInstanceAdmin: false,
+        } as typeof req.actor;
+        next();
+      });
+      await db.delete(instanceSettings);
+      await db.insert(instanceSettings).values({ singletonKey: "default", general: {}, experimental: { enableCrossCompanyInstructions: true } });
+    }, 60_000);
+
+    afterAll(async () => {
+      // Back to the default (off) so the earlier write probes' assumption holds for anything run after this block.
+      await db.delete(instanceSettings);
+    });
+
+    it("company A sends, company B approves with a private note, and A's own reads stay clean of B's side", async () => {
+      const sent = await asAgentA()
+        .post(`/api/companies/${A.id}/cross-company-instructions`)
+        .send({ toCompanyId: B.id, subject: `Please look at ${A.marker}`, instruction: `Instruction text ${A.marker}` });
+      expect(sent.status, JSON.stringify(sent.body)).toBe(201);
+      expectOkAndClean(sent, "agent POST cross-company-instructions (201 body)", { allowIds: [B.id], okStatus: 201 });
+
+      const [row] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, sent.body.id));
+      expect(row!.toAgentId).toBe(B.liaisonAgentId);
+      approvalId = row!.approvalId!;
+      B.ids.push(approvalId, boardBUserId);
+
+      decisionNote = `Board note ${B.marker}: our client is unhappy, approve anyway.`;
+      const approved = await request(boardBApp).post(`/api/approvals/${approvalId}/approve`).send({ decisionNote });
+      expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+
+      const [decided] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, sent.body.id));
+      expect(decided!.status).toBe("delivered");
+      expect(decided!.decisionNote).toBe(decisionNote);
+      deliveredIssueId = decided!.deliveredIssueId!;
+      B.ids.push(deliveredIssueId);
+
+      // Company A's own reads: sender view only, nothing from B's side.
+      for (const [label, res] of [
+        ["agent GET own cross-company-instructions", await asAgentA().get(`/api/companies/${A.id}/cross-company-instructions`)],
+        ["board GET own cross-company-instructions", await asBoardA().get(`/api/companies/${A.id}/cross-company-instructions`)],
+        // (The activity route refuses a board session without permission grants,
+        // like search does, so the board read of activity is not probed here.)
+        ["agent GET own activity", await asAgentA().get(`/api/companies/${A.id}/activity`)],
+        ["agent GET own approvals", await asAgentA().get(`/api/companies/${A.id}/approvals`)],
+        ["agent GET own issues", await asAgentA().get(`/api/companies/${A.id}/issues`)],
+      ] as const) {
+        expectOkAndClean(res, label, { allowIds: [B.id] });
+        expect(JSON.stringify(res.body), `${label}: B's decision note leaked`).not.toContain(decisionNote);
+        expect(JSON.stringify(res.body), `${label}: B's decider leaked`).not.toContain(boardBUserId);
+      }
+      const listA = await asAgentA().get(`/api/companies/${A.id}/cross-company-instructions`);
+      expect(listA.body).toHaveLength(1);
+      expect(listA.body[0]).toMatchObject({ id: sent.body.id, fromCompanyId: A.id, toCompanyId: B.id, status: "delivered" });
+      for (const field of ["toAgentId", "approvalId", "deliveredIssueId", "decidedByUserId", "decisionNote"]) {
+        expect(listA.body[0], `sender view carries ${field}`).not.toHaveProperty(field);
+      }
+
+      // Company B, the receiver, sees its full record; company A still cannot read it.
+      const listB = await request(boardBApp).get(`/api/companies/${B.id}/cross-company-instructions`);
+      expect(listB.status).toBe(200);
+      expect(listB.body[0]).toMatchObject({ toAgentId: B.liaisonAgentId, approvalId, deliveredIssueId, decidedByUserId: boardBUserId, decisionNote });
+      expectBlockedAndClean(await asAgentA().get(`/api/companies/${B.id}/cross-company-instructions`), "agent GET B cross-company-instructions after decision");
+      expectBlockedAndClean(await asBoardA().get(`/api/companies/${B.id}/cross-company-instructions`), "board GET B cross-company-instructions after decision");
+      expectBlockedAndClean(await asAgentA().get(`/api/issues/${deliveredIssueId}`), "agent GET the delivered issue in B");
+      expectBlockedAndClean(await asAgentA().get(`/api/approvals/${approvalId}`), "agent GET B's card for the instruction");
     });
   });
 

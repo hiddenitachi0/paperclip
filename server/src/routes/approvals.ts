@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
 import { and, eq, inArray } from "drizzle-orm";
-import { companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
+import { approvals, companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -652,17 +652,21 @@ function commitsRefer(a: string, b: string): boolean {
  * Never the repository slug — see DUR-24.
  */
 async function resolveApprovalProjectLabel(db: Db, companyId: string, issueIds: string[]) {
+  // Both lookups are pinned to the filing company: an issue id from another
+  // company must never resolve to that company's project name (the link to
+  // the issue itself is refused a few steps later, and the card is then
+  // removed again -- see the create route).
   for (const issueId of issueIds) {
     const issueRow = await db
       .select({ projectId: issues.projectId })
       .from(issues)
-      .where(eq(issues.id, issueId))
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (!issueRow?.projectId) continue;
     const projectRow = await db
       .select({ name: projects.name })
       .from(projects)
-      .where(eq(projects.id, issueRow.projectId))
+      .where(and(eq(projects.id, issueRow.projectId), eq(projects.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (projectRow?.name) return projectRow.name;
   }
@@ -759,12 +763,12 @@ function parseOwnerSlashRepo(repo: unknown): { owner: string; name: string } | n
   return { owner, name: rawName.replace(/\.git$/i, "") };
 }
 
-async function resolveProjectIdForIssues(db: Db, issueIds: string[]): Promise<string | null> {
+async function resolveProjectIdForIssues(db: Db, companyId: string, issueIds: string[]): Promise<string | null> {
   for (const issueId of issueIds) {
     const row = await db
       .select({ projectId: issues.projectId })
       .from(issues)
-      .where(eq(issues.id, issueId))
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (row?.projectId) return row.projectId;
   }
@@ -813,7 +817,7 @@ async function assertMergePrRepoMatchesProject(
   if (payload.kind !== "merge_pr") return;
   const claimed = parseOwnerSlashRepo(payload.repo);
   if (!claimed) return;
-  const projectId = await resolveProjectIdForIssues(db, issueIds);
+  const projectId = await resolveProjectIdForIssues(db, companyId, issueIds);
   if (!projectId) return;
   const registered = await resolveProjectPrimaryRepo(db, companyId, projectId);
   if (!registered) return;
@@ -1456,10 +1460,19 @@ export function approvalRoutes(
     });
 
     if (uniqueIssueIds.length > 0) {
-      await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
+      try {
+        await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
+          agentId: actor.agentId,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        });
+      } catch (err) {
+        // Isolation audit: linking is refused when an issue id belongs to
+        // another company (or does not exist). The card was already written
+        // above; take it back out so a refused request never leaves a card
+        // behind in this company's inbox.
+        await db.delete(approvals).where(and(eq(approvals.id, approval.id), eq(approvals.companyId, companyId)));
+        throw err;
+      }
     }
 
     await logActivity(db, {
