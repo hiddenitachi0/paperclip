@@ -35,6 +35,21 @@ export const DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS = 4;
 export const MIN_GLOBAL_MAX_CONCURRENT_RUNS = 1;
 export const MAX_GLOBAL_MAX_CONCURRENT_RUNS = 200;
 
+// DUR-3940 item 2 / run cap: the watchdog's limits for runs of adapters that
+// run a local child process (claude_local, codex_local, ...). Every run that
+// ever passed 120 minutes in production ended failed or cancelled (12 of 12),
+// and a child that is alive but has printed nothing for a long time is
+// almost always stuck (waiting on input, a hung tool, a dead MCP pipe) while
+// it holds its agent's only run slot. Both limits apply instance-wide and
+// can be overridden per agent in adapterConfig (maxRunDurationMinutes /
+// silentRunTimeoutMinutes; 0 there switches that limit off for the agent).
+export const DEFAULT_MAX_RUN_DURATION_MINUTES = 150;
+export const MIN_MAX_RUN_DURATION_MINUTES = 10;
+export const MAX_MAX_RUN_DURATION_MINUTES = 24 * 60;
+export const DEFAULT_SILENT_RUN_TIMEOUT_MINUTES = 45;
+export const MIN_SILENT_RUN_TIMEOUT_MINUTES = 5;
+export const MAX_SILENT_RUN_TIMEOUT_MINUTES = 12 * 60;
+
 /**
  * Instance-wide execution policy.
  *
@@ -102,6 +117,18 @@ export interface InstanceGeneralSettings {
   instructionsStalenessThresholdDays: number;
   /** Whole-instance ceiling on simultaneously running heartbeat runs, across every agent/company. */
   globalMaxConcurrentRuns: number;
+  /**
+   * DUR-3940 item 2: a run of a local child-process adapter that has been
+   * going this long without finishing is stopped by the watchdog, marked
+   * failed and retried once. Per-agent override: adapterConfig.maxRunDurationMinutes.
+   */
+  maxRunDurationMinutes: number;
+  /**
+   * DUR-3940 item 2: a run whose child process is alive but has produced no
+   * output for this long is stopped the same way. Per-agent override:
+   * adapterConfig.silentRunTimeoutMinutes.
+   */
+  silentRunTimeoutMinutes: number;
   /** DUR-224 quiet-mode state; not settable via the general-settings patch route. */
   quietMode: QuietModeState;
   /**
