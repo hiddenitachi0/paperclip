@@ -4439,10 +4439,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
 
       await Promise.all([
         tx.execute(
-          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.expectedCheckoutRunId} for update`,
+          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.expectedCheckoutRunId} for no key update`,
         ),
         tx.execute(
-          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
+          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for no key update`,
         ),
       ]);
       const [existingRun, actorRun] = await Promise.all([
@@ -4515,8 +4515,18 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     const companyId = await companyIdForIssue(input.issueId);
     if (!companyId) return null;
     return withCompanyScope(rawDb, companyId, async (tx) => {
+      // DUR-3931: issue row first, then the run row -- the same order as
+      // clearExecutionRunIfTerminal / clearCheckoutRunIfTerminal /
+      // adoptStaleCheckoutRun above. This used to lock only the run and then
+      // UPDATE the issue, so two overlapping requests from the same agent (one
+      // in a clear* helper holding the issue and waiting for the run, this one
+      // holding the run and waiting for the issue) deadlocked. Regression test:
+      // issue-checkout-run-finalize-deadlock.test.ts.
       await tx.execute(
-        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
+        sql`select ${issues.id} from ${issues} where ${issues.id} = ${input.issueId} for update`,
+      );
+      await tx.execute(
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for no key update`,
       );
       const actorRun = await tx
         .select({ status: heartbeatRuns.status })
@@ -4570,8 +4580,23 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         .then((rows) => rows[0] ?? null);
       if (!issue?.executionRunId) return false;
 
+      // DUR-3931: `for no key update`, not `for update`, on the run row (same
+      // in the sibling helpers below). The point of this lock is to keep the
+      // run's status from flipping underneath us while we decide whether the
+      // issue's lock is stale, and an UPDATE of heartbeat_runs.status takes
+      // exactly `no key update`, so that is fully preserved. What `for update`
+      // additionally conflicted with is `for key share` -- the lock every
+      // foreign-key check takes on the parent row. The finalizing run's own
+      // bookkeeping (recordWorkspaceFinalize's INSERT into
+      // workspace_operations, which references both the run and the issue;
+      // issue_comments / activity_log rows behave the same) key-shares the run
+      // first and the issue second, in one statement, so with `for update`
+      // here the two met head-on: we held the issue and waited for the run, it
+      // held the run and waited for the issue -- "deadlock detected" on the
+      // signoff-policy e2e (CI runs 34025840842 / 34101687694). Regression
+      // test: issue-checkout-run-finalize-deadlock.test.ts.
       await tx.execute(
-        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for no key update`,
       );
       const run = await tx
         .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
@@ -4621,7 +4646,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (!issue?.checkoutRunId) return false;
 
       await tx.execute(
-        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.checkoutRunId} for update`,
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.checkoutRunId} for no key update`,
       );
       const run = await tx
         .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
@@ -4632,7 +4657,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
 
       if (issue.executionRunId && issue.executionRunId !== issue.checkoutRunId) {
         await tx.execute(
-          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
+          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for no key update`,
         );
         const executionRun = await tx
           .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
