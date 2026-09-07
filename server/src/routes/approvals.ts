@@ -483,15 +483,23 @@ function findDuplicateApprovedDeploy(
 ): { id: string; message: string } | null {
   const shortCommit = commit.slice(0, 12);
   for (const candidate of [...approved].reverse()) {
-    const entry = statusEntries.find((row) => row.approvalId === candidate.id);
+    // The runner writes a "started" line when it begins a deploy and a terminal line when it
+    // finishes (DUR-3923); the last non-"started" line is that approval's outcome.
+    const own = statusEntries.filter((row) => row.approvalId === candidate.id);
+    const entry = own.filter((row) => row.outcome !== "started").pop() ?? null;
     if (!entry) {
+      const inProgress = own.length > 0;
       return {
         id: candidate.id,
-        message:
-          `Commit ${shortCommit} already has an approved deploy approval (${candidate.id}) that the deploy ` +
-          "runner has not run yet. Filing another card for the same commit would only add a duplicate for " +
-          "the operator to approve. Wait for that one, or pass acknowledgedDuplicateOfApprovalId to confirm " +
-          "you really need a second one.",
+        message: inProgress
+          ? `Commit ${shortCommit} already has an approved deploy approval (${candidate.id}) that the deploy ` +
+            "runner is working on right now. Filing another card for the same commit would only add a " +
+            "duplicate for the operator to approve. Wait for that one to finish, or pass " +
+            "acknowledgedDuplicateOfApprovalId to confirm you really need a second one."
+          : `Commit ${shortCommit} already has an approved deploy approval (${candidate.id}) that the deploy ` +
+            "runner has not run yet. Filing another card for the same commit would only add a duplicate for " +
+            "the operator to approve. Wait for that one, or pass acknowledgedDuplicateOfApprovalId to confirm " +
+            "you really need a second one.",
       };
     }
     if (entry.body.includes(DEPLOY_SUCCESS_MARKER) || entry.outcome === "carried") {

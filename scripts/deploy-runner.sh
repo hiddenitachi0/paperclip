@@ -74,7 +74,10 @@
 # Every comment attempt (delivered or not) is also mirrored, best-effort, as
 # a JSON line into $STATUS_PATH inside the server container's own volume, so
 # an agent without host/docker access can see recent runner activity via the
-# API instead of needing a human to read deploy-runner.log by hand.
+# API instead of needing a human to read deploy-runner.log by hand. Since
+# DUR-3923 a real deploy also writes one `outcome:"started"` line there before
+# its slow part begins (see process_approval), so the server can tell "busy
+# on it" from "never picked it up".
 #
 # DUR-3923: an approved card whose kind only LOOKS like a deploy ("deploy_pr",
 # "rollout", ...) is answered with a comment saying nothing acts on it (see
@@ -786,6 +789,14 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
+  # DUR-3923: write a "started" status line BEFORE the slow part (git fetch, quiet-mode drain of
+  # up to QUIET_MODE_DRAIN_TIMEOUT_SECONDS, the build, the health check, and a possible rollback
+  # that repeats the last two). Every other status line is a terminal outcome written at the very
+  # end, so without this one the server's deploy-approval-feedback tick had no way to tell "the
+  # runner is busy on this deploy right now" from "the runner never picked it up" and could tell
+  # the operator the runner service was stopped in the middle of a perfectly normal long deploy.
+  # Not a comment (nothing is posted on the card), not an outcome, never affects the processed set.
+  record_status "$aid" "$company_id" "Deploy started — the deploy runner is working on this approval (fetching $target_ref, then building and health-checking). The outcome will be posted here when it finishes." 1 "started"
   local carried_commit
   carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY" "" "$DV_REPO_REF")"
   local fetch_reset_status=$?

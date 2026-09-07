@@ -353,6 +353,35 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     it("does not warn for a merge into a branch nobody deploys from", async () => {
       const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
       mockResolveProjectDeployBranches.mockResolvedValue(null);
+      // The fallback ran and found no company project whose deploy branch is "main": the
+      // merge never touched a deploy branch, so there is nothing to check and nothing to say.
+      mockResolveFallbackDeployBranches.mockResolvedValue({
+        branches: null,
+        issueHasProject: false,
+        reason: "no_matching_project",
+      });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({ payload: { kind: "merge_pr", base: "main", originalIssueIds: [ISSUE.id] } }),
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: {} as any,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+      });
+
+      expect(result).toBeNull();
+      expect(mockResolveFallbackDeployBranches).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ companyId: ISSUE.companyId, issueIds: [ISSUE.id], bases: ["main"] }),
+      );
+    });
+
+    it("does not warn when the fallback resolves a project but the merge targeted a different branch", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue(null);
       mockResolveFallbackDeployBranches.mockResolvedValue({
         branches: { deployBranch: "custom", projectId: "project-1", resolvedViaFallback: true },
         issueHasProject: false,
@@ -371,6 +400,27 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
       });
 
       expect(result).toBeNull();
+    });
+
+    it("still warns when the merge approval does not say which branch it targeted (no_base)", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue(null);
+      mockResolveFallbackDeployBranches.mockResolvedValue({ branches: null, issueHasProject: false, reason: "no_base" });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({ payload: { kind: "merge_pr", originalIssueIds: [ISSUE.id] } }),
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: {} as any,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+      });
+
+      expect(result?.warningOnly).toBe(true);
+      expect(result?.reason).toBe("no_base");
+      expect(result?.message).toContain("merge into a branch");
     });
   });
 

@@ -124,10 +124,13 @@ describe.skipIf(!support.supported)("deploy pipeline SQL against embedded Postgr
       status: "active",
       deployPolicy: { enabled: true, workspaceId, deployBranch: "custom" },
     });
-    const deployPr = await seedApproval(companyId, { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip" }, minutesAgo(30));
-    const realDeploy = await seedApproval(companyId, { kind: "deploy", projectId, workspaceId, commit: "abc123def4567" }, minutesAgo(30));
-    const mergePr = await seedApproval(companyId, { kind: "merge_pr", prNumber: 43, repo: "acme/paperclip" }, minutesAgo(30));
+    // The tick waits DEPLOY_APPROVAL_FEEDBACK_DELAY_MS (45 min) after approval before it says anything.
+    const deployPr = await seedApproval(companyId, { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip" }, minutesAgo(60));
+    const realDeploy = await seedApproval(companyId, { kind: "deploy", projectId, workspaceId, commit: "abc123def4567" }, minutesAgo(60));
+    const mergePr = await seedApproval(companyId, { kind: "merge_pr", prNumber: 43, repo: "acme/paperclip" }, minutesAgo(60));
     const tooFresh = await seedApproval(companyId, { kind: "deploy", projectId, workspaceId }, minutesAgo(2));
+    // 30 minutes old: a slow deploy can still be running, so this is inside the delay too.
+    const stillWithinDelay = await seedApproval(companyId, { kind: "deploy", projectId, workspaceId }, minutesAgo(30));
     const tooOld = await seedApproval(companyId, { kind: "deploy", projectId, workspaceId }, minutesAgo(3 * 24 * 60));
     const pendingDeploy = await seedApproval(companyId, { kind: "deploy", projectId, workspaceId }, null, "pending");
 
@@ -138,7 +141,7 @@ describe.skipIf(!support.supported)("deploy pipeline SQL against embedded Postgr
       db.select({ body: approvalComments.body }).from(approvalComments).where(eq(approvalComments.approvalId, approvalId));
     expect((await commentsFor(deployPr)).map((c) => c.body).join("\n")).toContain('kind "deploy_pr"');
     expect((await commentsFor(realDeploy)).map((c) => c.body).join("\n")).toContain("has not picked it up");
-    for (const untouched of [mergePr, tooFresh, tooOld, pendingDeploy]) {
+    for (const untouched of [mergePr, tooFresh, stillWithinDelay, tooOld, pendingDeploy]) {
       expect(await commentsFor(untouched)).toEqual([]);
       expect((await readPayload(untouched)).deployRunnerFeedbackNoted).toBeUndefined();
     }

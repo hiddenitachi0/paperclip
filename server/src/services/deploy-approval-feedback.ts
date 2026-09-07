@@ -13,11 +13,12 @@ import { describeUnknownDeployLikeKind } from "./deploy-workspace.js";
  *
  * This scheduled tick (same shape as merge-deploy-visibility.ts, wired next to it in
  * server/src/index.ts) looks at every deploy-looking approval that has been `approved` for
- * more than `delayMs` (a few poll cycles of the runner, which fires every minute but can
- * spend minutes on one deploy) and checks the runner's own status log
- * (deploy-runner-status.ts) for an entry about it. No entry means the runner never picked it
- * up: post a plain-language comment on the approval and its linked issue(s) saying so, and
- * why, as far as it can be told from here:
+ * more than `delayMs` and checks the runner's own status log (deploy-runner-status.ts) for an
+ * entry about it. The runner writes an `outcome:"started"` line as soon as it begins a real
+ * deploy (before the fetch, drain and build) and a terminal line at the end, so ANY entry --
+ * started or terminal -- means the runner reached the card and its own comment is the answer.
+ * No entry at all means the runner never picked it up: post a plain-language comment on the
+ * approval and its linked issue(s) saying so, and why, as far as it can be told from here:
  *   - the card's kind is not "deploy" (nothing acts on it, and nothing ever will),
  *   - the project's deploy settings are missing/disabled,
  *   - the card names a workspace other than the project's deploy workspace (the runner
@@ -29,8 +30,16 @@ import { describeUnknownDeployLikeKind } from "./deploy-workspace.js";
  * decided within `maxAgeMs` -- the status log is trimmed to its last 500 lines, so an old
  * approval with no entry in it is not evidence of anything and must not be re-litigated.
  * The runner's own comment, when it does get to the card, remains the authoritative outcome.
+ *
+ * Why 45 minutes: the runner polls every minute but handles approvals one at a time, and a
+ * single deploy can legitimately take ~26 minutes end to end (quiet-mode drain up to 240 s,
+ * the docker build, a health-check budget of HEALTH_RETRIES x (3 s + 10 s) ~= 13 min, and the
+ * build + health check again on a rollback). A card approved while such a deploy is already
+ * running gets no "started" line until that deploy finishes, so the patience here has to
+ * exceed one worst-case deploy with room to spare -- otherwise this tick would tell the
+ * operator "the runner may be stopped" in the middle of a perfectly normal slow deploy.
  */
-export const DEPLOY_APPROVAL_FEEDBACK_DELAY_MS = 15 * 60 * 1000;
+export const DEPLOY_APPROVAL_FEEDBACK_DELAY_MS = 45 * 60 * 1000;
 export const DEPLOY_APPROVAL_FEEDBACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const DEPLOY_LIKE_KIND_SQL_PATTERN = "deploy|release|rollout|ship";
@@ -186,8 +195,9 @@ export function deployApprovalFeedbackService(
       const statusEntries = getStatusEntries(approval.companyId);
       const runnerSawIt = statusEntries.some((entry) => entry.approvalId === approval.id);
       if (runnerSawIt) {
-        // The runner reached it (and commented, or is retrying its comment) -- that comment is
-        // the operator's answer, not this one.
+        // The runner reached it: it is deploying it right now ("started" line), or it has
+        // commented (or is retrying its comment). That comment is the operator's answer, not
+        // this one.
         await markNoted(approval.id, payload, { deployRunnerFeedbackOutcome: "processed_by_runner" });
         continue;
       }

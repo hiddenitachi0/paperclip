@@ -838,8 +838,9 @@ test("DUR-152: process_approval records outcome=carried with the resolved commit
     assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
 
     const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-    const entry = statusLines.find((e) => e.approvalId === "aid-1");
-    assert.ok(entry, "expected a status-log entry for aid-1");
+    // DUR-3923: the "started" line precedes the outcome line; the outcome is what matters here.
+    const entry = statusLines.filter((e) => e.approvalId === "aid-1" && e.outcome !== "started").pop();
+    assert.ok(entry, "expected a status-log outcome entry for aid-1");
     assert.equal(entry.outcome, "carried", "deploy-completion-gate.ts keys off this to confirm a superseded approval by commit, not comment text");
     assert.equal(entry.commit, carriedCommit);
   } finally {
@@ -920,13 +921,117 @@ test("DUR-237: a successful deploy also records the deployed commit as a structu
     assert.match(comments[0], /is live and healthy/);
 
     const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-    const entry = statusLines.find((e) => e.approvalId === "aid-1");
-    assert.ok(entry, "expected a status-log entry for aid-1");
+    const entries = statusLines.filter((e) => e.approvalId === "aid-1");
+    // DUR-3923: a "started" line lands first, then the terminal outcome.
+    assert.equal(entries.length, 2, `expected a started line followed by the outcome line, got: ${JSON.stringify(entries)}`);
+    assert.equal(entries[0].outcome, "started");
+    assert.equal(entries[0].commentDelivered, false, "the started line is not a comment");
+    const entry = entries[1];
+    assert.notEqual(entry.outcome, "started");
     assert.equal(
       entry.commit,
       expectedCommit,
       "deploy-completion-gate.ts needs the structured commit field on a plain success too, not only 'carried' (DUR-237)",
     );
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-3923: the server's deploy-approval-feedback tick decides "the runner never picked this
+// card up" purely from the status log. Every other line is written at the END of a deploy, and a
+// deploy can legitimately take longer than the tick's patience (drain + build + health budget,
+// doubled on rollback), so the runner must say "started" BEFORE the slow part -- and must do so
+// on the failure path too, where the deploy takes longest.
+test("DUR-3923: a 'started' status line is recorded before the build, even when the deploy then fails and rolls back", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-started-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+
+    scenario.writeJson("project-proj-1.json", {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+        rollback: "git_previous",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    });
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      # The recipe fails the first time (the deploy) and succeeds the second (the rollback);
+      # every status line written before the first recipe run is what this test is about.
+      RECIPE_RUNS=0
+      run_recipe() {
+        RECIPE_RUNS=$((RECIPE_RUNS + 1))
+        echo "recipe run $RECIPE_RUNS lines_before=$(grep -c . "${statusPath}" 2>/dev/null || echo 0)" >> "${scenario.dir}/recipe.log"
+        [ "$RECIPE_RUNS" -eq 1 ] && return 1
+        return 0
+      }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1, "exactly one outcome comment is posted; the started line is not a comment");
+    assert.match(comments[0], /Deploy failed/);
+    assert.match(comments[0], /Rolled back/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entries = statusLines.filter((e) => e.approvalId === "aid-1");
+    assert.equal(entries.length, 2, `expected exactly a started line and a failed line, got: ${JSON.stringify(entries)}`);
+    assert.equal(entries[0].outcome, "started");
+    assert.equal(entries[0].companyId, "co-1");
+    assert.equal(entries[0].commentDelivered, false);
+    assert.match(entries[0].body, /Deploy started/);
+    assert.doesNotMatch(entries[0].body, /is live and healthy/, "a started line must never read like a success");
+    assert.match(entries[1].body, /Deploy failed/);
+    assert.notEqual(entries[1].outcome, "started");
+
+    // The started line was on disk before the recipe (build) ever ran.
+    const recipeLog = readFileSync(path.join(scenario.dir, "recipe.log"), "utf8").trim().split("\n");
+    assert.equal(recipeLog.length, 2, "deploy recipe + rollback recipe");
+    assert.match(recipeLog[0], /lines_before=1$/, "the started line must be written before the first recipe run");
   } finally {
     scenario.cleanup();
     rmSync(dir, { recursive: true, force: true });

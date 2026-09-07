@@ -368,11 +368,76 @@ describe("approval routes duplicate guard (DUR-101)", () => {
       expect(mockApprovalService.create).not.toHaveBeenCalled();
     }, TEST_TIMEOUT);
 
+    it("refuses a new card for a commit whose approved deploy the runner is working on right now (only a 'started' line so far)", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:01:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: false,
+          outcome: "started",
+          body: "Deploy started — the deploy runner is working on this approval.",
+        },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.details?.existingApprovalId).toBe(QUEUED_ID);
+      expect(res.body.error).toContain("working on right now");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("still recognises 'already went live' when the success line follows a 'started' line", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:01:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: false,
+          outcome: "started",
+          body: "Deploy started — the deploy runner is working on this approval.",
+        },
+        {
+          ts: "2026-09-05T10:09:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: true,
+          body: `Deployed to /root/paperclip — commit ${COMMIT.slice(0, 12)} is live and healthy (health check: http://x).`,
+          commit: COMMIT.slice(0, 12),
+        },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain("already went live");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
     it("allows a re-file for a commit whose earlier deploy the runner recorded as failed", async () => {
       mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
         { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
       ]);
       mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:01:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: false,
+          outcome: "started",
+          body: "Deploy started — the deploy runner is working on this approval.",
+        },
         {
           ts: "2026-09-05T10:05:00Z",
           approvalId: QUEUED_ID,

@@ -64,7 +64,8 @@ function makeFakeDb(dueRows: unknown[], projectRowsById: Record<string, unknown>
   return { db, updateCalls };
 }
 
-function approved(id: string, payload: Record<string, unknown>, decidedAt = new Date("2026-09-05T11:30:00Z")) {
+// Default: approved 60 minutes ago -- older than DEPLOY_APPROVAL_FEEDBACK_DELAY_MS (45 min).
+function approved(id: string, payload: Record<string, unknown>, decidedAt = new Date("2026-09-05T11:00:00Z")) {
   return { id, companyId: COMPANY, type: "request_board_approval", status: "approved", payload, decidedAt };
 }
 
@@ -96,6 +97,51 @@ describe("deployApprovalFeedbackService.tick (DUR-3923)", () => {
     expect(updateCalls[0].payload.deployRunnerFeedbackOutcome).toBe("processed_by_runner");
   });
 
+  it("says nothing about a card the runner is deploying right now (a 'started' line, no outcome yet)", async () => {
+    const { deployApprovalFeedbackService } = await import("../services/deploy-approval-feedback.js");
+    const { db, updateCalls } = makeFakeDb([approved("a-1b", deployPayload)], { [PROJECT]: enabledProject });
+    db._expectProject(PROJECT);
+    // The runner picked it up a while ago and is still building/health-checking: the only line
+    // for it is the "started" one scripts/deploy-runner.sh writes before the slow part.
+    const readStatusLog = vi.fn().mockReturnValue([
+      {
+        ts: "2026-09-05T11:03:00Z",
+        approvalId: "a-1b",
+        companyId: COMPANY,
+        commentDelivered: false,
+        outcome: "started",
+        body: "Deploy started — the deploy runner is working on this approval.",
+      },
+    ]);
+
+    const result = await deployApprovalFeedbackService(db as any, { readStatusLog }).tick(NOW);
+
+    expect(result).toEqual({ checked: 1, flagged: 0 });
+    expect(mockApprovalService.addComment).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(updateCalls[0].payload.deployRunnerFeedbackOutcome).toBe("processed_by_runner");
+  });
+
+  it("does not flag an approval younger than the 45-minute delay, even with no runner activity at all", async () => {
+    const { deployApprovalFeedbackService, DEPLOY_APPROVAL_FEEDBACK_DELAY_MS } = await import(
+      "../services/deploy-approval-feedback.js"
+    );
+    expect(DEPLOY_APPROVAL_FEEDBACK_DELAY_MS).toBe(45 * 60 * 1000);
+    // 30 minutes old: a normal slow deploy (drain + build + health budget, doubled on rollback)
+    // can still be running with no terminal line yet. This used to be flagged at 15 minutes.
+    const { db, updateCalls } = makeFakeDb([approved("young", deployPayload, new Date("2026-09-05T11:30:00Z"))], {
+      [PROJECT]: enabledProject,
+    });
+    db._expectProject(PROJECT);
+
+    const result = await deployApprovalFeedbackService(db as any, { readStatusLog: () => [] }).tick(NOW);
+
+    expect(result).toEqual({ checked: 0, flagged: 0 });
+    expect(mockApprovalService.addComment).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(updateCalls).toHaveLength(0);
+  });
+
   it("tells the operator plainly that a deploy_pr card will never be acted on, on the card and its issue", async () => {
     const { deployApprovalFeedbackService } = await import("../services/deploy-approval-feedback.js");
     const { db, updateCalls } = makeFakeDb([approved("a-2", { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip" })]);
@@ -107,7 +153,7 @@ describe("deployApprovalFeedbackService.tick (DUR-3923)", () => {
     expect(mockApprovalService.addComment).toHaveBeenCalledTimes(1);
     const [approvalId, body] = mockApprovalService.addComment.mock.calls[0];
     expect(approvalId).toBe("a-2");
-    expect(body).toContain("approved 30 minutes ago");
+    expect(body).toContain("approved 60 minutes ago");
     expect(body).toContain('kind "deploy_pr"');
     expect(body).toContain('kind "deploy"');
     expect(body).toContain("nothing has acted on it and nothing will");
@@ -139,7 +185,7 @@ describe("deployApprovalFeedbackService.tick (DUR-3923)", () => {
     const { db } = makeFakeDb([approved("a-4", deployPayload)], { [PROJECT]: enabledProject });
     db._expectProject(PROJECT);
     const readStatusLog = vi.fn().mockReturnValue([
-      { ts: "2026-09-05T11:45:00Z", approvalId: "other", companyId: COMPANY, commentDelivered: true, body: "Deployed — is live and healthy" },
+      { ts: "2026-09-05T11:15:00Z", approvalId: "other", companyId: COMPANY, commentDelivered: true, body: "Deployed — is live and healthy" },
     ]);
 
     await deployApprovalFeedbackService(db as any, { readStatusLog }).tick(NOW);
@@ -183,6 +229,8 @@ describe("deployApprovalFeedbackService.tick (DUR-3923)", () => {
     const { db, updateCalls } = makeFakeDb([
       // Too fresh: approved 2 minutes ago.
       approved("fresh", deployPayload, new Date("2026-09-05T11:58:00Z")),
+      // Still too fresh: approved 40 minutes ago, inside the 45-minute delay.
+      approved("fresh-40", deployPayload, new Date("2026-09-05T11:20:00Z")),
       // Too old: the status log is trimmed, so "no entry" means nothing for a 3-day-old card.
       approved("stale", deployPayload, new Date("2026-09-02T11:00:00Z")),
       // Not deploy-shaped at all.

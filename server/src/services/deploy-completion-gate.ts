@@ -253,7 +253,15 @@ export async function evaluateDeployCompletionDoneGate(
       // The project deliberately declares no deploy branch -- never a promise the platform
       // made for it (see deploy-branches.ts).
       return null;
+    } else if (fallback.reason === "no_matching_project") {
+      // The check DID run: no project in this company deploys from the branch this merge
+      // targeted, so the merge never touched a deploy branch and there is nothing to confirm.
+      // Same acceptance criterion as the base filter below -- not a gap, so no warning.
+      return null;
     } else {
+      // "ambiguous" (several projects deploy from that branch and the repo doesn't single one
+      // out) or "no_base" (the merge approval doesn't say which branch it targeted): the check
+      // genuinely could not run, so say so rather than pretending it did.
       const issueLabel = input.issue.identifier ?? "This issue";
       const baseLabel = bases[0] ? `"${bases[0]}"` : "a branch";
       return {

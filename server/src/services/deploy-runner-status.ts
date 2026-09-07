@@ -27,6 +27,12 @@ export type DeployRunnerStatusEntry = {
   // part of a different approval's deploy — so a consumer of this log can
   // confirm the change is live without depending on the runner's literal
   // success sentence, which a superseded approval's comment never contains.
+  // DUR-3923: "started" is written BEFORE a real deploy's slow part (fetch,
+  // drain, build, health check) with `commentDelivered:false` -- it is not a
+  // comment and not an outcome, only proof the runner is busy on that card.
+  // A card's terminal line follows it later; consumers that decide something
+  // from "the entry for this approval" must skip "started" lines (or look at
+  // the last entry) rather than the first one they find.
   outcome?: string;
   // The commit this entry's outcome pertains to, when known.
   commit?: string;
