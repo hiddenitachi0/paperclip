@@ -213,6 +213,15 @@ function runMain(scenario, extraEnv = {}) {
 
 const DISABLED_POLICY_PROJECT = { id: "proj-1", deployPolicy: { enabled: false } };
 
+// DUR-3923: unsupported-kind cards are only answered when decided within the last 24h
+// (UNSUPPORTED_KIND_MAX_AGE_SECONDS), so their decidedAt must be relative to "now" --
+// a hard-coded date silently goes stale the day after it is written.
+function isoAgo(ms) {
+  return new Date(Date.now() - ms).toISOString();
+}
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * ONE_HOUR_MS;
+
 test("deploy-runner.sh passes bash syntax validation", () => {
   assertSuccess(run("bash", ["-n", SCRIPT]), "bash -n");
 });
@@ -838,8 +847,9 @@ test("DUR-152: process_approval records outcome=carried with the resolved commit
     assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
 
     const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-    const entry = statusLines.find((e) => e.approvalId === "aid-1");
-    assert.ok(entry, "expected a status-log entry for aid-1");
+    // DUR-3923: the "started" line precedes the outcome line; the outcome is what matters here.
+    const entry = statusLines.filter((e) => e.approvalId === "aid-1" && e.outcome !== "started").pop();
+    assert.ok(entry, "expected a status-log outcome entry for aid-1");
     assert.equal(entry.outcome, "carried", "deploy-completion-gate.ts keys off this to confirm a superseded approval by commit, not comment text");
     assert.equal(entry.commit, carriedCommit);
   } finally {
@@ -920,13 +930,117 @@ test("DUR-237: a successful deploy also records the deployed commit as a structu
     assert.match(comments[0], /is live and healthy/);
 
     const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-    const entry = statusLines.find((e) => e.approvalId === "aid-1");
-    assert.ok(entry, "expected a status-log entry for aid-1");
+    const entries = statusLines.filter((e) => e.approvalId === "aid-1");
+    // DUR-3923: a "started" line lands first, then the terminal outcome.
+    assert.equal(entries.length, 2, `expected a started line followed by the outcome line, got: ${JSON.stringify(entries)}`);
+    assert.equal(entries[0].outcome, "started");
+    assert.equal(entries[0].commentDelivered, false, "the started line is not a comment");
+    const entry = entries[1];
+    assert.notEqual(entry.outcome, "started");
     assert.equal(
       entry.commit,
       expectedCommit,
       "deploy-completion-gate.ts needs the structured commit field on a plain success too, not only 'carried' (DUR-237)",
     );
+  } finally {
+    scenario.cleanup();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-3923: the server's deploy-approval-feedback tick decides "the runner never picked this
+// card up" purely from the status log. Every other line is written at the END of a deploy, and a
+// deploy can legitimately take longer than the tick's patience (drain + build + health budget,
+// doubled on rollback), so the runner must say "started" BEFORE the slow part -- and must do so
+// on the failure path too, where the deploy takes longest.
+test("DUR-3923: a 'started' status line is recorded before the build, even when the deploy then fails and rolls back", () => {
+  const scenario = makeScenario();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-started-test-"));
+  try {
+    const targetPath = path.join(dir, "target");
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const g = (args) => {
+      const result = spawnSync("git", args, { cwd: targetPath, encoding: "utf8", env: gitEnv });
+      assert.equal(result.status, 0, `git ${args.join(" ")} failed\n${result.stderr}`);
+      return result.stdout.trim();
+    };
+    mkdirSync(targetPath, { recursive: true });
+    g(["init", "--quiet", "-b", "custom"]);
+    writeFileSync(path.join(targetPath, "f.txt"), "A");
+    g(["add", "f.txt"]);
+    g(["commit", "--quiet", "-m", "A"]);
+
+    scenario.writeJson("project-proj-1.json", {
+      id: "proj-1",
+      deployPolicy: {
+        enabled: true,
+        workspaceId: "ws-1",
+        deployKind: "custom",
+        deployTargetPath: targetPath,
+        healthCheckUrl: "http://example.invalid/health",
+        rollback: "git_previous",
+      },
+      workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+    });
+    scenario.writeJson("approval-aid-1.json", {
+      id: "aid-1",
+      payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+    });
+
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      # The recipe fails the first time (the deploy) and succeeds the second (the rollback);
+      # every status line written before the first recipe run is what this test is about.
+      RECIPE_RUNS=0
+      run_recipe() {
+        RECIPE_RUNS=$((RECIPE_RUNS + 1))
+        echo "recipe run $RECIPE_RUNS lines_before=$(grep -c . "${statusPath}" 2>/dev/null || echo 0)" >> "${scenario.dir}/recipe.log"
+        [ "$RECIPE_RUNS" -eq 1 ] && return 1
+        return 0
+      }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${scenario.binDir}:${process.env.PATH}`,
+        SCENARIO_DIR: scenario.dir,
+        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath,
+      },
+    });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1, "exactly one outcome comment is posted; the started line is not a comment");
+    assert.match(comments[0], /Deploy failed/);
+    assert.match(comments[0], /Rolled back/);
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entries = statusLines.filter((e) => e.approvalId === "aid-1");
+    assert.equal(entries.length, 2, `expected exactly a started line and a failed line, got: ${JSON.stringify(entries)}`);
+    assert.equal(entries[0].outcome, "started");
+    assert.equal(entries[0].companyId, "co-1");
+    assert.equal(entries[0].commentDelivered, false);
+    assert.match(entries[0].body, /Deploy started/);
+    assert.doesNotMatch(entries[0].body, /is live and healthy/, "a started line must never read like a success");
+    assert.match(entries[1].body, /Deploy failed/);
+    assert.notEqual(entries[1].outcome, "started");
+
+    // The started line was on disk before the recipe (build) ever ran.
+    const recipeLog = readFileSync(path.join(scenario.dir, "recipe.log"), "utf8").trim().split("\n");
+    assert.equal(recipeLog.length, 2, "deploy recipe + rollback recipe");
+    assert.match(recipeLog[0], /lines_before=1$/, "the started line must be written before the first recipe run");
   } finally {
     scenario.cleanup();
     rmSync(dir, { recursive: true, force: true });
@@ -1746,6 +1860,206 @@ test("main() logs a diagnostic (not silence) when the company list itself fails 
       /company list did not parse as JSON -- aborting this poll cycle/,
       "a parse failure must be logged, not silently treated as zero companies",
     );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3923 (NOR-1242): an approved card whose kind only looks like a deploy used to be
+// invisible to main() -- filtered out by the `kind == "deploy"` candidate check, never
+// commented on, never marked processed -- so the operator approved it and nothing at all
+// happened. It must now get exactly one plain-language comment, a structured status-log
+// entry, and be marked processed; and it must never reach process_approval (no deploy).
+test("DUR-3923: an approved deploy_pr card gets a 'nothing acts on this' comment, never a deploy", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(ONE_HOUR_MS),
+        payload: { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip" },
+      },
+      {
+        id: "aid-real",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(ONE_HOUR_MS - 5_000),
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+      },
+      {
+        // Not deploy-like at all -- must be left alone entirely.
+        id: "aid-merge",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(ONE_HOUR_MS - 10_000),
+        payload: { kind: "merge_pr", prNumber: 43, repo: "acme/paperclip" },
+      },
+    ]);
+    scenario.writeJson("approval-issues-aid-deploy-pr.json", [{ id: "issue-77" }]);
+    scenario.writeJson("approval-aid-real.json", {
+      id: "aid-real",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+    });
+    scenario.writeJson("project-proj-1.json", DISABLED_POLICY_PROJECT);
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+
+    const result = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath });
+    assertSuccess(result, "main()");
+
+    const comments = scenario.commentsFor("aid-deploy-pr");
+    assert.equal(comments.length, 1, `expected exactly one comment for the deploy_pr card, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[0], /Nothing happened/);
+    assert.match(comments[0], /kind "deploy_pr"/, "the comment must name the kind that was filed");
+    assert.match(comments[0], /kind "deploy"/, "the comment must say what kind would actually work");
+    assert.doesNotMatch(comments[0], /is live and healthy/, "an unsupported card must never read like a successful deploy");
+    assert.deepEqual(scenario.issueCommentsFor("issue-77"), comments, "the note is mirrored onto the linked issue too");
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entry = statusLines.find((e) => e.approvalId === "aid-deploy-pr");
+    assert.ok(entry, "expected a status-log entry for the deploy_pr card");
+    assert.equal(entry.outcome, "unsupported_kind");
+
+    // The real deploy card is still handled exactly as before, and the merge_pr card untouched.
+    assert.equal(scenario.commentsFor("aid-real").length, 1);
+    assert.match(scenario.commentsFor("aid-real")[0], /Deploy failed/);
+    assert.deepEqual(scenario.commentsFor("aid-merge"), []);
+    assert.deepEqual(scenario.processedIds().sort(), ["aid-deploy-pr", "aid-real"]);
+
+    // Idempotent: a second poll cycle says nothing more about it.
+    const second = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath });
+    assertSuccess(second, "main() second cycle");
+    assert.equal(scenario.commentsFor("aid-deploy-pr").length, 1, "already processed -- must not comment again");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("DUR-3923: an unsupported-kind card whose comment cannot be delivered is left unprocessed for the next cycle", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-rollout",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(ONE_HOUR_MS),
+        payload: { kind: "rollout" },
+      },
+    ]);
+    scenario.setFailCount("aid-rollout", 99);
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main()");
+
+    assert.deepEqual(scenario.commentsFor("aid-rollout"), []);
+    assert.deepEqual(scenario.processedIds(), [], "no delivered comment means not processed (DUR-44 contract)");
+    assert.match(scenario.readLog(), /aid-rollout \(unsupported kind "rollout"\) — no comment could be delivered/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3923 follow-up: the processed-set lives on the host and starts empty on a fresh
+// box (or after a wipe), so without a decidedAt bound the first poll cycle after this
+// runner ships would comment on every deploy_pr/rollout card ever approved across every
+// company -- and mirror each onto its linked issues. Cards decided more than 24h ago
+// (matching DEPLOY_APPROVAL_FEEDBACK_MAX_AGE_MS) must be left completely alone: no
+// comment, no issue mirror, no status-log entry, no processed entry. A real
+// kind:"deploy" card of the same age is NOT bounded -- an approved deploy still happens.
+test("DUR-3923: an old approved deploy_pr card (decided >24h ago) is left alone -- no comment, not processed", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-old-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(3 * ONE_DAY_MS),
+        payload: { kind: "deploy_pr", prNumber: 12, repo: "acme/paperclip" },
+      },
+      {
+        // Missing decidedAt entirely (and no updatedAt/createdAt): treated as old -- stay quiet.
+        id: "aid-undated-rollout",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "rollout" },
+      },
+      {
+        // Recent one in the same list still gets its comment, proving the bound is per card.
+        id: "aid-recent-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(ONE_HOUR_MS),
+        payload: { kind: "deploy_pr", prNumber: 13, repo: "acme/paperclip" },
+      },
+      {
+        // A real deploy card of the same old age is NOT bounded by this window.
+        id: "aid-old-real",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(3 * ONE_DAY_MS),
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+      },
+    ]);
+    scenario.writeJson("approval-issues-aid-old-deploy-pr.json", [{ id: "issue-old" }]);
+    scenario.writeJson("approval-aid-old-real.json", {
+      id: "aid-old-real",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+    });
+    scenario.writeJson("project-proj-1.json", DISABLED_POLICY_PROJECT);
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+
+    const result = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath });
+    assertSuccess(result, "main()");
+
+    assert.deepEqual(scenario.commentsFor("aid-old-deploy-pr"), [], "an old deploy_pr card must not be commented on");
+    assert.deepEqual(scenario.issueCommentsFor("issue-old"), [], "nor mirrored onto its linked issue");
+    assert.deepEqual(scenario.commentsFor("aid-undated-rollout"), [], "a card with no decision time is treated as old");
+    const statusLines = existsSync(statusPath)
+      ? readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    assert.equal(statusLines.find((e) => e.approvalId === "aid-old-deploy-pr"), undefined, "no status-log entry for the old card");
+    assert.equal(statusLines.find((e) => e.approvalId === "aid-undated-rollout"), undefined);
+
+    assert.equal(scenario.commentsFor("aid-recent-deploy-pr").length, 1, "the recent deploy_pr card in the same list is still answered");
+    assert.match(scenario.commentsFor("aid-recent-deploy-pr")[0], /Nothing happened/);
+    assert.equal(scenario.commentsFor("aid-old-real").length, 1, "a real deploy card is not age-bounded");
+    assert.match(scenario.commentsFor("aid-old-real")[0], /Deploy failed/);
+
+    assert.deepEqual(
+      scenario.processedIds().sort(),
+      ["aid-old-real", "aid-recent-deploy-pr"],
+      "old/undated unsupported cards get no processed entry -- they were never acted on",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("DUR-3923: the unsupported-kind window is configurable via PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-3d-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(3 * ONE_DAY_MS),
+        payload: { kind: "deploy_pr", prNumber: 14, repo: "acme/paperclip" },
+      },
+    ]);
+
+    // 7-day window: the 3-day-old card is inside it and gets answered.
+    const result = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS: String(7 * 24 * 60 * 60) });
+    assertSuccess(result, "main()");
+    assert.equal(scenario.commentsFor("aid-3d-deploy-pr").length, 1);
+    assert.deepEqual(scenario.processedIds(), ["aid-3d-deploy-pr"]);
   } finally {
     scenario.cleanup();
   }

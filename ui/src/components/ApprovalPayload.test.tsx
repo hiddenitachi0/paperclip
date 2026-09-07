@@ -12,6 +12,7 @@ import {
   approvalLabel,
   approvalTargetBadge,
   approvalTechnicalReference,
+  approvalUnsupportedDeployKindWarning,
   credentialRequestFields,
   credentialRequestFriendlyName,
 } from "./ApprovalPayload";
@@ -81,6 +82,22 @@ describe("approvalDuplicateKey", () => {
     expect(approvalDuplicateKey({ kind: "deploy" })).toBeNull();
     expect(approvalDuplicateKey({ kind: "hire_agent" })).toBeNull();
     expect(approvalDuplicateKey(null)).toBeNull();
+  });
+});
+
+describe("approvalUnsupportedDeployKindWarning (DUR-3923)", () => {
+  it("warns on a deploy-looking kind nothing acts on, naming the kind and the fix", () => {
+    const warning = approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "deploy_pr", prNumber: 42 });
+    expect(warning).toContain('kind "deploy_pr"');
+    expect(warning).toContain('kind "deploy"');
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "rollout" })).not.toBeNull();
+  });
+
+  it("stays silent for a real deploy card and for non-deploy kinds", () => {
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "deploy", commit: "abc123" })).toBeNull();
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "merge_pr", prNumber: 1 })).toBeNull();
+    expect(approvalUnsupportedDeployKindWarning("hire_agent", { kind: "deploy_pr" })).toBeNull();
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", null)).toBeNull();
   });
 });
 

@@ -2,7 +2,8 @@ import { and, eq, lte, sql } from "drizzle-orm";
 import { approvals, type Db } from "@paperclipai/db";
 import { issueApprovalService } from "./issue-approvals.js";
 import { issueService } from "./issues.js";
-import { resolveProjectDeployBranches } from "./deploy-branches.js";
+import { resolveProjectDeployBranches, type ProjectDeployBranches } from "./deploy-branches.js";
+import { resolveFallbackDeployBranches } from "./deploy-branch-fallback.js";
 import { secretService } from "./secrets.js";
 import { ghFetch, gitHubApiBase } from "./github-fetch.js";
 
@@ -98,6 +99,59 @@ async function verifyPullRequestMerged(
 export const MERGE_DEPLOY_VISIBILITY_DELAY_MS = 30 * 60 * 1000;
 
 /**
+ * DUR-3928/DUR-3944: a merge_pr approval whose PR has not merged yet at check time used to be
+ * checked exactly once and then marked noted forever -- with no `mergeCommitSha`, which both
+ * deploy-completion-gate.ts and deploy-carried-issues.ts hard-require. Two live approvals
+ * (PR #248, PR #256) got stuck that way because their PRs merged 15-20 minutes AFTER the one
+ * and only check. Re-checks now back off from `delayMs` (30 min) doubling up to this cap ...
+ */
+export const MERGE_DEPLOY_VISIBILITY_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+/** ... and stop for good once the approval is this old (bounded: a PR that never merges). */
+export const MERGE_DEPLOY_VISIBILITY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** How many already-noted-but-sha-less legacy approvals to re-check per tick (see tick()). */
+export const MERGE_DEPLOY_VISIBILITY_LEGACY_RECHECK_LIMIT = 20;
+/** Give up on a legacy re-check after this many attempts (GitHub down, no token, ...). */
+export const MERGE_DEPLOY_VISIBILITY_LEGACY_RECHECK_MAX_ATTEMPTS = 5;
+
+/**
+ * Delay before re-checking an approval that has already been checked `attempts` times:
+ * base, 2x, 4x, ... capped at `maxMs`. With the defaults: 30m, 1h, 2h, 4h, 6h, 6h, ...
+ */
+export function mergeDeployVisibilityRetryDelayMs(
+  attempts: number,
+  baseMs = MERGE_DEPLOY_VISIBILITY_DELAY_MS,
+  maxMs = MERGE_DEPLOY_VISIBILITY_RETRY_MAX_MS,
+): number {
+  const exponent = Math.min(Math.max(Math.floor(attempts), 1) - 1, 20);
+  return Math.min(baseMs * 2 ** exponent, maxMs);
+}
+
+function readAttempts(payload: Record<string, unknown>, key: string): number {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function readTimestamp(payload: Record<string, unknown>, key: string): Date | null {
+  const value = payload[key];
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+export interface MergeDeployVisibilityTickResult {
+  /** Due approvals looked at this tick. */
+  checked: number;
+  /** Notes posted on issues (missing deploy approval, not-merged-yet, gave up). */
+  flagged: number;
+  /** Approvals left in the queue for a later re-check with a backoff. */
+  retried: number;
+  /** Approvals that hit the age bound and were marked noted without a merge. */
+  gaveUp: number;
+  /** Legacy noted approvals whose merge commit sha was backfilled this tick. */
+  backfilled: number;
+}
+
+/**
  * DUR-40 item 4: DUR-38 was marked `done` after its merge_pr approval landed
  * on the deploy branch, but no deploy approval was ever filed, so the
  * feature never went live — and nothing on the issue said so. This service
@@ -129,6 +183,9 @@ export function mergeDeployVisibilityService(
   db: Db,
   options: {
     delayMs?: number;
+    retryMaxMs?: number;
+    maxAgeMs?: number;
+    legacyRecheckLimit?: number;
     fetch?: FetchLike;
     verifyMerge?: (
       payload: Record<string, unknown>,
@@ -137,6 +194,9 @@ export function mergeDeployVisibilityService(
   } = {},
 ) {
   const delayMs = options.delayMs ?? MERGE_DEPLOY_VISIBILITY_DELAY_MS;
+  const retryMaxMs = options.retryMaxMs ?? MERGE_DEPLOY_VISIBILITY_RETRY_MAX_MS;
+  const maxAgeMs = options.maxAgeMs ?? MERGE_DEPLOY_VISIBILITY_MAX_AGE_MS;
+  const legacyRecheckLimit = options.legacyRecheckLimit ?? MERGE_DEPLOY_VISIBILITY_LEGACY_RECHECK_LIMIT;
   const issueApprovalsSvc = issueApprovalService(db);
   const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
@@ -155,10 +215,53 @@ export function mergeDeployVisibilityService(
     payload: Record<string, unknown>,
     extra: Record<string, unknown> = {},
   ) {
+    // Final: drop the retry schedule so the row reads as settled, not "due later".
+    const { deployVisibilityNextCheckAt: _nextCheckAt, ...rest } = payload;
     await db
       .update(approvals)
-      .set({ payload: { ...payload, ...extra, deployVisibilityNoted: true }, updatedAt: new Date() })
+      .set({ payload: { ...rest, ...extra, deployVisibilityNoted: true }, updatedAt: new Date() })
       .where(eq(approvals.id, approvalId));
+  }
+
+  async function scheduleRecheck(
+    approvalId: string,
+    payload: Record<string, unknown>,
+    attempts: number,
+    nextCheckAt: Date,
+    extra: Record<string, unknown> = {},
+  ) {
+    await db
+      .update(approvals)
+      .set({
+        payload: {
+          ...payload,
+          ...extra,
+          deployVisibilityAttempts: attempts,
+          deployVisibilityNextCheckAt: nextCheckAt.toISOString(),
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(approvals.id, approvalId));
+  }
+
+  async function resolveBranchesForApproval(
+    approval: { companyId: string },
+    linkedIssueIds: string[],
+    base: string,
+    payload: Record<string, unknown>,
+  ): Promise<ProjectDeployBranches | null> {
+    const viaProject = await resolveProjectDeployBranches(db, linkedIssueIds);
+    if (viaProject) return viaProject;
+    // DUR-291: an issue with no project used to make this a silent no-op, which also meant
+    // its merge commit sha was never backfilled -- and the done-gate's cross-issue match
+    // (deploy-completion-gate.ts) could then never recognise the change as shipped.
+    const fallback = await resolveFallbackDeployBranches(db, {
+      companyId: approval.companyId,
+      issueIds: linkedIssueIds,
+      bases: [base],
+      repo: payload.repo,
+    });
+    return fallback.branches;
   }
 
   async function hasFollowingDeployApproval(issueIds: string[]): Promise<boolean> {
@@ -175,8 +278,15 @@ export function mergeDeployVisibilityService(
     return false;
   }
 
-  async function tick(now = new Date()) {
+  async function postToLinkedIssues(issueIds: string[], body: string) {
+    for (const issueId of issueIds) {
+      await issuesSvc.addComment(issueId, body, {}, { authorType: "system" });
+    }
+  }
+
+  async function tick(now = new Date()): Promise<MergeDeployVisibilityTickResult> {
     const cutoff = new Date(now.getTime() - delayMs);
+    const nowIso = now.toISOString();
     const dueApprovals = await db
       .select()
       .from(approvals)
@@ -188,16 +298,25 @@ export function mergeDeployVisibilityService(
           sql`(${approvals.payload} ->> 'deployVisibilityNoted') is distinct from 'true'`,
           sql`${approvals.decidedAt} is not null`,
           lte(approvals.decidedAt, cutoff),
+          // DUR-3928: an approval scheduled for a later re-check is not due yet. NULL (never
+          // scheduled) is due.
+          sql`coalesce((${approvals.payload} ->> 'deployVisibilityNextCheckAt')::timestamptz <= ${nowIso}::timestamptz, true)`,
         ),
       )
       .limit(50);
 
     let checked = 0;
     let flagged = 0;
+    let retried = 0;
+    let gaveUp = 0;
 
     for (const approval of dueApprovals) {
-      checked += 1;
       const payload = (approval.payload ?? {}) as Record<string, unknown>;
+      // Belt and braces for the SQL filter above (and for callers whose db doesn't apply it).
+      const nextCheckAt = readTimestamp(payload, "deployVisibilityNextCheckAt");
+      if (nextCheckAt && nextCheckAt.getTime() > now.getTime()) continue;
+      checked += 1;
+
       const base = typeof payload.base === "string" ? payload.base.trim() : "";
 
       const linkedIssues = base
@@ -205,15 +324,20 @@ export function mergeDeployVisibilityService(
         : [];
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       let mergeCommitSha: string | undefined;
-      // DUR-237: whether it's safe to permanently stop re-checking this approval.
-      // Default true (matches every branch below that reaches a final answer, or
-      // never had enough on the payload to check at all); flipped to false only
-      // for a verification result that might resolve differently on a later tick.
-      let shouldMarkNoted = true;
+      // Whether it's safe to permanently stop re-checking this approval. Default true
+      // (every branch below that reaches a final answer, or never had enough on the payload
+      // to check at all); flipped to false for any verification result that might resolve
+      // differently on a later tick -- "unmerged" included (DUR-3928: PRs routinely merge
+      // later than 30 minutes after the approval; a one-shot check permanently lost their
+      // merge commit sha).
+      let isFinal = true;
+      const extra: Record<string, unknown> = {};
+      let deployBranchLabel = base;
 
       if (base && linkedIssueIds.length > 0) {
-        const branches = await resolveProjectDeployBranches(db, linkedIssueIds);
+        const branches = await resolveBranchesForApproval(approval, linkedIssueIds, base, payload);
         if (branches?.deployBranch && base === branches.deployBranch) {
+          deployBranchLabel = branches.deployBranch;
           const verification = await verifyMerge(payload, approval.companyId);
 
           if (verification.status === "merged") {
@@ -221,30 +345,27 @@ export function mergeDeployVisibilityService(
             const alreadyDeployed = await hasFollowingDeployApproval(linkedIssueIds);
             if (!alreadyDeployed) {
               flagged += 1;
-              for (const issueId of linkedIssueIds) {
-                await issuesSvc.addComment(
-                  issueId,
-                  `This merged into "${branches.deployBranch}", the branch we deploy from, over ` +
-                    `${Math.round(delayMs / 60000)} minutes ago. No deploy approval has been filed for ` +
-                    "it yet, so it has not gone live.",
-                  {},
-                  { authorType: "system" },
-                );
-              }
+              await postToLinkedIssues(
+                linkedIssueIds,
+                `This merged into "${branches.deployBranch}", the branch we deploy from, over ` +
+                  `${Math.round(delayMs / 60000)} minutes ago. No deploy approval has been filed for ` +
+                  "it yet, so it has not gone live.",
+              );
             }
           } else if (verification.status === "unmerged") {
-            // Confirmed via GitHub that no merge happened — this is the
-            // "approved but never acted on" gap DUR-46 also asked to close.
-            // Say so plainly rather than leaving it silent.
-            flagged += 1;
-            for (const issueId of linkedIssueIds) {
-              await issuesSvc.addComment(
-                issueId,
+            // Confirmed via GitHub that no merge has happened YET. Say so plainly once (the
+            // "approved but never acted on" gap DUR-46 asked to close), then keep checking
+            // with a backoff instead of giving up on the first look.
+            isFinal = false;
+            if (payload.deployVisibilityUnmergedNoted !== true) {
+              flagged += 1;
+              extra.deployVisibilityUnmergedNoted = true;
+              await postToLinkedIssues(
+                linkedIssueIds,
                 `An approval to merge into "${branches.deployBranch}", the branch we deploy from, was ` +
                   `approved over ${Math.round(delayMs / 60000)} minutes ago, but the linked pull request ` +
-                  "does not appear to have been merged. Nothing has deployed for it.",
-                {},
-                { authorType: "system" },
+                  "has not been merged yet. Nothing has deployed for it so far. I will keep checking " +
+                  "and note here once it merges.",
               );
             }
           }
@@ -259,17 +380,103 @@ export function mergeDeployVisibilityService(
           // done-gate's cross-issue ancestry match from ever seeing this
           // approval's merge commit.
           else if (verification.status === "unknown" && verification.reason !== "missing_pr_reference") {
-            shouldMarkNoted = false;
+            isFinal = false;
           }
         }
       }
 
-      if (shouldMarkNoted) {
-        await markNoted(approval.id, payload, mergeCommitSha ? { mergeCommitSha } : {});
+      if (isFinal) {
+        await markNoted(approval.id, payload, { ...extra, ...(mergeCommitSha ? { mergeCommitSha } : {}) });
+        continue;
       }
+
+      const attempts = readAttempts(payload, "deployVisibilityAttempts") + 1;
+      const decidedAtMs = approval.decidedAt ? new Date(approval.decidedAt).getTime() : now.getTime();
+      if (now.getTime() - decidedAtMs >= maxAgeMs) {
+        // Bounded: stop re-checking a PR that never merges. Say so, once, rather than
+        // silently dropping it -- and never invent a merge commit for it.
+        gaveUp += 1;
+        flagged += 1;
+        await postToLinkedIssues(
+          linkedIssueIds,
+          `I checked for ${Math.round(maxAgeMs / (24 * 60 * 60 * 1000))} days whether the pull request ` +
+            `behind the approved merge into "${deployBranchLabel}" merged, and could not confirm that it ` +
+            "did. I have stopped checking. Nothing has deployed for it. If it does merge later, file a " +
+            "deploy approval for it so the change actually goes live.",
+        );
+        await markNoted(approval.id, payload, {
+          ...extra,
+          deployVisibilityAttempts: attempts,
+          deployVisibilityGaveUpAt: nowIso,
+        });
+        continue;
+      }
+
+      retried += 1;
+      await scheduleRecheck(
+        approval.id,
+        payload,
+        attempts,
+        new Date(now.getTime() + mergeDeployVisibilityRetryDelayMs(attempts, delayMs, retryMaxMs)),
+        extra,
+      );
     }
 
-    return { checked, flagged };
+    const backfilled = await recheckLegacyNotedApprovals(now);
+
+    return { checked, flagged, retried, gaveUp, backfilled };
+  }
+
+  /**
+   * DUR-3928/DUR-3944: approvals that the one-shot version of this service already marked
+   * noted WITHOUT a merge commit sha (PR #248 / #256 are the two confirmed live victims) stay
+   * stuck forever otherwise -- deploy-carried-issues.ts and the done-gate both need that sha.
+   * Re-check each such approval against GitHub, a bounded number of times, and backfill the
+   * sha silently when the PR did merge. No comments: whatever this service had to say about
+   * these approvals was said when they were first noted.
+   */
+  async function recheckLegacyNotedApprovals(now: Date): Promise<number> {
+    if (legacyRecheckLimit <= 0) return 0;
+    const legacyApprovals = await db
+      .select()
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.type, "request_board_approval"),
+          eq(approvals.status, "approved"),
+          sql`${approvals.payload} ->> 'kind' = 'merge_pr'`,
+          sql`(${approvals.payload} ->> 'deployVisibilityNoted') = 'true'`,
+          sql`(${approvals.payload} ->> 'mergeCommitSha') is null`,
+          sql`(${approvals.payload} ->> 'mergeCommitShaRecheckedAt') is null`,
+          sql`(${approvals.payload} ->> 'prNumber') is not null`,
+          sql`(${approvals.payload} ->> 'repo') is not null`,
+        ),
+      )
+      .limit(legacyRecheckLimit);
+
+    let backfilled = 0;
+    for (const approval of legacyApprovals) {
+      const payload = (approval.payload ?? {}) as Record<string, unknown>;
+      if (typeof payload.mergeCommitSha === "string" || typeof payload.mergeCommitShaRecheckedAt === "string") continue;
+      const attempts = readAttempts(payload, "mergeCommitShaRecheckAttempts") + 1;
+      const verification = await verifyMerge(payload, approval.companyId);
+      const settled =
+        verification.status === "merged" ||
+        verification.status === "unmerged" ||
+        verification.reason === "missing_pr_reference" ||
+        attempts >= MERGE_DEPLOY_VISIBILITY_LEGACY_RECHECK_MAX_ATTEMPTS;
+      const extra: Record<string, unknown> = { mergeCommitShaRecheckAttempts: attempts };
+      if (verification.status === "merged" && verification.mergeCommitSha) {
+        extra.mergeCommitSha = verification.mergeCommitSha;
+        backfilled += 1;
+      }
+      if (settled) extra.mergeCommitShaRecheckedAt = now.toISOString();
+      await db
+        .update(approvals)
+        .set({ payload: { ...payload, ...extra }, updatedAt: new Date() })
+        .where(eq(approvals.id, approval.id));
+    }
+    return backfilled;
   }
 
   return { tick };
