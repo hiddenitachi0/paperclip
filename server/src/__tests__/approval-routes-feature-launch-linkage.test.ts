@@ -43,6 +43,7 @@ const mockApprovalService = vi.hoisted(() => ({
   findOpenHireApprovalForRole: vi.fn(),
   findOpenMergePrApproval: vi.fn(),
   findOpenDeployApproval: vi.fn(),
+  listApprovedDeployApprovalsForCommit: vi.fn(async () => []),
   findOpenFeatureLaunchApproval: vi.fn(),
 }));
 

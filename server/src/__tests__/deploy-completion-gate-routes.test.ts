@@ -65,6 +65,9 @@ const mockIssueApprovalService = vi.hoisted(() => ({
   listApprovalsForIssue: vi.fn(async () => []),
 }));
 const mockResolveProjectDeployBranches = vi.hoisted(() => vi.fn(async () => null));
+const mockResolveFallbackDeployBranches = vi.hoisted(() =>
+  vi.fn(async () => ({ branches: null, issueHasProject: true, reason: "issue_has_project" })),
+);
 const mockReadDeployRunnerStatus = vi.hoisted(() => vi.fn(() => []));
 
 vi.mock("../services/issue-approvals.js", () => ({
@@ -72,6 +75,9 @@ vi.mock("../services/issue-approvals.js", () => ({
 }));
 vi.mock("../services/deploy-branches.js", () => ({
   resolveProjectDeployBranches: (...args: unknown[]) => mockResolveProjectDeployBranches(...args),
+}));
+vi.mock("../services/deploy-branch-fallback.js", () => ({
+  resolveFallbackDeployBranches: (...args: unknown[]) => mockResolveFallbackDeployBranches(...args),
 }));
 vi.mock("../services/deploy-runner-status.js", () => ({
   readDeployRunnerStatus: (...args: unknown[]) => mockReadDeployRunnerStatus(...args),
@@ -201,6 +207,7 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
     mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
     mockResolveProjectDeployBranches.mockResolvedValue(null);
+    mockResolveFallbackDeployBranches.mockResolvedValue({ branches: null, issueHasProject: true, reason: "issue_has_project" });
     mockReadDeployRunnerStatus.mockReturnValue([]);
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
@@ -322,6 +329,66 @@ describe("PATCH /api/issues/:id -- deploy completion gate (DUR-99)", () => {
 
     expect(res.status).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "done" }));
+  });
+
+  // DUR-291: the DUR-286 shape -- projectId null, an approved merge into `custom`, an agent
+  // PATCHing done. Before: silent pass. Now: the fallback resolves the company project that
+  // deploys from `custom` and the gate applies exactly as if the issue had that project.
+  it("DUR-291: refuses done for an issue with no project whose merge targets a branch a company project deploys from", async () => {
+    const issue = baseIssue({ projectId: null });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockResolveProjectDeployBranches.mockResolvedValue(null);
+    mockResolveFallbackDeployBranches.mockResolvedValue({
+      branches: { deployBranch: "custom", projectId: "project-1", resolvedViaFallback: true },
+      issueHasProject: false,
+      reason: "resolved_unique",
+    });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
+    ]);
+
+    const res = await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("no deploy approval has been filed");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("DUR-291: lets done through for an unresolvable project-less issue, but posts a visible warning on it", async () => {
+    const issue = baseIssue({ projectId: null });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-1" });
+    mockResolveProjectDeployBranches.mockResolvedValue(null);
+    mockResolveFallbackDeployBranches.mockResolvedValue({ branches: null, issueHasProject: false, reason: "ambiguous" });
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      {
+        id: "merge-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "merge_pr", base: "custom", originalIssueIds: [ISSUE_ID] },
+      },
+    ]);
+
+    const res = await request(await createApp(AGENT_ACTOR)).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "done" }));
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.stringContaining("not attached to a project"),
+      {},
+      { authorType: "system" },
+    );
   });
 
   it("does not block a board/human-authored done transition even with an unresolved deploy-branch merge", async () => {

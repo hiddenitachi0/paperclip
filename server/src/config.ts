@@ -4,6 +4,12 @@ import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { resolvePaperclipEnvPath } from "./paths.js";
+import {
+  DEFAULT_HEARTBEAT_TIMER_JITTER_MAX_MS,
+  DEFAULT_HEARTBEAT_TIMER_JITTER_RATIO,
+  normalizeHeartbeatTimerJitterMaxMs,
+  normalizeHeartbeatTimerJitterRatio,
+} from "./services/heartbeat-timer-jitter.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
 import {
   AUTH_BASE_URL_MODES,
@@ -86,6 +92,8 @@ export interface Config {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  heartbeatTimerJitterRatio: number;
+  heartbeatTimerJitterMaxMs: number;
   // DUR-62: the weekly check-up. Off unless PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true.
   weeklyCheckupEnabled: boolean;
   // Compute and log findings, but never write the report.
@@ -137,6 +145,29 @@ export function resolveHeartbeatRunRetentionEnabled(
   env: { PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED?: string } = process.env,
 ): boolean {
   return env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true";
+}
+
+/**
+ * DUR-273: fraction of each agent's heartbeat interval used as a per-agent
+ * wake offset. Unset => the module default (a few percent). Any explicit
+ * value is normalized the same way the jitter module does (negative/NaN => 0,
+ * capped at MAX_HEARTBEAT_TIMER_JITTER_RATIO).
+ */
+export function resolveHeartbeatTimerJitterRatio(
+  env: { HEARTBEAT_TIMER_JITTER_RATIO?: string } = process.env,
+): number {
+  const raw = env.HEARTBEAT_TIMER_JITTER_RATIO?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_HEARTBEAT_TIMER_JITTER_RATIO;
+  return normalizeHeartbeatTimerJitterRatio(Number(raw));
+}
+
+/** DUR-273: absolute cap on the per-agent wake offset, in milliseconds. */
+export function resolveHeartbeatTimerJitterMaxMs(
+  env: { HEARTBEAT_TIMER_JITTER_MAX_MS?: string } = process.env,
+): number {
+  const raw = env.HEARTBEAT_TIMER_JITTER_MAX_MS?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_HEARTBEAT_TIMER_JITTER_MAX_MS;
+  return normalizeHeartbeatTimerJitterMaxMs(Number(raw));
 }
 
 export function loadConfig(): Config {
@@ -377,6 +408,12 @@ export function loadConfig(): Config {
     // all, following the same convention as heartbeatSchedulerEnabled).
     mergePrAutomationEnabled: process.env.PAPERCLIP_MERGE_PR_AUTOMATION_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    // DUR-273: per-agent timer jitter so heartbeat wakes spread out instead of
+    // clustering into one tick (see services/heartbeat-timer-jitter.ts).
+    // Ratio is a fraction of each agent's own intervalSec (0 disables); the
+    // max is an absolute cap in milliseconds.
+    heartbeatTimerJitterRatio: resolveHeartbeatTimerJitterRatio(),
+    heartbeatTimerJitterMaxMs: resolveHeartbeatTimerJitterMaxMs(),
     // DUR-319 (DUR-292 item 4): heartbeat_runs carries per-run stdout/stderr
     // excerpts and context snapshots -- the same class of content that leaked
     // a GitHub PAT across 706 rows in NOR-316. Retention bounds how long any

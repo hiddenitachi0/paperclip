@@ -46,6 +46,7 @@ import {
   heartbeatService,
   mergeDeployVisibilityService,
   deployCarriedIssuesService,
+  deployApprovalFeedbackService,
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
@@ -59,6 +60,7 @@ import {
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
+import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
@@ -845,6 +847,14 @@ export async function startServer(): Promise<StartedServer> {
   // container recreate yanking it out from under an in-flight run.
   let heartbeatDrainState: { isDraining: boolean; getInFlightRunCount: () => number } | null = null;
 
+  // DUR-3939/DUR-3940: tell /api/health whether a scheduler tick is expected
+  // at all (and how often) so "never ticked" can be judged against the
+  // configured interval instead of being silently reported as fine.
+  schedulerLiveness.configure({
+    enabled: config.heartbeatSchedulerEnabled,
+    intervalMs: config.heartbeatSchedulerIntervalMs,
+  });
+
   if (config.heartbeatSchedulerEnabled) {
     // DUR-352 (DUR-277 Wave 6): every consumer below is constructed with the
     // request-scoped Proxy (packages/db/src/company-scope.ts) instead of the
@@ -879,7 +889,12 @@ export async function startServer(): Promise<StartedServer> {
     // access is exactly what the scheduler had before the DUR-277 proxy was
     // wired here. Re-wire through the proxy only together with DUR-3952,
     // which gives executeRun its own scope.
-    const heartbeat = heartbeatService(db as any, { pluginWorkerManager, rawDb: db as any });
+    const heartbeat = heartbeatService(db as any, {
+      pluginWorkerManager,
+      rawDb: db as any,
+      // DUR-273: spread timer wakes so the fleet does not wake as one.
+      timerJitter: { ratio: config.heartbeatTimerJitterRatio, maxMs: config.heartbeatTimerJitterMaxMs },
+    });
     heartbeatDrainState = {
       isDraining: false,
       getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
@@ -890,6 +905,7 @@ export async function startServer(): Promise<StartedServer> {
     const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
+    const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
@@ -1024,17 +1040,22 @@ export async function startServer(): Promise<StartedServer> {
       // releases it -- preserving today's concurrent/independent dispatch
       // (no chain waits on another) while giving heartbeat/routines/etc. the
       // AsyncLocalStorage scope their request-scoped db now requires.
+      // DUR-3939/DUR-3940: record every tick so /api/health can say whether
+      // the scheduler itself is alive, separately from whether runs start.
+      schedulerLiveness.tickStarted();
       void runInCompanyScopeBypass(
         bypassDb,
         { reason: "heartbeat scheduler tick: tickTimers", actorType: "scheduler", route: "heartbeat-scheduler:tickTimers" },
         () => heartbeat.tickTimers(new Date()),
       )
         .then((result) => {
+          schedulerLiveness.tickFinished(result);
           if (result.enqueued > 0) {
             logger.info({ ...result }, "heartbeat timer tick enqueued runs");
           }
         })
         .catch((err) => {
+          schedulerLiveness.tickFailed(err);
           logger.error({ err }, "heartbeat timer tick failed");
         });
 
@@ -1068,12 +1089,33 @@ export async function startServer(): Promise<StartedServer> {
         () => mergeDeployVisibility.tick(new Date()),
       )
         .then((result) => {
-          if (result.flagged > 0) {
+          if (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0) {
             logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
           }
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      // DUR-3923: an approved deploy card the runner never picks up (wrong kind, wrong
+      // workspace, runner stopped) must get a plain-language note instead of silence
+      // (see deploy-approval-feedback.ts). Bypass scope for the same reason as above.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: deployApprovalFeedback",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:deployApprovalFeedback",
+        },
+        () => deployApprovalFeedback.tick(new Date()),
+      )
+        .then((result) => {
+          if (result.flagged > 0) {
+            logger.info({ ...result }, "deploy-approval feedback tick flagged approved deploys nothing acted on");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "deploy-approval feedback tick failed");
         });
 
       // DUR-238: once a deploy approval completes, proactively close every OTHER in_review

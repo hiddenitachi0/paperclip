@@ -4,7 +4,7 @@ import { deriveInitials } from "./Identity";
 import { IssueReferenceActivitySummary } from "./IssueReferenceActivitySummary";
 import { timeAgo } from "../lib/timeAgo";
 import { cn } from "../lib/utils";
-import { formatActivityVerb } from "../lib/activity-format";
+import { formatActivityVerb, formatOperatorNotice } from "../lib/activity-format";
 import { deriveProjectUrlKey, type ActivityEvent, type Agent } from "@paperclipai/shared";
 import type { CompanyUserProfile } from "../lib/company-members";
 
@@ -30,6 +30,7 @@ interface ActivityRowProps {
 
 export function ActivityRow({ event, agentMap, userProfileMap, entityNameMap, entityTitleMap, className }: ActivityRowProps) {
   const verb = formatActivityVerb(event.action, event.details, { agentMap, userProfileMap });
+  const operatorNotice = formatOperatorNotice(event.action, event.details as Record<string, unknown> | null);
 
   const isHeartbeatEvent = event.entityType === "heartbeat_run";
   const heartbeatAgentId = isHeartbeatEvent
@@ -68,6 +69,14 @@ export function ActivityRow({ event, agentMap, userProfileMap, entityNameMap, en
         </div>
         <span className="text-xs text-muted-foreground shrink-0">{timeAgo(event.createdAt)}</span>
       </div>
+      {operatorNotice && (
+        <p
+          data-testid="activity-operator-notice"
+          className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-foreground"
+        >
+          {operatorNotice}
+        </p>
+      )}
       <IssueReferenceActivitySummary event={event} />
     </div>
   );

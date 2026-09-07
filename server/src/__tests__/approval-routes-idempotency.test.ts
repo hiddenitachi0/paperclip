@@ -21,6 +21,7 @@ const mockApprovalService = vi.hoisted(() => ({
   findOpenHireApprovalForRole: vi.fn(),
   findOpenMergePrApproval: vi.fn(),
   findOpenDeployApproval: vi.fn(),
+  listApprovedDeployApprovalsForCommit: vi.fn(async () => []),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -347,6 +348,29 @@ describe("approval routes idempotent retries", () => {
 
     expect(res.status).toBe(403);
     expect(mockApprovalService.requestRevision).not.toHaveBeenCalled();
+  });
+
+  // DUR-3923 item 1 (NOR-1242): a card filed with kind "deploy_pr" looks approvable but the
+  // deploy runner only ever acts on kind "deploy" -- approving it did nothing, silently.
+  it("refuses to approve a deploy-looking card of a kind nothing acts on, with a plain reason", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-5",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      type: "request_board_approval",
+      status: "pending",
+      payload: { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip", title: "Deploy PR #42" },
+      requestedByAgentId: null,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-5/approve")
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain('kind "deploy_pr"');
+    expect(res.body.error).toContain("would do nothing");
+    expect(res.body.error).toContain("Reject it");
+    expect(mockApprovalService.approve).not.toHaveBeenCalled();
   });
 
   it("derives approval attribution from the authenticated actor on approve", async () => {

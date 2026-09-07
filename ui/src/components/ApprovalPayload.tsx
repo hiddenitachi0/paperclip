@@ -139,6 +139,28 @@ export function approvalDeployBranchInfo(payload?: Record<string, unknown> | nul
 }
 
 /**
+ * DUR-3923: a board approval whose kind only LOOKS like a deploy ("deploy_pr",
+ * "deploy_release", "rollout", ...) is one nothing acts on -- scripts/deploy-runner.sh
+ * only handles kind "deploy", and the server refuses to approve these. Mirrors
+ * isUnsupportedDeployLikeKind() in server/src/services/deploy-workspace.ts so the card
+ * says so BEFORE the operator clicks Approve. Returns the plain-language warning, or
+ * null for a real deploy card / anything that isn't deploy-shaped.
+ */
+export function approvalUnsupportedDeployKindWarning(
+  type: string | null | undefined,
+  payload?: Record<string, unknown> | null,
+): string | null {
+  if (type !== "request_board_approval") return null;
+  const kind = firstNonEmptyString(payload?.kind);
+  if (!kind || kind === "deploy") return null;
+  if (!/deploy|release|rollout|ship/i.test(kind)) return null;
+  return (
+    `Nothing will act on this card: it was filed with kind "${kind}", but only cards with kind "deploy" ` +
+    "get deployed. Reject it and ask the agent to file a proper deploy approval."
+  );
+}
+
+/**
  * DUR-3952 (DUR-137 follow-up): a deploy approval filed with
  * `allowBackwardDeploy` is an intentional rollback -- approving it moves
  * production back to an older commit and discards whatever shipped since.

@@ -1,4 +1,4 @@
-import type { ServerInfoSnapshot } from "@paperclipai/shared";
+import type { FleetHealth, ServerInfoSnapshot } from "@paperclipai/shared";
 
 export type DevServerHealthStatus = {
   enabled: true;
@@ -27,6 +27,12 @@ export type HealthStatus = {
   };
   serverInfo?: ServerInfoSnapshot;
   devServer?: DevServerHealthStatus;
+  /**
+   * DUR-3939/DUR-3940: live fleet signal (run rate, slot saturation, agents
+   * in error, stuck-run candidates, scheduler liveness, request load). Only
+   * present on full-details responses (board/agent callers).
+   */
+  fleet?: FleetHealth;
 };
 
 export const healthApi = {

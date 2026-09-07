@@ -58,6 +58,11 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.paused": "paused",
   "agent.resumed": "resumed",
   "agent.error_cleared": "cleared error on",
+  // DUR-98 / DUR-128: operator notices written by the platform itself when it
+  // knows something is wrong -- plain language, see formatOperatorNotice.
+  "agent.entered_error": "flagged that attention is needed for",
+  "agent.error_stalled": "is still waiting for someone to clear the error on",
+  "heartbeat.run_reaped": "ended a run that had stopped responding for",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -128,6 +133,9 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.paused": "paused the agent",
   "agent.resumed": "resumed the agent",
   "agent.error_cleared": "cleared the agent error",
+  "agent.entered_error": "flagged that the agent needs attention",
+  "agent.error_stalled": "is still waiting for someone to clear the agent error",
+  "heartbeat.run_reaped": "ended a run that had stopped responding",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -468,6 +476,36 @@ function formatStructuredIssueChange(input: {
     return input.forIssueDetail ? `updated ${plural}` : `updated ${plural} on`;
   }
 
+  return null;
+}
+
+/**
+ * DUR-98: activity entries the platform writes when it has detected a problem
+ * on its own (a reaped run, an agent entering error, a stall that nobody has
+ * cleared). Each carries a ready-made plain-language sentence in
+ * `details.message`; the feed shows it under the one-line verb so the
+ * operator gets the what-happened-and-what-next without opening anything.
+ */
+const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
+  "agent.entered_error",
+  "agent.error_stalled",
+  "heartbeat.run_reaped",
+]);
+
+export function isOperatorNoticeAction(action: string): boolean {
+  return OPERATOR_NOTICE_ACTIONS.has(action);
+}
+
+export function formatOperatorNotice(action: string, details?: Record<string, unknown> | null): string | null {
+  if (!isOperatorNoticeAction(action)) return null;
+  const message = details?.message;
+  if (typeof message === "string" && message.trim()) return message.trim();
+  if (action === "agent.error_stalled") {
+    // DUR-128 rows predate the message field: build the sentence here.
+    const agentName = typeof details?.agentName === "string" && details.agentName.trim() ? details.agentName.trim() : "This agent";
+    const reason = typeof details?.errorReason === "string" && details.errorReason.trim() ? ` Last error: ${details.errorReason.trim()}` : "";
+    return `${agentName} has been stopped with an error for a while and nobody has cleared it yet. Its tasks are waiting.${reason}`;
+  }
   return null;
 }
 
