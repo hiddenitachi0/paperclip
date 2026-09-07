@@ -8,6 +8,7 @@ import {
   costEvents,
   heartbeatRuns,
   inboxDismissals,
+  instanceClaudeAuth,
   issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
@@ -15,6 +16,11 @@ import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { budgetService } from "./budgets.js";
 import { inboxDismissalService } from "./inbox-dismissals.js";
+import {
+  CLAUDE_AUTH_NOTICE_EXPIRY_DAYS,
+  CLAUDE_AUTH_SETTINGS_PATH,
+  classifyClaudeAuthHealth,
+} from "./instance-claude-auth.js";
 import { issueService } from "./issues.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 
@@ -838,6 +844,80 @@ const detectPendingQuestions: Detector = async ({ db, company, now, thresholds, 
   }];
 };
 
+/**
+ * Polish round 3: the shared Claude sign-in (the instance-wide token every
+ * claude_local agent without a token of its own falls back to). Reported
+ * only in companies that have such an agent, and only when the sign-in has
+ * expired, failed its last check, or is a few days from expiring. Reads the
+ * same columns the daily check writes, so the report and the Activity-feed
+ * notice always agree.
+ */
+const detectClaudeSignInProblems: Detector = async ({ db, now, agents: companyAgents }) => {
+  const claudeAgents = companyAgents.filter(
+    (agent) => agent.adapterType === "claude_local" && agent.status !== "terminated",
+  );
+  if (claudeAgents.length === 0) return [];
+  const row = await db
+    .select({
+      expiresAt: instanceClaudeAuth.expiresAt,
+      lastCheckAt: instanceClaudeAuth.lastCheckAt,
+      lastCheckOk: instanceClaudeAuth.lastCheckOk,
+      lastCheckMessage: instanceClaudeAuth.lastCheckMessage,
+      lastAuthFailureAt: instanceClaudeAuth.lastAuthFailureAt,
+    })
+    .from(instanceClaudeAuth)
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!row) return [];
+
+  const { health, expiresInDays } = classifyClaudeAuthHealth(row, now);
+  const broken = health === "expired" || health === "check_failed";
+  const expiringSoon = !broken && expiresInDays !== null && expiresInDays <= CLAUDE_AUTH_NOTICE_EXPIRY_DAYS;
+  if (!broken && !expiringSoon) return [];
+
+  const who = `${plural(claudeAgents.length, "Claude agent")} in this company (${claudeAgents.map((agent) => agent.name).slice(0, MAX_LISTED_ITEMS).join(", ")})`;
+  const days = Math.max(0, expiresInDays ?? 0);
+  const headline =
+    health === "expired"
+      ? "The shared Claude sign-in has expired, so Claude agents without a token of their own cannot work."
+      : health === "check_failed"
+        ? "The shared Claude sign-in failed its last check, so Claude agents without a token of their own may stop working."
+        : `The shared Claude sign-in expires ${days === 0 ? "today" : `in about ${plural(days, "day")}`}.`;
+  const evidence = [
+    `${who} ${claudeAgents.length === 1 ? "uses" : "use"} the shared sign-in whenever ${claudeAgents.length === 1 ? "it has" : "they have"} no Claude token of ${claudeAgents.length === 1 ? "its" : "their"} own.`,
+    health === "check_failed" && row.lastCheckMessage?.trim()
+      ? `Claude said: ${humanizeMachineText(row.lastCheckMessage, 200)}`
+      : row.lastCheckAt
+        ? `It was last checked ${formatDuration(now.getTime() - row.lastCheckAt.getTime())} ago.`
+        : "It has not been checked yet.",
+  ];
+  const suggestion = `Sign in with Claude again under ${CLAUDE_AUTH_SETTINGS_PATH}. Only you can do this; accepting the suggestion just creates a reminder task, and the sign-in itself does not change until you do it.`;
+  return [{
+    fingerprint: "claude_signin",
+    severity: broken ? "stuck" : "risk",
+    headline,
+    evidence,
+    evidenceJson: {
+      health,
+      expiresInDays,
+      lastCheckAt: row.lastCheckAt?.toISOString() ?? null,
+      claudeAgentIds: claudeAgents.map((agent) => agent.id),
+    },
+    suggestion,
+    subjectAgentId: null,
+    suggestedTask: {
+      title: broken ? "Renew the shared Claude sign-in" : "Renew the shared Claude sign-in before it expires",
+      description: [
+        headline,
+        "",
+        `The operator needs to sign in with Claude again under ${CLAUDE_AUTH_SETTINGS_PATH}. An agent cannot do that step.`,
+        "What you can do: check which Claude agents rely on the shared sign-in and have no token of their own, list them in a comment, and remind the operator until the sign-in page shows the check passing again.",
+      ].join("\n"),
+      priority: broken ? "high" : "medium",
+    },
+  }];
+};
+
 export const CHECKUP_DETECTORS: Detector[] = [
   detectAgentsInError,
   detectRepeatedRunFailures,
@@ -846,6 +926,7 @@ export const CHECKUP_DETECTORS: Detector[] = [
   detectSpendOutliers,
   detectPendingApprovals,
   detectPendingQuestions,
+  detectClaudeSignInProblems,
 ];
 
 // ---------------------------------------------------------------------------
@@ -938,6 +1019,7 @@ function describeFingerprint(fingerprint: string) {
     case "company_budget_nearly_used": return "the company close to its monthly budget";
     case "pending_approvals": return "approvals waiting on you";
     case "unanswered_questions": return "questions waiting on you";
+    case "claude_signin": return "the shared Claude sign-in needing renewal";
     default: return "a finding";
   }
 }

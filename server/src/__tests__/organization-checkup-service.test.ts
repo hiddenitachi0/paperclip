@@ -12,6 +12,7 @@ import {
   createDb,
   heartbeatRuns,
   inboxDismissals,
+  instanceClaudeAuth,
   issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
@@ -83,6 +84,7 @@ describeEmbeddedPostgres("organization check-up service", () => {
   afterEach(async () => {
     await db.execute(sql.raw(`TRUNCATE TABLE "companies" CASCADE`));
     await db.execute(sql.raw(`TRUNCATE TABLE "user" CASCADE`));
+    await db.delete(instanceClaudeAuth);
   });
 
   afterAll(async () => {
@@ -427,6 +429,57 @@ describeEmbeddedPostgres("organization check-up service", () => {
     expect(questions?.headline).toBe("2 questions were asked of you more than 3 days ago and never answered.");
     expect(questions?.evidenceJson).toMatchObject({ count: 2, issueCount: 1 });
     expect(questions?.evidence[1]).toBe(`Builder asked "Which logo do you prefer?" on ${openIssue.identifier} "Pick a logo", 6 days ago.`);
+  });
+
+  // Polish round 3: the shared Claude sign-in as a check-up finding.
+  it("reports a shared Claude sign-in that is failing or about to expire, only where a Claude agent could depend on it", async () => {
+    const seeded = await seedCompany();
+    const codexOnly = await seedCompany({ name: "Codex Only Co" });
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, seeded.workerId));
+    const insertSignIn = async (row: { expiresAt: Date; lastCheckOk: boolean | null; lastCheckMessage?: string | null; lastCheckAt?: Date | null }) => {
+      await db.delete(instanceClaudeAuth);
+      await db.insert(instanceClaudeAuth).values({
+        tokenSealed: "instance-claude-auth:{}",
+        fingerprintSha256: "f".repeat(64),
+        source: "pasted",
+        savedAt: daysBefore(300),
+        expiresAt: row.expiresAt,
+        lastCheckAt: row.lastCheckAt === undefined ? hoursBefore(20) : row.lastCheckAt,
+        lastCheckOk: row.lastCheckOk,
+        lastCheckMessage: row.lastCheckMessage ?? null,
+      });
+    };
+
+    // Healthy and far from expiry: nothing to report.
+    await insertSignIn({ expiresAt: daysBefore(-60), lastCheckOk: true });
+    const healthy = await organizationCheckupService(db).runCheckup({ companyId: seeded.companyId, now: NOW, dryRun: true });
+    expect(findingsByKind(healthy.findings, "claude_signin")).toHaveLength(0);
+
+    // Two days from expiry: a "risk" finding that says when and where to fix it.
+    await insertSignIn({ expiresAt: daysBefore(-2), lastCheckOk: true });
+    const expiring = await organizationCheckupService(db).runCheckup({ companyId: seeded.companyId, now: NOW, dryRun: true });
+    const [soon] = findingsByKind(expiring.findings, "claude_signin");
+    expect(soon?.severity).toBe("risk");
+    expect(soon?.headline).toBe("The shared Claude sign-in expires in about 2 days.");
+    expect(soon?.evidence[0]).toBe("1 Claude agent in this company (Builder) uses the shared sign-in whenever it has no Claude token of its own.");
+    expect(soon?.suggestion).toContain("Settings > Instance settings > Claude sign-in");
+    expect(soon?.evidenceJson).toMatchObject({ health: "expiring_soon", expiresInDays: 2, claudeAgentIds: [seeded.workerId] });
+    expect(soon?.subjectAgentId).toBeNull();
+    expect(soon?.suggestedTask.priority).toBe("medium");
+
+    // Failed check: a "stuck" finding carrying Claude's reason, without identifiers.
+    await insertSignIn({ expiresAt: daysBefore(-60), lastCheckOk: false, lastCheckMessage: "Claude rejected this token (401 OAuth access token is invalid sk-ant-oat01-[redacted])." });
+    const failing = await organizationCheckupService(db).runCheckup({ companyId: seeded.companyId, now: NOW, dryRun: true });
+    const [failed] = findingsByKind(failing.findings, "claude_signin");
+    expect(failed?.severity).toBe("stuck");
+    expect(failed?.headline).toBe("The shared Claude sign-in failed its last check, so Claude agents without a token of their own may stop working.");
+    expect(failed?.evidence[1]).toContain("Claude said:");
+    expect(failed?.suggestedTask.priority).toBe("high");
+    expect(failed?.suggestedTask.title).toBe("Renew the shared Claude sign-in");
+
+    // A company with no Claude agents never hears about it.
+    const unaffected = await organizationCheckupService(db).runCheckup({ companyId: codexOnly.companyId, now: NOW, dryRun: true });
+    expect(findingsByKind(unaffected.findings, "claude_signin")).toHaveLength(0);
   });
 
   it("files one unassigned report with one accept card whose drafts match the findings, and writes only its own tables", async () => {

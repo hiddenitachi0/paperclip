@@ -92,6 +92,16 @@ describe("activity formatting", () => {
     expect(formatActivityVerb("heartbeat.run_stopped")).toBe("stopped a run that was taking too long for");
     expect(formatIssueActivityAction("heartbeat.run_stopped")).toBe("stopped a run that was taking too long");
     expect(isOperatorNoticeAction("heartbeat.run_stopped")).toBe(true);
+    // Polish round 3: the daily check of the shared Claude sign-in.
+    expect(formatActivityVerb("instance.claude_auth.check_failed")).toBe("found that the shared Claude sign-in stopped working");
+    expect(formatActivityVerb("instance.claude_auth.expiring")).toBe("warned that the shared Claude sign-in expires soon");
+    expect(formatIssueActivityAction("instance.claude_auth.saved")).toBe("saved the shared Claude sign-in");
+    expect(isOperatorNoticeAction("instance.claude_auth.check_failed")).toBe(true);
+    expect(isOperatorNoticeAction("instance.claude_auth.expiring")).toBe(true);
+    expect(isOperatorNoticeAction("instance.claude_auth.saved")).toBe(false);
+    expect(
+      formatOperatorNotice("instance.claude_auth.expiring", { message: "The shared Claude sign-in expires in about 2 days." }),
+    ).toBe("The shared Claude sign-in expires in about 2 days.");
   });
 
   it("surfaces the server-written message for operator notices only", () => {
