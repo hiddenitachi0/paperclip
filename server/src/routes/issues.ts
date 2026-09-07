@@ -59,6 +59,7 @@ import {
   updateDocumentAnnotationThreadSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
+  validateAdapterModelEffort,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isUuidLike,
@@ -3213,6 +3214,33 @@ export function issueRoutes(
     };
   }
 
+  /**
+   * Adapter-aware typo guard for a task's model/effort override. The shared
+   * schema already rejects Codex/OpenCode-keyed typos; this covers the `effort`
+   * key, whose vocabulary depends on the assignee's adapter (Claude levels vs
+   * free text), so it can only run once the assignee is known.
+   */
+  async function assertIssueAssigneeOverridesValid(
+    companyId: string,
+    assigneeAgentId: string | null | undefined,
+    overrides: unknown,
+  ) {
+    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return;
+    const adapterConfig = (overrides as { adapterConfig?: unknown }).adapterConfig;
+    if (!adapterConfig || typeof adapterConfig !== "object") return;
+    if (!assigneeAgentId) return;
+    const agent = await agentsSvc.getById(assigneeAgentId);
+    if (!agent || agent.companyId !== companyId) return;
+    const error = validateAdapterModelEffort({
+      adapterType: agent.adapterType,
+      adapterConfig,
+      agentAdapterConfig: (agent.adapterConfig as Record<string, unknown> | null | undefined) ?? null,
+    });
+    if (error) {
+      throw unprocessable(`This task's model/effort setting can't be saved. ${error}`);
+    }
+  }
+
   async function normalizeIssueAssigneeAgentReference(
     companyId: string,
     rawAssigneeAgentId: string | null | undefined,
@@ -5706,6 +5734,7 @@ export function issueRoutes(
         : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, createBody))) return;
+    await assertIssueAssigneeOverridesValid(companyId, createBody.assigneeAgentId, createBody.assigneeAdapterOverrides);
     const createAssignmentScope = {
       projectId: await resolveAssignmentProjectId({
         companyId,
@@ -6403,6 +6432,13 @@ export function issueRoutes(
       existing.companyId,
       req.body.assigneeAgentId as string | null | undefined,
     );
+    if (req.body.assigneeAdapterOverrides !== undefined) {
+      await assertIssueAssigneeOverridesValid(
+        existing.companyId,
+        normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId,
+        req.body.assigneeAdapterOverrides,
+      );
+    }
     const titleOrDescriptionChanged = req.body.title !== undefined || req.body.description !== undefined;
     const existingRelations =
       Array.isArray(req.body.blockedByIssueIds)

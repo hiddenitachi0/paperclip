@@ -9,6 +9,7 @@ import { agentAdapterTypeSchema } from "../adapter-type.js";
 import { envBindingSchema, envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
+import { validateAdapterModelEffort } from "../model-effort.js";
 
 export const agentPermissionsSchema = z.object({
   canCreateAgents: z.boolean().optional().default(false),
@@ -170,7 +171,50 @@ export const agentRuntimeConfigSchema = z.object({
   handOffUnhandledAfterMinutes: z.number().int().positive().optional().nullable(),
 }).catchall(z.unknown());
 
-export const createAgentSchema = z.object({
+/**
+ * Typo guard for model + thinking effort on an agent body whose adapterType is
+ * known (create / hire). The PATCH route re-runs the same check with the
+ * agent's effective adapter type (server/src/routes/agents.ts), since a patch
+ * body may omit adapterType.
+ */
+function refineAgentModelEffort(
+  value: { adapterType?: string | null; adapterConfig?: unknown; runtimeConfig?: unknown },
+  ctx: z.RefinementCtx,
+) {
+  const baseError = validateAdapterModelEffort({
+    adapterType: value.adapterType,
+    adapterConfig: value.adapterConfig,
+  });
+  if (baseError) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: baseError, path: ["adapterConfig"] });
+  }
+  const runtimeConfig = value.runtimeConfig;
+  const modelProfiles =
+    runtimeConfig && typeof runtimeConfig === "object"
+      ? (runtimeConfig as { modelProfiles?: Record<string, { adapterConfig?: unknown } | undefined> }).modelProfiles
+      : undefined;
+  if (!modelProfiles || typeof modelProfiles !== "object") return;
+  for (const [profileKey, profile] of Object.entries(modelProfiles)) {
+    if (!profile || typeof profile !== "object") continue;
+    const profileError = validateAdapterModelEffort({
+      adapterType: value.adapterType,
+      adapterConfig: profile.adapterConfig,
+      agentAdapterConfig:
+        value.adapterConfig && typeof value.adapterConfig === "object"
+          ? (value.adapterConfig as Record<string, unknown>)
+          : null,
+    });
+    if (profileError) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${profileKey === "cheap" ? "Cheap model" : profileKey} profile: ${profileError}`,
+        path: ["runtimeConfig", "modelProfiles", profileKey, "adapterConfig"],
+      });
+    }
+  }
+}
+
+const createAgentObjectSchema = z.object({
   name: z.string().min(1),
   role: z.enum(AGENT_ROLES).optional().default("general"),
   title: z.string().optional().nullable(),
@@ -205,16 +249,18 @@ export const createAgentSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
 });
 
+export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);
+
 export type CreateAgent = z.infer<typeof createAgentSchema>;
 
-export const createAgentHireSchema = createAgentSchema.extend({
+export const createAgentHireSchema = createAgentObjectSchema.extend({
   sourceIssueId: z.string().uuid().optional().nullable(),
   sourceIssueIds: z.array(z.string().uuid()).optional(),
-});
+}).superRefine(refineAgentModelEffort);
 
 export type CreateAgentHire = z.infer<typeof createAgentHireSchema>;
 
-export const updateAgentSchema = createAgentSchema
+export const updateAgentSchema = createAgentObjectSchema
   .omit({ permissions: true })
   .partial()
   .extend({

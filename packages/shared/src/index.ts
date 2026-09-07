@@ -28,6 +28,23 @@ export {
   type AgentWorkEligibility,
 } from "./agent-eligibility.js";
 export {
+  CLAUDE_THINKING_EFFORT_LEVELS,
+  CODEX_THINKING_EFFORT_LEVELS,
+  OPENCODE_THINKING_EFFORT_LEVELS,
+  CURSOR_MODE_LEVELS,
+  getThinkingEffortKey,
+  getThinkingEffortVocabulary,
+  getThinkingEffortLevels,
+  getThinkingEffortOptions,
+  supportsThinkingEffort,
+  isThinkingEffortValid,
+  validateAdapterModelEffort,
+  type ThinkingEffortKey,
+  type ThinkingEffortVocabulary,
+  type ThinkingEffortOption,
+  type ModelEffortValidationInput,
+} from "./model-effort.js";
+export {
   computePipelineHealth,
   groupWarningsByStage,
   isPipelineTerminalStageKind,

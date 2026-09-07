@@ -1,5 +1,5 @@
 import type { AdapterModel } from "../../api/agents";
-import type { Issue, Project } from "@paperclipai/shared";
+import { getThinkingEffortKey, getThinkingEffortOptions, type Issue, type Project } from "@paperclipai/shared";
 import { extractProviderIdWithFallback } from "../../lib/model-utils";
 import type { IssueModelLane } from "../../lib/issue-assignee-overrides";
 
@@ -73,32 +73,6 @@ export function parsePositiveInt(input: string): number | null {
   return value;
 }
 
-export const ISSUE_THINKING_EFFORT_OPTIONS = {
-  claude_local: [
-    { value: "", label: "Default" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-  ],
-  codex_local: [
-    { value: "", label: "Default" },
-    { value: "minimal", label: "Minimal" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "X-High" },
-  ],
-  opencode_local: [
-    { value: "", label: "Default" },
-    { value: "minimal", label: "Minimal" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "X-High" },
-    { value: "max", label: "Max" },
-  ],
-} as const;
-
 export function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -111,16 +85,13 @@ export function compactRecord(record: Record<string, unknown>) {
   );
 }
 
+/** Task-override effort choices: the shared per-adapter level list, with "" meaning the agent's own setting. */
 export function thinkingEffortOptionsFor(adapterType: string | null | undefined) {
-  if (adapterType === "codex_local") return ISSUE_THINKING_EFFORT_OPTIONS.codex_local;
-  if (adapterType === "opencode_local") return ISSUE_THINKING_EFFORT_OPTIONS.opencode_local;
-  return ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
+  return getThinkingEffortOptions(adapterType, undefined, { autoLabel: "Default" });
 }
 
 export function thinkingEffortKeyFor(adapterType: string | null | undefined) {
-  if (adapterType === "codex_local") return "modelReasoningEffort";
-  if (adapterType === "opencode_local") return "variant";
-  return "effort";
+  return getThinkingEffortKey(adapterType);
 }
 
 export function thinkingEffortValueFor(adapterType: string | null | undefined, adapterConfig: Record<string, unknown>) {

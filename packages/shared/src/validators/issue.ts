@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateAdapterModelEffort } from "../model-effort.js";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -133,7 +134,38 @@ export const issueAssigneeAdapterOverridesSchema = z
     adapterConfig: z.record(z.string(), z.unknown()).optional(),
     useProjectWorkspace: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    // Typo guard that needs no knowledge of the assignee: `modelReasoningEffort`
+    // is only ever a Codex level and `variant` only ever an OpenCode level, and
+    // `model` / `effort` must at least be text. The adapter-aware check for the
+    // `effort` key (Claude levels vs free text) runs in the task routes, where
+    // the assignee's adapter type is known.
+    const adapterConfig = value.adapterConfig;
+    if (!adapterConfig) return;
+    const keyedChecks: Array<["modelReasoningEffort" | "variant", string]> = [
+      ["modelReasoningEffort", "codex_local"],
+      ["variant", "opencode_local"],
+    ];
+    for (const [key, adapterType] of keyedChecks) {
+      if (adapterConfig[key] === undefined) continue;
+      const error = validateAdapterModelEffort({
+        adapterType,
+        adapterConfig: { [key]: adapterConfig[key] },
+      });
+      if (error) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: error, path: ["adapterConfig", key] });
+      }
+    }
+    const shapeError = validateAdapterModelEffort({
+      // "free" vocabulary: checks only that model/effort are well-formed text.
+      adapterType: null,
+      adapterConfig: { model: adapterConfig.model, effort: adapterConfig.effort },
+    });
+    if (shapeError) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: shapeError, path: ["adapterConfig"] });
+    }
+  });
 
 const issueExecutionStagePrincipalBaseSchema = z.object({
   type: z.enum(["agent", "user"]),

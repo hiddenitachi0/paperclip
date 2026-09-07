@@ -1334,6 +1334,60 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  // Per-task model/effort typo guard: the `effort` key's vocabulary depends on the
+  // assignee's adapter, so the route checks it against the assignee agent (the
+  // shared schema alone cannot tell Claude levels from free text).
+  it("rejects a misspelled per-task thinking effort for a Claude assignee in plain language", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === ownerAgentId
+        ? makeAgent(ownerAgentId, { adapterType: "claude_local", adapterConfig: { model: "claude-opus-4-1", effort: "high" } })
+        : null,
+    );
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-4-1", effort: "hgih" } } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(String(res.body.error ?? "")).toContain("This task's model/effort setting can't be saved.");
+    expect(String(res.body.error ?? "")).toContain("low, medium, high, xhigh, max");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts a valid per-task model/effort override for the assignee's adapter", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === ownerAgentId
+        ? makeAgent(ownerAgentId, { adapterType: "claude_local", adapterConfig: { model: "claude-opus-4-1", effort: "high" } })
+        : null,
+    );
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-4-1", effort: "max" } } })
+      .expect(200);
+
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-4-1", effort: "max" } },
+      }),
+    );
+  });
+
+  it("rejects a Codex-only level in a per-task override even before the assignee is looked up", async () => {
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { adapterConfig: { modelReasoningEffort: "max" } } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(JSON.stringify(res.body)).toContain("minimal, low, medium, high, xhigh");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("allows board users to set explicit cheap issue assignee profile overrides", async () => {
     const app = await createApp(boardActor());
 

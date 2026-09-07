@@ -5,7 +5,7 @@ import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { buildAgentUpdatePatch, type AgentConfigOverlay } from "../lib/agent-config-patch";
-import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "../lib/agent-model-effort";
+import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "@paperclipai/shared";
 import { useAdapterCapabilities } from "../adapters/use-adapter-capabilities";
 import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";

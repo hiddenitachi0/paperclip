@@ -25,6 +25,7 @@ import {
   updateAgentInstructionsPathSchema,
   wakeAgentSchema,
   updateAgentSchema,
+  validateAdapterModelEffort,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
   extractSorteringsreglerBlock,
@@ -1466,6 +1467,15 @@ export function agentRoutes(
     adapterType: string | null | undefined,
     adapterConfig: Record<string, unknown>,
   ) {
+    // Typo guard for model + thinking effort (one shared level list per adapter,
+    // packages/shared/src/model-effort.ts). Runs for create, patch, and the cheap
+    // model profile alike, because every persistence path funnels through here --
+    // a PATCH body may omit adapterType, so the create-schema refine alone is not
+    // enough.
+    const modelEffortError = validateAdapterModelEffort({ adapterType, adapterConfig });
+    if (modelEffortError) {
+      throw unprocessable(modelEffortError);
+    }
     if (adapterType !== "opencode_local") return;
     try {
       requireOpenCodeModelId(adapterConfig.model);
