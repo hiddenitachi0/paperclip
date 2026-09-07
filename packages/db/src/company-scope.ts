@@ -243,8 +243,13 @@ export async function withCompanyScope<T>(
   // outer reservation requires this nested wait to finish first) -- a
   // permanent pool-exhaustion deadlock, not merely contention. See DUR-418
   // for the full repro.
+  // DUR-3952: a "pooled" scope (runInPooledScope) has no reserved connection
+  // to reuse -- its scopedDb IS the pool -- so it falls through to the
+  // own-transaction path below exactly like no scope at all. Issuing
+  // BEGIN/COMMIT as separate autocommit statements against a pool would land
+  // them on different physical connections.
   const activeScope = requestCompanyScopeStorage.getStore();
-  if (activeScope && !activeScope.liveness.released) {
+  if (activeScope && activeScope.kind !== "pooled" && !activeScope.liveness.released) {
     if (activeScope.kind === "scoped") {
       // Only reused when the companyId matches the active scope exactly: the
       // reserved connection's session-level app.current_company_id claim is
@@ -445,7 +450,24 @@ export interface RequestCompanyScopeBypass {
   readonly liveness: ReservedScopeLiveness;
 }
 
-export type RequestScope = RequestCompanyScope | RequestCompanyScopeBypass;
+/**
+ * DUR-3952: the scope runInPooledScope establishes. Unlike the two above it
+ * reserves nothing: `scopedDb` is the raw pooled Db itself, every query
+ * borrows and returns a pool connection on its own, and `liveness.released`
+ * therefore never flips -- there is no connection to release. This is what a
+ * continuation that legitimately outlives the request/tick that spawned it
+ * (a dispatched heartbeat run, a fire-and-forget re-check) runs under, so
+ * createRequestScopedDb keeps resolving for it after the parent scope is
+ * gone instead of either throwing (DUR-932 guard) or silently reusing the
+ * parent's recycled connection.
+ */
+export interface RequestPooledScope {
+  readonly kind: "pooled";
+  readonly scopedDb: Db;
+  readonly liveness: ReservedScopeLiveness;
+}
+
+export type RequestScope = RequestCompanyScope | RequestCompanyScopeBypass | RequestPooledScope;
 
 // Shared between runInCompanyScope/runInCompanyScopeBypass (which populate
 // it) and createRequestScopedDb (which reads it) -- a single module-level
@@ -848,6 +870,36 @@ export async function runInCompanyScopeBypass<T>(
       await resetClaimAndRelease(reserved);
     }
   }
+}
+
+/**
+ * DUR-3952: run `fn` on the shared pool, detached from whatever request/tick
+ * scope is active, for as long as it takes.
+ *
+ * This exists for the one class of work runInCompanyScope/runInCompanyScopeBypass
+ * are the wrong tool for: a continuation that is *meant* to outlive the
+ * request or scheduler tick that started it. The canonical case is a
+ * dispatched heartbeat run -- startNextQueuedRunForAgent() fires executeRun()
+ * and returns, the tick's bypass scope is released seconds later, and the run
+ * keeps issuing queries for minutes or hours. Reserving a connection for that
+ * long (one per in-flight run) would pin the pool; leaving the run in the
+ * tick's AsyncLocalStorage context made every query after release hit the
+ * DUR-932 liveness guard (the 2026-09-06 fleet outage: every run "Process
+ * lost", ~1160 ConnectionFencedError lines in 45 minutes), and before that
+ * guard existed the same queries silently ran on the tick's already-recycled
+ * connection, interleaved with whichever request the pool handed it to next.
+ *
+ * Inside `fn`, createRequestScopedDb resolves straight to the raw pool (no
+ * company claim on the session -- set per transaction by withCompanyScope,
+ * which opens its own `db.transaction()` here rather than trying to BEGIN on
+ * "the reserved connection", see its pooled-scope branch). `rawDb` may be the
+ * request-scoped proxy itself: it is unwrapped to the pool behind it, so a
+ * service constructed with only the proxy can still detach safely.
+ */
+export function runInPooledScope<T>(rawDb: Db, fn: () => Promise<T>): Promise<T> {
+  const pool = unwrapRequestScopedDb(rawDb);
+  const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
+  return requestCompanyScopeStorage.run({ kind: "pooled", scopedDb: pool, liveness }, fn);
 }
 
 function walkPath(root: unknown, path: readonly PropertyKey[]): unknown {

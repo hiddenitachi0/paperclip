@@ -12,6 +12,7 @@ import {
   issueDocuments,
   issues,
   issueWorkProducts,
+  runInPooledScope,
   workspaceOperations,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
@@ -316,7 +317,11 @@ export function activityService(db: Db) {
     const key = `${companyId}:${issueId}`;
     if (scheduledLivenessBackfills.has(key)) return;
     scheduledLivenessBackfills.add(key);
-    void backfillMissingRunLivenessForIssue(companyId, issueId)
+    // DUR-3952: fire-and-forget, so it can outlive the request whose
+    // scoped `db` it was built on. Detach it onto the pool rather than let
+    // its trailing writes hit the request-scoped liveness guard (DUR-932)
+    // once that request's connection is released.
+    void runInPooledScope(db, () => backfillMissingRunLivenessForIssue(companyId, issueId))
       .catch((err: unknown) => {
         logger.warn({ err, companyId, issueId }, "run liveness backfill failed");
       })

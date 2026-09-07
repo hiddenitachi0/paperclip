@@ -13,6 +13,8 @@ import {
   companySkills,
   companies,
   costEvents,
+  createRequestScopedDb,
+  crossCompanyAccessLog,
   documentAnnotationAnchorSnapshots,
   documentAnnotationComments,
   documentAnnotationThreads,
@@ -36,6 +38,7 @@ import {
   issues,
   projects,
   projectWorkspaces,
+  runInCompanyScopeBypass,
   workspaceOperations,
 } from "@paperclipai/db";
 import {
@@ -345,6 +348,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     await waitForHeartbeatIdle(db, 5_000);
     await new Promise((resolve) => setTimeout(resolve, 100));
+    await db.delete(crossCompanyAccessLog);
     await db.delete(activityLog);
     await db.delete(agentRuntimeState);
     await db.delete(companySkills);
@@ -539,19 +543,30 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     issueId: string;
     provider?: string;
   }) {
-    const environmentId = randomUUID();
     const leaseId = randomUUID();
     const now = new Date("2026-03-19T00:00:00.000Z");
 
-    await db.insert(environments).values({
-      id: environmentId,
-      companyId: input.companyId,
-      name: "Local test environment",
-      driver: "local",
-      status: "active",
-      config: {},
-      metadata: null,
-    });
+    // environments_local_driver_idx allows exactly one "local" environment
+    // per database; the migration seed already holds it until the first
+    // afterEach wipes the table, so a test run in isolation (`-t`) must
+    // reuse it instead of inserting a second one.
+    const existingLocal = await db
+      .select({ id: environments.id })
+      .from(environments)
+      .where(eq(environments.driver, "local"))
+      .then((rows) => rows[0] ?? null);
+    const environmentId = existingLocal?.id ?? randomUUID();
+    if (!existingLocal) {
+      await db.insert(environments).values({
+        id: environmentId,
+        companyId: input.companyId,
+        name: "Local test environment",
+        driver: "local",
+        status: "active",
+        config: {},
+        metadata: null,
+      });
+    }
 
     await db.insert(environmentLeases).values({
       id: leaseId,
@@ -1653,6 +1668,113 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(0);
   });
+
+  // DUR-3952: the exact production shape that took the fleet down on
+  // 2026-09-06 when the DUR-932 liveness guard first shipped. The scheduler
+  // builds heartbeatService on the request-scoped proxy (server/src/index.ts),
+  // each tick runs resumeQueuedRuns() inside one runInCompanyScopeBypass scope,
+  // and executeRun() is dispatched fire-and-forget from inside that tick. The
+  // tick's reserved connection is released as soon as the tick returns, while
+  // the run keeps writing through the same proxy until the agent finishes --
+  // every one of those writes (run events, the finalize, lease release,
+  // resumeQueuedRuns in the finally) landed after release. With the guard they
+  // all threw ConnectionFencedError; before it they silently ran on a
+  // connection the pool had already handed to someone else. The run must now
+  // finalize cleanly because the dispatch detaches it onto the pool
+  // (runInPooledScope).
+  it("DUR-3952: a run dispatched from a scheduler tick through the request-scoped db finalizes after the tick's scope is released", async () => {
+    const { companyId, agentId, runId, issueId, wakeupRequestId } = await seedQueuedIssueRunFixture();
+    const { leaseId } = await seedEnvironmentLeaseFixture({ companyId, runId, issueId });
+
+    // Hold the agent's turn open until the dispatching tick has provably
+    // returned and released its scope, so every trailing write of the run is
+    // guaranteed to happen with no live tick scope behind the proxy.
+    let releaseTickScope!: () => void;
+    const tickScopeReleased = new Promise<void>((resolve) => {
+      releaseTickScope = resolve;
+    });
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await tickScopeReleased;
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Finished after the scheduler tick released its scope.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    const dispatched: Promise<unknown>[] = [];
+    const scopedDb = createRequestScopedDb(db);
+    const heartbeat = heartbeatService(scopedDb, {
+      rawDb: db,
+      onRunDispatched: (run) => {
+        dispatched.push(run);
+      },
+    });
+
+    try {
+      // One scheduler tick: mirrors the periodic recovery pipeline in
+      // server/src/index.ts (bypass scope around resumeQueuedRuns).
+      await runInCompanyScopeBypass(
+        db,
+        { reason: "DUR-3952 test: scheduler tick", actorType: "scheduler", route: "heartbeat-scheduler:test" },
+        () => heartbeat.resumeQueuedRuns(),
+      );
+      // The tick's reserved connection is released by now; the run is still
+      // in flight and, once its setup (all through the proxy, with no tick
+      // scope left) is done, parked inside the adapter.
+      const mid = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0] ?? null);
+      expect(mid?.status).toBe("running");
+      const adapterReached = await waitForValue(async () => (mockAdapterExecute.mock.calls.length === 1 ? true : null), 5_000);
+      expect(adapterReached).toBe(true);
+      const stillRunning = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0] ?? null);
+      expect(stillRunning?.status).toBe("running");
+    } finally {
+      releaseTickScope();
+    }
+
+    // Drain the fire-and-forget run itself (not just its status row) so the
+    // finally-block work -- lease release, resumeQueuedRuns -- has settled too.
+    while (dispatched.length > 0) {
+      const batch = dispatched.splice(0, dispatched.length);
+      await Promise.allSettled(batch);
+    }
+
+    const settled = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0] ?? null);
+    expect(settled?.status).toBe("succeeded");
+    expect(settled?.error).toBeNull();
+    expect(settled?.errorCode).toBeNull();
+    expect(settled?.finishedAt).toBeTruthy();
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("completed");
+
+    // executeRun -> releaseEnvironmentLeasesForRun -> releaseForRun ->
+    // releaseRunLeases: one of the two stacks from the production log.
+    const lease = await db
+      .select()
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, leaseId))
+      .then((rows) => rows[0] ?? null);
+    expect(lease?.status).toBe("released");
+    expect(lease?.releasedAt).toBeTruthy();
+
+    const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
+    expect(agent?.status).toBe("idle");
+
+    // Nothing the run wrote on its way out may have been lost to a fenced
+    // connection: the "run succeeded" event is written after the adapter
+    // returned, i.e. after the tick scope was gone.
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+    expect(events.some((event) => event.eventType === "lifecycle" && event.message === "run succeeded")).toBe(true);
+  }, 15_000);
 
   it("blocks a git-sensitive local adapter before launch when a project-workspace-linked issue is missing its project id", async () => {
     const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();

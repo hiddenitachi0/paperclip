@@ -11,7 +11,9 @@ import {
   requestCompanyScopeStorage,
   runInCompanyScope,
   runInCompanyScopeBypass,
+  runInPooledScope,
   withCompanyScope,
+  type RequestScope,
 } from "./company-scope.js";
 import { companies, crossCompanyAccessLog } from "./schema/index.js";
 import {
@@ -749,4 +751,80 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
       expect(() => scopedDb.transaction(async () => undefined)).toThrow(/not supported through the request-scoped proxy/);
     });
   });
+
+  // DUR-3952: the shape of a dispatched heartbeat run. startNextQueuedRunForAgent
+  // fires executeRun() from inside a scheduler tick's scope and returns; the
+  // tick's reserved connection is released moments later while the run keeps
+  // querying through the request-scoped proxy for minutes. runInPooledScope
+  // detaches that continuation onto the shared pool, so the proxy keeps
+  // resolving after the parent scope is gone and withCompanyScope opens its
+  // own transaction instead of trying to BEGIN on "the reserved connection".
+  it("DUR-3952: runInPooledScope keeps the request-scoped proxy usable after the parent scope that spawned it was released", async () => {
+    const companyA = await seedCompany("pooled-after-release");
+    const scopedDb = createRequestScopedDb(db);
+    let parentScope: RequestScope | undefined;
+    let detached!: Promise<{ direct: string[]; viaTx: string[]; innerScope: RequestScope | undefined }>;
+
+    await runInCompanyScope(db, companyA.id, async () => {
+      parentScope = requestCompanyScopeStorage.getStore();
+      // Fire-and-forget, exactly like the executeRun dispatch: not awaited by
+      // the parent, and deliberately slower than the parent's own finally.
+      detached = runInPooledScope(db, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(parentScope?.liveness.released).toBe(true);
+        const direct = await scopedDb.select({ name: companies.name }).from(companies).then((rows) => rows.map((r) => r.name));
+        const viaTx = await withCompanyScope(scopedDb, companyA.id, async (tx) =>
+          tx.select({ name: companies.name }).from(companies).then((rows) => rows.map((r) => r.name)),
+        );
+        return { direct, viaTx, innerScope: requestCompanyScopeStorage.getStore() };
+      });
+    });
+
+    expect(parentScope?.liveness.released).toBe(true);
+    const result = await detached;
+    expect(result.innerScope?.kind).toBe("pooled");
+    expect(result.innerScope?.liveness.released).toBe(false);
+    expect(result.direct).toContain(companyA.name);
+    expect(result.viaTx).toContain(companyA.name);
+  });
+
+  it("DUR-3952: runInPooledScope unwraps a request-scoped proxy passed as rawDb instead of proxying it to itself", async () => {
+    const companyA = await seedCompany("pooled-unwrap");
+    const scopedDb = createRequestScopedDb(db);
+    expect(requestCompanyScopeStorage.getStore()).toBeUndefined();
+
+    // A route-constructed service only holds the proxy (`rawDb` defaults to
+    // `db`); detaching through it must still reach the real pool.
+    const rows = await runInPooledScope(scopedDb, async () => {
+      expect(requestCompanyScopeStorage.getStore()?.scopedDb).toBe(db);
+      return scopedDb.select({ name: companies.name }).from(companies);
+    });
+    expect(rows.map((row) => row.name)).toContain(companyA.name);
+  });
+
+  it("DUR-3952: withCompanyScope inside a pooled scope runs a real transaction on one pooled connection (max: 1 pool does not hang)", async () => {
+    const companyA = await seedCompany("pooled-tx");
+    const singleConnDb = createSingleConnectionDb();
+    try {
+      const scopedDb = createRequestScopedDb(singleConnDb);
+      const name = await runInPooledScope(singleConnDb, () =>
+        withCompanyScope(scopedDb, companyA.id, async (tx) => {
+          // Inside the transaction the per-transaction claim is set -- proof
+          // this went through the own-transaction branch, not the reserved
+          // connection reuse branch (which has no connection to reuse here).
+          const [claim] = (await tx.execute(
+            drizzleSql`select current_setting('app.current_company_id', true) as company_id`,
+          )) as unknown as { company_id: string | null }[];
+          expect(claim?.company_id).toBe(companyA.id);
+          await tx.update(companies).set({ name: "pooled-tx-write" }).where(eq(companies.id, companyA.id));
+          return tx.select({ name: companies.name }).from(companies).where(eq(companies.id, companyA.id)).then((rows) => rows[0]?.name);
+        }),
+      );
+      expect(name).toBe("pooled-tx-write");
+      const [row] = await db.select().from(companies).where(eq(companies.id, companyA.id));
+      expect(row?.name).toBe("pooled-tx-write");
+    } finally {
+      await singleConnDb.$client.end({ timeout: 0 });
+    }
+  }, 5_000);
 });

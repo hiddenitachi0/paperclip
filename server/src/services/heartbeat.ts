@@ -56,6 +56,7 @@ import {
   routineRevisions,
   routineRuns,
   routines,
+  runInPooledScope,
   withCompanyScope,
   workspaceOperations,
 } from "@paperclipai/db";
@@ -10631,7 +10632,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (claimedRuns.length === 0) return [];
 
     for (const claimedRun of claimedRuns) {
-      const dispatched = executeRun(claimedRun.id).catch((err) => {
+      // DUR-3952: executeRun() is fire-and-forget and outlives whatever
+      // request/scheduler-tick scope dispatched it -- by minutes or hours.
+      // Detach it onto the shared pool (runInPooledScope) instead of leaving
+      // it in the caller's AsyncLocalStorage context: once that context's
+      // reserved connection was released, every query the run made through
+      // the request-scoped `db` proxy either ran on a recycled connection
+      // some other request now owns (pre-DUR-932) or hit the liveness guard
+      // (the 2026-09-06 outage: every run "Process lost"). `rawDb` may be the
+      // proxy itself for route-constructed services; runInPooledScope
+      // unwraps it.
+      const dispatched = runInPooledScope(rawDb, () => executeRun(claimedRun.id)).catch((err) => {
         logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
       });
       options.onRunDispatched?.(dispatched);
@@ -13803,8 +13814,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // for up to AGENT_START_LOCK_STALE_MS. Fire-and-forget, same as the
     // claimed-run dispatch below — the promoted run already exists as
     // "queued" from the transaction above, so callers observing that row
-    // don't need this call to have completed.
-    void startNextQueuedRunForAgent(promotedRun.agentId).catch((err) => {
+    // don't need this call to have completed. DUR-3952: detached onto the
+    // pool for the same reason as the executeRun dispatch -- the caller's
+    // request/tick scope may be released before this finishes.
+    void runInPooledScope(rawDb, () => startNextQueuedRunForAgent(promotedRun.agentId)).catch((err) => {
       logger.error({ err, agentId: promotedRun.agentId }, "failed to start promoted queued run");
     });
   }
@@ -14929,8 +14942,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // startNextQueuedRunForAgent call, which already holds the global run-start
     // lock — awaiting resumeQueuedRuns() here would re-enter that same lock
     // before the outer call releases it and deadlock for up to
-    // AGENT_START_LOCK_STALE_MS.
-    void resumeQueuedRuns().catch((err) => {
+    // AGENT_START_LOCK_STALE_MS. DUR-3952: detached onto the pool for the same
+    // reason as the executeRun dispatch -- a cancel from a route or a finishing
+    // run outlives the scope that issued it.
+    void runInPooledScope(rawDb, () => resumeQueuedRuns()).catch((err) => {
       logger.error({ err, runId: run.id }, "failed to resume queued runs after cancellation");
     });
     return cancelled;
