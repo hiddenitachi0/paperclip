@@ -1341,6 +1341,17 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(retry).not.toBeNull();
     expect(retry?.processLossRetryCount).toBe(1);
 
+    // The retry's first event says why the previous run ended, not the
+    // process-lost wording (polish round 3).
+    const retryEvents = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, retry!.id));
+    expect(retryEvents[0]?.message).toBe(
+      "Queued automatic retry after the previous run was stopped for running past the time limit",
+    );
+    expect((retryEvents[0]?.payload as Record<string, unknown> | null)?.stopReason).toBe("run_too_long");
+
     // A retry was queued, so the agent stays schedulable -- never "error".
     const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
     expect(agent?.status).not.toBe("error");
@@ -1382,6 +1393,20 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(failedRun?.status).toBe("failed");
     expect(failedRun?.errorCode).toBe("run_silent");
     expect(failedRun?.error).toBe("Stopped after 45 minutes without any output; it will be retried.");
+
+    const retry = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(retry).not.toBeNull();
+    const retryEvents = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, retry!.id));
+    expect(retryEvents[0]?.message).toBe(
+      "Queued automatic retry after the previous run was stopped for showing no output past the silence window",
+    );
 
     const notices = await readStoppedRunNotice(companyId);
     expect(notices).toHaveLength(1);

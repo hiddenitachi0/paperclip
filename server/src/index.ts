@@ -51,6 +51,7 @@ import {
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   organizationCheckupService,
+  instanceClaudeAuthService,
   instanceSettingsService,
   issueThreadInteractionService,
   reconcileCloudUpstreamRunsOnStartup,
@@ -1443,6 +1444,43 @@ export async function startServer(): Promise<StartedServer> {
     if (config.adminAuthCheckIntervalMinutes > 0) {
       setInterval(() => tickAdminAuthCheck("scheduled"), config.adminAuthCheckIntervalMinutes * 60 * 1000);
     }
+
+    // Polish round 3: re-test the shared Claude sign-in once a day. The tick
+    // is hourly but the service only makes a CLI call when the last check is
+    // a day old, and leaves a plain notice in every company's Activity feed
+    // when the check fails or the token is a few days from expiring. Bypass
+    // scope for the same reason as the check-up: instance-wide row, notices
+    // written across every company. Always on: there is nothing to do when
+    // no sign-in is saved.
+    const claudeAuthChecks = instanceClaudeAuthService(schedulerDb as any);
+    const tickClaudeAuthCheck = () => {
+      if (heartbeatDrainState?.isDraining) return;
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: daily Claude sign-in check",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:claudeAuthCheck",
+        },
+        () => claudeAuthChecks.runScheduledCheck(),
+      )
+        .then((result) => {
+          if (result.outcome !== "checked") return;
+          if (result.notice) {
+            logger.warn(
+              { health: result.status.health, expiresInDays: result.status.expiresInDays, companies: result.noticedCompanyIds.length },
+              `daily Claude sign-in check: ${result.notice.message}`,
+            );
+          } else {
+            logger.info({ health: result.status.health, expiresInDays: result.status.expiresInDays }, "daily Claude sign-in check passed");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "daily Claude sign-in check failed to run");
+        });
+    };
+    setTimeout(tickClaudeAuthCheck, 5 * 60 * 1000).unref?.();
+    setInterval(tickClaudeAuthCheck, 60 * 60 * 1000);
   }
   
   // DUR-352 (DUR-277 Wave 6): deliberately stays bypass-scoped forever, not a

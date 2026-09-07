@@ -34,8 +34,17 @@ export type {
   QuietModeActor,
   QuietModeAgentSnapshotEntry,
   QuietModeState,
+  DoneGateMode,
+  DoneGateCompanyOverride,
+  DoneGateSettings,
 } from "./instance.js";
 export {
+  DONE_GATE_MODES,
+  DEFAULT_DONE_GATE_MODE,
+  DEFAULT_DONE_GATE_MAX_ROUNDS,
+  MIN_DONE_GATE_MAX_ROUNDS,
+  MAX_DONE_GATE_MAX_ROUNDS,
+  DEFAULT_DONE_GATE_SETTINGS,
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,

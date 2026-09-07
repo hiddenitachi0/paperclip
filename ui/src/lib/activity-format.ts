@@ -79,6 +79,11 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "security.admin_signed_in_new_device": "noticed a sign-in from a new device for",
   "security.signed_out_everywhere": "signed out every device for",
   "security.session_revoked": "ended a signed-in session for",
+  // Polish round 3: the daily check of the shared Claude sign-in.
+  "instance.claude_auth.saved": "saved the shared Claude sign-in",
+  "instance.claude_auth.removed": "removed the shared Claude sign-in",
+  "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
+  "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -153,6 +158,10 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.error_stalled": "is still waiting for someone to clear the agent error",
   "heartbeat.run_reaped": "ended a run that had stopped responding",
   "heartbeat.run_stopped": "stopped a run that was taking too long",
+  "instance.claude_auth.saved": "saved the shared Claude sign-in",
+  "instance.claude_auth.removed": "removed the shared Claude sign-in",
+  "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
+  "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -523,6 +532,8 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "security.admin_signed_in_new_device",
   "security.signed_out_everywhere",
   "security.session_revoked",
+  "instance.claude_auth.check_failed",
+  "instance.claude_auth.expiring",
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {

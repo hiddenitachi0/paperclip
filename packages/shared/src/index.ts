@@ -541,6 +541,9 @@ export type {
   InstanceExperimentalSettings,
   InstanceGeneralSettings,
   InstanceSettings,
+  DoneGateMode,
+  DoneGateCompanyOverride,
+  DoneGateSettings,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
   QuietModeActor,
@@ -1050,6 +1053,12 @@ export {
 } from "./types/feedback.js";
 
 export {
+  DONE_GATE_MODES,
+  DEFAULT_DONE_GATE_MODE,
+  DEFAULT_DONE_GATE_MAX_ROUNDS,
+  MIN_DONE_GATE_MAX_ROUNDS,
+  MAX_DONE_GATE_MAX_ROUNDS,
+  DEFAULT_DONE_GATE_SETTINGS,
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
@@ -1168,6 +1177,9 @@ export {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
   issueGraphLivenessAutoRecoveryRequestSchema,
+  doneGateModeSchema,
+  doneGateCompanyOverrideSchema,
+  doneGateSettingsSchema,
   trustPresetSchema,
   lowTrustBoundarySchema,
   lowTrustReviewPresetPolicySchema,
