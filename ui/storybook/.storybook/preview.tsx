@@ -18,6 +18,7 @@ import {
   storybookCompanies,
   storybookDashboardSummary,
   storybookIssues,
+  storybookLatestCheckup,
   storybookLiveRuns,
   storybookProjects,
   storybookSecretAccessEvents,
@@ -216,6 +217,31 @@ function installStorybookApiFixtures() {
     if (secretEventsMatch) {
       const [, secretId] = secretEventsMatch;
       return Response.json(storybookSecretAccessEvents.filter((event) => event.secretId === secretId));
+    }
+
+    // DUR-62 / polish round 3: the dashboard's weekly check-up card.
+    const checkupLatestMatch = url.pathname.match(/^\/api\/companies\/([^/]+)\/checkups\/latest$/);
+    if (checkupLatestMatch) {
+      const [, companyId] = checkupLatestMatch;
+      return Response.json(
+        companyId === "company-storybook"
+          ? storybookLatestCheckup
+          : { report: null, suggestionCount: 0, pendingSuggestionCount: 0, suggestionsStatus: "none" },
+      );
+    }
+    const checkupRunMatch = url.pathname.match(/^\/api\/companies\/([^/]+)\/checkups\/run$/);
+    if (checkupRunMatch && init?.method?.toUpperCase() === "POST") {
+      return Response.json({
+        outcome: "existing",
+        dryRun: false,
+        reportIssueId: storybookLatestCheckup.report?.id ?? null,
+        reportIdentifier: storybookLatestCheckup.report?.identifier ?? null,
+        message: "A check-up from 2 hours ago is still open, so nothing new was written. Open it to see what it found.",
+        title: storybookLatestCheckup.report?.title ?? "",
+        body: "",
+        findingCount: 3,
+        findings: [],
+      });
     }
 
     const companyResourceMatch = url.pathname.match(/^\/api\/companies\/([^/]+)\/([^/]+)$/);
