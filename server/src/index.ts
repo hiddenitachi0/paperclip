@@ -51,6 +51,7 @@ import {
   agentErrorAlertsService,
   untrackedWriteAlertsService,
   personaPublisherSweepService,
+  escalationGrantService,
   organizationCheckupService,
   instanceClaudeAuthService,
   instanceSettingsService,
@@ -944,6 +945,7 @@ export async function startServer(): Promise<StartedServer> {
       : null;
     const organizationCheckups = organizationCheckupService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
+    const escalationGrants = escalationGrantService(schedulerDb as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery. Wrapped in
@@ -1290,6 +1292,27 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "issue-thread-interaction abandonment tick failed");
+        });
+
+      // Boost asks waiting on a boss (agent -> boss -> operator) move on to the
+      // operator by themselves once the boss's time is up, so a silent boss
+      // can never leave a report stuck on its normal setting forever.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: model boost boss-review timeouts",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:modelBoostBossReviewTimeouts",
+        },
+        () => escalationGrants.sweepBossReviewTimeouts(new Date()),
+      )
+        .then((movedOn) => {
+          if (movedOn.length > 0) {
+            logger.info({ movedOn: movedOn.length }, "boost requests moved on to the operator after the boss did not answer");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "model boost boss-review timeout tick failed");
         });
 
       void runInCompanyScopeBypass(

@@ -59,6 +59,7 @@ import {
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
   withdrawApprovalSchema,
+  modelBoostBossReviewDecisionSchema,
   addApprovalCommentSchema,
   // Cost / budget
   createCostEventSchema,
@@ -2560,6 +2561,18 @@ registry.registerPath({
     body: jsonBody(withdrawApprovalSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/boss-review",
+  tags: ["approvals"],
+  summary: "Boss answers a direct report's model boost request (decline, or forward to the operator)",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(modelBoostBossReviewDecisionSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({
