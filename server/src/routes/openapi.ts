@@ -875,8 +875,9 @@ registry.registerPath({
       deploymentMode: z.string().optional(),
       bootstrapStatus: z.enum(["ready", "bootstrap_pending"]).optional(),
       bootstrapInviteActive: z.boolean().optional(),
-      // DUR-3939/DUR-3940/DUR-272: live fleet signal (full-details responses
-      // only). `available: false` carries a `reason`; see
+      // DUR-3939/DUR-3940/DUR-272: live fleet signal, board callers only
+      // (it spans every company on the instance, so agent keys never see
+      // it). `available: false` carries a `reason`; see
       // packages/shared/src/types/fleet-health.ts for the full shape.
       fleet: z.union([
         z.object({
@@ -906,7 +907,6 @@ registry.registerPath({
               id: z.string(),
               name: z.string(),
               companyId: z.string(),
-              errorReason: z.string().nullable(),
               errorAt: z.string().datetime().nullable(),
             })),
           }),
@@ -926,6 +926,7 @@ registry.registerPath({
           }),
           requests: z.object({
             inFlight: z.number().int().nonnegative(),
+            streaming: z.number().int().nonnegative(),
             peakInFlight: z.number().int().nonnegative(),
             peakInFlightAt: z.string().datetime().nullable(),
             longestInFlightMs: z.number().int().nonnegative(),

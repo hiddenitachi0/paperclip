@@ -92,10 +92,16 @@ export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: strin
         : `Scheduler ticked ${formatFleetDuration(scheduler.sinceLastTickMs)} ago`,
     alert: !scheduler.enabled || scheduler.stale,
   });
+  // Slow requests and open streams (board chat replies, log tails) are
+  // shown for information only; the one thing that turns this row amber is
+  // a genuine pile-up (the overload line).
   facts.push({
     key: "requests",
-    text: `${requests.inFlight} request${requests.inFlight === 1 ? "" : "s"} in flight${requests.slowInFlight > 0 ? ` (${requests.slowInFlight} slow)` : ""}`,
-    alert: requests.overloaded || requests.slowInFlight > 0,
+    text:
+      `${requests.inFlight} request${requests.inFlight === 1 ? "" : "s"} in flight` +
+      (requests.slowInFlight > 0 ? ` (${requests.slowInFlight} slow)` : "") +
+      (requests.streaming > 0 ? ` · ${requests.streaming} streaming` : ""),
+    alert: requests.overloaded,
   });
   return facts;
 }

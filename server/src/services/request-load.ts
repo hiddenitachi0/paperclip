@@ -16,8 +16,18 @@ export const DEFAULT_REQUEST_LOAD_OVERLOAD_THRESHOLD = 50;
 export const REQUEST_LOAD_WARNING_INTERVAL_MS = 60_000;
 
 export interface RequestLoadSnapshot {
-  /** Requests being handled right now. */
+  /**
+   * Requests being handled right now that have not started sending a
+   * response yet. Streaming responses (board-chat SSE, log tails) are
+   * counted in `streaming` instead -- see `isStreaming` on `begin`.
+   */
   inFlight: number;
+  /**
+   * Requests whose response has started (headers sent) and is still open,
+   * i.e. a legitimately long-lived stream. Informational: a stream is not a
+   * pile-up, so it counts toward neither `slowInFlight` nor `overloaded`.
+   */
+  streaming: number;
   /** Highest in-flight count seen since the process started. */
   peakInFlight: number;
   peakInFlightAt: string | null;
@@ -47,25 +57,50 @@ export function createRequestLoadTracker(options: RequestLoadTrackerOptions = {}
   const overloadThreshold = Math.max(1, options.overloadThreshold ?? DEFAULT_REQUEST_LOAD_OVERLOAD_THRESHOLD);
   const now = options.now ?? (() => Date.now());
 
-  const inFlightStartedAt = new Map<symbol, number>();
+  interface InFlightEntry {
+    startedAt: number;
+    /** Live check: has this response started streaming its body? */
+    isStreaming: () => boolean;
+  }
+  const inFlightEntries = new Map<symbol, InFlightEntry>();
   let peakInFlight = 0;
   let peakInFlightAt: number | null = null;
   let totalStarted = 0;
   let totalFinished = 0;
   let lastOverloadWarningAt: number | null = null;
 
+  /** Requests that have not started sending a response (the ones that can pile up). */
+  function pendingCount(): number {
+    let pending = 0;
+    for (const entry of inFlightEntries.values()) {
+      if (!entry.isStreaming()) pending += 1;
+    }
+    return pending;
+  }
+
   function snapshot(): RequestLoadSnapshot {
     const current = now();
     let longestInFlightMs = 0;
     let slowInFlight = 0;
-    for (const startedAt of inFlightStartedAt.values()) {
-      const age = Math.max(0, current - startedAt);
+    let streaming = 0;
+    let inFlight = 0;
+    for (const entry of inFlightEntries.values()) {
+      // A response that has begun (headers out, body streaming) is doing
+      // its job, however long it stays open: a board-chat reply streamed
+      // over SSE for a minute is not a stuck request. Only requests still
+      // waiting to answer can be "slow" or part of a pile-up.
+      if (entry.isStreaming()) {
+        streaming += 1;
+        continue;
+      }
+      inFlight += 1;
+      const age = Math.max(0, current - entry.startedAt);
       if (age > longestInFlightMs) longestInFlightMs = age;
       if (slowThresholdMs > 0 && age >= slowThresholdMs) slowInFlight += 1;
     }
-    const inFlight = inFlightStartedAt.size;
     return {
       inFlight,
+      streaming,
       peakInFlight,
       peakInFlightAt: peakInFlightAt === null ? null : new Date(peakInFlightAt).toISOString(),
       longestInFlightMs,
@@ -80,7 +115,7 @@ export function createRequestLoadTracker(options: RequestLoadTrackerOptions = {}
 
   function maybeWarnOverload() {
     const current = now();
-    if (inFlightStartedAt.size < overloadThreshold) return;
+    if (pendingCount() < overloadThreshold) return;
     if (lastOverloadWarningAt !== null && current - lastOverloadWarningAt < REQUEST_LOAD_WARNING_INTERVAL_MS) return;
     lastOverloadWarningAt = current;
     const snap = snapshot();
@@ -94,14 +129,19 @@ export function createRequestLoadTracker(options: RequestLoadTrackerOptions = {}
     );
   }
 
-  /** Marks a request as started; returns the function that marks it finished (idempotent). */
-  function begin(): () => void {
+  /**
+   * Marks a request as started; returns the function that marks it finished
+   * (idempotent). `isStreaming` is consulted on every snapshot so a request
+   * moves from "pending" to "streaming" the moment its response begins.
+   */
+  function begin(isStreaming: () => boolean = () => false): () => void {
     const key = Symbol("request");
     const startedAt = now();
-    inFlightStartedAt.set(key, startedAt);
+    inFlightEntries.set(key, { startedAt, isStreaming });
     totalStarted += 1;
-    if (inFlightStartedAt.size > peakInFlight) {
-      peakInFlight = inFlightStartedAt.size;
+    const pending = pendingCount();
+    if (pending > peakInFlight) {
+      peakInFlight = pending;
       peakInFlightAt = startedAt;
     }
     maybeWarnOverload();
@@ -109,14 +149,17 @@ export function createRequestLoadTracker(options: RequestLoadTrackerOptions = {}
     return () => {
       if (finished) return;
       finished = true;
-      inFlightStartedAt.delete(key);
+      inFlightEntries.delete(key);
       totalFinished += 1;
     };
   }
 
   function middleware() {
     return (_req: Request, res: Response, next: NextFunction) => {
-      const finish = begin();
+      // Once the headers are out the handler has answered and is streaming
+      // the body (SSE, a file, a log tail). A pile-up is made of requests
+      // that have *not* answered yet, so that is the line we draw.
+      const finish = begin(() => res.headersSent);
       // "finish" fires when the response is fully sent; "close" covers a
       // client that gave up (or a streaming response torn down) so a hung
       // request never stays counted forever.
@@ -127,7 +170,7 @@ export function createRequestLoadTracker(options: RequestLoadTrackerOptions = {}
   }
 
   function reset() {
-    inFlightStartedAt.clear();
+    inFlightEntries.clear();
     peakInFlight = 0;
     peakInFlightAt = null;
     totalStarted = 0;

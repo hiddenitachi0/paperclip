@@ -27,6 +27,7 @@ const healthyScheduler: FleetSchedulerStatus = {
 
 const quietRequests: FleetRequestLoad = {
   inFlight: 2,
+  streaming: 0,
   peakInFlight: 9,
   peakInFlightAt: "2026-09-06T09:00:00.000Z",
   longestInFlightMs: 120,
@@ -110,7 +111,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     });
     expect(summary.level).toBe("warning");
     expect(summary.headline).toBe(
-      'All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise "Max concurrent runs" in Settings to let more through.',
+      'All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise "Max concurrent runs (whole instance)" under Settings > Instance settings > General to let more through.',
     );
     expect(summary.notes.at(-1)).toContain("Runs are flowing");
   });
@@ -123,7 +124,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.level).toBe("ok");
     expect(summary.headline).toContain("Runs are flowing");
     expect(summary.notes).toEqual([
-      'All 4 run slots are in use and 2 runs are waiting for one (the oldest has waited 3 minutes). Nothing is broken; raise "Max concurrent runs" in Settings to let more through.',
+      'All 4 run slots are in use and 2 runs are waiting for one (the oldest has waited 3 minutes). Nothing is broken; raise "Max concurrent runs (whole instance)" under Settings > Instance settings > General to let more through.',
     ]);
   });
 
@@ -179,10 +180,10 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
       agents: {
         inError: 5,
         inErrorSample: [
-          { id: "a", name: "Reviewer", companyId: "c", errorReason: null, errorAt: null },
-          { id: "b", name: "Backend Engineer", companyId: "c", errorReason: null, errorAt: null },
-          { id: "c", name: "Fork Lead", companyId: "c", errorReason: null, errorAt: null },
-          { id: "d", name: "Writer", companyId: "c", errorReason: null, errorAt: null },
+          { id: "a", name: "Reviewer", companyId: "c", errorAt: null },
+          { id: "b", name: "Backend Engineer", companyId: "c", errorAt: null },
+          { id: "c", name: "Fork Lead", companyId: "c", errorAt: null },
+          { id: "d", name: "Writer", companyId: "c", errorAt: null },
         ],
       },
     });
@@ -190,7 +191,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.headline).toBe(
       "5 agents have stopped with an error and will not take work until someone clears it: Reviewer, Backend Engineer, Fork Lead and 2 more.",
     );
-    expect(summarize({ agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorReason: null, errorAt: null }] } }).headline).toBe(
+    expect(summarize({ agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] } }).headline).toBe(
       "1 agent has stopped with an error and will not take work until someone clears it: Reviewer.",
     );
   });
@@ -201,10 +202,15 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.headline).toBe(
       "The server is handling 109 requests at once (its overload line is 50). It is overloaded, not down; expect slow pages until this drains.",
     );
-    expect(summarize({ requests: { ...quietRequests, slowInFlight: 3 } })).toMatchObject({
-      level: "warning",
-      headline: "3 requests have been waiting longer than 10 seconds.",
-    });
+    // A few slow requests on their own are informational: the note is
+    // there, but the strip stays green. (Long-running streams such as board
+    // chat are not even counted -- see request-load.test.ts.)
+    const slow = summarize({ requests: { ...quietRequests, slowInFlight: 3, streaming: 2 } });
+    expect(slow.level).toBe("ok");
+    expect(slow.headline).toContain("Runs are flowing");
+    expect(slow.notes).toEqual([
+      "3 requests have been waiting longer than 10 seconds. That is fine on its own; it only matters if pages feel slow.",
+    ]);
   });
 
   it("an exhausted database pool is called out", () => {
@@ -218,7 +224,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
       runs: runs({ zombieCandidates: 1, running: 4, queued: 2, oldestQueuedWaitMs: 60_000 }),
       slots: computeFleetSlotUsage(4, 4),
       scheduler: { ...healthyScheduler, stale: true, sinceLastTickMs: 10 * 60_000 },
-      agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorReason: null, errorAt: null }] },
+      agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] },
     });
     expect(summary.level).toBe("critical");
     expect(summary.headline).toContain("The scheduler has not completed a tick for 10 minutes");
@@ -375,8 +381,10 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
     expect(snapshot.runs.oldestQueuedWaitMs).toBeLessThanOrEqual(20 * 60_000 + 5_000);
     expect(snapshot.slots).toEqual({ max: 3, used: 3, available: 0, saturated: true });
     expect(snapshot.agents.inError).toBe(1);
+    // Name and time only: the error text ("Adapter crashed") is never
+    // carried on this instance-wide signal.
     expect(snapshot.agents.inErrorSample).toEqual([
-      expect.objectContaining({ id: broken, name: "Broken", companyId, errorReason: "Adapter crashed" }),
+      { id: broken, name: "Broken", companyId, errorAt: expect.any(String) },
     ]);
     expect(snapshot.database.available).toBe(true);
     expect(snapshot.database.connections).toBeGreaterThanOrEqual(1);

@@ -125,12 +125,13 @@ export async function loadFleetAgentCounts(db: Db): Promise<FleetAgentCounts> {
     .from(agents)
     .innerJoin(companies, eq(companies.id, agents.companyId))
     .where(errorFilter);
+  // Name + when only. The free-text error reason stays on the agent's own
+  // page (company-scoped); this instance-wide signal never carries it.
   const sample = await db
     .select({
       id: agents.id,
       name: agents.name,
       companyId: agents.companyId,
-      errorReason: agents.errorReason,
       errorAt: agents.errorAt,
     })
     .from(agents)
@@ -145,7 +146,6 @@ export async function loadFleetAgentCounts(db: Db): Promise<FleetAgentCounts> {
       id: row.id,
       name: row.name,
       companyId: row.companyId,
-      errorReason: row.errorReason ?? null,
       errorAt: row.errorAt ? new Date(row.errorAt).toISOString() : null,
     })),
   };
@@ -236,9 +236,12 @@ export function summarizeFleetHealth(input: {
       text: `The server is handling ${plural(requests.inFlight, "request")} at once (its overload line is ${requests.overloadThreshold}). It is overloaded, not down; expect slow pages until this drains.`,
     });
   } else if (requests.slowInFlight > 0) {
+    // Informational only. A handful of slow requests is normal (exports,
+    // git work, a big page); the signal that something is wrong is the
+    // overload line above, not one request taking a while.
     findings.push({
-      level: "warning",
-      text: `${plural(requests.slowInFlight, "request has", "requests have")} been waiting longer than ${Math.round(requests.slowThresholdMs / 1000)} seconds.`,
+      level: "ok",
+      text: `${plural(requests.slowInFlight, "request has", "requests have")} been waiting longer than ${Math.round(requests.slowThresholdMs / 1000)} seconds. That is fine on its own; it only matters if pages feel slow.`,
     });
   }
 
@@ -263,7 +266,7 @@ export function summarizeFleetHealth(input: {
     const level: FleetHealthLevel = oldest >= FLEET_QUEUE_WAIT_WARN_MS ? "warning" : "ok";
     findings.push({
       level,
-      text: `All ${plural(slots.max, "run slot")} are in use and ${plural(runs.queued, "run is", "runs are")} waiting for one${waited}. Nothing is broken; raise "Max concurrent runs" in Settings to let more through.`,
+      text: `All ${plural(slots.max, "run slot")} are in use and ${plural(runs.queued, "run is", "runs are")} waiting for one${waited}. Nothing is broken; raise "Max concurrent runs (whole instance)" under Settings > Instance settings > General to let more through.`,
     });
   }
 

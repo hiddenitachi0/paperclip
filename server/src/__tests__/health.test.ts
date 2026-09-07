@@ -67,6 +67,7 @@ const testFleet = {
   },
   requests: {
     inFlight: 1,
+    streaming: 0,
     peakInFlight: 4,
     peakInFlightAt: "2026-09-06T09:00:00.000Z",
     longestInFlightMs: 12,
@@ -80,13 +81,27 @@ const testFleet = {
   database: { available: true, poolMax: 20, connections: 3, active: 1, idleInTransaction: 0, waitingOnLocks: 0 },
   summary: {
     level: "warning" as const,
-    headline: "All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise \"Max concurrent runs\" in Settings to let more through.",
+    headline: "All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise \"Max concurrent runs (whole instance)\" under Settings > Instance settings > General to let more through.",
     notes: ["Runs are flowing: 9 started, 7 finished, 1 failed in the last 15 minutes. 4 of 4 slots in use, 15 queued."],
   },
 };
 
-function createApp(db?: Db, serverInfo = testServerInfo) {
+// What actorMiddleware stamps on every request in local_trusted mode (the
+// browser is the local board). Pass `actor: null` to leave it unset.
+const localBoardActor = { type: "board", userId: "local-board", source: "local_implicit" } as const;
+
+function createApp(
+  db?: Db,
+  serverInfo = testServerInfo,
+  actor: { type: string; [key: string]: unknown } | null = localBoardActor,
+) {
   const app = express();
+  if (actor) {
+    app.use((req, _res, next) => {
+      (req as any).actor = actor;
+      next();
+    });
+  }
   app.use(
     "/health",
     healthRoutes(db, {
@@ -306,7 +321,7 @@ describe("GET /health", () => {
     });
   });
 
-  it("includes the fleet signal for any caller in local_trusted mode", async () => {
+  it("includes the fleet signal for the local board in local_trusted mode", async () => {
     const db = {
       execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
       select: vi.fn(() => ({
@@ -321,6 +336,46 @@ describe("GET /health", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.fleet).toEqual(testFleet);
+  });
+
+  it("omits the fleet signal for agent callers, who still get the rest of the full-details body", async () => {
+    const db = {
+      execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ count: 1 }]),
+        })),
+      })),
+    } as unknown as Db;
+    const agentActor = { type: "agent", agentId: "agent-1", companyId: "company-a", source: "agent_key" };
+
+    for (const deploymentMode of ["local_trusted", "authenticated"] as const) {
+      const app = express();
+      app.use((req, _res, next) => {
+        (req as any).actor = agentActor;
+        next();
+      });
+      app.use(
+        "/health",
+        healthRoutes(db, {
+          deploymentMode,
+          deploymentExposure: "private",
+          authReady: true,
+          companyDeletionEnabled: true,
+          serverInfo: testServerInfo,
+        }),
+      );
+
+      const res = await request(app).get("/health");
+
+      expect(res.status).toBe(200);
+      // Full details (version, serverInfo) are still there for an agent...
+      expect(res.body).toMatchObject({ status: "ok", version: serverVersion, serverInfo: testServerInfo });
+      // ...but the fleet signal names agents across every company, so an
+      // agent key from one company never receives it.
+      expect(res.body.fleet).toBeUndefined();
+      expect(mockComputeFleetHealth).not.toHaveBeenCalled();
+    }
   });
 
   it("reports the fleet signal as unavailable, not as healthy, when it cannot be computed (DUR-98)", async () => {

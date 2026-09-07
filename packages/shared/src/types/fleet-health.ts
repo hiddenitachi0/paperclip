@@ -29,18 +29,22 @@ export interface FleetRunCounts {
 }
 
 export interface FleetSlotUsage {
-  /** Instance-wide ceiling (Settings > "Max concurrent runs"). */
+  /** Instance-wide ceiling (Settings > Instance settings > General > "Max concurrent runs (whole instance)"). */
   max: number;
   used: number;
   available: number;
   saturated: boolean;
 }
 
+/**
+ * Who is in error and since when. Deliberately no error text: this signal
+ * is instance-wide, and the free-text reason belongs on the agent's own
+ * (company-scoped) page.
+ */
 export interface FleetAgentInErrorSample {
   id: string;
   name: string;
   companyId: string;
-  errorReason: string | null;
   errorAt: string | null;
 }
 
@@ -62,7 +66,10 @@ export interface FleetSchedulerStatus {
 }
 
 export interface FleetRequestLoad {
+  /** Requests still waiting to answer (the ones that can pile up). */
   inFlight: number;
+  /** Responses that have started and are streaming (board chat, log tails); never an alarm. */
+  streaming: number;
   peakInFlight: number;
   peakInFlightAt: string | null;
   longestInFlightMs: number;

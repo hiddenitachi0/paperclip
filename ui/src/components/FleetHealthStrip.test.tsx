@@ -50,6 +50,7 @@ const healthyFleet: FleetHealthSnapshot = {
   },
   requests: {
     inFlight: 2,
+    streaming: 0,
     peakInFlight: 9,
     peakInFlightAt: "2026-09-06T09:00:00.000Z",
     longestInFlightMs: 120,
@@ -75,14 +76,14 @@ const starvedFleet: FleetHealthSnapshot = {
   agents: {
     inError: 2,
     inErrorSample: [
-      { id: "a", name: "Reviewer", companyId: "c", errorReason: "Adapter crashed", errorAt: "2026-09-06T08:00:00.000Z" },
-      { id: "b", name: "Writer", companyId: "c", errorReason: null, errorAt: null },
+      { id: "a", name: "Reviewer", companyId: "c", errorAt: "2026-09-06T08:00:00.000Z" },
+      { id: "b", name: "Writer", companyId: "c", errorAt: null },
     ],
   },
   summary: {
     level: "warning",
     headline:
-      'All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise "Max concurrent runs" in Settings to let more through.',
+      'All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise "Max concurrent runs (whole instance)" under Settings > Instance settings > General to let more through.',
     notes: [
       "1 run has shown no output for 30+ minutes and may be stuck, holding a slot. The watchdog ends a run once its process is confirmed gone.",
       "2 agents have stopped with an error and will not take work until someone clears it: Reviewer, Writer.",
@@ -152,6 +153,20 @@ describe("fleetHealthFacts", () => {
     const stale = fleetHealthFacts({ ...healthyFleet, scheduler: { ...healthyFleet.scheduler, stale: true, sinceLastTickMs: 5 * 3_600_000 } });
     expect(stale[4]).toEqual({ key: "scheduler", text: "Scheduler ticked 5 h ago", alert: true });
   });
+
+  it("shows slow requests and open streams as information, and only a pile-up as an alert", () => {
+    const busy = fleetHealthFacts({
+      ...healthyFleet,
+      requests: { ...healthyFleet.requests, inFlight: 3, slowInFlight: 1, streaming: 2 },
+    });
+    expect(busy[5]).toEqual({ key: "requests", text: "3 requests in flight (1 slow) · 2 streaming", alert: false });
+
+    const overloaded = fleetHealthFacts({
+      ...healthyFleet,
+      requests: { ...healthyFleet.requests, inFlight: 60, overloaded: true },
+    });
+    expect(overloaded[5]).toEqual({ key: "requests", text: "60 requests in flight", alert: true });
+  });
 });
 
 describe("FleetHealthStripView", () => {
@@ -174,7 +189,7 @@ describe("FleetHealthStripView", () => {
     const strip = container!.querySelector('[data-testid="fleet-health-strip"]');
     expect(strip?.getAttribute("data-level")).toBe("warning");
     expect(strip?.textContent).toContain("Needs a look.");
-    expect(strip?.textContent).toContain('raise "Max concurrent runs" in Settings');
+    expect(strip?.textContent).toContain('raise "Max concurrent runs (whole instance)" under Settings > Instance settings > General');
     const notes = [...container!.querySelectorAll('[data-testid="fleet-health-note"]')].map((node) => node.textContent);
     expect(notes).toHaveLength(3);
     expect(notes[1]).toContain("Reviewer, Writer");

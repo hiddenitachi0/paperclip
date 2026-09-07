@@ -191,11 +191,14 @@ export function healthRoutes(
 
     // DUR-3939/DUR-3940/DUR-272: fleet run-rate, slot saturation, agents in
     // error, zombie candidates, scheduler liveness and request load -- all
-    // computed from live state right now. Board/agent callers only (it rides
-    // on the full-details branch). A failure to compute is reported as such,
-    // never rendered as "healthy" (DUR-98 item 4).
+    // computed from live state right now. Board callers only: the signal
+    // spans every company on the instance (agent names across companies),
+    // so an agent's API key -- which belongs to one company -- never gets
+    // it, even though agents do get the rest of the full-details body. A
+    // failure to compute is reported as such, never rendered as "healthy"
+    // (DUR-98 item 4).
     let fleet: FleetHealth | undefined;
-    if (typeof (db as { select?: unknown }).select === "function") {
+    if (actorType === "board" && typeof (db as { select?: unknown }).select === "function") {
       try {
         fleet = await computeFleetHealth(db, {
           scheduler: schedulerLiveness.snapshot(),
