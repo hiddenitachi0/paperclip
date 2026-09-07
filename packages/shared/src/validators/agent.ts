@@ -11,6 +11,9 @@ import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-polic
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
 
+/** Upper bound for agents.laneAInstructions (roughly 2k tokens); it is prepended to every quick-agent call. */
+export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
+
 export const agentPermissionsSchema = z.object({
   canCreateAgents: z.boolean().optional().default(false),
   canCreateSkills: z.boolean().optional().default(true),
@@ -288,6 +291,9 @@ export const updateAgentSchema = createAgentObjectSchema
     // Lane A (DUR-217) opt-in — board-settable only, enforced in
     // server/src/routes/agents.ts (assertCanManageLaneAFlag), not here.
     laneAEnabled: z.boolean().optional(),
+    // Quick agent instruction set — board-settable only, same guard as
+    // laneAEnabled. Kept short: it is prepended to every Lane A call.
+    laneAInstructions: z.string().max(LANE_A_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
   });
 
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;

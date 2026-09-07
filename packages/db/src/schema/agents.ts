@@ -58,6 +58,10 @@ export const agents = pgTable(
     // by default and board-settable only — see assertCanManageLaneAFlag in
     // server/src/routes/agents.ts, which mirrors the instructions-path guard.
     laneAEnabled: boolean("lane_a_enabled").notNull().default(false),
+    // Quick agents (migration 0162): the operator-written instruction set a
+    // Lane A agent follows (persona + rules). Board-settable only, same guard
+    // as laneAEnabled. Null means "no special instructions".
+    laneAInstructions: text("lane_a_instructions"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // DUR-109: last time a human (direct bundle/file edit) or an approved

@@ -1583,11 +1583,19 @@ export function agentRoutes(
     await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
   }
 
+  // Quick-agent fields guarded by the board-only Lane A rule: the on/off switch
+  // and the instruction set the quick agent follows.
+  const LANE_A_BOARD_ONLY_FIELDS = ["laneAEnabled", "laneAInstructions"] as const;
+  function patchTouchesLaneAFields(patchData: Record<string, unknown>) {
+    return LANE_A_BOARD_ONLY_FIELDS.some((key) => hasOwn(patchData, key));
+  }
+
   // Mirrors assertNoAgentInstructionsConfigMutation: an agent PATCHing its own
-  // config cannot flip its own laneAEnabled flag, even to false.
+  // config cannot flip its own laneAEnabled flag (even to false) or rewrite
+  // its own quick-agent instructions.
   function assertNoAgentLaneAFlagMutation(req: Request, patchData: Record<string, unknown>) {
-    if (req.actor.type !== "agent" || !hasOwn(patchData, "laneAEnabled")) return;
-    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled");
+    if (req.actor.type !== "agent" || !patchTouchesLaneAFields(patchData)) return;
+    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled or laneAInstructions");
   }
 
   function assertNoAgentInstructionsConfigMutation(
@@ -3383,7 +3391,7 @@ export function agentRoutes(
 
     const patchData = { ...(req.body as Record<string, unknown>) };
     assertNoAgentLaneAFlagMutation(req, patchData);
-    if (hasOwn(patchData, "laneAEnabled")) {
+    if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
     }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
