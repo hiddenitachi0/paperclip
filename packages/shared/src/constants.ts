@@ -286,6 +286,9 @@ export const ISSUE_ORIGIN_KINDS = [
   "stranded_issue_recovery",
   "task_watchdog",
   TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND,
+  // DUR-62: the weekly check-up report. Written for the operator, deliberately
+  // unassigned, and refused to every agent-authenticated mutation.
+  "organization_checkup",
 ] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;

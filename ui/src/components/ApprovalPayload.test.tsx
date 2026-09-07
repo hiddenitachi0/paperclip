@@ -8,6 +8,7 @@ import {
   approvalDeployBranchInfo,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
+  approvalIsRollbackDeploy,
   approvalLabel,
   approvalTargetBadge,
   approvalTechnicalReference,
@@ -103,6 +104,16 @@ describe("approvalDeployBranchInfo", () => {
   it("returns null for non-deploy approvals", () => {
     expect(approvalDeployBranchInfo({ kind: "merge_pr", sourceBranch: "master" })).toBeNull();
     expect(approvalDeployBranchInfo(null)).toBeNull();
+  });
+});
+
+describe("approvalIsRollbackDeploy (DUR-3952)", () => {
+  it("is true only for a deploy filed with allowBackwardDeploy", () => {
+    expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234", allowBackwardDeploy: true })).toBe(true);
+    expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234" })).toBe(false);
+    expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234", allowBackwardDeploy: false })).toBe(false);
+    expect(approvalIsRollbackDeploy({ kind: "merge_pr", allowBackwardDeploy: true })).toBe(false);
+    expect(approvalIsRollbackDeploy(null)).toBe(false);
   });
 });
 

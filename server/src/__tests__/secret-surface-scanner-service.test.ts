@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import {
@@ -178,14 +178,14 @@ describeEmbeddedPostgres("secret-surface-scanner", () => {
     expect(filedIssue.description).toContain(leakyRunId);
 
     // Resuming from the returned cursor must not refile the already-filed
-    // finding. The boundary row itself may be re-selected once (JS `Date`
-    // only carries millisecond precision, Postgres timestamptz carries
-    // microseconds, so the cursor's re-serialized createdAt can be a hair
-    // behind the stored value) -- harmless because fileSecretFinding's
-    // fingerprint dedup makes rescanning idempotent, so what actually
-    // matters is zero new matches/issues, not zero re-selected rows.
+    // finding, and must not re-select anything either: the cursor carries the
+    // boundary row's created_at at Postgres's own microsecond precision
+    // (DUR-3931), so the resume query lands exactly after it. Before that fix
+    // the cursor was a millisecond JS Date and this assertion had to allow one
+    // re-selected row -- which still flaked on CI, because two rows inserted
+    // in the same millisecond were BOTH re-selected ("expected 2 to be <= 1").
     const secondSweep = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: firstSweep.cursor });
-    expect(secondSweep.rowsScanned).toBeLessThanOrEqual(1);
+    expect(secondSweep.rowsScanned).toBe(0);
     expect(secondSweep.matchesFound).toBe(0);
     expect(secondSweep.issuesFiled).toBe(0);
 
@@ -194,6 +194,63 @@ describeEmbeddedPostgres("secret-surface-scanner", () => {
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.originKind, SECRET_SCAN_ORIGIN_KIND)));
     expect(allFindingIssues).toHaveLength(1);
+  });
+
+  it("DUR-3931: the resume cursor is exact when rows share a millisecond but differ by microseconds", async () => {
+    const companyId = await seedCompany();
+    const runnerAgentId = await seedAgent(companyId);
+
+    // Two rows 500 microseconds apart inside the same millisecond -- the shape a
+    // fast CI runner produces for back-to-back inserts, and the exact input the
+    // old millisecond-precision cursor got wrong (it truncated the boundary to
+    // ...123000 and `created_at > cursor` then matched both rows again).
+    const earlierId = "00000000-0000-4000-8000-000000000001";
+    const laterId = "00000000-0000-4000-8000-000000000002";
+    await db.insert(heartbeatRuns).values({
+      id: earlierId,
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      createdAt: sql`'2026-01-01 00:00:00.123400+00'::timestamptz`,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: laterId,
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      createdAt: sql`'2026-01-01 00:00:00.123900+00'::timestamptz`,
+    });
+
+    const firstSweep = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: null });
+    expect(firstSweep.rowsScanned).toBe(2);
+    expect(firstSweep.cursor).toEqual({ createdAt: expect.stringContaining(".1239"), id: laterId });
+
+    const resumed = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: firstSweep.cursor });
+    expect(resumed.rowsScanned).toBe(0);
+    expect(resumed.cursor).toEqual(firstSweep.cursor);
+
+    // A row that lands strictly after the boundary is still picked up.
+    const newestId = "00000000-0000-4000-8000-000000000003";
+    await db.insert(heartbeatRuns).values({
+      id: newestId,
+      companyId,
+      agentId: runnerAgentId,
+      invocationSource: "on_demand",
+      status: "succeeded",
+      createdAt: sql`'2026-01-01 00:00:00.124000+00'::timestamptz`,
+    });
+    const third = await scanHeartbeatRunsForLeakedSecrets(db, { cursor: resumed.cursor });
+    expect(third.rowsScanned).toBe(1);
+    expect(third.cursor?.id).toBe(newestId);
+
+    // A legacy millisecond Date cursor is still accepted and resumes at the
+    // old (coarser) precision without throwing.
+    const legacy = await scanHeartbeatRunsForLeakedSecrets(db, {
+      cursor: { createdAt: new Date("2026-01-01T00:00:00.123Z"), id: earlierId },
+    });
+    expect(legacy.rowsScanned).toBe(3);
   });
 
   it("DUR-360: does not hang on an adversarial multi-MB error column (unbounded-input DoS via the shared multi-line PEM pattern)", async () => {

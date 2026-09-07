@@ -141,6 +141,34 @@ describe("ApprovalCard deploy branch warning (DUR-226)", () => {
     expect(container.textContent).not.toContain("Not on");
   });
 
+  it("DUR-3952: calls out a rollback in the title row so approving it is a deliberate choice", () => {
+    renderCard({
+      linkedIssues: [issue("DUR-217")],
+      approval: makeApproval({
+        payload: {
+          title: "Roll back to yesterday's release",
+          kind: "deploy",
+          commit: "abc1234",
+          sourceBranch: "custom",
+          deployBranch: "custom",
+          allowBackwardDeploy: true,
+        },
+      }),
+    });
+    expect(container.textContent).toContain("Rollback");
+    expect(container.textContent).toContain("moves production back");
+  });
+
+  it("does not call an ordinary deploy a rollback", () => {
+    renderCard({
+      linkedIssues: [issue("DUR-217")],
+      approval: makeApproval({
+        payload: { title: "Deploy widgets", kind: "deploy", commit: "abc1234", sourceBranch: "custom", deployBranch: "custom" },
+      }),
+    });
+    expect(container.textContent).not.toContain("Rollback");
+  });
+
   it("shows nothing when the backend hasn't resolved a source branch yet", () => {
     renderCard({
       linkedIssues: [issue("DUR-217")],

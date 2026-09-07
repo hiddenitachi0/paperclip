@@ -5,8 +5,12 @@ import { validate } from "../middleware/validate.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { inboxDismissalService, logActivity } from "../services/index.js";
 
+// DUR-62: `checkup-finding:<fingerprint>` hides one weekly check-up finding
+// for 28 days. Unlike the other keys it is read company-wide (any board user's
+// dismissal counts, and the report says who hid it) -- see
+// services/organization-checkup.ts listActiveDismissals.
 const inboxDismissalSchema = z.object({
-  itemKey: z.string().trim().min(1).regex(/^(approval|join|run):.+$/, "Unsupported inbox item key"),
+  itemKey: z.string().trim().min(1).regex(/^(approval|join|run|checkup-finding):.+$/, "Unsupported inbox item key"),
 });
 
 export function inboxDismissalRoutes(db: Db) {

@@ -2743,6 +2743,29 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+// ─── Company check-ups (DUR-62) ───────────────────────────────────────────────
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/checkups/run",
+  tags: ["checkups"],
+  summary: "Run the company check-up now (board only); dryRun returns the report without filing it",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(z.object({ dryRun: z.boolean().optional() })),
+  },
+  responses: { 200: r.ok(), 201: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/checkups/latest",
+  tags: ["checkups"],
+  summary: "Get the latest open check-up report for a company (board only)",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── Instance settings ────────────────────────────────────────────────────────
 
 registry.registerPath({
