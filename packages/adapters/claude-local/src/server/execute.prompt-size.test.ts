@@ -300,7 +300,7 @@ describe("claude local execute -- resumed-session task context (DUR-3943)", () =
         startedAt: new Date().toISOString(),
       }));
     }
-    const sessionParams = input.sessionParams ? { ...input.sessionParams, cwd: workspaceDir } : null;
+    const sessionParams: Record<string, unknown> | null = input.sessionParams ? { ...input.sessionParams, cwd: workspaceDir } : null;
     const metas: Array<{ prompt?: string; commandArgs?: string[]; commandNotes?: string[]; promptMetrics?: Record<string, number> }> = [];
     const result = await execute({
       runId: "run-prompt-size",
