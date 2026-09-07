@@ -11,6 +11,7 @@ import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
 import { healthRoutes } from "./routes/health.js";
+import { requestLoadTracker } from "./services/request-load.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { teamsCatalogRoutes } from "./routes/teams-catalog.js";
@@ -187,6 +188,10 @@ export async function createApp(
     verify: captureRawBody,
   }));
   app.use(httpLogger);
+  // DUR-272: count requests in flight (and how long the oldest has waited)
+  // so /api/health can tell "overloaded" from "down". Mounted before any
+  // auth/route work so a request stuck anywhere downstream is still counted.
+  app.use(requestLoadTracker.middleware());
   const privateHostnameGateEnabled = shouldEnablePrivateHostnameGuard({
     deploymentMode: opts.deploymentMode,
     deploymentExposure: opts.deploymentExposure,
