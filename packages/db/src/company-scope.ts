@@ -346,7 +346,9 @@ const lastAuditWriteAtByKey = new Map<string, number>();
 function shouldWriteAuditRow(opts: CompanyScopeBypassOptions, nowMs: number = Date.now()): boolean {
   const windowMs = opts.auditCoalesceMs;
   if (!windowMs || !(windowMs > 0)) return true;
-  const key = `${opts.route ?? ""} ${opts.reason}`;
+  // The separator is written as an escape sequence (not a raw byte in the source) so
+  // the file stays plain text; a NUL can never occur inside a route or a reason.
+  const key = `${opts.route ?? ""}\u0000${opts.reason}`;
   const last = lastAuditWriteAtByKey.get(key);
   if (last !== undefined && nowMs - last < windowMs) return false;
   lastAuditWriteAtByKey.set(key, nowMs);
