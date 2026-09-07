@@ -61,3 +61,60 @@ export function buildAgentEnteredErrorNotice(input: AgentEnteredErrorNoticeInput
   const because = reason ? ` Last error: ${reason}` : "";
   return `${who} stopped taking work after a failed run and needs attention. Open the agent and use "Clear error" once the cause is fixed.${because}`;
 }
+
+export type FrozenRunStopReason = "too_long" | "silent";
+
+export interface FrozenRunStopWordingInput {
+  reason: FrozenRunStopReason;
+  /** The limit that was crossed (max run duration, or the silence window). */
+  limitMs: number;
+  /** Whether a fresh run was queued to pick the work up again. */
+  retryQueued: boolean;
+}
+
+/**
+ * DUR-3940 item 2 / run cap: the sentence stored as the run's own error
+ * (shown on the run row and the agent page). Plain language, states the
+ * limit and what happens next.
+ */
+export function buildFrozenRunErrorMessage(input: FrozenRunStopWordingInput): string {
+  const limit = formatOperatorDuration(input.limitMs);
+  const what =
+    input.reason === "too_long"
+      ? `Stopped after ${limit} with no result`
+      : `Stopped after ${limit} without any output`;
+  const next = input.retryQueued
+    ? "it will be retried."
+    : "this was already the retry, so the agent has been flagged for attention.";
+  return `${what}; ${next}`;
+}
+
+export interface StoppedRunOperatorNoticeInput extends FrozenRunStopWordingInput {
+  agentName: string | null | undefined;
+  /** How long the run had been going when it was stopped. */
+  ranForMs: number | null;
+  /** How long the run had shown no output when it was stopped. */
+  silentForMs: number | null;
+  /** Whether the agent was left in "error" and now needs a person. */
+  agentMarkedError: boolean;
+}
+
+/**
+ * DUR-3940 item 2 / run cap: the Activity-feed notice written when the
+ * watchdog stops a run that is alive but frozen (silent for too long) or
+ * simply running for longer than any real run ever finishes in.
+ */
+export function buildStoppedRunOperatorNotice(input: StoppedRunOperatorNoticeInput): string {
+  const who = input.agentName?.trim() ? input.agentName.trim() : "An agent";
+  const limit = formatOperatorDuration(input.limitMs);
+  const why =
+    input.reason === "too_long"
+      ? `it had been going for ${formatOperatorDuration(input.ranForMs)} without finishing (the limit is ${limit})`
+      : `its process was still running but had shown no output for ${formatOperatorDuration(input.silentForMs)} (the limit is ${limit})`;
+  const then = input.retryQueued
+    ? "Paperclip ended it and queued a fresh run to pick the work up again."
+    : input.agentMarkedError
+      ? `Paperclip ended it. That was already the retry, so ${who} is now marked as needing attention and will not take new work until someone clears the error.`
+      : `Paperclip ended it. ${who} is free to take work again.`;
+  return `${who}'s run was stopped: ${why}. ${then}`;
+}

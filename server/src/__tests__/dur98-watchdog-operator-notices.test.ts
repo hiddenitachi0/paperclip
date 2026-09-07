@@ -26,7 +26,9 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   buildAgentEnteredErrorNotice,
+  buildFrozenRunErrorMessage,
   buildReapedRunOperatorNotice,
+  buildStoppedRunOperatorNotice,
   formatOperatorDuration,
 } from "../services/operator-notices.js";
 
@@ -53,7 +55,7 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
-import { heartbeatService } from "../services/heartbeat.ts";
+import { heartbeatService, resolveFrozenRunCaps } from "../services/heartbeat.ts";
 
 // DUR-98: "something broke, the system knew, and nobody was told." The two
 // cases below are the platform's own detections -- the watchdog ending a run
@@ -379,5 +381,87 @@ describeEmbeddedPostgres("watchdog and agent-error operator notices (DUR-98)", (
       .from(activityLog)
       .where(and(eq(activityLog.companyId, first.companyId), eq(activityLog.action, "heartbeat.run_reaped")));
     expect(reapNotices).toHaveLength(2);
+  });
+});
+
+// DUR-3940 item 2 / run cap: the frozen-run watchdog's wording and its
+// limit precedence (agent adapterConfig > instance setting > default).
+describe("frozen-run watchdog wording and limits (DUR-3940 item 2)", () => {
+  it("states the limit and what happens next on the run itself", () => {
+    expect(buildFrozenRunErrorMessage({ reason: "too_long", limitMs: 150 * 60_000, retryQueued: true })).toBe(
+      "Stopped after 2 hours 30 minutes with no result; it will be retried.",
+    );
+    expect(buildFrozenRunErrorMessage({ reason: "silent", limitMs: 45 * 60_000, retryQueued: true })).toBe(
+      "Stopped after 45 minutes without any output; it will be retried.",
+    );
+    expect(buildFrozenRunErrorMessage({ reason: "silent", limitMs: 45 * 60_000, retryQueued: false })).toBe(
+      "Stopped after 45 minutes without any output; this was already the retry, so the agent has been flagged for attention.",
+    );
+  });
+
+  it("tells the operator why the run was stopped and what Paperclip did about it", () => {
+    expect(
+      buildStoppedRunOperatorNotice({
+        agentName: "Backend Engineer",
+        reason: "too_long",
+        limitMs: 150 * 60_000,
+        ranForMs: 155 * 60_000,
+        silentForMs: 2 * 60_000,
+        retryQueued: true,
+        agentMarkedError: false,
+      }),
+    ).toBe(
+      "Backend Engineer's run was stopped: it had been going for 2 hours 35 minutes without finishing (the limit is 2 hours 30 minutes). Paperclip ended it and queued a fresh run to pick the work up again.",
+    );
+    expect(
+      buildStoppedRunOperatorNotice({
+        agentName: "  ",
+        reason: "silent",
+        limitMs: 45 * 60_000,
+        ranForMs: 80 * 60_000,
+        silentForMs: 47 * 60_000,
+        retryQueued: false,
+        agentMarkedError: true,
+      }),
+    ).toBe(
+      "An agent's run was stopped: its process was still running but had shown no output for 47 minutes (the limit is 45 minutes). Paperclip ended it. That was already the retry, so An agent is now marked as needing attention and will not take new work until someone clears the error.",
+    );
+    expect(
+      buildStoppedRunOperatorNotice({
+        agentName: "Scout",
+        reason: "silent",
+        limitMs: 45 * 60_000,
+        ranForMs: null,
+        silentForMs: 46 * 60_000,
+        retryQueued: false,
+        agentMarkedError: false,
+      }),
+    ).toBe(
+      "Scout's run was stopped: its process was still running but had shown no output for 46 minutes (the limit is 45 minutes). Paperclip ended it. Scout is free to take work again.",
+    );
+  });
+
+  it("resolves the limits: agent adapterConfig beats the instance setting, 0 switches a limit off, junk falls back", () => {
+    const general = { maxRunDurationMinutes: 150, silentRunTimeoutMinutes: 45 };
+    expect(resolveFrozenRunCaps({}, general)).toEqual({
+      maxRunDurationMs: 150 * 60_000,
+      silentRunTimeoutMs: 45 * 60_000,
+    });
+    expect(resolveFrozenRunCaps(null, { maxRunDurationMinutes: 90, silentRunTimeoutMinutes: 20 })).toEqual({
+      maxRunDurationMs: 90 * 60_000,
+      silentRunTimeoutMs: 20 * 60_000,
+    });
+    expect(resolveFrozenRunCaps({ maxRunDurationMinutes: 30, silentRunTimeoutMinutes: "15" }, general)).toEqual({
+      maxRunDurationMs: 30 * 60_000,
+      silentRunTimeoutMs: 15 * 60_000,
+    });
+    expect(resolveFrozenRunCaps({ maxRunDurationMinutes: 0, silentRunTimeoutMinutes: 0 }, general)).toEqual({
+      maxRunDurationMs: 0,
+      silentRunTimeoutMs: 0,
+    });
+    expect(resolveFrozenRunCaps({ maxRunDurationMinutes: "soon", silentRunTimeoutMinutes: -3 }, general)).toEqual({
+      maxRunDurationMs: 150 * 60_000,
+      silentRunTimeoutMs: 45 * 60_000,
+    });
   });
 });

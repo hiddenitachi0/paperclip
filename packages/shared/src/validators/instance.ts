@@ -14,6 +14,12 @@ import {
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   MIN_GLOBAL_MAX_CONCURRENT_RUNS,
   MAX_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_MAX_RUN_DURATION_MINUTES,
+  MIN_MAX_RUN_DURATION_MINUTES,
+  MAX_MAX_RUN_DURATION_MINUTES,
+  DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
+  MIN_SILENT_RUN_TIMEOUT_MINUTES,
+  MAX_SILENT_RUN_TIMEOUT_MINUTES,
   DEFAULT_QUIET_MODE_STATE,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
@@ -77,6 +83,24 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_GLOBAL_MAX_CONCURRENT_RUNS)
     .max(MAX_GLOBAL_MAX_CONCURRENT_RUNS)
     .default(DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS),
+  // DUR-3940 item 2 / run cap: watchdog limits for local child-process runs.
+  // A run going longer than this without finishing is stopped, marked failed
+  // and retried once; per agent it can be overridden (or switched off with
+  // 0) via adapterConfig.maxRunDurationMinutes.
+  maxRunDurationMinutes: z
+    .number()
+    .int()
+    .min(MIN_MAX_RUN_DURATION_MINUTES)
+    .max(MAX_MAX_RUN_DURATION_MINUTES)
+    .default(DEFAULT_MAX_RUN_DURATION_MINUTES),
+  // Same for a run whose process is alive but has printed nothing for this
+  // long; per-agent override adapterConfig.silentRunTimeoutMinutes.
+  silentRunTimeoutMinutes: z
+    .number()
+    .int()
+    .min(MIN_SILENT_RUN_TIMEOUT_MINUTES)
+    .max(MAX_SILENT_RUN_TIMEOUT_MINUTES)
+    .default(DEFAULT_SILENT_RUN_TIMEOUT_MINUTES),
   // DUR-224. Managed exclusively by the quiet-mode activate/deactivate
   // service functions (they need to read+write the `agents` table
   // atomically with the flip), not by the generic general-settings patch --

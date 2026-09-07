@@ -614,3 +614,15 @@ export type {
   PluginDatabaseNamespaceMode,
   PluginDatabaseNamespaceStatus,
 } from "./plugin.js";
+export {
+  CLAUDE_AUTH_SOURCES,
+  CLAUDE_AUTH_TOKEN_LIFETIME_DAYS,
+  CLAUDE_AUTH_EXPIRY_WARNING_DAYS,
+} from "./instance-claude-auth.js";
+export type {
+  ClaudeAuthHealth,
+  ClaudeAuthSource,
+  InstanceClaudeAuthStatus,
+  InstanceClaudeSignInSession,
+  InstanceClaudeSignInStatus,
+} from "./instance-claude-auth.js";
