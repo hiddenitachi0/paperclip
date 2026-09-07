@@ -110,6 +110,13 @@ export interface InstanceGeneralSettings {
    * operator opts in via a normal general-settings PATCH.
    */
   mergePrAutomationEnabled: boolean;
+  /**
+   * DUR-411: when true, the reassuring "fact check" card is only shown for
+   * confirmations that are positively recognised as a fact check (on top of
+   * the existing decision-verb denylist). Defaults to false = current
+   * behaviour; turning it on can only make the UI stricter.
+   */
+  factCheckCardStrictAllowlist: boolean;
 }
 
 export interface InstanceExperimentalSettings {
