@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { PatchInstanceGeneralSettings, BackupRetentionPolicy } from "@paperclipai/shared";
+import type { PatchInstanceGeneralSettings, BackupRetentionPolicy, DoneGateMode, DoneGateSettings } from "@paperclipai/shared";
 import {
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
+  DEFAULT_DONE_GATE_SETTINGS,
+  MIN_DONE_GATE_MAX_ROUNDS,
+  MAX_DONE_GATE_MAX_ROUNDS,
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   MIN_GLOBAL_MAX_CONCURRENT_RUNS,
   MAX_GLOBAL_MAX_CONCURRENT_RUNS,
@@ -39,8 +42,9 @@ function MinutesLimitField(props: {
   max: number;
   pending: boolean;
   onSave: (minutes: number) => void;
+  unit?: string;
 }) {
-  const { label, saved, min, max, pending, onSave } = props;
+  const { label, saved, min, max, pending, onSave, unit = "minutes" } = props;
   const [draft, setDraft] = useState<string | null>(null);
   const value = draft ?? String(saved);
   const parsed = Number(value);
@@ -70,7 +74,7 @@ function MinutesLimitField(props: {
         aria-invalid={!valid}
         className="w-28"
       />
-      <span className="text-sm text-muted-foreground">minutes</span>
+      <span className="text-sm text-muted-foreground">{unit}</span>
       <Button type="submit" size="sm" disabled={!changed || pending}>
         {pending ? "Saving..." : "Save"}
       </Button>
@@ -150,6 +154,14 @@ export function InstanceGeneralSettings() {
   const censorUsernameInLogs = generalQuery.data?.censorUsernameInLogs === true;
   const keyboardShortcuts = generalQuery.data?.keyboardShortcuts === true;
   const factCheckCardStrictAllowlist = generalQuery.data?.factCheckCardStrictAllowlist === true;
+  const doneGate: DoneGateSettings = generalQuery.data?.doneGate ?? DEFAULT_DONE_GATE_SETTINGS;
+  const saveDoneGate = (patch: Partial<DoneGateSettings>) =>
+    updateGeneralMutation.mutate({ doneGate: { ...doneGate, ...patch } });
+  const doneGateModeOptions: Array<{ value: DoneGateMode; label: string }> = [
+    { value: "off", label: "Off" },
+    { value: "dry_run", label: "Comment only" },
+    { value: "enforce", label: "On" },
+  ];
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
   const globalMaxConcurrentRuns = generalQuery.data?.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS;
@@ -367,6 +379,61 @@ export function InstanceGeneralSettings() {
             disabled={updateGeneralMutation.isPending}
             aria-label="Toggle stricter fact-check cards"
           />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-5">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Quality check before a task is marked done</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              When an agent says a task is finished, a second, cheap AI reviewer reads what the task asked for next to
+              what the agent reported (and the change summary, when there was one) and answers &quot;looks done&quot; or
+              &quot;still needs work&quot;. You are never checked, only agents. Off by default.
+            </p>
+            <ul className="max-w-2xl list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              <li><span className="font-medium text-foreground">Off</span>: nothing happens.</li>
+              <li>
+                <span className="font-medium text-foreground">Comment only</span>: the reviewer&apos;s verdict is posted on
+                the task, but the task still moves to done. Use this first to see whether the reviewer is helpful.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">On</span>: a &quot;needs work&quot; verdict sends the task
+                back to the agent with the findings. After the number of rounds below, the platform stops looping and
+                asks you to decide instead.
+              </li>
+            </ul>
+          </div>
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Quality check mode">
+            {doneGateModeOptions.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                size="sm"
+                variant={doneGate.mode === option.value ? "default" : "outline"}
+                aria-pressed={doneGate.mode === option.value}
+                disabled={updateGeneralMutation.isPending || doneGate.mode === option.value}
+                onClick={() => saveDoneGate({ mode: option.value })}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
+          <MinutesLimitField
+            label="Ask me after"
+            unit={"rounds of \"needs work\""}
+            saved={doneGate.maxRounds}
+            min={MIN_DONE_GATE_MAX_ROUNDS}
+            max={MAX_DONE_GATE_MAX_ROUNDS}
+            pending={updateGeneralMutation.isPending}
+            onSave={(rounds) => saveDoneGate({ maxRounds: rounds })}
+          />
+          {Object.keys(doneGate.companyOverrides ?? {}).length > 0 ? (
+            <p className="max-w-2xl text-xs text-muted-foreground">
+              {Object.keys(doneGate.companyOverrides).length} company-specific override(s) are set through the API and
+              take precedence over the instance setting for those companies.
+            </p>
+          ) : null}
         </div>
       </section>
 
