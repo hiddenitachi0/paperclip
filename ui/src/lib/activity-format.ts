@@ -64,6 +64,20 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.error_stalled": "is still waiting for someone to clear the error on",
   "heartbeat.run_reaped": "ended a run that had stopped responding for",
   "heartbeat.run_stopped": "stopped a run that was taking too long for",
+  // Admin auth hardening: security notices about operator accounts. The
+  // entity is a user, so the verb reads "...for <user>" like the ones above.
+  "security.admin_added_outside_app": "noticed a new instance admin added outside the app:",
+  "security.admin_removed_outside_app": "noticed an instance admin removed outside the app:",
+  "security.admin_email_changed_outside_app": "noticed a sign-in email changed outside the app for",
+  "security.admin_password_changed_outside_app": "noticed a password changed outside the app for",
+  "security.admin_record_tampered": "noticed the signed admin record was edited outside the app",
+  "security.admin_promoted": "made an instance admin of",
+  "security.admin_demoted": "removed instance admin access from",
+  "security.password_changed": "changed the password of",
+  "security.email_changed": "changed the sign-in email of",
+  "security.admin_signed_in_new_device": "noticed a sign-in from a new device for",
+  "security.signed_out_everywhere": "signed out every device for",
+  "security.session_revoked": "ended a signed-in session for",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -493,6 +507,20 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "agent.error_stalled",
   "heartbeat.run_reaped",
   "heartbeat.run_stopped",
+  // Admin auth hardening: every security.* entry carries its sentence in
+  // details.message (see server/src/services/admin-auth-audit.ts).
+  "security.admin_added_outside_app",
+  "security.admin_removed_outside_app",
+  "security.admin_email_changed_outside_app",
+  "security.admin_password_changed_outside_app",
+  "security.admin_record_tampered",
+  "security.admin_promoted",
+  "security.admin_demoted",
+  "security.password_changed",
+  "security.email_changed",
+  "security.admin_signed_in_new_device",
+  "security.signed_out_everywhere",
+  "security.session_revoked",
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {

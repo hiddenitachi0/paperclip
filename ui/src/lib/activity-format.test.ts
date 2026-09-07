@@ -94,6 +94,22 @@ describe("activity formatting", () => {
     expect(isOperatorNoticeAction("heartbeat.run_stopped")).toBe(true);
   });
 
+  // Admin auth hardening: security notices about operator accounts render
+  // their server-written sentence, and never fall back to a raw action key.
+  it("treats admin-account security entries as operator notices with plain verbs", () => {
+    expect(isOperatorNoticeAction("security.admin_added_outside_app")).toBe(true);
+    expect(isOperatorNoticeAction("security.admin_signed_in_new_device")).toBe(true);
+    expect(isOperatorNoticeAction("security.signed_out_everywhere")).toBe(true);
+    expect(
+      formatOperatorNotice("security.admin_password_changed_outside_app", {
+        message: "The password for instance admin Filip was changed without going through the app.",
+      }),
+    ).toBe("The password for instance admin Filip was changed without going through the app.");
+    expect(formatActivityVerb("security.admin_added_outside_app")).toBe("noticed a new instance admin added outside the app:");
+    expect(formatActivityVerb("security.admin_promoted")).toBe("made an instance admin of");
+    expect(formatActivityVerb("security.admin_record_tampered")).not.toContain("security.");
+  });
+
   it("surfaces the server-written message for operator notices only", () => {
     expect(isOperatorNoticeAction("heartbeat.run_reaped")).toBe(true);
     expect(isOperatorNoticeAction("issue.updated")).toBe(false);

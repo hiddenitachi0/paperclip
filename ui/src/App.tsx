@@ -56,6 +56,7 @@ import { CompanyImport } from "./pages/CompanyImport";
 import { DesignGuide } from "./pages/DesignGuide";
 import { InstanceGeneralSettings } from "./pages/InstanceGeneralSettings";
 import { InstanceClaudeAuth } from "./pages/InstanceClaudeAuth";
+import { InstanceSecurity } from "./pages/InstanceSecurity";
 import { InstanceAccess } from "./pages/InstanceAccess";
 import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
@@ -107,6 +108,7 @@ function boardRoutes() {
       <Route path="company/settings/instance/profile" element={<ProfileSettings />} />
       <Route path="company/settings/instance/general" element={<InstanceGeneralSettings />} />
       <Route path="company/settings/instance/claude" element={<InstanceClaudeAuth />} />
+      <Route path="company/settings/instance/security" element={<InstanceSecurity />} />
       <Route path="company/settings/instance/environments" element={<CompanyEnvironments />} />
       <Route path="company/settings/instance/access" element={<InstanceAccess />} />
       <Route path="company/settings/instance/heartbeats" element={<InstanceSettings />} />
