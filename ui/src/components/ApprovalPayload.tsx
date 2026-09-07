@@ -463,7 +463,10 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
         .filter(Boolean)
     : [];
   const title = firstNonEmptyString(payload.title);
-  const summary = firstNonEmptyString(payload.summary);
+  // Operator cards the server files for itself (done_gate_exhausted, goal_condition_exhausted)
+  // carry their findings in `plainSummary`; fall back to it so the card never shows a
+  // recommended action without the facts behind it. Multi-line summaries keep their lines.
+  const summary = firstNonEmptyString(payload.summary, payload.plainSummary);
   const recommendedAction = firstNonEmptyString(payload.recommendedAction);
   const nextActionOnApproval = firstNonEmptyString(payload.nextActionOnApproval);
   const proposedComment = firstNonEmptyString(payload.proposedComment);
@@ -479,7 +482,7 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
       {summary && (
         <div className="space-y-1">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Summary</p>
-          <p className="leading-6 text-foreground/90">{summary}</p>
+          <p className="whitespace-pre-line leading-6 text-foreground/90">{summary}</p>
         </div>
       )}
       {recommendedAction && (

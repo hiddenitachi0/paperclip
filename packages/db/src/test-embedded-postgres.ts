@@ -103,10 +103,31 @@ const EMBEDDED_POSTGRES_TEST_FLAGS = [
   "full_page_writes=off",
 ];
 
-async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
+export type EmbeddedPostgresTestOptions = {
+  /**
+   * Extra `postgres -c name=value` server settings appended after the
+   * durability-off defaults, e.g. `["-c", "log_lock_waits=on", "-c",
+   * "deadlock_timeout=200ms"]` for a lock-ordering regression test that wants
+   * Postgres to explain a deadlock (which backend waited on which lock, and
+   * what statement it was running) instead of only reporting "deadlock
+   * detected" to the losing client.
+   */
+  postgresFlags?: string[];
+  /**
+   * Receives the server's stderr output (one chunk per write, possibly
+   * several log lines). Off by default so ordinary suites stay quiet.
+   */
+  onLog?: (message: string) => void;
+};
+
+async function createEmbeddedPostgresTestInstance(
+  tempDirPrefix: string,
+  options: EmbeddedPostgresTestOptions = {},
+) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), tempDirPrefix));
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
+  const onLog = options.onLog;
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: "paperclip",
@@ -114,8 +135,8 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    postgresFlags: EMBEDDED_POSTGRES_TEST_FLAGS,
-    onLog: () => {},
+    postgresFlags: [...EMBEDDED_POSTGRES_TEST_FLAGS, ...(options.postgresFlags ?? [])],
+    onLog: onLog ? (message) => onLog(typeof message === "string" ? message : String(message)) : () => {},
     onError: () => {},
   });
 
@@ -165,12 +186,13 @@ export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgres
 
 export async function startEmbeddedPostgresTestDatabase(
   tempDirPrefix: string,
+  options: EmbeddedPostgresTestOptions = {},
 ): Promise<EmbeddedPostgresTestDatabase> {
   let dataDir: string | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
 
   try {
-    const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
+    const created = await createEmbeddedPostgresTestInstance(tempDirPrefix, options);
     dataDir = created.dataDir;
     instance = created.instance;
     const { port } = created;

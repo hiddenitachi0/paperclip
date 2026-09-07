@@ -193,6 +193,19 @@ describe("buildAgentUpdatePatch", () => {
     });
   });
 
+  it("keeps per-agent run time limits across an adapter switch, and drops one when it is cleared", () => {
+    const agent = makeAgent();
+    agent.adapterConfig = { ...agent.adapterConfig, maxRunDurationMinutes: 30, silentRunTimeoutMinutes: 0 };
+
+    const switched = buildAgentUpdatePatch(agent, makeOverlay({ adapterType: "codex_local", adapterConfig: { model: "gpt-5.4" } }));
+    expect(switched.adapterConfig).toMatchObject({ maxRunDurationMinutes: 30, silentRunTimeoutMinutes: 0, model: "gpt-5.4" });
+
+    const cleared = buildAgentUpdatePatch(agent, makeOverlay({ adapterConfig: { maxRunDurationMinutes: undefined } }));
+    expect(cleared.replaceAdapterConfig).toBe(true);
+    expect(cleared.adapterConfig).not.toHaveProperty("maxRunDurationMinutes");
+    expect(cleared.adapterConfig).toMatchObject({ silentRunTimeoutMinutes: 0, model: "claude-sonnet-4-6" });
+  });
+
   it("preserves adapter-agnostic keys when changing adapter types", () => {
     const patch = buildAgentUpdatePatch(
       makeAgent(),
