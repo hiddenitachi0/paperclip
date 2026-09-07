@@ -865,7 +865,12 @@ export async function startServer(): Promise<StartedServer> {
     // scope is released. Without `rawDb` here the service falls back to the
     // proxy, whose .transaction() refuses -- every affected run then stayed
     // "running" forever with a dead child (11 such runs in 2h on 2026-09-06).
-    const heartbeat = heartbeatService(schedulerDb as any, { pluginWorkerManager, rawDb: db as any });
+    const heartbeat = heartbeatService(schedulerDb as any, {
+      pluginWorkerManager,
+      rawDb: db as any,
+      // DUR-273: spread timer wakes so the fleet does not wake as one.
+      timerJitter: { ratio: config.heartbeatTimerJitterRatio, maxMs: config.heartbeatTimerJitterMaxMs },
+    });
     heartbeatDrainState = {
       isDraining: false,
       getInFlightRunCount: () => heartbeat.getInFlightRunCount(),

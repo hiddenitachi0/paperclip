@@ -215,6 +215,7 @@ import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
+import { computeHeartbeatTimerJitterMs, type HeartbeatTimerJitterOptions } from "./heartbeat-timer-jitter.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -4976,6 +4977,13 @@ export interface HeartbeatServiceOptions {
    * guessing a wait duration. No-op when unset.
    */
   onRunDispatched?: (run: Promise<unknown>) => void;
+  /**
+   * DUR-273: per-agent offset added to each heartbeat interval so timer wakes
+   * spread out instead of clustering into one tick (see
+   * heartbeat-timer-jitter.ts). Defaults to a few percent of the interval,
+   * capped at a few minutes; `{ ratio: 0 }` disables it.
+   */
+  timerJitter?: HeartbeatTimerJitterOptions;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -15363,7 +15371,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         checked += 1;
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
-        if (elapsedMs < policy.intervalSec * 1000) continue;
+        // DUR-273: each agent waits its own small, stable extra offset past
+        // the interval so a fleet whose lastHeartbeatAt values line up (after
+        // a restart, a reap, or a shared creation time) does not wake as one.
+        const jitterMs = computeHeartbeatTimerJitterMs(agent.id, policy.intervalSec, options.timerJitter);
+        if (elapsedMs < policy.intervalSec * 1000 + jitterMs) continue;
 
         // DUR-3932: enqueueWakeup can throw (budget block, invokability race,
         // inactive company, etc. -- see its `throw conflict(...)` paths) and this
