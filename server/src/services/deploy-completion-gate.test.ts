@@ -11,12 +11,16 @@ const mockIssueApprovalService = vi.hoisted(() => ({
   listApprovalsForIssue: vi.fn(),
 }));
 const mockResolveProjectDeployBranches = vi.hoisted(() => vi.fn());
+const mockResolveFallbackDeployBranches = vi.hoisted(() => vi.fn());
 
 vi.mock("./issue-approvals.js", () => ({
   issueApprovalService: () => mockIssueApprovalService,
 }));
 vi.mock("./deploy-branches.js", () => ({
   resolveProjectDeployBranches: (...args: unknown[]) => mockResolveProjectDeployBranches(...args),
+}));
+vi.mock("./deploy-branch-fallback.js", () => ({
+  resolveFallbackDeployBranches: (...args: unknown[]) => mockResolveFallbackDeployBranches(...args),
 }));
 
 const AGENT_ACTOR = { actorType: "agent", agentId: "agent-1", runId: "run-1" };
@@ -55,9 +59,17 @@ function fakeDbWithProjectDeployApprovalIds(ids: string[]) {
 }
 
 describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
+  // The first dynamic import of the gate pulls the whole @paperclipai/db schema through
+  // esbuild; on a loaded machine that alone sits right at vitest's 5s default.
+  vi.setConfig({ testTimeout: 20000 });
+
   beforeEach(() => {
     mockIssueApprovalService.listApprovalsForIssue.mockReset();
     mockResolveProjectDeployBranches.mockReset();
+    mockResolveFallbackDeployBranches.mockReset();
+    // Default: the issue has a project (that simply declares no deploy branch) -- the
+    // pre-DUR-291 shape every existing test below assumes.
+    mockResolveFallbackDeployBranches.mockResolvedValue({ branches: null, issueHasProject: true, reason: "issue_has_project" });
   });
 
   it("reproduces the DUR-98 Class C incident: merged into the deploy branch, no deploy approval at all -- blocks done", async () => {
@@ -217,6 +229,26 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
   it("is unaffected when the issue has no deploy branch declared for its project", async () => {
     const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
     mockResolveProjectDeployBranches.mockResolvedValue(null);
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval()]);
+
+    const result = await evaluateDeployCompletionDoneGate({
+      db: {} as any,
+      issue: ISSUE,
+      actor: AGENT_ACTOR,
+      requestedStatus: "done",
+      currentStatus: "in_review",
+    });
+
+    // The project deliberately declares no deploy branch: no block, and no warning either --
+    // DUR-291's fallback is only for issues with NO project at all.
+    expect(result).toBeNull();
+    expect(mockResolveFallbackDeployBranches).toHaveBeenCalled();
+  });
+
+  it("never even resolves a project for an issue with no merge_pr approval of its own", async () => {
+    const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+    mockResolveProjectDeployBranches.mockResolvedValue(null);
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
 
     const result = await evaluateDeployCompletionDoneGate({
       db: {} as any,
@@ -227,7 +259,119 @@ describe("evaluateDeployCompletionDoneGate (DUR-99)", () => {
     });
 
     expect(result).toBeNull();
-    expect(mockIssueApprovalService.listApprovalsForIssue).not.toHaveBeenCalled();
+    expect(mockResolveFallbackDeployBranches).not.toHaveBeenCalled();
+  });
+
+  // DUR-291: DUR-286 (projectId: null) merged a security fix into `custom` and went straight to
+  // `done` -- resolveProjectDeployBranches returned null for the project-less issue and the gate
+  // short-circuited before ever looking at the merge approval. The gate now resolves the project
+  // through the branch the merge targeted, and when even that fails it lets the transition
+  // through with a VISIBLE warning instead of a silent skip.
+  describe("DUR-291: issues with no project", () => {
+    it("blocks done when the merge's target branch resolves to a company project that deploys from it", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue(null);
+      mockResolveFallbackDeployBranches.mockResolvedValue({
+        branches: { deployBranch: "custom", projectId: "project-1", resolvedViaFallback: true },
+        issueHasProject: false,
+        reason: "resolved_unique",
+      });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({ payload: { kind: "merge_pr", base: "custom", repo: "acme/paperclip", originalIssueIds: [ISSUE.id] } }),
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: {} as any,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+      });
+
+      expect(mockResolveFallbackDeployBranches).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ companyId: "company-1", issueIds: [ISSUE.id], bases: ["custom"], repo: "acme/paperclip" }),
+      );
+      expect(result).not.toBeNull();
+      expect(result?.warningOnly).toBeUndefined();
+      expect(result?.message).toContain("no deploy approval has been filed");
+    });
+
+    it("allows done once the fallback-resolved project's deploy approval is confirmed live", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue(null);
+      mockResolveFallbackDeployBranches.mockResolvedValue({
+        branches: { deployBranch: "custom", projectId: "project-1", resolvedViaFallback: true },
+        issueHasProject: false,
+        reason: "resolved_unique",
+      });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval(), deployApproval()]);
+      const readStatusLog = vi.fn().mockReturnValue([
+        {
+          ts: "t",
+          approvalId: "deploy-approval-1",
+          companyId: "company-1",
+          commentDelivered: true,
+          body: "Deployed to /root/paperclip -- commit abc123 is live and healthy (health check: http://x).",
+        },
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: {} as any,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+        readStatusLog,
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it("lets done through with a visible, non-blocking warning when no project can be inferred", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue(null);
+      mockResolveFallbackDeployBranches.mockResolvedValue({ branches: null, issueHasProject: false, reason: "ambiguous" });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([mergeApproval()]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: {} as any,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+      });
+
+      expect(result).not.toBeNull();
+      expect(result?.warningOnly).toBe(true);
+      expect(result?.message).toContain("PAP-99");
+      expect(result?.message).toContain("not attached to a project");
+      expect(result?.message).toContain('"custom"');
+      expect(result?.message).toContain("deploy approval");
+    });
+
+    it("does not warn for a merge into a branch nobody deploys from", async () => {
+      const { evaluateDeployCompletionDoneGate } = await import("./deploy-completion-gate.js");
+      mockResolveProjectDeployBranches.mockResolvedValue(null);
+      mockResolveFallbackDeployBranches.mockResolvedValue({
+        branches: { deployBranch: "custom", projectId: "project-1", resolvedViaFallback: true },
+        issueHasProject: false,
+        reason: "resolved_unique",
+      });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+        mergeApproval({ payload: { kind: "merge_pr", base: "feature/x", originalIssueIds: [ISSUE.id] } }),
+      ]);
+
+      const result = await evaluateDeployCompletionDoneGate({
+        db: {} as any,
+        issue: ISSUE,
+        actor: AGENT_ACTOR,
+        requestedStatus: "done",
+        currentStatus: "in_review",
+      });
+
+      expect(result).toBeNull();
+    });
   });
 
   // DUR-252 security review (defense in depth, same root cause as the deploy-carried-issues.ts

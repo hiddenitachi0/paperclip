@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { approvals, type Db } from "@paperclipai/db";
-import { resolveProjectDeployBranches } from "./deploy-branches.js";
+import { resolveProjectDeployBranches, type ProjectDeployBranches } from "./deploy-branches.js";
+import { resolveFallbackDeployBranches } from "./deploy-branch-fallback.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
 
@@ -188,24 +189,34 @@ export interface DeployCompletionGateInput {
   readStatusLog?: (companyId: string) => DeployRunnerStatusEntry[];
 }
 
+/**
+ * A blocking result carries only `message` (the route answers 409 with it). A result with
+ * `warningOnly: true` never blocks: the route lets the transition through and posts `message`
+ * on the issue afterwards, so the gap is visible instead of silent (DUR-291).
+ */
+export interface DeployCompletionGateResult {
+  message: string;
+  warningOnly?: boolean;
+  /** Why the fallback could not resolve a project (warningOnly results only) -- for logs. */
+  reason?: string;
+}
+
 export async function evaluateDeployCompletionDoneGate(
   input: DeployCompletionGateInput,
-): Promise<{ message: string } | null> {
+): Promise<DeployCompletionGateResult | null> {
   if (input.requestedStatus !== "done") return null;
   if (input.currentStatus === "done") return null;
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
 
-  const branches = await resolveProjectDeployBranches(input.db, [input.issue.id]);
-  if (!branches?.deployBranch) return null;
-
   const linked = await issueApprovalService(input.db).listApprovalsForIssue(input.issue.id);
 
-  const mergeApprovals = linked.filter(
+  // Every approved merge this issue was genuinely filed for, regardless of base branch --
+  // the base is matched against the deploy branch below, once we know what that is.
+  const ownMergeApprovals = linked.filter(
     (approval) =>
       approval.type === "request_board_approval" &&
       approval.status === "approved" &&
       approvalPayloadKind(approval.payload) === "merge_pr" &&
-      approvalPayloadBase(approval.payload) === branches.deployBranch &&
       // DUR-252: `issueApprovals` is a mutable link table -- an agent that requested a
       // merge_pr approval may relink it to any issue in the company later, so a linked
       // approval alone is not proof it was filed for THIS issue. `originalIssueIds` is
@@ -215,8 +226,53 @@ export async function evaluateDeployCompletionDoneGate(
       // deploy-carried-issues.ts's identical check.
       approvalPayloadOriginalIssueIds(approval.payload).includes(input.issue.id),
   );
-  // This issue's completing action was never a merge into the declared deploy branch — the
-  // acceptance criterion "do not block issues that never touch a deploy branch" applies.
+  // This issue's completing action was never a merge at all -- the acceptance criterion
+  // "do not block issues that never touch a deploy branch" applies, whatever its project.
+  if (ownMergeApprovals.length === 0) return null;
+
+  let branches: ProjectDeployBranches | null = await resolveProjectDeployBranches(input.db, [input.issue.id]);
+  if (!branches?.deployBranch) {
+    // DUR-291: an issue with no project used to fall out here silently, so a merge into the
+    // deploy branch could reach `done` with no deploy ever confirmed (DUR-286 did exactly
+    // that with a security fix). Resolve the project through the branch the merge actually
+    // targeted instead; if that can't single one out, say so on the issue rather than
+    // pretending the check ran.
+    const bases = ownMergeApprovals
+      .map((approval) => approvalPayloadBase(approval.payload))
+      .filter((base): base is string => Boolean(base));
+    const repo = (ownMergeApprovals[0]?.payload as Record<string, unknown> | null)?.repo;
+    const fallback = await resolveFallbackDeployBranches(input.db, {
+      companyId: input.issue.companyId,
+      issueIds: [input.issue.id],
+      bases,
+      repo,
+    });
+    if (fallback.branches?.deployBranch) {
+      branches = fallback.branches;
+    } else if (fallback.issueHasProject) {
+      // The project deliberately declares no deploy branch -- never a promise the platform
+      // made for it (see deploy-branches.ts).
+      return null;
+    } else {
+      const issueLabel = input.issue.identifier ?? "This issue";
+      const baseLabel = bases[0] ? `"${bases[0]}"` : "a branch";
+      return {
+        warningOnly: true,
+        reason: fallback.reason,
+        message:
+          `Heads-up: ${issueLabel} is not attached to a project, so the usual check that its merge into ` +
+          `${baseLabel} actually deployed could not run before it was marked done. If this change needs to ` +
+          "go live, make sure a deploy approval was filed and completed for it -- a merge alone does not mean " +
+          "the change is live.",
+      };
+    }
+  }
+
+  const deployBranch = branches.deployBranch;
+  const mergeApprovals = ownMergeApprovals.filter(
+    (approval) => approvalPayloadBase(approval.payload) === deployBranch,
+  );
+  // This issue's completing action was never a merge into the declared deploy branch.
   if (mergeApprovals.length === 0) return null;
 
   const deployApprovals = linked.filter(
