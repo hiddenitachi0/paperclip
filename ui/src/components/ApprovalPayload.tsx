@@ -329,6 +329,9 @@ export function BoardApprovalPayload({
   if (firstNonEmptyString(payload.kind) === "feature_launch") {
     return <FeatureLaunchPayloadContent payload={nextPayload} />;
   }
+  if (firstNonEmptyString(payload.kind) === "persona_publish") {
+    return <PersonaPublishPayloadContent payload={nextPayload} />;
+  }
   return (
     <BoardApprovalPayloadContent payload={nextPayload} />
   );
@@ -383,6 +386,71 @@ function FeatureLaunchPayloadContent({ payload }: { payload: Record<string, unkn
           <p className="mt-1 leading-6 text-foreground">{whatIfItFails}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * DUR-134: a persona asking to post. Filed by the publisher (never the
+ * persona's own agent) when the account is still warming up or always needs
+ * approval. What the operator needs on the card: the exact text going out,
+ * whether an AI-disclosure line is added, why they are being asked, and what
+ * approve/reject does -- all of which the payload carries in plain words.
+ */
+function PersonaPublishPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const summary = firstNonEmptyString(payload.summary);
+  const caption = firstNonEmptyString(payload.caption);
+  const disclosureText = firstNonEmptyString(payload.disclosureText);
+  const personaDisplayName = firstNonEmptyString(payload.personaDisplayName);
+  const reason = firstNonEmptyString(payload.reason);
+  const reasonLabel =
+    reason === "warmup"
+      ? "New account: her first posts need your OK"
+      : reason === "requires_approval_channel"
+        ? "This account always needs your OK"
+        : null;
+
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Title</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {caption && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+            {personaDisplayName ? `What ${personaDisplayName} wants to post` : "What she wants to post"}
+          </p>
+          <p className="whitespace-pre-wrap rounded-md bg-muted/40 px-3 py-2 leading-6 text-foreground">{caption}</p>
+        </div>
+      )}
+      <div className="space-y-1">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">AI disclosure</p>
+        <p className="leading-6 text-foreground/90">
+          {disclosureText
+            ? `Added under the post: "${disclosureText}"`
+            : "Not added -- disclosure is switched off for this account."}
+        </p>
+      </div>
+      {(reasonLabel || summary) && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Why you are asked</p>
+          {reasonLabel && <p className="font-medium leading-6 text-foreground">{reasonLabel}</p>}
+          {summary && <p className="leading-6 text-foreground/90">{summary}</p>}
+        </div>
+      )}
+      <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">
+          If you approve
+        </p>
+        <p className="mt-1 leading-6 text-foreground">
+          It is posted at the next publishing pass, as long as publishing is not paused and today's limit is not
+          used up. If you reject, it is never posted.
+        </p>
+      </div>
     </div>
   );
 }

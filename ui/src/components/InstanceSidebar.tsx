@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Clock3, Cpu, FlaskConical, KeyRound, MonitorCog, Puzzle, Settings, Shield, SlidersHorizontal, UserRoundPen } from "lucide-react";
+import { Clock3, Cpu, FlaskConical, KeyRound, MonitorCog, Puzzle, Settings, Shield, ShieldCheck, SlidersHorizontal, UserRoundPen } from "lucide-react";
 import type { PluginRecord } from "@paperclipai/shared";
 import { NavLink } from "@/lib/router";
 import { pluginsApi } from "@/api/plugins";
@@ -44,6 +44,7 @@ export function InstanceSidebar() {
           <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/claude`} label="Claude sign-in" icon={KeyRound} end />
           <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/environments`} label="Environments" icon={MonitorCog} end />
           <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/access`} label="Access" icon={Shield} end />
+          <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/security`} label="Security" icon={ShieldCheck} end />
           <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/heartbeats`} label="Heartbeats" icon={Clock3} end />
           <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/experimental`} label="Experimental" icon={FlaskConical} />
           <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`} label="Plugins" icon={Puzzle} />

@@ -253,6 +253,7 @@ export const queryKeys = {
     experimentalSettings: ["instance", "experimental-settings"] as const,
     quietMode: ["instance", "quiet-mode"] as const,
     claudeAuth: ["instance", "claude-auth"] as const,
+    security: ["instance", "security"] as const,
     claudeSignIn: (sessionId: string) => ["instance", "claude-auth", "sign-in", sessionId] as const,
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
@@ -271,6 +272,9 @@ export const queryKeys = {
   personas: {
     list: (companyId: string) => ["personas", companyId] as const,
     detail: (id: string) => ["personas", "detail", id] as const,
+    accounts: (personaId: string) => ["personas", "accounts", personaId] as const,
+    companyPosts: (companyId: string) => ["persona-posts", companyId] as const,
+    companyPublishing: (companyId: string) => ["persona-publishing-settings", companyId] as const,
   },
   companySearch: {
     search: (companyId: string, q: string, scope: string, limit: number, offset: number) =>

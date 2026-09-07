@@ -17,6 +17,8 @@ export interface Persona {
   avatarAssetId: string | null;
   status: "draft" | "active" | "paused";
   dailyGenerationCap: number | null;
+  // DUR-134: the per-persona half of the publishing kill switch.
+  publishingPaused: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -40,6 +42,7 @@ export interface UpdatePersonaInput {
   avatarAssetId?: string | null;
   status?: "draft" | "active" | "paused";
   dailyGenerationCap?: number | null;
+  publishingPaused?: boolean;
 }
 
 export const personasApi = {

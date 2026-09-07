@@ -160,6 +160,9 @@ export function personaAccountRoutes(rawDb: Db) {
         configPath: PERSONA_ACCOUNT_PUBLISH_TOKEN_CONFIG_PATH,
         versionSelector: req.body.versionSelector,
       });
+      // The account is only usable once a credential is bound; reflect that
+      // so the persona page can tell "connected" from "still needs a key".
+      await accounts.markConnected(account.id);
       res.status(204).end();
     },
   );

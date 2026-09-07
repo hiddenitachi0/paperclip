@@ -30,6 +30,7 @@ import {
   personaAccounts,
   personaPosts,
   personas,
+  withCompanyScope,
 } from "@paperclipai/db";
 import { PERSONA_POST_AI_DISCLOSURE_TEXT, type PersonaAccountPlatform } from "@paperclipai/shared";
 import type { EnqueuePersonaPostInput } from "@paperclipai/shared/validators/persona-account";
@@ -157,9 +158,16 @@ export function personaPublisherService(db: Db) {
       // place a persona_publish approval is filed -- never by the persona's
       // own agent, mirroring how deploy/instructions_change approvals are
       // always filed by the acting service, not the requester.
+      // The card is filed on behalf of the persona's own agent
+      // (requestedByAgentId) so the approval UI treats it as a persona
+      // request (DUR-177: plain display name, no raw JSON/UUIDs by
+      // default) and the persona is woken with the decision, exactly like
+      // her picture/credential requests. The publisher, not the agent, is
+      // still the only thing that files it.
+      const remaining = Math.max(0, account.warmupPostsRequired - account.publishedPostCount);
       const approval = await approvals.create(account.companyId, {
         type: "request_board_approval",
-        requestedByAgentId: null,
+        requestedByAgentId: persona.agentId,
         payload: {
           kind: "persona_publish",
           personaId: persona.id,
@@ -169,10 +177,12 @@ export function personaPublisherService(db: Db) {
           reason: warmingUp ? "warmup" : "requires_approval_channel",
           caption: post.caption,
           disclosureText,
-          title: `Publish to ${account.accountLabel}`,
+          title: `Post to ${account.accountLabel}`,
           summary: warmingUp
-            ? `${account.accountLabel} is still within its warm-up window (${account.publishedPostCount}/${account.warmupPostsRequired} posts) -- every post needs sign-off until it clears.`
-            : `${account.accountLabel} (${account.platform}) requires approval before every post.`,
+            ? `This account is new, so her first ${account.warmupPostsRequired} posts need your OK before they go out. ` +
+              `This is post ${account.publishedPostCount + 1} of ${account.warmupPostsRequired}; after ${remaining === 1 ? "this one" : `${remaining} more`} she posts here on her own, up to ${account.dailyPostCap} a day.`
+            : `Posts to ${account.accountLabel} always need your OK before they go out. ` +
+              `If you approve, it is posted at the next publishing pass (as long as publishing is not paused and today's limit of ${account.dailyPostCap} is not used up). If you reject, it is never posted.`,
         },
         status: "pending",
       });
@@ -234,13 +244,14 @@ export function personaPublisherService(db: Db) {
       return { outcome: "not_claimable" };
     }
 
+    let result: { externalPostId: string };
     try {
       const token = await accounts.resolvePublishToken(account.companyId, account.id, {
         actorType: "system",
         actorId: "persona-publisher",
       });
       const adapter = getPlatformAdapter(account.platform as PersonaAccountPlatform);
-      const result = await adapter.publish({
+      result = await adapter.publish({
         token,
         externalAccountId: account.externalAccountId,
         caption: claimed.caption,
@@ -253,8 +264,51 @@ export function personaPublisherService(db: Db) {
         mediaUrl: null,
         disclosureText: claimed.disclosureText,
       });
+    } catch (error) {
+      const failureReason = error instanceof PlatformPublishError ? error.message : String((error as Error)?.message ?? error);
+      await db
+        .update(personaPosts)
+        .set({ status: "failed", failureReason, updatedAt: new Date() })
+        .where(eq(personaPosts.id, claimed.id));
 
-      await db.transaction(async (tx) => {
+      // Item 10 (DUR-98 principle): the failure is an operator notice --
+      // `persona_post.publish_failed` is in the UI's operator-notice list
+      // (ui/src/lib/activity-format.ts) so it lands in the feed/Needs-you
+      // surfaces with the plain `message` below, not just as a quiet row.
+      await logActivity(db, {
+        companyId: account.companyId,
+        actorType: "system",
+        actorId: "persona-publisher",
+        action: "persona_post.publish_failed",
+        entityType: "persona_post",
+        entityId: claimed.id,
+        agentId: persona.agentId,
+        details: {
+          personaId: persona.id,
+          personaAccountId: account.id,
+          accountLabel: account.accountLabel,
+          platform: account.platform,
+          failureReason,
+          message:
+            `A post to ${account.accountLabel} could not be published and will not be retried on its own. ` +
+            `Reason: ${failureReason}. Check the account's publishing credential and re-queue the post if it should still go out.`,
+        },
+      }).catch(() => {});
+
+      return { outcome: "failed", failureReason };
+    }
+
+    // Bookkeeping AFTER the platform accepted the post. Deliberately outside
+    // the try/catch above: once Fanvue has it, the post is published no
+    // matter what happens to our own rows, so a DB hiccup here must never
+    // flip the row to "failed" (that would invite a re-queue and a
+    // duplicate post). Runs through withCompanyScope rather than
+    // db.transaction(): the request-scoped proxy every route (and the
+    // scheduler sweep) hands this service refuses db.transaction() by
+    // design, and withCompanyScope reuses the caller's reserved connection
+    // (SAVEPOINT) or opens its own when there is none.
+    try {
+      await withCompanyScope(db, account.companyId, async (tx) => {
         await tx
           .update(personaPosts)
           .set({
@@ -269,37 +323,47 @@ export function personaPublisherService(db: Db) {
           .set({ publishedPostCount: sql`${personaAccounts.publishedPostCount} + 1`, updatedAt: new Date() })
           .where(eq(personaAccounts.id, account.id));
       });
-
-      return { outcome: "published", externalPostId: result.externalPostId };
     } catch (error) {
-      const failureReason = error instanceof PlatformPublishError ? error.message : String((error as Error)?.message ?? error);
+      // Best effort, non-transactional fallback so the row still says what
+      // actually happened on the platform.
+      const reason = String((error as Error)?.message ?? error);
       await db
         .update(personaPosts)
-        .set({ status: "failed", failureReason, updatedAt: new Date() })
-        .where(eq(personaPosts.id, claimed.id));
-
-      // Item 10 (DUR-98 principle): make the failure loud in the activity
-      // feed now. Fanning this out to Telegram/Needs-You is tracked as
-      // explicit follow-up work (see the PR description) -- it needs the
-      // same alert-tick shape as agent-error-alerts.ts/untracked-write-alerts.ts,
-      // which is a separable piece of work from the publisher itself.
-      await logActivity(db, {
-        companyId: account.companyId,
-        actorType: "system",
-        actorId: "persona-publisher",
-        action: "persona_post.publish_failed",
-        entityType: "persona_post",
-        entityId: claimed.id,
-        details: {
-          personaId: persona.id,
-          personaAccountId: account.id,
-          platform: account.platform,
-          failureReason,
-        },
-      }).catch(() => {});
-
-      return { outcome: "failed", failureReason };
+        .set({
+          status: "published",
+          externalPostId: result.externalPostId,
+          publishedAt: new Date(),
+          failureReason: `Published, but recording it locally failed once: ${reason}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(personaPosts.id, claimed.id))
+        .catch(() => {});
+      await db
+        .update(personaAccounts)
+        .set({ publishedPostCount: sql`${personaAccounts.publishedPostCount} + 1`, updatedAt: new Date() })
+        .where(eq(personaAccounts.id, account.id))
+        .catch(() => {});
     }
+
+    await logActivity(db, {
+      companyId: account.companyId,
+      actorType: "system",
+      actorId: "persona-publisher",
+      action: "persona_post.published",
+      entityType: "persona_post",
+      entityId: claimed.id,
+      agentId: persona.agentId,
+      details: {
+        personaId: persona.id,
+        personaAccountId: account.id,
+        accountLabel: account.accountLabel,
+        platform: account.platform,
+        externalPostId: result.externalPostId,
+        disclosureShown: Boolean(claimed.disclosureText),
+      },
+    }).catch(() => {});
+
+    return { outcome: "published", externalPostId: result.externalPostId };
   }
 
   return { enqueuePost, getPostById, listFeedForCompany, attemptPublish };

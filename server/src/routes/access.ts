@@ -88,6 +88,12 @@ import {
   inspectBoardClaimChallenge
 } from "../board-claim.js";
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
+import {
+  reconcileAdminAuthSnapshot,
+  recordAdminSetChangedViaApp,
+  resolveAdminAuthSigningSecret,
+  revokeSessionsForUser,
+} from "../services/admin-auth-audit.js";
 import { getStorageService } from "../storage/index.js";
 import { secretService } from "../services/secrets.js";
 
@@ -2775,6 +2781,16 @@ export function accessRoutes(
     if (claimed.status === "already_claimed") {
       throw conflict("Someone else has already claimed this instance");
     }
+    // Admin auth hardening: the first admin is a legitimate, app-driven
+    // change to the admin set -- refresh the signed record so the periodic
+    // check does not report it as written outside the app.
+    await reconcileAdminAuthSnapshot(rawDb, {
+      secret: resolveAdminAuthSigningSecret(),
+      trigger: "app_change",
+      expected: [{ kind: "added", userId: claimed.userId }],
+    }).catch((err) => {
+      logger.warn({ err }, "admin auth record refresh after bootstrap claim failed");
+    });
 
     res.json({ claimed: true, userId: claimed.userId });
   });
@@ -3836,6 +3852,15 @@ export function accessRoutes(
           throw conflict("Someone else has already claimed this instance");
         }
         const updatedInvite = claimed.value ?? invite;
+        // Admin auth hardening: fold the first admin into the signed record
+        // so the periodic check does not report it as an outside change.
+        await reconcileAdminAuthSnapshot(rawDb, {
+          secret: resolveAdminAuthSigningSecret(),
+          trigger: "app_change",
+          expected: [{ kind: "added", userId: claimed.userId }],
+        }).catch((err) => {
+          logger.warn({ err }, "admin auth record refresh after bootstrap invite failed");
+        });
         res.status(202).json({
           inviteId: updatedInvite.id,
           inviteType: updatedInvite.inviteType,
@@ -4970,7 +4995,24 @@ export function accessRoutes(
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
+      const wasAdmin = await rawAccess.isInstanceAdmin(userId);
       const result = await rawAccess.promoteInstanceAdmin(userId);
+      if (!wasAdmin) {
+        // Admin auth hardening: a privilege change ends the user's open
+        // sessions (they sign in again with the new access), and the change
+        // is announced in every company's Activity feed and folded into the
+        // signed admin record so the periodic check does not re-report it.
+        const sessionsRevoked = await revokeSessionsForUser(rawDb, userId).catch(() => 0);
+        await recordAdminSetChangedViaApp(rawDb, {
+          secret: resolveAdminAuthSigningSecret(),
+          userId,
+          change: "promoted",
+          actor: { actorType: "user", actorId: req.actor.userId ?? "local-board", actorName: req.actor.userName ?? null },
+          sessionsRevoked,
+        }).catch((err) => {
+          logger.warn({ err, userId }, "failed to record instance-admin promotion");
+        });
+      }
       res.status(201).json(result);
     }
   );
@@ -5043,6 +5085,18 @@ export function accessRoutes(
       const userId = req.params.userId as string;
       const removed = await rawAccess.demoteInstanceAdmin(userId);
       if (!removed) throw notFound("Instance admin role not found");
+      // Admin auth hardening: see the promote route above. Demotion also
+      // ends the user's sessions so the old access stops immediately.
+      const sessionsRevoked = await revokeSessionsForUser(rawDb, userId).catch(() => 0);
+      await recordAdminSetChangedViaApp(rawDb, {
+        secret: resolveAdminAuthSigningSecret(),
+        userId,
+        change: "demoted",
+        actor: { actorType: "user", actorId: req.actor.userId ?? "local-board", actorName: req.actor.userName ?? null },
+        sessionsRevoked,
+      }).catch((err) => {
+        logger.warn({ err, userId }, "failed to record instance-admin demotion");
+      });
       res.json(removed);
     }
   );

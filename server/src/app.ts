@@ -50,6 +50,7 @@ import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { instanceClaudeAuthRoutes } from "./routes/instance-claude-auth.js";
+import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
   instanceDatabaseBackupRoutes,
@@ -162,6 +163,9 @@ export async function createApp(
     bindHost: string;
     authReady: boolean;
     companyDeletionEnabled: boolean;
+    // Admin auth hardening: shown on the Security settings page so the
+    // operator knows how often the admin set is re-checked.
+    adminAuthCheckIntervalMinutes?: number;
     instanceId?: string;
     hostVersion?: string;
     localPluginDir?: string;
@@ -280,6 +284,7 @@ export async function createApp(
   api.use(inboxDismissalRoutes(db));
   api.use(instanceSettingsRoutes(db));
   api.use(instanceClaudeAuthRoutes(db));
+  api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
