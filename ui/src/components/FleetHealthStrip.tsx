@@ -67,6 +67,23 @@ export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: strin
         : ""),
     alert: slots.saturated && runs.queued > 0,
   });
+  // Polish round 3: split the queue by whether each queued run is waiting on
+  // its own agent (normal: agents run one at a time) or on nothing at all
+  // (a free agent and a free slot, yet it has not started). Only the second
+  // number means the queue itself is stuck, and only once nothing has
+  // started for the whole window -- the same rule the server uses for its
+  // critical line, so the fact and the headline never disagree.
+  if (runs.queued > 0) {
+    const free = runs.queuedWithNoRunningAgent;
+    const behindOwnAgent = Math.max(0, runs.queued - free);
+    facts.push({
+      key: "queue",
+      text:
+        `${free} queued with a free agent` +
+        (behindOwnAgent > 0 ? ` · ${behindOwnAgent} queued behind ${behindOwnAgent === 1 ? "its" : "their"} own agent` : ""),
+      alert: free > 0 && !slots.saturated && runs.startedInWindow === 0,
+    });
+  }
   facts.push({
     key: "zombies",
     text:
