@@ -6,6 +6,9 @@ import {
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
+  DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+  MIN_GLOBAL_MAX_CONCURRENT_RUNS,
+  MAX_GLOBAL_MAX_CONCURRENT_RUNS,
 } from "@paperclipai/shared";
 import { LogOut, SlidersHorizontal } from "lucide-react";
 import { authApi } from "@/api/auth";
@@ -13,6 +16,7 @@ import { healthApi } from "@/api/health";
 import { instanceSettingsApi } from "@/api/instanceSettings";
 import { ModeBadge } from "@/components/access/ModeBadge";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
@@ -24,6 +28,9 @@ export function InstanceGeneralSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
+  // DUR-3939: the instance-wide run cap. Edited as text so a half-typed
+  // number does not save; null means "showing the saved value".
+  const [maxRunsDraft, setMaxRunsDraft] = useState<string | null>(null);
 
   const signOutMutation = useMutation({
     mutationFn: () => authApi.signOut(),
@@ -83,6 +90,22 @@ export function InstanceGeneralSettings() {
   const factCheckCardStrictAllowlist = generalQuery.data?.factCheckCardStrictAllowlist === true;
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
+  const globalMaxConcurrentRuns = generalQuery.data?.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS;
+  const maxRunsValue = maxRunsDraft ?? String(globalMaxConcurrentRuns);
+  const maxRunsParsed = Number(maxRunsValue);
+  const maxRunsValid =
+    /^\d+$/.test(maxRunsValue.trim()) &&
+    Number.isInteger(maxRunsParsed) &&
+    maxRunsParsed >= MIN_GLOBAL_MAX_CONCURRENT_RUNS &&
+    maxRunsParsed <= MAX_GLOBAL_MAX_CONCURRENT_RUNS;
+  const maxRunsChanged = maxRunsValid && maxRunsParsed !== globalMaxConcurrentRuns;
+  const saveMaxRuns = () => {
+    if (!maxRunsChanged) return;
+    updateGeneralMutation.mutate(
+      { globalMaxConcurrentRuns: maxRunsParsed },
+      { onSuccess: () => setMaxRunsDraft(null) },
+    );
+  };
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -92,8 +115,8 @@ export function InstanceGeneralSettings() {
           <h1 className="text-lg font-semibold">General</h1>
         </div>
         <p className="text-sm text-muted-foreground">
-          Configure instance-wide preferences including log display, keyboard shortcuts, backup
-          retention, and data sharing.
+          Configure instance-wide preferences including log display, keyboard shortcuts, how many
+          agent runs may go at once, backup retention, and data sharing.
         </p>
       </div>
 
@@ -170,6 +193,62 @@ export function InstanceGeneralSettings() {
             disabled={updateGeneralMutation.isPending}
             aria-label="Toggle keyboard shortcuts"
           />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Max concurrent runs (whole instance)</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              How many agent runs may be going at the same time across every company on this server.
+              When all of these slots are taken, new runs wait in the queue until one frees up; the
+              Now page says so when that happens. Each agent also has its own limit in its settings,
+              and both apply. Raising this lets more agents work at once but uses more of your AI
+              budget and more of the server at the same time. Default {DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS};
+              allowed {MIN_GLOBAL_MAX_CONCURRENT_RUNS} to {MAX_GLOBAL_MAX_CONCURRENT_RUNS}.
+            </p>
+          </div>
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveMaxRuns();
+            }}
+          >
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={MIN_GLOBAL_MAX_CONCURRENT_RUNS}
+              max={MAX_GLOBAL_MAX_CONCURRENT_RUNS}
+              step={1}
+              value={maxRunsValue}
+              onChange={(event) => setMaxRunsDraft(event.target.value)}
+              disabled={updateGeneralMutation.isPending}
+              aria-label="Max concurrent runs (whole instance)"
+              aria-invalid={!maxRunsValid}
+              className="w-28"
+            />
+            <Button type="submit" size="sm" disabled={!maxRunsChanged || updateGeneralMutation.isPending}>
+              {updateGeneralMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+            {maxRunsDraft !== null && maxRunsDraft !== String(globalMaxConcurrentRuns) ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={updateGeneralMutation.isPending}
+                onClick={() => setMaxRunsDraft(null)}
+              >
+                Cancel
+              </Button>
+            ) : null}
+            <span className="text-xs text-muted-foreground">
+              {maxRunsValid
+                ? `Currently ${globalMaxConcurrentRuns}. Takes effect on the next run; running work is not interrupted.`
+                : `Enter a whole number from ${MIN_GLOBAL_MAX_CONCURRENT_RUNS} to ${MAX_GLOBAL_MAX_CONCURRENT_RUNS}.`}
+            </span>
+          </form>
         </div>
       </section>
 

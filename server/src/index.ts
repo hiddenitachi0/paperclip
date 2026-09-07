@@ -59,6 +59,7 @@ import {
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
+import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
@@ -845,6 +846,14 @@ export async function startServer(): Promise<StartedServer> {
   // container recreate yanking it out from under an in-flight run.
   let heartbeatDrainState: { isDraining: boolean; getInFlightRunCount: () => number } | null = null;
 
+  // DUR-3939/DUR-3940: tell /api/health whether a scheduler tick is expected
+  // at all (and how often) so "never ticked" can be judged against the
+  // configured interval instead of being silently reported as fine.
+  schedulerLiveness.configure({
+    enabled: config.heartbeatSchedulerEnabled,
+    intervalMs: config.heartbeatSchedulerIntervalMs,
+  });
+
   if (config.heartbeatSchedulerEnabled) {
     // DUR-352 (DUR-277 Wave 6): every consumer below is constructed with the
     // request-scoped Proxy (packages/db/src/company-scope.ts) instead of the
@@ -879,7 +888,12 @@ export async function startServer(): Promise<StartedServer> {
     // access is exactly what the scheduler had before the DUR-277 proxy was
     // wired here. Re-wire through the proxy only together with DUR-3952,
     // which gives executeRun its own scope.
-    const heartbeat = heartbeatService(db as any, { pluginWorkerManager, rawDb: db as any });
+    const heartbeat = heartbeatService(db as any, {
+      pluginWorkerManager,
+      rawDb: db as any,
+      // DUR-273: spread timer wakes so the fleet does not wake as one.
+      timerJitter: { ratio: config.heartbeatTimerJitterRatio, maxMs: config.heartbeatTimerJitterMaxMs },
+    });
     heartbeatDrainState = {
       isDraining: false,
       getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
@@ -1024,17 +1038,22 @@ export async function startServer(): Promise<StartedServer> {
       // releases it -- preserving today's concurrent/independent dispatch
       // (no chain waits on another) while giving heartbeat/routines/etc. the
       // AsyncLocalStorage scope their request-scoped db now requires.
+      // DUR-3939/DUR-3940: record every tick so /api/health can say whether
+      // the scheduler itself is alive, separately from whether runs start.
+      schedulerLiveness.tickStarted();
       void runInCompanyScopeBypass(
         bypassDb,
         { reason: "heartbeat scheduler tick: tickTimers", actorType: "scheduler", route: "heartbeat-scheduler:tickTimers" },
         () => heartbeat.tickTimers(new Date()),
       )
         .then((result) => {
+          schedulerLiveness.tickFinished(result);
           if (result.enqueued > 0) {
             logger.info({ ...result }, "heartbeat timer tick enqueued runs");
           }
         })
         .catch((err) => {
+          schedulerLiveness.tickFailed(err);
           logger.error({ err }, "heartbeat timer tick failed");
         });
 
