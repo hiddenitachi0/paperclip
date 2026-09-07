@@ -8102,10 +8102,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { outcome: "retry_exhausted" as const, queuedRun: null };
   }
 
+  /**
+   * Why the previous run was ended before its automatic retry was queued.
+   * "process_lost": the child process was gone (reapOrphanedRuns).
+   * "run_too_long" / "run_silent": the watchdog stopped a live child that
+   * ran past the max duration or the silence window (stopFrozenRun).
+   */
+  type ProcessLossRetryReason = "process_lost" | "run_too_long" | "run_silent";
+
+  function describeProcessLossRetry(reason: ProcessLossRetryReason): string {
+    switch (reason) {
+      case "run_too_long":
+        return "Queued automatic retry after the previous run was stopped for running past the time limit";
+      case "run_silent":
+        return "Queued automatic retry after the previous run was stopped for showing no output past the silence window";
+      case "process_lost":
+      default:
+        return "Queued automatic retry after orphaned child process was confirmed dead";
+    }
+  }
+
   async function enqueueProcessLossRetry(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
     now: Date,
+    reason: ProcessLossRetryReason = "process_lost",
   ) {
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
@@ -8214,9 +8235,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: "Queued automatic retry after orphaned child process was confirmed dead",
+      message: describeProcessLossRetry(reason),
       payload: {
         retryOfRunId: run.id,
+        stopReason: reason,
       },
     });
 
@@ -10432,7 +10454,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (shouldRetry) {
       const agent = await getAgent(run.agentId);
       if (agent) {
-        retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
+        retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now, errorCode);
       } else {
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
