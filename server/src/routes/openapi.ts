@@ -142,6 +142,8 @@ import {
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
   sendLaneAMessageSchema,
+  saveInstanceClaudeAuthTokenSchema,
+  submitInstanceClaudeSignInCodeSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -702,6 +704,13 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   "POST /api/admin/users/{userId}/promote-instance-admin",
   "POST /api/admin/users/{userId}/demote-instance-admin",
   "PUT /api/admin/users/{userId}/company-access",
+  "POST /api/instance/claude-auth/token",
+  "POST /api/instance/claude-auth/check",
+  "DELETE /api/instance/claude-auth",
+  "POST /api/instance/claude-auth/sign-in",
+  "GET /api/instance/claude-auth/sign-in/{sessionId}",
+  "POST /api/instance/claude-auth/sign-in/{sessionId}/code",
+  "POST /api/instance/claude-auth/sign-in/{sessionId}/cancel",
 ]);
 
 const CREATED_OPERATIONS = new Set([
@@ -750,6 +759,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/admin/users/{userId}/promote-instance-admin",
   "POST /api/plugins/install",
   "POST /api/instance/database-backups",
+  "POST /api/instance/claude-auth/sign-in",
 ]);
 
 const ACCEPTED_OPERATIONS = new Set([
@@ -2933,6 +2943,27 @@ registry.registerPath({
   summary: "Restore exactly the agents that were active before quiet mode was turned on (DUR-224)",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
+
+// ─── One-click Claude sign-in (instance-wide Claude subscription token) ─────
+// The token value never appears in any of these responses.
+for (const route of [
+  ["get", "/api/instance/claude-auth", "Show the instance-wide Claude sign-in status (never the token)", undefined],
+  ["post", "/api/instance/claude-auth/token", "Save a pasted Claude subscription token after testing it with the Claude CLI", saveInstanceClaudeAuthTokenSchema],
+  ["post", "/api/instance/claude-auth/check", "Re-test the stored Claude sign-in with one Claude CLI call", undefined],
+  ["delete", "/api/instance/claude-auth", "Remove the instance-wide Claude sign-in", undefined],
+  ["post", "/api/instance/claude-auth/sign-in", "Start an interactive Claude sign-in (runs `claude setup-token` on the server)", undefined],
+  ["get", "/api/instance/claude-auth/sign-in/{sessionId}", "Poll an interactive Claude sign-in", undefined],
+  ["post", "/api/instance/claude-auth/sign-in/{sessionId}/code", "Hand the code from claude.com to the interactive sign-in", submitInstanceClaudeSignInCodeSchema],
+  ["post", "/api/instance/claude-auth/sign-in/{sessionId}/cancel", "Cancel an interactive Claude sign-in", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["instance"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
 
 registry.registerPath({
   method: "post",

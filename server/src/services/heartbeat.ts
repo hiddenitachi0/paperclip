@@ -156,6 +156,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { CLAUDE_AUTH_FALLBACK_ENV_KEY, instanceClaudeAuthService } from "./instance-claude-auth.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import {
   evaluateExecutionAllowlist,
@@ -550,6 +551,25 @@ function formatMissingBindingForOperator(missing: MissingRuntimeBinding): string
   return `secret ${secretLabel} not bound at ${missing.consumerType} ${missing.configPath}`;
 }
 
+function hasNonEmptyEnvString(env: Record<string, unknown>, key: string): boolean {
+  const value = env[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Mirrors the claude_local adapter's own auth detection: a subscription
+ * token, an API key, or a Bedrock setup each count as "has its own way in".
+ */
+export function claudeEnvHasOwnCredential(env: Record<string, unknown>): boolean {
+  if (hasNonEmptyEnvString(env, CLAUDE_AUTH_FALLBACK_ENV_KEY)) return true;
+  if (hasNonEmptyEnvString(env, "ANTHROPIC_API_KEY")) return true;
+  if (hasNonEmptyEnvString(env, "ANTHROPIC_AUTH_TOKEN")) return true;
+  const bedrock = env.CLAUDE_CODE_USE_BEDROCK;
+  if (bedrock === "1" || bedrock === "true" || bedrock === true) return true;
+  if (hasNonEmptyEnvString(env, "ANTHROPIC_BEDROCK_BASE_URL")) return true;
+  return false;
+}
+
 function isConfiguredEnvBindingValue(binding: unknown) {
   const parsed = envBindingSchema.safeParse(binding);
   if (!parsed.success) return false;
@@ -640,6 +660,14 @@ export async function resolveExecutionRunAdapterConfig(input: {
     reason: string;
     remediation: string;
   };
+  /**
+   * One-click Claude sign-in: the instance-wide Claude subscription token a
+   * claude_local agent falls back to when nothing in its own env, project,
+   * environment or routine bindings gives it a CLAUDE_CODE_OAUTH_TOKEN,
+   * ANTHROPIC_API_KEY or Bedrock setup. Optional so callers/tests that don't
+   * care keep working unchanged.
+   */
+  instanceClaudeAuth?: { resolveFallbackToken: () => Promise<string | null> } | null;
 }) {
   const executionRunConfig = stripPaperclipRuntimeEnvFromAdapterConfig(input.executionRunConfig);
   const environmentEnv = stripPaperclipRuntimeEnvBindings(input.environmentEnv);
@@ -868,14 +896,34 @@ export async function resolveExecutionRunAdapterConfig(input: {
       secretKeys.add(key);
     }
   }
+  // One-click Claude sign-in fallback. Only for claude_local, and only when
+  // the fully merged env still carries no Claude credential of its own — an
+  // agent-level, project-level, environment or routine token always wins, so
+  // existing per-agent setups are untouched. The injected value is treated
+  // exactly like a bound secret for redaction (key + literal value).
+  let usedInstanceClaudeAuth = false;
+  const effectiveSecretValues = secretValues ?? new Set<string>();
+  if (input.adapterType === "claude_local" && input.instanceClaudeAuth) {
+    const mergedEnv = parseObject(resolvedConfig.env);
+    if (!claudeEnvHasOwnCredential(mergedEnv)) {
+      const fallbackToken = await input.instanceClaudeAuth.resolveFallbackToken();
+      if (fallbackToken) {
+        resolvedConfig.env = { ...mergedEnv, [CLAUDE_AUTH_FALLBACK_ENV_KEY]: fallbackToken };
+        secretKeys.add(CLAUDE_AUTH_FALLBACK_ENV_KEY);
+        effectiveSecretValues.add(fallbackToken);
+        usedInstanceClaudeAuth = true;
+      }
+    }
+  }
   return {
     resolvedConfig,
     secretKeys,
+    usedInstanceClaudeAuth,
     // DUR-132: literal resolved secret values (currently only ever
     // populated from adapterConfig.mcpServers[*].env/.headers -- see
     // resolveMcpServersForRuntime in secrets.ts) for output redaction that
     // can't key off a known process-env variable name.
-    secretValues: secretValues ?? new Set<string>(),
+    secretValues: effectiveSecretValues,
     secretManifest: [
       ...(environmentEnvResolution.manifest ?? []),
       ...(manifest ?? []),
@@ -5111,6 +5159,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
+  const instanceClaudeAuth = instanceClaudeAuthService(db);
   const companySkills = companySkillService(db);
   // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
   // run this server instance still has an in-memory process handle for is
@@ -11620,10 +11669,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
-    const { resolvedConfig, secretKeys, secretValues, secretManifest } = await resolveExecutionRunAdapterConfig({
+    const { resolvedConfig, secretKeys, secretValues, secretManifest, usedInstanceClaudeAuth } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
       adapterType: agent.adapterType,
+      instanceClaudeAuth,
       issueId,
       heartbeatRunId: run.id,
       environmentId: selectedEnvironmentForConfig?.id ?? null,
@@ -13016,6 +13066,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             : outcome === "failed"
               ? (adapterResult.errorCode ?? "adapter_failed")
               : null;
+      if (runErrorCode === "claude_auth_required" && usedInstanceClaudeAuth) {
+        // The instance-wide Claude sign-in was the credential for this run
+        // and Claude asked for a login: surface that on the sign-in page
+        // ("Sign in again") instead of leaving it to look healthy.
+        await instanceClaudeAuth.markAuthFailure().catch(() => undefined);
+      }
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
       if (handle) {

@@ -1073,6 +1073,26 @@ export {
   QUIET_MODE_STALE_AFTER_MS,
 } from "./types/instance.js";
 
+export {
+  CLAUDE_AUTH_SOURCES,
+  CLAUDE_AUTH_TOKEN_LIFETIME_DAYS,
+  CLAUDE_AUTH_EXPIRY_WARNING_DAYS,
+} from "./types/instance-claude-auth.js";
+export type {
+  ClaudeAuthHealth,
+  ClaudeAuthSource,
+  InstanceClaudeAuthStatus,
+  InstanceClaudeSignInSession,
+  InstanceClaudeSignInStatus,
+} from "./types/instance-claude-auth.js";
+export {
+  CLAUDE_OAUTH_TOKEN_PATTERN,
+  saveInstanceClaudeAuthTokenSchema,
+  submitInstanceClaudeSignInCodeSchema,
+  type SaveInstanceClaudeAuthTokenInput,
+  type SubmitInstanceClaudeSignInCodeInput,
+} from "./validators/instance-claude-auth.js";
+
 export type {
   CloudUpstreamConnectStartResponse,
   CloudUpstreamActivationDecision,

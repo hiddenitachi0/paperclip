@@ -7,6 +7,20 @@ export {
   resetClaudeCliCapabilitiesCacheForTests,
 } from "./cli-capabilities.js";
 export {
+  automaticClaudeSignInSupport,
+  looksLikeClaudeOAuthToken,
+  readClaudeCliVersion,
+  resetClaudeSignInCachesForTests,
+  scrubClaudeTokens,
+  startClaudeSignInSession,
+  verifyClaudeOAuthToken,
+  type ClaudeSignInSession,
+  type ClaudeSignInSessionSnapshot,
+  type ClaudeSignInSessionStatus,
+  type ClaudeTokenVerification,
+  type StartClaudeSignInSessionOptions,
+} from "./signin.js";
+export {
   parseClaudeStreamJson,
   describeClaudeFailure,
   isClaudeMaxTurnsResult,
