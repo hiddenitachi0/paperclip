@@ -2275,6 +2275,32 @@ export function issueRoutes(
     return decision.allowed;
   }
 
+  // DUR-62: the weekly check-up report reviews the agents' own behaviour and
+  // is deliberately unassigned (it is written for the operator). The base
+  // ownership rule below returns true for every unassigned issue, which would
+  // make the one page reviewing agents the one page every agent may edit,
+  // close or delete. So: no agent-authenticated mutation of it, ever --
+  // PATCH of any field, DELETE, and checkout. Board users are unaffected.
+  // Kept as a literal so this route file does not pull the check-up service
+  // into its import graph.
+  const ORGANIZATION_CHECKUP_ORIGIN_KIND = "organization_checkup";
+  function rejectAgentCheckupReportMutation(
+    req: Request,
+    res: Response,
+    issue: { id: string; originKind?: string | null },
+  ) {
+    if (req.actor.type !== "agent") return true;
+    if (issue.originKind !== ORGANIZATION_CHECKUP_ORIGIN_KIND) return true;
+    res.status(403).json({
+      error: "This check-up report is written for the operator; agents cannot change it",
+      details: {
+        issueId: issue.id,
+        securityPrinciples: ["Least Privilege", "Complete Mediation", "Fail Securely"],
+      },
+    });
+    return false;
+  }
+
   async function assertAgentIssueMutationAllowed(
     req: Request,
     res: Response,
@@ -2286,9 +2312,11 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      originKind?: string | null;
     },
   ) {
     if (req.actor.type !== "agent") return true;
+    if (!rejectAgentCheckupReportMutation(req, res, issue)) return false;
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
       res.status(403).json({ error: "Agent authentication required" });
@@ -7601,6 +7629,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!rejectAgentCheckupReportMutation(req, res, issue)) return;
 
     if (issue.projectId) {
       const project = await projectsSvc.getById(issue.projectId);

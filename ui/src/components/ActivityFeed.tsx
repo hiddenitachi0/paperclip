@@ -79,6 +79,13 @@ const ACTION_TIER: Record<string, EventTier> = {
   "agent.terminated": 2,
   "approval.requester_wakeup_queued": 3,
   "approval.requester_wakeup_failed": 3,
+  // DUR-283: per-issue mirrors of an approval decision (they exist so the
+  // issue's own Activity tab shows the decision + note). The company feed
+  // already shows the approval-scoped entry above, so hide the mirrors here
+  // to avoid one decision appearing once per linked issue.
+  "issue.approval_approved": 3,
+  "issue.approval_rejected": 3,
+  "issue.approval_revision_requested": 3,
   "company.created": 3,
   "company.updated": 3,
   "company.archived": 3,

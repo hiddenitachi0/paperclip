@@ -13,6 +13,7 @@ import {
   approvalLabel,
   approvalTechnicalReference,
   approvalDeployBranchInfo,
+  approvalIsRollbackDeploy,
   approvalIsPersonaRequest,
   approvalUnsupportedDeployKindWarning,
   typeIcon,
@@ -281,6 +282,11 @@ export function ApprovalDetail() {
               {unsupportedDeployKindWarning && (
                 <p className="mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
                   {unsupportedDeployKindWarning}
+                </p>
+              )}
+              {approvalIsRollbackDeploy(payload) && (
+                <p className="mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
+                  Rollback — approving moves production back to an older version and drops whatever shipped after it
                 </p>
               )}
             </div>

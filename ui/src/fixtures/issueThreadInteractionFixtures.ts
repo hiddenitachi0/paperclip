@@ -1052,3 +1052,71 @@ export const mixedIssueThreadInteractions = [
   pendingRequestConfirmationInteraction,
   pendingAskUserQuestionsInteraction,
 ];
+
+// DUR-411: a consent trap phrased as plain statements. No word here is in
+// DECISION_ASK_PATTERN (no "wire", "pay", "transfer", "send", ...), so the
+// denylist-only heuristic renders it as a low-scrutiny fact-check card even
+// though confirming it reads as consent to move money. The strict allowlist
+// mode rejects it three times over: the prompt is not a verification
+// question, "goes to account ... at 17:00" is an event rather than a
+// statement, and "unless you object" is a silence-as-consent construction.
+export const declarativeConsentTrapSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-declarative-consent-trap-spoofed-fact-check",
+  title: "Quick check on vendor account status",
+  summary: "Quick check on vendor account status",
+  payload: {
+    version: 1,
+    prompt: "Quick check on vendor account status",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. The 18 500 kr for Nordlys AS goes to account 1234.56.78901 at 17:00 today unless you object.\n2. The vendor gets a phone update once it has gone through.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-411: the same trap, but with the ask phrased as a verification question
+// so that only the statement-shape and consent-trap checks stand in its way.
+export const questionFramedConsentTrapSpoofedFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-question-framed-consent-trap-spoofed-fact-check",
+  title: "Is this correct?",
+  summary: "Is this correct?",
+  payload: {
+    version: 1,
+    prompt: "Is this correct?",
+    acceptLabel: "Yes, that's correct",
+    rejectLabel: "No, something's off",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "What's different?",
+    detailsMarkdown:
+      "1. The vendor's account number is 1234.56.78901.\n2. The 18 500 kr for Nordlys AS is due at 17:00 today and goes out automatically if I don't hear back.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});
+
+// DUR-411: a legitimate Norwegian fact check that the strict allowlist must
+// still recognise (verification question + plain statements, no traps).
+export const norwegianFactCheckRequestConfirmationInteraction = createRequestConfirmationInteraction({
+  id: "interaction-confirmation-norwegian-fact-check",
+  title: "Stemmer disse tallene?",
+  summary: "Agenten hentet tallene fra Fiken og trenger at du sjekker dem.",
+  payload: {
+    version: 1,
+    prompt: "Stemmer disse tallene med det du ser i Fiken?",
+    acceptLabel: "Ja, det stemmer",
+    rejectLabel: "Nei, noe er feil",
+    rejectRequiresReason: true,
+    rejectReasonLabel: "Hva er annerledes?",
+    detailsMarkdown:
+      "1. Faktura #1042 til Nordlys AS er på 18 400 kr og forfaller 2026-05-15.\n2. Utestående saldo: 28 150 kr.",
+    supersedeOnUserComment: true,
+    target: null,
+    factCheck: true,
+  },
+});

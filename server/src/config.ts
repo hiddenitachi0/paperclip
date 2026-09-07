@@ -86,6 +86,15 @@ export interface Config {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  // DUR-62: the weekly check-up. Off unless PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true.
+  weeklyCheckupEnabled: boolean;
+  // Compute and log findings, but never write the report.
+  weeklyCheckupDryRun: boolean;
+  weeklyCheckupIntervalDays: number;
+  // How often the scheduler checks whether any company is due. Not the report cadence.
+  weeklyCheckupTickMinutes: number;
+  // Empty = every active company (when enabled). Otherwise only these company ids.
+  weeklyCheckupCompanyIds: string[];
   heartbeatRunRetentionEnabled: boolean;
   heartbeatRunRetentionDays: number;
   heartbeatRunRetentionIntervalMinutes: number;
@@ -376,6 +385,17 @@ export function loadConfig(): Config {
     // of run history for debugging/audit; adjust via env if that's wrong for
     // this deployment. See resolveHeartbeatRunRetentionEnabled() above for
     // why the enable flag itself defaults off (DUR-366).
+    // DUR-62: the weekly check-up ships off for every company. Filip turns it
+    // on per deployment (and optionally per company) once he has read a dry
+    // run; see services/organization-checkup.ts for what it reports.
+    weeklyCheckupEnabled: process.env.PAPERCLIP_WEEKLY_CHECKUP_ENABLED === "true",
+    weeklyCheckupDryRun: process.env.PAPERCLIP_WEEKLY_CHECKUP_DRY_RUN === "true",
+    weeklyCheckupIntervalDays: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_INTERVAL_DAYS) || 7),
+    weeklyCheckupTickMinutes: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_TICK_MINUTES) || 60),
+    weeklyCheckupCompanyIds: (process.env.PAPERCLIP_WEEKLY_CHECKUP_COMPANY_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
     heartbeatRunRetentionEnabled: resolveHeartbeatRunRetentionEnabled(),
     heartbeatRunRetentionDays: Math.max(
       1,
