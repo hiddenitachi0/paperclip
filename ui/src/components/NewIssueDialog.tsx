@@ -435,8 +435,13 @@ export function NewIssueDialog() {
     effort: "",
     chrome: false,
   });
-  // Set by the open/restore effect for the commit in which it queues its state updates.
-  const assigneeSeedSkipPassRef = useRef(false);
+  // Sequencing between the open/restore effect and the assignee seeding effect. The
+  // open/restore effect bumps the counter in the same batch as the assignee/lane/effort
+  // state it queues; the seeding effect only acts once the rendered counter has caught
+  // up, i.e. once that state has actually landed. This holds whether the dialog mounts
+  // already open (tests) or is mounted closed at app load and opened later (Layout).
+  const [initGeneration, setInitGeneration] = useState(0);
+  const queuedInitGenerationRef = useRef(0);
 
   const effectiveCompanyId = dialogCompanyId ?? selectedCompanyId;
   const dialogCompany = companies.find((c) => c.id === effectiveCompanyId) ?? selectedCompany;
@@ -755,10 +760,12 @@ export function NewIssueDialog() {
     const initializationKey = `${selectedCompanyId ?? ""}:${JSON.stringify(newIssueDefaults)}`;
     if (initializationKeyRef.current === initializationKey) return;
     initializationKeyRef.current = initializationKey;
-    // The assignee/lane/effort states set below only apply on the NEXT render. Tell the
-    // seeding effect (which runs later in this same commit and still sees the stale,
-    // empty assignee) to skip one pass, or it would reset a restored custom override.
-    assigneeSeedSkipPassRef.current = true;
+    // The assignee/lane/effort states set below only apply on the NEXT render. Bump the
+    // generation in the same batch so the seeding effect can tell a pass that still sees
+    // the stale, pre-open state (which would reset a restored custom override) from the
+    // first pass after this state has landed.
+    queuedInitGenerationRef.current += 1;
+    setInitGeneration(queuedInitGenerationRef.current);
     setDialogCompanyId(selectedCompanyId);
     executionWorkspaceDefaultProjectId.current = null;
 
@@ -929,10 +936,10 @@ export function NewIssueDialog() {
   // are display-only: they do NOT emit an override (the lane stays "primary") until the
   // operator edits a control away from the seeded default (see laneAfterEdit).
   useEffect(() => {
-    if (assigneeSeedSkipPassRef.current) {
-      assigneeSeedSkipPassRef.current = false;
-      return;
-    }
+    // The open/restore effect has queued new assignee/lane/effort state that has not
+    // rendered yet: this pass still sees the stale values, so do nothing. The bumped
+    // generation lands together with that state and re-runs this effect.
+    if (initGeneration !== queuedInitGenerationRef.current) return;
     if (assigneeAgentPending) return;
     if (!supportsAssigneeOverrides) {
       seededAssigneeDefaultsRef.current = { model: "", effort: "", chrome: false };
@@ -972,6 +979,7 @@ export function NewIssueDialog() {
     setAssigneeThinkingEffort(seededEffort);
     setAssigneeChrome(seededChrome);
   }, [
+    initGeneration,
     assigneeAgentPending,
     supportsAssigneeOverrides,
     assigneeAdapterType,

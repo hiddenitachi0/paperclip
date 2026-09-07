@@ -321,6 +321,19 @@ function renderDialog(container: HTMLDivElement) {
   return { root, queryClient };
 }
 
+// Layout.tsx mounts <NewIssueDialog /> once at app load and keeps it mounted; opening
+// and closing only flips the dialog context. Re-rendering the same root after mutating
+// `dialogState` reproduces that path without unmounting.
+function rerenderDialog({ root, queryClient }: ReturnType<typeof renderDialog>) {
+  act(() => {
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <NewIssueDialog />
+      </QueryClientProvider>,
+    );
+  });
+}
+
 describe("NewIssueDialog", () => {
   let container: HTMLDivElement;
   let originalResizeObserver: typeof ResizeObserver | undefined;
@@ -1588,6 +1601,82 @@ describe("NewIssueDialog", () => {
       const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
       expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
       act(() => primary.root.unmount());
+    });
+
+    it("pre-fills when the dialog was mounted closed at app load and opened later (Layout path)", async () => {
+      // Layout.tsx renders <NewIssueDialog /> once with the dialog closed...
+      dialogState.newIssueOpen = false;
+      dialogState.newIssueDefaults = {};
+      const rendered = renderDialog(container);
+      await flush();
+      expect(container.querySelector('[data-testid="assignee-model-options"]')).toBeNull();
+
+      // ...and the operator opens it later with an assignee already chosen.
+      dialogState.newIssueDefaults = { title: "Opened later", assigneeAgentId: "agent-1" };
+      dialogState.newIssueOpen = true;
+      rerenderDialog(rendered);
+
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Claude options");
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+      expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("claude-opus-4-1");
+
+      await submit();
+      const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
+      expect(payload.assigneeAgentId).toBe("agent-1");
+      expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
+
+      act(() => rendered.root.unmount());
+    });
+
+    it("re-fills for a different assignee after close and reopen without unmounting (Layout path)", async () => {
+      dialogState.newIssueOpen = false;
+      dialogState.newIssueDefaults = {};
+      const rendered = renderDialog(container);
+      await flush();
+
+      // First open: a Claude agent.
+      dialogState.newIssueDefaults = { title: "First task", assigneeAgentId: "agent-1" };
+      dialogState.newIssueOpen = true;
+      rerenderDialog(rendered);
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Claude options");
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+
+      // Close (the dialog stays mounted, as in Layout.tsx).
+      dialogState.newIssueOpen = false;
+      rerenderDialog(rendered);
+      await flush();
+      expect(container.querySelector('[data-testid="assignee-model-options"]')).toBeNull();
+
+      // Reopen with a Codex agent: the block must follow the new agent, not show "Default".
+      dialogState.newIssueDefaults = { title: "Second task", assigneeAgentId: "agent-2" };
+      dialogState.newIssueOpen = true;
+      rerenderDialog(rendered);
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Codex options");
+        expect(pressedEffort()).toEqual(["Minimal"]);
+      });
+      expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("gpt-5-codex");
+
+      await act(async () => {
+        effortButton("High")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      expect(pressedEffort()).toEqual(["High"]);
+
+      await submit();
+      expect(mockIssuesApi.create).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({
+          assigneeAgentId: "agent-2",
+          assigneeAdapterOverrides: { adapterConfig: { model: "gpt-5-codex", modelReasoningEffort: "high" } },
+        }),
+      );
+
+      act(() => rendered.root.unmount());
     });
   });
 
