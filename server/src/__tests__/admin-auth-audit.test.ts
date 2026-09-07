@@ -36,7 +36,8 @@ import {
   revokeSessionsForUser,
   verifyAdminAuthSnapshot,
 } from "../services/admin-auth-audit.js";
-import { buildBetterAuthDatabaseHooks } from "../auth/better-auth.js";
+import { APIError } from "better-auth/api";
+import { buildBetterAuthDatabaseHooks, endpointSucceeded } from "../auth/better-auth.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -187,6 +188,41 @@ describe("admin auth record (pure)", () => {
       warn.mockRestore();
     }
   });
+
+  // better-auth 1.6 runs `hooks.after` even when the endpoint threw: the
+  // APIError is parked in `ctx.context.returned` first. A rejected
+  // change-password (wrong current password) must never be announced as
+  // "changed their password in the app".
+  it("does not report a password change when the change-password endpoint failed", async () => {
+    const onPasswordChanged = vi.fn(async () => {});
+    const built = buildBetterAuthDatabaseHooks({ onPasswordChanged }) as {
+      hooks: { after: (ctx: unknown) => Promise<unknown> };
+    };
+    const call = (path: string, returned: unknown) =>
+      built.hooks.after({
+        path,
+        context: { returned, session: { user: { id: "u1" } } },
+        headers: new Headers(),
+      });
+
+    await call("/change-password", new APIError("BAD_REQUEST", { message: "Invalid password" }));
+    await call("/set-password", new APIError("UNAUTHORIZED", { message: "Unauthorized" }));
+    await call("/reset-password", new APIError("BAD_REQUEST", { message: "Invalid token" }));
+    await call("/change-password", new Response(null, { status: 400 }));
+    await call("/sign-in/email", { status: true });
+    expect(onPasswordChanged).not.toHaveBeenCalled();
+
+    await call("/change-password", { status: true });
+    expect(onPasswordChanged).toHaveBeenCalledTimes(1);
+    expect(onPasswordChanged).toHaveBeenCalledWith({ userId: "u1", path: "/change-password" });
+
+    expect(endpointSucceeded(new APIError("BAD_REQUEST"))).toBe(false);
+    expect(endpointSucceeded(new Error("x"))).toBe(false);
+    expect(endpointSucceeded(new Response(null, { status: 500 }))).toBe(false);
+    expect(endpointSucceeded(new Response(null, { status: 200 }))).toBe(true);
+    expect(endpointSucceeded({ status: true })).toBe(true);
+    expect(endpointSucceeded(undefined)).toBe(true);
+  });
 });
 
 // ─── Database-backed reconciliation and notices ──────────────────────────────
@@ -265,14 +301,22 @@ describeEmbeddedPostgres("admin auth reconciliation and notices (embedded Postgr
     return db.select().from(activityLog).where(eq(activityLog.action, action));
   }
 
-  it("takes a baseline on the first run, then reports nothing while nothing changes", async () => {
+  it("takes a baseline on the first run and says so, then reports nothing while nothing changes", async () => {
     await seedCompany("Acme");
     const admin = await seedUser({ name: "Filip", email: "filip@example.com", admin: true });
     await seedUser({ name: "Kari", email: "kari@example.com" });
 
     const first = await reconcileAdminAuthSnapshot(db, { secret: SECRET, trigger: "startup" });
     expect(first.status).toBe("baseline");
-    expect(first.notices).toEqual([]);
+    // Never silent: a missing record is announced so "delete the record row,
+    // then add yourself as admin" shows up in the Activity feed.
+    expect(first.notices).toHaveLength(1);
+    expect(first.notices[0]).toContain("took a fresh record of the admin list while starting up: 1 instance admin (Filip (filip@example.com))");
+    expect(first.notices[0]).toContain("someone with database access may have deleted it");
+    expect(first.notices[0]).not.toMatch(/security\./);
+    const baselineNotices = await noticesFor(ADMIN_AUTH_ACTIONS.recordBaselineTaken);
+    expect(baselineNotices).toHaveLength(1);
+    expect((baselineNotices[0]!.details as { message: string; admins: number }).admins).toBe(1);
 
     const stored = await loadAdminAuthRecord(db);
     expect(stored.snapshot?.entries.map((e) => e.userId)).toEqual([admin]);
@@ -284,7 +328,9 @@ describeEmbeddedPostgres("admin auth reconciliation and notices (embedded Postgr
 
     const second = await reconcileAdminAuthSnapshot(db, { secret: SECRET, trigger: "scheduled" });
     expect(second.status).toBe("unchanged");
-    expect(await db.select().from(activityLog)).toHaveLength(0);
+    expect(second.notices).toEqual([]);
+    // Only the one baseline notice; a quiet check adds nothing.
+    expect(await db.select().from(activityLog)).toHaveLength(1);
     // The default instance_settings row is never touched by the record.
     const rows = await db.select({ key: instanceSettings.singletonKey }).from(instanceSettings);
     expect(rows.map((r) => r.key)).toContain(ADMIN_AUTH_SNAPSHOT_KEY);
@@ -370,6 +416,25 @@ describeEmbeddedPostgres("admin auth reconciliation and notices (embedded Postgr
     const fresh = await loadAdminAuthRecord(db);
     expect(fresh.snapshot && verifyAdminAuthSnapshot(fresh.snapshot, SECRET)).toBe(true);
     expect((await reconcileAdminAuthSnapshot(db, { secret: SECRET, trigger: "scheduled" })).status).toBe("unchanged");
+  });
+
+  it("makes deleting the stored record visible: the re-taken baseline names every admin", async () => {
+    await seedCompany("Acme");
+    await seedUser({ name: "Filip", email: "filip@example.com", admin: true });
+    await reconcileAdminAuthSnapshot(db, { secret: SECRET, trigger: "startup" });
+    await db.delete(activityLog);
+
+    // The attack: add yourself as admin, then delete the record row so the
+    // next tick cannot diff against it.
+    await seedUser({ name: "Mallory", email: "mallory@example.com", admin: true });
+    await db.delete(instanceSettings).where(eq(instanceSettings.singletonKey, ADMIN_AUTH_SNAPSHOT_KEY));
+
+    const result = await reconcileAdminAuthSnapshot(db, { secret: SECRET, trigger: "scheduled" });
+    expect(result.status).toBe("baseline");
+    expect(result.notices[0]).toContain("during a routine check: 2 instance admins (");
+    expect(result.notices[0]).toContain("Mallory (mallory@example.com)");
+    expect(result.notices[0]).toContain("the previous record is missing");
+    expect(await noticesFor(ADMIN_AUTH_ACTIONS.recordBaselineTaken)).toHaveLength(1);
   });
 
   it("announces a promotion made through the app and does not re-report it as an outside change", async () => {

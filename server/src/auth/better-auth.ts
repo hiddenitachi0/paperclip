@@ -1,7 +1,7 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth, type Auth } from "better-auth";
-import { createAuthMiddleware } from "better-auth/api";
+import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import type { Db } from "@paperclipai/db";
@@ -173,6 +173,20 @@ export interface BetterAuthAuditHooks {
 
 const PASSWORD_CHANGE_PATHS = new Set(["/change-password", "/set-password", "/reset-password"]);
 
+/**
+ * better-auth runs `hooks.after` even when the endpoint threw: the APIError is
+ * caught and stored as `ctx.context.returned` before the after hooks run. A
+ * rejected change-password (wrong current password -- exactly what someone
+ * probing an admin account produces) must therefore never look like a
+ * successful change. Only a non-error result counts as "the password changed".
+ */
+export function endpointSucceeded(returned: unknown): boolean {
+  if (returned === undefined || returned === null) return true;
+  if (isAPIError(returned) || returned instanceof Error) return false;
+  if (typeof Response !== "undefined" && returned instanceof Response) return returned.ok;
+  return true;
+}
+
 function swallow(label: string, fn: () => Promise<void>): Promise<void> {
   return fn().catch((err: unknown) => {
     // eslint-disable-next-line no-console
@@ -213,6 +227,7 @@ export function buildBetterAuthDatabaseHooks(hooks: BetterAuthAuditHooks | undef
     hooks: {
       after: createAuthMiddleware(async (ctx) => {
         if (!hooks.onPasswordChanged || !PASSWORD_CHANGE_PATHS.has(ctx.path)) return;
+        if (!endpointSucceeded((ctx.context as { returned?: unknown }).returned)) return;
         const session = (ctx.context as { session?: { user?: { id?: string } } | null }).session;
         const userId = typeof session?.user?.id === "string" ? session.user.id : null;
         await swallow("onPasswordChanged", () => hooks.onPasswordChanged!({ userId, path: ctx.path }));

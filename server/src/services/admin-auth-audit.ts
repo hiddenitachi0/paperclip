@@ -58,6 +58,7 @@ export const ADMIN_AUTH_ACTIONS = {
   emailChangedOutsideApp: "security.admin_email_changed_outside_app",
   passwordChangedOutsideApp: "security.admin_password_changed_outside_app",
   snapshotTampered: "security.admin_record_tampered",
+  recordBaselineTaken: "security.admin_record_baseline",
   adminPromoted: "security.admin_promoted",
   adminDemoted: "security.admin_demoted",
   passwordChanged: "security.password_changed",
@@ -240,6 +241,14 @@ export function buildPasswordChangedOutsideAppNotice(input: AdminAuthNoticeInput
 
 export function buildSnapshotTamperedNotice(): string {
   return `The signed record of who the instance admins are no longer matches its signature, which means someone edited it directly in the database. Paperclip has taken a fresh record. ${NOT_YOU_ADVICE}`;
+}
+
+export function buildRecordBaselineNotice(input: { admins: string[]; trigger: AdminAuthCheckTrigger }): string {
+  const count = input.admins.length;
+  const list = count === 0 ? "" : ` (${input.admins.join(", ")})`;
+  const noun = count === 1 ? "instance admin" : "instance admins";
+  const when = input.trigger === "startup" ? "while starting up" : "during a routine check";
+  return `Paperclip took a fresh record of the admin list ${when}: ${count} ${noun}${list}. This normally happens only once, the first time the server starts. If this server has been running for a while, the previous record is missing -- someone with database access may have deleted it to hide a change to the admin list. Check the admin list under Settings > Instance > Access and make sure everyone on it belongs there.`;
 }
 
 export function buildAdminPromotedNotice(input: { who: string; by: string; sessionsRevoked: number }): string {
@@ -529,10 +538,11 @@ export interface ReconcileAdminAuthOptions {
 }
 
 /**
- * Compares the live admin set against the signed record. First run stores a
- * baseline silently; afterwards any unexplained difference becomes an operator
- * notice and the record is refreshed so the same difference is not reported
- * again on the next tick.
+ * Compares the live admin set against the signed record. When no record exists
+ * (first start -- or someone deleted it) a baseline is stored and announced;
+ * afterwards any unexplained difference becomes an operator notice and the
+ * record is refreshed so the same difference is not reported again on the
+ * next tick.
  */
 export async function reconcileAdminAuthSnapshot(db: Db, opts: ReconcileAdminAuthOptions): Promise<AdminAuthCheckResult> {
   const now = opts.now ?? new Date();
@@ -550,8 +560,23 @@ export async function reconcileAdminAuthSnapshot(db: Db, opts: ReconcileAdminAut
   };
 
   if (!stored.snapshot) {
+    // Never silent: a missing record is expected exactly once (first start).
+    // Announcing it makes "delete the record row, then add yourself as admin"
+    // visible in the Activity feed instead of quietly re-baselining.
     logger.info({ admins: current.length, trigger: opts.trigger }, "admin auth record: baseline taken");
-    return finish("baseline", 0, []);
+    const labels = await loadUserLabels(db, current.map((e) => e.userId));
+    const admins = current.map((e) =>
+      describeUser({ userId: e.userId, name: labels.get(e.userId)?.name ?? null, email: labels.get(e.userId)?.email ?? e.email }),
+    );
+    const message = buildRecordBaselineNotice({ admins, trigger: opts.trigger });
+    await notifyOperators(db, {
+      action: ADMIN_AUTH_ACTIONS.recordBaselineTaken,
+      entityType: "instance_settings",
+      entityId: ADMIN_AUTH_SNAPSHOT_KEY,
+      message,
+      details: { trigger: opts.trigger, admins: current.length, adminUserIds: current.map((e) => e.userId) },
+    });
+    return finish("baseline", 0, [message]);
   }
 
   if (!verifyAdminAuthSnapshot(stored.snapshot, opts.secret)) {

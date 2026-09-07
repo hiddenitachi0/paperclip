@@ -108,6 +108,8 @@ describe("activity formatting", () => {
     expect(formatActivityVerb("security.admin_added_outside_app")).toBe("noticed a new instance admin added outside the app:");
     expect(formatActivityVerb("security.admin_promoted")).toBe("made an instance admin of");
     expect(formatActivityVerb("security.admin_record_tampered")).not.toContain("security.");
+    expect(isOperatorNoticeAction("security.admin_record_baseline")).toBe(true);
+    expect(formatActivityVerb("security.admin_record_baseline")).toBe("took a fresh record of the admin list");
   });
 
   it("surfaces the server-written message for operator notices only", () => {
