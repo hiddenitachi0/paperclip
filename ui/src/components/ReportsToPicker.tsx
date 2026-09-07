@@ -18,6 +18,8 @@ export function ReportsToPicker({
   excludeAgentIds = [],
   disabledEmptyLabel = "Reports to: N/A (CEO)",
   chooseLabel = "Reports to...",
+  selectedLabel = (name) => `Reports to ${name}`,
+  clearLabel = "No manager",
 }: {
   agents: Agent[];
   value: string | null;
@@ -26,6 +28,10 @@ export function ReportsToPicker({
   excludeAgentIds?: string[];
   disabledEmptyLabel?: string;
   chooseLabel?: string;
+  /** How the chosen agent is shown on the button; the default reads as a manager relationship. */
+  selectedLabel?: (name: string) => string;
+  /** Label of the "none" row at the top of the list. */
+  clearLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const exclude = new Set(excludeAgentIds);
@@ -62,7 +68,7 @@ export function ReportsToPicker({
                   terminatedManager && "text-amber-900 dark:text-amber-200",
                 )}
               >
-                {`Reports to ${current.name}${terminatedManager ? " (terminated)" : ""}`}
+                {`${selectedLabel(current.name)}${terminatedManager ? " (terminated)" : ""}`}
               </span>
             </>
           ) : (
@@ -87,7 +93,7 @@ export function ReportsToPicker({
             setOpen(false);
           }}
         >
-          No manager
+          {clearLabel}
         </button>
         {terminatedManager && (
           <div className="flex min-w-0 items-center gap-2 overflow-hidden px-2 py-1.5 text-xs text-muted-foreground border-b border-border mb-0.5">
