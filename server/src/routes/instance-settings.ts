@@ -139,10 +139,21 @@ export function instanceSettingsRoutes(db: Db) {
     assertCanManageInstanceSettings(req);
     const result = await svc.clearMaxTurnsPerRunAgentOverrides();
     const actor = getActorInfo(req);
+    // Every company gets an activity row (the instance-wide change is
+    // visible to all of them), but each row names only that company's own
+    // agents. Agent ids from other companies must never land in a
+    // company's activity feed.
+    const clearedByCompany = new Map<string, string[]>();
+    for (const cleared of result.clearedAgents) {
+      const list = clearedByCompany.get(cleared.companyId) ?? [];
+      list.push(cleared.agentId);
+      clearedByCompany.set(cleared.companyId, list);
+    }
     const companyIds = await svc.listCompanyIds();
     await Promise.all(
-      companyIds.map((companyId) =>
-        logActivity(db, {
+      companyIds.map((companyId) => {
+        const clearedAgentIds = clearedByCompany.get(companyId) ?? [];
+        return logActivity(db, {
           companyId,
           actorType: actor.actorType,
           actorId: actor.actorId,
@@ -151,11 +162,11 @@ export function instanceSettingsRoutes(db: Db) {
           action: "instance.settings.max_turns_agent_overrides_cleared",
           entityType: "instance_settings",
           entityId: "default",
-          details: { clearedAgentCount: result.clearedAgentIds.length, clearedAgentIds: result.clearedAgentIds },
-        }),
-      ),
+          details: { clearedAgentCount: clearedAgentIds.length, clearedAgentIds },
+        });
+      }),
     );
-    res.json({ clearedAgentCount: result.clearedAgentIds.length });
+    res.json({ clearedAgentCount: result.clearedAgents.length });
   });
 
   router.get("/instance/settings/experimental", async (req, res) => {

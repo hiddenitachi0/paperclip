@@ -315,11 +315,16 @@ export function instanceSettingsService(db: Db) {
       return overrides.sort((a, b) => a.agentName.localeCompare(b.agentName));
     },
 
-    clearMaxTurnsPerRunAgentOverrides: async (): Promise<{ clearedAgentIds: string[] }> => {
+    // Returns each cleared agent with its company so the caller can record
+    // the change per company without leaking one company's agent ids into
+    // another company's activity feed.
+    clearMaxTurnsPerRunAgentOverrides: async (): Promise<{
+      clearedAgents: Array<{ agentId: string; companyId: string }>;
+    }> => {
       const rows = await db
-        .select({ id: agents.id, adapterConfig: agents.adapterConfig })
+        .select({ id: agents.id, companyId: agents.companyId, adapterConfig: agents.adapterConfig })
         .from(agents);
-      const clearedAgentIds: string[] = [];
+      const clearedAgents: Array<{ agentId: string; companyId: string }> = [];
       for (const row of rows) {
         const adapterConfig = parseObject(row.adapterConfig);
         if (!Object.prototype.hasOwnProperty.call(adapterConfig, "maxTurnsPerRun")) continue;
@@ -328,9 +333,9 @@ export function instanceSettingsService(db: Db) {
           .update(agents)
           .set({ adapterConfig: rest, updatedAt: new Date() })
           .where(eq(agents.id, row.id));
-        clearedAgentIds.push(row.id);
+        clearedAgents.push({ agentId: row.id, companyId: row.companyId });
       }
-      return { clearedAgentIds };
+      return { clearedAgents };
     },
 
     getQuietMode: async (): Promise<QuietModeState & { activeRunCount: number }> => {

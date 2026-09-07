@@ -582,6 +582,49 @@ describe("instance settings routes", () => {
     expect(res.body.agents.map((agent: { agentId: string }) => agent.agentId)).toEqual(["agent-a", "agent-b"]);
   });
 
+  it("records the cleared turn-cap overrides per company without leaking other companies' agent ids", async () => {
+    mockInstanceSettingsService.clearMaxTurnsPerRunAgentOverrides.mockResolvedValue({
+      clearedAgents: [
+        { agentId: "agent-a1", companyId: "company-1" },
+        { agentId: "agent-a2", companyId: "company-1" },
+        { agentId: "agent-b1", companyId: "company-2" },
+      ],
+    });
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1", "company-2", "company-3"]);
+    mockLogActivity.mockResolvedValue(undefined);
+    const app = await createApp({
+      type: "board",
+      userId: "admin-1",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app).post("/api/instance/settings/general/max-turns-per-run/clear-agent-overrides");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ clearedAgentCount: 3 });
+    expect(mockLogActivity).toHaveBeenCalledTimes(3);
+    const rowsByCompany = new Map(
+      mockLogActivity.mock.calls.map(([, input]: [unknown, { companyId: string; details: Record<string, unknown> }]) => [
+        input.companyId,
+        input.details,
+      ]),
+    );
+    expect(rowsByCompany.get("company-1")).toEqual({ clearedAgentCount: 2, clearedAgentIds: ["agent-a1", "agent-a2"] });
+    expect(rowsByCompany.get("company-2")).toEqual({ clearedAgentCount: 1, clearedAgentIds: ["agent-b1"] });
+    expect(rowsByCompany.get("company-3")).toEqual({ clearedAgentCount: 0, clearedAgentIds: [] });
+    // No row mentions an agent that belongs to a different company.
+    for (const [companyId, details] of rowsByCompany) {
+      for (const agentId of details.clearedAgentIds as string[]) {
+        expect(agentId.startsWith(companyId === "company-1" ? "agent-a" : "agent-b"), `${companyId} row lists ${agentId}`).toBe(true);
+      }
+    }
+    for (const [, input] of mockLogActivity.mock.calls) {
+      expect(input.action).toBe("instance.settings.max_turns_agent_overrides_cleared");
+    }
+  });
+
   it("rejects non-admin board users from clearing every agent's turn-cap override", async () => {
     const app = await createApp({
       type: "board",

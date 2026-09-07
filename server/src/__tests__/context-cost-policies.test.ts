@@ -73,9 +73,13 @@ describe("max turns per run (DUR-3943 item 4): precedence", () => {
     });
   });
 
-  it("only applies to adapters that pass the cap to their CLI", () => {
+  it("only applies to adapters that both pass the cap to their CLI and report the turn-cap stop", () => {
     expect(adapterHonoursMaxTurnsPerRun("claude_local")).toBe(true);
-    expect(adapterHonoursMaxTurnsPerRun("hermes_local")).toBe(true);
+    // Hermes passes --max-turns but never reports the cap stop, so an injected
+    // cap would silently truncate runs with no note and no continuation.
+    expect(adapterHonoursMaxTurnsPerRun("hermes_local")).toBe(false);
+    // Gemini reports the stop but ignores adapterConfig.maxTurnsPerRun.
+    expect(adapterHonoursMaxTurnsPerRun("gemini_local")).toBe(false);
     expect(adapterHonoursMaxTurnsPerRun("codex_local")).toBe(false);
     expect(adapterHonoursMaxTurnsPerRun("http")).toBe(false);
   });
@@ -442,7 +446,11 @@ describeEmbeddedPostgres("context-cost policies against the database", () => {
     ]);
 
     const cleared = await settings.clearMaxTurnsPerRunAgentOverrides();
-    expect(new Set(cleared.clearedAgentIds)).toEqual(new Set([a.agentId, b.agentId]));
+    expect(new Set(cleared.clearedAgents.map((row) => row.agentId))).toEqual(new Set([a.agentId, b.agentId]));
+    // Each cleared agent is reported with its own company, so the route can
+    // write per-company activity rows that never name another company's agents.
+    expect(cleared.clearedAgents.find((row) => row.agentId === a.agentId)?.companyId).toBe(a.companyId);
+    expect(cleared.clearedAgents.find((row) => row.agentId === b.agentId)?.companyId).toBe(b.companyId);
     expect(await settings.listMaxTurnsPerRunAgentOverrides()).toEqual([]);
 
     // The rest of each agent's config survives; the untouched agent is untouched.

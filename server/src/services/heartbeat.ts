@@ -4492,10 +4492,26 @@ export function resolveFrozenRunCaps(
   };
 }
 
-// DUR-3943 item 4: adapters that honour adapterConfig.maxTurnsPerRun (they
-// pass it to the CLI as --max-turns). Only these get the instance-wide cap
-// injected; the others ignore the key anyway.
-const MAX_TURNS_PER_RUN_ADAPTER_TYPES = new Set(["claude_local", "hermes_local"]);
+// DUR-3943 item 4: adapters that get the instance-wide cap injected as
+// adapterConfig.maxTurnsPerRun. An adapter may only be listed here when it
+// BOTH passes the cap to its CLI AND reports the turn-cap stop back to
+// Paperclip (resultJson.stopReason / errorCode "max_turns_exhausted"), because
+// the continuation + "not continued" note below key off that stop reason. An
+// adapter that caps silently would truncate runs with no note and no
+// continuation.
+//
+// Verified 2026-09-07 by reading packages/adapters/*/src/server/execute.ts:
+// - claude_local: passes --max-turns and sets stopReason "max_turns_exhausted"
+//   (execute.ts, via parse.ts isClaudeMaxTurnsResult). Listed.
+// - hermes_local: passes --max-turns but never sets a stopReason/errorCode for
+//   the cap. NOT listed.
+// - gemini_local: reports "max_turns_exhausted" for its own limit but ignores
+//   adapterConfig.maxTurnsPerRun, so the injected cap would be a no-op. NOT listed.
+// - grok_local: reads config.maxTurns (a different key), so the injected cap is
+//   ignored; it only passes through whatever stopReason the CLI emits. NOT listed.
+// - codex_local, acpx_local, cursor, cursor_cloud, opencode_local, pi_local,
+//   openclaw_gateway, hermes_gateway, http, process: no turn cap at all.
+const MAX_TURNS_PER_RUN_ADAPTER_TYPES = new Set(["claude_local"]);
 
 /**
  * DUR-3943 item 4: the turn ceiling for one run. Precedence: the agent's
