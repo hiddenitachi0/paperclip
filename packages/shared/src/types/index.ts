@@ -653,3 +653,4 @@ export type {
   SignOutEverywhereResult,
   SignOutEverywhereScope,
 } from "./instance-security.js";
+export type { CrossCompanyInstruction } from "./cross-company-instruction.js";
