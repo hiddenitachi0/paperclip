@@ -152,10 +152,12 @@ export function Layout() {
     },
     refetchIntervalInBackground: true,
   });
-  const keyboardShortcutsEnabled = useQuery({
+  const instanceGeneralSettings = useQuery({
     queryKey: queryKeys.instance.generalSettings,
     queryFn: () => instanceSettingsApi.getGeneral(),
-  }).data?.keyboardShortcuts === true;
+  }).data;
+  const keyboardShortcutsEnabled = instanceGeneralSettings?.keyboardShortcuts === true;
+  const factCheckCardStrictAllowlist = instanceGeneralSettings?.factCheckCardStrictAllowlist === true;
 
   // A secondary sidebar always collapses the app sidebar to its rail (still
   // peek-able) — a hard invariant that overrides the user pin while the route
@@ -506,7 +508,7 @@ export function Layout() {
   }, [location.key, location.pathname, location.state, navigationType]);
 
   return (
-    <GeneralSettingsProvider value={{ keyboardShortcutsEnabled }}>
+    <GeneralSettingsProvider value={{ keyboardShortcutsEnabled, factCheckCardStrictAllowlist }}>
       <div
       className={cn(
         "bg-background text-foreground pt-[env(safe-area-inset-top)]",

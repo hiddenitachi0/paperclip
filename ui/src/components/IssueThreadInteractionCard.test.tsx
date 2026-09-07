@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IssueThreadInteractionCard } from "./IssueThreadInteractionCard";
 import { ThemeProvider } from "../context/ThemeContext";
+import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
 import { TooltipProvider } from "./ui/tooltip";
 import {
   pendingAskUserQuestionsInteraction,
@@ -13,6 +14,9 @@ import {
   additionalMoneyMovementSpoofedFactCheckRequestConfirmationInteraction,
   combiningMarkSpoofedFactCheckRequestConfirmationInteraction,
   commentExpiredRequestConfirmationInteraction,
+  declarativeConsentTrapSpoofedFactCheckRequestConfirmationInteraction,
+  norwegianFactCheckRequestConfirmationInteraction,
+  questionFramedConsentTrapSpoofedFactCheckRequestConfirmationInteraction,
   disabledDeclineReasonRequestConfirmationInteraction,
   failedRequestConfirmationInteraction,
   moneyMovementSpoofedFactCheckRequestConfirmationInteraction,
@@ -78,6 +82,47 @@ function renderCard(
   });
 
   return container;
+}
+
+// DUR-411: same as renderCard, but with the instance's "Stricter fact-check
+// cards" setting switched on (Layout.tsx provides it from general settings).
+function renderStrictCard(
+  props: Partial<ComponentProps<typeof IssueThreadInteractionCard>> = {},
+) {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  act(() => {
+    root?.render(
+      <GeneralSettingsProvider value={{ keyboardShortcutsEnabled: false, factCheckCardStrictAllowlist: true }}>
+        <TooltipProvider>
+          <ThemeProvider>
+            <IssueThreadInteractionCard
+              interaction={pendingAskUserQuestionsInteraction}
+              {...props}
+            />
+          </ThemeProvider>
+        </TooltipProvider>
+      </GeneralSettingsProvider>,
+    );
+  });
+
+  return container;
+}
+
+function unmountCard(host: HTMLDivElement) {
+  act(() => root?.unmount());
+  host.remove();
+  root = null;
+}
+
+function isFactCheckCard(host: HTMLDivElement): boolean {
+  const shell = host.firstElementChild as HTMLElement;
+  return (
+    shell.className.includes("border-teal-500/")
+    && (host.textContent ?? "").includes("Read this carefully and only confirm if it matches what you actually know")
+  );
 }
 
 afterEach(() => {
@@ -576,6 +621,91 @@ describe("IssueThreadInteractionCard", () => {
     expect(shell.className).not.toContain("border-teal-500/60");
     expect(spoofed.textContent).not.toContain("Fact check");
     expect(spoofed.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+  });
+
+  // DUR-411: opt-in strict allowlist layer on top of the denylist.
+  describe("strict fact-check allowlist (DUR-411)", () => {
+    it("still renders a well-phrased fact check as a fact-check card with strict mode on (English and Norwegian)", () => {
+      const english = renderStrictCard({ interaction: pendingFactCheckRequestConfirmationInteraction });
+      expect(isFactCheckCard(english)).toBe(true);
+      expect(english.textContent).toContain("Needs your check");
+      unmountCard(english);
+
+      const norwegian = renderStrictCard({ interaction: norwegianFactCheckRequestConfirmationInteraction });
+      expect(isFactCheckCard(norwegian)).toBe(true);
+      unmountCard(norwegian);
+
+      // And the default (denylist-only) mode is untouched for the same fixtures.
+      const defaultMode = renderCard({ interaction: norwegianFactCheckRequestConfirmationInteraction });
+      expect(isFactCheckCard(defaultMode)).toBe(true);
+    });
+
+    it("documents the gap: a consent trap phrased as plain statements passes the denylist-only default", () => {
+      // Characterisation of today's behaviour, and the reason strict mode
+      // exists. If the default heuristic ever closes this gap, flip this
+      // expectation rather than deleting the fixture.
+      const host = renderCard({ interaction: declarativeConsentTrapSpoofedFactCheckRequestConfirmationInteraction });
+      expect(isFactCheckCard(host)).toBe(true);
+    });
+
+    it("does not render the declarative consent trap as a fact-check card with strict mode on", () => {
+      const host = renderStrictCard({
+        interaction: declarativeConsentTrapSpoofedFactCheckRequestConfirmationInteraction,
+      });
+      expect(isFactCheckCard(host)).toBe(false);
+      expect(host.textContent).not.toContain("Fact check");
+      expect(host.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+    });
+
+    it("does not render a question-framed consent trap as a fact-check card with strict mode on", () => {
+      // Prompt reads as a check ("Is this correct?") and both lines are
+      // statement-shaped, so only the consent-trap check ("automatically",
+      // "if I don't hear back") stands between this and the calm card.
+      const host = renderStrictCard({
+        interaction: questionFramedConsentTrapSpoofedFactCheckRequestConfirmationInteraction,
+      });
+      expect(isFactCheckCard(host)).toBe(false);
+      expect(host.textContent).not.toContain("Read this carefully and only confirm if it matches what you actually know");
+    });
+
+    it("falls back to the decision card when the ask is not phrased as a check, even for harmless content", () => {
+      const host = renderStrictCard({
+        interaction: {
+          ...pendingFactCheckRequestConfirmationInteraction,
+          title: "Invoice numbers",
+          summary: "Invoice numbers",
+          payload: { ...pendingFactCheckRequestConfirmationInteraction.payload, prompt: "Invoice numbers" },
+        },
+      });
+      expect(isFactCheckCard(host)).toBe(false);
+    });
+
+    it("falls back to the decision card when a numbered line is not a plain statement", () => {
+      const host = renderStrictCard({
+        interaction: {
+          ...pendingFactCheckRequestConfirmationInteraction,
+          payload: {
+            ...pendingFactCheckRequestConfirmationInteraction.payload,
+            detailsMarkdown:
+              "1. Invoice #1042 to Nordlys AS: 18 400 kr, due 2026-05-15\n2. Then call the vendor about the remaining 9 750 kr",
+          },
+        },
+      });
+      expect(isFactCheckCard(host)).toBe(false);
+    });
+
+    it("keeps every existing denylist spoof out of the fact-check card with strict mode on", () => {
+      for (const interaction of [
+        moneyMovementSpoofedFactCheckRequestConfirmationInteraction,
+        titleSummarySpoofedFactCheckRequestConfirmationInteraction,
+        zeroWidthSpoofedFactCheckRequestConfirmationInteraction,
+        verbGapSpoofedFactCheckRequestConfirmationInteraction,
+      ]) {
+        const host = renderStrictCard({ interaction });
+        expect(isFactCheckCard(host), interaction.id).toBe(false);
+        unmountCard(host);
+      }
+    });
   });
 
   it("attaches screenshots to a plan request-changes reason as markdown images", async () => {

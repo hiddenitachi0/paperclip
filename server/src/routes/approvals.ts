@@ -822,6 +822,53 @@ async function firstLinkedIssueId(
   return Array.isArray(linked) ? linked[0]?.id ?? null : null;
 }
 
+type ApprovalDecision = "approved" | "rejected" | "revision_requested";
+
+function readDecisionNote(...candidates: unknown[]): string | null {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+// DUR-283: the issue Activity tab only lists entries whose entityType is
+// "issue" (activityService.forIssue), so the approval-scoped
+// `approval.approved` / `approval.rejected` / `approval.revision_requested`
+// entry alone never reaches a linked issue's history -- the operator had to
+// open the approval to learn *why* something was rejected or sent back.
+// Mirror every decision onto each linked issue as its own entry, carrying
+// the decision note, so the reason shows up right in the task's timeline.
+async function logApprovalDecisionOnLinkedIssues(
+  db: Db,
+  input: {
+    approval: { id: string; companyId: string; type: string; requestedByAgentId?: string | null };
+    decision: ApprovalDecision;
+    actorId: string;
+    linkedIssueIds: string[];
+    decisionNote: string | null;
+  },
+) {
+  for (const issueId of input.linkedIssueIds) {
+    await logActivity(db, {
+      companyId: input.approval.companyId,
+      actorType: "user",
+      actorId: input.actorId,
+      action: `issue.approval_${input.decision}`,
+      entityType: "issue",
+      entityId: issueId,
+      details: {
+        approvalId: input.approval.id,
+        approvalType: input.approval.type,
+        decision: input.decision,
+        decisionNote: input.decisionNote,
+        requestedByAgentId: input.approval.requestedByAgentId ?? null,
+      },
+    });
+  }
+}
+
 function readIssueIdForEscalation(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
   const rawIssueIds = (body as Record<string, unknown>).issueIds;
@@ -1315,6 +1362,7 @@ export function approvalRoutes(
       // immediate check would flag every single normal merge, not just the
       // ones that were actually forgotten.
 
+      const approveDecisionNote = readDecisionNote(approval.decisionNote, req.body.decisionNote);
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -1326,7 +1374,15 @@ export function approvalRoutes(
           type: approval.type,
           requestedByAgentId: approval.requestedByAgentId,
           linkedIssueIds,
+          decisionNote: approveDecisionNote,
         },
+      });
+      await logApprovalDecisionOnLinkedIssues(db, {
+        approval,
+        decision: "approved",
+        actorId: req.actor.userId ?? "board",
+        linkedIssueIds,
+        decisionNote: approveDecisionNote,
       });
 
       // A tool_grant approval is exactly when an agent's tool connections
@@ -1457,6 +1513,9 @@ export function approvalRoutes(
         userId: req.actor.userId ?? "board",
       });
 
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      const rejectDecisionNote = readDecisionNote(approval.decisionNote, req.body.decisionNote);
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -1464,7 +1523,19 @@ export function approvalRoutes(
         action: "approval.rejected",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          type: approval.type,
+          requestedByAgentId: approval.requestedByAgentId,
+          linkedIssueIds,
+          decisionNote: rejectDecisionNote,
+        },
+      });
+      await logApprovalDecisionOnLinkedIssues(db, {
+        approval,
+        decision: "rejected",
+        actorId: req.actor.userId ?? "board",
+        linkedIssueIds,
+        decisionNote: rejectDecisionNote,
       });
     }
 
@@ -1481,6 +1552,9 @@ export function approvalRoutes(
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
 
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      const revisionDecisionNote = readDecisionNote(approval.decisionNote, req.body.decisionNote);
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -1488,7 +1562,19 @@ export function approvalRoutes(
         action: "approval.revision_requested",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          type: approval.type,
+          requestedByAgentId: approval.requestedByAgentId,
+          linkedIssueIds,
+          decisionNote: revisionDecisionNote,
+        },
+      });
+      await logApprovalDecisionOnLinkedIssues(db, {
+        approval,
+        decision: "revision_requested",
+        actorId: req.actor.userId ?? "board",
+        linkedIssueIds,
+        decisionNote: revisionDecisionNote,
       });
 
       const revisionPersonaNames = await personaDisplayNamesFor([approval]);
