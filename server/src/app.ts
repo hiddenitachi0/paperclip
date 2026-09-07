@@ -50,6 +50,7 @@ import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { instanceClaudeAuthRoutes } from "./routes/instance-claude-auth.js";
+import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructions.js";
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
@@ -270,6 +271,7 @@ export async function createApp(
   api.use(laneARoutes(db));
   api.use(chatRouterRoutes(db));
   api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(crossCompanyInstructionRoutes(db));
   api.use(deployRunnerRoutes(db));
   api.use(secretRoutes(db));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));

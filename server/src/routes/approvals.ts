@@ -50,6 +50,10 @@ import { redactEventPayload } from "../redaction.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
+import {
+  crossCompanyInstructionService,
+  isCrossCompanyInstructionApproval,
+} from "../services/cross-company-instructions.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
@@ -1023,6 +1027,7 @@ export function approvalRoutes(
   const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
   const personasSvc = personaService(db);
+  const crossCompanyInstructionsSvc = crossCompanyInstructionService(db, { rawDb });
 
   /** Look up persona display names for one or more approvals in a single query. */
   async function personaDisplayNamesFor(
@@ -1470,6 +1475,33 @@ export function approvalRoutes(
       req.body.decisionNote,
     );
 
+    if (applied && isCrossCompanyInstructionApproval(approval)) {
+      // Guarded cross-company channel: approving the card is the ONLY place
+      // an instruction from another company ever turns into work here. The
+      // liaison gets it as an issue in THIS company and is woken; the
+      // sending company only learns "approved".
+      await crossCompanyInstructionsSvc.deliverApproved(approval, {
+        userId: decidedByUserId,
+        decisionNote: req.body.decisionNote,
+        wakeLiaison: (agentId, issueId) =>
+          heartbeat.wakeup(agentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "cross_company_instruction_approved",
+            payload: { approvalId: approval.id, issueId },
+            requestedByActorType: "user",
+            requestedByActorId: decidedByUserId,
+            contextSnapshot: {
+              source: "cross_company_instruction.approved",
+              approvalId: approval.id,
+              issueId,
+              taskId: issueId,
+              wakeReason: "cross_company_instruction_approved",
+            },
+          }),
+      });
+    }
+
     if (applied) {
       // DUR-29: an agent may have raised a request_confirmation for the same decision as
       // this approval — resolve it now so the operator doesn't have to answer it separately.
@@ -1633,6 +1665,13 @@ export function approvalRoutes(
     const id = req.params.id as string;
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
+
+    if (applied && isCrossCompanyInstructionApproval(approval)) {
+      await crossCompanyInstructionsSvc.markRejected(approval, {
+        userId: decidedByUserId,
+        decisionNote: req.body.decisionNote,
+      });
+    }
 
     if (applied) {
       // DUR-29: resolve any request_confirmation linked to this approval too.

@@ -343,6 +343,7 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
       { activityRoutes },
       { dashboardRoutes },
       { pluginRoutes },
+      { crossCompanyInstructionRoutes },
     ] = await Promise.all([
       import("../middleware/index.js"),
       import("../routes/companies.js"),
@@ -359,6 +360,7 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
       import("../routes/activity.js"),
       import("../routes/dashboard.js"),
       import("../routes/plugins.js"),
+      import("../routes/cross-company-instructions.js"),
     ]);
     const storageStub = {} as never;
     const app = express();
@@ -378,6 +380,7 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
     api.use(secretRoutes(db));
     api.use(activityRoutes(db));
     api.use(dashboardRoutes(db));
+    api.use(crossCompanyInstructionRoutes(db));
     api.use(
       pluginRoutes(
         db,
@@ -526,6 +529,7 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
       `/api/companies/${target.id}/dashboard`,
       `/api/companies/${target.id}/timeline`,
       `/api/companies/${target.id}/instructions`,
+      `/api/companies/${target.id}/cross-company-instructions`,
       `/api/agents/${target.agentId}`,
       `/api/agents/${target.agentId}/configuration`,
       `/api/agents/${target.agentId}/keys`,
@@ -611,6 +615,10 @@ describeEmbeddedPostgres("cross-company isolation audit: nothing from company B 
         ["patch B execution workspace", () => asAgentA().patch(`/api/execution-workspaces/${B.executionWorkspaceId}`).send({ name: "renamed" })],
         ["patch B company", () => asAgentA().patch(`/api/companies/${B.id}`).send({ name: "renamed" })],
         ["star B skill", () => asAgentA().post(`/api/companies/${B.id}/skills/${B.skillId}/star`).send({})],
+        // The guarded channel itself: A cannot file an instruction "from" B,
+        // and with the flag off (the default here) cannot file one at all.
+        ["send instruction as B", () => asAgentA().post(`/api/companies/${B.id}/cross-company-instructions`).send({ toCompanyId: A.id, subject: "x", instruction: "y" })],
+        ["send instruction to B with channel off", () => asAgentA().post(`/api/companies/${A.id}/cross-company-instructions`).send({ toCompanyId: B.id, subject: "x", instruction: "y" })],
       ];
       expect(await collectFailures(probes, (res, label) => expectBlockedAndClean(res, `agent ${label}`))).toEqual([]);
 
