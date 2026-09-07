@@ -245,6 +245,61 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("shows the quality check's findings on a done_gate_exhausted card (plainSummary, no summary)", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "done_gate_exhausted",
+            issueId: "8e6f9a2e-9e2a-4f7a-9c8b-1a2b3c4d5e6f",
+            title: "Paperclip — decide whether \"Add a language switcher\" is really finished",
+            plainSummary:
+              "The agent has said \"Add a language switcher\" (PAP-12) is finished 3 times, and an independent quality check disagreed 2 times.\n\nThe last time, the check found:\n1. No test was added for the switcher.",
+            recommendedAction:
+              "Look at the task and the findings. If the work is actually fine, mark the task done yourself.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("disagreed 2 times");
+    expect(container.textContent).toContain("1. No test was added for the switcher.");
+    expect(container.textContent).toContain("mark the task done yourself");
+    expect(container.textContent).not.toContain("\"plainSummary\"");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("prefers summary over plainSummary when a card carries both", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "done_gate_exhausted",
+            title: "decide whether the task is really finished",
+            summary: "Summary text the card should show.",
+            plainSummary: "Duplicate text that must not be shown twice.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Summary text the card should show.");
+    expect(container.textContent).not.toContain("Duplicate text that must not be shown twice.");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("renders feature_launch payload fields as a plain-language card, not raw JSON", () => {
     const root = createRoot(container);
 

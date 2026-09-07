@@ -40,6 +40,8 @@ import {
 } from "@paperclipai/adapter-claude-local/server";
 import { badRequest, notFound, unprocessable } from "../errors.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
+import { logActivity } from "./activity-log.js";
+import { instanceSettingsService } from "./instance-settings.js";
 
 const SINGLETON_KEY = "default";
 const SEALED_PREFIX = "instance-claude-auth:";
@@ -49,6 +51,17 @@ const FINISHED_SIGNIN_RETENTION_MS = 15 * 60 * 1000;
 /** `lastUsedAt` is informational; don't write it on every single run. */
 const LAST_USED_WRITE_THROTTLE_MS = 5 * 60 * 1000;
 export const CLAUDE_AUTH_FALLBACK_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
+/**
+ * Polish round 3: the stored token is re-tested with one real CLI call once a
+ * day (the scheduler ticks more often; `runScheduledCheck` only acts when the
+ * last check is at least this old), and the operator is told when the check
+ * fails or the token is within CLAUDE_AUTH_NOTICE_EXPIRY_DAYS of expiring.
+ */
+export const CLAUDE_AUTH_SCHEDULED_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const CLAUDE_AUTH_NOTICE_EXPIRY_DAYS = 3;
+export const CLAUDE_AUTH_CHECK_FAILED_ACTION = "instance.claude_auth.check_failed";
+export const CLAUDE_AUTH_EXPIRING_ACTION = "instance.claude_auth.expiring";
+export const CLAUDE_AUTH_SETTINGS_PATH = "Settings > Instance settings > Claude sign-in";
 
 export interface InstanceClaudeAuthServiceDeps {
   command?: string;
@@ -57,7 +70,85 @@ export interface InstanceClaudeAuthServiceDeps {
   readCliVersion?: () => Promise<string | null>;
   automaticSupport?: () => { supported: boolean; reason: string | null };
   now?: () => Date;
+  /** Which companies get the operator notice in their Activity feed. Defaults to every company. */
+  listCompanyIds?: () => Promise<string[]>;
 }
+
+/** The columns the health verdict is made from; shared with the weekly check-up. */
+export interface ClaudeAuthHealthRow {
+  expiresAt: Date | null;
+  lastCheckAt: Date | null;
+  lastCheckOk: boolean | null;
+  lastAuthFailureAt: Date | null;
+}
+
+/**
+ * Pure: the health verdict for a stored sign-in at `now`. Expiry wins over a
+ * failed check, a failed check (or a run told to log in since the last
+ * check) over "expiring soon", and an untested token reads as unverified.
+ */
+export function classifyClaudeAuthHealth(
+  row: ClaudeAuthHealthRow,
+  now: Date,
+): { health: Exclude<ClaudeAuthHealth, "not_configured">; expiresInDays: number | null } {
+  const expiresInDays = row.expiresAt ? daysUntil(row.expiresAt, now) : null;
+  const authFailedSinceLastCheck =
+    row.lastAuthFailureAt != null &&
+    (row.lastCheckAt == null || row.lastAuthFailureAt.getTime() > row.lastCheckAt.getTime());
+  let health: Exclude<ClaudeAuthHealth, "not_configured">;
+  if (expiresInDays !== null && expiresInDays <= 0) health = "expired";
+  else if (row.lastCheckOk === false || authFailedSinceLastCheck) health = "check_failed";
+  else if (expiresInDays !== null && expiresInDays <= CLAUDE_AUTH_EXPIRY_WARNING_DAYS) health = "expiring_soon";
+  else if (row.lastCheckOk == null) health = "unverified";
+  else health = "ok";
+  return { health, expiresInDays };
+}
+
+export interface ClaudeAuthOperatorNotice {
+  action: typeof CLAUDE_AUTH_CHECK_FAILED_ACTION | typeof CLAUDE_AUTH_EXPIRING_ACTION;
+  /** One plain-language sentence for the Activity feed. */
+  message: string;
+}
+
+/**
+ * Pure: the notice the daily check leaves for the operator, or null when the
+ * sign-in is fine. Written for a person who does not read code: what is
+ * wrong, what it means for agents, and where to fix it.
+ */
+export function buildClaudeAuthOperatorNotice(input: {
+  health: ClaudeAuthHealth;
+  expiresInDays: number | null;
+  lastCheckMessage: string | null;
+}): ClaudeAuthOperatorNotice | null {
+  const fix = `Sign in again under ${CLAUDE_AUTH_SETTINGS_PATH} so Claude agents without a token of their own keep working.`;
+  if (input.health === "expired") {
+    return {
+      action: CLAUDE_AUTH_CHECK_FAILED_ACTION,
+      message: `The shared Claude sign-in has expired. ${fix}`,
+    };
+  }
+  if (input.health === "check_failed") {
+    const why = input.lastCheckMessage?.trim() ? ` Claude said: ${input.lastCheckMessage.trim()}` : "";
+    return {
+      action: CLAUDE_AUTH_CHECK_FAILED_ACTION,
+      message: `The daily check of the shared Claude sign-in failed.${why} ${fix}`,
+    };
+  }
+  if (input.expiresInDays !== null && input.expiresInDays <= CLAUDE_AUTH_NOTICE_EXPIRY_DAYS) {
+    const days = Math.max(0, input.expiresInDays);
+    const when = days === 0 ? "today" : `in about ${days} day${days === 1 ? "" : "s"}`;
+    return {
+      action: CLAUDE_AUTH_EXPIRING_ACTION,
+      message: `The shared Claude sign-in expires ${when}. ${fix}`,
+    };
+  }
+  return null;
+}
+
+export type ScheduledClaudeAuthCheckResult =
+  | { outcome: "not_configured"; status: null; notice: null }
+  | { outcome: "not_due"; status: null; notice: null; nextDueAt: string }
+  | { outcome: "checked"; status: InstanceClaudeAuthStatus; notice: ClaudeAuthOperatorNotice | null; noticedCompanyIds: string[] };
 
 type ActiveSignIn = {
   id: string;
@@ -128,6 +219,7 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
   const startSignIn = deps.startSignIn ?? ((options: StartClaudeSignInSessionOptions) => startClaudeSignInSession({ ...options, command }));
   const readCliVersion = deps.readCliVersion ?? (() => readClaudeCliVersion(command));
   const automaticSupport = deps.automaticSupport ?? automaticClaudeSignInSupport;
+  const listCompanyIds = deps.listCompanyIds ?? (() => instanceSettingsService(db).listCompanyIds());
 
   async function getRow() {
     const rows = await db
@@ -180,16 +272,7 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
         ...base,
       };
     }
-    const expiresInDays = row.expiresAt ? daysUntil(row.expiresAt, current) : null;
-    const authFailedSinceLastCheck =
-      row.lastAuthFailureAt != null &&
-      (row.lastCheckAt == null || row.lastAuthFailureAt.getTime() > row.lastCheckAt.getTime());
-    let health: ClaudeAuthHealth;
-    if (expiresInDays !== null && expiresInDays <= 0) health = "expired";
-    else if (row.lastCheckOk === false || authFailedSinceLastCheck) health = "check_failed";
-    else if (expiresInDays !== null && expiresInDays <= CLAUDE_AUTH_EXPIRY_WARNING_DAYS) health = "expiring_soon";
-    else if (row.lastCheckOk == null) health = "unverified";
-    else health = "ok";
+    const { health, expiresInDays } = classifyClaudeAuthHealth(row, current);
     return {
       configured: true,
       health,
@@ -281,6 +364,78 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
     const row = await getRow();
     if (row) await db.delete(instanceClaudeAuth).where(eq(instanceClaudeAuth.id, row.id));
     return getStatus();
+  }
+
+  /**
+   * Scheduler-only: re-test the stored token once a day and leave a plain
+   * notice in every company's Activity feed when the check fails or the
+   * token is within CLAUDE_AUTH_NOTICE_EXPIRY_DAYS of expiring. Nothing is
+   * saved when no sign-in exists, and a check younger than
+   * CLAUDE_AUTH_SCHEDULED_CHECK_INTERVAL_MS is not repeated (so the hourly
+   * tick costs one CLI call a day, and the notice appears once a day at
+   * most). `force` skips the age gate (tests, "Check now").
+   */
+  async function runScheduledCheck(opts: { force?: boolean } = {}): Promise<ScheduledClaudeAuthCheckResult> {
+    const row = await getRow();
+    if (!row) return { outcome: "not_configured", status: null, notice: null };
+    const current = now();
+    if (!opts.force && row.lastCheckAt) {
+      const nextDueAt = new Date(row.lastCheckAt.getTime() + CLAUDE_AUTH_SCHEDULED_CHECK_INTERVAL_MS);
+      if (nextDueAt.getTime() > current.getTime()) {
+        return { outcome: "not_due", status: null, notice: null, nextDueAt: nextDueAt.toISOString() };
+      }
+    }
+
+    let status: InstanceClaudeAuthStatus;
+    try {
+      status = await checkNow();
+    } catch (err) {
+      // The CLI itself could not be run (missing binary, unsealing failed).
+      // Record it like a failed check so the page and the notice agree.
+      const message = scrubClaudeTokens(err instanceof Error ? err.message : String(err));
+      await db
+        .update(instanceClaudeAuth)
+        .set({ lastCheckAt: current, lastCheckOk: false, lastCheckMessage: message, updatedAt: current })
+        .where(eq(instanceClaudeAuth.id, row.id));
+      status = await getStatus();
+    }
+
+    const notice = buildClaudeAuthOperatorNotice({
+      health: status.health,
+      expiresInDays: status.expiresInDays,
+      lastCheckMessage: status.lastCheckMessage,
+    });
+    const noticedCompanyIds: string[] = [];
+    if (notice) {
+      const companyIds = await listCompanyIds().catch(() => [] as string[]);
+      for (const companyId of companyIds) {
+        try {
+          await logActivity(db, {
+            companyId,
+            actorType: "system",
+            actorId: "claude-auth-check",
+            action: notice.action,
+            entityType: "instance_claude_auth",
+            entityId: SINGLETON_KEY,
+            details: {
+              message: notice.message,
+              health: status.health,
+              expiresAt: status.expiresAt,
+              expiresInDays: status.expiresInDays,
+              lastCheckAt: status.lastCheckAt,
+              lastCheckMessage: status.lastCheckMessage,
+              fingerprint: status.fingerprint,
+            },
+          });
+          noticedCompanyIds.push(companyId);
+        } catch (err) {
+          console.warn(
+            `[instance-claude-auth] could not write the sign-in notice for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+    return { outcome: "checked", status, notice, noticedCompanyIds };
   }
 
   /**
@@ -384,6 +539,7 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
     saveToken,
     checkNow,
     clear,
+    runScheduledCheck,
     resolveFallbackToken,
     markAuthFailure,
     startInteractiveSignIn,

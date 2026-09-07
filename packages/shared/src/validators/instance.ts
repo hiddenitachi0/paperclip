@@ -21,8 +21,30 @@ import {
   MIN_SILENT_RUN_TIMEOUT_MINUTES,
   MAX_SILENT_RUN_TIMEOUT_MINUTES,
   DEFAULT_QUIET_MODE_STATE,
+  DONE_GATE_MODES,
+  DEFAULT_DONE_GATE_MODE,
+  DEFAULT_DONE_GATE_MAX_ROUNDS,
+  MIN_DONE_GATE_MAX_ROUNDS,
+  MAX_DONE_GATE_MAX_ROUNDS,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
+
+// Done-gate quality check (see DoneGateSettings in ../types/instance.ts).
+export const doneGateModeSchema = z.enum(DONE_GATE_MODES as [string, ...string[]]);
+const doneGateMaxRoundsSchema = z.number().int().min(MIN_DONE_GATE_MAX_ROUNDS).max(MAX_DONE_GATE_MAX_ROUNDS);
+export const doneGateCompanyOverrideSchema = z
+  .object({
+    mode: doneGateModeSchema.optional(),
+    maxRounds: doneGateMaxRoundsSchema.optional(),
+  })
+  .strict();
+export const doneGateSettingsSchema = z
+  .object({
+    mode: doneGateModeSchema.default(DEFAULT_DONE_GATE_MODE),
+    maxRounds: doneGateMaxRoundsSchema.default(DEFAULT_DONE_GATE_MAX_ROUNDS),
+    companyOverrides: z.record(z.string().uuid(), doneGateCompanyOverrideSchema).default({}),
+  })
+  .strict();
 
 function presetSchema<T extends readonly number[]>(presets: T, label: string) {
   return z.number().refine(
@@ -119,6 +141,12 @@ export const instanceGeneralSettingsSchema = z.object({
   // line a plain statement, no "unless you object"-style consent traps).
   // Strictly more conservative than off, never less.
   factCheckCardStrictAllowlist: z.boolean().default(false),
+  // Done-gate quality check: a cheap second model call that reads an agent's
+  // "I'm done" against the task before the task may move to done. Ships in
+  // mode "off"; see DoneGateSettings for the modes and the per-company
+  // override. A PATCH replaces the whole object (send mode + maxRounds +
+  // companyOverrides together, or rely on the defaults for what you omit).
+  doneGate: doneGateSettingsSchema.default({}),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.omit({ quietMode: true }).partial();
