@@ -4515,6 +4515,22 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     const companyId = await companyIdForIssue(input.issueId);
     if (!companyId) return null;
     return withCompanyScope(rawDb, companyId, async (tx) => {
+      // DUR-3931: lock the issue row BEFORE the run row. Every other
+      // transaction that touches both -- clearExecutionRunIfTerminal,
+      // clearCheckoutRunIfTerminal, adoptStaleCheckoutRun here, and the
+      // heartbeat finalization/scheduling paths in heartbeat.ts -- takes them
+      // issue-first. This function used to take the run lock first and then
+      // UPDATE the issue (an implicit issue row lock), which is the classic
+      // two-resource inversion: a concurrent PATCH/checkout on the same issue
+      // that holds the issue lock and is waiting for this run's row deadlocks
+      // with it (seen as `deadlock detected` on clearExecutionRunIfTerminal's
+      // `select heartbeat_runs.id ... for update` in the signoff-policy e2e,
+      // CI run 34025840842). Locking the issue first serialises the two
+      // instead. It also makes the `update ... where checkoutRunId is null`
+      // guard below read a stable row rather than racing that other writer.
+      await tx.execute(
+        sql`select ${issues.id} from ${issues} where ${issues.id} = ${input.issueId} for update`,
+      );
       await tx.execute(
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
       );
