@@ -8,6 +8,9 @@ import {
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   DEFAULT_MAX_RUN_DURATION_MINUTES,
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
+  DEFAULT_MAX_TURNS_PER_RUN,
+  DEFAULT_SESSION_RESET_AFTER_RUNS,
+  DEFAULT_SESSION_RESET_AFTER_HOURS,
   DEFAULT_QUIET_MODE_STATE,
   DEFAULT_DONE_GATE_SETTINGS,
   instanceGeneralSettingsSchema,
@@ -40,6 +43,28 @@ function heartbeatFlagsFromRuntimeConfig(runtimeConfig: Record<string, unknown>)
   };
 }
 
+export interface MaxTurnsPerRunAgentOverride {
+  agentId: string;
+  agentName: string;
+  companyId: string;
+  adapterType: string;
+  maxTurnsPerRun: number;
+}
+
+/**
+ * DUR-3943 item 4: the per-agent turn cap, when the agent has one. Only a
+ * finite number above 0 counts as an override; blank/0/junk means "use the
+ * instance setting". Shared with the heartbeat's resolveMaxTurnsPerRun so
+ * both sides agree on what an override is.
+ */
+export function readMaxTurnsPerRunOverride(adapterConfig: Record<string, unknown>): number | null {
+  const raw = adapterConfig.maxTurnsPerRun;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const parsed = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.floor(parsed);
+}
+
 const DEFAULT_SINGLETON_KEY = "default";
 const instanceGeneralSettingsStorageSchema = instanceGeneralSettingsSchema.strip();
 const instanceExperimentalSettingsStorageSchema = instanceExperimentalSettingsSchema.strip();
@@ -61,6 +86,9 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
         parsed.data.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
       maxRunDurationMinutes: parsed.data.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES,
       silentRunTimeoutMinutes: parsed.data.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
+      maxTurnsPerRun: parsed.data.maxTurnsPerRun ?? DEFAULT_MAX_TURNS_PER_RUN,
+      sessionResetAfterRuns: parsed.data.sessionResetAfterRuns ?? DEFAULT_SESSION_RESET_AFTER_RUNS,
+      sessionResetAfterHours: parsed.data.sessionResetAfterHours ?? DEFAULT_SESSION_RESET_AFTER_HOURS,
       quietMode: parsed.data.quietMode ?? DEFAULT_QUIET_MODE_STATE,
       mergePrAutomationEnabled: parsed.data.mergePrAutomationEnabled ?? false,
       factCheckCardStrictAllowlist: parsed.data.factCheckCardStrictAllowlist ?? false,
@@ -82,6 +110,9 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     globalMaxConcurrentRuns: DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
     maxRunDurationMinutes: DEFAULT_MAX_RUN_DURATION_MINUTES,
     silentRunTimeoutMinutes: DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
+    maxTurnsPerRun: DEFAULT_MAX_TURNS_PER_RUN,
+    sessionResetAfterRuns: DEFAULT_SESSION_RESET_AFTER_RUNS,
+    sessionResetAfterHours: DEFAULT_SESSION_RESET_AFTER_HOURS,
     quietMode: DEFAULT_QUIET_MODE_STATE,
     mergePrAutomationEnabled: false,
     factCheckCardStrictAllowlist: false,
@@ -254,6 +285,60 @@ export function instanceSettingsService(db: Db) {
         .select({ id: companies.id })
         .from(companies)
         .then((rows) => rows.map((row) => row.id)),
+
+    // DUR-3943 item 4: an agent whose adapterConfig carries its own
+    // maxTurnsPerRun keeps that number, whatever the instance setting says.
+    // Agents created before the instance setting existed all carry one (the
+    // create form always wrote it), so the operator needs to see who still
+    // overrides and be able to switch everyone to the instance default in
+    // one go -- otherwise the new default would be a no-op on a real fleet.
+    listMaxTurnsPerRunAgentOverrides: async (): Promise<MaxTurnsPerRunAgentOverride[]> => {
+      const rows = await db
+        .select({
+          id: agents.id,
+          name: agents.name,
+          companyId: agents.companyId,
+          adapterType: agents.adapterType,
+          adapterConfig: agents.adapterConfig,
+        })
+        .from(agents);
+      const overrides: MaxTurnsPerRunAgentOverride[] = [];
+      for (const row of rows) {
+        const value = readMaxTurnsPerRunOverride(parseObject(row.adapterConfig));
+        if (value === null) continue;
+        overrides.push({
+          agentId: row.id,
+          agentName: row.name,
+          companyId: row.companyId,
+          adapterType: row.adapterType,
+          maxTurnsPerRun: value,
+        });
+      }
+      return overrides.sort((a, b) => a.agentName.localeCompare(b.agentName));
+    },
+
+    // Returns each cleared agent with its company so the caller can record
+    // the change per company without leaking one company's agent ids into
+    // another company's activity feed.
+    clearMaxTurnsPerRunAgentOverrides: async (): Promise<{
+      clearedAgents: Array<{ agentId: string; companyId: string }>;
+    }> => {
+      const rows = await db
+        .select({ id: agents.id, companyId: agents.companyId, adapterConfig: agents.adapterConfig })
+        .from(agents);
+      const clearedAgents: Array<{ agentId: string; companyId: string }> = [];
+      for (const row of rows) {
+        const adapterConfig = parseObject(row.adapterConfig);
+        if (!Object.prototype.hasOwnProperty.call(adapterConfig, "maxTurnsPerRun")) continue;
+        const { maxTurnsPerRun: _dropped, ...rest } = adapterConfig;
+        await db
+          .update(agents)
+          .set({ adapterConfig: rest, updatedAt: new Date() })
+          .where(eq(agents.id, row.id));
+        clearedAgents.push({ agentId: row.id, companyId: row.companyId });
+      }
+      return { clearedAgents };
+    },
 
     getQuietMode: async (): Promise<QuietModeState & { activeRunCount: number }> => {
       const row = await getOrCreateRow();

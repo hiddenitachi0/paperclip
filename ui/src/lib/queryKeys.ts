@@ -249,6 +249,7 @@ export const queryKeys = {
   instance: {
     settings: ["instance", "settings"] as const,
     generalSettings: ["instance", "general-settings"] as const,
+    maxTurnsAgentOverrides: ["instance", "general-settings", "max-turns-agent-overrides"] as const,
     schedulerHeartbeats: ["instance", "scheduler-heartbeats"] as const,
     experimentalSettings: ["instance", "experimental-settings"] as const,
     quietMode: ["instance", "quiet-mode"] as const,

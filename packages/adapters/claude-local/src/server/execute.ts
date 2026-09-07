@@ -518,6 +518,8 @@ export function resolveClaudeAdapterResult(
     model: string;
     billingType: AdapterExecutionResult["billingType"];
     maxTokensPerRun: number;
+    /** DUR-3943 item 4: the --max-turns this attempt ran with (0 = none), for the plain-language stop note. */
+    maxTurns?: number;
   },
 ): AdapterExecutionResult {
   const { proc, parsedStream, parsed, usageCapTracker } = attempt;
@@ -674,7 +676,14 @@ export function resolveClaudeAdapterResult(
       ...(env.taskContextFingerprint ? { taskContextFingerprint: env.taskContextFingerprint } : {}),
     } as Record<string, unknown>)
     : null;
-  const errorMessage = failed
+  // DUR-3943 item 4: a run that ran out of turns is an expected stop, not a
+  // crash -- say so in plain words (the heartbeat service appends what
+  // happens next once it knows whether a fresh run was queued).
+  const errorMessage = failed && clearSessionForMaxTurns
+    ? env.maxTurns && env.maxTurns > 0
+      ? `Stopped after ${env.maxTurns} turns, the limit for one run.`
+      : "Stopped at the turn limit for one run."
+    : failed
     ? describeClaudeFailure(parsed) ?? `Claude exited with code ${proc.exitCode ?? -1}`
     : null;
   // Quota/rate-limit wording is checked before auth so a shared-credential
@@ -1335,6 +1344,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       model,
       billingType,
       maxTokensPerRun,
+      maxTurns,
     });
 
   try {

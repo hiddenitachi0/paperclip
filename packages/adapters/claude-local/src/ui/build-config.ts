@@ -90,7 +90,9 @@ export function buildClaudeLocalConfig(v: CreateConfigValues): Record<string, un
     }
   }
   if (Object.keys(env).length > 0) ac.env = env;
-  ac.maxTurnsPerRun = v.maxTurnsPerRun;
+  // DUR-3943 item 4: only an explicit number above 0 is stored; blank/0 means
+  // the agent follows the instance-wide "Max turns per run" setting.
+  if (v.maxTurnsPerRun > 0) ac.maxTurnsPerRun = v.maxTurnsPerRun;
   ac.dangerouslySkipPermissions = v.dangerouslySkipPermissions;
   if (v.workspaceStrategyType === "git_worktree") {
     ac.workspaceStrategy = {

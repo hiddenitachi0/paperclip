@@ -2933,6 +2933,22 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/instance/settings/general/max-turns-per-run/agent-overrides",
+  tags: ["instance"],
+  summary: "List agents that override the instance-wide max turns per run",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/settings/general/max-turns-per-run/clear-agent-overrides",
+  tags: ["instance"],
+  summary: "Make every agent follow the instance-wide max turns per run",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/instance/settings/experimental",
   tags: ["instance"],
   summary: "Get experimental instance settings",
