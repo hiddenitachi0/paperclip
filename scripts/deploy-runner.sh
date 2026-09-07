@@ -83,6 +83,8 @@
 # "rollout", ...) is answered with a comment saying nothing acts on it (see
 # run_unsupported_kind_approval) instead of being skipped in silence -- the
 # NOR-1242 incident was exactly an approved deploy_pr card that did nothing.
+# Only cards decided within UNSUPPORTED_KIND_MAX_AGE_SECONDS (24h) are
+# answered, so a fresh processed-set does not replay history.
 #
 # Auth: uses the CLI's stored board credential inside the server container,
 # same as deploy-poller.sh — must be an instance admin (required for the
@@ -151,6 +153,16 @@ STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/sta
 # once the recreate actually starts either way.
 QUIET_MODE_DRAIN_TIMEOUT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS:-240}"
 QUIET_MODE_DRAIN_POLL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS:-5}"
+# DUR-3923: only deploy-LOOKING cards (deploy_pr, rollout, ...) approved within
+# this window get the "nothing acts on this" comment. Without a bound, the
+# first poll cycle after this runner ships would comment on every historically
+# approved deploy_pr-style card across every company -- and mirror each one
+# onto its linked issues -- which is noise, not help: those cards were decided
+# long ago and nobody is waiting on them. Matches
+# DEPLOY_APPROVAL_FEEDBACK_MAX_AGE_MS (24h) in
+# server/src/services/deploy-approval-feedback.ts. Real kind:"deploy" cards
+# are NOT bounded by this: a deploy that was approved is still meant to happen.
+UNSUPPORTED_KIND_MAX_AGE_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS:-86400}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -1095,8 +1107,8 @@ for c in items:
     # *approved* one in the group needs to actually run this cycle (DUR-44).
     # Approvals missing a projectId are never grouped together, so a
     # malformed row can't accidentally swallow an unrelated one.
-    selection="$(printf '%s' "$list" | python3 -c '
-import json, sys
+    selection="$(printf '%s' "$list" | UNSUPPORTED_KIND_MAX_AGE_SECONDS="$UNSUPPORTED_KIND_MAX_AGE_SECONDS" python3 -c '
+import json, os, sys
 
 try:
     d = json.load(sys.stdin)
@@ -1122,7 +1134,42 @@ candidates = [
 # comment saying why. Same regex as isUnsupportedDeployLikeKind() in
 # server/src/services/deploy-workspace.ts. These are answered (a comment
 # explaining nothing acts on them) and marked processed, never deployed.
+#
+# Bounded by decidedAt (UNSUPPORTED_KIND_MAX_AGE_SECONDS, default 24h): the
+# processed-set is per host and starts empty on a fresh box or after a wipe,
+# so without this bound the first cycle would answer every deploy_pr/rollout
+# card ever approved across all companies (and mirror onto every linked
+# issue). A card whose decision time is missing or unparseable is treated as
+# old -- the safe direction is to stay quiet, not to spam.
 import re
+from datetime import datetime, timezone
+
+def parse_when(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+try:
+    max_age_seconds = float(os.environ.get("UNSUPPORTED_KIND_MAX_AGE_SECONDS") or 86400)
+except ValueError:
+    max_age_seconds = 86400.0
+now = datetime.now(timezone.utc)
+
+def decided_recently(a):
+    decided = parse_when(a.get("decidedAt") or a.get("updatedAt") or a.get("createdAt"))
+    if decided is None:
+        return False
+    return (now - decided).total_seconds() <= max_age_seconds
+
 unsupported = [
     a for a in items
     if a.get("type") == "request_board_approval"
@@ -1130,6 +1177,7 @@ unsupported = [
     and isinstance((a.get("payload") or {}).get("kind"), str)
     and str((a.get("payload") or {}).get("kind")).strip() != "deploy"
     and re.search(r"deploy|release|rollout|ship", str((a.get("payload") or {}).get("kind")), re.I)
+    and decided_recently(a)
 ]
 for a in unsupported:
     kind = str((a.get("payload") or {}).get("kind")).strip().replace("\t", " ")

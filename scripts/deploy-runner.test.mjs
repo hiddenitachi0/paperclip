@@ -213,6 +213,15 @@ function runMain(scenario, extraEnv = {}) {
 
 const DISABLED_POLICY_PROJECT = { id: "proj-1", deployPolicy: { enabled: false } };
 
+// DUR-3923: unsupported-kind cards are only answered when decided within the last 24h
+// (UNSUPPORTED_KIND_MAX_AGE_SECONDS), so their decidedAt must be relative to "now" --
+// a hard-coded date silently goes stale the day after it is written.
+function isoAgo(ms) {
+  return new Date(Date.now() - ms).toISOString();
+}
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * ONE_HOUR_MS;
+
 test("deploy-runner.sh passes bash syntax validation", () => {
   assertSuccess(run("bash", ["-n", SCRIPT]), "bash -n");
 });
@@ -1870,14 +1879,14 @@ test("DUR-3923: an approved deploy_pr card gets a 'nothing acts on this' comment
         id: "aid-deploy-pr",
         type: "request_board_approval",
         status: "approved",
-        decidedAt: "2026-09-05T10:00:00Z",
+        decidedAt: isoAgo(ONE_HOUR_MS),
         payload: { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip" },
       },
       {
         id: "aid-real",
         type: "request_board_approval",
         status: "approved",
-        decidedAt: "2026-09-05T10:00:05Z",
+        decidedAt: isoAgo(ONE_HOUR_MS - 5_000),
         payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
       },
       {
@@ -1885,7 +1894,7 @@ test("DUR-3923: an approved deploy_pr card gets a 'nothing acts on this' comment
         id: "aid-merge",
         type: "request_board_approval",
         status: "approved",
-        decidedAt: "2026-09-05T10:00:10Z",
+        decidedAt: isoAgo(ONE_HOUR_MS - 10_000),
         payload: { kind: "merge_pr", prNumber: 43, repo: "acme/paperclip" },
       },
     ]);
@@ -1937,7 +1946,7 @@ test("DUR-3923: an unsupported-kind card whose comment cannot be delivered is le
         id: "aid-rollout",
         type: "request_board_approval",
         status: "approved",
-        decidedAt: "2026-09-05T10:00:00Z",
+        decidedAt: isoAgo(ONE_HOUR_MS),
         payload: { kind: "rollout" },
       },
     ]);
@@ -1949,6 +1958,108 @@ test("DUR-3923: an unsupported-kind card whose comment cannot be delivered is le
     assert.deepEqual(scenario.commentsFor("aid-rollout"), []);
     assert.deepEqual(scenario.processedIds(), [], "no delivered comment means not processed (DUR-44 contract)");
     assert.match(scenario.readLog(), /aid-rollout \(unsupported kind "rollout"\) — no comment could be delivered/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3923 follow-up: the processed-set lives on the host and starts empty on a fresh
+// box (or after a wipe), so without a decidedAt bound the first poll cycle after this
+// runner ships would comment on every deploy_pr/rollout card ever approved across every
+// company -- and mirror each onto its linked issues. Cards decided more than 24h ago
+// (matching DEPLOY_APPROVAL_FEEDBACK_MAX_AGE_MS) must be left completely alone: no
+// comment, no issue mirror, no status-log entry, no processed entry. A real
+// kind:"deploy" card of the same age is NOT bounded -- an approved deploy still happens.
+test("DUR-3923: an old approved deploy_pr card (decided >24h ago) is left alone -- no comment, not processed", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-old-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(3 * ONE_DAY_MS),
+        payload: { kind: "deploy_pr", prNumber: 12, repo: "acme/paperclip" },
+      },
+      {
+        // Missing decidedAt entirely (and no updatedAt/createdAt): treated as old -- stay quiet.
+        id: "aid-undated-rollout",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { kind: "rollout" },
+      },
+      {
+        // Recent one in the same list still gets its comment, proving the bound is per card.
+        id: "aid-recent-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(ONE_HOUR_MS),
+        payload: { kind: "deploy_pr", prNumber: 13, repo: "acme/paperclip" },
+      },
+      {
+        // A real deploy card of the same old age is NOT bounded by this window.
+        id: "aid-old-real",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(3 * ONE_DAY_MS),
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+      },
+    ]);
+    scenario.writeJson("approval-issues-aid-old-deploy-pr.json", [{ id: "issue-old" }]);
+    scenario.writeJson("approval-aid-old-real.json", {
+      id: "aid-old-real",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+    });
+    scenario.writeJson("project-proj-1.json", DISABLED_POLICY_PROJECT);
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+
+    const result = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath });
+    assertSuccess(result, "main()");
+
+    assert.deepEqual(scenario.commentsFor("aid-old-deploy-pr"), [], "an old deploy_pr card must not be commented on");
+    assert.deepEqual(scenario.issueCommentsFor("issue-old"), [], "nor mirrored onto its linked issue");
+    assert.deepEqual(scenario.commentsFor("aid-undated-rollout"), [], "a card with no decision time is treated as old");
+    const statusLines = existsSync(statusPath)
+      ? readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    assert.equal(statusLines.find((e) => e.approvalId === "aid-old-deploy-pr"), undefined, "no status-log entry for the old card");
+    assert.equal(statusLines.find((e) => e.approvalId === "aid-undated-rollout"), undefined);
+
+    assert.equal(scenario.commentsFor("aid-recent-deploy-pr").length, 1, "the recent deploy_pr card in the same list is still answered");
+    assert.match(scenario.commentsFor("aid-recent-deploy-pr")[0], /Nothing happened/);
+    assert.equal(scenario.commentsFor("aid-old-real").length, 1, "a real deploy card is not age-bounded");
+    assert.match(scenario.commentsFor("aid-old-real")[0], /Deploy failed/);
+
+    assert.deepEqual(
+      scenario.processedIds().sort(),
+      ["aid-old-real", "aid-recent-deploy-pr"],
+      "old/undated unsupported cards get no processed entry -- they were never acted on",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("DUR-3923: the unsupported-kind window is configurable via PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-3d-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(3 * ONE_DAY_MS),
+        payload: { kind: "deploy_pr", prNumber: 14, repo: "acme/paperclip" },
+      },
+    ]);
+
+    // 7-day window: the 3-day-old card is inside it and gets answered.
+    const result = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS: String(7 * 24 * 60 * 60) });
+    assertSuccess(result, "main()");
+    assert.equal(scenario.commentsFor("aid-3d-deploy-pr").length, 1);
+    assert.deepEqual(scenario.processedIds(), ["aid-3d-deploy-pr"]);
   } finally {
     scenario.cleanup();
   }
