@@ -216,6 +216,7 @@ import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
 import { computeHeartbeatTimerJitterMs, type HeartbeatTimerJitterOptions } from "./heartbeat-timer-jitter.js";
+import { buildAgentEnteredErrorNotice, buildReapedRunOperatorNotice } from "./operator-notices.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -9903,6 +9904,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (tc) trackAgentFirstHeartbeat(tc, { agentRole: updated.role, agentId: updated.id });
     }
 
+    // DUR-98: an agent dropping into "error" is exactly the case where an
+    // operator sat unaware for hours (fourteen tickets stranded behind one
+    // red marker, 21-22 August). Write the moment it happens, in plain
+    // language, so the Activity feed and agent page carry it without anyone
+    // having to notice a status colour. The DUR-128 stall sweep separately
+    // re-raises it if nobody acts within 30 minutes.
+    if (updated && enteringError) {
+      await logActivity(db, {
+        companyId: updated.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: updated.id,
+        action: "agent.entered_error",
+        entityType: "agent",
+        entityId: updated.id,
+        details: {
+          message: buildAgentEnteredErrorNotice({ agentName: updated.name, reason: updated.errorReason }),
+          agentName: updated.name,
+          errorReason: updated.errorReason,
+          outcome,
+          errorAt: updated.errorAt ? new Date(updated.errorAt).toISOString() : null,
+        },
+      }).catch((err) => {
+        logger.warn({ err, agentId: updated.id }, "failed to log operator notice for agent entering error");
+      });
+    }
+
     if (updated) {
       publishLiveEvent({
         companyId: updated.companyId,
@@ -10146,6 +10174,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         run: heartbeatRuns,
         adapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        agentName: agents.name,
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
@@ -10153,7 +10182,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const reaped: string[] = [];
 
-    for (const { run, adapterType, adapterConfig } of activeRuns) {
+    for (const { run, adapterType, adapterConfig, agentName } of activeRuns) {
       // DUR-257: staleness must key on evidence the run is actually making
       // progress (adapter output, process start, run start) -- NOT on
       // `updatedAt`. Every periodic pass that classifies liveness or patches
@@ -10331,6 +10360,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // "error" until someone reset them by hand.)
       const agentOutcome = shouldRetry || !(run.processPid || run.processGroupId) ? "cancelled" : "failed";
       await finalizeAgentStatus(run.agentId, agentOutcome, baseMessage);
+
+      // DUR-98: the watchdog knew this run was dead and acted on it -- say so
+      // where the operator will see it, in plain language, instead of only a
+      // server log line. finalizeAgentStatus above already logged the
+      // agent-level "needs attention" notice if the agent entered error.
+      const agentAfterReap = await getAgent(run.agentId);
+      const agentMarkedError = agentAfterReap?.status === "error";
+      const processWasKnown = Boolean(run.processPid || run.processGroupId);
+      await logActivity(db, {
+        companyId: run.companyId,
+        actorType: "system",
+        actorId: "run-watchdog",
+        agentId: run.agentId,
+        runId: run.id,
+        action: "heartbeat.run_reaped",
+        entityType: "heartbeat_run",
+        entityId: run.id,
+        details: {
+          message: buildReapedRunOperatorNotice({
+            agentName,
+            silentForMs: progressRefTime > 0 ? staleForMs : null,
+            processWasKnown,
+            retryQueued: Boolean(retriedRun),
+            agentMarkedError,
+          }),
+          // ActivityRow links heartbeat_run entries to the agent via details.agentId.
+          agentId: run.agentId,
+          agentName,
+          silentForMs: progressRefTime > 0 ? staleForMs : null,
+          staleThresholdMs,
+          processWasKnown,
+          retryQueued: Boolean(retriedRun),
+          ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+          agentMarkedError,
+          errorCode: "process_lost",
+          technicalReason: baseMessage,
+        },
+      }).catch((err) => {
+        logger.warn({ err, runId: run.id }, "failed to log operator notice for reaped heartbeat run");
+      });
+
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
