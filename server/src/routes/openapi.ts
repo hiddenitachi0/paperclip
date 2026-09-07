@@ -3020,7 +3020,7 @@ registry.registerPath({
   method: "post",
   path: "/api/lane-a/{agentId}/messages",
   tags: ["agents"],
-  summary: "Send a message to a Lane A-enabled agent (direct model call, no tools, no runtime)",
+  summary: "Send a message to a quick agent (Lane A: direct model call, allow-listed tools, conversation memory)",
   request: {
     params: z.object({ agentId: z.string() }),
     body: jsonBody(sendLaneAMessageSchema),
@@ -3033,6 +3033,37 @@ registry.registerPath({
     404: r.notFound,
     409: r.conflict,
     429: r.tooManyRequests,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/lane-a/{agentId}/conversations/{conversationId}",
+  tags: ["agents"],
+  summary: "Read the stored transcript of one quick-agent conversation (only the person who started it)",
+  query: z.object({ companyId: z.string().uuid() }),
+  responses: {
+    200: r.ok(
+      z.object({
+        conversationId: z.string(),
+        turnCount: z.number(),
+        expired: z.boolean(),
+        turnCapReached: z.boolean(),
+        messages: z.array(
+          z.object({
+            id: z.string(),
+            role: z.enum(["user", "assistant"]),
+            content: z.string(),
+            actions: z.array(z.object({ tool: z.string(), summary: z.string(), ok: z.boolean() })),
+            createdAt: z.string(),
+          }),
+        ),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
   },
 });
 

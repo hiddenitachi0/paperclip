@@ -8,6 +8,7 @@ const mockAgentService = vi.hoisted(() => ({
 
 const mockLaneAService = vi.hoisted(() => ({
   sendMessage: vi.fn(),
+  getConversation: vi.fn(),
 }));
 
 vi.mock("../services/index.js", () => ({
@@ -153,5 +154,93 @@ describe("lane A routes", () => {
         requester: { userId: null, agentId: "caller-agent" },
       }),
     );
+  });
+
+  it("passes the agent's role and quick-agent instructions through to the service", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ ...({ role: "secretary", laneAInstructions: "Answer in Norwegian." } as object) }),
+    );
+    mockLaneAService.sendMessage.mockResolvedValue({ conversationId: "conv-3", response: "hei", turnCount: 1, stopReason: "end_turn", actions: [] });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user-1",
+      companyIds: ["11111111-1111-4111-8111-111111111112"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/lane-a/11111111-1111-4111-8111-111111111111/messages")
+      .send({ companyId: "11111111-1111-4111-8111-111111111112", message: "hi" });
+
+    expect(res.status).toBe(200);
+    expect(mockLaneAService.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetAgent: expect.objectContaining({ role: "secretary", laneAInstructions: "Answer in Norwegian." }),
+      }),
+    );
+  });
+
+  describe("GET /lane-a/:agentId/conversations/:conversationId", () => {
+    const conversationId = "44444444-4444-4444-8444-444444444444";
+
+    it("requires companyId", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent());
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+      const res = await request(app).get(`/api/lane-a/11111111-1111-4111-8111-111111111111/conversations/${conversationId}`);
+      expect(res.status).toBe(400);
+      expect(mockLaneAService.getConversation).not.toHaveBeenCalled();
+    });
+
+    it("404s when the agent is in another company", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent({ companyId: "22222222-2222-4222-8222-222222222223" }));
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112", "22222222-2222-4222-8222-222222222223"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+      const res = await request(app)
+        .get(`/api/lane-a/11111111-1111-4111-8111-111111111111/conversations/${conversationId}`)
+        .query({ companyId: "11111111-1111-4111-8111-111111111112" });
+      expect(res.status).toBe(404);
+      expect(mockLaneAService.getConversation).not.toHaveBeenCalled();
+    });
+
+    it("returns the transcript for the requester who owns it", async () => {
+      mockAgentService.getById.mockResolvedValue(makeAgent());
+      mockLaneAService.getConversation.mockResolvedValue({
+        conversationId,
+        turnCount: 1,
+        expired: false,
+        turnCapReached: false,
+        messages: [{ id: "m1", role: "user", content: "hi", actions: [], createdAt: new Date().toISOString() }],
+      });
+      const app = await createApp({
+        type: "board",
+        userId: "board-user-1",
+        companyIds: ["11111111-1111-4111-8111-111111111112"],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+      const res = await request(app)
+        .get(`/api/lane-a/11111111-1111-4111-8111-111111111111/conversations/${conversationId}`)
+        .query({ companyId: "11111111-1111-4111-8111-111111111112" });
+      expect(res.status).toBe(200);
+      expect(res.body.messages).toHaveLength(1);
+      expect(mockLaneAService.getConversation).toHaveBeenCalledWith({
+        companyId: "11111111-1111-4111-8111-111111111112",
+        targetAgentId: "11111111-1111-4111-8111-111111111111",
+        conversationId,
+        requester: { userId: "board-user-1", agentId: null },
+      });
+    });
   });
 });
