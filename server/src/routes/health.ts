@@ -8,6 +8,10 @@ import { readPersistedDevServerStatus, toDevServerHealthStatus, writeDevServerRe
 import { logger } from "../middleware/logger.js";
 import { getServerInfoSnapshot, type ServerInfoSnapshot } from "../server-info.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { computeFleetHealth } from "../services/fleet-health.js";
+import { getRequestLoadSnapshot } from "../services/request-load.js";
+import { schedulerLiveness } from "../services/scheduler-liveness.js";
+import type { FleetHealth } from "@paperclipai/shared";
 import { serverVersion } from "../version.js";
 
 function shouldExposeFullHealthDetails(
@@ -185,6 +189,27 @@ export function healthRoutes(
       return;
     }
 
+    // DUR-3939/DUR-3940/DUR-272: fleet run-rate, slot saturation, agents in
+    // error, zombie candidates, scheduler liveness and request load -- all
+    // computed from live state right now. Board/agent callers only (it rides
+    // on the full-details branch). A failure to compute is reported as such,
+    // never rendered as "healthy" (DUR-98 item 4).
+    let fleet: FleetHealth | undefined;
+    if (typeof (db as { select?: unknown }).select === "function") {
+      try {
+        fleet = await computeFleetHealth(db, {
+          scheduler: schedulerLiveness.snapshot(),
+          requests: getRequestLoadSnapshot(),
+        });
+      } catch (error) {
+        logger.warn({ err: error }, "Health check fleet signal failed to compute");
+        fleet = {
+          available: false,
+          reason: error instanceof Error ? error.message : "fleet_health_unavailable",
+        };
+      }
+    }
+
     res.json({
       status: "ok",
       version: serverVersion,
@@ -198,6 +223,7 @@ export function healthRoutes(
       },
       serverInfo,
       ...(devServer ? { devServer } : {}),
+      ...(fleet ? { fleet } : {}),
     });
   });
 

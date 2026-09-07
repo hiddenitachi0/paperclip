@@ -875,6 +875,86 @@ registry.registerPath({
       deploymentMode: z.string().optional(),
       bootstrapStatus: z.enum(["ready", "bootstrap_pending"]).optional(),
       bootstrapInviteActive: z.boolean().optional(),
+      // DUR-3939/DUR-3940/DUR-272: live fleet signal (full-details responses
+      // only). `available: false` carries a `reason`; see
+      // packages/shared/src/types/fleet-health.ts for the full shape.
+      fleet: z.union([
+        z.object({
+          available: z.literal(true),
+          computedAt: z.string().datetime(),
+          runs: z.object({
+            windowMinutes: z.number().int().nonnegative(),
+            startedInWindow: z.number().int().nonnegative(),
+            succeededInWindow: z.number().int().nonnegative(),
+            failedInWindow: z.number().int().nonnegative(),
+            cancelledInWindow: z.number().int().nonnegative(),
+            running: z.number().int().nonnegative(),
+            queued: z.number().int().nonnegative(),
+            oldestQueuedWaitMs: z.number().int().nonnegative().nullable(),
+            zombieCandidates: z.number().int().nonnegative(),
+            zombieSilenceMinutes: z.number().int().nonnegative(),
+          }),
+          slots: z.object({
+            max: z.number().int().nonnegative(),
+            used: z.number().int().nonnegative(),
+            available: z.number().int().nonnegative(),
+            saturated: z.boolean(),
+          }),
+          agents: z.object({
+            inError: z.number().int().nonnegative(),
+            inErrorSample: z.array(z.object({
+              id: z.string(),
+              name: z.string(),
+              companyId: z.string(),
+              errorReason: z.string().nullable(),
+              errorAt: z.string().datetime().nullable(),
+            })),
+          }),
+          scheduler: z.object({
+            enabled: z.boolean(),
+            intervalMs: z.number().int().positive().nullable(),
+            lastTickStartedAt: z.string().datetime().nullable(),
+            lastTickFinishedAt: z.string().datetime().nullable(),
+            lastTickResult: z.object({
+              checked: z.number().int().nonnegative(),
+              enqueued: z.number().int().nonnegative(),
+              skipped: z.number().int().nonnegative(),
+            }).nullable(),
+            lastTickError: z.string().nullable(),
+            sinceLastTickMs: z.number().int().nonnegative().nullable(),
+            stale: z.boolean(),
+          }),
+          requests: z.object({
+            inFlight: z.number().int().nonnegative(),
+            peakInFlight: z.number().int().nonnegative(),
+            peakInFlightAt: z.string().datetime().nullable(),
+            longestInFlightMs: z.number().int().nonnegative(),
+            slowInFlight: z.number().int().nonnegative(),
+            slowThresholdMs: z.number().int().nonnegative(),
+            overloadThreshold: z.number().int().positive(),
+            overloaded: z.boolean(),
+            totalStarted: z.number().int().nonnegative(),
+            totalFinished: z.number().int().nonnegative(),
+          }),
+          database: z.object({
+            available: z.boolean(),
+            poolMax: z.number().int().nonnegative().nullable(),
+            connections: z.number().int().nonnegative().nullable(),
+            active: z.number().int().nonnegative().nullable(),
+            idleInTransaction: z.number().int().nonnegative().nullable(),
+            waitingOnLocks: z.number().int().nonnegative().nullable(),
+          }),
+          summary: z.object({
+            level: z.enum(["ok", "warning", "critical"]),
+            headline: z.string(),
+            notes: z.array(z.string()),
+          }),
+        }).strict(),
+        z.object({
+          available: z.literal(false),
+          reason: z.string(),
+        }).strict(),
+      ]).optional(),
       serverInfo: z.object({
         processStartedAt: z.string().datetime(),
         git: z.union([

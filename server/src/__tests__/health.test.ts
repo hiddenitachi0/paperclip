@@ -30,6 +30,61 @@ vi.mock("../dev-server-status.js", () => ({
   toDevServerHealthStatus: vi.fn(),
 }));
 
+// DUR-3939/DUR-3940: the fleet signal is computed by its own service (tested
+// against a real database in fleet-health.test.ts); here it is mocked so the
+// route's exposure rules can be checked on the same stub db the other cases use.
+const mockComputeFleetHealth = vi.hoisted(() => vi.fn());
+vi.mock("../services/fleet-health.js", () => ({
+  computeFleetHealth: mockComputeFleetHealth,
+}));
+
+const testFleet = {
+  available: true as const,
+  computedAt: "2026-09-06T10:00:00.000Z",
+  runs: {
+    windowMinutes: 15,
+    startedInWindow: 9,
+    succeededInWindow: 7,
+    failedInWindow: 1,
+    cancelledInWindow: 0,
+    running: 4,
+    queued: 15,
+    oldestQueuedWaitMs: 20 * 60_000,
+    zombieCandidates: 0,
+    zombieSilenceMinutes: 30,
+  },
+  slots: { max: 4, used: 4, available: 0, saturated: true },
+  agents: { inError: 0, inErrorSample: [] },
+  scheduler: {
+    enabled: true,
+    intervalMs: 30_000,
+    lastTickStartedAt: "2026-09-06T09:59:30.000Z",
+    lastTickFinishedAt: "2026-09-06T09:59:30.200Z",
+    lastTickResult: { checked: 12, enqueued: 8, skipped: 4 },
+    lastTickError: null,
+    sinceLastTickMs: 29_800,
+    stale: false,
+  },
+  requests: {
+    inFlight: 1,
+    peakInFlight: 4,
+    peakInFlightAt: "2026-09-06T09:00:00.000Z",
+    longestInFlightMs: 12,
+    slowInFlight: 0,
+    slowThresholdMs: 10_000,
+    overloadThreshold: 50,
+    overloaded: false,
+    totalStarted: 10,
+    totalFinished: 9,
+  },
+  database: { available: true, poolMax: 20, connections: 3, active: 1, idleInTransaction: 0, waitingOnLocks: 0 },
+  summary: {
+    level: "warning" as const,
+    headline: "All 4 run slots are in use and 15 runs are waiting for one (the oldest has waited 20 minutes). Nothing is broken; raise \"Max concurrent runs\" in Settings to let more through.",
+    notes: ["Runs are flowing: 9 started, 7 finished, 1 failed in the last 15 minutes. 4 of 4 slots in use, 15 queued."],
+  },
+};
+
 function createApp(db?: Db, serverInfo = testServerInfo) {
   const app = express();
   app.use(
@@ -49,6 +104,7 @@ describe("GET /health", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockReadPersistedDevServerStatus.mockReturnValue(undefined);
+    mockComputeFleetHealth.mockResolvedValue(testFleet);
   });
 
   afterEach(() => {
@@ -155,6 +211,9 @@ describe("GET /health", () => {
       bootstrapInviteActive: false,
     });
     expect(res.body.serverInfo).toBeUndefined();
+    // The fleet signal names agents and counts runs: never for anonymous callers.
+    expect(res.body.fleet).toBeUndefined();
+    expect(mockComputeFleetHealth).not.toHaveBeenCalled();
   });
 
   it("redacts detailed metadata when authenticated mode is reached without auth middleware", async () => {
@@ -237,6 +296,62 @@ describe("GET /health", () => {
         companyDeletionEnabled: false,
       },
       serverInfo: testServerInfo,
+      fleet: testFleet,
     });
+    expect(mockComputeFleetHealth).toHaveBeenCalledTimes(1);
+    const [, options] = mockComputeFleetHealth.mock.calls[0]!;
+    expect(options).toMatchObject({
+      scheduler: expect.objectContaining({ enabled: expect.any(Boolean), stale: expect.any(Boolean) }),
+      requests: expect.objectContaining({ inFlight: expect.any(Number), overloaded: expect.any(Boolean) }),
+    });
+  });
+
+  it("includes the fleet signal for any caller in local_trusted mode", async () => {
+    const db = {
+      execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ count: 1 }]),
+        })),
+      })),
+    } as unknown as Db;
+    const app = createApp(db);
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.fleet).toEqual(testFleet);
+  });
+
+  it("reports the fleet signal as unavailable, not as healthy, when it cannot be computed (DUR-98)", async () => {
+    mockComputeFleetHealth.mockRejectedValueOnce(new Error("relation heartbeat_runs is locked"));
+    const db = {
+      execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ count: 1 }]),
+        })),
+      })),
+    } as unknown as Db;
+    const app = createApp(db);
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.fleet).toEqual({ available: false, reason: "relation heartbeat_runs is locked" });
+  });
+
+  it("skips the fleet signal when the db handle cannot run queries", async () => {
+    const db = {
+      execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+    } as unknown as Db;
+    const app = createApp(db);
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.fleet).toBeUndefined();
+    expect(mockComputeFleetHealth).not.toHaveBeenCalled();
   });
 });
