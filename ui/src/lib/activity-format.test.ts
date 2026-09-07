@@ -88,6 +88,10 @@ describe("activity formatting", () => {
     expect(formatActivityVerb("agent.entered_error")).toBe("flagged that attention is needed for");
     expect(formatActivityVerb("agent.error_stalled")).toBe("is still waiting for someone to clear the error on");
     expect(formatIssueActivityAction("heartbeat.run_reaped")).toBe("ended a run that had stopped responding");
+    // DUR-3940 item 2: the frozen-run / run-cap watchdog notice.
+    expect(formatActivityVerb("heartbeat.run_stopped")).toBe("stopped a run that was taking too long for");
+    expect(formatIssueActivityAction("heartbeat.run_stopped")).toBe("stopped a run that was taking too long");
+    expect(isOperatorNoticeAction("heartbeat.run_stopped")).toBe(true);
   });
 
   it("surfaces the server-written message for operator notices only", () => {
