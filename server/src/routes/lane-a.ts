@@ -63,6 +63,7 @@ export function laneARoutes(db: Db) {
         mcpToolIds: (targetAgent.mcpToolIds as string[] | null) ?? [],
       },
       requester: requesterFor(req),
+      actor: req.actor,
       message,
       context,
       conversationId,

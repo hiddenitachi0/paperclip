@@ -125,6 +125,8 @@ describe("lane A routes", () => {
     expect(mockLaneAService.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         requester: { userId: "board-user-1", agentId: null },
+        // The request actor rides along so built-in actions can run permission checks.
+        actor: expect.objectContaining({ type: "board", userId: "board-user-1" }),
       }),
     );
   });

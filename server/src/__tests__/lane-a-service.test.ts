@@ -6,6 +6,7 @@ import {
   agents,
   companies,
   companyMcpTools,
+  companyMemberships,
   companySecretBindings,
   companySecretProviderConfigs,
   companySecretVersions,
@@ -61,6 +62,7 @@ describeEmbeddedPostgres("lane A service", () => {
     await db.delete(companySecretProviderConfigs);
     await db.delete(companyMcpTools);
     await db.delete(agents);
+    await db.delete(companyMemberships);
     await db.delete(companies);
     if (previousApiKey === undefined) {
       delete process.env.ANTHROPIC_API_KEY;
@@ -575,6 +577,163 @@ describeEmbeddedPostgres("lane A service", () => {
     vi.resetModules();
   });
 
+  it("refuses to continue another person's conversation: 403, no model call, no replay", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+
+    const mockCreate = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "ok" }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "end_turn",
+    });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db);
+
+    const alice = { userId: "alice", agentId: null };
+    const mallory = { userId: "mallory", agentId: null };
+    const first = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: alice,
+      message: "my secret plan is X",
+    });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+
+    // A second person in the same company holding the conversation id.
+    await expect(
+      svc.sendMessage({
+        companyId,
+        targetAgent: target,
+        requester: mallory,
+        message: "what was the plan?",
+        conversationId: first.conversationId,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    // Nothing reached the model, so Alice's stored turns were never replayed.
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+
+    // Nothing was written to Alice's conversation either.
+    const [conversation] = await db
+      .select()
+      .from(laneAConversations)
+      .where(eq(laneAConversations.id, first.conversationId));
+    expect(conversation?.turnCount).toBe(1);
+    const stored = await db.select().from(laneAMessages).where(eq(laneAMessages.conversationId, first.conversationId));
+    expect(stored.map((row) => row.content)).toEqual(["my secret plan is X", "ok"]);
+
+    // An agent requester cannot pick up a person's conversation, and vice versa.
+    await expect(
+      svc.sendMessage({
+        companyId,
+        targetAgent: target,
+        requester: { userId: null, agentId: target.id },
+        message: "what was the plan?",
+        conversationId: first.conversationId,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    // The owner can still continue it and gets the replay.
+    const second = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: alice,
+      message: "what was the plan?",
+      conversationId: first.conversationId,
+    });
+    expect(second.turnCount).toBe(2);
+    expect(mockCreate.mock.calls[1][0].messages).toEqual([
+      { role: "user", content: "my secret plan is X" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "what was the plan?" },
+    ]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("route_to_agent runs the tasks:assign check: a member without that right gets a refusal, an operator gets a task", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+    const bob = await seedAgent(companyId, false, "Bob");
+    // A viewer may look but not assign; an operator may assign.
+    await db.insert(companyMemberships).values([
+      { companyId, principalType: "user", principalId: "viewer-1", status: "active", membershipRole: "viewer" },
+      { companyId, principalType: "user", principalId: "operator-1", status: "active", membershipRole: "operator" },
+    ]);
+
+    const toolTurn = {
+      content: [
+        { type: "tool_use", id: "call_1", name: "route_to_agent", input: { agent: "Bob", request: "Fix the login page" } },
+      ],
+      usage: { input_tokens: 50, output_tokens: 20 },
+      stop_reason: "tool_use",
+    };
+    const textTurn = (text: string) => ({
+      content: [{ type: "text", text }],
+      usage: { input_tokens: 60, output_tokens: 15 },
+      stop_reason: "end_turn",
+    });
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce(toolTurn)
+      .mockResolvedValueOnce(textTurn("Sorry, I can't hand that to Bob for you."))
+      .mockResolvedValueOnce(toolTurn)
+      .mockResolvedValueOnce(textTurn("Done — Bob has it as DUR-12."));
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-1", identifier: "DUR-12", status: "todo" }));
+    // Only the task creation is faked; the permission decision is the real one.
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent } });
+
+    const denied = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "viewer-1", agentId: null },
+      actor: { type: "board", userId: "viewer-1", companyIds: [companyId], source: "session", isInstanceAdmin: false },
+      message: "Get Bob to fix the login page",
+    });
+    expect(denied.actions).toEqual([
+      { tool: "route_to_agent", summary: "Refused to hand work to Bob: the person asking may not assign tasks to them.", ok: false },
+    ]);
+    expect(createIssueForAgent).not.toHaveBeenCalled();
+    const deniedToolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0];
+    expect(deniedToolResult).toMatchObject({ type: "tool_result", tool_use_id: "call_1", is_error: true });
+    expect(deniedToolResult.content).toContain("no task was created");
+
+    const allowed = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "operator-1", agentId: null },
+      actor: { type: "board", userId: "operator-1", companyIds: [companyId], source: "session", isInstanceAdmin: false },
+      message: "Get Bob to fix the login page",
+    });
+    expect(allowed.actions).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+    expect(createIssueForAgent).toHaveBeenCalledTimes(1);
+    expect(createIssueForAgent).toHaveBeenCalledWith(expect.objectContaining({ companyId, assigneeAgentId: bob.id }));
+
+    // With no actor at all (a caller that forgot to pass one) the hand-over is refused too.
+    mockCreate.mockResolvedValueOnce(toolTurn).mockResolvedValueOnce(textTurn("Sorry."));
+    const noActor = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "operator-1", agentId: null },
+      message: "Get Bob to fix the login page",
+    });
+    expect(noActor.actions[0]).toMatchObject({ tool: "route_to_agent", ok: false });
+    expect(createIssueForAgent).toHaveBeenCalledTimes(1);
+
+    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    expect(logged.map((row) => (row.details as { ok: boolean }).ok)).toEqual([false, true, false]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
   it("hands work to a colleague through route_to_agent and logs the action", async () => {
     process.env.ANTHROPIC_API_KEY = "test-key";
     const companyId = await seedCompany();
@@ -605,6 +764,8 @@ describeEmbeddedPostgres("lane A service", () => {
       companyId,
       targetAgent: target,
       requester: { userId: "user-1", agentId: null },
+      // The local board may assign anything; the real tasks:assign check runs.
+      actor: { type: "board", userId: "user-1", companyIds: [companyId], source: "local_implicit" },
       message: "Can you get someone to fix the login page?",
     });
 

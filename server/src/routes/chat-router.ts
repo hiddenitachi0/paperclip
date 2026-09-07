@@ -142,6 +142,7 @@ export function chatRouterRoutes(db: Db) {
           mcpToolIds: (targetAgent.mcpToolIds as string[] | null) ?? [],
         },
         requester,
+        actor: req.actor,
         message,
         context,
         conversationId,

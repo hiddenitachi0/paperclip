@@ -10,6 +10,7 @@ import { HttpError, conflict, forbidden, notFound } from "../errors.js";
 import { costService } from "./costs.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import type { AuthorizationActor } from "./authorization.js";
 import { secretService } from "./secrets.js";
 import {
   buildLaneABuiltinToolDefinitions,
@@ -318,6 +319,21 @@ function summarizeToolInput(input: unknown): Record<string, unknown> {
   return out;
 }
 
+/**
+ * A conversation belongs to the user or agent who opened it and nobody else —
+ * not even another member of the same company. Used by both the send path
+ * (resuming with a conversationId) and the transcript read.
+ */
+function assertConversationOwnedBy(
+  conversation: { requestedByUserId: string | null; requestedByAgentId: string | null },
+  requester: LaneARequester,
+): void {
+  const ownedByRequester = requester.agentId
+    ? conversation.requestedByAgentId === requester.agentId
+    : Boolean(requester.userId) && conversation.requestedByUserId === requester.userId;
+  if (!ownedByRequester) throw forbidden("This conversation belongs to someone else");
+}
+
 export interface LaneAServiceOptions {
   /** Test seam: override any of the built-in tools' dependencies (agents, issues, fetch). */
   toolDeps?: Partial<LaneAToolDeps>;
@@ -379,6 +395,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (existing.companyId !== companyId || existing.agentId !== targetAgentId) {
       throw forbidden("Conversation does not belong to this agent");
     }
+    // Same rule as getConversation: a conversation is private to whoever
+    // opened it. Without this, anyone in the company holding the UUID could
+    // continue it and have the stored transcript replayed to the model.
+    assertConversationOwnedBy(existing, requester);
     if (Date.now() - existing.lastMessageAt.getTime() > LANE_A_IDLE_TIMEOUT_MS) {
       throw conflict("Conversation has been idle too long — start a new one", {
         code: "LANE_A_CONVERSATION_EXPIRED",
@@ -600,6 +620,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     companyId: string;
     targetAgent: LaneATargetAgent;
     requester: LaneARequester;
+    /**
+     * The authenticated request actor (`req.actor`), used for permission
+     * decisions when a built-in action needs one (handing work to a colleague
+     * runs the same tasks:assign check the chat router runs). When a caller
+     * leaves it out, actions that need a permission are refused.
+     */
+    actor?: AuthorizationActor;
     message: string;
     context?: string;
     conversationId?: string;
@@ -624,6 +651,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       companyId: params.companyId,
       agent: { id: params.targetAgent.id, name: params.targetAgent.name },
       requester: params.requester,
+      actor: params.actor ?? { type: "none" },
       conversationId: conversation.id,
     };
 
@@ -716,10 +744,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!conversation || conversation.companyId !== params.companyId || conversation.agentId !== params.targetAgentId) {
       throw notFound("Lane A conversation not found");
     }
-    const ownedByRequester = params.requester.agentId
-      ? conversation.requestedByAgentId === params.requester.agentId
-      : conversation.requestedByUserId === params.requester.userId;
-    if (!ownedByRequester) throw forbidden("This conversation belongs to someone else");
+    assertConversationOwnedBy(conversation, params.requester);
 
     const rows = await db
       .select()

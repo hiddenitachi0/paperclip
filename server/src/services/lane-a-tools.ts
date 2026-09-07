@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Db } from "@paperclipai/db";
+import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
+import type { AuthorizationActor } from "./authorization.js";
 import { issueService } from "./issues.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
@@ -74,6 +76,11 @@ export interface LaneAToolContext {
   agent: { id: string; name: string };
   /** Who is talking to the quick agent (user or agent). */
   requester: { userId: string | null; agentId: string | null };
+  /**
+   * The authenticated request actor, for permission decisions. `{ type: "none" }`
+   * when the caller did not supply one — every permission check then denies.
+   */
+  actor: AuthorizationActor;
   conversationId: string;
 }
 
@@ -83,6 +90,16 @@ export interface LaneAToolContext {
  */
 export interface LaneAToolDeps {
   listAgents(companyId: string): Promise<LaneAToolColleague[]>;
+  /**
+   * May the requester hand work to this colleague? The same tasks:assign
+   * decision the chat router makes before creating a task, so a quick agent
+   * cannot be used to sidestep the assignment policy.
+   */
+  canAssignTask(input: {
+    companyId: string;
+    assigneeAgentId: string;
+    ctx: LaneAToolContext;
+  }): Promise<{ allowed: boolean; explanation: string }>;
   createIssueForAgent(input: {
     companyId: string;
     assigneeAgentId: string;
@@ -299,6 +316,19 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         summary: `Could not find a colleague called "${wanted}".`,
       };
     }
+    // Same permission gate the chat router runs before creating a task
+    // (tasks:assign for this assignee). Denied means a plain refusal the
+    // model relays — no task, no wake-up.
+    const decision = await deps.canAssignTask({ companyId: ctx.companyId, assigneeAgentId: match.id, ctx });
+    if (!decision.allowed) {
+      return {
+        ok: false,
+        content:
+          `The person asking is not allowed to hand work to ${match.name}, so no task was created. ` +
+          `Tell them plainly and suggest they ask someone who manages assignments.`,
+        summary: `Refused to hand work to ${match.name}: the person asking may not assign tasks to them.`,
+      };
+    }
     const explicitTitle = readString(input, "title");
     const title = buildTaskTitle(explicitTitle || request);
     const description =
@@ -404,6 +434,24 @@ export function createDbLaneAToolDeps(db: Db): LaneAToolDeps {
         status: agent.status,
         urlKey: agent.urlKey,
       }));
+    },
+    async canAssignTask({ companyId, assigneeAgentId, ctx }) {
+      // Mirrors routes/chat-router.ts's Lane B dispatch check exactly.
+      const decision = await accessService(db).decide({
+        actor: ctx.actor,
+        action: "tasks:assign",
+        resource: {
+          type: "issue",
+          companyId,
+          issueId: null,
+          projectId: null,
+          parentIssueId: null,
+          assigneeAgentId,
+          assigneeUserId: null,
+        },
+        scope: { assigneeAgentId },
+      });
+      return { allowed: decision.allowed, explanation: decision.explanation };
     },
     async createIssueForAgent({ companyId, assigneeAgentId, title, description, ctx }) {
       const issues = issueService(db);

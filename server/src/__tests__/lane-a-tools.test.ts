@@ -28,6 +28,7 @@ const colleagues = [
 function makeDeps(overrides: Partial<LaneAToolDeps> = {}): LaneAToolDeps {
   return {
     listAgents: vi.fn(async () => colleagues),
+    canAssignTask: vi.fn(async () => ({ allowed: true, explanation: "ok" })),
     createIssueForAgent: vi.fn(async () => ({ id: "issue-1", identifier: "DUR-12", status: "todo" })),
     lookupIssue: vi.fn(async () => null),
     fetch: vi.fn(async () => {
@@ -42,6 +43,7 @@ function ctx(overrides: Partial<LaneAToolContext> = {}): LaneAToolContext {
     companyId,
     agent: { id: quickAgentId, name: "Ada" },
     requester: { userId: "user-1", agentId: null },
+    actor: { type: "board", userId: "user-1", companyIds: [companyId], source: "session" },
     conversationId: "44444444-4444-4444-8444-444444444444",
     ...overrides,
   };
@@ -79,6 +81,10 @@ describe("route_to_agent", () => {
     expect(result.ok).toBe(true);
     expect(result.summary).toBe("Handed to Bob as task DUR-12.");
     expect(result.content).toContain("DUR-12");
+    // The permission check ran for the resolved colleague before the task was created.
+    expect(deps.canAssignTask).toHaveBeenCalledWith(
+      expect.objectContaining({ companyId, assigneeAgentId: bobId, ctx: expect.objectContaining({ actor: expect.objectContaining({ userId: "user-1" }) }) }),
+    );
     expect(deps.createIssueForAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         companyId,
@@ -111,6 +117,22 @@ describe("route_to_agent", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.content).toContain("Only a person can ask me");
+    expect(deps.canAssignTask).not.toHaveBeenCalled();
+    expect(deps.createIssueForAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses plainly, without creating a task, when the person may not assign work to that colleague", async () => {
+    const deps = makeDeps({
+      canAssignTask: vi.fn(async () => ({ allowed: false, explanation: "user principal user-1 is not an active member" })),
+    });
+    const execute = createLaneABuiltinToolExecutor(deps);
+    const result = await execute("route_to_agent", { agent: "Bob", request: "fix the login page" }, ctx());
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("not allowed to hand work to Bob");
+    expect(result.content).toContain("no task was created");
+    expect(result.summary).toBe("Refused to hand work to Bob: the person asking may not assign tasks to them.");
+    // The policy's internal explanation is not surfaced to the model or the person.
+    expect(result.content).not.toContain("principal");
     expect(deps.createIssueForAgent).not.toHaveBeenCalled();
   });
 
