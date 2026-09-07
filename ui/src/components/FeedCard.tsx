@@ -4,6 +4,7 @@ import { timeAgo } from "../lib/timeAgo";
 import { cn } from "../lib/utils";
 import { deriveProjectUrlKey, type ActivityEvent, type Agent } from "@paperclipai/shared";
 import { issueStatusIcon, issueStatusIconDefault } from "../lib/status-colors";
+import { readActivityDecisionNote } from "../lib/activity-format";
 import {
   FileText,
   UserPlus,
@@ -84,6 +85,14 @@ function formatVerb(
       return "rejected";
     case "approval.revision_requested":
       return "requested changes on";
+    // DUR-283: per-issue mirrors of an approval decision (hidden by default
+    // in the company feed, but rendered if the operator shows all events).
+    case "issue.approval_approved":
+      return "approved an approval request on";
+    case "issue.approval_rejected":
+      return "rejected an approval request on";
+    case "issue.approval_revision_requested":
+      return "sent an approval request back for changes on";
 
     case "agent.created":
       return context === "pinned" ? "wants to hire" : "hired";
@@ -194,10 +203,13 @@ function getIconSpec(
     case "approval.created":
       return { kind: "lucide", Icon: CircleAlert, color: "text-amber-600 dark:text-amber-400" };
     case "approval.approved":
+    case "issue.approval_approved":
       return { kind: "lucide", Icon: CircleCheck, color: "text-green-600 dark:text-green-400" };
     case "approval.rejected":
+    case "issue.approval_rejected":
       return { kind: "lucide", Icon: CircleSlash, color: "text-red-600 dark:text-red-400" };
     case "approval.revision_requested":
+    case "issue.approval_revision_requested":
       return { kind: "lucide", Icon: PencilLine, color: "text-amber-600 dark:text-amber-400", filled: true };
   }
 
@@ -434,6 +446,11 @@ export function FeedCard({
   const content = resolveContent(event, agentMap, entityNameMap, entityTitleMap);
   const verb = formatVerb(event.action, details, isPinned ? "pinned" : "chronological");
   const iconSpec = getIconSpec(event, details, isActive);
+  // DUR-283: the reason the operator gave when approving / rejecting /
+  // sending back an approval -- the same plain text ApprovalCard shows as
+  // its "Decision note.", so the feed reader does not have to open the
+  // approval to learn why.
+  const decisionNote = readActivityDecisionNote(event.action, details);
 
   const mutedTextBase = isMuted ? "text-muted-foreground/70" : "text-[#959596]";
   const mutedTextHover = isMuted ? "" : "group-hover:text-white";
@@ -442,42 +459,52 @@ export function FeedCard({
     <div
       data-fc="card"
       className={cn(
-        "group ml-3 mr-3 md:ml-0 my-2 flex items-center gap-2 rounded-lg border bg-card p-[18px] text-xs",
+        "group ml-3 mr-3 md:ml-0 my-2 flex flex-col gap-2 rounded-lg border bg-card p-[18px] text-xs",
         "transition-[background-color,border-color] duration-150",
         content.link && "cursor-pointer hover:bg-accent hover:border-muted-foreground/30",
         className,
       )}
     >
-      <EntityIcon spec={iconSpec} />
-      <ActorGlyph content={content} />
-      <span className="flex min-w-0 flex-1 items-baseline gap-1 truncate">
-        <span data-fc="actor" className={cn("font-medium", mutedTextBase, mutedTextHover)}>
-          {content.actorName}
+      <div className="flex items-center gap-2">
+        <EntityIcon spec={iconSpec} />
+        <ActorGlyph content={content} />
+        <span className="flex min-w-0 flex-1 items-baseline gap-1 truncate">
+          <span data-fc="actor" className={cn("font-medium", mutedTextBase, mutedTextHover)}>
+            {content.actorName}
+          </span>
+          <span data-fc="verb" className={mutedTextBase}>{verb}</span>
+          {content.identifier && (
+            <span
+              data-fc="id"
+              className={cn(content.identifierMono && "font-mono", mutedTextBase, mutedTextHover)}
+            >
+              {content.identifier}
+            </span>
+          )}
+          {content.title && (
+            <span
+              data-fc="title"
+              className={cn("truncate", mutedTextBase, mutedTextHover)}
+            >
+              {content.title}
+            </span>
+          )}
         </span>
-        <span data-fc="verb" className={mutedTextBase}>{verb}</span>
-        {content.identifier && (
-          <span
-            data-fc="id"
-            className={cn(content.identifierMono && "font-mono", mutedTextBase, mutedTextHover)}
-          >
-            {content.identifier}
-          </span>
+        {isPinned && (
+          <span className="shrink-0 text-xs text-muted-foreground">Review →</span>
         )}
-        {content.title && (
-          <span
-            data-fc="title"
-            className={cn("truncate", mutedTextBase, mutedTextHover)}
-          >
-            {content.title}
-          </span>
-        )}
-      </span>
-      {isPinned && (
-        <span className="shrink-0 text-xs text-muted-foreground">Review →</span>
+        <span data-fc="time" className="shrink-0 text-muted-foreground">
+          {timeAgo(event.createdAt)}
+        </span>
+      </div>
+      {decisionNote && (
+        <div
+          data-fc="decision-note"
+          className="whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/30 px-2.5 py-1.5 leading-5 text-muted-foreground"
+        >
+          <span className="font-medium text-foreground">Decision note.</span> {decisionNote}
+        </div>
       )}
-      <span data-fc="time" className="shrink-0 text-muted-foreground">
-        {timeAgo(event.createdAt)}
-      </span>
     </div>
   );
 

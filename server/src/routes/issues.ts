@@ -2275,6 +2275,32 @@ export function issueRoutes(
     return decision.allowed;
   }
 
+  // DUR-62: the weekly check-up report reviews the agents' own behaviour and
+  // is deliberately unassigned (it is written for the operator). The base
+  // ownership rule below returns true for every unassigned issue, which would
+  // make the one page reviewing agents the one page every agent may edit,
+  // close or delete. So: no agent-authenticated mutation of it, ever --
+  // PATCH of any field, DELETE, and checkout. Board users are unaffected.
+  // Kept as a literal so this route file does not pull the check-up service
+  // into its import graph.
+  const ORGANIZATION_CHECKUP_ORIGIN_KIND = "organization_checkup";
+  function rejectAgentCheckupReportMutation(
+    req: Request,
+    res: Response,
+    issue: { id: string; originKind?: string | null },
+  ) {
+    if (req.actor.type !== "agent") return true;
+    if (issue.originKind !== ORGANIZATION_CHECKUP_ORIGIN_KIND) return true;
+    res.status(403).json({
+      error: "This check-up report is written for the operator; agents cannot change it",
+      details: {
+        issueId: issue.id,
+        securityPrinciples: ["Least Privilege", "Complete Mediation", "Fail Securely"],
+      },
+    });
+    return false;
+  }
+
   async function assertAgentIssueMutationAllowed(
     req: Request,
     res: Response,
@@ -2286,9 +2312,11 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      originKind?: string | null;
     },
   ) {
     if (req.actor.type !== "agent") return true;
+    if (!rejectAgentCheckupReportMutation(req, res, issue)) return false;
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
       res.status(403).json({ error: "Agent authentication required" });
@@ -6439,10 +6467,15 @@ export function issueRoutes(
       requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
       currentStatus: existing.status,
     });
-    if (deployCompletionGateResult) {
+    if (deployCompletionGateResult && !deployCompletionGateResult.warningOnly) {
       res.status(409).json({ error: deployCompletionGateResult.message });
       return;
     }
+    // DUR-291: the gate could not run (issue has no project and no project could be inferred
+    // from the merge) -- let the transition through, but say so on the issue once it lands.
+    const deployCompletionWarning = deployCompletionGateResult?.warningOnly
+      ? deployCompletionGateResult.message
+      : null;
     // DUR-313: composes with the gates above -- this asks a narrower question again,
     // "did the operator explicitly sign off on THIS being a finished, user-facing
     // launch", independent of whether the work itself is done or already deployed.
@@ -6803,6 +6836,18 @@ export function issueRoutes(
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
+    }
+
+    if (deployCompletionWarning) {
+      logger.warn(
+        { issueId: issue.id, companyId: issue.companyId, reason: deployCompletionGateResult?.reason },
+        "issue with no project marked done without a deploy-completion check; warning posted on the issue (DUR-291)",
+      );
+      try {
+        await svc.addComment(issue.id, deployCompletionWarning, {}, { authorType: "system" });
+      } catch (err) {
+        logger.warn({ err, issueId: issue.id }, "failed to post deploy-completion warning comment (DUR-291)");
+      }
     }
 
     let cancelledStatusRunId: string | null = null;
@@ -7584,6 +7629,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!rejectAgentCheckupReportMutation(req, res, issue)) return;
 
     if (issue.projectId) {
       const project = await projectsSvc.getById(issue.projectId);

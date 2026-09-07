@@ -31,6 +31,7 @@ const mockApprovalService = vi.hoisted(() => ({
   findOpenHireApprovalForRole: vi.fn(),
   findOpenMergePrApproval: vi.fn(),
   findOpenDeployApproval: vi.fn(),
+  listApprovedDeployApprovalsForCommit: vi.fn(async () => []),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({ wakeup: vi.fn() }));
@@ -144,6 +145,28 @@ async function createAgentApp(db: any) {
       companyId: COMPANY_ID,
       runId: "run-1",
       source: "api_key",
+      isInstanceAdmin: false,
+    };
+    next();
+  });
+  app.use("/api", approvalRoutes(db));
+  app.use(errorHandler);
+  return app;
+}
+
+async function createBoardApp(db: any) {
+  const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
+    import("../middleware/index.js"),
+    import("../routes/approvals.js"),
+  ]);
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor = {
+      type: "board",
+      userId: "user-1",
+      companyIds: [COMPANY_ID],
+      source: "session",
       isInstanceAdmin: false,
     };
     next();
@@ -414,6 +437,69 @@ describe("DUR-284: deploy approval branch stamp", () => {
       const resubmittedPayload = mockApprovalService.resubmit.mock.calls[0][1];
       expect(resubmittedPayload.sourceBranch).toBe("custom");
       expect(resubmittedPayload.deployBranch).toBe("custom");
+    },
+    TEST_TIMEOUT,
+  );
+
+  // DUR-3952 (DUR-137 follow-up): the runner has honoured
+  // payload.allowBackwardDeploy for intentional rollbacks since DUR-137, but
+  // the strict payload schema rejected the key at filing, so the only way to
+  // set it was a direct DB update. It is now a real field -- board-only.
+  it(
+    "DUR-3952: the board can file a deploy as an intentional rollback and allowBackwardDeploy is kept on the payload",
+    async () => {
+      mockGhFetch
+        .mockResolvedValueOnce(new Response(JSON.stringify({ status: "ahead" }), { status: 200 }))
+        .mockResolvedValueOnce(branchesWhereHeadResponse(["custom"]));
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app)
+        .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
+        .send(deployBody({ allowBackwardDeploy: true }));
+
+      expect(res.status).toBe(201);
+      const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
+      expect(createdPayload.allowBackwardDeploy).toBe(true);
+      expect(createdPayload.deployBranch).toBe("custom");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "DUR-3952: an agent cannot pre-confirm a rollback -- allowBackwardDeploy from an agent is refused with a plain-language 403",
+    async () => {
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app)
+        .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
+        .send(deployBody({ allowBackwardDeploy: true }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("rollback");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "DUR-3952: an agent resubmit cannot smuggle allowBackwardDeploy in either",
+    async () => {
+      mockApprovalService.getById.mockResolvedValue({
+        id: "approval-1",
+        type: "request_board_approval",
+        status: "revision_requested",
+        payload: { kind: "deploy", projectId: PROJECT_ID, workspaceId: WORKSPACE_ID },
+        companyId: "22222222-2222-4222-8222-222222222222",
+        requestedByAgentId: "agent-1",
+      });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app)
+        .post("/api/approvals/approval-1/resubmit")
+        .send({ payload: { ...deployBody().payload, allowBackwardDeploy: true } });
+
+      expect(res.status).toBe(403);
+      expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
     },
     TEST_TIMEOUT,
   );

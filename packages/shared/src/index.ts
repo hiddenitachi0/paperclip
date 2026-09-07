@@ -1084,6 +1084,20 @@ export type {
 } from "./types/cloud-upstream.js";
 
 export type { ServerGitInfo, ServerGitLocalChanges, ServerInfoSnapshot } from "./types/server-info.js";
+export type {
+  FleetAgentCounts,
+  FleetAgentInErrorSample,
+  FleetDatabaseLoad,
+  FleetHealth,
+  FleetHealthLevel,
+  FleetHealthSnapshot,
+  FleetHealthSummary,
+  FleetHealthUnavailable,
+  FleetRequestLoad,
+  FleetRunCounts,
+  FleetSchedulerStatus,
+  FleetSlotUsage,
+} from "./types/fleet-health.js";
 
 export {
   getClosedIsolatedExecutionWorkspaceMessage,

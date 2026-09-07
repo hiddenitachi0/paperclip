@@ -56,6 +56,7 @@ import {
   routineRevisions,
   routineRuns,
   routines,
+  runInPooledScope,
   withCompanyScope,
   workspaceOperations,
 } from "@paperclipai/db";
@@ -215,6 +216,8 @@ import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
+import { computeHeartbeatTimerJitterMs, type HeartbeatTimerJitterOptions } from "./heartbeat-timer-jitter.js";
+import { buildAgentEnteredErrorNotice, buildReapedRunOperatorNotice } from "./operator-notices.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -315,6 +318,11 @@ const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_INLINE_WAKE_COMMENTS = 8;
 const MAX_INLINE_WAKE_COMMENT_BODY_CHARS = 4_000;
 const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
+// DUR-3943: adapters whose execute() always renders the wake payload and the
+// task block side by side in one prompt, so the task block can point at the
+// wake comment instead of repeating it. Template-driven adapters (hermes) are
+// deliberately excluded because an operator template may drop either block.
+const WAKE_COMMENT_DEDUP_ADAPTER_TYPES = new Set(["claude_local"]);
 const execFile = promisify(execFileCallback);
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
@@ -4590,21 +4598,63 @@ function buildRunEventRuntimeProgress(input: {
   };
 }
 
+type PaperclipTaskMarkdownIssue = {
+  id: string;
+  identifier: string | null;
+  title: string;
+  workMode?: string | null;
+  description?: string | null;
+};
+
+type PaperclipTaskMarkdownAncestor = {
+  id: string;
+  identifier?: string | null;
+  title?: string | null;
+  status?: string | null;
+  priority?: string | null;
+};
+
+const MAX_PAPERCLIP_TASK_MARKDOWN_ANCESTORS = 6;
+
+/**
+ * DUR-3943: stable identity of the "standing" part of the task context (the
+ * issue itself plus its ancestor chain) -- everything in the task block that
+ * does NOT change from wake to wake. An adapter that resumes a session whose
+ * saved fingerprint equals the current one already has this text in the
+ * session transcript and can send the short resume form instead of the full
+ * description again. Anything that changes the rendered block (title,
+ * description, work mode, an ancestor's status/priority) changes the
+ * fingerprint, which falls back to sending the full block.
+ */
+export function buildPaperclipTaskContextFingerprint(input: {
+  issue: PaperclipTaskMarkdownIssue | null;
+  ancestors?: PaperclipTaskMarkdownAncestor[] | null;
+}): string | null {
+  if (!input.issue) return null;
+  const ancestors = (input.ancestors ?? []).slice(0, MAX_PAPERCLIP_TASK_MARKDOWN_ANCESTORS).map((ancestor) => ({
+    id: ancestor.id,
+    identifier: ancestor.identifier ?? null,
+    title: ancestor.title ?? null,
+    status: ancestor.status ?? null,
+    priority: ancestor.priority ?? null,
+  }));
+  const canonical = JSON.stringify({
+    issue: {
+      id: input.issue.id,
+      identifier: input.issue.identifier ?? null,
+      title: input.issue.title,
+      workMode: input.issue.workMode ?? null,
+      description: input.issue.description?.trim() || null,
+    },
+    ancestors,
+    truncated: (input.ancestors ?? []).length > ancestors.length,
+  });
+  return `v1:sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+}
+
 export function buildPaperclipTaskMarkdown(input: {
-  issue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    workMode?: string | null;
-    description?: string | null;
-  } | null;
-  ancestors?: Array<{
-    id: string;
-    identifier?: string | null;
-    title?: string | null;
-    status?: string | null;
-    priority?: string | null;
-  }> | null;
+  issue: PaperclipTaskMarkdownIssue | null;
+  ancestors?: PaperclipTaskMarkdownAncestor[] | null;
   wakeComment?: {
     id: string;
     body: string;
@@ -4614,6 +4664,20 @@ export function buildPaperclipTaskMarkdown(input: {
     status?: string | null;
   } | null;
   acceptedPlanContinuation?: boolean;
+  /**
+   * DUR-3943: the same comment is already inlined (untruncated) in the wake
+   * payload that every adapter renders ahead of this block. Point at it
+   * instead of repeating the body, so a comment wake does not carry the
+   * comment text twice in every turn of the run.
+   */
+  wakeCommentInlinedInWakePayload?: boolean;
+  /**
+   * DUR-3943: render the short resume form. Only valid when the adapter is
+   * resuming a session that already received the full block for the same
+   * issue/ancestor fingerprint (see buildPaperclipTaskContextFingerprint);
+   * the description and ancestor chain are replaced by a one-line notice.
+   */
+  unchangedTaskContextForResume?: boolean;
 }) {
   const quoteTaskScalar = (value: string) => JSON.stringify(value);
   const fenceTaskText = (value: string) => {
@@ -4625,7 +4689,7 @@ export function buildPaperclipTaskMarkdown(input: {
     return [fence + "text", value, fence].join("\n");
   };
   const issue = input.issue;
-  const ancestors = (input.ancestors ?? []).slice(0, 6);
+  const ancestors = (input.ancestors ?? []).slice(0, MAX_PAPERCLIP_TASK_MARKDOWN_ANCESTORS);
   const wakeComment = input.wakeComment ?? null;
   const acceptedPlanContinuation =
     !wakeComment &&
@@ -4635,6 +4699,7 @@ export function buildPaperclipTaskMarkdown(input: {
       issue?.workMode === "planning"
     ));
   if (!issue && !wakeComment) return null;
+  const unchangedTaskContextForResume = input.unchangedTaskContextForResume === true && issue != null;
 
   const lines = [
     "Paperclip task context:",
@@ -4674,11 +4739,16 @@ export function buildPaperclipTaskMarkdown(input: {
       );
     }
     const description = issue.description?.trim();
-    if (description) {
+    if (unchangedTaskContextForResume) {
+      lines.push(
+        "",
+        "Issue description and parent / ancestor context: unchanged since your previous run in this session (already in your context). Do not re-fetch them unless you need detail you no longer have.",
+      );
+    } else if (description) {
       lines.push("", "Issue description:", fenceTaskText(description));
     }
   }
-  if (ancestors.length > 0) {
+  if (ancestors.length > 0 && !unchangedTaskContextForResume) {
     lines.push("", "Authoritative parent / ancestor context:");
     for (const [index, ancestor] of ancestors.entries()) {
       const label = ancestor.identifier || ancestor.id;
@@ -4692,7 +4762,14 @@ export function buildPaperclipTaskMarkdown(input: {
     }
   }
   if (wakeComment?.body.trim()) {
-    lines.push("", "Latest wake comment:", fenceTaskText(wakeComment.body.trim()));
+    if (input.wakeCommentInlinedInWakePayload) {
+      lines.push(
+        "",
+        `Latest wake comment: ${quoteTaskScalar(wakeComment.id)} (full text is in the wake payload of this prompt; not repeated here).`,
+      );
+    } else {
+      lines.push("", "Latest wake comment:", fenceTaskText(wakeComment.body.trim()));
+    }
   }
   lines.push("", "Use this task context as the current assignment.");
   return lines.join("\n");
@@ -4976,6 +5053,13 @@ export interface HeartbeatServiceOptions {
    * guessing a wait duration. No-op when unset.
    */
   onRunDispatched?: (run: Promise<unknown>) => void;
+  /**
+   * DUR-273: per-agent offset added to each heartbeat interval so timer wakes
+   * spread out instead of clustering into one tick (see
+   * heartbeat-timer-jitter.ts). Defaults to a few percent of the interval,
+   * capped at a few minutes; `{ ratio: 0 }` disables it.
+   */
+  timerJitter?: HeartbeatTimerJitterOptions;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -9895,6 +9979,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (tc) trackAgentFirstHeartbeat(tc, { agentRole: updated.role, agentId: updated.id });
     }
 
+    // DUR-98: an agent dropping into "error" is exactly the case where an
+    // operator sat unaware for hours (fourteen tickets stranded behind one
+    // red marker, 21-22 August). Write the moment it happens, in plain
+    // language, so the Activity feed and agent page carry it without anyone
+    // having to notice a status colour. The DUR-128 stall sweep separately
+    // re-raises it if nobody acts within 30 minutes.
+    if (updated && enteringError) {
+      await logActivity(db, {
+        companyId: updated.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: updated.id,
+        action: "agent.entered_error",
+        entityType: "agent",
+        entityId: updated.id,
+        details: {
+          message: buildAgentEnteredErrorNotice({ agentName: updated.name, reason: updated.errorReason }),
+          agentName: updated.name,
+          errorReason: updated.errorReason,
+          outcome,
+          errorAt: updated.errorAt ? new Date(updated.errorAt).toISOString() : null,
+        },
+      }).catch((err) => {
+        logger.warn({ err, agentId: updated.id }, "failed to log operator notice for agent entering error");
+      });
+    }
+
     if (updated) {
       publishLiveEvent({
         companyId: updated.companyId,
@@ -10138,6 +10249,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         run: heartbeatRuns,
         adapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        agentName: agents.name,
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
@@ -10145,7 +10257,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const reaped: string[] = [];
 
-    for (const { run, adapterType, adapterConfig } of activeRuns) {
+    for (const { run, adapterType, adapterConfig, agentName } of activeRuns) {
       // DUR-257: staleness must key on evidence the run is actually making
       // progress (adapter output, process start, run start) -- NOT on
       // `updatedAt`. Every periodic pass that classifies liveness or patches
@@ -10323,6 +10435,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // "error" until someone reset them by hand.)
       const agentOutcome = shouldRetry || !(run.processPid || run.processGroupId) ? "cancelled" : "failed";
       await finalizeAgentStatus(run.agentId, agentOutcome, baseMessage);
+
+      // DUR-98: the watchdog knew this run was dead and acted on it -- say so
+      // where the operator will see it, in plain language, instead of only a
+      // server log line. finalizeAgentStatus above already logged the
+      // agent-level "needs attention" notice if the agent entered error.
+      const agentAfterReap = await getAgent(run.agentId);
+      const agentMarkedError = agentAfterReap?.status === "error";
+      const processWasKnown = Boolean(run.processPid || run.processGroupId);
+      await logActivity(db, {
+        companyId: run.companyId,
+        actorType: "system",
+        actorId: "run-watchdog",
+        agentId: run.agentId,
+        runId: run.id,
+        action: "heartbeat.run_reaped",
+        entityType: "heartbeat_run",
+        entityId: run.id,
+        details: {
+          message: buildReapedRunOperatorNotice({
+            agentName,
+            silentForMs: progressRefTime > 0 ? staleForMs : null,
+            processWasKnown,
+            retryQueued: Boolean(retriedRun),
+            agentMarkedError,
+          }),
+          // ActivityRow links heartbeat_run entries to the agent via details.agentId.
+          agentId: run.agentId,
+          agentName,
+          silentForMs: progressRefTime > 0 ? staleForMs : null,
+          staleThresholdMs,
+          processWasKnown,
+          retryQueued: Boolean(retriedRun),
+          ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+          agentMarkedError,
+          errorCode: "process_lost",
+          technicalReason: baseMessage,
+        },
+      }).catch((err) => {
+        logger.warn({ err, runId: run.id }, "failed to log operator notice for reaped heartbeat run");
+      });
+
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
@@ -10631,7 +10784,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (claimedRuns.length === 0) return [];
 
     for (const claimedRun of claimedRuns) {
-      const dispatched = executeRun(claimedRun.id).catch((err) => {
+      // DUR-3952: executeRun() is fire-and-forget and outlives whatever
+      // request/scheduler-tick scope dispatched it -- by minutes or hours.
+      // Detach it onto the shared pool (runInPooledScope) instead of leaving
+      // it in the caller's AsyncLocalStorage context: once that context's
+      // reserved connection was released, every query the run made through
+      // the request-scoped `db` proxy either ran on a recycled connection
+      // some other request now owns (pre-DUR-932) or hit the liveness guard
+      // (the 2026-09-06 outage: every run "Process lost"). `rawDb` may be the
+      // proxy itself for route-constructed services; runInPooledScope
+      // unwraps it.
+      const dispatched = runInPooledScope(rawDb, () => executeRun(claimedRun.id)).catch((err) => {
         logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
       });
       options.onRunDispatched?.(dispatched);
@@ -10915,7 +11078,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context[PAPERCLIP_WAKE_PAYLOAD_KEY];
     }
-    const taskMarkdown = buildPaperclipTaskMarkdown({
+    // DUR-3943: the wake payload above already inlines the wake comment
+    // (untruncated) for adapters that always render both blocks together,
+    // so the task block only needs to point at it. Gated per adapter type:
+    // template-driven adapters (hermes) may render one block without the
+    // other, so they keep the full copy.
+    const wakeCommentInlinedInWakePayload = Boolean(
+      wakeCommentId &&
+        wakeCommentContext &&
+        WAKE_COMMENT_DEDUP_ADAPTER_TYPES.has(agent.adapterType) &&
+        paperclipWakePayload?.comments.some(
+          (comment) => comment.id === wakeCommentId && comment.bodyTruncated !== true,
+        ),
+    );
+    const taskMarkdownInput = {
       issue: issueRef
         ? {
             id: issueRef.id,
@@ -10934,6 +11110,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       acceptedPlanContinuation:
         readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation"
         && Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0,
+      wakeCommentInlinedInWakePayload,
+    };
+    const taskMarkdown = buildPaperclipTaskMarkdown(taskMarkdownInput);
+    // DUR-3943: short form + fingerprint for adapters that resume a session
+    // which already carries the full block (see claude-local execute).
+    const taskMarkdownResume = buildPaperclipTaskMarkdown({
+      ...taskMarkdownInput,
+      unchangedTaskContextForResume: true,
+    });
+    const taskContextFingerprint = buildPaperclipTaskContextFingerprint({
+      issue: taskMarkdownInput.issue,
+      ancestors: issueAncestors,
     });
     if (issueRef) {
       context.paperclipIssue = {
@@ -10955,6 +11143,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       context.paperclipTaskMarkdown = taskMarkdown;
     } else {
       delete context.paperclipTaskMarkdown;
+    }
+    if (taskMarkdownResume && taskContextFingerprint) {
+      context.paperclipTaskMarkdownResume = taskMarkdownResume;
+      context.paperclipTaskContextFingerprint = taskContextFingerprint;
+    } else {
+      delete context.paperclipTaskMarkdownResume;
+      delete context.paperclipTaskContextFingerprint;
     }
     const requestedExecutionWorkspaceId = readNonEmptyString(issueRef?.executionWorkspaceId);
     const existingExecutionWorkspace =
@@ -13803,8 +13998,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // for up to AGENT_START_LOCK_STALE_MS. Fire-and-forget, same as the
     // claimed-run dispatch below — the promoted run already exists as
     // "queued" from the transaction above, so callers observing that row
-    // don't need this call to have completed.
-    void startNextQueuedRunForAgent(promotedRun.agentId).catch((err) => {
+    // don't need this call to have completed. DUR-3952: detached onto the
+    // pool for the same reason as the executeRun dispatch -- the caller's
+    // request/tick scope may be released before this finishes.
+    void runInPooledScope(rawDb, () => startNextQueuedRunForAgent(promotedRun.agentId)).catch((err) => {
       logger.error({ err, agentId: promotedRun.agentId }, "failed to start promoted queued run");
     });
   }
@@ -14929,8 +15126,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // startNextQueuedRunForAgent call, which already holds the global run-start
     // lock — awaiting resumeQueuedRuns() here would re-enter that same lock
     // before the outer call releases it and deadlock for up to
-    // AGENT_START_LOCK_STALE_MS.
-    void resumeQueuedRuns().catch((err) => {
+    // AGENT_START_LOCK_STALE_MS. DUR-3952: detached onto the pool for the same
+    // reason as the executeRun dispatch -- a cancel from a route or a finishing
+    // run outlives the scope that issued it.
+    void runInPooledScope(rawDb, () => resumeQueuedRuns()).catch((err) => {
       logger.error({ err, runId: run.id }, "failed to resume queued runs after cancellation");
     });
     return cancelled;
@@ -15363,7 +15562,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         checked += 1;
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
-        if (elapsedMs < policy.intervalSec * 1000) continue;
+        // DUR-273: each agent waits its own small, stable extra offset past
+        // the interval so a fleet whose lastHeartbeatAt values line up (after
+        // a restart, a reap, or a shared creation time) does not wake as one.
+        const jitterMs = computeHeartbeatTimerJitterMs(agent.id, policy.intervalSec, options.timerJitter);
+        if (elapsedMs < policy.intervalSec * 1000 + jitterMs) continue;
 
         // DUR-3932: enqueueWakeup can throw (budget block, invokability race,
         // inactive company, etc. -- see its `throw conflict(...)` paths) and this

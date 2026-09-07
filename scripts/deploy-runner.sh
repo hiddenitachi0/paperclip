@@ -74,7 +74,17 @@
 # Every comment attempt (delivered or not) is also mirrored, best-effort, as
 # a JSON line into $STATUS_PATH inside the server container's own volume, so
 # an agent without host/docker access can see recent runner activity via the
-# API instead of needing a human to read deploy-runner.log by hand.
+# API instead of needing a human to read deploy-runner.log by hand. Since
+# DUR-3923 a real deploy also writes one `outcome:"started"` line there before
+# its slow part begins (see process_approval), so the server can tell "busy
+# on it" from "never picked it up".
+#
+# DUR-3923: an approved card whose kind only LOOKS like a deploy ("deploy_pr",
+# "rollout", ...) is answered with a comment saying nothing acts on it (see
+# run_unsupported_kind_approval) instead of being skipped in silence -- the
+# NOR-1242 incident was exactly an approved deploy_pr card that did nothing.
+# Only cards decided within UNSUPPORTED_KIND_MAX_AGE_SECONDS (24h) are
+# answered, so a fresh processed-set does not replay history.
 #
 # Auth: uses the CLI's stored board credential inside the server container,
 # same as deploy-poller.sh — must be an instance admin (required for the
@@ -143,6 +153,16 @@ STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/sta
 # once the recreate actually starts either way.
 QUIET_MODE_DRAIN_TIMEOUT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS:-240}"
 QUIET_MODE_DRAIN_POLL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS:-5}"
+# DUR-3923: only deploy-LOOKING cards (deploy_pr, rollout, ...) approved within
+# this window get the "nothing acts on this" comment. Without a bound, the
+# first poll cycle after this runner ships would comment on every historically
+# approved deploy_pr-style card across every company -- and mirror each one
+# onto its linked issues -- which is noise, not help: those cards were decided
+# long ago and nobody is waiting on them. Matches
+# DEPLOY_APPROVAL_FEEDBACK_MAX_AGE_MS (24h) in
+# server/src/services/deploy-approval-feedback.ts. Real kind:"deploy" cards
+# are NOT bounded by this: a deploy that was approved is still meant to happen.
+UNSUPPORTED_KIND_MAX_AGE_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS:-86400}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -781,6 +801,14 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   before_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
   log "runner: $aid deploying project $DV_PROJECT_ID ($DV_DEPLOY_TARGET_PATH) -> $target_ref"
+  # DUR-3923: write a "started" status line BEFORE the slow part (git fetch, quiet-mode drain of
+  # up to QUIET_MODE_DRAIN_TIMEOUT_SECONDS, the build, the health check, and a possible rollback
+  # that repeats the last two). Every other status line is a terminal outcome written at the very
+  # end, so without this one the server's deploy-approval-feedback tick had no way to tell "the
+  # runner is busy on this deploy right now" from "the runner never picked it up" and could tell
+  # the operator the runner service was stopped in the middle of a perfectly normal long deploy.
+  # Not a comment (nothing is posted on the card), not an outcome, never affects the processed set.
+  record_status "$aid" "$company_id" "Deploy started — the deploy runner is working on this approval (fetching $target_ref, then building and health-checking). The outcome will be posted here when it finishes." 1 "started"
   local carried_commit
   carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY" "" "$DV_REPO_REF")"
   local fetch_reset_status=$?
@@ -1003,6 +1031,33 @@ run_superseded_approval() { # approval_id, company_id, keep_approval_id
   rm -f "$result_file"
 }
 
+# DUR-3923: an approved request_board_approval whose payload.kind looks like a
+# deploy but is not "deploy" (the NOR-1242 card was kind "deploy_pr"). Nothing
+# here can act on it -- there is no project/workspace/commit contract behind
+# it -- so the only correct outcome is to SAY so, on the card (and, via
+# comment()'s mirror, on its linked issues), and mark it processed so it is
+# said once. Never deploys anything. Same processed-set/comment-delivery
+# contract as the other run_* functions (DUR-44).
+run_unsupported_kind_approval() { # approval_id, company_id, kind
+  local aid="$1" company_id="$2" kind="$3" result_file
+  result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
+  (
+    trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
+    log "runner: $aid was approved with kind \"$kind\", which this runner does not act on -- answering, not deploying"
+    local body
+    body="Nothing happened — this card was filed with kind \"$kind\", which the deploy runner does not act on. Only cards with kind \"deploy\" (project, workspace and commit filled in) get deployed. If this change should go live, file a new deploy approval with kind \"deploy\"; this card can be left as it is."
+    if comment "$aid" "$company_id" "$body" "unsupported_kind"; then
+      echo ok > "$result_file"
+    fi
+  )
+  if [ -s "$result_file" ]; then
+    mark_processed "$aid"
+  else
+    log "runner: $aid (unsupported kind \"$kind\") — no comment could be delivered after retries; leaving unprocessed so it is retried next poll cycle"
+  fi
+  rm -f "$result_file"
+}
+
 main() {
   local companies company_ids
   companies="$(cli_json company list)" || {
@@ -1052,8 +1107,8 @@ for c in items:
     # *approved* one in the group needs to actually run this cycle (DUR-44).
     # Approvals missing a projectId are never grouped together, so a
     # malformed row can't accidentally swallow an unrelated one.
-    selection="$(printf '%s' "$list" | python3 -c '
-import json, sys
+    selection="$(printf '%s' "$list" | UNSUPPORTED_KIND_MAX_AGE_SECONDS="$UNSUPPORTED_KIND_MAX_AGE_SECONDS" python3 -c '
+import json, os, sys
 
 try:
     d = json.load(sys.stdin)
@@ -1072,6 +1127,63 @@ candidates = [
     and str((a.get("payload") or {}).get("kind")) == "deploy"
     and a.get("status") == "approved"
 ]
+
+# DUR-3923 (NOR-1242): an approved card whose kind merely LOOKS like a deploy
+# ("deploy_pr", "deploy_release", "rollout", ...) used to be invisible to this
+# runner -- the operator approved it and nothing at all happened, with no
+# comment saying why. Same regex as isUnsupportedDeployLikeKind() in
+# server/src/services/deploy-workspace.ts. These are answered (a comment
+# explaining nothing acts on them) and marked processed, never deployed.
+#
+# Bounded by decidedAt (UNSUPPORTED_KIND_MAX_AGE_SECONDS, default 24h): the
+# processed-set is per host and starts empty on a fresh box or after a wipe,
+# so without this bound the first cycle would answer every deploy_pr/rollout
+# card ever approved across all companies (and mirror onto every linked
+# issue). A card whose decision time is missing or unparseable is treated as
+# old -- the safe direction is to stay quiet, not to spam.
+import re
+from datetime import datetime, timezone
+
+def parse_when(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+try:
+    max_age_seconds = float(os.environ.get("UNSUPPORTED_KIND_MAX_AGE_SECONDS") or 86400)
+except ValueError:
+    max_age_seconds = 86400.0
+now = datetime.now(timezone.utc)
+
+def decided_recently(a):
+    decided = parse_when(a.get("decidedAt") or a.get("updatedAt") or a.get("createdAt"))
+    if decided is None:
+        return False
+    return (now - decided).total_seconds() <= max_age_seconds
+
+unsupported = [
+    a for a in items
+    if a.get("type") == "request_board_approval"
+    and a.get("status") == "approved"
+    and isinstance((a.get("payload") or {}).get("kind"), str)
+    and str((a.get("payload") or {}).get("kind")).strip() != "deploy"
+    and re.search(r"deploy|release|rollout|ship", str((a.get("payload") or {}).get("kind")), re.I)
+    and decided_recently(a)
+]
+for a in unsupported:
+    kind = str((a.get("payload") or {}).get("kind")).strip().replace("\t", " ")
+    unsupported_id = a.get("id")
+    if unsupported_id:
+        print(f"UNSUPPORTED\t{unsupported_id}\t{kind}")
 
 groups = {}
 for a in candidates:
@@ -1110,6 +1222,7 @@ for group in groups.values():
       case "$kind" in
         KEEP) run_one_approval "$aid" "$company_id" ;;
         SUPERSEDED) run_superseded_approval "$aid" "$company_id" "$extra" ;;
+        UNSUPPORTED) run_unsupported_kind_approval "$aid" "$company_id" "$extra" ;;
       esac
     done <<< "$selection"
   done

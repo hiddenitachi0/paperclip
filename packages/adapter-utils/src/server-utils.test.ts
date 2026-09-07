@@ -786,6 +786,43 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("named unblock owner/action");
   });
 
+  it("omits the execution contract paragraph only when asked to (DUR-3943)", () => {
+    const payload = {
+      reason: "issue_commented",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-1580",
+        title: "Update prompts",
+        status: "in_progress",
+      },
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      comments: [],
+      fallbackFetchNeeded: false,
+    };
+
+    const withContract = renderPaperclipWakePrompt(payload);
+    const withoutContract = renderPaperclipWakePrompt(payload, { omitExecutionContract: true });
+    const resumedWithoutContract = renderPaperclipWakePrompt(payload, {
+      resumedSession: true,
+      omitExecutionContract: true,
+    });
+
+    expect(withContract).toContain("Execution contract: take concrete action in this heartbeat");
+    expect(withoutContract).not.toContain("Execution contract:");
+    expect(resumedWithoutContract).not.toContain("Execution contract:");
+    // The rest of the payload is unchanged: same header, same scoped-issue lines.
+    expect(withoutContract).toContain("## Paperclip Wake Payload");
+    expect(withoutContract).toContain("- reason: issue_commented");
+    expect(withoutContract).toContain("- issue: PAP-1580 Update prompts");
+    expect(resumedWithoutContract).toContain("## Paperclip Resume Delta");
+    expect(withoutContract).not.toContain("\n\n\n");
+    expect(withContract.length - withoutContract.length).toBeGreaterThan(500);
+  });
+
   it("renders resolved checkbox selections in scoped wake prompts", () => {
     const payload = {
       reason: "issue_commented",

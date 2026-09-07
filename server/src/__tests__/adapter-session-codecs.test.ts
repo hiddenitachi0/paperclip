@@ -37,6 +37,26 @@ describe("adapter session codecs", () => {
     expect(claudeSessionCodec.getDisplayId?.(serialized ?? null)).toBe("claude-session-1");
   });
 
+  it("round-trips the claude task-context fingerprint so a resumed run can skip the unchanged task block (DUR-3943)", () => {
+    const parsed = claudeSessionCodec.deserialize({
+      session_id: "claude-session-2",
+      cwd: "/tmp/workspace",
+      task_context_fingerprint: "v1:sha256:abc",
+    });
+    expect(parsed).toEqual({
+      sessionId: "claude-session-2",
+      cwd: "/tmp/workspace",
+      taskContextFingerprint: "v1:sha256:abc",
+    });
+    expect(claudeSessionCodec.serialize(parsed)).toEqual({
+      sessionId: "claude-session-2",
+      cwd: "/tmp/workspace",
+      taskContextFingerprint: "v1:sha256:abc",
+    });
+    // Older rows without the field keep working and do not grow a key.
+    expect(claudeSessionCodec.serialize({ sessionId: "claude-session-3" })).toEqual({ sessionId: "claude-session-3" });
+  });
+
   it("normalizes codex session params with cwd", () => {
     const parsed = codexSessionCodec.deserialize({
       sessionId: "codex-session-1",

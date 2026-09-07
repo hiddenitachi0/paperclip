@@ -88,6 +88,13 @@ export const instanceGeneralSettingsSchema = z.object({
   // explicitly opt in via a normal PATCH here (no redeploy needed either way
   // to turn it on or back off).
   mergePrAutomationEnabled: z.boolean().default(false),
+  // DUR-411: opt-in stricter gate for the low-scrutiny "fact check" card
+  // (ui/src/components/IssueThreadInteractionCard.tsx). Off = today's
+  // denylist-only heuristic; on = the card must ALSO be positively
+  // recognised as a fact check (question phrased as a check, every numbered
+  // line a plain statement, no "unless you object"-style consent traps).
+  // Strictly more conservative than off, never less.
+  factCheckCardStrictAllowlist: z.boolean().default(false),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.omit({ quietMode: true }).partial();

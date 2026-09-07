@@ -56,6 +56,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
         parsed.data.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
       quietMode: parsed.data.quietMode ?? DEFAULT_QUIET_MODE_STATE,
       mergePrAutomationEnabled: parsed.data.mergePrAutomationEnabled ?? false,
+      factCheckCardStrictAllowlist: parsed.data.factCheckCardStrictAllowlist ?? false,
     };
   }
   return {
@@ -67,6 +68,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     globalMaxConcurrentRuns: DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
     quietMode: DEFAULT_QUIET_MODE_STATE,
     mergePrAutomationEnabled: false,
+    factCheckCardStrictAllowlist: false,
   };
 }
 

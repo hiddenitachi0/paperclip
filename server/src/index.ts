@@ -47,9 +47,11 @@ import {
   heartbeatService,
   mergeDeployVisibilityService,
   deployCarriedIssuesService,
+  deployApprovalFeedbackService,
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
+  organizationCheckupService,
   instanceSettingsService,
   issueThreadInteractionService,
   reconcileCloudUpstreamRunsOnStartup,
@@ -59,6 +61,7 @@ import {
   logScheduleChainBootstrapVerification,
   startSecretSurfaceScanner,
 } from "./services/index.js";
+import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
@@ -903,6 +906,14 @@ export async function startServer(): Promise<StartedServer> {
   // container recreate yanking it out from under an in-flight run.
   let heartbeatDrainState: { isDraining: boolean; getInFlightRunCount: () => number } | null = null;
 
+  // DUR-3939/DUR-3940: tell /api/health whether a scheduler tick is expected
+  // at all (and how often) so "never ticked" can be judged against the
+  // configured interval instead of being silently reported as fine.
+  schedulerLiveness.configure({
+    enabled: config.heartbeatSchedulerEnabled,
+    intervalMs: config.heartbeatSchedulerIntervalMs,
+  });
+
   if (config.heartbeatSchedulerEnabled) {
     // DUR-352 (DUR-277 Wave 6): every consumer below is constructed with the
     // request-scoped Proxy (packages/db/src/company-scope.ts) instead of the
@@ -924,18 +935,40 @@ export async function startServer(): Promise<StartedServer> {
     // scope is released. Without `rawDb` here the service falls back to the
     // proxy, whose .transaction() refuses -- every affected run then stayed
     // "running" forever with a dead child (11 such runs in 2h on 2026-09-06).
-    const heartbeat = heartbeatService(schedulerDb as any, { pluginWorkerManager, rawDb: db as any });
+    // DUR-381 (2026-09-07): the scheduler's heartbeat service runs on the RAW
+    // db, not the request-scoped proxy. executeRun() is dispatched
+    // fire-and-forget from inside the tick's runInCompanyScopeBypass(); that
+    // scope releases its reserved connection as soon as resumeQueuedRuns()
+    // returns, while executeRun keeps going for minutes. Every proxy query
+    // executeRun made after that point (getAgent, ensureRuntimeState,
+    // workspace resolution, lease acquisition...) was issued through a
+    // released scope and silently never resolved: runs sat "running" with no
+    // pid, no events and no output until reaped (six of them in the 20 min
+    // after the 07:06 deploy). The RLS cutover (DUR-3945) is not live, so raw
+    // access is exactly what the scheduler had before the DUR-277 proxy was
+    // wired here. Re-wire through the proxy only together with DUR-3952,
+    // which gives executeRun its own scope.
+    const heartbeat = heartbeatService(db as any, {
+      pluginWorkerManager,
+      rawDb: db as any,
+      // DUR-273: spread timer wakes so the fleet does not wake as one.
+      timerJitter: { ratio: config.heartbeatTimerJitterRatio, maxMs: config.heartbeatTimerJitterMaxMs },
+    });
     heartbeatDrainState = {
       isDraining: false,
       getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
     };
     const environmentCustomImages = environmentCustomImageService(schedulerDb as any, { pluginWorkerManager });
-    const routines = routineService(schedulerDb as any, { pluginWorkerManager });
+    // Same reason as above: routine-triggered runs dispatch through the
+    // heartbeat service, so they must use the raw-db instance.
+    const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
+    const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
+    const organizationCheckups = organizationCheckupService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
@@ -1091,6 +1124,14 @@ export async function startServer(): Promise<StartedServer> {
       "heartbeat scheduler tick: mergeDeployVisibility",
       () => mergeDeployVisibility.tick(new Date()),
     );
+    // DUR-3923: an approved deploy card the runner never picks up (wrong kind, wrong
+    // workspace, runner stopped) must get a plain-language note instead of silence
+    // (see deploy-approval-feedback.ts). Bypass scope for the same reason as above.
+    const deployApprovalFeedbackChain = schedulerChain(
+      "deployApprovalFeedback",
+      "heartbeat scheduler tick: deployApprovalFeedback",
+      () => deployApprovalFeedback.tick(new Date()),
+    );
     // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
     // issue in the same project whose merge commit shipped as part of it (exact match or a
     // confirmed git ancestor) instead of leaving each to wait for its own agent to retry the
@@ -1220,13 +1261,22 @@ export async function startServer(): Promise<StartedServer> {
 
       // Each chain resolves `undefined` when DUR-385 skipped it because the
       // previous tick's copy is still running -- nothing to report then.
+      // DUR-3939/DUR-3940: record every tick so /api/health can say whether
+      // the scheduler itself is alive, separately from whether runs start.
+      // A DUR-385 skip is deliberately NOT recorded as a finish: the copy
+      // still running reports when it ends, and if it never does, liveness
+      // goes stale after three intervals -- which is exactly the signal.
+      schedulerLiveness.tickStarted();
       void tickTimersChain()
         .then((result) => {
-          if (result && result.enqueued > 0) {
+          if (!result) return;
+          schedulerLiveness.tickFinished(result);
+          if (result.enqueued > 0) {
             logger.info({ ...result }, "heartbeat timer tick enqueued runs");
           }
         })
         .catch((err) => {
+          schedulerLiveness.tickFailed(err);
           logger.error({ err }, "heartbeat timer tick failed");
         });
 
@@ -1242,12 +1292,22 @@ export async function startServer(): Promise<StartedServer> {
 
       void mergeDeployVisibilityChain()
         .then((result) => {
-          if (result && result.flagged > 0) {
+          if (result && (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0)) {
             logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
           }
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      void deployApprovalFeedbackChain()
+        .then((result) => {
+          if (result && result.flagged > 0) {
+            logger.info({ ...result }, "deploy-approval feedback tick flagged approved deploys nothing acted on");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "deploy-approval feedback tick failed");
         });
 
       void deployCarriedIssuesChain()
@@ -1319,6 +1379,55 @@ export async function startServer(): Promise<StartedServer> {
         logger.error({ err }, "periodic heartbeat recovery failed");
       });
     }, config.heartbeatSchedulerIntervalMs);
+
+    // DUR-62: the weekly check-up. Its own, much slower interval: the tick
+    // only asks "is any company due?", and a company is due once per
+    // weeklyCheckupIntervalDays. Off by default -- ships dormant until
+    // PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true. Dry-run mode logs what it would
+    // have reported and writes nothing. Deliberately a separate bypass scope
+    // from the recovery pipeline above: it reads across every company and
+    // writes only its own report issue, never runs or wake-ups.
+    if (config.weeklyCheckupEnabled) {
+      logger.info(
+        {
+          intervalDays: config.weeklyCheckupIntervalDays,
+          tickMinutes: config.weeklyCheckupTickMinutes,
+          dryRun: config.weeklyCheckupDryRun,
+          companyIds: config.weeklyCheckupCompanyIds.length > 0 ? config.weeklyCheckupCompanyIds : "all active companies",
+        },
+        "Weekly check-up enabled",
+      );
+      // Same DUR-385 single-flight + DUR-386 audit coalescing as the chains
+      // above: a check-up that outlives its hourly tick must not stack a
+      // second bypass reservation on top of the one it still holds.
+      const organizationCheckupsChain = schedulerChain(
+        "organizationCheckups",
+        "heartbeat scheduler tick: weekly organization check-up",
+        () =>
+          organizationCheckups.reconcileOrganizationCheckups({
+            now: new Date(),
+            intervalDays: config.weeklyCheckupIntervalDays,
+            dryRun: config.weeklyCheckupDryRun,
+            companyIds: config.weeklyCheckupCompanyIds,
+          }),
+      );
+      const tickWeeklyCheckup = () => {
+        if (heartbeatDrainState?.isDraining) return;
+        void organizationCheckupsChain()
+          .then((result) => {
+            if (result && (result.created > 0 || result.failed > 0 || result.dryRun > 0)) {
+              logger.warn({ ...result }, "weekly check-up tick wrote or previewed reports");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "weekly check-up tick failed");
+          });
+      };
+      // First tick a couple of minutes after boot so startup recovery has
+      // settled and the first report does not describe a restart in progress.
+      setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
+      setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
+    }
   }
   
   // DUR-352 (DUR-277 Wave 6): deliberately stays bypass-scoped forever, not a

@@ -4,6 +4,12 @@ import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { resolvePaperclipEnvPath } from "./paths.js";
+import {
+  DEFAULT_HEARTBEAT_TIMER_JITTER_MAX_MS,
+  DEFAULT_HEARTBEAT_TIMER_JITTER_RATIO,
+  normalizeHeartbeatTimerJitterMaxMs,
+  normalizeHeartbeatTimerJitterRatio,
+} from "./services/heartbeat-timer-jitter.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
 import {
   AUTH_BASE_URL_MODES,
@@ -86,6 +92,17 @@ export interface Config {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  heartbeatTimerJitterRatio: number;
+  heartbeatTimerJitterMaxMs: number;
+  // DUR-62: the weekly check-up. Off unless PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true.
+  weeklyCheckupEnabled: boolean;
+  // Compute and log findings, but never write the report.
+  weeklyCheckupDryRun: boolean;
+  weeklyCheckupIntervalDays: number;
+  // How often the scheduler checks whether any company is due. Not the report cadence.
+  weeklyCheckupTickMinutes: number;
+  // Empty = every active company (when enabled). Otherwise only these company ids.
+  weeklyCheckupCompanyIds: string[];
   heartbeatRunRetentionEnabled: boolean;
   heartbeatRunRetentionDays: number;
   heartbeatRunRetentionIntervalMinutes: number;
@@ -176,6 +193,29 @@ export function resolveSchedulerBypassAuditCoalesceMs(
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return 60 * 60 * 1000;
   return Math.round(parsed * 60 * 1000);
+}
+
+/**
+ * DUR-273: fraction of each agent's heartbeat interval used as a per-agent
+ * wake offset. Unset => the module default (a few percent). Any explicit
+ * value is normalized the same way the jitter module does (negative/NaN => 0,
+ * capped at MAX_HEARTBEAT_TIMER_JITTER_RATIO).
+ */
+export function resolveHeartbeatTimerJitterRatio(
+  env: { HEARTBEAT_TIMER_JITTER_RATIO?: string } = process.env,
+): number {
+  const raw = env.HEARTBEAT_TIMER_JITTER_RATIO?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_HEARTBEAT_TIMER_JITTER_RATIO;
+  return normalizeHeartbeatTimerJitterRatio(Number(raw));
+}
+
+/** DUR-273: absolute cap on the per-agent wake offset, in milliseconds. */
+export function resolveHeartbeatTimerJitterMaxMs(
+  env: { HEARTBEAT_TIMER_JITTER_MAX_MS?: string } = process.env,
+): number {
+  const raw = env.HEARTBEAT_TIMER_JITTER_MAX_MS?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_HEARTBEAT_TIMER_JITTER_MAX_MS;
+  return normalizeHeartbeatTimerJitterMaxMs(Number(raw));
 }
 
 export function loadConfig(): Config {
@@ -420,6 +460,12 @@ export function loadConfig(): Config {
     // all, following the same convention as heartbeatSchedulerEnabled).
     mergePrAutomationEnabled: process.env.PAPERCLIP_MERGE_PR_AUTOMATION_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    // DUR-273: per-agent timer jitter so heartbeat wakes spread out instead of
+    // clustering into one tick (see services/heartbeat-timer-jitter.ts).
+    // Ratio is a fraction of each agent's own intervalSec (0 disables); the
+    // max is an absolute cap in milliseconds.
+    heartbeatTimerJitterRatio: resolveHeartbeatTimerJitterRatio(),
+    heartbeatTimerJitterMaxMs: resolveHeartbeatTimerJitterMaxMs(),
     // DUR-319 (DUR-292 item 4): heartbeat_runs carries per-run stdout/stderr
     // excerpts and context snapshots -- the same class of content that leaked
     // a GitHub PAT across 706 rows in NOR-316. Retention bounds how long any
@@ -428,6 +474,17 @@ export function loadConfig(): Config {
     // of run history for debugging/audit; adjust via env if that's wrong for
     // this deployment. See resolveHeartbeatRunRetentionEnabled() above for
     // why the enable flag itself defaults off (DUR-366).
+    // DUR-62: the weekly check-up ships off for every company. Filip turns it
+    // on per deployment (and optionally per company) once he has read a dry
+    // run; see services/organization-checkup.ts for what it reports.
+    weeklyCheckupEnabled: process.env.PAPERCLIP_WEEKLY_CHECKUP_ENABLED === "true",
+    weeklyCheckupDryRun: process.env.PAPERCLIP_WEEKLY_CHECKUP_DRY_RUN === "true",
+    weeklyCheckupIntervalDays: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_INTERVAL_DAYS) || 7),
+    weeklyCheckupTickMinutes: Math.max(1, Number(process.env.PAPERCLIP_WEEKLY_CHECKUP_TICK_MINUTES) || 60),
+    weeklyCheckupCompanyIds: (process.env.PAPERCLIP_WEEKLY_CHECKUP_COMPANY_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
     heartbeatRunRetentionEnabled: resolveHeartbeatRunRetentionEnabled(),
     heartbeatRunRetentionDays: Math.max(
       1,

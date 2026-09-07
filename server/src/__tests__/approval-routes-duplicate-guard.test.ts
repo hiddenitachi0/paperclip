@@ -29,6 +29,14 @@ const mockApprovalService = vi.hoisted(() => ({
   findOpenHireApprovalForRole: vi.fn(),
   findOpenMergePrApproval: vi.fn(),
   findOpenDeployApproval: vi.fn(),
+  listApprovedDeployApprovalsForCommit: vi.fn(),
+}));
+
+// DUR-3923: the same-commit guard reads deploy-runner's status log to tell "still queued" /
+// "already live" (duplicates) apart from "failed" (a re-file is fine).
+const mockReadDeployRunnerStatus = vi.hoisted(() => vi.fn(() => [] as unknown[]));
+vi.mock("../services/deploy-runner-status.js", () => ({
+  readDeployRunnerStatus: (...args: unknown[]) => mockReadDeployRunnerStatus(...args),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({ wakeup: vi.fn() }));
@@ -157,6 +165,8 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     mockApprovalService.findOpenHireApprovalForRole.mockResolvedValue(null);
     mockApprovalService.findOpenMergePrApproval.mockResolvedValue(null);
     mockApprovalService.findOpenDeployApproval.mockResolvedValue(null);
+    mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([]);
+    mockReadDeployRunnerStatus.mockReturnValue([]);
     mockApprovalService.create.mockResolvedValue({
       id: "new-approval-1",
       companyId: "22222222-2222-4222-8222-222222222222",
@@ -296,4 +306,183 @@ describe("approval routes duplicate guard (DUR-101)", () => {
     const createCall = mockApprovalService.create.mock.calls[0];
     expect(createCall[1].payload.relatedApprovalId).toBe("existing-hire-1");
   }, TEST_TIMEOUT);
+
+  // DUR-3923 item 3 (NOR-1242): four deploy cards piled up for ONE commit because each
+  // earlier card was already *approved* (so the open-approval guard above never saw it) but
+  // nothing had acted on it yet, and the agent filed "another one just in case".
+  describe("DUR-3923: same-commit deploy de-dup against approved cards", () => {
+    const COMMIT = "8623c28bd1234567890abcdef1234567890abcde";
+    const deployPayload = {
+      kind: "deploy",
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: COMMIT,
+      title: "Deploy to prod",
+      note: "Deploying the latest build.",
+    };
+    const QUEUED_ID = "55555555-5555-4555-8555-555555555555";
+
+    it("refuses a new card for a commit whose approved deploy the runner has not run yet, with a plain reason", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.details?.existingApprovalId).toBe(QUEUED_ID);
+      expect(res.body.error).toContain("has not run yet");
+      expect(res.body.error).toContain("acknowledgedDuplicateOfApprovalId");
+      expect(mockApprovalService.listApprovedDeployApprovalsForCommit).toHaveBeenCalledWith(
+        COMPANY_ID,
+        deployPayload.projectId,
+        deployPayload.workspaceId,
+        COMMIT,
+      );
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("refuses a new card for a commit that already went live, saying there is nothing left to deploy", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:05:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: true,
+          body: `Deployed to /root/paperclip — commit ${COMMIT.slice(0, 12)} is live and healthy (health check: http://x).`,
+          commit: COMMIT.slice(0, 12),
+        },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain("already went live");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("refuses a new card for a commit whose approved deploy the runner is working on right now (only a 'started' line so far)", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:01:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: false,
+          outcome: "started",
+          body: "Deploy started — the deploy runner is working on this approval.",
+        },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.details?.existingApprovalId).toBe(QUEUED_ID);
+      expect(res.body.error).toContain("working on right now");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("still recognises 'already went live' when the success line follows a 'started' line", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:01:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: false,
+          outcome: "started",
+          body: "Deploy started — the deploy runner is working on this approval.",
+        },
+        {
+          ts: "2026-09-05T10:09:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: true,
+          body: `Deployed to /root/paperclip — commit ${COMMIT.slice(0, 12)} is live and healthy (health check: http://x).`,
+          commit: COMMIT.slice(0, 12),
+        },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain("already went live");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("allows a re-file for a commit whose earlier deploy the runner recorded as failed", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-05T10:01:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: false,
+          outcome: "started",
+          body: "Deploy started — the deploy runner is working on this approval.",
+        },
+        {
+          ts: "2026-09-05T10:05:00Z",
+          approvalId: QUEUED_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: true,
+          body: "Deploy failed — health check never returned 200. Rolled back.",
+        },
+      ]);
+      mockApprovalService.create.mockResolvedValue({
+        id: "new-deploy-2",
+        companyId: COMPANY_ID,
+        type: "request_board_approval",
+        status: "pending",
+        payload: { kind: "deploy" },
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: deployPayload });
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalledOnce();
+    }, TEST_TIMEOUT);
+
+    it("lets an explicitly acknowledged second card for the same commit through, linked to the first", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: QUEUED_ID, status: "approved", decidedAt: new Date("2026-09-05T10:00:00Z") },
+      ]);
+      mockApprovalService.create.mockResolvedValue({
+        id: "new-deploy-3",
+        companyId: COMPANY_ID,
+        type: "request_board_approval",
+        status: "pending",
+        payload: { kind: "deploy" },
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({
+          type: "request_board_approval",
+          payload: { ...deployPayload, acknowledgedDuplicateOfApprovalId: QUEUED_ID },
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create.mock.calls[0][1].payload.relatedApprovalId).toBe(QUEUED_ID);
+    }, TEST_TIMEOUT);
+  });
 });

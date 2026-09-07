@@ -8,9 +8,11 @@ import {
   approvalDeployBranchInfo,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
+  approvalIsRollbackDeploy,
   approvalLabel,
   approvalTargetBadge,
   approvalTechnicalReference,
+  approvalUnsupportedDeployKindWarning,
   credentialRequestFields,
   credentialRequestFriendlyName,
 } from "./ApprovalPayload";
@@ -83,6 +85,22 @@ describe("approvalDuplicateKey", () => {
   });
 });
 
+describe("approvalUnsupportedDeployKindWarning (DUR-3923)", () => {
+  it("warns on a deploy-looking kind nothing acts on, naming the kind and the fix", () => {
+    const warning = approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "deploy_pr", prNumber: 42 });
+    expect(warning).toContain('kind "deploy_pr"');
+    expect(warning).toContain('kind "deploy"');
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "rollout" })).not.toBeNull();
+  });
+
+  it("stays silent for a real deploy card and for non-deploy kinds", () => {
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "deploy", commit: "abc123" })).toBeNull();
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", { kind: "merge_pr", prNumber: 1 })).toBeNull();
+    expect(approvalUnsupportedDeployKindWarning("hire_agent", { kind: "deploy_pr" })).toBeNull();
+    expect(approvalUnsupportedDeployKindWarning("request_board_approval", null)).toBeNull();
+  });
+});
+
 describe("approvalDeployBranchInfo", () => {
   it("flags a mismatch when the commit's branch differs from the deploy branch (DUR-221/DUR-226)", () => {
     expect(
@@ -103,6 +121,16 @@ describe("approvalDeployBranchInfo", () => {
   it("returns null for non-deploy approvals", () => {
     expect(approvalDeployBranchInfo({ kind: "merge_pr", sourceBranch: "master" })).toBeNull();
     expect(approvalDeployBranchInfo(null)).toBeNull();
+  });
+});
+
+describe("approvalIsRollbackDeploy (DUR-3952)", () => {
+  it("is true only for a deploy filed with allowBackwardDeploy", () => {
+    expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234", allowBackwardDeploy: true })).toBe(true);
+    expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234" })).toBe(false);
+    expect(approvalIsRollbackDeploy({ kind: "deploy", commit: "abc1234", allowBackwardDeploy: false })).toBe(false);
+    expect(approvalIsRollbackDeploy({ kind: "merge_pr", allowBackwardDeploy: true })).toBe(false);
+    expect(approvalIsRollbackDeploy(null)).toBe(false);
   });
 });
 

@@ -58,6 +58,11 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.paused": "paused",
   "agent.resumed": "resumed",
   "agent.error_cleared": "cleared error on",
+  // DUR-98 / DUR-128: operator notices written by the platform itself when it
+  // knows something is wrong -- plain language, see formatOperatorNotice.
+  "agent.entered_error": "flagged that attention is needed for",
+  "agent.error_stalled": "is still waiting for someone to clear the error on",
+  "heartbeat.run_reaped": "ended a run that had stopped responding for",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -72,6 +77,10 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
+  "approval.revision_requested": "requested changes on",
+  "issue.approval_approved": "approved an approval request on",
+  "issue.approval_rejected": "rejected an approval request on",
+  "issue.approval_revision_requested": "sent an approval request back for changes on",
   "project.created": "created",
   "project.updated": "updated",
   "project.deleted": "deleted",
@@ -124,6 +133,9 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.paused": "paused the agent",
   "agent.resumed": "resumed the agent",
   "agent.error_cleared": "cleared the agent error",
+  "agent.entered_error": "flagged that the agent needs attention",
+  "agent.error_stalled": "is still waiting for someone to clear the agent error",
+  "heartbeat.run_reaped": "ended a run that had stopped responding",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -132,7 +144,59 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
+  "approval.revision_requested": "requested changes",
+  "issue.approval_approved": "approved the approval request",
+  "issue.approval_rejected": "rejected the approval request",
+  "issue.approval_revision_requested": "sent the approval request back for changes",
 };
+
+// Plain-language names for the approval kinds an operator actually meets in
+// the timeline. Anything else falls back to the humanized raw type.
+const APPROVAL_TYPE_LABELS: Record<string, string> = {
+  hire_agent: "hire agent",
+  approve_ceo_strategy: "CEO strategy",
+  budget_override_required: "budget override",
+  request_board_approval: "board approval",
+  credential_request: "credential request",
+  merge_pr: "merge pull request",
+  deploy: "deploy",
+  tool_grant: "tool access",
+  instructions_change: "instructions change",
+};
+
+// DUR-283: the activity actions whose `details.decisionNote` is the reason an
+// operator typed when deciding an approval (approve / reject / send back).
+// Both the approval-scoped entry and its per-issue mirror carry the note.
+const APPROVAL_DECISION_ACTIONS = new Set([
+  "approval.approved",
+  "approval.rejected",
+  "approval.revision_requested",
+  "issue.approval_approved",
+  "issue.approval_rejected",
+  "issue.approval_revision_requested",
+]);
+
+export function isApprovalDecisionAction(action: string): boolean {
+  return APPROVAL_DECISION_ACTIONS.has(action);
+}
+
+/**
+ * The reason the operator gave with an approval decision, if the entry
+ * carries one. Only read for decision actions so an unrelated entry that
+ * happens to have a `decisionNote` field never renders as a decision.
+ */
+export function readActivityDecisionNote(action: string, details: ActivityDetails): string | null {
+  if (!isApprovalDecisionAction(action)) return null;
+  const note = details?.decisionNote;
+  if (typeof note !== "string") return null;
+  const trimmed = note.trim();
+  return trimmed ? trimmed : null;
+}
+
+function formatApprovalTypeLabel(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return APPROVAL_TYPE_LABELS[value] ?? humanizeValue(value);
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -415,6 +479,36 @@ function formatStructuredIssueChange(input: {
   return null;
 }
 
+/**
+ * DUR-98: activity entries the platform writes when it has detected a problem
+ * on its own (a reaped run, an agent entering error, a stall that nobody has
+ * cleared). Each carries a ready-made plain-language sentence in
+ * `details.message`; the feed shows it under the one-line verb so the
+ * operator gets the what-happened-and-what-next without opening anything.
+ */
+const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
+  "agent.entered_error",
+  "agent.error_stalled",
+  "heartbeat.run_reaped",
+]);
+
+export function isOperatorNoticeAction(action: string): boolean {
+  return OPERATOR_NOTICE_ACTIONS.has(action);
+}
+
+export function formatOperatorNotice(action: string, details?: Record<string, unknown> | null): string | null {
+  if (!isOperatorNoticeAction(action)) return null;
+  const message = details?.message;
+  if (typeof message === "string" && message.trim()) return message.trim();
+  if (action === "agent.error_stalled") {
+    // DUR-128 rows predate the message field: build the sentence here.
+    const agentName = typeof details?.agentName === "string" && details.agentName.trim() ? details.agentName.trim() : "This agent";
+    const reason = typeof details?.errorReason === "string" && details.errorReason.trim() ? ` Last error: ${details.errorReason.trim()}` : "";
+    return `${agentName} has been stopped with an error for a while and nobody has cleared it yet. Its tasks are waiting.${reason}`;
+  }
+  return null;
+}
+
 export function formatActivityVerb(
   action: string,
   details?: Record<string, unknown> | null,
@@ -472,6 +566,11 @@ export function formatIssueActivityAction(
   if (action === "issue.accepted_plan_decomposition_updated") {
     const detail = formatAcceptedPlanDecompositionDetail(details);
     if (detail) return detail;
+  }
+
+  if (action.startsWith("issue.approval_") && ISSUE_ACTIVITY_LABELS[action]) {
+    const typeLabel = formatApprovalTypeLabel(details?.approvalType);
+    return typeLabel ? `${ISSUE_ACTIVITY_LABELS[action]} (${typeLabel})` : ISSUE_ACTIVITY_LABELS[action];
   }
 
   if (action.startsWith("issue.monitor_") && details) {

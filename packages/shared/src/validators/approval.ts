@@ -81,6 +81,16 @@ export const deployRequestPayloadSchema = z
     // before that check ever ran, making the documented escape hatch dead
     // code for this kind.
     acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
+    // DUR-3952 (DUR-137 follow-up): the deploy runner refuses to move the
+    // checkout backward -- to a commit that is already an ancestor of what
+    // is live -- unless the approval carries this explicit opt-in, so a
+    // stale approval can never roll production back by accident. The runner
+    // has honoured `payload.allowBackwardDeploy` since DUR-137, but the
+    // strict parse here rejected the key, so the only way to set it was a
+    // direct DB update. Only the board may file with it (enforced in
+    // server/src/routes/approvals.ts); the UI shows such a card as a
+    // rollback so approving it is a deliberate choice.
+    allowBackwardDeploy: z.boolean().optional(),
   })
   .strict();
 

@@ -34,13 +34,38 @@ export async function resolveProjectDeployWorkspaceId(db: Db, projectId: string)
  * `kind:"deploy"`). Catch that at filing time with a plain-language error.
  */
 export function describeUnknownDeployLikeKind(kind: unknown): string | null {
-  if (typeof kind !== "string") return null;
-  const normalized = kind.trim();
-  if (!normalized || normalized === "deploy") return null;
-  if (!/deploy|release|rollout|ship/i.test(normalized)) return null;
+  if (!isUnsupportedDeployLikeKind(kind)) return null;
+  const normalized = (kind as string).trim();
   return (
     `Unknown approval kind "${normalized}". A request to deploy must use kind "deploy" with projectId, ` +
     `workspaceId, commit, title and note, so the deploy runner can act on it once approved. ` +
     `Nothing acts on kind "${normalized}", so the card would sit approved and do nothing.`
+  );
+}
+
+/**
+ * DUR-3923: the same test, as a predicate. `deploy_pr` (the NOR-1242 card), `deploy_release`,
+ * `rollout`, `ship_it` -- anything that reads like a deploy but is not the one kind the
+ * runner handles. Kept in one place so the filing route, the approve route, the feedback tick
+ * and the runner's own check (scripts/deploy-runner.sh, same regex) can't drift apart.
+ */
+export function isUnsupportedDeployLikeKind(kind: unknown): boolean {
+  if (typeof kind !== "string") return false;
+  const normalized = kind.trim();
+  if (!normalized || normalized === "deploy") return false;
+  return /deploy|release|rollout|ship/i.test(normalized);
+}
+
+/**
+ * DUR-3923 item 1: operator-facing refusal when someone tries to APPROVE such a card (it
+ * was filed before the filing-time check existed, or slipped past it). Says what to do.
+ */
+export function describeUnsupportedDeployLikeApproval(kind: unknown): string | null {
+  if (!isUnsupportedDeployLikeKind(kind)) return null;
+  const normalized = (kind as string).trim();
+  return (
+    `This card cannot be approved: it was filed with kind "${normalized}", which the deploy runner does not ` +
+    `act on, so approving it would do nothing. Reject it and ask the agent to file a new deploy approval ` +
+    `with kind "deploy" (project, workspace and commit filled in).`
   );
 }

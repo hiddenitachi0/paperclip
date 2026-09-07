@@ -47,6 +47,11 @@ export const sessionCodec: AdapterSessionCodec = {
     const workspaceId = readNonEmptyString(record.workspaceId) ?? readNonEmptyString(record.workspace_id);
     const repoUrl = readNonEmptyString(record.repoUrl) ?? readNonEmptyString(record.repo_url);
     const repoRef = readNonEmptyString(record.repoRef) ?? readNonEmptyString(record.repo_ref);
+    // DUR-3943: fingerprint of the task block the session last received in
+    // full, so a resumed run can send the short form when nothing changed.
+    const taskContextFingerprint =
+      readNonEmptyString(record.taskContextFingerprint) ??
+      readNonEmptyString(record.task_context_fingerprint);
     return {
       sessionId,
       ...(cwd ? { cwd } : {}),
@@ -54,6 +59,7 @@ export const sessionCodec: AdapterSessionCodec = {
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
       ...(repoRef ? { repoRef } : {}),
+      ...(taskContextFingerprint ? { taskContextFingerprint } : {}),
     };
   },
   serialize(params: Record<string, unknown> | null) {
@@ -70,6 +76,9 @@ export const sessionCodec: AdapterSessionCodec = {
     const workspaceId = readNonEmptyString(params.workspaceId) ?? readNonEmptyString(params.workspace_id);
     const repoUrl = readNonEmptyString(params.repoUrl) ?? readNonEmptyString(params.repo_url);
     const repoRef = readNonEmptyString(params.repoRef) ?? readNonEmptyString(params.repo_ref);
+    const taskContextFingerprint =
+      readNonEmptyString(params.taskContextFingerprint) ??
+      readNonEmptyString(params.task_context_fingerprint);
     return {
       sessionId,
       ...(cwd ? { cwd } : {}),
@@ -77,6 +86,7 @@ export const sessionCodec: AdapterSessionCodec = {
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
       ...(repoRef ? { repoRef } : {}),
+      ...(taskContextFingerprint ? { taskContextFingerprint } : {}),
     };
   },
   getDisplayId(params: Record<string, unknown> | null) {

@@ -21,6 +21,7 @@ const mockApprovalService = vi.hoisted(() => ({
   findOpenHireApprovalForRole: vi.fn(),
   findOpenMergePrApproval: vi.fn(),
   findOpenDeployApproval: vi.fn(),
+  listApprovedDeployApprovalsForCommit: vi.fn(async () => []),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -347,6 +348,29 @@ describe("approval routes idempotent retries", () => {
 
     expect(res.status).toBe(403);
     expect(mockApprovalService.requestRevision).not.toHaveBeenCalled();
+  });
+
+  // DUR-3923 item 1 (NOR-1242): a card filed with kind "deploy_pr" looks approvable but the
+  // deploy runner only ever acts on kind "deploy" -- approving it did nothing, silently.
+  it("refuses to approve a deploy-looking card of a kind nothing acts on, with a plain reason", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-5",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      type: "request_board_approval",
+      status: "pending",
+      payload: { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip", title: "Deploy PR #42" },
+      requestedByAgentId: null,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-5/approve")
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain('kind "deploy_pr"');
+    expect(res.body.error).toContain("would do nothing");
+    expect(res.body.error).toContain("Reject it");
+    expect(mockApprovalService.approve).not.toHaveBeenCalled();
   });
 
   it("derives approval attribution from the authenticated actor on approve", async () => {
@@ -747,5 +771,223 @@ describe("approval routes idempotent retries", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.addComment).not.toHaveBeenCalled();
+  });
+});
+
+// DUR-283: the reason an operator gives when rejecting / sending back an
+// approval must reach the linked issue's own history, not just the approval.
+// The issue Activity tab only lists entityType="issue" entries
+// (activityService.forIssue), so each decision is mirrored onto every linked
+// issue as `issue.approval_<decision>` carrying the decision note, and the
+// approval-scoped entry carries the note too (for the company feed).
+describe("approval decision activity carries the decision note (DUR-283)", () => {
+  const LINKED_ISSUE_A = "11111111-1111-4111-8111-111111111111";
+  const LINKED_ISSUE_B = "44444444-4444-4444-8444-444444444444";
+
+  function activityCalls(action: string) {
+    return mockLogActivity.mock.calls
+      .map((call) => call[1] as Record<string, unknown>)
+      .filter((entry) => entry.action === action);
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../services/index.js");
+    vi.doUnmock("../routes/approvals.js");
+    vi.doUnmock("../routes/authz.js");
+    vi.doUnmock("../middleware/index.js");
+    registerModuleMocks();
+    vi.clearAllMocks();
+    mockApprovalService.getById.mockReset();
+    mockApprovalService.approve.mockReset();
+    mockApprovalService.reject.mockReset();
+    mockApprovalService.requestRevision.mockReset();
+    mockHeartbeatService.wakeup.mockReset();
+    mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
+    mockIssueApprovalService.listIssuesForApproval.mockReset();
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([
+      { id: LINKED_ISSUE_A },
+      { id: LINKED_ISSUE_B },
+    ]);
+    mockIssueThreadInteractionService.resolveInteractionsLinkedToApproval.mockReset();
+    mockIssueThreadInteractionService.resolveInteractionsLinkedToApproval.mockResolvedValue([]);
+    mockLogActivity.mockReset();
+    mockLogActivity.mockResolvedValue(undefined);
+    mockAccessService.decide.mockReset();
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      action: "company_scope:read",
+      reason: "allow_test",
+      explanation: "Allowed by test mock.",
+    });
+  });
+
+  it("mirrors a rejection with its reason onto every linked issue", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-10",
+      companyId: COMPANY_ID,
+      type: "merge_pr",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: "agent-1",
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: {
+        id: "approval-10",
+        companyId: COMPANY_ID,
+        type: "merge_pr",
+        status: "rejected",
+        payload: {},
+        requestedByAgentId: "agent-1",
+        decisionNote: "The migration drops a column we still read.",
+      },
+      applied: true,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-10/reject")
+      .send({ decisionNote: "The migration drops a column we still read." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const approvalEntries = activityCalls("approval.rejected");
+    expect(approvalEntries).toHaveLength(1);
+    expect(approvalEntries[0]).toMatchObject({
+      entityType: "approval",
+      entityId: "approval-10",
+      details: {
+        type: "merge_pr",
+        requestedByAgentId: "agent-1",
+        linkedIssueIds: [LINKED_ISSUE_A, LINKED_ISSUE_B],
+        decisionNote: "The migration drops a column we still read.",
+      },
+    });
+
+    const issueEntries = activityCalls("issue.approval_rejected");
+    expect(issueEntries.map((entry) => entry.entityId)).toEqual([LINKED_ISSUE_A, LINKED_ISSUE_B]);
+    for (const entry of issueEntries) {
+      expect(entry).toMatchObject({
+        companyId: COMPANY_ID,
+        actorType: "user",
+        actorId: "user-1",
+        entityType: "issue",
+        details: {
+          approvalId: "approval-10",
+          approvalType: "merge_pr",
+          decision: "rejected",
+          decisionNote: "The migration drops a column we still read.",
+          requestedByAgentId: "agent-1",
+        },
+      });
+    }
+  });
+
+  it("mirrors a revision request with its reason onto the linked issue", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-11",
+      companyId: COMPANY_ID,
+      type: "request_board_approval",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: null,
+    });
+    mockApprovalService.requestRevision.mockResolvedValue({
+      id: "approval-11",
+      companyId: COMPANY_ID,
+      type: "request_board_approval",
+      status: "revision_requested",
+      payload: {},
+      requestedByAgentId: null,
+      decisionNote: "Please add the total cost before I decide.",
+    });
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: LINKED_ISSUE_A }]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-11/request-revision")
+      .send({ decisionNote: "Please add the total cost before I decide." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(activityCalls("approval.revision_requested")[0]).toMatchObject({
+      entityType: "approval",
+      entityId: "approval-11",
+      details: {
+        type: "request_board_approval",
+        linkedIssueIds: [LINKED_ISSUE_A],
+        decisionNote: "Please add the total cost before I decide.",
+      },
+    });
+    expect(activityCalls("issue.approval_revision_requested")).toEqual([
+      expect.objectContaining({
+        entityType: "issue",
+        entityId: LINKED_ISSUE_A,
+        details: expect.objectContaining({
+          approvalId: "approval-11",
+          decision: "revision_requested",
+          decisionNote: "Please add the total cost before I decide.",
+        }),
+      }),
+    ]);
+  });
+
+  it("mirrors an approval onto the linked issue, with a null note when none was given", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-12",
+      companyId: COMPANY_ID,
+      type: "hire_agent",
+      status: "pending",
+      payload: {},
+      requestedByAgentId: null,
+    });
+    mockApprovalService.approve.mockResolvedValue({
+      approval: {
+        id: "approval-12",
+        companyId: COMPANY_ID,
+        type: "hire_agent",
+        status: "approved",
+        payload: {},
+        requestedByAgentId: null,
+        decisionNote: null,
+      },
+      applied: true,
+    });
+    mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: LINKED_ISSUE_A }]);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-12/approve")
+      .send({});
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(activityCalls("approval.approved")[0]).toMatchObject({
+      details: { type: "hire_agent", linkedIssueIds: [LINKED_ISSUE_A], decisionNote: null },
+    });
+    expect(activityCalls("issue.approval_approved")).toEqual([
+      expect.objectContaining({
+        entityType: "issue",
+        entityId: LINKED_ISSUE_A,
+        details: expect.objectContaining({ decision: "approved", decisionNote: null }),
+      }),
+    ]);
+  });
+
+  it("does not mirror anything when the rejection was already applied earlier", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-13",
+      companyId: COMPANY_ID,
+      type: "hire_agent",
+      status: "rejected",
+      payload: {},
+    });
+    mockApprovalService.reject.mockResolvedValue({
+      approval: { id: "approval-13", companyId: COMPANY_ID, type: "hire_agent", status: "rejected", payload: {} },
+      applied: false,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-13/reject")
+      .send({ decisionNote: "duplicate click" });
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockIssueApprovalService.listIssuesForApproval).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,13 @@
 import type { Agent } from "@paperclipai/shared";
 import { describe, expect, it } from "vitest";
-import { formatActivityVerb, formatIssueActivityAction } from "./activity-format";
+import {
+  formatActivityVerb,
+  formatIssueActivityAction,
+  formatOperatorNotice,
+  isApprovalDecisionAction,
+  isOperatorNoticeAction,
+  readActivityDecisionNote,
+} from "./activity-format";
 
 describe("activity formatting", () => {
   const agentMap = new Map<string, Agent>([
@@ -73,5 +80,73 @@ describe("activity formatting", () => {
     expect(formatIssueActivityAction("issue.successful_run_handoff_escalated")).toBe(
       "Run finished without a next step - recovery escalated",
     );
+  });
+
+  // DUR-98: platform-written notices read as sentences, never as raw action keys.
+  it("gives the watchdog and agent-error notices plain-language verbs", () => {
+    expect(formatActivityVerb("heartbeat.run_reaped")).toBe("ended a run that had stopped responding for");
+    expect(formatActivityVerb("agent.entered_error")).toBe("flagged that attention is needed for");
+    expect(formatActivityVerb("agent.error_stalled")).toBe("is still waiting for someone to clear the error on");
+    expect(formatIssueActivityAction("heartbeat.run_reaped")).toBe("ended a run that had stopped responding");
+  });
+
+  it("surfaces the server-written message for operator notices only", () => {
+    expect(isOperatorNoticeAction("heartbeat.run_reaped")).toBe(true);
+    expect(isOperatorNoticeAction("issue.updated")).toBe(false);
+    expect(
+      formatOperatorNotice("heartbeat.run_reaped", { message: "  CodexCoder's run stopped. Paperclip ended it.  " }),
+    ).toBe("CodexCoder's run stopped. Paperclip ended it.");
+    expect(formatOperatorNotice("issue.updated", { message: "not a notice" })).toBeNull();
+    expect(formatOperatorNotice("heartbeat.run_reaped", { message: "" })).toBeNull();
+    expect(formatOperatorNotice("heartbeat.run_reaped", null)).toBeNull();
+  });
+
+  it("builds a sentence for legacy stall alerts that carry no message", () => {
+    expect(
+      formatOperatorNotice("agent.error_stalled", { agentName: "Reviewer Bot", errorReason: "Adapter crashed" }),
+    ).toBe(
+      "Reviewer Bot has been stopped with an error for a while and nobody has cleared it yet. Its tasks are waiting. Last error: Adapter crashed",
+    );
+    expect(formatOperatorNotice("agent.error_stalled", {})).toBe(
+      "This agent has been stopped with an error for a while and nobody has cleared it yet. Its tasks are waiting.",
+    );
+  });
+
+  // DUR-283: approval decisions are mirrored onto each linked issue as
+  // issue.approval_<decision> entries carrying the operator's note.
+  it("describes mirrored approval decisions on the issue in plain words", () => {
+    expect(
+      formatIssueActivityAction("issue.approval_rejected", {
+        approvalId: "approval-1",
+        approvalType: "merge_pr",
+        decision: "rejected",
+        decisionNote: "The migration drops a column we still read.",
+      }),
+    ).toBe("rejected the approval request (merge pull request)");
+    expect(
+      formatIssueActivityAction("issue.approval_revision_requested", { approvalType: "request_board_approval" }),
+    ).toBe("sent the approval request back for changes (board approval)");
+    expect(formatIssueActivityAction("issue.approval_approved", { approvalType: "some_new_kind" })).toBe(
+      "approved the approval request (some new kind)",
+    );
+    expect(formatIssueActivityAction("issue.approval_approved", null)).toBe("approved the approval request");
+    expect(formatActivityVerb("issue.approval_rejected")).toBe("rejected an approval request on");
+    expect(formatActivityVerb("approval.revision_requested")).toBe("requested changes on");
+  });
+
+  it("reads the decision note only from approval decision entries", () => {
+    expect(
+      readActivityDecisionNote("approval.rejected", { type: "merge_pr", decisionNote: "  Not this week.  " }),
+    ).toBe("Not this week.");
+    expect(readActivityDecisionNote("issue.approval_revision_requested", { decisionNote: "Add the cost." })).toBe(
+      "Add the cost.",
+    );
+    expect(readActivityDecisionNote("issue.approval_approved", { decisionNote: null })).toBeNull();
+    expect(readActivityDecisionNote("issue.approval_approved", { decisionNote: "   " })).toBeNull();
+    expect(readActivityDecisionNote("approval.approved", undefined)).toBeNull();
+    // An unrelated entry with a stray decisionNote field must not be shown as a decision.
+    expect(readActivityDecisionNote("issue.updated", { decisionNote: "nope" })).toBeNull();
+    expect(isApprovalDecisionAction("approval.revision_requested")).toBe(true);
+    expect(isApprovalDecisionAction("approval.created")).toBe(false);
   });
 });

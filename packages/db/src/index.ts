@@ -43,6 +43,7 @@ export {
   withCompanyScopeBypass,
   runInCompanyScope,
   runInCompanyScopeBypass,
+  runInPooledScope,
   createRequestScopedDb,
   setCompanyScopeBypassPool,
   getCompanyScopeBypassPool,
@@ -53,6 +54,7 @@ export {
   type RequestScope,
   type RequestCompanyScope,
   type RequestCompanyScopeBypass,
+  type RequestPooledScope,
 } from "./company-scope.js";
 export { issueRelations } from "./schema/issue_relations.js";
 export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";

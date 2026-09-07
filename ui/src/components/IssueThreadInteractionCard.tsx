@@ -3,6 +3,7 @@ import type { Agent } from "@paperclipai/shared";
 import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, ClipboardCheck, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
+import { useGeneralSettings } from "../context/GeneralSettingsContext";
 import {
   buildSuggestedTaskTree,
   collectSuggestedTaskClientKeys,
@@ -285,7 +286,60 @@ function normalizeForDecisionScan(text: string): string {
     .replace(INVISIBLE_CHAR_PATTERN, "");
 }
 
-function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
+// DUR-411: opt-in "strict allowlist" layer on top of the denylist above.
+//
+// Evaluation summary (full write-up in the DUR-411 ticket report): a *pure*
+// inversion -- drop DECISION_ASK_PATTERN, keep only an allowlist -- is NOT
+// safe. No lexical allowlist can tell a fact ("The vendor was credited
+// 18 400 kr on 3 May") from a consent trap phrased as a fact ("The 18 400 kr
+// goes out at 17:00 unless you object"); the denylist catches the first
+// family (verb forms) and nothing lexical catches the second. So the
+// denylist stays as a hard veto, and strict mode ADDS three positive
+// requirements, each of which can only turn a fact-check card back into the
+// stricter decision card, never the reverse:
+//   1. the ask (prompt or title) must read as a verification question --
+//      "Is this correct?", "Do these numbers match Fiken?", "Stemmer dette?";
+//   2. every numbered line must be a plain statement (a copula/stative verb
+//      or a "label: value" shape), not an instruction ("Release the funds")
+//      or an event ("The money goes to account X at 17:00");
+//   3. no field may carry a silence-as-consent construction ("unless you
+//      object", "if I don't hear back", "will proceed", "med mindre").
+// Anything unrecognised falls back to the normal decision card. The cost is
+// false negatives for legitimately-phrased-but-unusual fact checks, which is
+// why this ships behind an instance setting that defaults to off; the
+// phrasing agents are asked to use is documented in
+// docs/guides/agent-developer/handling-approvals.md.
+const FACT_CHECK_ASK_PATTERN =
+  /(?:\b(?:is|are|was|were|does|do|did|has|have)\b[^?\n]{0,80}\b(?:correct|right|accurate|true|exact|precise|match(?:es)?|up to date|still (?:true|right|correct|the case)|what you (?:see|have|know|expect|remember))\b[^?\n]{0,60}\?)|(?:\b(?:can|could|would) you (?:please )?(?:confirm|verify|check|double[- ]check|validate)\b)|(?:\b(?:please )?(?:confirm|verify|check|double[- ]check|validate) (?:that|whether|if|these|this|those|the following|each|all|every)\b)|\bfact[- ]?check\b|\bsanity[- ]?check\b|(?:\bstemmer\b[^?\n]{0,80}\?)|(?:\ber (?:dette|disse|det|tallene|beløpene|datoene|summene|opplysningene)\b[^?\n]{0,80}\b(?:riktig|riktige|korrekt|korrekte|rett)\b[^?\n]{0,30}\?)|(?:\bkan du (?:bekrefte|sjekke|verifisere|dobbeltsjekke|kontrollere)\b)|(?:\b(?:vennligst )?bekreft(?:e)? (?:at|om|disse|dette|tallene|følgende|opplysningene)\b)|\bfaktasjekk\b/i;
+
+const CONSENT_TRAP_PATTERN =
+  /\b(?:unless (?:you|i hear|we hear|told|instructed)|if (?:you|i|we) (?:don't|do not|doesn't|does not|haven't|have not) (?:hear|object|reply|respond|say|answer|stop)|(?:no|without) (?:reply|response|objection|answer)|otherwise|by default|will (?:proceed|go ahead|be (?:sent|paid|released|charged|executed|applied|moved|transferred))|automatically|once you confirm|(?:after|upon) (?:your )?confirm(?:ation|ing)|med mindre|hvis (?:du|vi|jeg) ikke|dersom (?:du|vi) ikke|ellers|automatisk|uten (?:svar|innsigelse)|når du bekrefter|etter (?:din )?bekreftelse)\b/i;
+
+const STATEMENT_SHAPE_PATTERN =
+  /\b(?:is|are|was|were|isn't|aren't|wasn't|weren't|has|have|had|shows?|showed|reads?|totals?|totalled|totaled|equals?|comes to|came to|amounts? to|amounted to|contains?|contained|includes?|included|matches?|matched|lists?|listed|counts?|counted|stands? at|stood at|remains?|remained|means|says|said|states?|stated|reports?|reported|due|dated|expires?|expired|starts?|started|ends?|ended|belongs? to|refers? to|costs?|weighs?|measures?|runs? (?:from|until|through)|er|var|har|hadde|viser|viste|utgjør|utgjorde|inneholder|inneholdt|forfaller|forfalt|står|sto|stod|betyr|heter|koster|kostet|tilsvarer|gjelder|ligger|lå|starter|startet|slutter|sluttet|teller|telte)\b|[:=]/i;
+
+function readsAsFactCheckAsk(text: string): boolean {
+  return FACT_CHECK_ASK_PATTERN.test(normalizeForDecisionScan(text));
+}
+
+function readsAsPlainStatement(claimLine: string): boolean {
+  const body = claimLine.replace(/^\s*\d+[.)]\s+/, "");
+  return STATEMENT_SHAPE_PATTERN.test(normalizeForDecisionScan(body));
+}
+
+function carriesConsentTrap(text: string): boolean {
+  return CONSENT_TRAP_PATTERN.test(normalizeForDecisionScan(text));
+}
+
+export interface FactCheckHeuristicOptions {
+  /** DUR-411: also require the positive fact-check shape (see above). */
+  strictAllowlist?: boolean;
+}
+
+function isFactCheckConfirmation(
+  interaction: IssueThreadInteraction,
+  options: FactCheckHeuristicOptions = {},
+): boolean {
   if (interaction.kind !== "request_confirmation") return false;
   if (isPlanConfirmation(interaction)) return false;
   if (interaction.payload.factCheck !== true) return false;
@@ -304,8 +358,16 @@ function isFactCheckConfirmation(interaction: IssueThreadInteraction): boolean {
   // pair paired with a title/summary carrying the real instruction ("Wire
   // $18,500 to ...") would otherwise slip the fact-check styling on an actual
   // decision. Scan them the same way.
-  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(interaction.title ?? ""))) return false;
-  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(interaction.summary ?? ""))) return false;
+  const title = interaction.title ?? "";
+  const summary = interaction.summary ?? "";
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(title))) return false;
+  if (DECISION_ASK_PATTERN.test(normalizeForDecisionScan(summary))) return false;
+  if (options.strictAllowlist !== true) return true;
+
+  // DUR-411 strict layer: fail closed unless positively recognised.
+  if (!readsAsFactCheckAsk(prompt) && !readsAsFactCheckAsk(title)) return false;
+  if (!numberedClaims.every(readsAsPlainStatement)) return false;
+  if ([prompt, details, title, summary].some(carriesConsentTrap)) return false;
   return true;
 }
 
@@ -2050,8 +2112,10 @@ export function IssueThreadInteractionCard({
   onUploadImage,
   externalReferences,
 }: IssueThreadInteractionCardProps) {
+  const { factCheckCardStrictAllowlist } = useGeneralSettings();
   const isPlan = isPlanConfirmation(interaction);
-  const isFactCheck = !isPlan && isFactCheckConfirmation(interaction);
+  const isFactCheck =
+    !isPlan && isFactCheckConfirmation(interaction, { strictAllowlist: factCheckCardStrictAllowlist });
   const planStyles = isPlan ? planStatusClasses(interaction.status) : null;
   const factCheckStyles = isFactCheck ? factCheckStatusClasses(interaction.status) : null;
   const StatusIcon = planStyles?.Icon ?? factCheckStyles?.Icon ?? statusIcon(interaction.status);
