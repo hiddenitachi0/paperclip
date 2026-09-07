@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Link, useParams, useNavigate, useLocation, Navigate } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { PROJECT_COLORS, PROJECT_ICON_NAMES, isUuidLike, type BudgetPolicySummary } from "@paperclipai/shared";
+import {
+  PROJECT_COLORS,
+  PROJECT_ICON_NAMES,
+  isUuidLike,
+  type BudgetPolicySummary,
+  type ProjectDeployPolicy,
+} from "@paperclipai/shared";
 import { budgetsApi } from "../api/budgets";
 import { executionWorkspacesApi } from "../api/execution-workspaces";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -24,6 +30,7 @@ import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
 import { ProjectWorkspacesContent } from "../components/ProjectWorkspacesContent";
+import { ProjectDeployHistoryCard } from "../components/ProjectDeployHistoryCard";
 import { MembershipAction } from "../components/MembershipAction";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { collectLiveIssueIds } from "../lib/liveIssueIds";
@@ -70,15 +77,26 @@ function resolveProjectTab(pathname: string, projectId: string): ProjectTab | nu
 
 function OverviewContent({
   project,
+  companyId,
   onUpdate,
   imageUploadHandler,
 }: {
-  project: { description: string | null; status: string; targetDate: string | null };
+  project: {
+    id: string;
+    description: string | null;
+    status: string;
+    targetDate: string | null;
+    deployPolicy?: ProjectDeployPolicy | null;
+  };
+  companyId: string | null | undefined;
   onUpdate: (data: Record<string, unknown>) => void;
   imageUploadHandler?: (file: File) => Promise<string>;
 }) {
   return (
     <div className="space-y-6">
+      {companyId ? (
+        <ProjectDeployHistoryCard companyId={companyId} projectId={project.id} deployPolicy={project.deployPolicy} />
+      ) : null}
       <InlineEditor
         value={project.description ?? ""}
         onSave={(description) => onUpdate({ description })}
@@ -842,6 +860,7 @@ export function ProjectDetail() {
       {activeTab === "overview" && (
         <OverviewContent
           project={project}
+          companyId={resolvedCompanyId}
           onUpdate={(data) => updateProject.mutate(data)}
           imageUploadHandler={async (file) => {
             const asset = await uploadImage.mutateAsync(file);

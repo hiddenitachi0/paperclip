@@ -11,6 +11,7 @@ const items = [
   { value: "secrets", label: "Secrets", href: "/company/settings/secrets" },
   { value: "instance-profile", label: "Instance profile", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/profile` },
   { value: "instance-general", label: "Instance general", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/general` },
+  { value: "instance-claude", label: "Claude sign-in", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/claude` },
   { value: "instance-environments", label: "Instance environments", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/environments` },
   { value: "instance-access", label: "Instance access", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/access` },
   { value: "instance-heartbeats", label: "Instance heartbeats", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/heartbeats` },
@@ -28,6 +29,10 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
 
   if (pathname.includes(`${INSTANCE_SETTINGS_PATH_PREFIX}/access`)) {
     return "instance-access";
+  }
+
+  if (pathname.includes(`${INSTANCE_SETTINGS_PATH_PREFIX}/claude`)) {
+    return "instance-claude";
   }
 
   if (pathname.includes(`${INSTANCE_SETTINGS_PATH_PREFIX}/environments`)) {

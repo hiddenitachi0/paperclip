@@ -170,6 +170,8 @@ export const queryKeys = {
   projects: {
     list: (companyId: string) => ["projects", companyId] as const,
     detail: (id: string) => ["projects", "detail", id] as const,
+    deployHistory: (companyId: string, projectId: string) =>
+      ["projects", "deploy-history", companyId, projectId] as const,
   },
   externalObjects: {
     byIssue: (issueId: string) => ["external-objects", "by-issue", issueId] as const,
@@ -250,6 +252,8 @@ export const queryKeys = {
     schedulerHeartbeats: ["instance", "scheduler-heartbeats"] as const,
     experimentalSettings: ["instance", "experimental-settings"] as const,
     quietMode: ["instance", "quiet-mode"] as const,
+    claudeAuth: ["instance", "claude-auth"] as const,
+    claudeSignIn: (sessionId: string) => ["instance", "claude-auth", "sign-in", sessionId] as const,
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,

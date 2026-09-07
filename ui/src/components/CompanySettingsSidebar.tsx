@@ -151,6 +151,12 @@ export function CompanySettingsSidebar() {
             end
           />
           <SidebarNavItem
+            to={`${INSTANCE_SETTINGS_PATH_PREFIX}/claude`}
+            label="Claude sign-in"
+            icon={KeyRound}
+            end
+          />
+          <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/environments`}
             label="Environments"
             icon={MonitorCog}

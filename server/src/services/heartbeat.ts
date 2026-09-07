@@ -19,6 +19,7 @@ import {
   type ExecutionWorkspace,
   type ExecutionWorkspaceConfig,
   type HeartbeatRunStatusPhase,
+  type InstanceGeneralSettings,
   type IssueExecutionMonitorClearReason,
   type IssueExecutionMonitorPolicy,
   type IssueExecutionMonitorRecoveryPolicy,
@@ -89,6 +90,8 @@ import {
   mergeHeartbeatRunResultJson,
 } from "./heartbeat-run-summary.js";
 import {
+  RUN_SILENT_ERROR_CODE,
+  RUN_TOO_LONG_ERROR_CODE,
   buildHeartbeatRunStopMetadata,
   mergeHeartbeatRunStopMetadata,
   normalizeMaxTurnStopReason,
@@ -153,6 +156,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { CLAUDE_AUTH_FALLBACK_ENV_KEY, instanceClaudeAuthService } from "./instance-claude-auth.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import {
   evaluateExecutionAllowlist,
@@ -217,7 +221,13 @@ import { productivityReviewService } from "./productivity-review.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock, withGlobalRunStartLock } from "./agent-start-lock.js";
 import { computeHeartbeatTimerJitterMs, type HeartbeatTimerJitterOptions } from "./heartbeat-timer-jitter.js";
-import { buildAgentEnteredErrorNotice, buildReapedRunOperatorNotice } from "./operator-notices.js";
+import {
+  buildAgentEnteredErrorNotice,
+  buildFrozenRunErrorMessage,
+  buildReapedRunOperatorNotice,
+  buildStoppedRunOperatorNotice,
+  type FrozenRunStopReason,
+} from "./operator-notices.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -541,6 +551,25 @@ function formatMissingBindingForOperator(missing: MissingRuntimeBinding): string
   return `secret ${secretLabel} not bound at ${missing.consumerType} ${missing.configPath}`;
 }
 
+function hasNonEmptyEnvString(env: Record<string, unknown>, key: string): boolean {
+  const value = env[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Mirrors the claude_local adapter's own auth detection: a subscription
+ * token, an API key, or a Bedrock setup each count as "has its own way in".
+ */
+export function claudeEnvHasOwnCredential(env: Record<string, unknown>): boolean {
+  if (hasNonEmptyEnvString(env, CLAUDE_AUTH_FALLBACK_ENV_KEY)) return true;
+  if (hasNonEmptyEnvString(env, "ANTHROPIC_API_KEY")) return true;
+  if (hasNonEmptyEnvString(env, "ANTHROPIC_AUTH_TOKEN")) return true;
+  const bedrock = env.CLAUDE_CODE_USE_BEDROCK;
+  if (bedrock === "1" || bedrock === "true" || bedrock === true) return true;
+  if (hasNonEmptyEnvString(env, "ANTHROPIC_BEDROCK_BASE_URL")) return true;
+  return false;
+}
+
 function isConfiguredEnvBindingValue(binding: unknown) {
   const parsed = envBindingSchema.safeParse(binding);
   if (!parsed.success) return false;
@@ -631,6 +660,14 @@ export async function resolveExecutionRunAdapterConfig(input: {
     reason: string;
     remediation: string;
   };
+  /**
+   * One-click Claude sign-in: the instance-wide Claude subscription token a
+   * claude_local agent falls back to when nothing in its own env, project,
+   * environment or routine bindings gives it a CLAUDE_CODE_OAUTH_TOKEN,
+   * ANTHROPIC_API_KEY or Bedrock setup. Optional so callers/tests that don't
+   * care keep working unchanged.
+   */
+  instanceClaudeAuth?: { resolveFallbackToken: () => Promise<string | null> } | null;
 }) {
   const executionRunConfig = stripPaperclipRuntimeEnvFromAdapterConfig(input.executionRunConfig);
   const environmentEnv = stripPaperclipRuntimeEnvBindings(input.environmentEnv);
@@ -859,14 +896,34 @@ export async function resolveExecutionRunAdapterConfig(input: {
       secretKeys.add(key);
     }
   }
+  // One-click Claude sign-in fallback. Only for claude_local, and only when
+  // the fully merged env still carries no Claude credential of its own — an
+  // agent-level, project-level, environment or routine token always wins, so
+  // existing per-agent setups are untouched. The injected value is treated
+  // exactly like a bound secret for redaction (key + literal value).
+  let usedInstanceClaudeAuth = false;
+  const effectiveSecretValues = secretValues ?? new Set<string>();
+  if (input.adapterType === "claude_local" && input.instanceClaudeAuth) {
+    const mergedEnv = parseObject(resolvedConfig.env);
+    if (!claudeEnvHasOwnCredential(mergedEnv)) {
+      const fallbackToken = await input.instanceClaudeAuth.resolveFallbackToken();
+      if (fallbackToken) {
+        resolvedConfig.env = { ...mergedEnv, [CLAUDE_AUTH_FALLBACK_ENV_KEY]: fallbackToken };
+        secretKeys.add(CLAUDE_AUTH_FALLBACK_ENV_KEY);
+        effectiveSecretValues.add(fallbackToken);
+        usedInstanceClaudeAuth = true;
+      }
+    }
+  }
   return {
     resolvedConfig,
     secretKeys,
+    usedInstanceClaudeAuth,
     // DUR-132: literal resolved secret values (currently only ever
     // populated from adapterConfig.mcpServers[*].env/.headers -- see
     // resolveMcpServersForRuntime in secrets.ts) for output redaction that
     // can't key off a known process-env variable name.
-    secretValues: secretValues ?? new Set<string>(),
+    secretValues: effectiveSecretValues,
     secretManifest: [
       ...(environmentEnvResolution.manifest ?? []),
       ...(manifest ?? []),
@@ -4369,6 +4426,37 @@ function isTrackedLocalChildProcessAdapter(adapterType: string) {
   return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
 }
 
+export interface FrozenRunCaps {
+  /** 0 = switched off. */
+  maxRunDurationMs: number;
+  /** 0 = switched off. */
+  silentRunTimeoutMs: number;
+}
+
+/**
+ * DUR-3940 item 2 / run cap: which limits apply to an agent's runs.
+ * Precedence: the agent's adapterConfig (`maxRunDurationMinutes`,
+ * `silentRunTimeoutMinutes`; 0 switches that limit off for the agent) over
+ * the instance-wide general settings, which default to 150 / 45 minutes.
+ * Pure so the precedence is unit-testable.
+ */
+export function resolveFrozenRunCaps(
+  adapterConfig: unknown,
+  general: Pick<InstanceGeneralSettings, "maxRunDurationMinutes" | "silentRunTimeoutMinutes">,
+): FrozenRunCaps {
+  const config = parseObject(adapterConfig);
+  const minutes = (value: unknown, fallback: number) => {
+    if (value === null || value === undefined || value === "") return fallback;
+    const parsed = typeof value === "number" ? value : Number(String(value).trim());
+    if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+    return Math.floor(parsed);
+  };
+  return {
+    maxRunDurationMs: minutes(config.maxRunDurationMinutes, general.maxRunDurationMinutes) * 60_000,
+    silentRunTimeoutMs: minutes(config.silentRunTimeoutMinutes, general.silentRunTimeoutMinutes) * 60_000,
+  };
+}
+
 function isHeartbeatRunTerminalStatus(
   status: string | null | undefined,
 ): status is (typeof HEARTBEAT_RUN_TERMINAL_STATUSES)[number] {
@@ -5071,6 +5159,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
+  const instanceClaudeAuth = instanceClaudeAuthService(db);
   const companySkills = companySkillService(db);
   // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
   // run this server instance still has an in-memory process handle for is
@@ -10239,9 +10328,194 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
+  /**
+   * DUR-3940 item 2 / run cap: end a run whose child process is alive but
+   * which has either run past the max duration or gone silent past the
+   * window. Mirrors the process-lost branch of reapOrphanedRuns (failed run,
+   * one retry, agent left idle, operator notice) with one deliberate
+   * difference in ordering: the row is flipped to "failed" BEFORE the child
+   * is killed, so the in-process execution that owns the child sees a
+   * non-running row when the adapter returns and skips its own finalization
+   * (setRunStatusIfRunning no-ops) instead of racing this path for the
+   * agent's status. Returns false when the run had already left "running"
+   * on its own between the reap query and here.
+   */
+  async function stopFrozenRun(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    adapterType: string;
+    adapterConfig: Record<string, unknown>;
+    agentName: string | null;
+    reason: FrozenRunStopReason;
+    limitMs: number;
+    ranForMs: number | null;
+    silentForMs: number | null;
+    now: Date;
+  }): Promise<boolean> {
+    const { run, adapterType, adapterConfig, agentName, reason, limitMs, ranForMs, silentForMs, now } = input;
+    const shouldRetry = (run.processLossRetryCount ?? 0) < 1;
+    const errorCode = reason === "too_long" ? RUN_TOO_LONG_ERROR_CODE : RUN_SILENT_ERROR_CODE;
+    const errorMessage = buildFrozenRunErrorMessage({ reason, limitMs, retryQueued: shouldRetry });
+    const technicalReason =
+      reason === "too_long"
+        ? `Run exceeded the max run duration (${Math.round(limitMs / 60_000)} min) with child pid ${run.processPid} still alive; terminated by the watchdog`
+        : `Run produced no output for ${Math.round(limitMs / 60_000)} min with child pid ${run.processPid} still alive; terminated by the watchdog`;
+
+    const failedWrite = await setRunStatusIfRunning(run.id, "failed", {
+      error: errorMessage,
+      errorCode,
+      finishedAt: now,
+      resultJson: mergeRunStopMetadataForAgent(
+        { adapterType, adapterConfig },
+        "failed",
+        {
+          resultJson: parseObject(run.resultJson),
+          errorCode,
+          errorMessage,
+        },
+      ),
+    });
+    if (!failedWrite.updated) {
+      logger.info(
+        { runId: run.id, agentId: run.agentId, currentStatus: failedWrite.run?.status ?? null, reason },
+        "frozen-run watchdog: run left running state before it could be stopped; leaving it alone",
+      );
+      return false;
+    }
+
+    logger.warn(
+      {
+        runId: run.id,
+        agentId: run.agentId,
+        processPid: run.processPid,
+        processGroupId: run.processGroupId,
+        reason,
+        limitMs,
+        ranForMs,
+        silentForMs,
+        lastOutputAt: run.lastOutputAt,
+        startedAt: run.startedAt,
+      },
+      reason === "too_long"
+        ? "frozen-run watchdog: run exceeded the max run duration with its child alive; stopping it (DUR-3940)"
+        : "frozen-run watchdog: run is alive but has produced no output past the silence window; stopping it (DUR-3940)",
+    );
+
+    const running = runningProcesses.get(run.id);
+    try {
+      await terminateHeartbeatRunProcess({
+        pid: running?.child.pid ?? run.processPid,
+        processGroupId: running?.processGroupId ?? run.processGroupId,
+        ...(running ? { graceMs: Math.max(1, running.graceSec) * 1000 } : {}),
+      });
+    } catch (err) {
+      logger.error({ err, runId: run.id, processPid: run.processPid }, "frozen-run watchdog: failed to terminate run process");
+    } finally {
+      runningProcesses.delete(run.id);
+    }
+
+    await setWakeupStatus(run.wakeupRequestId, "failed", {
+      finishedAt: now,
+      error: errorMessage,
+    });
+    let finalizedRun = failedWrite.run ?? (await getRun(run.id));
+    if (!finalizedRun) return true;
+    finalizedRun = await classifyAndPersistRunLiveness(finalizedRun, parseObject(finalizedRun.resultJson)) ?? finalizedRun;
+    await releaseEnvironmentLeasesForRun({
+      runId: finalizedRun.id,
+      companyId: finalizedRun.companyId,
+      agentId: finalizedRun.agentId,
+      status: finalizedRun.status,
+      failureReason: finalizedRun.error ?? undefined,
+    });
+
+    let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
+    if (shouldRetry) {
+      const agent = await getAgent(run.agentId);
+      if (agent) {
+        retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
+      } else {
+        await releaseIssueExecutionAndPromote(finalizedRun);
+      }
+    } else {
+      await releaseIssueExecutionAndPromote(finalizedRun);
+    }
+
+    await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "error",
+      message: retriedRun ? `${errorMessage} Queued retry ${retriedRun.id}.` : errorMessage,
+      payload: {
+        stopReason: reason,
+        limitMs,
+        ...(ranForMs !== null ? { ranForMs } : {}),
+        ...(silentForMs !== null ? { silentForMs } : {}),
+        ...(run.processPid ? { processPid: run.processPid } : {}),
+        ...(run.processGroupId ? { processGroupId: run.processGroupId } : {}),
+        ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+        technicalReason,
+      },
+    });
+
+    // Same rule as the process-lost branch (DUR-257): a stuck run is not a
+    // reason to park the agent in "error" while a retry is queued. Only when
+    // the retry itself froze again does the agent surface as needing a
+    // person -- two frozen runs in a row means something is genuinely wrong
+    // with the task, not the infrastructure.
+    await finalizeAgentStatus(run.agentId, retriedRun ? "cancelled" : "failed", errorMessage);
+
+    const agentAfterStop = await getAgent(run.agentId);
+    const agentMarkedError = agentAfterStop?.status === "error";
+    await logActivity(db, {
+      companyId: run.companyId,
+      actorType: "system",
+      actorId: "run-watchdog",
+      agentId: run.agentId,
+      runId: run.id,
+      action: "heartbeat.run_stopped",
+      entityType: "heartbeat_run",
+      entityId: run.id,
+      details: {
+        message: buildStoppedRunOperatorNotice({
+          agentName,
+          reason,
+          limitMs,
+          ranForMs,
+          silentForMs,
+          retryQueued: Boolean(retriedRun),
+          agentMarkedError,
+        }),
+        // ActivityRow links heartbeat_run entries to the agent via details.agentId.
+        agentId: run.agentId,
+        agentName,
+        stopReason: reason,
+        limitMinutes: Math.round(limitMs / 60_000),
+        ranForMs,
+        silentForMs,
+        retryQueued: Boolean(retriedRun),
+        ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+        agentMarkedError,
+        errorCode,
+        technicalReason,
+      },
+    }).catch((err) => {
+      logger.warn({ err, runId: run.id }, "failed to log operator notice for stopped frozen heartbeat run");
+    });
+
+    await startNextQueuedRunForAgent(run.agentId);
+    return true;
+  }
+
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
+    // DUR-3940 item 2: the instance-wide run caps are read once per pass, and
+    // only when a live-pid run actually needs them.
+    let generalSettingsForCaps: InstanceGeneralSettings | null = null;
+    const frozenRunCapsForAgent = async (adapterConfig: unknown) => {
+      if (!generalSettingsForCaps) generalSettingsForCaps = await instanceSettings.getGeneral();
+      return resolveFrozenRunCaps(adapterConfig, generalSettingsForCaps);
+    };
 
     // Find all runs stuck in "running" state (queued runs are legitimately waiting; resumeQueuedRuns handles them)
     const activeRuns = await db
@@ -10276,6 +10550,56 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           : 0,
       );
       const staleForMs = now.getTime() - progressRefTime;
+
+      // DUR-3940 item 2 / run cap: a run whose child is ALIVE can still be
+      // dead weight. Two shapes seen in production: (a) every run that ever
+      // passed 120 minutes ended failed or cancelled (12 of 12), so a run
+      // past the max duration is not going to finish; (b) a child that is
+      // alive but has printed nothing for a long time (waiting on input, a
+      // hung tool, an MCP pipe kept open after the CLI died) holds its
+      // agent's only slot indefinitely -- the paths below only act once the
+      // pid is confirmed gone. Both are stopped here, marked failed in plain
+      // language, the agent left idle, and one process-loss-style retry
+      // queued. Periodic pass only (staleThresholdMs > 0): the startup reap
+      // runs before anything is alive. Only adapters that track a local
+      // child are ever touched, and only when the recorded pid is alive.
+      if (
+        staleThresholdMs > 0 &&
+        isTrackedLocalChildProcessAdapter(adapterType) &&
+        !!run.processPid &&
+        isProcessAlive(run.processPid)
+      ) {
+        const caps = await frozenRunCapsForAgent(adapterConfig);
+        const runStartRefTime = Math.max(
+          run.processStartedAt ? new Date(run.processStartedAt).getTime() : 0,
+          run.startedAt ? new Date(run.startedAt).getTime() : 0,
+        );
+        const ranForMs = runStartRefTime > 0 ? now.getTime() - runStartRefTime : null;
+        const silentForMs = progressRefTime > 0 ? staleForMs : null;
+        const frozenReason: FrozenRunStopReason | null =
+          caps.maxRunDurationMs > 0 && ranForMs !== null && ranForMs >= caps.maxRunDurationMs
+            ? "too_long"
+            : caps.silentRunTimeoutMs > 0 && silentForMs !== null && silentForMs >= caps.silentRunTimeoutMs
+              ? "silent"
+              : null;
+        if (frozenReason) {
+          const stopped = await stopFrozenRun({
+            run,
+            adapterType,
+            adapterConfig,
+            agentName,
+            reason: frozenReason,
+            limitMs: frozenReason === "too_long" ? caps.maxRunDurationMs : caps.silentRunTimeoutMs,
+            ranForMs,
+            silentForMs,
+            now,
+          });
+          if (stopped) {
+            reaped.push(run.id);
+            continue;
+          }
+        }
+      }
 
       if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) {
         const tracksLocalChildHeld = isTrackedLocalChildProcessAdapter(adapterType);
@@ -11345,10 +11669,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
-    const { resolvedConfig, secretKeys, secretValues, secretManifest } = await resolveExecutionRunAdapterConfig({
+    const { resolvedConfig, secretKeys, secretValues, secretManifest, usedInstanceClaudeAuth } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
       adapterType: agent.adapterType,
+      instanceClaudeAuth,
       issueId,
       heartbeatRunId: run.id,
       environmentId: selectedEnvironmentForConfig?.id ?? null,
@@ -12741,6 +13066,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             : outcome === "failed"
               ? (adapterResult.errorCode ?? "adapter_failed")
               : null;
+      if (runErrorCode === "claude_auth_required" && usedInstanceClaudeAuth) {
+        // The instance-wide Claude sign-in was the credential for this run
+        // and Claude asked for a login: surface that on the sign-in page
+        // ("Sign in again") instead of leaving it to look healthy.
+        await instanceClaudeAuth.markAuthFailure().catch(() => undefined);
+      }
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
       if (handle) {

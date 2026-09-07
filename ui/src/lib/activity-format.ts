@@ -63,6 +63,7 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.entered_error": "flagged that attention is needed for",
   "agent.error_stalled": "is still waiting for someone to clear the error on",
   "heartbeat.run_reaped": "ended a run that had stopped responding for",
+  "heartbeat.run_stopped": "stopped a run that was taking too long for",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -136,6 +137,7 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.entered_error": "flagged that the agent needs attention",
   "agent.error_stalled": "is still waiting for someone to clear the agent error",
   "heartbeat.run_reaped": "ended a run that had stopped responding",
+  "heartbeat.run_stopped": "stopped a run that was taking too long",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -490,6 +492,7 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "agent.entered_error",
   "agent.error_stalled",
   "heartbeat.run_reaped",
+  "heartbeat.run_stopped",
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {
