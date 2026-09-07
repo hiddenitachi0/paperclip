@@ -5,6 +5,7 @@ import { ApiError } from "../api/client";
 import { inboxDismissalsApi } from "../api/inboxDismissals";
 import { approvalsApi } from "../api/approvals";
 import { authApi } from "../api/auth";
+import { checkupsApi } from "../api/checkups";
 import { dashboardApi } from "../api/dashboard";
 import { heartbeatsApi } from "../api/heartbeats";
 import { issuesApi } from "../api/issues";
@@ -90,6 +91,8 @@ export function useInboxDismissals(companyId: string | null | undefined) {
       if (!companyId) return;
       queryClient.invalidateQueries({ queryKey });
       queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
+      // DUR-62: hiding a check-up finding changes what the next report says.
+      queryClient.invalidateQueries({ queryKey: queryKeys.checkups.latest(companyId) });
     },
   });
 
@@ -200,6 +203,25 @@ export function useInboxBadge(companyId: string | null | undefined) {
     staleTime: INBOX_BADGE_HOT_PATH_STALE_MS,
   });
 
+  // DUR-62: the weekly check-up with suggestions nobody has decided on yet.
+  // Board-only on the server; anyone else just gets no badge.
+  const { data: latestCheckup } = useQuery({
+    queryKey: queryKeys.checkups.latest(companyId!),
+    queryFn: async () => {
+      try {
+        return await checkupsApi.latest(companyId!);
+      } catch (err) {
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return null;
+        throw err;
+      }
+    },
+    enabled: !!companyId,
+    retry: false,
+    refetchOnWindowFocus: false,
+    staleTime: INBOX_BADGE_HOT_PATH_STALE_MS,
+  });
+  const pendingCheckupSuggestions = latestCheckup?.pendingSuggestionCount ?? 0;
+
   return useMemo(
     () =>
       computeInboxBadgeData({
@@ -211,7 +233,8 @@ export function useInboxBadge(companyId: string | null | undefined) {
         dismissedAlerts,
         dismissedAtByKey,
         currentUserId,
+        pendingCheckupSuggestions,
       }),
-    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissedAlerts, dismissedAtByKey, currentUserId],
+    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissedAlerts, dismissedAtByKey, currentUserId, pendingCheckupSuggestions],
   );
 }
