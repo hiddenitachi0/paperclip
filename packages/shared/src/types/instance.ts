@@ -103,6 +103,48 @@ export const DEFAULT_QUIET_MODE_STATE: QuietModeState = {
 // case (~22h) so that expected usage never trips the warning.
 export const QUIET_MODE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Done-gate quality check ("critic"): when an AGENT tries to move a task to
+ * done, a second, cheap model call compares the task's description and
+ * acceptance criteria against the agent's final comment (and the change
+ * summary when a merge was involved) and answers pass / needs work.
+ *
+ * - "off": nothing happens (the default -- ships dormant).
+ * - "dry_run": the check runs and its verdict is posted as a comment, but the
+ *   task is never held back. Use this to see what the critic would say.
+ * - "enforce": a "needs work" verdict sends the task back to in progress with
+ *   the findings as a comment. After `maxRounds` such rounds the platform
+ *   stops looping and asks the operator instead.
+ *
+ * A board/human actor is never gated, whatever the mode.
+ */
+export type DoneGateMode = "off" | "dry_run" | "enforce";
+
+export const DONE_GATE_MODES: readonly DoneGateMode[] = ["off", "dry_run", "enforce"];
+export const DEFAULT_DONE_GATE_MODE: DoneGateMode = "off";
+export const DEFAULT_DONE_GATE_MAX_ROUNDS = 2;
+export const MIN_DONE_GATE_MAX_ROUNDS = 1;
+export const MAX_DONE_GATE_MAX_ROUNDS = 5;
+
+export interface DoneGateCompanyOverride {
+  mode?: DoneGateMode;
+  maxRounds?: number;
+}
+
+export interface DoneGateSettings {
+  mode: DoneGateMode;
+  /** How many "needs work" rounds an agent gets before the operator is asked. */
+  maxRounds: number;
+  /** Per-company override keyed by company id; absent keys fall back to the instance default. */
+  companyOverrides: Record<string, DoneGateCompanyOverride>;
+}
+
+export const DEFAULT_DONE_GATE_SETTINGS: DoneGateSettings = {
+  mode: DEFAULT_DONE_GATE_MODE,
+  maxRounds: DEFAULT_DONE_GATE_MAX_ROUNDS,
+  companyOverrides: {},
+};
+
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   keyboardShortcuts: boolean;
@@ -144,6 +186,12 @@ export interface InstanceGeneralSettings {
    * behaviour; turning it on can only make the UI stricter.
    */
   factCheckCardStrictAllowlist: boolean;
+  /**
+   * Done-gate quality check (see DoneGateSettings). Defaults to mode "off"
+   * with 2 rounds -- ships dormant; an operator opts in per instance and can
+   * override per company.
+   */
+  doneGate: DoneGateSettings;
 }
 
 export interface InstanceExperimentalSettings {

@@ -9,6 +9,7 @@ import {
   DEFAULT_MAX_RUN_DURATION_MINUTES,
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   DEFAULT_QUIET_MODE_STATE,
+  DEFAULT_DONE_GATE_SETTINGS,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
   instanceExperimentalSettingsSchema,
@@ -20,6 +21,8 @@ import {
   type QuietModeActor,
   type QuietModeAgentSnapshotEntry,
   type QuietModeState,
+  type DoneGateMode,
+  type DoneGateSettings,
 } from "@paperclipai/shared";
 import { eq, inArray, count } from "drizzle-orm";
 import { parseObject, asBoolean } from "@paperclipai/adapter-utils/server-utils";
@@ -61,6 +64,13 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
       quietMode: parsed.data.quietMode ?? DEFAULT_QUIET_MODE_STATE,
       mergePrAutomationEnabled: parsed.data.mergePrAutomationEnabled ?? false,
       factCheckCardStrictAllowlist: parsed.data.factCheckCardStrictAllowlist ?? false,
+      doneGate: parsed.data.doneGate
+        ? {
+            mode: parsed.data.doneGate.mode as DoneGateMode,
+            maxRounds: parsed.data.doneGate.maxRounds,
+            companyOverrides: (parsed.data.doneGate.companyOverrides ?? {}) as DoneGateSettings["companyOverrides"],
+          }
+        : DEFAULT_DONE_GATE_SETTINGS,
     };
   }
   return {
@@ -75,6 +85,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     quietMode: DEFAULT_QUIET_MODE_STATE,
     mergePrAutomationEnabled: false,
     factCheckCardStrictAllowlist: false,
+    doneGate: DEFAULT_DONE_GATE_SETTINGS,
   };
 }
 
