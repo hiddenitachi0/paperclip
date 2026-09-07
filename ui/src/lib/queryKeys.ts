@@ -250,6 +250,8 @@ export const queryKeys = {
     schedulerHeartbeats: ["instance", "scheduler-heartbeats"] as const,
     experimentalSettings: ["instance", "experimental-settings"] as const,
     quietMode: ["instance", "quiet-mode"] as const,
+    claudeAuth: ["instance", "claude-auth"] as const,
+    claudeSignIn: (sessionId: string) => ["instance", "claude-auth", "sign-in", sessionId] as const,
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,
