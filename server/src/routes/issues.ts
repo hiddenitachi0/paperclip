@@ -158,6 +158,7 @@ import { assertEnvironmentSelectionForCompany } from "./environment-selection.js
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
+import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -6494,6 +6495,35 @@ export function issueRoutes(
     });
     if (featureLaunchGateResult) {
       res.status(409).json({ error: featureLaunchGateResult.message });
+      return;
+    }
+    // Done-gate quality check (offensive quality loop): the gates above ask whether the
+    // work was re-checked, judged against a finish line, deployed, or signed off. This one
+    // asks a cheap independent reviewer whether what the agent reports done actually
+    // matches what the task asked for. Ships off (instance setting general.doneGate);
+    // dry run only comments; enforce sends the task back with the findings and, after
+    // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
+    const doneGateCriticResult = await evaluateDoneGateCritic({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+      readGeneralSettings: () => instanceSettings.getGeneral(),
+    });
+    if (doneGateCriticResult) {
+      res.status(409).json({
+        error: doneGateCriticResult.message,
+        findings: doneGateCriticResult.findings,
+        escalated: doneGateCriticResult.escalated,
+      });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =
