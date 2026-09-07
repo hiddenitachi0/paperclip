@@ -8,7 +8,15 @@ export type HeartbeatRunStopReason =
   | "paused"
   | "max_turns_exhausted"
   | "process_lost"
+  // DUR-3940 item 2 / run cap: stopped by the watchdog while its process was
+  // still alive -- ran past the max duration, or silent past the window.
+  | "run_too_long"
+  | "run_silent"
   | "adapter_failed";
+
+/** heartbeat_runs.error_code values written by the frozen-run watchdog (DUR-3940 item 2). */
+export const RUN_TOO_LONG_ERROR_CODE = "run_too_long";
+export const RUN_SILENT_ERROR_CODE = "run_silent";
 
 export interface HeartbeatRunTimeoutPolicy {
   effectiveTimeoutSec: number | null;
@@ -87,6 +95,8 @@ export function inferHeartbeatRunStopReason(input: {
   if (maxTurnStopReason) return maxTurnStopReason;
   if (input.outcome === "timed_out") return "timeout";
   if (input.outcome === "failed" && input.errorCode === "process_lost") return "process_lost";
+  if (input.outcome === "failed" && input.errorCode === RUN_TOO_LONG_ERROR_CODE) return "run_too_long";
+  if (input.outcome === "failed" && input.errorCode === RUN_SILENT_ERROR_CODE) return "run_silent";
   if (input.outcome === "cancelled") {
     const message = (input.errorMessage ?? "").toLowerCase();
     if (message.includes("budget")) return "budget_paused";
