@@ -5,6 +5,7 @@ import { Link } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { approvalsApi } from "../api/approvals";
+import { ApiError } from "../api/client";
 import { deployRunnerApi, type ProjectDeployHistory } from "../api/deployRunner";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -50,6 +51,13 @@ export function ProjectDeployHistoryCard({
   );
 }
 
+/** The id of the already-open card a 409 "duplicate approval" refusal points at, if any. */
+export function existingApprovalIdFromError(err: unknown): string | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const details = (err.body as { details?: { existingApprovalId?: unknown } } | null)?.details;
+  return typeof details?.existingApprovalId === "string" && details.existingApprovalId ? details.existingApprovalId : null;
+}
+
 export function ProjectDeployHistoryCardView({
   companyId,
   projectId,
@@ -87,7 +95,16 @@ export function ProjectDeployHistoryCardView({
       });
     },
     onError: (err: Error) => {
-      pushToast({ title: "Could not file the rollback request", body: err.message, tone: "error" });
+      // The server refuses a rollback only when the same rollback is already waiting for a
+      // decision (409 with the waiting card's id) -- send the operator to that card rather
+      // than leaving them with an error they cannot act on.
+      const waitingCardId = existingApprovalIdFromError(err);
+      pushToast({
+        title: waitingCardId ? "This rollback is already waiting for you" : "Could not file the rollback request",
+        body: err.message,
+        tone: waitingCardId ? "info" : "error",
+        action: waitingCardId ? { label: "Open the waiting card", href: `/approvals/${waitingCardId}` } : undefined,
+      });
     },
   });
 

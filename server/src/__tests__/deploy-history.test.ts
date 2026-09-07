@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
+import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 // DUR-3952 follow-up (operator rollback button): the project deploy-history
 // API must report the two versions that were genuinely live per the runner's
@@ -87,11 +88,12 @@ describe("selectProjectDeployHistory", () => {
   });
 });
 
+// The route reads through the company-scope middleware (companyScopeFromParam +
+// createRequestScopedDb), so the fake must satisfy the reserved-connection
+// lifecycle and answer the real drizzle query for `.select({ id })` with
+// positional tuples -- see helpers/fake-scoped-db.ts.
 function fakeDbWithApprovalIds(ids: string[]) {
-  const rows = ids.map((id) => ({ id }));
-  return {
-    select: () => ({ from: () => ({ where: async () => rows }) }),
-  };
+  return withFakeCompanyScopeReserve({}, { unsafeRows: ids.map((id) => [id]) });
 }
 
 async function createApp(db: unknown, actor?: Record<string, unknown>) {

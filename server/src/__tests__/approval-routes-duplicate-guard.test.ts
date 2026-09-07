@@ -485,4 +485,112 @@ describe("approval routes duplicate guard (DUR-101)", () => {
       expect(mockApprovalService.create.mock.calls[0][1].payload.relatedApprovalId).toBe(QUEUED_ID);
     }, TEST_TIMEOUT);
   });
+
+  // DUR-3952 follow-up: the project page's "Roll back to previous version" button files a
+  // board-only deploy card with allowBackwardDeploy for a commit that -- by definition --
+  // already went live once, usually while agents have the next forward deploy queued. The
+  // guards above must not turn that card away with agent-facing payload-field advice.
+  describe("DUR-3952: operator rollback cards get past the deploy duplicate guards", () => {
+    const PREVIOUS_SHORT = "8623c28bd123";
+    const PREVIOUS_CARD_ID = "66666666-6666-4666-8666-666666666666";
+    const OPEN_FORWARD_ID = "77777777-7777-4777-8777-777777777777";
+    const rollbackPayload = {
+      kind: "deploy",
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: PREVIOUS_SHORT,
+      title: `Roll production back to ${PREVIOUS_SHORT.slice(0, 8)}`,
+      note: "Approving moves production back to the version that was live before the current one.",
+      allowBackwardDeploy: true,
+    };
+
+    beforeEach(() => {
+      mockApprovalService.create.mockResolvedValue({
+        id: "new-rollback-1",
+        companyId: COMPANY_ID,
+        type: "request_board_approval",
+        status: "pending",
+        payload: { kind: "deploy", allowBackwardDeploy: true },
+      });
+    });
+
+    it("files a rollback for a commit that already went live under an approved card (same 12-char sha)", async () => {
+      mockApprovalService.listApprovedDeployApprovalsForCommit.mockResolvedValue([
+        { id: PREVIOUS_CARD_ID, status: "approved", decidedAt: new Date("2026-09-04T10:00:00Z") },
+      ]);
+      mockReadDeployRunnerStatus.mockReturnValue([
+        {
+          ts: "2026-09-04T10:05:00Z",
+          approvalId: PREVIOUS_CARD_ID,
+          companyId: COMPANY_ID,
+          commentDelivered: true,
+          body: `Deployed to /root/paperclip — commit ${PREVIOUS_SHORT} is live and healthy (health check: http://x).`,
+          commit: PREVIOUS_SHORT,
+        },
+      ]);
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: rollbackPayload });
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalledOnce();
+      // The same-commit guard is not even consulted for a rollback.
+      expect(mockApprovalService.listApprovedDeployApprovalsForCommit).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("files a rollback while an ordinary forward deploy is still waiting, linked to that card", async () => {
+      mockApprovalService.findOpenDeployApproval.mockResolvedValue({
+        id: OPEN_FORWARD_ID,
+        status: "pending",
+        payload: { kind: "deploy", commit: "ffffffffffff", projectId: rollbackPayload.projectId },
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: rollbackPayload });
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalledOnce();
+      expect(mockApprovalService.create.mock.calls[0][1].payload.relatedApprovalId).toBe(OPEN_FORWARD_ID);
+    }, TEST_TIMEOUT);
+
+    it("refuses a second rollback to the same version in plain words, pointing at the waiting card", async () => {
+      mockApprovalService.findOpenDeployApproval.mockResolvedValue({
+        id: OPEN_FORWARD_ID,
+        status: "pending",
+        payload: { kind: "deploy", commit: PREVIOUS_SHORT, allowBackwardDeploy: true },
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({ type: "request_board_approval", payload: rollbackPayload });
+
+      expect(res.status).toBe(409);
+      expect(res.body.details?.existingApprovalId).toBe(OPEN_FORWARD_ID);
+      expect(res.body.error).toContain("already waiting for your decision");
+      expect(res.body.error).not.toContain("acknowledgedDuplicateOfApprovalId");
+      expect(res.body.error).not.toContain("allowBackwardDeploy");
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+
+    it("still refuses an ordinary (non-rollback) card while a rollback to a different version is open", async () => {
+      mockApprovalService.findOpenDeployApproval.mockResolvedValue({
+        id: OPEN_FORWARD_ID,
+        status: "pending",
+        payload: { kind: "deploy", commit: PREVIOUS_SHORT, allowBackwardDeploy: true },
+      });
+
+      const res = await request(await createApp())
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send({
+          type: "request_board_approval",
+          payload: { ...rollbackPayload, commit: "abcdefabcdef", allowBackwardDeploy: undefined },
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.details?.existingApprovalId).toBe(OPEN_FORWARD_ID);
+      expect(mockApprovalService.create).not.toHaveBeenCalled();
+    }, TEST_TIMEOUT);
+  });
 });

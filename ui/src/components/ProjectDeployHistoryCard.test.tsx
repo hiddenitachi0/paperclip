@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
+import { ApiError } from "../api/client";
 import { ProjectDeployHistoryCard, ProjectDeployHistoryCardView } from "./ProjectDeployHistoryCard";
 
 const mockApprovalsApi = vi.hoisted(() => ({ create: vi.fn() }));
@@ -124,6 +125,66 @@ describe("ProjectDeployHistoryCard", () => {
     expect(input.payload.note).toContain("Approving moves production back to aaaaaaaa, the version that was live before bbbbbbbb");
     expect(mockPushToast).toHaveBeenCalledWith(
       expect.objectContaining({ tone: "success", action: { label: "Open the card", href: "/approvals/approval-new" } }),
+    );
+  });
+
+  it("sends the operator to the waiting card when the same rollback is already open (409), in plain words", async () => {
+    // Server-side (approvals.ts duplicate guard) the only refusal a rollback can get is
+    // "the same rollback is already waiting"; the toast must point at that card and never
+    // surface payload-field advice like acknowledgedDuplicateOfApprovalId.
+    mockApprovalsApi.create.mockRejectedValue(
+      new ApiError("A rollback request to aaaaaaaa is already waiting for your decision. Approve or reject that card instead of filing another one.", 409, {
+        error: "A rollback request to aaaaaaaa is already waiting for your decision.",
+        details: { existingApprovalId: "approval-open-rollback" },
+      }),
+    );
+    const el = await render(
+      <ProjectDeployHistoryCardView
+        companyId="co-1"
+        projectId="proj-1"
+        workspaceId="ws-1"
+        history={{ current, previous }}
+        isLoading={false}
+        error={null}
+        confirm={() => true}
+      />,
+    );
+    const button = el.querySelector('[data-testid="deploy-history-rollback"]') as HTMLButtonElement;
+    await act(async () => {
+      button.click();
+    });
+    await flush();
+
+    expect(mockApprovalsApi.create).toHaveBeenCalledTimes(1);
+    expect(mockPushToast).toHaveBeenCalledTimes(1);
+    const toast = mockPushToast.mock.calls[0]?.[0] as { title: string; body: string; tone: string; action?: { label: string; href: string } };
+    expect(toast.tone).toBe("info");
+    expect(toast.title).toBe("This rollback is already waiting for you");
+    expect(toast.action).toEqual({ label: "Open the waiting card", href: "/approvals/approval-open-rollback" });
+    expect(`${toast.title} ${toast.body}`).not.toMatch(/acknowledgedDuplicateOfApprovalId|allowBackwardDeploy|payload\./);
+  });
+
+  it("shows a plain error toast for any other failure", async () => {
+    mockApprovalsApi.create.mockRejectedValue(new ApiError("Request failed: 500", 500, null));
+    const el = await render(
+      <ProjectDeployHistoryCardView
+        companyId="co-1"
+        projectId="proj-1"
+        workspaceId="ws-1"
+        history={{ current, previous }}
+        isLoading={false}
+        error={null}
+        confirm={() => true}
+      />,
+    );
+    const button = el.querySelector('[data-testid="deploy-history-rollback"]') as HTMLButtonElement;
+    await act(async () => {
+      button.click();
+    });
+    await flush();
+
+    expect(mockPushToast).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "error", title: "Could not file the rollback request", action: undefined }),
     );
   });
 
