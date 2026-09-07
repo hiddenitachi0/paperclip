@@ -14,6 +14,7 @@ import {
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { budgetService } from "./budgets.js";
+import { inboxDismissalService } from "./inbox-dismissals.js";
 import { issueService } from "./issues.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 
@@ -961,10 +962,31 @@ export type RunCheckupResult = {
   existingReportCreatedAt: Date | null;
 };
 
+/**
+ * What the dashboard card and the sidebar badge need to know about the open
+ * check-up, without loading the whole report.
+ */
+export type OpenCheckupSummary = {
+  report: {
+    id: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+    createdAt: Date;
+  };
+  /** Drafts on the report's accept card that nobody has accepted or rejected yet. */
+  pendingSuggestionCount: number;
+  /** Total drafts the report proposed, whatever happened to them since. */
+  suggestionCount: number;
+  /** "pending" while the operator has not decided; "accepted"/"rejected" after; "none" for a clean report. */
+  suggestionsStatus: "pending" | "accepted" | "rejected" | "none";
+};
+
 export function organizationCheckupService(db: Db) {
   const issuesSvc = issueService(db);
   const interactionsSvc = issueThreadInteractionService(db);
   const budgets = budgetService(db);
+  const dismissalsSvc = inboxDismissalService(db);
 
   async function getCompany(companyId: string) {
     return db
@@ -993,6 +1015,93 @@ export function organizationCheckupService(db: Db) {
       .orderBy(desc(issues.createdAt))
       .limit(1)
       .then((rows) => rows[0] ?? null);
+  }
+
+  /**
+   * The open check-up plus how many of its suggestions still wait on the
+   * operator. One small query on top of findOpenCheckup; read by the
+   * dashboard card and the sidebar badge, so it must stay cheap.
+   */
+  async function summarizeOpenCheckup(companyId: string): Promise<OpenCheckupSummary | null> {
+    const open = await findOpenCheckup(companyId);
+    if (!open) return null;
+    const card = await db
+      .select({
+        status: issueThreadInteractions.status,
+        payload: issueThreadInteractions.payload,
+        result: issueThreadInteractions.result,
+      })
+      .from(issueThreadInteractions)
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, companyId),
+          eq(issueThreadInteractions.issueId, open.id),
+          eq(issueThreadInteractions.kind, "suggest_tasks"),
+        ),
+      )
+      .orderBy(desc(issueThreadInteractions.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    const payload = (card?.payload ?? null) as { tasks?: unknown[] } | null;
+    const suggestionCount = Array.isArray(payload?.tasks) ? payload.tasks.length : 0;
+    const suggestionsStatus: OpenCheckupSummary["suggestionsStatus"] =
+      !card || suggestionCount === 0
+        ? "none"
+        : card.status === "pending"
+          ? "pending"
+          : card.status === "accepted"
+            ? "accepted"
+            : "rejected";
+
+    return {
+      report: {
+        id: open.id,
+        identifier: open.identifier ?? null,
+        title: open.title,
+        status: open.status,
+        createdAt: open.createdAt,
+      },
+      pendingSuggestionCount: suggestionsStatus === "pending" ? suggestionCount : 0,
+      suggestionCount,
+      suggestionsStatus,
+    };
+  }
+
+  /**
+   * "Hide this for a month": one inbox dismissal per finding, keyed
+   * `checkup-finding:<fingerprint>`, stamped with the board user who hid it.
+   * Any board user's dismissal hides the finding company-wide for 28 days
+   * (see listActiveDismissals), and the next report says who hid what.
+   * Called by the accept route for every draft the operator left unticked.
+   */
+  async function hideFindings(opts: { companyId: string; userId: string; fingerprints: string[]; now?: Date }) {
+    const now = opts.now ?? new Date();
+    const fingerprints = [...new Set(opts.fingerprints.map((value) => value.trim()).filter((value) => value.length > 0))];
+    const itemKeys: string[] = [];
+    for (const fingerprint of fingerprints) {
+      const itemKey = `${CHECKUP_FINDING_DISMISSAL_PREFIX}${fingerprint}`;
+      await dismissalsSvc.dismiss(opts.companyId, opts.userId, itemKey, now);
+      itemKeys.push(itemKey);
+    }
+    if (itemKeys.length > 0) {
+      await logActivity(db, {
+        companyId: opts.companyId,
+        actorType: "user",
+        actorId: opts.userId,
+        action: "inbox.dismissed",
+        entityType: "company",
+        entityId: opts.companyId,
+        details: {
+          userId: opts.userId,
+          itemKeys,
+          dismissedAt: now,
+          source: "organization_checkup.hide_findings",
+          hiddenForDays: CHECKUP_DISMISSAL_WINDOW_DAYS,
+        },
+      });
+    }
+    return { itemKeys, dismissedAt: now };
   }
 
   async function findNewestCheckup(companyId: string) {
@@ -1304,5 +1413,7 @@ export function organizationCheckupService(db: Db) {
     reconcileOrganizationCheckups,
     resolveAdviceOwnerAgentId,
     findOpenCheckup,
+    summarizeOpenCheckup,
+    hideFindings,
   };
 }

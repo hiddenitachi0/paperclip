@@ -73,23 +73,30 @@ export function organizationCheckupRoutes(db: Db, opts: { intervalDays?: number 
     },
   );
 
+  /**
+   * What the dashboard card and the sidebar badge read: the open report (if
+   * any) and how many of its suggestions still wait on the operator.
+   */
   router.get("/companies/:companyId/checkups/latest", companyScopeFromParam(db), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
-    const open = await svc.findOpenCheckup(companyId);
-    if (!open) {
-      res.json({ report: null });
+    const summary = await svc.summarizeOpenCheckup(companyId);
+    if (!summary) {
+      res.json({ report: null, suggestionCount: 0, pendingSuggestionCount: 0, suggestionsStatus: "none" });
       return;
     }
     res.json({
       report: {
-        id: open.id,
-        identifier: open.identifier,
-        title: open.title,
-        status: open.status,
-        createdAt: open.createdAt,
+        id: summary.report.id,
+        identifier: summary.report.identifier,
+        title: summary.report.title,
+        status: summary.report.status,
+        createdAt: summary.report.createdAt,
       },
+      suggestionCount: summary.suggestionCount,
+      pendingSuggestionCount: summary.pendingSuggestionCount,
+      suggestionsStatus: summary.suggestionsStatus,
     });
   });
 
