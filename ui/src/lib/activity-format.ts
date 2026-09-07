@@ -192,6 +192,7 @@ const APPROVAL_TYPE_LABELS: Record<string, string> = {
   deploy: "deploy",
   tool_grant: "tool access",
   instructions_change: "instructions change",
+  model_boost: "temporary model boost",
 };
 
 // DUR-283: the activity actions whose `details.decisionNote` is the reason an
