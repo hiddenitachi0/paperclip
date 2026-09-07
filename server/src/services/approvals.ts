@@ -229,6 +229,37 @@ export function approvalService(db: Db) {
       return rows[0] ?? null;
     },
 
+    /**
+     * DUR-3923 item 3: every APPROVED deploy approval for the same project/workspace/commit,
+     * oldest first. The open-approval guard above only sees pending cards; the NOR-1242
+     * pile-up was approved cards nothing had acted on yet, each prompting the agent to file
+     * "another one just in case". routes/approvals.ts cross-checks these against the
+     * runner's status log to tell "still waiting" / "already live" (duplicates) apart from
+     * "failed" (a re-file is legitimate).
+     */
+    listApprovedDeployApprovalsForCommit: async (
+      companyId: string,
+      projectId: string,
+      workspaceId: string,
+      commit: string,
+    ) => {
+      return db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            eq(approvals.type, "request_board_approval"),
+            eq(approvals.status, "approved"),
+            sql`${approvals.payload} ->> 'kind' = 'deploy'`,
+            sql`${approvals.payload} ->> 'projectId' = ${projectId}`,
+            sql`${approvals.payload} ->> 'workspaceId' = ${workspaceId}`,
+            sql`${approvals.payload} ->> 'commit' = ${commit}`,
+          ),
+        )
+        .orderBy(asc(approvals.decidedAt));
+    },
+
     findOpenDeployApproval: async (companyId: string, projectId: string, workspaceId: string) => {
       const rows = await db
         .select()

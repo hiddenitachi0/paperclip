@@ -24,6 +24,12 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
+// `vi.resetModules()` in beforeEach re-transforms the large approvals.ts
+// dependency graph on every test; the first test to hit that cold-start
+// cost sits right at (and on a loaded machine past) the default 5s budget
+// -- same allowance approval-routes-idempotency.test.ts already makes.
+vi.setConfig({ testTimeout: 20_000 });
+
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
   getById: vi.fn(),
@@ -37,6 +43,7 @@ const mockApprovalService = vi.hoisted(() => ({
   findOpenHireApprovalForRole: vi.fn(),
   findOpenMergePrApproval: vi.fn(),
   findOpenDeployApproval: vi.fn(),
+  listApprovedDeployApprovalsForCommit: vi.fn(async () => []),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({

@@ -1750,3 +1750,101 @@ test("main() logs a diagnostic (not silence) when the company list itself fails 
     scenario.cleanup();
   }
 });
+
+// DUR-3923 (NOR-1242): an approved card whose kind only looks like a deploy used to be
+// invisible to main() -- filtered out by the `kind == "deploy"` candidate check, never
+// commented on, never marked processed -- so the operator approved it and nothing at all
+// happened. It must now get exactly one plain-language comment, a structured status-log
+// entry, and be marked processed; and it must never reach process_approval (no deploy).
+test("DUR-3923: an approved deploy_pr card gets a 'nothing acts on this' comment, never a deploy", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-deploy-pr",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-09-05T10:00:00Z",
+        payload: { kind: "deploy_pr", prNumber: 42, repo: "acme/paperclip" },
+      },
+      {
+        id: "aid-real",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-09-05T10:00:05Z",
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+      },
+      {
+        // Not deploy-like at all -- must be left alone entirely.
+        id: "aid-merge",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-09-05T10:00:10Z",
+        payload: { kind: "merge_pr", prNumber: 43, repo: "acme/paperclip" },
+      },
+    ]);
+    scenario.writeJson("approval-issues-aid-deploy-pr.json", [{ id: "issue-77" }]);
+    scenario.writeJson("approval-aid-real.json", {
+      id: "aid-real",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+    });
+    scenario.writeJson("project-proj-1.json", DISABLED_POLICY_PROJECT);
+    const statusPath = path.join(scenario.dir, "status.jsonl");
+
+    const result = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath });
+    assertSuccess(result, "main()");
+
+    const comments = scenario.commentsFor("aid-deploy-pr");
+    assert.equal(comments.length, 1, `expected exactly one comment for the deploy_pr card, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[0], /Nothing happened/);
+    assert.match(comments[0], /kind "deploy_pr"/, "the comment must name the kind that was filed");
+    assert.match(comments[0], /kind "deploy"/, "the comment must say what kind would actually work");
+    assert.doesNotMatch(comments[0], /is live and healthy/, "an unsupported card must never read like a successful deploy");
+    assert.deepEqual(scenario.issueCommentsFor("issue-77"), comments, "the note is mirrored onto the linked issue too");
+
+    const statusLines = readFileSync(statusPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const entry = statusLines.find((e) => e.approvalId === "aid-deploy-pr");
+    assert.ok(entry, "expected a status-log entry for the deploy_pr card");
+    assert.equal(entry.outcome, "unsupported_kind");
+
+    // The real deploy card is still handled exactly as before, and the merge_pr card untouched.
+    assert.equal(scenario.commentsFor("aid-real").length, 1);
+    assert.match(scenario.commentsFor("aid-real")[0], /Deploy failed/);
+    assert.deepEqual(scenario.commentsFor("aid-merge"), []);
+    assert.deepEqual(scenario.processedIds().sort(), ["aid-deploy-pr", "aid-real"]);
+
+    // Idempotent: a second poll cycle says nothing more about it.
+    const second = runMain(scenario, { PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH: statusPath });
+    assertSuccess(second, "main() second cycle");
+    assert.equal(scenario.commentsFor("aid-deploy-pr").length, 1, "already processed -- must not comment again");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("DUR-3923: an unsupported-kind card whose comment cannot be delivered is left unprocessed for the next cycle", () => {
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-rollout",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-09-05T10:00:00Z",
+        payload: { kind: "rollout" },
+      },
+    ]);
+    scenario.setFailCount("aid-rollout", 99);
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main()");
+
+    assert.deepEqual(scenario.commentsFor("aid-rollout"), []);
+    assert.deepEqual(scenario.processedIds(), [], "no delivered comment means not processed (DUR-44 contract)");
+    assert.match(scenario.readLog(), /aid-rollout \(unsupported kind "rollout"\) — no comment could be delivered/);
+  } finally {
+    scenario.cleanup();
+  }
+});

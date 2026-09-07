@@ -14,6 +14,7 @@ import {
   approvalTechnicalReference,
   approvalDeployBranchInfo,
   approvalIsPersonaRequest,
+  approvalUnsupportedDeployKindWarning,
   typeIcon,
   defaultTypeIcon,
   ApprovalPayloadRenderer,
@@ -200,6 +201,7 @@ export function ApprovalDetail() {
   const isPersonaApproval = approvalIsPersonaRequest(payload);
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
   const branchInfo = approvalDeployBranchInfo(payload);
+  const unsupportedDeployKindWarning = approvalUnsupportedDeployKindWarning(approval.type, payload);
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
   const primaryLinkedIssue = linkedIssues?.[0] ?? null;
   const resolvedCta =
@@ -274,6 +276,11 @@ export function ApprovalDetail() {
                   {branchInfo.mismatch
                     ? `Not on ${branchInfo.deployBranch} — this commit is on ${branchInfo.sourceBranch}`
                     : `Deploys from ${branchInfo.sourceBranch}`}
+                </p>
+              )}
+              {unsupportedDeployKindWarning && (
+                <p className="mt-1 inline-flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:text-red-400">
+                  {unsupportedDeployKindWarning}
                 </p>
               )}
             </div>
@@ -371,7 +378,8 @@ export function ApprovalDetail() {
                 size="sm"
                 className="bg-green-700 hover:bg-green-600 text-white"
                 onClick={() => approveMutation.mutate()}
-                disabled={approveMutation.isPending}
+                disabled={approveMutation.isPending || Boolean(unsupportedDeployKindWarning)}
+                title={unsupportedDeployKindWarning ?? undefined}
               >
                 Approve
               </Button>

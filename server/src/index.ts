@@ -46,6 +46,7 @@ import {
   heartbeatService,
   mergeDeployVisibilityService,
   deployCarriedIssuesService,
+  deployApprovalFeedbackService,
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
@@ -889,6 +890,7 @@ export async function startServer(): Promise<StartedServer> {
     const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
+    const deployApprovalFeedback = deployApprovalFeedbackService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
@@ -1066,12 +1068,33 @@ export async function startServer(): Promise<StartedServer> {
         () => mergeDeployVisibility.tick(new Date()),
       )
         .then((result) => {
-          if (result.flagged > 0) {
+          if (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0) {
             logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
           }
         })
         .catch((err) => {
           logger.error({ err }, "merge-deploy visibility tick failed");
+        });
+
+      // DUR-3923: an approved deploy card the runner never picks up (wrong kind, wrong
+      // workspace, runner stopped) must get a plain-language note instead of silence
+      // (see deploy-approval-feedback.ts). Bypass scope for the same reason as above.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: deployApprovalFeedback",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:deployApprovalFeedback",
+        },
+        () => deployApprovalFeedback.tick(new Date()),
+      )
+        .then((result) => {
+          if (result.flagged > 0) {
+            logger.info({ ...result }, "deploy-approval feedback tick flagged approved deploys nothing acted on");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "deploy-approval feedback tick failed");
         });
 
       // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
