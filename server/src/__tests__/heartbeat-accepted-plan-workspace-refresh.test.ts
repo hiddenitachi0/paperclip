@@ -32,6 +32,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { deleteTablesAfterLateWritesDrain } from "./helpers/late-write-teardown.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
@@ -113,33 +114,37 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
       const root = tempRoots.pop();
       if (root) await rm(root, { recursive: true, force: true }).catch(() => undefined);
     }
-    await db.delete(issuePlanDecompositions);
-    await db.delete(issueDocuments);
-    await db.delete(documentRevisions);
-    await db.delete(documents);
-    await db.delete(agentTaskSessions);
-    await db.delete(executionWorkspaces);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await db.delete(activityLog);
-      await db.delete(heartbeatRunEvents);
-      try {
-        await db.delete(heartbeatRuns);
-        break;
-      } catch (error) {
-        if (attempt === 4) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    }
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(projectWorkspaces);
-    await db.delete(projects);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(agents);
-    await db.delete(workspaceOperations);
-    await db.delete(companySkills);
-    await db.delete(companies);
+    // DUR-3925: the wakeup()-driven finalization keeps writing after the
+    // test's waitFor(status === succeeded) has returned -- the continuation
+    // summary refresh lands issue_documents/document_revisions rows, and
+    // ensureRuntimeState/agent_task_sessions land rows against the agent. The
+    // delete order below is already correct; what tripped
+    // issue_documents_company_id_companies_id_fk on `delete from companies`
+    // was a late row arriving between the child delete and the parent delete.
+    // The helper re-drains and retries instead of hand-rolling that loop for
+    // one table pair at a time (the previous heartbeat_runs-only loop here
+    // was the same fix for a different pair).
+    await deleteTablesAfterLateWritesDrain(db, [
+      issuePlanDecompositions,
+      issueDocuments,
+      documentRevisions,
+      documents,
+      agentTaskSessions,
+      executionWorkspaces,
+      activityLog,
+      heartbeatRunEvents,
+      heartbeatRuns,
+      issueComments,
+      issues,
+      projectWorkspaces,
+      projects,
+      agentWakeupRequests,
+      agentRuntimeState,
+      agents,
+      workspaceOperations,
+      companySkills,
+      companies,
+    ]);
   });
 
   afterAll(async () => {

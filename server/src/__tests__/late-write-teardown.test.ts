@@ -5,7 +5,13 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { deleteAfterLateWritesDrain } from "./helpers/late-write-teardown.js";
+import type { PgTable } from "drizzle-orm/pg-core";
+import {
+  deleteAfterLateWritesDrain,
+  deleteTablesAfterLateWritesDrain,
+  isLateWriteTeardownError,
+  type TeardownDeleter,
+} from "./helpers/late-write-teardown.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -156,5 +162,110 @@ describeEmbeddedPostgres("deleteAfterLateWritesDrain", () => {
     );
 
     await cleanup();
+  });
+
+  describe("deleteTablesAfterLateWritesDrain (DUR-3925)", () => {
+    const teardownOrder = [agentRuntimeState, agents, companies] as const;
+
+    /**
+     * A db whose `delete` behaves exactly like the real one, except that it
+     * fires `onDelete(table)` after each delete resolves -- the hook stands in
+     * for the fire-and-forget continuation that re-inserts a child row between
+     * the child drain and the parent delete.
+     */
+    function dbWithLateWriter(onDelete: (table: PgTable) => Promise<void>): TeardownDeleter & { deletes: PgTable[] } {
+      const deletes: PgTable[] = [];
+      return {
+        deletes,
+        delete: (table) => {
+          deletes.push(table);
+          return db.delete(table).then(async (result) => {
+            await onDelete(table);
+            return result;
+          });
+        },
+      };
+    }
+
+    it("recognises the two retryable teardown errors and nothing else", async () => {
+      const { insertRuntimeState } = await seedAgentWithRuntimeState();
+      await db.delete(agentRuntimeState);
+      await insertRuntimeState();
+      let fkError: unknown = null;
+      try {
+        await db.delete(agents);
+      } catch (error) {
+        fkError = error;
+      }
+      expect(fkError).not.toBeNull();
+      expect(isLateWriteTeardownError(fkError)).toBe(true);
+
+      expect(isLateWriteTeardownError({ code: "40P01" })).toBe(true);
+      expect(isLateWriteTeardownError(new Error("write CONNECTION_ENDED"))).toBe(false);
+      expect(isLateWriteTeardownError({ code: "42601" })).toBe(false);
+      expect(isLateWriteTeardownError(null)).toBe(false);
+
+      await cleanup();
+    });
+
+    it("re-drains the earlier tables and retries when a late child write trips the parent delete", async () => {
+      const { insertRuntimeState } = await seedAgentWithRuntimeState();
+
+      let lateWriteFired = false;
+      const spy = dbWithLateWriter(async (table) => {
+        if (table === agentRuntimeState && !lateWriteFired) {
+          lateWriteFired = true;
+          await insertRuntimeState();
+        }
+      });
+
+      await deleteTablesAfterLateWritesDrain(spy, teardownOrder, { delayMs: 1 });
+
+      expect(lateWriteFired).toBe(true);
+      // agentRuntimeState, agents (23503), then agentRuntimeState again, agents, companies.
+      expect(spy.deletes).toEqual([agentRuntimeState, agents, agentRuntimeState, agents, companies]);
+      expect(await db.select().from(agents)).toHaveLength(0);
+      expect(await db.select().from(agentRuntimeState)).toHaveLength(0);
+      expect(await db.select().from(companies)).toHaveLength(0);
+    });
+
+    it("issues exactly one delete per table on the happy path", async () => {
+      await seedAgentWithRuntimeState();
+      const spy = dbWithLateWriter(async () => {});
+
+      await deleteTablesAfterLateWritesDrain(spy, teardownOrder);
+
+      expect(spy.deletes).toEqual([agentRuntimeState, agents, companies]);
+    });
+
+    it("rethrows the last FK error when the late writer never stops", async () => {
+      const { insertRuntimeState } = await seedAgentWithRuntimeState();
+      const spy = dbWithLateWriter(async (table) => {
+        if (table === agentRuntimeState) await insertRuntimeState();
+      });
+
+      await expectAgentsDeleteFkViolation(() =>
+        deleteTablesAfterLateWritesDrain(spy, teardownOrder, { attempts: 3, delayMs: 1 }),
+      );
+      // Three attempts on `agents`, each preceded by a drain of agent_runtime_state.
+      expect(spy.deletes.filter((table) => table === agents)).toHaveLength(3);
+
+      await cleanup();
+    });
+
+    it("rethrows a non-retryable error immediately instead of looping on it", async () => {
+      let calls = 0;
+      const broken: TeardownDeleter = {
+        delete: () => {
+          calls += 1;
+          return Promise.reject(new Error("write CONNECTION_ENDED 127.0.0.1:5432"));
+        },
+      };
+
+      await expect(
+        deleteTablesAfterLateWritesDrain(broken, teardownOrder, { attempts: 5, delayMs: 1 }),
+      ).rejects.toThrow("CONNECTION_ENDED");
+      expect(calls).toBe(1);
+    });
   });
 });
