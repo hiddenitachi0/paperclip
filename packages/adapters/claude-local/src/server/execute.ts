@@ -105,6 +105,73 @@ interface ClaudeRuntimeConfig {
   extraArgs: string[];
 }
 
+/**
+ * DUR-3943: assembles the stdin prompt for one Claude CLI attempt. Extracted
+ * (and exported) so the prompt-size before/after can be measured directly
+ * in tests without spawning anything.
+ *
+ * On a resumed session:
+ * - the bootstrap prompt is skipped (the session already ran it);
+ * - the heartbeat template is skipped when a wake payload is present (the
+ *   resume delta carries the execution contract instead);
+ * - the task block is sent in its short form when the session already
+ *   received the full block for the same issue/ancestor fingerprint.
+ * On a fresh session with the default heartbeat template, the wake payload
+ * omits its one-paragraph execution contract because the template that
+ * follows it spells the same contract out in full.
+ */
+export function buildClaudePromptForAttempt(input: {
+  resumeSessionId: string | null;
+  bootstrapPromptTemplate: string;
+  promptTemplate: string;
+  templateData: Record<string, unknown>;
+  wakePayload: unknown;
+  sessionHandoffNote: string;
+  taskContextNote: string;
+  taskContextResumeNote: string;
+  taskContextFingerprint: string | null;
+  sessionTaskContextFingerprint: string;
+  personaChars: number;
+}) {
+  const resumed = Boolean(input.resumeSessionId);
+  const renderedBootstrapPrompt =
+    !resumed && input.bootstrapPromptTemplate.trim().length > 0
+      ? renderTemplate(input.bootstrapPromptTemplate, input.templateData).trim()
+      : "";
+  const wakePrompt = renderPaperclipWakePrompt(input.wakePayload, {
+    resumedSession: resumed,
+    omitExecutionContract: !resumed && input.promptTemplate === DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  });
+  const shouldUseResumeDeltaPrompt = resumed && wakePrompt.length > 0;
+  const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(input.promptTemplate, input.templateData);
+  const taskContextUnchanged =
+    resumed &&
+    input.taskContextFingerprint != null &&
+    input.taskContextFingerprint.length > 0 &&
+    input.sessionTaskContextFingerprint === input.taskContextFingerprint &&
+    input.taskContextResumeNote.length > 0;
+  const taskContextNote = taskContextUnchanged ? input.taskContextResumeNote : input.taskContextNote;
+  const prompt = joinPromptSections([
+    renderedBootstrapPrompt,
+    wakePrompt,
+    input.sessionHandoffNote,
+    taskContextNote,
+    renderedPrompt,
+  ]);
+  const promptMetrics = {
+    promptChars: prompt.length,
+    bootstrapPromptChars: renderedBootstrapPrompt.length,
+    wakePromptChars: wakePrompt.length,
+    sessionHandoffChars: input.sessionHandoffNote.length,
+    taskContextChars: taskContextNote.length,
+    taskContextFullChars: input.taskContextNote.length,
+    taskContextUnchanged: taskContextUnchanged ? 1 : 0,
+    heartbeatPromptChars: renderedPrompt.length,
+    personaChars: input.personaChars,
+  };
+  return { prompt, promptMetrics, taskContextUnchanged };
+}
+
 export function claudeSessionCwdMatchesExecutionTarget(input: {
   runtimeSessionCwd: string;
   effectiveExecutionCwd: string;
@@ -435,6 +502,13 @@ export function resolveClaudeAdapterResult(
     timeoutSec: number;
     cwd: string;
     promptBundleKey: string;
+    /**
+     * DUR-3943: fingerprint of the task block this run sent (full or, when
+     * it matched the saved one, the short form). Saved with the session so
+     * the next resumed run can tell whether the session already holds the
+     * current issue description.
+     */
+    taskContextFingerprint?: string | null;
     executionTargetIsRemote: boolean;
     remoteExecutionSessionIdentity?: Record<string, unknown> | null;
     workspaceId?: string | null;
@@ -597,6 +671,7 @@ export function resolveClaudeAdapterResult(
       ...(env.workspaceId ? { workspaceId: env.workspaceId } : {}),
       ...(env.workspaceRepoUrl ? { repoUrl: env.workspaceRepoUrl } : {}),
       ...(env.workspaceRepoRef ? { repoRef: env.workspaceRepoRef } : {}),
+      ...(env.taskContextFingerprint ? { taskContextFingerprint: env.taskContextFingerprint } : {}),
     } as Record<string, unknown>)
     : null;
   const errorMessage = failed
@@ -1102,31 +1177,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     run: { id: runId, source: "on_demand" },
     context,
   };
-  const renderedBootstrapPrompt =
-    !sessionId && bootstrapPromptTemplate.trim().length > 0
-      ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
-      : "";
-  const wakePrompt = renderPaperclipWakePrompt(context.paperclipWake, { resumedSession: Boolean(sessionId) });
-  const shouldUseResumeDeltaPrompt = Boolean(sessionId) && wakePrompt.length > 0;
-  const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(promptTemplate, templateData);
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
   const taskContextNote = asString(context.paperclipTaskMarkdown, "").trim();
-  const prompt = joinPromptSections([
-    renderedBootstrapPrompt,
-    wakePrompt,
-    sessionHandoffNote,
-    taskContextNote,
-    renderedPrompt,
-  ]);
-  const promptMetrics = {
-    promptChars: prompt.length,
-    bootstrapPromptChars: renderedBootstrapPrompt.length,
-    wakePromptChars: wakePrompt.length,
-    sessionHandoffChars: sessionHandoffNote.length,
-    taskContextChars: taskContextNote.length,
-    heartbeatPromptChars: renderedPrompt.length,
-    personaChars,
-  };
+  const taskContextResumeNote = asString(context.paperclipTaskMarkdownResume, "").trim();
+  const taskContextFingerprint = asString(context.paperclipTaskContextFingerprint, "").trim() || null;
+  const runtimeTaskContextFingerprint = asString(runtimeSessionParams.taskContextFingerprint, "").trim();
+  // DUR-3943: the prompt depends on whether this attempt actually resumes a
+  // session, so it is assembled per attempt (a fresh retry after a failed
+  // --resume must get the full fresh-session prompt, not the resume delta).
+  const buildPromptForAttempt = (resumeSessionId: string | null) =>
+    buildClaudePromptForAttempt({
+      resumeSessionId,
+      bootstrapPromptTemplate,
+      promptTemplate,
+      templateData,
+      wakePayload: context.paperclipWake,
+      sessionHandoffNote,
+      taskContextNote,
+      taskContextResumeNote,
+      taskContextFingerprint,
+      sessionTaskContextFingerprint: runtimeTaskContextFingerprint,
+      personaChars,
+    });
 
   const buildClaudeArgs = (
     resumeSessionId: string | null,
@@ -1167,9 +1239,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const runAttempt = async (resumeSessionId: string | null) => {
     const attemptInstructionsFilePath = resumeSessionId ? undefined : effectiveInstructionsFilePath;
     const args = buildClaudeArgs(resumeSessionId, attemptInstructionsFilePath);
+    const { prompt, promptMetrics, taskContextUnchanged } = buildPromptForAttempt(resumeSessionId);
     const commandNotes: string[] = [];
     if (!resumeSessionId) {
       commandNotes.push(`Using stable Claude prompt bundle ${promptBundle.bundleKey}.`);
+    }
+    if (taskContextUnchanged) {
+      commandNotes.push(
+        `Issue description and parent context are unchanged since the last run in this session; sent the short task note (${promptMetrics.taskContextChars} characters instead of ${promptMetrics.taskContextFullChars}).`,
+      );
     }
     if (dangerouslySkipPermissions && executionTargetIsRemote) {
       commandNotes.push(
@@ -1245,6 +1323,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       cwd,
       promptBundleKey: promptBundle.bundleKey,
+      taskContextFingerprint,
       executionTargetIsRemote,
       remoteExecutionSessionIdentity: executionTargetIsRemote
         ? adapterExecutionTargetSessionIdentity(runtimeExecutionTarget)
