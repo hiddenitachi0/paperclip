@@ -2740,6 +2740,15 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/projects/{projectId}/deploy-history",
+  tags: ["deploy-runner"],
+  summary: "The current and previously live versions of a project, per the deploy runner's log",
+  request: { params: z.object({ companyId: z.string(), projectId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
 // ─── Dashboard ───────────────────────────────────────────────────────────────
 
 registry.registerPath({
