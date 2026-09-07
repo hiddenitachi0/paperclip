@@ -47,6 +47,10 @@ describe("approval validators", () => {
     expect(() => deployRequestPayloadSchema.parse({ ...payload, extra: "nope" })).toThrow();
     const { title: _title, ...missingTitle } = payload;
     expect(() => deployRequestPayloadSchema.parse(missingTitle)).toThrow();
+    // DUR-3952: the runner's rollback opt-in is a real field now, not an
+    // "unrecognized key" the strict parse throws on.
+    expect(deployRequestPayloadSchema.parse({ ...payload, allowBackwardDeploy: true }).allowBackwardDeploy).toBe(true);
+    expect(() => deployRequestPayloadSchema.parse({ ...payload, allowBackwardDeploy: "yes" })).toThrow();
   });
 
   it("accepts acknowledgedDuplicateOfApprovalId on the deploy payload (DUR-138)", () => {

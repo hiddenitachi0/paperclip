@@ -139,6 +139,17 @@ export function approvalDeployBranchInfo(payload?: Record<string, unknown> | nul
 }
 
 /**
+ * DUR-3952 (DUR-137 follow-up): a deploy approval filed with
+ * `allowBackwardDeploy` is an intentional rollback -- approving it moves
+ * production back to an older commit and discards whatever shipped since.
+ * That must never look like an ordinary deploy card, so every surface that
+ * renders a deploy approval shows it as a rollback.
+ */
+export function approvalIsRollbackDeploy(payload?: Record<string, unknown> | null): boolean {
+  return firstNonEmptyString(payload?.kind) === "deploy" && payload?.allowBackwardDeploy === true;
+}
+
+/**
  * Key used to detect two pending approvals that target the same underlying
  * thing — same repo+PR for a merge, same commit for a deploy — so the Now
  * view can flag them as duplicates of each other (DUR-156). Mirrors the

@@ -147,6 +147,25 @@ async function assertDeployRequestProjectExists(
   }
 }
 
+/**
+ * DUR-3952 (DUR-137 follow-up): `payload.allowBackwardDeploy` tells the
+ * deploy runner that moving production back to an older commit is intended
+ * -- a rollback -- rather than a stale approval being processed late. That
+ * is the board's call, not an agent's: an agent may still file the deploy,
+ * it just cannot pre-confirm the rollback on the operator's behalf. Board
+ * actors (a person signed in, or a board API key) are the only ones allowed
+ * to set it; anyone else gets a plain-language 403.
+ */
+function assertBackwardDeployOptInIsBoardFiled(req: Request, payload: { allowBackwardDeploy?: boolean }) {
+  if (payload.allowBackwardDeploy !== true) return;
+  if (req.actor.type === "board") return;
+  throw forbidden(
+    "Only the board can mark a deploy as an intentional rollback (allowBackwardDeploy). " +
+      "File the deploy without that flag; if it really should move production back to an older commit, " +
+      "a person can re-file it as a rollback from the board.",
+  );
+}
+
 function parseGitHubRepoFromUrl(repoUrl: string | null | undefined): { owner: string; name: string } | null {
   if (!repoUrl) return null;
   try {
@@ -1040,6 +1059,7 @@ export function approvalRoutes(
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
       const parsedDeployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
+      assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
       // DUR-3926: stamp the project's real deploy workspace over whatever the
       // filer supplied -- the runner silently refuses any other workspace.
@@ -1501,6 +1521,7 @@ export function approvalRoutes(
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
       const parsedDeployPayload = deployRequestPayloadSchema.parse(req.body.payload);
+      assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, existing.companyId, parsedDeployPayload);
       // DUR-3926: same deploy-workspace stamp as the filing path above.
       const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
