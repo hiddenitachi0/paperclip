@@ -143,6 +143,7 @@ import {
   workspaceFileResourceQuerySchema,
   sendLaneAMessageSchema,
   saveInstanceClaudeAuthTokenSchema,
+  signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
 } from "@paperclipai/shared";
 
@@ -711,6 +712,10 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   "GET /api/instance/claude-auth/sign-in/{sessionId}",
   "POST /api/instance/claude-auth/sign-in/{sessionId}/code",
   "POST /api/instance/claude-auth/sign-in/{sessionId}/cancel",
+  "GET /api/instance/security",
+  "POST /api/instance/security/check",
+  "POST /api/instance/security/sign-out-everywhere",
+  "DELETE /api/instance/security/sessions/{sessionId}",
 ]);
 
 const CREATED_OPERATIONS = new Set([
@@ -2955,6 +2960,23 @@ for (const route of [
   ["get", "/api/instance/claude-auth/sign-in/{sessionId}", "Poll an interactive Claude sign-in", undefined],
   ["post", "/api/instance/claude-auth/sign-in/{sessionId}/code", "Hand the code from claude.com to the interactive sign-in", submitInstanceClaudeSignInCodeSchema],
   ["post", "/api/instance/claude-auth/sign-in/{sessionId}/cancel", "Cancel an interactive Claude sign-in", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["instance"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Security section of Instance settings (admin auth hardening) ───────────
+// Never returns a session token, a password hash, or the signed admin record.
+for (const route of [
+  ["get", "/api/instance/security", "List instance admins, open sessions (device, address, last seen) and the last admin-record check", undefined],
+  ["post", "/api/instance/security/check", "Compare the live admin set against the signed record right now and report any change made outside the app", undefined],
+  ["post", "/api/instance/security/sign-out-everywhere", "End the caller's sessions on every device, or everyone's sessions on the server", signOutEverywhereSchema],
+  ["delete", "/api/instance/security/sessions/{sessionId}", "End one open session so that device has to sign in again", undefined],
 ] as const) {
   registerCurrentRoute({
     method: route[0],

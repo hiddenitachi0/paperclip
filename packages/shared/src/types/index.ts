@@ -626,3 +626,21 @@ export type {
   InstanceClaudeSignInSession,
   InstanceClaudeSignInStatus,
 } from "./instance-claude-auth.js";
+export {
+  ADMIN_AUTH_CHECK_STATUSES,
+  ADMIN_AUTH_CHECK_TRIGGERS,
+  SIGN_OUT_EVERYWHERE_SCOPES,
+  describeUserAgent,
+} from "./instance-security.js";
+export type {
+  AdminAuthCheckResult,
+  AdminAuthCheckStatus,
+  AdminAuthCheckTrigger,
+  AdminAuthLastCheck,
+  InstanceSecurityAdmin,
+  InstanceSecurityOverview,
+  InstanceSecuritySession,
+  RevokeSessionResult,
+  SignOutEverywhereResult,
+  SignOutEverywhereScope,
+} from "./instance-security.js";
