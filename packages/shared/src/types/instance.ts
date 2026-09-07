@@ -134,6 +134,8 @@ export interface InstanceExperimentalSettings {
   autoRestartDevServerWhenIdle: boolean;
   enableIssueGraphLivenessAutoRecovery: boolean;
   issueGraphLivenessAutoRecoveryLookbackHours: number;
+  /** DUR-62: run the weekly check-up for every active company on a schedule. */
+  enableWeeklyCheckup: boolean;
 }
 
 export interface InstanceSettings {

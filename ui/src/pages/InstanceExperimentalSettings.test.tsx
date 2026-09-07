@@ -46,6 +46,8 @@ const TASK_WATCHDOGS_TOGGLE_SELECTOR =
   'button[aria-label="Toggle task watchdogs experimental setting"]';
 const SERVER_INFO_TOGGLE_SELECTOR =
   'button[aria-label="Toggle server info debug view experimental setting"]';
+const WEEKLY_CHECKUP_TOGGLE_SELECTOR =
+  'button[aria-label="Toggle weekly check-up experimental setting"]';
 
 function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
   return {
@@ -63,6 +65,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     autoRestartDevServerWhenIdle: false,
     enableIssueGraphLivenessAutoRecovery: false,
     issueGraphLivenessAutoRecoveryLookbackHours: 24,
+    enableWeeklyCheckup: false,
   };
 }
 
@@ -225,5 +228,35 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
       enableServerInfoDebugView: true,
     });
     expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  });
+
+  // DUR-62: the weekly check-up is off until the operator turns it on here.
+  it("renders and patches the Weekly check-up toggle, off by default", async () => {
+    await renderPage();
+
+    expect(container.textContent).toContain("Weekly check-up");
+    expect(container.textContent).toContain("The check-up itself never changes anything");
+
+    const toggle = container.querySelector<HTMLButtonElement>(WEEKLY_CHECKUP_TOGGLE_SELECTOR);
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      toggle?.click();
+    });
+    await flushReact();
+
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
+      enableWeeklyCheckup: true,
+    });
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+
+    await act(async () => {
+      toggle?.click();
+    });
+    await flushReact();
+
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({
+      enableWeeklyCheckup: false,
+    });
   });
 });

@@ -1324,11 +1324,14 @@ export async function startServer(): Promise<StartedServer> {
 
     // DUR-62: the weekly check-up. Its own, much slower interval: the tick
     // only asks "is any company due?", and a company is due once per
-    // weeklyCheckupIntervalDays. Off by default -- ships dormant until
-    // PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true. Dry-run mode logs what it would
-    // have reported and writes nothing. Deliberately a separate bypass scope
-    // from the recovery pipeline above: it reads across every company and
-    // writes only its own report issue, never runs or wake-ups.
+    // weeklyCheckupIntervalDays. Off by default. Two switches turn it on:
+    // PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true (env, fixed at boot) or the
+    // "Weekly check-up" toggle under Settings > Instance > Experimental,
+    // which is read fresh on every tick so flipping it needs no restart.
+    // Dry-run mode logs what it would have reported and writes nothing.
+    // Deliberately a separate bypass scope from the recovery pipeline above:
+    // it reads across every company and writes only its own report issue,
+    // never runs or wake-ups.
     if (config.weeklyCheckupEnabled) {
       logger.info(
         {
@@ -1337,39 +1340,49 @@ export async function startServer(): Promise<StartedServer> {
           dryRun: config.weeklyCheckupDryRun,
           companyIds: config.weeklyCheckupCompanyIds.length > 0 ? config.weeklyCheckupCompanyIds : "all active companies",
         },
-        "Weekly check-up enabled",
+        "Weekly check-up enabled by environment",
       );
-      const tickWeeklyCheckup = () => {
-        if (heartbeatDrainState?.isDraining) return;
-        void runInCompanyScopeBypass(
-          bypassDb,
-          {
-            reason: "heartbeat scheduler tick: weekly organization check-up",
-            actorType: "scheduler",
-            route: "heartbeat-scheduler:organizationCheckups",
-          },
-          () =>
-            organizationCheckups.reconcileOrganizationCheckups({
-              now: new Date(),
-              intervalDays: config.weeklyCheckupIntervalDays,
-              dryRun: config.weeklyCheckupDryRun,
-              companyIds: config.weeklyCheckupCompanyIds,
-            }),
-        )
-          .then((result) => {
-            if (result.created > 0 || result.failed > 0 || result.dryRun > 0) {
-              logger.warn({ ...result }, "weekly check-up tick wrote or previewed reports");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "weekly check-up tick failed");
-          });
-      };
-      // First tick a couple of minutes after boot so startup recovery has
-      // settled and the first report does not describe a restart in progress.
-      setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
-      setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
     }
+    const weeklyCheckupSettings = instanceSettingsService(schedulerDb as any);
+    let weeklyCheckupWasOn = config.weeklyCheckupEnabled;
+    const tickWeeklyCheckup = () => {
+      if (heartbeatDrainState?.isDraining) return;
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: weekly organization check-up",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:organizationCheckups",
+        },
+        async () => {
+          const enabled =
+            config.weeklyCheckupEnabled || (await weeklyCheckupSettings.getExperimental()).enableWeeklyCheckup;
+          if (enabled !== weeklyCheckupWasOn) {
+            logger.info({ enabled }, enabled ? "Weekly check-up switched on in instance settings" : "Weekly check-up switched off");
+            weeklyCheckupWasOn = enabled;
+          }
+          if (!enabled) return null;
+          return organizationCheckups.reconcileOrganizationCheckups({
+            now: new Date(),
+            intervalDays: config.weeklyCheckupIntervalDays,
+            dryRun: config.weeklyCheckupDryRun,
+            companyIds: config.weeklyCheckupCompanyIds,
+          });
+        },
+      )
+        .then((result) => {
+          if (result && (result.created > 0 || result.failed > 0 || result.dryRun > 0)) {
+            logger.warn({ ...result }, "weekly check-up tick wrote or previewed reports");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "weekly check-up tick failed");
+        });
+    };
+    // First tick a couple of minutes after boot so startup recovery has
+    // settled and the first report does not describe a restart in progress.
+    setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
+    setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
   }
   
   // DUR-352 (DUR-277 Wave 6): deliberately stays bypass-scoped forever, not a

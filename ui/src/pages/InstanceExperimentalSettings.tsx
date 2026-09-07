@@ -248,6 +248,7 @@ export function InstanceExperimentalSettings() {
   const autoRestartDevServerWhenIdle = experimentalQuery.data?.autoRestartDevServerWhenIdle === true;
   const enableIssueGraphLivenessAutoRecovery =
     experimentalQuery.data?.enableIssueGraphLivenessAutoRecovery === true;
+  const enableWeeklyCheckup = experimentalQuery.data?.enableWeeklyCheckup === true;
   const lookbackHours =
     experimentalQuery.data?.issueGraphLivenessAutoRecoveryLookbackHours ?? 24;
   const parsedLookbackHours = Number.parseInt(lookbackHoursDraft, 10);
@@ -480,6 +481,29 @@ export function InstanceExperimentalSettings() {
             }
             disabled={toggleMutation.isPending}
             aria-label="Toggle task watchdogs experimental setting"
+          />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Weekly check-up</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Once a week, look over every company and write one short report: what looks wrong and what to do about it.
+              Each suggestion is a tick-box you can accept. The check-up itself never changes anything, and you can run
+              one by hand from the dashboard whether this is on or off.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={enableWeeklyCheckup}
+            onCheckedChange={(checked) =>
+              toggleMutation.mutate({
+                enableWeeklyCheckup: checked,
+              })
+            }
+            disabled={toggleMutation.isPending}
+            aria-label="Toggle weekly check-up experimental setting"
           />
         </div>
       </section>
