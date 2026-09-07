@@ -652,6 +652,13 @@ export type EscalationGrantExpiredReason = (typeof ESCALATION_GRANT_EXPIRED_REAS
 export const ESCALATION_GRANT_DEFAULT_DURATION_MINUTES = 240;
 export const ESCALATION_GRANT_MAX_DURATION_MINUTES = 1440;
 
+// Boss-first routing of a model/effort boost ask (agent -> boss -> operator).
+// The ask waits for the requester's boss this long; if the boss has not
+// answered by then it goes on to the operator on its own.
+export const MODEL_BOOST_BOSS_REVIEW_STATUSES = ["awaiting_boss", "forwarded", "declined", "timed_out"] as const;
+export type ModelBoostBossReviewStatus = (typeof MODEL_BOOST_BOSS_REVIEW_STATUSES)[number];
+export const MODEL_BOOST_BOSS_REVIEW_TIMEOUT_MINUTES = 30;
+
 export const SECRET_PROVIDERS = [
   "local_encrypted",
   "aws_secrets_manager",
