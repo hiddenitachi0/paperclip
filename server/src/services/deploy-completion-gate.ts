@@ -4,6 +4,7 @@ import { resolveProjectDeployBranches, type ProjectDeployBranches } from "./depl
 import { resolveFallbackDeployBranches } from "./deploy-branch-fallback.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "./deploy-runner-status.js";
+import { logger } from "../middleware/logger.js";
 
 /**
  * DUR-99: "done" must mean running, not merely merged. DUR-98's Class C evidence was four
@@ -208,7 +209,22 @@ export async function evaluateDeployCompletionDoneGate(
   if (input.currentStatus === "done") return null;
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
 
-  const linked = await issueApprovalService(input.db).listApprovalsForIssue(input.issue.id);
+  // Resolve the project first, as before DUR-291. The linked-approvals lookup below is a
+  // join; for an issue that is NOT attached to a project (the DUR-291 fallback case) a
+  // failing lookup must never block marking the issue done -- it falls back to the
+  // pre-DUR-291 behaviour (no check) with a log line, instead of a 500 on the transition.
+  let branches: ProjectDeployBranches | null = await resolveProjectDeployBranches(input.db, [input.issue.id]);
+  let linked: Awaited<ReturnType<ReturnType<typeof issueApprovalService>["listApprovalsForIssue"]>>;
+  try {
+    linked = await issueApprovalService(input.db).listApprovalsForIssue(input.issue.id);
+  } catch (err) {
+    if (branches?.deployBranch) throw err;
+    logger.warn(
+      { err, issueId: input.issue.id, companyId: input.issue.companyId },
+      "deploy-completion gate: linked-approvals lookup failed for an issue with no project; skipping the check (DUR-291)",
+    );
+    return null;
+  }
 
   // Every approved merge this issue was genuinely filed for, regardless of base branch --
   // the base is matched against the deploy branch below, once we know what that is.
@@ -230,7 +246,6 @@ export async function evaluateDeployCompletionDoneGate(
   // "do not block issues that never touch a deploy branch" applies, whatever its project.
   if (ownMergeApprovals.length === 0) return null;
 
-  let branches: ProjectDeployBranches | null = await resolveProjectDeployBranches(input.db, [input.issue.id]);
   if (!branches?.deployBranch) {
     // DUR-291: an issue with no project used to fall out here silently, so a merge into the
     // deploy branch could reach `done` with no deploy ever confirmed (DUR-286 did exactly
