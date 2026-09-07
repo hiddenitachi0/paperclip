@@ -26,7 +26,7 @@ See [the cutover runbook](../rls-cutover-runbook.md) for the order to change the
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_BYPASS_URL` | `DATABASE_URL` | Connection string for the pool that background schedulers and instance-wide operations use. Point it at a login that holds `paperclip_app_bypass` (`paperclip_app_bypass_login` from migration 0160). When it differs from `DATABASE_URL`, every cross-company operation in the app is served from this pool. |
+| `DATABASE_BYPASS_URL` | `DATABASE_URL` | Connection string for the pool that background schedulers and instance-wide operations use. Point it at a login that holds `paperclip_app_bypass` (`paperclip_app_bypass_login` from migration 0161). When it differs from `DATABASE_URL`, every cross-company operation in the app is served from this pool. |
 | `DATABASE_MIGRATION_URL` | `DATABASE_URL` | Connection string used to run schema migrations and database backups. Must be the table owner. Required once `DATABASE_URL` is no longer the owner. |
 | `PAPERCLIP_DB_ROLE_PREFLIGHT` | `warn` | `strict` makes the server refuse to start when the database logins cannot work together (e.g. a scoped `DATABASE_URL` with no bypass pool). The default only logs the problem. |
 | `PAPERCLIP_LOG_UNSCOPED_TENANT_ACCESS` | (off) | `1`/`true` logs, once per table, every query that reaches a company-scoped table without declaring a company. Diagnostic for the runbook's gate check; costs a little per query, so switch it off afterwards. |
