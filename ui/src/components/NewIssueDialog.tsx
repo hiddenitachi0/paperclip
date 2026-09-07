@@ -1,6 +1,12 @@
 import { memo, useState, useEffect, useRef, useCallback, useMemo, type ChangeEvent, type CSSProperties, type DragEvent, type RefObject } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { MODEL_PROFILE_KEYS, type IssueWorkMode, type ModelProfileKey } from "@paperclipai/shared";
+import {
+  MODEL_PROFILE_KEYS,
+  getThinkingEffortKey,
+  getThinkingEffortOptions,
+  type IssueWorkMode,
+  type ModelProfileKey,
+} from "@paperclipai/shared";
 import { pickTextColorForSolidBg } from "@/lib/color-contrast";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
@@ -49,8 +55,6 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
-  ChevronRight,
-  ChevronDown,
   Check,
   CircleDot,
   Minus,
@@ -130,33 +134,10 @@ import {
 
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 
-const ISSUE_THINKING_EFFORT_OPTIONS = {
-  claude_local: [
-    { value: "", label: "Default" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "X-High" },
-    { value: "max", label: "Max" },
-  ],
-  codex_local: [
-    { value: "", label: "Default" },
-    { value: "minimal", label: "Minimal" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "X-High" },
-  ],
-  opencode_local: [
-    { value: "", label: "Default" },
-    { value: "minimal", label: "Minimal" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "X-High" },
-    { value: "max", label: "Max" },
-  ],
-} as const;
+/** Per-task effort choices come from the one shared per-adapter list; "" = the agent's own setting. */
+function issueThinkingEffortOptionsFor(adapterType: string | null | undefined, adapterConfig?: Record<string, unknown>) {
+  return getThinkingEffortOptions(adapterType, adapterConfig, { autoLabel: "Default" });
+}
 
 function loadDraft(): IssueDraft | null {
   try {
@@ -433,7 +414,6 @@ export function NewIssueDialog() {
   const [projectId, setProjectId] = useState("");
   const [projectWorkspaceId, setProjectWorkspaceId] = useState("");
   const [goalId, setGoalId] = useState("");
-  const [assigneeOptionsOpen, setAssigneeOptionsOpen] = useState(false);
   const [assigneeModelLane, setAssigneeModelLane] = useState<IssueModelLane>("primary");
   const [assigneeModelOverride, setAssigneeModelOverride] = useState("");
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
@@ -455,6 +435,8 @@ export function NewIssueDialog() {
     effort: "",
     chrome: false,
   });
+  // Set by the open/restore effect for the commit in which it queues its state updates.
+  const assigneeSeedSkipPassRef = useRef(false);
 
   const effectiveCompanyId = dialogCompanyId ?? selectedCompanyId;
   const dialogCompany = companies.find((c) => c.id === effectiveCompanyId) ?? selectedCompany;
@@ -773,6 +755,10 @@ export function NewIssueDialog() {
     const initializationKey = `${selectedCompanyId ?? ""}:${JSON.stringify(newIssueDefaults)}`;
     if (initializationKeyRef.current === initializationKey) return;
     initializationKeyRef.current = initializationKey;
+    // The assignee/lane/effort states set below only apply on the NEXT render. Tell the
+    // seeding effect (which runs later in this same commit and still sees the stale,
+    // empty assignee) to skip one pass, or it would reset a restored custom override.
+    assigneeSeedSkipPassRef.current = true;
     setDialogCompanyId(selectedCompanyId);
     executionWorkspaceDefaultProjectId.current = null;
 
@@ -933,14 +919,22 @@ export function NewIssueDialog() {
   const currentAssignee = selectedAssigneeAgentId
     ? (agents ?? []).find((a) => a.id === selectedAssigneeAgentId)
     : null;
+  // An agent is selected but the agent list has not arrived yet, so we cannot tell what
+  // it supports. Until it does, leave the controls alone — otherwise a draft restored
+  // with a custom override would be reset to "primary" before the agent ever loads.
+  const assigneeAgentPending = Boolean(selectedAssigneeAgentId) && agents === undefined;
 
   // Seed the displayed model/effort/chrome from the selected assignee's saved adapter
   // config. Re-fills automatically when the operator changes the assignee. Seeded values
   // are display-only: they do NOT emit an override (the lane stays "primary") until the
   // operator edits a control away from the seeded default (see laneAfterEdit).
   useEffect(() => {
+    if (assigneeSeedSkipPassRef.current) {
+      assigneeSeedSkipPassRef.current = false;
+      return;
+    }
+    if (assigneeAgentPending) return;
     if (!supportsAssigneeOverrides) {
-      setAssigneeOptionsOpen(false);
       seededAssigneeDefaultsRef.current = { model: "", effort: "", chrome: false };
       setAssigneeModelLane("primary");
       setAssigneeModelOverride("");
@@ -952,24 +946,14 @@ export function NewIssueDialog() {
       setAssigneeModelLane("primary");
     }
 
-    const validThinkingValues =
-      assigneeAdapterType === "codex_local"
-        ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
-        : assigneeAdapterType === "opencode_local"
-          ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
-          : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
-    const effortField =
-      assigneeAdapterType === "codex_local"
-        ? "modelReasoningEffort"
-        : assigneeAdapterType === "opencode_local"
-          ? "variant"
-          : "effort";
+    const config = (currentAssignee?.adapterConfig ?? {}) as Record<string, unknown>;
+    const validThinkingValues = issueThinkingEffortOptionsFor(assigneeAdapterType, config);
+    const effortField = getThinkingEffortKey(assigneeAdapterType, config);
 
-    const config = currentAssignee?.adapterConfig ?? {};
     const seededModel = typeof config.model === "string" ? config.model : "";
     const rawEffort = config[effortField];
     const seededEffort =
-      typeof rawEffort === "string" && validThinkingValues.some((option) => option.value === rawEffort)
+      typeof rawEffort === "string" && validThinkingValues.some((option) => option.id === rawEffort)
         ? rawEffort
         : "";
     const seededChrome = assigneeAdapterType === "claude_local" && config.chrome === true;
@@ -978,7 +962,7 @@ export function NewIssueDialog() {
     if (assigneeModelLane === "custom") {
       // An explicit override is active (e.g. restored from a draft) — keep the operator's
       // values, only dropping an effort that is not valid for this adapter.
-      if (!validThinkingValues.some((option) => option.value === assigneeThinkingEffort)) {
+      if (!validThinkingValues.some((option) => option.id === assigneeThinkingEffort)) {
         setAssigneeThinkingEffort("");
       }
       return;
@@ -988,6 +972,7 @@ export function NewIssueDialog() {
     setAssigneeThinkingEffort(seededEffort);
     setAssigneeChrome(seededChrome);
   }, [
+    assigneeAgentPending,
     supportsAssigneeOverrides,
     assigneeAdapterType,
     assigneeThinkingEffort,
@@ -1024,7 +1009,6 @@ export function NewIssueDialog() {
     setProjectId("");
     setProjectWorkspaceId("");
     setGoalId("");
-    setAssigneeOptionsOpen(false);
     setAssigneeModelLane("primary");
     setAssigneeModelOverride("");
     setAssigneeThinkingEffort("");
@@ -1254,12 +1238,10 @@ export function NewIssueDialog() {
         : assigneeAdapterType === "opencode_local"
           ? "OpenCode options"
         : "Agent options";
-  const thinkingEffortOptions =
-    assigneeAdapterType === "codex_local"
-      ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
-      : assigneeAdapterType === "opencode_local"
-        ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
-      : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
+  const thinkingEffortOptions = issueThinkingEffortOptionsFor(
+    assigneeAdapterType,
+    (currentAssignee?.adapterConfig ?? undefined) as Record<string, unknown> | undefined,
+  );
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
   const recentAssigneeOptionIds = useMemo(
     () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),
@@ -2126,15 +2108,10 @@ export function NewIssueDialog() {
           )}
 
           {supportsAssigneeOverrides && (
-            <div className="px-4 pb-2">
-            <button
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-              onClick={() => setAssigneeOptionsOpen((open) => !open)}
-            >
-              {assigneeOptionsOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-              {assigneeOptionsTitle}
-            </button>
-            {assigneeOptionsOpen && (
+            <div className="px-4 pb-2" data-testid="assignee-model-options">
+            {/* Always visible and pre-filled from the assignee's saved settings, so the operator
+                sees what model/effort this task will run on without opening anything. */}
+            <div className="text-xs font-medium text-muted-foreground">{assigneeOptionsTitle}</div>
               <div className="mt-2 rounded-md border border-border p-3 bg-muted/20 space-y-3">
                 <div className="space-y-1.5">
                   <div className="text-xs text-muted-foreground">Model lane</div>
@@ -2201,12 +2178,14 @@ export function NewIssueDialog() {
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {thinkingEffortOptions.map((option) => (
                         <button
-                          key={option.value || "default"}
+                          key={option.id || "default"}
+                          type="button"
+                          aria-pressed={assigneeThinkingEffort === option.id}
                           className={cn(
                             "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
-                            assigneeThinkingEffort === option.value && "bg-accent"
+                            assigneeThinkingEffort === option.id && "bg-accent"
                           )}
-                          onClick={() => handleAssigneeThinkingEffortChange(option.value)}
+                          onClick={() => handleAssigneeThinkingEffortChange(option.id)}
                         >
                           {option.label}
                         </button>
@@ -2224,7 +2203,6 @@ export function NewIssueDialog() {
                   </div>
                 )}
               </div>
-            )}
             </div>
           )}
 

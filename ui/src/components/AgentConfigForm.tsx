@@ -32,7 +32,7 @@ import { Button } from "@/components/ui/button";
 import { FolderOpen, Heart, ChevronDown, X } from "lucide-react";
 import { asBoolean, asFiniteNumber, asObject, cn } from "../lib/utils";
 import { extractModelName, extractProviderId } from "../lib/model-utils";
-import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "../lib/agent-model-effort";
+import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "@paperclipai/shared";
 import { queryKeys } from "../lib/queryKeys";
 import { useCompany } from "../context/CompanyContext";
 import {

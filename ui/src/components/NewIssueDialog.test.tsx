@@ -66,6 +66,7 @@ const mockGoalsApi = vi.hoisted(() => ({
 const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(),
   adapterModels: vi.fn(),
+  adapterModelProfiles: vi.fn(),
 }));
 
 const mockAuthApi = vi.hoisted(() => ({
@@ -180,13 +181,27 @@ vi.mock("./InlineEntitySelector", async () => {
       {
         value: string;
         placeholder?: string;
+        options?: Array<{ id: string; label: string }>;
+        onChange?: (id: string) => void;
         renderTriggerValue?: (option: { id: string; label: string } | null) => ReactNode;
       }
-    >(function InlineEntitySelectorMock({ value, placeholder, renderTriggerValue }, ref) {
+    >(function InlineEntitySelectorMock({ value, placeholder, options, onChange, renderTriggerValue }, ref) {
       return (
-        <button ref={ref} type="button">
-          {(renderTriggerValue?.(value ? { id: value, label: value } : null) ?? value) || placeholder}
-        </button>
+        <>
+          <button ref={ref} type="button">
+            {(renderTriggerValue?.(value ? { id: value, label: value } : null) ?? value) || placeholder}
+          </button>
+          {/* Text-free option buttons so tests can pick a value without disturbing textContent assertions. */}
+          {(options ?? []).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              data-inline-option={option.id}
+              aria-label={`Choose ${option.label}`}
+              onClick={() => onChange?.(option.id)}
+            />
+          ))}
+        </>
       );
     }),
   };
@@ -345,6 +360,7 @@ describe("NewIssueDialog", () => {
     ]);
     mockAgentsApi.list.mockResolvedValue([]);
     mockAgentsApi.adapterModels.mockResolvedValue([]);
+    mockAgentsApi.adapterModelProfiles.mockResolvedValue([]);
     mockAuthApi.getSession.mockResolvedValue({ user: { id: "user-1" } });
     mockAssetsApi.uploadImage.mockResolvedValue({ contentPath: "/uploads/asset.png" });
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
@@ -1371,6 +1387,208 @@ describe("NewIssueDialog", () => {
     expect(goalTextarea!.value).toBe("");
 
     act(() => root.unmount());
+  });
+
+  // Self-filling per-task model/effort selector. The block is always visible for
+  // agents that accept overrides and is PRE-FILLED from the assignee's saved
+  // settings. Pre-fill is display-only: no override is sent until the operator
+  // changes a value, so a task never silently pins the agent's current model.
+  describe("self-filling model/effort selector", () => {
+    const claudeAgent = {
+      id: "agent-1",
+      name: "Claude Engineer",
+      role: "engineer",
+      title: null,
+      status: "idle",
+      adapterType: "claude_local",
+      adapterConfig: { model: "claude-opus-4-1", effort: "high" },
+    };
+    const codexAgent = {
+      id: "agent-2",
+      name: "Codex Engineer",
+      role: "engineer",
+      title: null,
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5-codex", modelReasoningEffort: "minimal" },
+    };
+
+    function effortButton(label: string) {
+      const block = container.querySelector('[data-testid="assignee-model-options"]');
+      return Array.from(block?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === label && button.hasAttribute("aria-pressed"),
+      );
+    }
+
+    function pressedEffort() {
+      const block = container.querySelector('[data-testid="assignee-model-options"]');
+      return Array.from(block?.querySelectorAll('button[aria-pressed="true"]') ?? []).map((b) => b.textContent);
+    }
+
+    async function submit(label = "Create Task") {
+      const submitButton = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes(label));
+      expect(submitButton).not.toBeUndefined();
+      await vi.waitFor(() => {
+        expect(submitButton?.hasAttribute("disabled")).toBe(false);
+      });
+      await act(async () => {
+        submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+    }
+
+    beforeEach(() => {
+      mockAgentsApi.list.mockResolvedValue([claudeAgent, codexAgent]);
+    });
+
+    it("shows the block without opening anything, pre-filled from the assignee, and sends no override", async () => {
+      dialogState.newIssueDefaults = { title: "Seeded task", assigneeAgentId: "agent-1" };
+      const { root } = renderDialog(container);
+
+      await waitForAssertion(() => {
+        expect(container.querySelector('[data-testid="assignee-model-options"]')).not.toBeNull();
+        expect(container.textContent).toContain("Claude options");
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+      // Model selector shows the agent's saved model (the mock renders the value as text).
+      expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("claude-opus-4-1");
+      // The expanded per-model list is offered (xhigh/max exist for Claude now).
+      expect(effortButton("X-High")).not.toBeUndefined();
+      expect(effortButton("Max")).not.toBeUndefined();
+
+      await submit();
+
+      expect(mockIssuesApi.create).toHaveBeenCalledTimes(1);
+      const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
+      expect(payload.assigneeAgentId).toBe("agent-1");
+      expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
+
+      act(() => root.unmount());
+    });
+
+    it("sends an override only after the operator changes a value, and drops it again when set back", async () => {
+      dialogState.newIssueDefaults = { title: "Boosted task", assigneeAgentId: "agent-1" };
+      const { root } = renderDialog(container);
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+
+      await act(async () => {
+        effortButton("Max")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      expect(pressedEffort()).toEqual(["Max"]);
+
+      await submit();
+      expect(mockIssuesApi.create).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({
+          assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-4-1", effort: "max" } },
+        }),
+      );
+      act(() => root.unmount());
+
+      // Setting the value back to the seeded default means "no override" again.
+      mockIssuesApi.create.mockClear();
+      dialogState.newIssueDefaults = { title: "Boosted then reverted", assigneeAgentId: "agent-1" };
+      const again = renderDialog(container);
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+      await act(async () => {
+        effortButton("Max")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      await act(async () => {
+        effortButton("High")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      await submit();
+      const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
+      expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
+      act(() => again.root.unmount());
+    });
+
+    it("re-fills the block from the new assignee's settings when the assignee changes", async () => {
+      dialogState.newIssueDefaults = { title: "Reassigned task", assigneeAgentId: "agent-1" };
+      const { root } = renderDialog(container);
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Claude options");
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+
+      const codexOption = container.querySelector('[data-inline-option="agent:agent-2"]');
+      expect(codexOption).not.toBeNull();
+      await act(async () => {
+        codexOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Codex options");
+        expect(pressedEffort()).toEqual(["Minimal"]);
+      });
+      expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("gpt-5-codex");
+      // Codex has no "Max" level; the list follows the adapter.
+      expect(effortButton("Max")).toBeUndefined();
+
+      await submit();
+      const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
+      expect(payload.assigneeAgentId).toBe("agent-2");
+      expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
+
+      act(() => root.unmount());
+    });
+
+    it("keeps a saved custom override from a draft, but re-seeds a draft that had no override", async () => {
+      const draftBase = {
+        title: "Drafted task",
+        description: "",
+        status: "todo",
+        priority: "medium",
+        assigneeValue: "agent:agent-1",
+        reviewerValue: "",
+        approverValue: "",
+        projectId: "",
+        assigneeModelOverride: "claude-opus-4-1",
+        assigneeChrome: false,
+        workMode: "standard",
+      };
+
+      localStorage.setItem(
+        "paperclip:issue-draft",
+        JSON.stringify({ ...draftBase, assigneeModelLane: "custom", assigneeThinkingEffort: "max" }),
+      );
+      const custom = renderDialog(container);
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["Max"]);
+      });
+      await submit();
+      expect(mockIssuesApi.create).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({
+          assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-4-1", effort: "max" } },
+        }),
+      );
+      act(() => custom.root.unmount());
+
+      mockIssuesApi.create.mockClear();
+      localStorage.setItem(
+        "paperclip:issue-draft",
+        JSON.stringify({ ...draftBase, assigneeModelLane: "primary", assigneeThinkingEffort: "low" }),
+      );
+      const primary = renderDialog(container);
+      // A primary-lane draft carries no override, so the stale "low" must not survive:
+      // the block shows the agent's real saved setting again.
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+      await submit();
+      const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
+      expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
+      act(() => primary.root.unmount());
+    });
   });
 
   describe("graduated work-mode labels and status hues", () => {
