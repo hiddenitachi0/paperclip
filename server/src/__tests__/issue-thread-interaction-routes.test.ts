@@ -29,6 +29,10 @@ const mockHeartbeatService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+// DUR-62: the accept route turns unticked check-up drafts into "hide for a month" dismissals.
+const mockCheckupService = vi.hoisted(() => ({
+  hideFindings: vi.fn(async () => ({ itemKeys: [], dismissedAt: new Date() })),
+}));
 const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
   then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
     Promise.resolve([{ companyId: COMPANY_ID, agentId: CREATED_AGENT_ID, contextSnapshot: null }]).then(
@@ -123,6 +127,7 @@ function registerModuleMocks() {
       disableForIssue: vi.fn(async () => null),
     }),
     logActivity: mockLogActivity,
+    organizationCheckupService: () => mockCheckupService,
     projectService: () => ({}),
     routineService: () => ({
       syncRunStatusForIssue: vi.fn(async () => undefined),
@@ -474,6 +479,35 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+  });
+
+  it("hides the unticked drafts for a month when accepting on a weekly check-up report, and only there", async () => {
+    // A normal issue: skipped drafts are just skipped.
+    const plain = await createApp();
+    const plainRes = await request(plain)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-1/accept")
+      .send({ selectedClientKeys: ["task-1"] });
+    expect(plainRes.status).toBe(200);
+    expect(mockCheckupService.hideFindings).not.toHaveBeenCalled();
+
+    // The check-up report: every unticked draft becomes a checkup-finding dismissal.
+    mockIssueService.getById.mockResolvedValue(createIssue({
+      originKind: "organization_checkup",
+      assigneeAgentId: null,
+      status: "todo",
+    }));
+    const checkup = await createApp();
+    const res = await request(checkup)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-1/accept")
+      .send({ selectedClientKeys: ["task-1"] });
+
+    expect(res.status).toBe(200);
+    expect(mockCheckupService.hideFindings).toHaveBeenCalledTimes(1);
+    expect(mockCheckupService.hideFindings).toHaveBeenCalledWith({
+      companyId: COMPANY_ID,
+      userId: "local-board",
+      fingerprints: ["task-2"],
+    });
   });
 
   it("answers questions and emits a continuation wake", async () => {
