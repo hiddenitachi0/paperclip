@@ -22,6 +22,7 @@ import type {
   WorkspaceRuntimeService,
 } from "@paperclipai/shared";
 import type { RunForIssue } from "@/api/activity";
+import type { LatestCheckupResponse } from "@/api/checkups";
 import type { LiveRunForIssue } from "@/api/heartbeats";
 
 const now = new Date("2026-04-20T12:00:00.000Z");
@@ -1251,6 +1252,20 @@ export const storybookEntityTitleMap = new Map<string, string>([
   ["issue:issue-storybook-6", "Publish static Storybook preview"],
   ["issue:issue-storybook-7", "Confirm project budget override policy"],
 ]);
+
+/** DUR-62 / polish round 3: what /companies/:id/checkups/latest answers in Storybook. */
+export const storybookLatestCheckup: LatestCheckupResponse = {
+  report: {
+    id: "issue-storybook-checkup",
+    identifier: "PAP-88",
+    title: "Weekly check-up for Paperclip Labs, 7 September 2026: 3 things to look at",
+    status: "todo",
+    createdAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+  },
+  suggestionCount: 3,
+  pendingSuggestionCount: 3,
+  suggestionsStatus: "pending",
+};
 
 export const storybookSidebarBadges: SidebarBadges = {
   inbox: 7,
