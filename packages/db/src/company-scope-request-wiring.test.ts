@@ -752,6 +752,61 @@ describeEmbeddedPostgres("DUR-418: withCompanyScope reuses the runInCompanyScope
     });
   });
 
+  it(
+    // DUR-932 (re-landed by DUR-3952): this is the actual shape of the PR #218
+    // e2e crash -- listWakeableBlockedDependents/logActivity were called on
+    // the bare `db` proxy (createRequestScopedDb), never through
+    // withCompanyScope/tx.transaction(), from a fire-and-forget continuation
+    // (`void (async () => { ... })()` in routes/issues.ts) that the request
+    // handler never awaited. DUR-926's guard only covers the
+    // withCompanyScope/tx.transaction() reuse path (see the two tests above);
+    // the bare-proxy path had no equivalent check, so a query issued this way
+    // after release silently ran on a connection the pool may have already
+    // handed to an unrelated request, corrupting the Postgres extended-query
+    // protocol for both ("bind message supplies N parameters, but prepared
+    // statement requires M") instead of failing loudly. This proves
+    // createRequestScopedDb itself now refuses, with the same error type the
+    // connection-level fence raises (DUR-3931).
+    "createRequestScopedDb throws ConnectionFencedError instead of reusing a connection its owning runInCompanyScope call already released",
+    async () => {
+      const companyA = await seedCompany("bare-proxy-after-release");
+      let capturedScope: unknown;
+
+      await runInCompanyScope(db, companyA.id, async () => {
+        capturedScope = requestCompanyScopeStorage.getStore();
+      });
+
+      // By now runInCompanyScope's finally has already reset+released the
+      // connection. Simulate the orphaned continuation re-entering the
+      // captured scope and calling straight through the request-scoped
+      // proxy, exactly like an un-awaited `logActivity(db, ...)` would.
+      await requestCompanyScopeStorage.run(capturedScope as never, async () => {
+        const scopedDb = createRequestScopedDb(db);
+        let thrown: unknown;
+        try {
+          scopedDb.select({ name: companies.name }).from(companies);
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeInstanceOf(ConnectionFencedError);
+        expect((thrown as Error).message).toMatch(/already released it \(DUR-932\)/);
+      });
+    },
+    10_000,
+  );
+
+  it("DUR-932: a scope store without a liveness field (server test doubles) is treated as live, not released", async () => {
+    const companyA = await seedCompany("bare-store");
+    // server/src/__tests__/helpers/fake-scoped-db.ts enters the ALS with a
+    // bare `{ kind, companyId, scopedDb }` store; a missing liveness must not
+    // become a TypeError.
+    const rows = await requestCompanyScopeStorage.run(
+      { kind: "scoped", companyId: companyA.id, scopedDb: db } as never,
+      async () => createRequestScopedDb(db).select({ name: companies.name }).from(companies),
+    );
+    expect(rows.map((row) => row.name)).toContain(companyA.name);
+  });
+
   // DUR-3952: the shape of a dispatched heartbeat run. startNextQueuedRunForAgent
   // fires executeRun() from inside a scheduler tick's scope and returns; the
   // tick's reserved connection is released moments later while the run keeps
