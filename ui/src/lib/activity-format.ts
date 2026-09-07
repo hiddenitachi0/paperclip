@@ -58,6 +58,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.paused": "paused",
   "agent.resumed": "resumed",
   "agent.error_cleared": "cleared error on",
+  "persona_post.published": "published a post for",
+  "persona_post.publish_failed": "could not publish a post for",
   // DUR-98 / DUR-128: operator notices written by the platform itself when it
   // knows something is wrong -- plain language, see formatOperatorNotice.
   "agent.entered_error": "flagged that attention is needed for",
@@ -138,6 +140,8 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.error_stalled": "is still waiting for someone to clear the agent error",
   "heartbeat.run_reaped": "ended a run that had stopped responding",
   "heartbeat.run_stopped": "stopped a run that was taking too long",
+  "persona_post.published": "published a persona post",
+  "persona_post.publish_failed": "could not publish a persona post",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -493,6 +497,9 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "agent.error_stalled",
   "heartbeat.run_reaped",
   "heartbeat.run_stopped",
+  // DUR-134 item 10: a persona post the platform refused, or that never
+  // went out because the account's credential is missing/expired.
+  "persona_post.publish_failed",
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {
@@ -503,6 +510,13 @@ export function formatOperatorNotice(action: string, details?: Record<string, un
   if (!isOperatorNoticeAction(action)) return null;
   const message = details?.message;
   if (typeof message === "string" && message.trim()) return message.trim();
+  if (action === "persona_post.publish_failed") {
+    const accountLabel =
+      typeof details?.accountLabel === "string" && details.accountLabel.trim() ? details.accountLabel.trim() : "a persona account";
+    const reason =
+      typeof details?.failureReason === "string" && details.failureReason.trim() ? ` Reason: ${details.failureReason.trim()}` : "";
+    return `A post to ${accountLabel} could not be published and will not be retried on its own.${reason}`;
+  }
   if (action === "agent.error_stalled") {
     // DUR-128 rows predate the message field: build the sentence here.
     const agentName = typeof details?.agentName === "string" && details.agentName.trim() ? details.agentName.trim() : "This agent";

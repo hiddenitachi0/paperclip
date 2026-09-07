@@ -105,6 +105,20 @@ describe("activity formatting", () => {
     expect(formatOperatorNotice("heartbeat.run_reaped", null)).toBeNull();
   });
 
+  it("treats a failed persona post as an operator notice (DUR-134 item 10)", () => {
+    expect(isOperatorNoticeAction("persona_post.publish_failed")).toBe(true);
+    expect(isOperatorNoticeAction("persona_post.published")).toBe(false);
+    expect(
+      formatOperatorNotice("persona_post.publish_failed", {
+        message: "A post to Maja — Fanvue could not be published and will not be retried on its own. Reason: token expired.",
+      }),
+    ).toBe("A post to Maja — Fanvue could not be published and will not be retried on its own. Reason: token expired.");
+    expect(
+      formatOperatorNotice("persona_post.publish_failed", { accountLabel: "Maja — Fanvue", failureReason: "token expired" }),
+    ).toBe("A post to Maja — Fanvue could not be published and will not be retried on its own. Reason: token expired");
+    expect(formatActivityVerb("persona_post.published")).toBe("published a post for");
+  });
+
   it("builds a sentence for legacy stall alerts that carry no message", () => {
     expect(
       formatOperatorNotice("agent.error_stalled", { agentName: "Reviewer Bot", errorReason: "Adapter crashed" }),
