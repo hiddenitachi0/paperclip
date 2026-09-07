@@ -147,6 +147,25 @@ async function assertDeployRequestProjectExists(
   }
 }
 
+/**
+ * DUR-3952 (DUR-137 follow-up): `payload.allowBackwardDeploy` tells the
+ * deploy runner that moving production back to an older commit is intended
+ * -- a rollback -- rather than a stale approval being processed late. That
+ * is the board's call, not an agent's: an agent may still file the deploy,
+ * it just cannot pre-confirm the rollback on the operator's behalf. Board
+ * actors (a person signed in, or a board API key) are the only ones allowed
+ * to set it; anyone else gets a plain-language 403.
+ */
+function assertBackwardDeployOptInIsBoardFiled(req: Request, payload: { allowBackwardDeploy?: boolean }) {
+  if (payload.allowBackwardDeploy !== true) return;
+  if (req.actor.type === "board") return;
+  throw forbidden(
+    "Only the board can mark a deploy as an intentional rollback (allowBackwardDeploy). " +
+      "File the deploy without that flag; if it really should move production back to an older commit, " +
+      "a person can re-file it as a rollback from the board.",
+  );
+}
+
 function parseGitHubRepoFromUrl(repoUrl: string | null | undefined): { owner: string; name: string } | null {
   if (!repoUrl) return null;
   try {
@@ -803,6 +822,53 @@ async function firstLinkedIssueId(
   return Array.isArray(linked) ? linked[0]?.id ?? null : null;
 }
 
+type ApprovalDecision = "approved" | "rejected" | "revision_requested";
+
+function readDecisionNote(...candidates: unknown[]): string | null {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+// DUR-283: the issue Activity tab only lists entries whose entityType is
+// "issue" (activityService.forIssue), so the approval-scoped
+// `approval.approved` / `approval.rejected` / `approval.revision_requested`
+// entry alone never reaches a linked issue's history -- the operator had to
+// open the approval to learn *why* something was rejected or sent back.
+// Mirror every decision onto each linked issue as its own entry, carrying
+// the decision note, so the reason shows up right in the task's timeline.
+async function logApprovalDecisionOnLinkedIssues(
+  db: Db,
+  input: {
+    approval: { id: string; companyId: string; type: string; requestedByAgentId?: string | null };
+    decision: ApprovalDecision;
+    actorId: string;
+    linkedIssueIds: string[];
+    decisionNote: string | null;
+  },
+) {
+  for (const issueId of input.linkedIssueIds) {
+    await logActivity(db, {
+      companyId: input.approval.companyId,
+      actorType: "user",
+      actorId: input.actorId,
+      action: `issue.approval_${input.decision}`,
+      entityType: "issue",
+      entityId: issueId,
+      details: {
+        approvalId: input.approval.id,
+        approvalType: input.approval.type,
+        decision: input.decision,
+        decisionNote: input.decisionNote,
+        requestedByAgentId: input.approval.requestedByAgentId ?? null,
+      },
+    });
+  }
+}
+
 function readIssueIdForEscalation(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
   const rawIssueIds = (body as Record<string, unknown>).issueIds;
@@ -1040,6 +1106,7 @@ export function approvalRoutes(
     if (isDeployRequestApproval(approvalInput.type, approvalInput.payload)) {
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
       const parsedDeployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
+      assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
       // DUR-3926: stamp the project's real deploy workspace over whatever the
       // filer supplied -- the runner silently refuses any other workspace.
@@ -1295,6 +1362,7 @@ export function approvalRoutes(
       // immediate check would flag every single normal merge, not just the
       // ones that were actually forgotten.
 
+      const approveDecisionNote = readDecisionNote(approval.decisionNote, req.body.decisionNote);
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -1306,7 +1374,15 @@ export function approvalRoutes(
           type: approval.type,
           requestedByAgentId: approval.requestedByAgentId,
           linkedIssueIds,
+          decisionNote: approveDecisionNote,
         },
+      });
+      await logApprovalDecisionOnLinkedIssues(db, {
+        approval,
+        decision: "approved",
+        actorId: req.actor.userId ?? "board",
+        linkedIssueIds,
+        decisionNote: approveDecisionNote,
       });
 
       // A tool_grant approval is exactly when an agent's tool connections
@@ -1437,6 +1513,9 @@ export function approvalRoutes(
         userId: req.actor.userId ?? "board",
       });
 
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      const rejectDecisionNote = readDecisionNote(approval.decisionNote, req.body.decisionNote);
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -1444,7 +1523,19 @@ export function approvalRoutes(
         action: "approval.rejected",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          type: approval.type,
+          requestedByAgentId: approval.requestedByAgentId,
+          linkedIssueIds,
+          decisionNote: rejectDecisionNote,
+        },
+      });
+      await logApprovalDecisionOnLinkedIssues(db, {
+        approval,
+        decision: "rejected",
+        actorId: req.actor.userId ?? "board",
+        linkedIssueIds,
+        decisionNote: rejectDecisionNote,
       });
     }
 
@@ -1461,6 +1552,9 @@ export function approvalRoutes(
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
 
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      const revisionDecisionNote = readDecisionNote(approval.decisionNote, req.body.decisionNote);
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -1468,7 +1562,19 @@ export function approvalRoutes(
         action: "approval.revision_requested",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          type: approval.type,
+          requestedByAgentId: approval.requestedByAgentId,
+          linkedIssueIds,
+          decisionNote: revisionDecisionNote,
+        },
+      });
+      await logApprovalDecisionOnLinkedIssues(db, {
+        approval,
+        decision: "revision_requested",
+        actorId: req.actor.userId ?? "board",
+        linkedIssueIds,
+        decisionNote: revisionDecisionNote,
       });
 
       const revisionPersonaNames = await personaDisplayNamesFor([approval]);
@@ -1501,6 +1607,7 @@ export function approvalRoutes(
 
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
       const parsedDeployPayload = deployRequestPayloadSchema.parse(req.body.payload);
+      assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, existing.companyId, parsedDeployPayload);
       // DUR-3926: same deploy-workspace stamp as the filing path above.
       const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);

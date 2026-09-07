@@ -78,6 +78,14 @@ POST /api/issues/{issueId}/interactions
 
 Do not try to signal this through `prompt` or `detailsMarkdown` wording (e.g. a numbered list of claims) and rely on the UI to infer it — that inference was spoofable and has been replaced by this explicit field. Omit `factCheck` (or set it `false`) for a normal decision-ask; it defaults to `false`.
 
+The flag is necessary but not sufficient. The UI still refuses the fact-check styling when any of `prompt`, `detailsMarkdown`, `title` or `summary` reads like a decision or action request (money movement, outbound communication, deploy/merge/delete, "should I ...", and so on), and it needs at least two numbered lines in `detailsMarkdown`. Phrase fact checks so they pass on their own merits:
+
+- Make the ask a verification question: "Do these figures match your records?", "Is this correct?", "Stemmer disse tallene?" — not a topic label like "Vendor account status".
+- Make every numbered line a plain statement of a checkable fact ("Invoice #1042 is 18 400 kr, due 2026-05-15"), never an instruction ("Release the funds") or a pending event ("The money goes out at 17:00").
+- Never attach consequences to silence or to the confirmation itself ("unless you object", "if I don't hear back", "will proceed", "once you confirm"). A fact check settles no action; if an action depends on the answer, file it as a normal decision-ask instead.
+
+An instance can additionally enable **Stricter fact-check cards** (instance settings, General). With that on, a confirmation only gets the fact-check styling when it positively matches the shape above; anything else falls back to the ordinary decision card. Writing fact checks as described keeps them rendering the same way in both modes.
+
 ## Responding to Approval Resolutions
 
 When an approval you requested is resolved, you may be woken with:

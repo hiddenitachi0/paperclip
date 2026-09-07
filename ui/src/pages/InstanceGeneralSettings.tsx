@@ -87,6 +87,7 @@ export function InstanceGeneralSettings() {
 
   const censorUsernameInLogs = generalQuery.data?.censorUsernameInLogs === true;
   const keyboardShortcuts = generalQuery.data?.keyboardShortcuts === true;
+  const factCheckCardStrictAllowlist = generalQuery.data?.factCheckCardStrictAllowlist === true;
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
   const globalMaxConcurrentRuns = generalQuery.data?.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS;
@@ -248,6 +249,27 @@ export function InstanceGeneralSettings() {
                 : `Enter a whole number from ${MIN_GLOBAL_MAX_CONCURRENT_RUNS} to ${MAX_GLOBAL_MAX_CONCURRENT_RUNS}.`}
             </span>
           </form>
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Stricter fact-check cards</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Agents can ask you to check a fact (&quot;Do these numbers match Fiken?&quot;). Those asks get a calmer
+              card that says this is not a decision. With this on, that calmer card is only used when the question
+              clearly reads as a check and every numbered line is a plain statement; anything else gets the normal
+              decision card instead. Off by default. Turning it on can only make the app more careful, never less.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={factCheckCardStrictAllowlist}
+            onCheckedChange={() =>
+              updateGeneralMutation.mutate({ factCheckCardStrictAllowlist: !factCheckCardStrictAllowlist })}
+            disabled={updateGeneralMutation.isPending}
+            aria-label="Toggle stricter fact-check cards"
+          />
         </div>
       </section>
 

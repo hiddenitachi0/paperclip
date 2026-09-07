@@ -2123,4 +2123,68 @@ describe("issue approval link permissions (DUR-43)", () => {
     expect(res.body.error).toBe("Missing permission to link approvals");
     expect(mockIssueApprovalService.link).not.toHaveBeenCalled();
   });
+
+  // DUR-62: the weekly check-up report is deliberately unassigned, and the
+  // base ownership rule lets any same-company agent mutate an unassigned
+  // issue -- so the report needs its own refusal for every agent actor.
+  describe("weekly check-up report (organization_checkup)", () => {
+    const checkupIssue = () => makeIssue({ originKind: "organization_checkup", status: "todo", assigneeAgentId: null });
+
+    it.each([
+      ["patch status=done", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ status: "done" })],
+      ["patch hiddenAt", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ hiddenAt: "2026-09-07T12:00:00.000Z" })],
+      ["patch title", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Renamed by an agent" })],
+      ["patch description", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ description: "Nothing to see here" })],
+      ["delete", (app: express.Express) => request(app).delete(`/api/issues/${issueId}`)],
+      [
+        "checkout",
+        (app: express.Express) =>
+          request(app).post(`/api/issues/${issueId}/checkout`).send({ agentId: peerAgentId, expectedStatuses: ["todo"] }),
+      ],
+    ])("rejects agent %s on the check-up report", async (_name, sendRequest) => {
+      mockIssueService.getById.mockResolvedValue(checkupIssue());
+
+      const res = await sendRequest(await createApp(peerActor()));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toBe("This check-up report is written for the operator; agents cannot change it");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.remove).not.toHaveBeenCalled();
+      expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    });
+
+    it("rejects the agent even when the report has been assigned to it", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({ originKind: "organization_checkup", status: "todo", assigneeAgentId: ownerAgentId }));
+
+      const res = await request(await createApp(ownerActor())).patch(`/api/issues/${issueId}`).send({ status: "done" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("lets a board user close the report", async () => {
+      mockIssueService.getById.mockResolvedValue(checkupIssue());
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...checkupIssue(),
+        ...patch,
+      }));
+
+      const res = await request(await createApp(boardActor())).patch(`/api/issues/${issueId}`).send({ status: "done" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "done" }));
+    });
+
+    it("still allows agents to mutate an ordinary unassigned issue", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({ originKind: "manual", status: "todo", assigneeAgentId: null }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ originKind: "manual", status: "todo", assigneeAgentId: null }),
+        ...patch,
+      }));
+
+      const res = await request(await createApp(peerActor())).patch(`/api/issues/${issueId}`).send({ title: "Still fine" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    });
+  });
 });

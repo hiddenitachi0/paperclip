@@ -125,7 +125,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { formatIssueActivityAction } from "@/lib/activity-format";
+import { formatIssueActivityAction, readActivityDecisionNote } from "@/lib/activity-format";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { buildIssuePropertiesPanelKey } from "../lib/issue-properties-panel-key";
 import { buildIssueSiblingNavigation, shouldRenderRichSubIssuesSection } from "../lib/issue-detail-subissues";
@@ -1271,6 +1271,10 @@ function IssueDetailActivityTab({
             const isHandoffWarning =
               evt.action === SUCCESSFUL_RUN_HANDOFF_REQUIRED_ACTION
               || evt.action === SUCCESSFUL_RUN_HANDOFF_ESCALATED_ACTION;
+            // DUR-283: the reason the operator gave when deciding a linked
+            // approval, shown right here in the task's history -- same
+            // plain-text treatment as the "Decision note." on ApprovalCard.
+            const decisionNote = readActivityDecisionNote(evt.action, evt.details);
             return (
               <div className={cn("space-y-1.5 rounded-lg border px-3 py-2 text-xs", tone.className)}>
                 <div className="flex items-center gap-1.5">
@@ -1281,6 +1285,14 @@ function IssueDetailActivityTab({
                   <span>{formatIssueActivityAction(evt.action, evt.details, { agentMap, userProfileMap, currentUserId })}</span>
                   <span className="ml-auto shrink-0">{relativeTime(evt.createdAt)}</span>
                 </div>
+                {decisionNote ? (
+                  <div
+                    data-testid="activity-decision-note"
+                    className="whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/30 px-2.5 py-1.5 leading-5 text-muted-foreground"
+                  >
+                    <span className="font-medium text-foreground">Decision note.</span> {decisionNote}
+                  </div>
+                ) : null}
                 <IssueReferenceActivitySummary event={evt} />
               </div>
             );

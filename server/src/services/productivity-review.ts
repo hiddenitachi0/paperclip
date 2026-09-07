@@ -784,6 +784,10 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
           inArray(issues.status, ["todo", "in_progress"]),
           sql`${issues.assigneeAgentId} is not null`,
           sql`${issues.originKind} <> ${PRODUCTIVITY_REVIEW_ORIGIN_KIND}`,
+          // DUR-62: the weekly check-up report is a page for the operator, not
+          // work an agent is progressing -- never review it, even if a board
+          // user assigns it to someone.
+          sql`${issues.originKind} <> 'organization_checkup'`,
         ),
       )
       .orderBy(asc(issues.updatedAt), asc(issues.id))

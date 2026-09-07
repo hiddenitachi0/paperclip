@@ -4,7 +4,9 @@ import {
   formatActivityVerb,
   formatIssueActivityAction,
   formatOperatorNotice,
+  isApprovalDecisionAction,
   isOperatorNoticeAction,
+  readActivityDecisionNote,
 } from "./activity-format";
 
 describe("activity formatting", () => {
@@ -108,5 +110,43 @@ describe("activity formatting", () => {
     expect(formatOperatorNotice("agent.error_stalled", {})).toBe(
       "This agent has been stopped with an error for a while and nobody has cleared it yet. Its tasks are waiting.",
     );
+  });
+
+  // DUR-283: approval decisions are mirrored onto each linked issue as
+  // issue.approval_<decision> entries carrying the operator's note.
+  it("describes mirrored approval decisions on the issue in plain words", () => {
+    expect(
+      formatIssueActivityAction("issue.approval_rejected", {
+        approvalId: "approval-1",
+        approvalType: "merge_pr",
+        decision: "rejected",
+        decisionNote: "The migration drops a column we still read.",
+      }),
+    ).toBe("rejected the approval request (merge pull request)");
+    expect(
+      formatIssueActivityAction("issue.approval_revision_requested", { approvalType: "request_board_approval" }),
+    ).toBe("sent the approval request back for changes (board approval)");
+    expect(formatIssueActivityAction("issue.approval_approved", { approvalType: "some_new_kind" })).toBe(
+      "approved the approval request (some new kind)",
+    );
+    expect(formatIssueActivityAction("issue.approval_approved", null)).toBe("approved the approval request");
+    expect(formatActivityVerb("issue.approval_rejected")).toBe("rejected an approval request on");
+    expect(formatActivityVerb("approval.revision_requested")).toBe("requested changes on");
+  });
+
+  it("reads the decision note only from approval decision entries", () => {
+    expect(
+      readActivityDecisionNote("approval.rejected", { type: "merge_pr", decisionNote: "  Not this week.  " }),
+    ).toBe("Not this week.");
+    expect(readActivityDecisionNote("issue.approval_revision_requested", { decisionNote: "Add the cost." })).toBe(
+      "Add the cost.",
+    );
+    expect(readActivityDecisionNote("issue.approval_approved", { decisionNote: null })).toBeNull();
+    expect(readActivityDecisionNote("issue.approval_approved", { decisionNote: "   " })).toBeNull();
+    expect(readActivityDecisionNote("approval.approved", undefined)).toBeNull();
+    // An unrelated entry with a stray decisionNote field must not be shown as a decision.
+    expect(readActivityDecisionNote("issue.updated", { decisionNote: "nope" })).toBeNull();
+    expect(isApprovalDecisionAction("approval.revision_requested")).toBe(true);
+    expect(isApprovalDecisionAction("approval.created")).toBe(false);
   });
 });

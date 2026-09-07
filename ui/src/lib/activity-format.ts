@@ -77,6 +77,10 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
+  "approval.revision_requested": "requested changes on",
+  "issue.approval_approved": "approved an approval request on",
+  "issue.approval_rejected": "rejected an approval request on",
+  "issue.approval_revision_requested": "sent an approval request back for changes on",
   "project.created": "created",
   "project.updated": "updated",
   "project.deleted": "deleted",
@@ -140,7 +144,59 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
+  "approval.revision_requested": "requested changes",
+  "issue.approval_approved": "approved the approval request",
+  "issue.approval_rejected": "rejected the approval request",
+  "issue.approval_revision_requested": "sent the approval request back for changes",
 };
+
+// Plain-language names for the approval kinds an operator actually meets in
+// the timeline. Anything else falls back to the humanized raw type.
+const APPROVAL_TYPE_LABELS: Record<string, string> = {
+  hire_agent: "hire agent",
+  approve_ceo_strategy: "CEO strategy",
+  budget_override_required: "budget override",
+  request_board_approval: "board approval",
+  credential_request: "credential request",
+  merge_pr: "merge pull request",
+  deploy: "deploy",
+  tool_grant: "tool access",
+  instructions_change: "instructions change",
+};
+
+// DUR-283: the activity actions whose `details.decisionNote` is the reason an
+// operator typed when deciding an approval (approve / reject / send back).
+// Both the approval-scoped entry and its per-issue mirror carry the note.
+const APPROVAL_DECISION_ACTIONS = new Set([
+  "approval.approved",
+  "approval.rejected",
+  "approval.revision_requested",
+  "issue.approval_approved",
+  "issue.approval_rejected",
+  "issue.approval_revision_requested",
+]);
+
+export function isApprovalDecisionAction(action: string): boolean {
+  return APPROVAL_DECISION_ACTIONS.has(action);
+}
+
+/**
+ * The reason the operator gave with an approval decision, if the entry
+ * carries one. Only read for decision actions so an unrelated entry that
+ * happens to have a `decisionNote` field never renders as a decision.
+ */
+export function readActivityDecisionNote(action: string, details: ActivityDetails): string | null {
+  if (!isApprovalDecisionAction(action)) return null;
+  const note = details?.decisionNote;
+  if (typeof note !== "string") return null;
+  const trimmed = note.trim();
+  return trimmed ? trimmed : null;
+}
+
+function formatApprovalTypeLabel(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return APPROVAL_TYPE_LABELS[value] ?? humanizeValue(value);
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -510,6 +566,11 @@ export function formatIssueActivityAction(
   if (action === "issue.accepted_plan_decomposition_updated") {
     const detail = formatAcceptedPlanDecompositionDetail(details);
     if (detail) return detail;
+  }
+
+  if (action.startsWith("issue.approval_") && ISSUE_ACTIVITY_LABELS[action]) {
+    const typeLabel = formatApprovalTypeLabel(details?.approvalType);
+    return typeLabel ? `${ISSUE_ACTIVITY_LABELS[action]} (${typeLabel})` : ISSUE_ACTIVITY_LABELS[action];
   }
 
   if (action.startsWith("issue.monitor_") && details) {
