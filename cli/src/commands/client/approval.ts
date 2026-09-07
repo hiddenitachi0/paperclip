@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import {
+  APPROVAL_TYPES,
   createApprovalSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
@@ -43,6 +44,30 @@ interface ApprovalResubmitOptions extends BaseClientOptions {
 interface ApprovalCommentOptions extends BaseClientOptions {
   body: string;
 }
+
+// Shown under `approval create --help`. request_board_approval is the type
+// the deploy runner and the other request_board_approval kinds hang off, and
+// it was missing from the type list entirely, so agents guessed.
+const APPROVAL_CREATE_HELP = `
+Examples:
+  Ask the board to deploy a commit (the deploy runner acts on kind "deploy" once approved):
+    paperclipai approval create -C <companyId> --type request_board_approval --payload '{
+      "kind": "deploy",
+      "projectId": "<projectId>",
+      "workspaceId": "<the project's deploy workspaceId>",
+      "commit": "<full or 12-char sha on the project's deploy branch>",
+      "title": "Deploy fix for the login page",
+      "note": "Approving puts commit abc123 live. It fixes the sign-in error reported this morning."
+    }'
+
+  Roll production back to an older version (board only -- an agent gets a 403):
+    add "allowBackwardDeploy": true to the deploy payload above, pointing "commit" at the
+    older version. The project page's "Roll back to previous version" button does this for you.
+
+Notes:
+  - Only kind "deploy" is deployed. "deploy_pr", "release", "rollout" and similar are refused.
+  - Write "title" and "note" for a person: what it does, and what happens if approved.
+`;
 
 export function registerApprovalCommands(program: Command): void {
   const approval = program.command("approval").description("Approval operations");
@@ -129,10 +154,11 @@ export function registerApprovalCommands(program: Command): void {
       .command("create")
       .description("Create an approval request")
       .requiredOption("-C, --company-id <id>", "Company ID")
-      .requiredOption("--type <type>", "Approval type (hire_agent|approve_ceo_strategy)")
+      .requiredOption("--type <type>", `Approval type (${APPROVAL_TYPES.join("|")})`)
       .requiredOption("--payload <json>", "Approval payload as JSON object")
       .option("--requested-by-agent-id <id>", "Requesting agent ID")
       .option("--issue-ids <csv>", "Comma-separated linked issue IDs")
+      .addHelpText("after", APPROVAL_CREATE_HELP)
       .action(async (opts: ApprovalCreateOptions) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
