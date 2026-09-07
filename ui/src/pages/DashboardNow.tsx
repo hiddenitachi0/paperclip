@@ -21,6 +21,7 @@ import { cn, relativeTime } from "../lib/utils";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { EmptyState } from "../components/EmptyState";
+import { FleetHealthStrip } from "../components/FleetHealthStrip";
 import { Identity } from "../components/Identity";
 import { DecisionReasonDialog } from "../components/DecisionReasonDialog";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
@@ -381,6 +382,11 @@ export function DashboardNow() {
           <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>
+
+      {/* DUR-3939/DUR-3940: whole-instance signal (every company shares the
+          scheduler and the run slots), so an operator can tell "the scheduler
+          is stuck" from "every slot is taken" before reading the lanes. */}
+      <FleetHealthStrip />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {LANES.map((lane) => {
