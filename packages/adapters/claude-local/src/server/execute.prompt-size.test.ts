@@ -263,6 +263,50 @@ describe("buildClaudePromptForAttempt (DUR-3943)", () => {
     expect(afterFresh.prompt.length).toBeLessThan(beforeFresh.prompt.length);
     expect(afterResumed.prompt.length).toBeLessThan(beforeResumed.prompt.length * 0.6);
   });
+
+  // DUR-3943 item 5: the saved-session reset policy (instance default: reset
+  // after 8 runs on the same task or 24 hours) decides how many runs in a row
+  // get the cheap resume delta before one pays the full fresh-session prompt
+  // again. This shows the per-run prompt cost of both shapes and the cost of
+  // a reset cycle, so the trade-off behind the default is visible in numbers
+  // rather than asserted in prose. The reset itself is decided server-side
+  // (heartbeat decideSessionReset); here the adapter simply gets no session
+  // to resume, which is exactly what a reset looks like from its side.
+  it("reports what a session reset costs: the run after a reset pays the full prompt, every resumed run pays the delta", () => {
+    const resumedDelta = assemble({
+      resumeSessionId: SESSION_ID,
+      taskContextResumeNote: resumeTaskBlock,
+      taskContextFingerprint: fingerprint,
+      sessionTaskContextFingerprint: fingerprint,
+    });
+    // After a reset the server passes no session id (and the saved fingerprint
+    // is gone with it), so the attempt is assembled as a fresh session.
+    const afterReset = assemble({
+      resumeSessionId: null,
+      taskContextResumeNote: resumeTaskBlock,
+      taskContextFingerprint: fingerprint,
+      sessionTaskContextFingerprint: "",
+    });
+
+    expect(afterReset.taskContextUnchanged).toBe(false);
+    expect(afterReset.prompt).toContain(fullTaskBlock);
+    expect(afterReset.prompt).toContain("Start actionable work in this heartbeat");
+    expect(resumedDelta.prompt).not.toContain("## Context");
+
+    const resetAfterRuns = 8; // DEFAULT_SESSION_RESET_AFTER_RUNS
+    const cycleChars = afterReset.prompt.length + (resetAfterRuns - 1) * resumedDelta.prompt.length;
+    const neverResetChars = resetAfterRuns * resumedDelta.prompt.length;
+    console.info(
+      `[DUR-3943 item 5] claude prompt chars per run: after a session reset=${afterReset.prompt.length}, resumed with unchanged task=${resumedDelta.prompt.length}; ` +
+        `one reset cycle of ${resetAfterRuns} runs sends ${cycleChars} prompt chars vs ${neverResetChars} if the session were never reset ` +
+        `(+${Math.round(((cycleChars - neverResetChars) / neverResetChars) * 100)}% on the prompt, in exchange for a transcript that stops growing)`,
+    );
+    // The full prompt after a reset is a few times the delta, but a reset
+    // cycle at the default cadence stays within 2x of never resetting on the
+    // prompt side -- the transcript it drops is what dominates a run's cost.
+    expect(afterReset.prompt.length).toBeGreaterThan(resumedDelta.prompt.length * 2);
+    expect(cycleChars).toBeLessThan(neverResetChars * 2);
+  });
 });
 
 describe("claude local execute -- resumed-session task context (DUR-3943)", () => {

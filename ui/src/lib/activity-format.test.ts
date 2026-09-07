@@ -92,6 +92,19 @@ describe("activity formatting", () => {
     expect(formatActivityVerb("heartbeat.run_stopped")).toBe("stopped a run that was taking too long for");
     expect(formatIssueActivityAction("heartbeat.run_stopped")).toBe("stopped a run that was taking too long");
     expect(isOperatorNoticeAction("heartbeat.run_stopped")).toBe(true);
+    // DUR-3943 item 4: repeated turn-limit stops on one task.
+    expect(formatActivityVerb("heartbeat.turn_limit_repeated")).toBe(
+      "stopped queuing fresh runs after repeated turn-limit stops for",
+    );
+    expect(formatIssueActivityAction("heartbeat.turn_limit_repeated")).toBe(
+      "stopped queuing fresh runs after repeated turn-limit stops",
+    );
+    expect(isOperatorNoticeAction("heartbeat.turn_limit_repeated")).toBe(true);
+    expect(
+      formatOperatorNotice("heartbeat.turn_limit_repeated", {
+        message: "Backend Engineer hit the limit of 60 turns per run on \"Cut agent context cost\" (DUR-3943) 3 times in a row.",
+      }),
+    ).toContain("3 times in a row");
     // Polish round 3: the daily check of the shared Claude sign-in.
     expect(formatActivityVerb("instance.claude_auth.check_failed")).toBe("found that the shared Claude sign-in stopped working");
     expect(formatActivityVerb("instance.claude_auth.expiring")).toBe("warned that the shared Claude sign-in expires soon");
