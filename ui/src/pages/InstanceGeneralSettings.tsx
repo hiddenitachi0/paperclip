@@ -400,7 +400,8 @@ export function InstanceGeneralSettings() {
               <li>
                 <span className="font-medium text-foreground">On</span>: a &quot;needs work&quot; verdict sends the task
                 back to the agent with the findings. After the number of rounds below, the platform stops looping and
-                asks you to decide instead.
+                asks you to decide instead. Once you answer that question or move the task back to in progress, the
+                agent gets a fresh set of rounds.
               </li>
             </ul>
           </div>

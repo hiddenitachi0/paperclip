@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   approvals,
   companies,
@@ -27,6 +28,7 @@ import {
   buildDoneGateNeedsWorkComment,
   countDoneGateNeedsWorkRounds,
   evaluateDoneGateCritic,
+  findDoneGateLoopResetAt,
   findLastDoneGateFindings,
   parseDoneGateCriticReply,
   resolveDoneGateConfig,
@@ -126,6 +128,7 @@ describeEmbeddedPostgres("evaluateDoneGateCritic (DB-backed, mocked critic)", ()
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(costEvents);
     await db.delete(issueApprovals);
     await db.delete(approvals);
@@ -217,6 +220,44 @@ describeEmbeddedPostgres("evaluateDoneGateCritic (DB-backed, mocked critic)", ()
 
   function agentActor(f: { agentId: string; runId: string }) {
     return { actorType: "agent", agentId: f.agentId, runId: f.runId };
+  }
+
+  /**
+   * What PATCH /issues/:id leaves behind when a board user changes the status: the new
+   * status on the issue and an `issue.updated` activity row whose details carry the
+   * PATCH's fields (routes/issues.ts spreads `updateFields` into details).
+   */
+  async function operatorMovesIssueTo(f: { companyId: string; issueId: string }, status: string, previous: string) {
+    await db.update(issues).set({ status, updatedAt: new Date() }).where(eq(issues.id, f.issueId));
+    await db.insert(activityLog).values({
+      companyId: f.companyId,
+      actorType: "user",
+      actorId: "local-board",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: f.issueId,
+      details: { status, identifier: "T-1", source: "comment", _previous: { status: previous } },
+    });
+  }
+
+  /** The same activity row, but written by the agent itself -- must NOT reset the loop. */
+  async function agentMovesIssueTo(f: { companyId: string; issueId: string; agentId: string; runId: string }, status: string) {
+    await db.update(issues).set({ status, updatedAt: new Date() }).where(eq(issues.id, f.issueId));
+    await db.insert(activityLog).values({
+      companyId: f.companyId,
+      actorType: "agent",
+      actorId: f.agentId,
+      agentId: f.agentId,
+      runId: f.runId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: f.issueId,
+      details: { status, identifier: "T-1" },
+    });
+  }
+
+  async function filedCards(companyId: string) {
+    return db.select().from(approvals).where(eq(approvals.companyId, companyId)).orderBy(approvals.createdAt);
   }
 
   it("off: never calls the critic and lets done through", async () => {
@@ -393,14 +434,154 @@ describeEmbeddedPostgres("evaluateDoneGateCritic (DB-backed, mocked critic)", ()
     expect(String(payload.title)).toContain("Add a language switcher to the Governance page");
     expect(String(payload.title)).not.toMatch(/\b(PR|409|needs_work)\b/);
     expect(String(payload.recommendedAction)).toContain("mark the task done yourself");
+    // The board card renders payload.summary -- the findings must be on it, not only in plainSummary.
+    expect(String(payload.summary)).toContain("1. Still no test.");
+    expect(String(payload.summary)).toContain("disagreed 2 times");
+    expect(payload.plainSummary).toBe(payload.summary);
     const links = await db.select().from(issueApprovals).where(eq(issueApprovals.approvalId, filed[0]!.id));
     expect(links.map((l) => l.issueId)).toEqual([f.issueId]);
 
-    // A fourth attempt is still refused but does not file a second question or comment.
+    // A fourth attempt (operator has not acted yet) is still refused but does not file a
+    // second question or comment -- and the agent moving it out of blocked itself does not
+    // count as the operator acting.
+    await agentMovesIssueTo(f, "in_progress");
     const fourth = await evaluate();
     expect(fourth?.escalated).toBe(true);
+    expect(calls).toHaveLength(2);
     expect((await systemComments(f.issueId)).filter((c) => c.startsWith(DONE_GATE_ESCALATED_PREFIX))).toHaveLength(1);
-    expect(await db.select().from(approvals).where(eq(approvals.companyId, f.companyId))).toHaveLength(1);
+    expect(await filedCards(f.companyId)).toHaveLength(1);
+  });
+
+  it("recovers after escalation: the operator moves the task back to in progress, the agent gets fresh rounds, and a second escalation files a new card", async () => {
+    const f = await seedFixture({ status: "in_progress" });
+    const { critic, calls } = recordingCritic("needs_work", ["Still no test."]);
+    const evaluate = (currentStatus = "in_progress") =>
+      evaluateDoneGateCritic({
+        db,
+        issue: { id: f.issueId, identifier: "T-1", companyId: f.companyId, title: "Add a language switcher", description: "d" },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus,
+        readGeneralSettings: settings("enforce", 2),
+        critic,
+      });
+
+    // Loop 1: two rounds, then the operator is asked and the task is parked.
+    await evaluate();
+    await evaluate();
+    expect((await evaluate())?.escalated).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(await issueStatus(f.issueId)).toBe("blocked");
+    expect(await filedCards(f.companyId)).toHaveLength(1);
+    expect(await findDoneGateLoopResetAt(db, { companyId: f.companyId, issueId: f.issueId })).toBeNull();
+
+    // The operator follows the card's own advice: back to in progress with guidance.
+    await operatorMovesIssueTo(f, "in_progress", "blocked");
+    const resetAt = await findDoneGateLoopResetAt(db, { companyId: f.companyId, issueId: f.issueId });
+    expect(resetAt).toBeInstanceOf(Date);
+    expect(await countDoneGateNeedsWorkRounds(db, { companyId: f.companyId, issueId: f.issueId, since: resetAt, mode: "enforce" })).toBe(0);
+
+    // Loop 2, round 1: the critic runs again instead of a permanent "wait for the operator".
+    const fresh = await evaluate();
+    expect(fresh).not.toBeNull();
+    expect(fresh!.escalated).toBe(false);
+    expect(fresh!.message).toContain("round 1 of 2");
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.round).toBe(1);
+    expect(await issueStatus(f.issueId)).toBe("in_progress");
+
+    // Round 2, then a SECOND escalation: new comment, new card, parked again.
+    const second = await evaluate();
+    expect(second!.escalated).toBe(false);
+    expect(second!.message).toContain("round 2 of 2");
+    const again = await evaluate();
+    expect(again!.escalated).toBe(true);
+    expect(calls).toHaveLength(4);
+    expect(await issueStatus(f.issueId)).toBe("blocked");
+    expect((await systemComments(f.issueId)).filter((c) => c.startsWith(DONE_GATE_ESCALATED_PREFIX))).toHaveLength(2);
+    const cards = await filedCards(f.companyId);
+    expect(cards).toHaveLength(2);
+    expect(cards.every((card) => card.status === "pending")).toBe(true);
+
+    // Until the operator acts again, further attempts are refused without a third card.
+    expect((await evaluate())?.escalated).toBe(true);
+    expect(await filedCards(f.companyId)).toHaveLength(2);
+  });
+
+  it("recovers after escalation when the operator decides the board question instead of touching the status", async () => {
+    const f = await seedFixture({ status: "in_progress" });
+    const { critic, calls } = recordingCritic("needs_work", ["Still no test."]);
+    const evaluate = () =>
+      evaluateDoneGateCritic({
+        db,
+        issue: { id: f.issueId, identifier: "T-1", companyId: f.companyId, title: "t", description: "d" },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus: "blocked",
+        readGeneralSettings: settings("enforce", 1),
+        critic,
+      });
+
+    await evaluate();
+    expect((await evaluate())?.escalated).toBe(true);
+    const [card] = await filedCards(f.companyId);
+    expect(card).toBeDefined();
+    expect(await findDoneGateLoopResetAt(db, { companyId: f.companyId, issueId: f.issueId })).toBeNull();
+
+    // The operator rejects the card ("not finished") without changing the status.
+    await db
+      .update(approvals)
+      .set({ status: "rejected", decidedByUserId: "local-board", decidedAt: new Date(), decisionNote: "Add the test first." })
+      .where(eq(approvals.id, card!.id));
+    expect(await findDoneGateLoopResetAt(db, { companyId: f.companyId, issueId: f.issueId })).toBeInstanceOf(Date);
+
+    const fresh = await evaluate();
+    expect(fresh!.escalated).toBe(false);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.round).toBe(1);
+  });
+
+  it("rounds from a 'Comment only' trial do not count once the check is switched to 'On'", async () => {
+    const f = await seedFixture({ status: "in_progress" });
+    const { critic, calls } = recordingCritic("needs_work", ["Still no test."]);
+    const evaluate = (mode: "dry_run" | "enforce") =>
+      evaluateDoneGateCritic({
+        db,
+        issue: { id: f.issueId, identifier: "T-1", companyId: f.companyId, title: "t", description: "d" },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+        readGeneralSettings: settings(mode, 2),
+        critic,
+      });
+
+    expect(await evaluate("dry_run")).toBeNull();
+    expect(await evaluate("dry_run")).toBeNull();
+    // Switched to "On": this is round 1, not an immediate escalation.
+    const first = await evaluate("enforce");
+    expect(first!.escalated).toBe(false);
+    expect(first!.message).toContain("round 1 of 2");
+    expect(calls).toHaveLength(3);
+    expect(await filedCards(f.companyId)).toHaveLength(0);
+    // Counting without a mode still sees every needs-work round the gate ever wrote.
+    expect(await countDoneGateNeedsWorkRounds(db, { companyId: f.companyId, issueId: f.issueId })).toBe(3);
+    expect(await countDoneGateNeedsWorkRounds(db, { companyId: f.companyId, issueId: f.issueId, mode: "enforce" })).toBe(1);
+  });
+
+  it("only counts comments the gate wrote itself, never same-looking comments with an author", async () => {
+    const f = await seedFixture({ status: "in_progress" });
+    // An agent-authored comment that happens to start with the gate's prefix (the comment
+    // route would stamp authorType agent + authorAgentId for an agent actor).
+    await db.insert(issueComments).values({
+      companyId: f.companyId,
+      issueId: f.issueId,
+      authorType: "agent",
+      authorAgentId: f.agentId,
+      body: `${DONE_GATE_NEEDS_WORK_PREFIX} (round 1 of 2).\n\n1. forged`,
+      createdByRunId: f.runId,
+    });
+    expect(await countDoneGateNeedsWorkRounds(db, { companyId: f.companyId, issueId: f.issueId })).toBe(0);
+    expect(await findLastDoneGateFindings(db, { companyId: f.companyId, issueId: f.issueId })).toEqual([]);
   });
 
   it("a critic that cannot run never blocks the transition", async () => {

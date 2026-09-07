@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { and, desc, eq, isNull, like } from "drizzle-orm";
+import { and, desc, eq, gt, isNotNull, isNull, like, ne, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, issueComments, issues } from "@paperclipai/db";
+import { activityLog, approvals, companies, issueApprovals, issueComments, issues } from "@paperclipai/db";
 import {
   DEFAULT_DONE_GATE_SETTINGS,
   formatApprovalTitle,
@@ -48,13 +48,31 @@ import { approvalPayloadKind, approvalPayloadOriginalIssueIds } from "./deploy-c
  * - The critic failing (no API key, upstream error, garbage output) never blocks work: the
  *   transition goes through and the failure is logged.
  *
- * Rounds are counted from the system-authored "needs work" comments on the issue
+ * Rounds are counted from the "needs work" comments this gate writes on the issue
  * (deleted ones included), so an agent can neither reset the counter by editing a field
- * it can PATCH nor by deleting the findings.
+ * it can PATCH nor by deleting the findings. Gate comments are authorType "system" with no
+ * author agent/user; an agent or a board user cannot write one through the comment route
+ * because issueService.addComment (assertIssueCommentAuthorTypeAllowed) refuses any
+ * authorType that does not match the authenticated actor. Should some other caller ever
+ * manage to write one, all it could do is inflate its own round count or pretend the
+ * operator was already asked -- neither lets work through the gate.
+ *
+ * The loop is RECOVERABLE. Rounds and the "already asked the operator" marker are only
+ * counted after the most recent operator intervention on the issue: a status change by
+ * a non-agent actor (the escalation card's own recommended action is "put it back to in
+ * progress with a comment"), or a decision on the board question this gate filed.
+ * Without that, the round cap would be a dead end: once escalated, no agent could ever
+ * mark the task done again, even after the operator sent it back with guidance.
  */
 
 export const DONE_GATE_CRITIC_MODEL = process.env.PAPERCLIP_DONE_GATE_CRITIC_MODEL?.trim() || "claude-haiku-4-5";
 const DONE_GATE_CRITIC_MAX_OUTPUT_TOKENS = 600;
+// The critic answers synchronously inside PATCH /issues/:id, so a hung upstream must not
+// stall the agent's "done" call for the SDK's default 10 minutes x 3 attempts. One retry on
+// a 60 s timeout bounds the worst case at ~2 minutes; a timeout is thrown and treated by
+// the caller as "the critic could not run" (fail open).
+const DONE_GATE_CRITIC_TIMEOUT_MS = 60_000;
+const DONE_GATE_CRITIC_MAX_RETRIES = 1;
 // Anthropic list price for the default model (claude-haiku-4-5); a custom model via the env
 // var is billed at the same rate here, which is fine for a cost line that only has to be
 // roughly right (mirrors lane-a.ts's flat computeCostCents).
@@ -198,7 +216,11 @@ export const anthropicDoneGateCritic: DoneGateCritic = async (input) => {
   if (!apiKey) {
     throw new Error("done-gate critic is not configured on this instance (ANTHROPIC_API_KEY unset)");
   }
-  const client = new Anthropic({ apiKey });
+  const client = new Anthropic({
+    apiKey,
+    timeout: DONE_GATE_CRITIC_TIMEOUT_MS,
+    maxRetries: DONE_GATE_CRITIC_MAX_RETRIES,
+  });
   const response = await client.messages.create({
     model: DONE_GATE_CRITIC_MODEL,
     max_tokens: DONE_GATE_CRITIC_MAX_OUTPUT_TOKENS,
@@ -231,45 +253,116 @@ export function computeDoneGateCriticCostCents(inputTokens: number, outputTokens
 }
 
 /**
- * How many "needs work" rounds this issue has already had. Counts system comments that
- * start with either needs-work prefix (enforce or dry run), deleted ones included -- see
- * the module docblock for why.
+ * The WHERE clause for "a comment this gate wrote on this issue": system-authored with no
+ * author agent/user (what postDoneGateComment stamps and what the comment route cannot
+ * produce for an agent or a user), optionally only those newer than `since`.
+ */
+function doneGateCommentWhere(input: { companyId: string; issueId: string; since?: Date | null }, bodyLike: string): SQL {
+  const clauses: SQL[] = [
+    eq(issueComments.companyId, input.companyId),
+    eq(issueComments.issueId, input.issueId),
+    eq(issueComments.authorType, "system"),
+    isNull(issueComments.authorAgentId),
+    isNull(issueComments.authorUserId),
+    like(issueComments.body, bodyLike),
+  ];
+  // Postgres keeps microseconds, the driver hands back milliseconds: anything written in
+  // the same millisecond as the intervention is treated as before it, so the escalation
+  // comment that immediately preceded the operator's action can never leak into the new loop.
+  if (input.since) clauses.push(gt(issueComments.createdAt, new Date(input.since.getTime() + 1)));
+  return and(...clauses)!;
+}
+
+/**
+ * When the operator last intervened on this issue, or null if never. The round counter and
+ * the "already asked the operator" marker only look at gate comments newer than this, so
+ * following the escalation card's own advice (move it back to in progress, or decide the
+ * card) gives the agent a fresh set of rounds instead of a permanent refusal.
+ *
+ * Two sources, the newer wins:
+ * - a status change on the issue by a non-agent actor (activity log `issue.updated` rows
+ *   carry the PATCH's fields, so `details.status` is set exactly when a status was sent);
+ * - a decision (any status other than pending) on a board question this gate filed for
+ *   the issue.
+ * The gate's own status writes (back to in_progress, park as blocked) are direct DB updates
+ * without an activity row, so they never count as an intervention.
+ */
+export async function findDoneGateLoopResetAt(
+  db: Db,
+  input: { companyId: string; issueId: string },
+): Promise<Date | null> {
+  const [statusChange, decision] = await Promise.all([
+    db
+      .select({ createdAt: activityLog.createdAt })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, input.companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, input.issueId),
+          eq(activityLog.action, "issue.updated"),
+          ne(activityLog.actorType, "agent"),
+          sql`${activityLog.details}->>'status' IS NOT NULL`,
+        ),
+      )
+      .orderBy(desc(activityLog.createdAt))
+      .limit(1)
+      .then((rows) => rows[0]?.createdAt ?? null),
+    db
+      .select({ decidedAt: approvals.decidedAt })
+      .from(issueApprovals)
+      .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+      .where(
+        and(
+          eq(issueApprovals.companyId, input.companyId),
+          eq(issueApprovals.issueId, input.issueId),
+          sql`${approvals.payload}->>'kind' = 'done_gate_exhausted'`,
+          ne(approvals.status, "pending"),
+          isNotNull(approvals.decidedAt),
+        ),
+      )
+      .orderBy(desc(approvals.decidedAt))
+      .limit(1)
+      .then((rows) => rows[0]?.decidedAt ?? null),
+  ]);
+  const candidates = [statusChange, decision].filter((value): value is Date => value instanceof Date);
+  if (candidates.length === 0) return null;
+  return new Date(Math.max(...candidates.map((value) => value.getTime())));
+}
+
+/**
+ * How many "needs work" rounds this issue has had in the current loop. Counts the gate's
+ * own needs-work comments (deleted ones included -- see the module docblock for why) newer
+ * than `since` (the last operator intervention; pass null to count the issue's whole life).
+ * `mode` restricts the count to that mode's comments, so rounds from a "Comment only" trial
+ * never count against the agent once the check is switched to "On"; omit it to count both.
  */
 export async function countDoneGateNeedsWorkRounds(
   db: Db,
-  input: { companyId: string; issueId: string },
+  input: { companyId: string; issueId: string; since?: Date | null; mode?: DoneGateMode },
 ): Promise<number> {
   const rows = await db
     .select({ body: issueComments.body })
     .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.companyId, input.companyId),
-        eq(issueComments.issueId, input.issueId),
-        eq(issueComments.authorType, "system"),
-        like(issueComments.body, DONE_GATE_COMMENT_LIKE),
-      ),
-    );
-  return rows.filter(
-    (row) => row.body.startsWith(DONE_GATE_NEEDS_WORK_PREFIX) || row.body.startsWith(DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX),
-  ).length;
+    .where(doneGateCommentWhere(input, DONE_GATE_COMMENT_LIKE));
+  const prefixes =
+    input.mode === "enforce"
+      ? [DONE_GATE_NEEDS_WORK_PREFIX]
+      : input.mode === "dry_run"
+        ? [DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX]
+        : [DONE_GATE_NEEDS_WORK_PREFIX, DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX];
+  return rows.filter((row) => prefixes.some((prefix) => row.body.startsWith(prefix))).length;
 }
 
+/** Whether this gate has already asked the operator about the issue in the current loop (newer than `since`). */
 export async function hasDoneGateEscalationComment(
   db: Db,
-  input: { companyId: string; issueId: string },
+  input: { companyId: string; issueId: string; since?: Date | null },
 ): Promise<boolean> {
   const row = await db
     .select({ id: issueComments.id })
     .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.companyId, input.companyId),
-        eq(issueComments.issueId, input.issueId),
-        eq(issueComments.authorType, "system"),
-        like(issueComments.body, `${DONE_GATE_ESCALATED_PREFIX}%`),
-      ),
-    )
+    .where(doneGateCommentWhere(input, `${DONE_GATE_ESCALATED_PREFIX}%`))
     .limit(1)
     .then((rows) => rows[0] ?? null);
   return Boolean(row);
@@ -429,7 +522,14 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
   const issueId = input.issue.id;
   const sourceRunId = input.actor.runId ?? null;
 
-  const priorRounds = await countDoneGateNeedsWorkRounds(db, { companyId, issueId });
+  // Only rounds since the operator last intervened count (see findDoneGateLoopResetAt).
+  let resetAt: Date | null = null;
+  try {
+    resetAt = await findDoneGateLoopResetAt(db, { companyId, issueId });
+  } catch (err) {
+    logger.warn({ err, issueId }, "done-gate critic: could not read the last operator intervention; counting all rounds");
+  }
+  const priorRounds = await countDoneGateNeedsWorkRounds(db, { companyId, issueId, since: resetAt, mode: config.mode });
 
   if (priorRounds >= config.maxRounds) {
     if (dryRun) {
@@ -437,7 +537,7 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
       logger.info({ issueId, priorRounds }, "done-gate critic (dry run): round cap reached, letting done through");
       return null;
     }
-    return escalateToBoard({ ...input, maxRounds: config.maxRounds });
+    return escalateToBoard({ ...input, maxRounds: config.maxRounds, resetAt });
   }
 
   const round = priorRounds + 1;
@@ -578,15 +678,18 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
 }
 
 async function escalateToBoard(
-  input: DoneGateEvaluationInput & { maxRounds: number },
+  input: DoneGateEvaluationInput & { maxRounds: number; resetAt: Date | null },
 ): Promise<DoneGateEvaluationResult> {
   const { db } = input;
   const companyId = input.issue.companyId;
   const issueId = input.issue.id;
   const label = input.issue.identifier ?? "This task";
 
-  const alreadyEscalated = await hasDoneGateEscalationComment(db, { companyId, issueId });
-  const lastFindings = await findLastDoneGateFindings(db, { companyId, issueId });
+  // "Already asked" only counts a question filed in THIS loop: once the operator has acted
+  // (status change / card decision) and the agent has used up a fresh set of rounds, a new
+  // card is filed rather than a silent, permanent refusal.
+  const alreadyEscalated = await hasDoneGateEscalationComment(db, { companyId, issueId, since: input.resetAt });
+  const lastFindings = await findLastDoneGateFindings(db, { companyId, issueId, since: input.resetAt });
   const text = buildDoneGateEscalationText({
     issueIdentifier: input.issue.identifier,
     title: input.issue.title,
@@ -623,6 +726,9 @@ async function escalateToBoard(
       payload: {
         kind: "done_gate_exhausted",
         title: formatApprovalTitle(companyLabel, text.approvalTitle),
+        // `summary` is what the board card renders (ui BoardApprovalPayloadContent);
+        // `plainSummary` is kept for the shape other operator cards use.
+        summary: text.plainSummary,
         plainSummary: text.plainSummary,
         recommendedAction: text.recommendedAction,
         issueId,
@@ -644,22 +750,15 @@ async function escalateToBoard(
   return { message, findings: lastFindings, escalated: true };
 }
 
-/** The findings from the most recent needs-work comment, parsed back out of its numbered list. */
+/** The findings from the most recent needs-work comment (in the current loop when `since` is given), parsed back out of its numbered list. */
 export async function findLastDoneGateFindings(
   db: Db,
-  input: { companyId: string; issueId: string },
+  input: { companyId: string; issueId: string; since?: Date | null },
 ): Promise<string[]> {
   const row = await db
     .select({ body: issueComments.body })
     .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.companyId, input.companyId),
-        eq(issueComments.issueId, input.issueId),
-        eq(issueComments.authorType, "system"),
-        like(issueComments.body, `${DONE_GATE_NEEDS_WORK_PREFIX}%`),
-      ),
-    )
+    .where(doneGateCommentWhere(input, `${DONE_GATE_NEEDS_WORK_PREFIX}%`))
     .orderBy(desc(issueComments.createdAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
