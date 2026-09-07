@@ -64,6 +64,41 @@ export interface ProjectCodebase {
   origin: ProjectCodebaseOrigin;
 }
 
+/**
+ * Result of "Check token" on a project with a GitHub repo: which GitHub
+ * scopes the project needs and whether the bound token has them. Carries
+ * scope names, statuses and the GitHub login -- never the token itself.
+ */
+export type GitHubTokenScopeStatus = "ok" | "missing" | "unknown";
+
+export interface GitHubTokenRequirement {
+  /** GitHub's own name for the permission, e.g. "repo" or "workflow". */
+  scope: string;
+  /** Why the project needs it, in operator language. */
+  why: string;
+  /** Whether this repo actually needs it (workflow only matters with CI files). */
+  required: boolean;
+}
+
+export interface GitHubTokenScopeResult extends GitHubTokenRequirement {
+  status: GitHubTokenScopeStatus;
+  /** Extra sentence when the status is not "ok". */
+  note?: string;
+}
+
+export interface GitHubTokenCheckReport {
+  tokenKind: "classic" | "fine_grained" | "unknown";
+  login: string | null;
+  repo: { owner: string; name: string; hostname: string; private: boolean | null; defaultBranch: string | null };
+  /** Whether the repo has files under .github/workflows (null when it could not be checked). */
+  hasWorkflows: boolean | null;
+  scopes: GitHubTokenScopeResult[];
+  summary: string;
+  ok: boolean;
+  /** Where the checked token came from, e.g. "the project's Env setting GITHUB_TOKEN". */
+  tokenSource?: string;
+}
+
 export interface ProjectManagedByPlugin {
   id: string;
   pluginId: string;
