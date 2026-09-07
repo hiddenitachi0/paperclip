@@ -2147,6 +2147,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/projects/{id}/github-token-check",
+  tags: ["projects"],
+  summary: "Check whether the project's GitHub token has the scopes the project needs (board only; never returns the token)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/projects/{id}/workspaces",
   tags: ["projects"],
