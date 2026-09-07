@@ -174,6 +174,9 @@ export const instanceExperimentalSettingsSchema = z.object({
   // DUR-62: run the weekly check-up for every active company on a schedule.
   // Off by default; PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true also turns it on.
   enableWeeklyCheckup: z.boolean().default(false),
+  // Guarded cross-company instruction channel (migration 0163). Off by
+  // default: with it off, no instruction can be sent between companies at all.
+  enableCrossCompanyInstructions: z.boolean().default(false),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

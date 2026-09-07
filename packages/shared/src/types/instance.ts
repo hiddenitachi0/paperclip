@@ -211,6 +211,8 @@ export interface InstanceExperimentalSettings {
   issueGraphLivenessAutoRecoveryLookbackHours: number;
   /** DUR-62: run the weekly check-up for every active company on a schedule. */
   enableWeeklyCheckup: boolean;
+  /** Guarded cross-company instruction channel; off means nothing can be sent between companies. */
+  enableCrossCompanyInstructions: boolean;
 }
 
 export interface InstanceSettings {

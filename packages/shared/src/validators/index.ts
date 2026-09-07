@@ -725,3 +725,11 @@ export {
   type SaveInstanceClaudeAuthTokenInput,
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./instance-claude-auth.js";
+export {
+  sendCrossCompanyInstructionSchema,
+  crossCompanyInstructionRequestPayloadSchema,
+  CROSS_COMPANY_INSTRUCTION_STATUSES,
+  type SendCrossCompanyInstruction,
+  type CrossCompanyInstructionRequestPayload,
+  type CrossCompanyInstructionStatus,
+} from "./cross-company-instruction.js";

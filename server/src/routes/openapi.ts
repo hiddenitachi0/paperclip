@@ -143,6 +143,7 @@ import {
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
   sendLaneAMessageSchema,
+  sendCrossCompanyInstructionSchema,
   saveInstanceClaudeAuthTokenSchema,
   signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
@@ -3082,6 +3083,40 @@ registerCurrentRoute({
         ),
       }),
     ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+// ─── Cross-company instruction channel (guarded, feature-flagged) ─────────────
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/cross-company-instructions",
+  tags: ["companies"],
+  summary:
+    "Send a plain-text instruction to another company's liaison agent; it is only delivered after that company's board approves (off unless the instance flag is on)",
+  query: z.object({ fromAgentId: z.string().uuid().optional() }),
+  body: sendCrossCompanyInstructionSchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/cross-company-instructions",
+  tags: ["companies"],
+  summary: "List the instructions this company has sent to, or received from, other companies",
+  responses: {
+    200: r.ok(),
     400: r.badRequest,
     401: r.unauthorized,
     403: r.forbidden,

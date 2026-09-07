@@ -1229,6 +1229,20 @@ export {
 } from "./validators/index.js";
 
 export {
+  sendCrossCompanyInstructionSchema,
+  crossCompanyInstructionRequestPayloadSchema,
+  CROSS_COMPANY_INSTRUCTION_STATUSES,
+  type SendCrossCompanyInstruction,
+  type CrossCompanyInstructionRequestPayload,
+  type CrossCompanyInstructionStatus,
+} from "./validators/cross-company-instruction.js";
+export type {
+  CrossCompanyInstruction,
+  CrossCompanyInstructionSenderView,
+  CrossCompanyInstructionView,
+} from "./types/cross-company-instruction.js";
+
+export {
   createCompanySchema,
   updateCompanySchema,
   updateCompanyBrandingSchema,

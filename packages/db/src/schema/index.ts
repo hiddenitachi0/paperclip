@@ -4,6 +4,7 @@ export { crossCompanyAccessLog } from "./cross_company_access_log.js";
 export { authUsers, authSessions, authAccounts, authVerifications } from "./auth.js";
 export { instanceSettings } from "./instance_settings.js";
 export { instanceClaudeAuth } from "./instance_claude_auth.js";
+export { crossCompanyInstructions } from "./cross_company_instructions.js";
 export { cloudUpstreamConnections, cloudUpstreamRuns } from "./cloud_upstreams.js";
 export { instanceUserRoles } from "./instance_user_roles.js";
 export { userSidebarPreferences } from "./user_sidebar_preferences.js";
