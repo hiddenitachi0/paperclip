@@ -315,6 +315,11 @@ const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_INLINE_WAKE_COMMENTS = 8;
 const MAX_INLINE_WAKE_COMMENT_BODY_CHARS = 4_000;
 const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
+// DUR-3943: adapters whose execute() always renders the wake payload and the
+// task block side by side in one prompt, so the task block can point at the
+// wake comment instead of repeating it. Template-driven adapters (hermes) are
+// deliberately excluded because an operator template may drop either block.
+const WAKE_COMMENT_DEDUP_ADAPTER_TYPES = new Set(["claude_local"]);
 const execFile = promisify(execFileCallback);
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
@@ -4590,21 +4595,63 @@ function buildRunEventRuntimeProgress(input: {
   };
 }
 
+type PaperclipTaskMarkdownIssue = {
+  id: string;
+  identifier: string | null;
+  title: string;
+  workMode?: string | null;
+  description?: string | null;
+};
+
+type PaperclipTaskMarkdownAncestor = {
+  id: string;
+  identifier?: string | null;
+  title?: string | null;
+  status?: string | null;
+  priority?: string | null;
+};
+
+const MAX_PAPERCLIP_TASK_MARKDOWN_ANCESTORS = 6;
+
+/**
+ * DUR-3943: stable identity of the "standing" part of the task context (the
+ * issue itself plus its ancestor chain) -- everything in the task block that
+ * does NOT change from wake to wake. An adapter that resumes a session whose
+ * saved fingerprint equals the current one already has this text in the
+ * session transcript and can send the short resume form instead of the full
+ * description again. Anything that changes the rendered block (title,
+ * description, work mode, an ancestor's status/priority) changes the
+ * fingerprint, which falls back to sending the full block.
+ */
+export function buildPaperclipTaskContextFingerprint(input: {
+  issue: PaperclipTaskMarkdownIssue | null;
+  ancestors?: PaperclipTaskMarkdownAncestor[] | null;
+}): string | null {
+  if (!input.issue) return null;
+  const ancestors = (input.ancestors ?? []).slice(0, MAX_PAPERCLIP_TASK_MARKDOWN_ANCESTORS).map((ancestor) => ({
+    id: ancestor.id,
+    identifier: ancestor.identifier ?? null,
+    title: ancestor.title ?? null,
+    status: ancestor.status ?? null,
+    priority: ancestor.priority ?? null,
+  }));
+  const canonical = JSON.stringify({
+    issue: {
+      id: input.issue.id,
+      identifier: input.issue.identifier ?? null,
+      title: input.issue.title,
+      workMode: input.issue.workMode ?? null,
+      description: input.issue.description?.trim() || null,
+    },
+    ancestors,
+    truncated: (input.ancestors ?? []).length > ancestors.length,
+  });
+  return `v1:sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+}
+
 export function buildPaperclipTaskMarkdown(input: {
-  issue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    workMode?: string | null;
-    description?: string | null;
-  } | null;
-  ancestors?: Array<{
-    id: string;
-    identifier?: string | null;
-    title?: string | null;
-    status?: string | null;
-    priority?: string | null;
-  }> | null;
+  issue: PaperclipTaskMarkdownIssue | null;
+  ancestors?: PaperclipTaskMarkdownAncestor[] | null;
   wakeComment?: {
     id: string;
     body: string;
@@ -4614,6 +4661,20 @@ export function buildPaperclipTaskMarkdown(input: {
     status?: string | null;
   } | null;
   acceptedPlanContinuation?: boolean;
+  /**
+   * DUR-3943: the same comment is already inlined (untruncated) in the wake
+   * payload that every adapter renders ahead of this block. Point at it
+   * instead of repeating the body, so a comment wake does not carry the
+   * comment text twice in every turn of the run.
+   */
+  wakeCommentInlinedInWakePayload?: boolean;
+  /**
+   * DUR-3943: render the short resume form. Only valid when the adapter is
+   * resuming a session that already received the full block for the same
+   * issue/ancestor fingerprint (see buildPaperclipTaskContextFingerprint);
+   * the description and ancestor chain are replaced by a one-line notice.
+   */
+  unchangedTaskContextForResume?: boolean;
 }) {
   const quoteTaskScalar = (value: string) => JSON.stringify(value);
   const fenceTaskText = (value: string) => {
@@ -4625,7 +4686,7 @@ export function buildPaperclipTaskMarkdown(input: {
     return [fence + "text", value, fence].join("\n");
   };
   const issue = input.issue;
-  const ancestors = (input.ancestors ?? []).slice(0, 6);
+  const ancestors = (input.ancestors ?? []).slice(0, MAX_PAPERCLIP_TASK_MARKDOWN_ANCESTORS);
   const wakeComment = input.wakeComment ?? null;
   const acceptedPlanContinuation =
     !wakeComment &&
@@ -4635,6 +4696,7 @@ export function buildPaperclipTaskMarkdown(input: {
       issue?.workMode === "planning"
     ));
   if (!issue && !wakeComment) return null;
+  const unchangedTaskContextForResume = input.unchangedTaskContextForResume === true && issue != null;
 
   const lines = [
     "Paperclip task context:",
@@ -4674,11 +4736,16 @@ export function buildPaperclipTaskMarkdown(input: {
       );
     }
     const description = issue.description?.trim();
-    if (description) {
+    if (unchangedTaskContextForResume) {
+      lines.push(
+        "",
+        "Issue description and parent / ancestor context: unchanged since your previous run in this session (already in your context). Do not re-fetch them unless you need detail you no longer have.",
+      );
+    } else if (description) {
       lines.push("", "Issue description:", fenceTaskText(description));
     }
   }
-  if (ancestors.length > 0) {
+  if (ancestors.length > 0 && !unchangedTaskContextForResume) {
     lines.push("", "Authoritative parent / ancestor context:");
     for (const [index, ancestor] of ancestors.entries()) {
       const label = ancestor.identifier || ancestor.id;
@@ -4692,7 +4759,14 @@ export function buildPaperclipTaskMarkdown(input: {
     }
   }
   if (wakeComment?.body.trim()) {
-    lines.push("", "Latest wake comment:", fenceTaskText(wakeComment.body.trim()));
+    if (input.wakeCommentInlinedInWakePayload) {
+      lines.push(
+        "",
+        `Latest wake comment: ${quoteTaskScalar(wakeComment.id)} (full text is in the wake payload of this prompt; not repeated here).`,
+      );
+    } else {
+      lines.push("", "Latest wake comment:", fenceTaskText(wakeComment.body.trim()));
+    }
   }
   lines.push("", "Use this task context as the current assignment.");
   return lines.join("\n");
@@ -10915,7 +10989,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context[PAPERCLIP_WAKE_PAYLOAD_KEY];
     }
-    const taskMarkdown = buildPaperclipTaskMarkdown({
+    // DUR-3943: the wake payload above already inlines the wake comment
+    // (untruncated) for adapters that always render both blocks together,
+    // so the task block only needs to point at it. Gated per adapter type:
+    // template-driven adapters (hermes) may render one block without the
+    // other, so they keep the full copy.
+    const wakeCommentInlinedInWakePayload = Boolean(
+      wakeCommentId &&
+        wakeCommentContext &&
+        WAKE_COMMENT_DEDUP_ADAPTER_TYPES.has(agent.adapterType) &&
+        paperclipWakePayload?.comments.some(
+          (comment) => comment.id === wakeCommentId && comment.bodyTruncated !== true,
+        ),
+    );
+    const taskMarkdownInput = {
       issue: issueRef
         ? {
             id: issueRef.id,
@@ -10934,6 +11021,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       acceptedPlanContinuation:
         readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation"
         && Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0,
+      wakeCommentInlinedInWakePayload,
+    };
+    const taskMarkdown = buildPaperclipTaskMarkdown(taskMarkdownInput);
+    // DUR-3943: short form + fingerprint for adapters that resume a session
+    // which already carries the full block (see claude-local execute).
+    const taskMarkdownResume = buildPaperclipTaskMarkdown({
+      ...taskMarkdownInput,
+      unchangedTaskContextForResume: true,
+    });
+    const taskContextFingerprint = buildPaperclipTaskContextFingerprint({
+      issue: taskMarkdownInput.issue,
+      ancestors: issueAncestors,
     });
     if (issueRef) {
       context.paperclipIssue = {
@@ -10955,6 +11054,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       context.paperclipTaskMarkdown = taskMarkdown;
     } else {
       delete context.paperclipTaskMarkdown;
+    }
+    if (taskMarkdownResume && taskContextFingerprint) {
+      context.paperclipTaskMarkdownResume = taskMarkdownResume;
+      context.paperclipTaskContextFingerprint = taskContextFingerprint;
+    } else {
+      delete context.paperclipTaskMarkdownResume;
+      delete context.paperclipTaskContextFingerprint;
     }
     const requestedExecutionWorkspaceId = readNonEmptyString(issueRef?.executionWorkspaceId);
     const existingExecutionWorkspace =
