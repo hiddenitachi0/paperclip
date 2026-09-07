@@ -296,7 +296,7 @@ export function summarizeFleetHealth(input: {
   if (runs.zombieCandidates > 0) {
     findings.push({
       level: "warning",
-      text: `${plural(runs.zombieCandidates, "run has", "runs have")} shown no output for ${runs.zombieSilenceMinutes}+ minutes and may be stuck, holding a slot. The watchdog ends a run once its process is confirmed gone.`,
+      text: `${plural(runs.zombieCandidates, "run has", "runs have")} shown no output for ${runs.zombieSilenceMinutes}+ minutes and may be stuck, holding a slot. The watchdog ends a run once its process is gone, and stops one that stays silent or runs past the time limits under Settings > Instance settings > General.`,
     });
   }
 
@@ -338,10 +338,18 @@ export function summarizeFleetHealth(input: {
 export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOptions): Promise<FleetHealthSnapshot> {
   const now = options.now ?? new Date();
   const windowMs = options.windowMs ?? FLEET_HEALTH_WINDOW_MS;
-  const zombieSilenceMs = options.zombieSilenceMs ?? FLEET_ZOMBIE_SILENCE_MS;
 
-  const globalMaxConcurrentRuns =
-    options.globalMaxConcurrentRuns ?? (await instanceSettingsService(db).getGeneral()).globalMaxConcurrentRuns;
+  const general =
+    options.globalMaxConcurrentRuns !== undefined && options.zombieSilenceMs !== undefined
+      ? null
+      : await instanceSettingsService(db).getGeneral();
+  const globalMaxConcurrentRuns = options.globalMaxConcurrentRuns ?? general!.globalMaxConcurrentRuns;
+  // DUR-3940 item 2: "may be stuck" uses the same silence window the
+  // watchdog actually enforces, so the count on screen matches what the
+  // watchdog is about to act on.
+  const zombieSilenceMs =
+    options.zombieSilenceMs ??
+    (general && general.silentRunTimeoutMinutes > 0 ? general.silentRunTimeoutMinutes * 60_000 : FLEET_ZOMBIE_SILENCE_MS);
 
   const [runs, agentCounts, database] = await Promise.all([
     loadFleetRunCounts(db, { now, windowMs, zombieSilenceMs }),
