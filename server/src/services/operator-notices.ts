@@ -89,6 +89,68 @@ export function buildFrozenRunErrorMessage(input: FrozenRunStopWordingInput): st
   return `${what}; ${next}`;
 }
 
+export interface TurnCapContinuationNoteInput {
+  /** The turn limit that was hit (null when the adapter did not report it). */
+  turns: number | null;
+  outcome: "continued" | "exhausted" | "not_continued";
+  /** For "exhausted": how many cap hits in a row this made on the same task. */
+  timesInARow?: number;
+  /** For "not_continued": why no fresh run was queued, in plain words. */
+  reason?: string | null;
+}
+
+/**
+ * DUR-3943 item 4: the sentence stored as the error of a run that ended
+ * because it hit its turn cap (shown on the run row and the agent page).
+ */
+export function buildTurnCapContinuationNote(input: TurnCapContinuationNoteInput): string {
+  const stopped = input.turns && input.turns > 0
+    ? `Stopped after ${input.turns} turns, the limit for one run`
+    : "Stopped at the turn limit for one run";
+  if (input.outcome === "continued") {
+    return `${stopped}; the work continues in a fresh run.`;
+  }
+  if (input.outcome === "exhausted") {
+    const times = input.timesInARow && input.timesInARow > 1 ? `${input.timesInARow} times in a row` : "again";
+    return `${stopped}. This task has hit the limit ${times}, so no further fresh run was queued; it needs a look.`;
+  }
+  const reason = input.reason?.trim();
+  return `${stopped}; the work was not continued${reason ? ` because ${lowerFirst(reason)}` : ""}.`;
+}
+
+export interface TurnCapRepeatedOperatorNoticeInput {
+  agentName: string | null | undefined;
+  issueIdentifier: string | null | undefined;
+  issueTitle: string | null | undefined;
+  turns: number | null;
+  timesInARow: number;
+}
+
+/**
+ * DUR-3943 item 4: the Activity-feed notice written only when the same task
+ * has hit the turn cap repeatedly (three times in a row by default) and the
+ * platform stopped queuing fresh runs for it.
+ */
+export function buildTurnCapRepeatedOperatorNotice(input: TurnCapRepeatedOperatorNoticeInput): string {
+  const who = input.agentName?.trim() ? input.agentName.trim() : "An agent";
+  const task = input.issueTitle?.trim()
+    ? `"${input.issueTitle.trim()}"${input.issueIdentifier ? ` (${input.issueIdentifier})` : ""}`
+    : input.issueIdentifier
+      ? `task ${input.issueIdentifier}`
+      : "its task";
+  const limit = input.turns && input.turns > 0 ? `${input.turns} turns` : "the turn limit";
+  const times = input.timesInARow > 1 ? `${input.timesInARow} times in a row` : "again";
+  return (
+    `${who} hit the limit of ${limit} per run on ${task} ${times}. ` +
+    `Paperclip stopped queuing fresh runs for it, because a task that keeps running out of turns is usually stuck, too big, or unclear. ` +
+    `Have a look at the task, then split it, clarify it, or wake the agent again when it is ready to continue.`
+  );
+}
+
+function lowerFirst(text: string): string {
+  return text.length > 0 ? text[0].toLowerCase() + text.slice(1) : text;
+}
+
 export interface StoppedRunOperatorNoticeInput extends FrozenRunStopWordingInput {
   agentName: string | null | undefined;
   /** How long the run had been going when it was stopped. */

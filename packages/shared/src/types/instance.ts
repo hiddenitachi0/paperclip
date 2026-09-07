@@ -50,6 +50,31 @@ export const DEFAULT_SILENT_RUN_TIMEOUT_MINUTES = 45;
 export const MIN_SILENT_RUN_TIMEOUT_MINUTES = 5;
 export const MAX_SILENT_RUN_TIMEOUT_MINUTES = 12 * 60;
 
+// DUR-3943 item 4: every turn of a run re-sends the whole standing context,
+// so the turn ceiling is the single biggest multiplier on what a run can
+// cost. Instance-wide default for Claude-style local agents; an agent's own
+// adapterConfig.maxTurnsPerRun (when set, > 0) takes precedence. A run that
+// hits the cap ends with a plain note and the work continues in a fresh run
+// through the existing max-turn continuation; after three cap hits in a row
+// on the same task the operator is told instead.
+export const DEFAULT_MAX_TURNS_PER_RUN = 60;
+export const MIN_MAX_TURNS_PER_RUN = 1;
+export const MAX_MAX_TURNS_PER_RUN = 1000;
+
+// DUR-3943 item 5: a saved (resumable) session used to be resumed forever,
+// so its transcript grew without bound and every later turn paid for it.
+// Instance-wide reset policy for sessioned local agents: the saved session
+// is dropped after this many runs on the same task, or once it is older
+// than this many hours, and the next run starts fresh with the full task
+// block. 0 = never reset on that criterion. Per-agent override:
+// runtimeConfig.heartbeat.sessionCompaction.{maxSessionRuns,maxSessionAgeHours}.
+export const DEFAULT_SESSION_RESET_AFTER_RUNS = 8;
+export const MIN_SESSION_RESET_AFTER_RUNS = 0;
+export const MAX_SESSION_RESET_AFTER_RUNS = 1000;
+export const DEFAULT_SESSION_RESET_AFTER_HOURS = 24;
+export const MIN_SESSION_RESET_AFTER_HOURS = 0;
+export const MAX_SESSION_RESET_AFTER_HOURS = 24 * 30;
+
 /**
  * Instance-wide execution policy.
  *
@@ -171,6 +196,23 @@ export interface InstanceGeneralSettings {
    * adapterConfig.silentRunTimeoutMinutes.
    */
   silentRunTimeoutMinutes: number;
+  /**
+   * DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
+   * Per-agent override: adapterConfig.maxTurnsPerRun (> 0 wins).
+   */
+  maxTurnsPerRun: number;
+  /**
+   * DUR-3943 item 5: drop an agent's saved session after this many runs on
+   * the same task (0 = never on this criterion). Per-agent override:
+   * runtimeConfig.heartbeat.sessionCompaction.maxSessionRuns.
+   */
+  sessionResetAfterRuns: number;
+  /**
+   * DUR-3943 item 5: drop an agent's saved session once it is older than
+   * this many hours (0 = never on this criterion). Per-agent override:
+   * runtimeConfig.heartbeat.sessionCompaction.maxSessionAgeHours.
+   */
+  sessionResetAfterHours: number;
   /** DUR-224 quiet-mode state; not settable via the general-settings patch route. */
   quietMode: QuietModeState;
   /**

@@ -12,7 +12,25 @@ import { api } from "./client";
 
 export type QuietModeStatus = QuietModeState & { activeRunCount: number };
 
+export interface MaxTurnsPerRunAgentOverride {
+  agentId: string;
+  agentName: string;
+  companyId: string;
+  adapterType: string;
+  maxTurnsPerRun: number;
+}
+
 export const instanceSettingsApi = {
+  // DUR-3943 item 4: agents whose own "max turns per run" wins over the instance setting.
+  listMaxTurnsAgentOverrides: () =>
+    api.get<{ agentCount: number; agents: MaxTurnsPerRunAgentOverride[] }>(
+      "/instance/settings/general/max-turns-per-run/agent-overrides",
+    ),
+  clearMaxTurnsAgentOverrides: () =>
+    api.post<{ clearedAgentCount: number }>(
+      "/instance/settings/general/max-turns-per-run/clear-agent-overrides",
+      undefined,
+    ),
   get: () =>
     api.get<InstanceSettings>("/instance/settings"),
   update: (patch: PatchInstanceSettings) =>

@@ -119,6 +119,40 @@ export function instanceSettingsRoutes(db: Db) {
     },
   );
 
+  // DUR-3943 item 4: which agents carry their own "max turns per run" (their
+  // number wins over the instance setting), and a one-click way to make every
+  // agent follow the instance setting instead. Admin-gated like the general
+  // settings PATCH; the listing is readable by any org member so the settings
+  // page can show it.
+  router.get("/instance/settings/general/max-turns-per-run/agent-overrides", async (req, res) => {
+    assertBoardOrgAccess(req);
+    const agents = await svc.listMaxTurnsPerRunAgentOverrides();
+    res.json({ agentCount: agents.length, agents });
+  });
+
+  router.post("/instance/settings/general/max-turns-per-run/clear-agent-overrides", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const result = await svc.clearMaxTurnsPerRunAgentOverrides();
+    const actor = getActorInfo(req);
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.settings.max_turns_agent_overrides_cleared",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: { clearedAgentCount: result.clearedAgentIds.length, clearedAgentIds: result.clearedAgentIds },
+        }),
+      ),
+    );
+    res.json({ clearedAgentCount: result.clearedAgentIds.length });
+  });
+
   router.get("/instance/settings/experimental", async (req, res) => {
     // Experimental settings are readable by any authenticated org member
     // or instance admin. Updating them remains instance-admin only because
