@@ -1200,7 +1200,11 @@ export {
   type CrossCompanyInstructionRequestPayload,
   type CrossCompanyInstructionStatus,
 } from "./validators/cross-company-instruction.js";
-export type { CrossCompanyInstruction } from "./types/cross-company-instruction.js";
+export type {
+  CrossCompanyInstruction,
+  CrossCompanyInstructionSenderView,
+  CrossCompanyInstructionView,
+} from "./types/cross-company-instruction.js";
 
 export {
   createCompanySchema,

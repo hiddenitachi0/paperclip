@@ -12,13 +12,18 @@ import {
   crossCompanyInstructionRequestPayloadSchema,
   type CrossCompanyInstruction,
   type CrossCompanyInstructionRequestPayload,
+  type CrossCompanyInstructionSenderView,
+  type CrossCompanyInstructionView,
   type SendCrossCompanyInstruction,
 } from "@paperclipai/shared";
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
+import { isCrossCompanyInstructionApproval } from "./approvals.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
+
+export { isCrossCompanyInstructionApproval };
 
 /**
  * The receiving company's designated liaison is the ONE active agent whose
@@ -32,30 +37,46 @@ const ACTIVE_LIAISON_STATUSES = ["active", "idle"] as const;
 
 export type CrossCompanyInstructionRow = typeof crossCompanyInstructions.$inferSelect;
 
-export function isCrossCompanyInstructionApproval(
-  approval: Pick<typeof approvals.$inferSelect, "type" | "payload">,
-): boolean {
-  return approval.type === "request_board_approval" && approval.payload?.kind === "cross_company_instruction";
-}
-
-export function toCrossCompanyInstruction(row: CrossCompanyInstructionRow): CrossCompanyInstruction {
+/**
+ * The SENDING company's view: its own side plus the outcome. Built by
+ * picking fields, never by deleting them from the full row, so a column
+ * added to the table later can never leak to the sender by default.
+ */
+export function toCrossCompanyInstructionSenderView(row: CrossCompanyInstructionRow): CrossCompanyInstructionSenderView {
   return {
     id: row.id,
     fromCompanyId: row.fromCompanyId,
     fromAgentId: row.fromAgentId,
     toCompanyId: row.toCompanyId,
-    toAgentId: row.toAgentId,
     subject: row.subject,
     instruction: row.instruction,
     status: row.status as CrossCompanyInstruction["status"],
-    approvalId: row.approvalId ?? null,
-    deliveredIssueId: row.deliveredIssueId ?? null,
-    decidedByUserId: row.decidedByUserId ?? null,
-    decisionNote: row.decisionNote ?? null,
     decidedAt: row.decidedAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/** The full row: only ever handed to the RECEIVING company. */
+export function toCrossCompanyInstruction(row: CrossCompanyInstructionRow): CrossCompanyInstruction {
+  return {
+    ...toCrossCompanyInstructionSenderView(row),
+    toAgentId: row.toAgentId,
+    approvalId: row.approvalId ?? null,
+    deliveredIssueId: row.deliveredIssueId ?? null,
+    decidedByUserId: row.decidedByUserId ?? null,
+    decisionNote: row.decisionNote ?? null,
+  };
+}
+
+/**
+ * What `viewerCompanyId` may see of one row. The receiving company gets the
+ * full row; anyone else -- which, given the list query, can only be the
+ * sender -- gets the sender view. Deciding by "is the viewer the receiver"
+ * rather than "is the viewer the sender" keeps the default the redacted one.
+ */
+export function toCrossCompanyInstructionViewFor(row: CrossCompanyInstructionRow, viewerCompanyId: string): CrossCompanyInstructionView {
+  return row.toCompanyId === viewerCompanyId ? toCrossCompanyInstruction(row) : toCrossCompanyInstructionSenderView(row);
 }
 
 export interface CrossCompanyInstructionSender {
@@ -293,17 +314,24 @@ export function crossCompanyInstructionService(db: Db, deps: { rawDb: Db }) {
         },
       );
 
-      return toCrossCompanyInstruction(created);
+      // The caller is the sender: it gets its own side and the status, not
+      // the receiving company's liaison agent id or approval card id.
+      return toCrossCompanyInstructionSenderView(created);
     },
 
-    /** Everything a company sent or received, newest first. */
-    listForCompany: async (companyId: string) => {
+    /**
+     * Everything a company sent or received, newest first. Rows the company
+     * RECEIVED come back whole; rows it SENT come back as the sender view
+     * (no decision note, decider, liaison, approval card or delivered task
+     * from the other side).
+     */
+    listForCompany: async (companyId: string): Promise<CrossCompanyInstructionView[]> => {
       const rows = await db
         .select()
         .from(crossCompanyInstructions)
         .where(or(eq(crossCompanyInstructions.fromCompanyId, companyId), eq(crossCompanyInstructions.toCompanyId, companyId)))
         .orderBy(desc(crossCompanyInstructions.createdAt));
-      return rows.map(toCrossCompanyInstruction);
+      return rows.map((row) => toCrossCompanyInstructionViewFor(row, companyId));
     },
 
     getByApprovalId: async (approvalId: string) => {
@@ -316,11 +344,17 @@ export function crossCompanyInstructionService(db: Db, deps: { rawDb: Db }) {
     },
 
     /**
-     * Called ONLY from the receiving company's approve route after the card
-     * was approved. Creates the liaison's issue in the receiving company,
-     * marks the instruction delivered, logs both sides and wakes the liaison.
+     * Runs INSIDE approvalService.approve (as its cross-company hook) for the
+     * receiving company's card. Creates the liaison's issue in the receiving
+     * company, marks the instruction delivered, logs both sides and wakes the
+     * liaison. Throwing here makes approvalService put the card back to
+     * pending, so a card can never sit "approved" with nothing delivered.
      */
     deliverApproved: async (approval: typeof approvals.$inferSelect, decider: CrossCompanyInstructionDecider) => {
+      // The instance flag covers both halves of the channel: with it off,
+      // cards that were filed earlier stay pending instead of turning into
+      // work (they can still be rejected).
+      await assertEnabled();
       const payload = crossCompanyInstructionRequestPayloadSchema.parse(approval.payload);
       const row = await db
         .select()
@@ -355,18 +389,30 @@ export function crossCompanyInstructionService(db: Db, deps: { rawDb: Db }) {
       if (!issue) throw unprocessable("Could not create the liaison's task");
 
       const now = new Date();
-      const [updated] = await db
-        .update(crossCompanyInstructions)
-        .set({
-          status: "delivered",
-          deliveredIssueId: issue.id,
-          decidedByUserId: decider.userId,
-          decisionNote: decider.decisionNote ?? null,
-          decidedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(crossCompanyInstructions.id, row.id))
-        .returning();
+      let updated: CrossCompanyInstructionRow | undefined;
+      try {
+        [updated] = await db
+          .update(crossCompanyInstructions)
+          .set({
+            status: "delivered",
+            deliveredIssueId: issue.id,
+            decidedByUserId: decider.userId,
+            decisionNote: decider.decisionNote ?? null,
+            decidedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(crossCompanyInstructions.id, row.id), eq(crossCompanyInstructions.status, "pending_approval")))
+          .returning();
+        if (!updated) throw unprocessable("This instruction was already decided");
+      } catch (err) {
+        // Fail closed: no "delivered" mark means no task either. Remove the
+        // task we just created so the liaison is not left with work the
+        // record says was never delivered, then let the approval revert.
+        await db.delete(issues).where(and(eq(issues.id, issue.id), eq(issues.companyId, approval.companyId))).catch((cleanupErr) => {
+          logger.error({ err: cleanupErr, instructionId: row.id, issueId: issue.id }, "could not remove the liaison task after a failed cross-company delivery");
+        });
+        throw err;
+      }
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -420,7 +466,11 @@ export function crossCompanyInstructionService(db: Db, deps: { rawDb: Db }) {
       return toCrossCompanyInstruction(updated!);
     },
 
-    /** Called ONLY from the receiving company's reject route. Logs both sides; nothing is delivered. */
+    /**
+     * Runs INSIDE approvalService.reject (as its cross-company hook) for the
+     * receiving company's card. Logs both sides; nothing is delivered. Rejecting
+     * works with the instance flag off as well: declining is always safe.
+     */
     markRejected: async (approval: typeof approvals.$inferSelect, decider: CrossCompanyInstructionDecider) => {
       const payload = crossCompanyInstructionRequestPayloadSchema.parse(approval.payload);
       const row = await db

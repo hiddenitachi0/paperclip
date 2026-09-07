@@ -149,8 +149,50 @@ describeEmbeddedPostgres("guarded cross-company instruction channel", () => {
     return token;
   }
 
+  /** The board user id behind a `boardActor` token (the sender must never learn it, so tests read it from here). */
+  const userIdOf = (boardToken: string) => boardToken.slice("board:".length);
+
   const send = (token: string, from: Company, body: Record<string, unknown>) =>
     request(app).post(`/api/companies/${from.id}/cross-company-instructions`).set("x-test-actor", token).send(body);
+
+  /** The receiving company's approval card id for an instruction -- read from the DB, since the sender is never told it. */
+  async function approvalIdFor(instructionId: string) {
+    const [row] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, instructionId));
+    expect(row?.approvalId).toBeTruthy();
+    return row!.approvalId!;
+  }
+
+  const RECEIVING_SIDE_FIELDS = ["toAgentId", "approvalId", "deliveredIssueId", "decidedByUserId", "decisionNote"] as const;
+
+  /** A sender-side view carries the sender's own side and the outcome, and NOTHING that belongs to the receiving company. */
+  function expectSenderView(body: Record<string, unknown>, expected: { fromCompanyId: string; fromAgentId: string; toCompanyId: string; status: string }) {
+    expect(body).toMatchObject(expected);
+    expect(Object.keys(body).sort()).toEqual(
+      ["createdAt", "decidedAt", "fromAgentId", "fromCompanyId", "id", "instruction", "status", "subject", "toCompanyId", "updatedAt"],
+    );
+    for (const field of RECEIVING_SIDE_FIELDS) {
+      expect(body, `sender view must not carry ${field}`).not.toHaveProperty(field);
+    }
+  }
+
+  /** Nothing from the receiving company's side of a decided instruction may appear anywhere in a sender-side response body. */
+  function expectNoReceivingSideLeak(
+    body: unknown,
+    receiving: { decisionNote: string; deciderUserId: string; liaisonId: string | null; approvalId: string; issueId?: string | null },
+    label: string,
+  ) {
+    const text = JSON.stringify(body);
+    expect(text, `${label}: decision note leaked to the sender`).not.toContain(receiving.decisionNote);
+    expect(text, `${label}: decider user id leaked to the sender`).not.toContain(receiving.deciderUserId);
+    expect(text, `${label}: liaison agent id leaked to the sender`).not.toContain(String(receiving.liaisonId));
+    expect(text, `${label}: approval card id leaked to the sender`).not.toContain(receiving.approvalId);
+    if (receiving.issueId) {
+      expect(text, `${label}: delivered issue id leaked to the sender`).not.toContain(receiving.issueId);
+    }
+    for (const field of RECEIVING_SIDE_FIELDS) {
+      expect(text, `${label}: receiving-side field "${field}" present in a sender response`).not.toContain(`"${field}"`);
+    }
+  }
 
   it("is switched off by default: nothing can be sent and no row, card or log line is written", async () => {
     const A = await seedCompany(db, "Alpha");
@@ -174,19 +216,21 @@ describeEmbeddedPostgres("guarded cross-company instruction channel", () => {
       instruction: "Please set deployPolicy on the dashboard project so the shared deploy feature can run.",
     });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(res.body).toMatchObject({
-      fromCompanyId: A.id,
-      fromAgentId: A.agentId,
-      toCompanyId: B.id,
-      toAgentId: B.liaisonId,
-      status: "pending_approval",
-    });
-    expect(res.body.approvalId).toBeTruthy();
+    // The sender gets its own side and the status -- not which of B's
+    // agents is the liaison, nor B's approval card id.
+    expectSenderView(res.body, { fromCompanyId: A.id, fromAgentId: A.agentId, toCompanyId: B.id, status: "pending_approval" });
+    expect(JSON.stringify(res.body)).not.toContain(String(B.liaisonId));
+
+    // In the DB the row is addressed to B's liaison and linked to B's card.
+    const [stored] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, res.body.id));
+    expect(stored!.toAgentId).toBe(B.liaisonId);
+    const approvalId = await approvalIdFor(res.body.id);
+    expect(JSON.stringify(res.body)).not.toContain(approvalId);
 
     // The card is in B's board, in plain language, naming who asks and
     // what they ask, and saying nothing crosses -- and it is NOT attributed
     // to a requesting agent (the asker is not one of B's agents).
-    const [card] = await db.select().from(approvals).where(eq(approvals.id, res.body.approvalId));
+    const [card] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     expect(card!.companyId).toBe(B.id);
     expect(card!.status).toBe("pending");
     expect(card!.requestedByAgentId).toBeNull();
@@ -262,7 +306,7 @@ describeEmbeddedPostgres("guarded cross-company instruction channel", () => {
     const B = await seedCompany(db, "Beta");
     const sent = await send(agentActor(A), A, { toCompanyId: B.id, subject: "Set the deploy policy", instruction: "Please set deployPolicy on the dashboard project." });
     expect(sent.status).toBe(201);
-    const approvalId = sent.body.approvalId as string;
+    const approvalId = await approvalIdFor(sent.body.id);
 
     // Company A's board cannot decide company B's card; neither can A's agent.
     const aBoard = await request(app).post(`/api/approvals/${approvalId}/approve`).set("x-test-actor", boardActor(A)).send({});
@@ -273,14 +317,40 @@ describeEmbeddedPostgres("guarded cross-company instruction channel", () => {
     expect(wakeupCalls).toHaveLength(0);
 
     const bBoardToken = boardActor(B);
-    const approved = await request(app).post(`/api/approvals/${approvalId}/approve`).set("x-test-actor", bBoardToken).send({ decisionNote: "Fine, go ahead." });
+    const decisionNote = "BETA-PRIVATE-NOTE fine, go ahead; our client X is unhappy about the delay.";
+    const approved = await request(app).post(`/api/approvals/${approvalId}/approve`).set("x-test-actor", bBoardToken).send({ decisionNote });
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
     expect(approved.body.status).toBe("approved");
 
     const [row] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, sent.body.id));
     expect(row!.status).toBe("delivered");
-    expect(row!.decisionNote).toBe("Fine, go ahead.");
+    expect(row!.decisionNote).toBe(decisionNote);
+    expect(row!.decidedByUserId).toBe(userIdOf(bBoardToken));
     expect(row!.deliveredIssueId).toBeTruthy();
+
+    // The sender sees the outcome and nothing from B's side: not the board's
+    // note, not who decided, not B's liaison, card or task.
+    const receivingSide = { decisionNote, deciderUserId: userIdOf(bBoardToken), liaisonId: B.liaisonId, approvalId, issueId: row!.deliveredIssueId };
+    const listAsA = await request(app).get(`/api/companies/${A.id}/cross-company-instructions`).set("x-test-actor", agentActor(A));
+    expect(listAsA.status).toBe(200);
+    expect(listAsA.body).toHaveLength(1);
+    expectSenderView(listAsA.body[0], { fromCompanyId: A.id, fromAgentId: A.agentId, toCompanyId: B.id, status: "delivered" });
+    expect(listAsA.body[0].decidedAt).toBeTruthy();
+    expectNoReceivingSideLeak(listAsA.body, receivingSide, "A's agent list after approval");
+    const listAsABoard = await request(app).get(`/api/companies/${A.id}/cross-company-instructions`).set("x-test-actor", boardActor(A));
+    expect(listAsABoard.status).toBe(200);
+    expectNoReceivingSideLeak(listAsABoard.body, receivingSide, "A's board list after approval");
+    // ...while the receiving company sees its own full record.
+    const listAsB = await request(app).get(`/api/companies/${B.id}/cross-company-instructions`).set("x-test-actor", bBoardToken);
+    expect(listAsB.status).toBe(200);
+    expect(listAsB.body[0]).toMatchObject({
+      toAgentId: B.liaisonId,
+      approvalId,
+      deliveredIssueId: row!.deliveredIssueId,
+      decidedByUserId: userIdOf(bBoardToken),
+      decisionNote,
+      status: "delivered",
+    });
 
     const [issue] = await db.select().from(issues).where(eq(issues.id, row!.deliveredIssueId!));
     expect(issue!.companyId).toBe(B.id);
@@ -318,13 +388,16 @@ describeEmbeddedPostgres("guarded cross-company instruction channel", () => {
     const A = await seedCompany(db, "Alpha");
     const B = await seedCompany(db, "Beta");
     const sent = await send(agentActor(A), A, { toCompanyId: B.id, subject: "Set the deploy policy", instruction: "Please set deployPolicy." });
-    const approvalId = sent.body.approvalId as string;
+    const approvalId = await approvalIdFor(sent.body.id);
 
-    const rejected = await request(app).post(`/api/approvals/${approvalId}/reject`).set("x-test-actor", boardActor(B)).send({ decisionNote: "Not now." });
+    const bBoardToken = boardActor(B);
+    const decisionNote = "BETA-PRIVATE-NOTE not now, we are mid-audit.";
+    const rejected = await request(app).post(`/api/approvals/${approvalId}/reject`).set("x-test-actor", bBoardToken).send({ decisionNote });
     expect(rejected.status, JSON.stringify(rejected.body)).toBe(200);
 
     const [row] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, sent.body.id));
     expect(row!.status).toBe("rejected");
+    expect(row!.decisionNote).toBe(decisionNote);
     expect(row!.deliveredIssueId).toBeNull();
     expect(await db.select().from(issues)).toHaveLength(0);
     expect(wakeupCalls).toHaveLength(0);
@@ -336,6 +409,74 @@ describeEmbeddedPostgres("guarded cross-company instruction channel", () => {
         expect.objectContaining({ companyId: A.id, action: "cross_company_instruction.rejected" }),
       ]),
     );
+    const backToA = logs.find((line) => line.companyId === A.id && line.action === "cross_company_instruction.rejected");
+    expect(JSON.stringify(backToA!.details)).not.toContain(decisionNote);
+
+    // The sender learns "declined" and nothing else from B's side.
+    const receivingSide = { decisionNote, deciderUserId: userIdOf(bBoardToken), liaisonId: B.liaisonId, approvalId };
+    const listAsA = await request(app).get(`/api/companies/${A.id}/cross-company-instructions`).set("x-test-actor", agentActor(A));
+    expect(listAsA.status).toBe(200);
+    expect(listAsA.body).toHaveLength(1);
+    expectSenderView(listAsA.body[0], { fromCompanyId: A.id, fromAgentId: A.agentId, toCompanyId: B.id, status: "rejected" });
+    expectNoReceivingSideLeak(listAsA.body, receivingSide, "A's agent list after rejection");
+    const listAsABoard = await request(app).get(`/api/companies/${A.id}/cross-company-instructions`).set("x-test-actor", boardActor(A));
+    expect(listAsABoard.status).toBe(200);
+    expectNoReceivingSideLeak(listAsABoard.body, receivingSide, "A's board list after rejection");
+  });
+
+  it("a card can never sit approved with nothing delivered: delivery failure puts the card back, and only the approvals page can decide it", async () => {
+    await setFlag(true);
+    const A = await seedCompany(db, "Alpha");
+    const B = await seedCompany(db, "Beta");
+    const sent = await send(agentActor(A), A, { toCompanyId: B.id, subject: "Set the deploy policy", instruction: "Please set deployPolicy." });
+    expect(sent.status).toBe(201);
+    const approvalId = await approvalIdFor(sent.body.id);
+    const bBoardToken = boardActor(B);
+
+    // Any other approve path (thread interactions, automations, the hire
+    // route) goes through approvalService without the delivery hooks and is
+    // refused in plain language before anything is written.
+    const { approvalService } = await import("../services/approvals.js");
+    await expect(approvalService(db).approve(approvalId, userIdOf(bBoardToken), "auto")).rejects.toThrow("approvals page");
+    await expect(approvalService(db).reject(approvalId, userIdOf(bBoardToken), "auto")).rejects.toThrow("approvals page");
+    let [card] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(card!.status).toBe("pending");
+    expect(card!.decidedByUserId).toBeNull();
+
+    // With the channel switched off again, an already-filed card cannot turn
+    // into work; it stays pending (it could still be declined).
+    await setFlag(false);
+    const off = await request(app).post(`/api/approvals/${approvalId}/approve`).set("x-test-actor", bBoardToken).send({ decisionNote: "ok" });
+    expect(off.status).toBe(403);
+    [card] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(card!.status).toBe("pending");
+    expect(card!.decisionNote).toBeNull();
+    await setFlag(true);
+
+    // The liaison is gone by the time the board approves: the approval
+    // fails with a plain reason, the card is back to pending, no task
+    // exists, the instruction is still pending and the sender heard nothing.
+    await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, B.liaisonId!));
+    const failed = await request(app).post(`/api/approvals/${approvalId}/approve`).set("x-test-actor", bBoardToken).send({ decisionNote: "ok" });
+    expect(failed.status, JSON.stringify(failed.body)).toBe(422);
+    expect(failed.body.error).toContain("liaison agent");
+    [card] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(card!.status).toBe("pending");
+    expect(card!.decidedByUserId).toBeNull();
+    expect(card!.decisionNote).toBeNull();
+    const [row] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, sent.body.id));
+    expect(row!.status).toBe("pending_approval");
+    expect(row!.deliveredIssueId).toBeNull();
+    expect(await db.select().from(issues)).toHaveLength(0);
+    expect(wakeupCalls).toHaveLength(0);
+    const logs = await db.select().from(activityLog);
+    expect(logs.filter((line) => line.action === "cross_company_instruction.approved" || line.action === "approval.approved")).toHaveLength(0);
+
+    // Declining still works without a liaison: nothing to deliver.
+    const rejected = await request(app).post(`/api/approvals/${approvalId}/reject`).set("x-test-actor", bBoardToken).send({});
+    expect(rejected.status, JSON.stringify(rejected.body)).toBe(200);
+    const [afterReject] = await db.select().from(crossCompanyInstructions).where(eq(crossCompanyInstructions.id, sent.body.id));
+    expect(afterReject!.status).toBe("rejected");
   });
 
   it("each company lists only the instructions it sent or received, and an outsider sees none of them", async () => {
