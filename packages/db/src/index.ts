@@ -19,6 +19,7 @@ export {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
   type EmbeddedPostgresTestDatabase,
+  type EmbeddedPostgresTestOptions,
   type EmbeddedPostgresTestSupport,
 } from "./test-embedded-postgres.js";
 export {
