@@ -254,7 +254,7 @@ export function resolveCompanyIdFromPath(filePath: string): string | null {
 export function computeFindingFingerprint(input: { surface: SecretScanSurface; location: string; pattern: string }): string {
   const hash = crypto
     .createHash("sha256")
-    .update(`${input.surface} ${input.location} ${input.pattern}`)
+    .update(`${input.surface}\0${input.location}\0${input.pattern}`)
     .digest("hex");
   return `secret_scan:${hash.slice(0, 40)}`;
 }
@@ -446,8 +446,29 @@ export async function scanFilesystemForLeakedSecrets(
 }
 
 export interface HeartbeatRunCursor {
-  createdAt: Date;
+  /**
+   * The boundary row's `created_at` exactly as Postgres renders it
+   * (`timestamptz::text`, microsecond precision), NOT a JS Date.
+   *
+   * DUR-3931: this used to be a `Date`. JS Dates carry milliseconds while
+   * the column carries microseconds, so re-serialising the boundary row's
+   * timestamp truncated it and the resume query `created_at > $cursor`
+   * re-selected every row sharing that millisecond -- on a fast CI runner
+   * that is routinely both rows a test just inserted, which flaked
+   * secret-surface-scanner-service.test.ts ("expected 2 to be <= 1"). In
+   * production it meant every sweep re-scanned the tail of the previous
+   * batch. Keeping the value as Postgres text round-trips exactly, and the
+   * `> $1::timestamptz` comparison still uses heartbeat_runs_created_at_idx.
+   *
+   * A `Date` is still accepted for any caller holding a cursor from before
+   * this change; it resumes with the old millisecond precision.
+   */
+  createdAt: string | Date;
   id: string;
+}
+
+function cursorCreatedAtAsSqlText(createdAt: HeartbeatRunCursor["createdAt"]): string {
+  return createdAt instanceof Date ? createdAt.toISOString() : createdAt;
 }
 
 export interface HeartbeatRunScanSummary {
@@ -518,11 +539,14 @@ export async function scanHeartbeatRunsForLeakedSecrets(
 
   for (let batch = 0; batch < HEARTBEAT_RUN_MAX_BATCHES_PER_SWEEP; batch += 1) {
     const cursor = summary.cursor;
+    const cursorCreatedAt = cursor ? cursorCreatedAtAsSqlText(cursor.createdAt) : null;
     const rows = await db
       .select({
         id: heartbeatRuns.id,
         companyId: heartbeatRuns.companyId,
         createdAt: heartbeatRuns.createdAt,
+        // Microsecond-exact text for the cursor; see HeartbeatRunCursor.createdAt.
+        createdAtText: sql<string>`${heartbeatRuns.createdAt}::text`,
         error: heartbeatRuns.error,
         stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
         stderrExcerpt: heartbeatRuns.stderrExcerpt,
@@ -532,8 +556,11 @@ export async function scanHeartbeatRunsForLeakedSecrets(
       .where(
         cursor
           ? or(
-              gt(heartbeatRuns.createdAt, cursor.createdAt),
-              and(eq(heartbeatRuns.createdAt, cursor.createdAt), gt(heartbeatRuns.id, cursor.id)),
+              gt(heartbeatRuns.createdAt, sql`${cursorCreatedAt}::timestamptz`),
+              and(
+                eq(heartbeatRuns.createdAt, sql`${cursorCreatedAt}::timestamptz`),
+                gt(heartbeatRuns.id, cursor.id),
+              ),
             )
           : undefined,
       )
@@ -573,7 +600,7 @@ export async function scanHeartbeatRunsForLeakedSecrets(
       }
     }
 
-    summary.cursor = { createdAt: rows[rows.length - 1].createdAt, id: rows[rows.length - 1].id };
+    summary.cursor = { createdAt: rows[rows.length - 1].createdAtText, id: rows[rows.length - 1].id };
     if (rows.length < HEARTBEAT_RUN_BATCH_SIZE) return summary;
     if (batch === HEARTBEAT_RUN_MAX_BATCHES_PER_SWEEP - 1) {
       summary.truncated = true;
