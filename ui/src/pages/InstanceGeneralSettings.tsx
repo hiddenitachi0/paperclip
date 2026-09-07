@@ -9,6 +9,12 @@ import {
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
   MIN_GLOBAL_MAX_CONCURRENT_RUNS,
   MAX_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_MAX_RUN_DURATION_MINUTES,
+  MIN_MAX_RUN_DURATION_MINUTES,
+  MAX_MAX_RUN_DURATION_MINUTES,
+  DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
+  MIN_SILENT_RUN_TIMEOUT_MINUTES,
+  MAX_SILENT_RUN_TIMEOUT_MINUTES,
 } from "@paperclipai/shared";
 import { LogOut, SlidersHorizontal } from "lucide-react";
 import { authApi } from "@/api/auth";
@@ -23,6 +29,62 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { cn } from "../lib/utils";
 
 const FEEDBACK_TERMS_URL = import.meta.env.VITE_FEEDBACK_TERMS_URL?.trim() || "https://paperclip.ing/tos";
+
+// DUR-3940 item 2 / run cap: one whole-number-of-minutes field with its own
+// draft, so a half-typed value never saves. Shared by the two run time limits.
+function MinutesLimitField(props: {
+  label: string;
+  saved: number;
+  min: number;
+  max: number;
+  pending: boolean;
+  onSave: (minutes: number) => void;
+}) {
+  const { label, saved, min, max, pending, onSave } = props;
+  const [draft, setDraft] = useState<string | null>(null);
+  const value = draft ?? String(saved);
+  const parsed = Number(value);
+  const valid = /^\d+$/.test(value.trim()) && Number.isInteger(parsed) && parsed >= min && parsed <= max;
+  const changed = valid && parsed !== saved;
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!changed) return;
+        onSave(parsed);
+        setDraft(null);
+      }}
+    >
+      <span className="w-full text-sm font-medium sm:w-56">{label}</span>
+      <Input
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        onChange={(event) => setDraft(event.target.value)}
+        disabled={pending}
+        aria-label={label}
+        aria-invalid={!valid}
+        className="w-28"
+      />
+      <span className="text-sm text-muted-foreground">minutes</span>
+      <Button type="submit" size="sm" disabled={!changed || pending}>
+        {pending ? "Saving..." : "Save"}
+      </Button>
+      {draft !== null && draft !== String(saved) ? (
+        <Button type="button" variant="ghost" size="sm" disabled={pending} onClick={() => setDraft(null)}>
+          Cancel
+        </Button>
+      ) : null}
+      <span className="text-xs text-muted-foreground">
+        {valid ? `Currently ${saved}.` : `Enter a whole number from ${min} to ${max}.`}
+      </span>
+    </form>
+  );
+}
 
 export function InstanceGeneralSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -91,6 +153,8 @@ export function InstanceGeneralSettings() {
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
   const globalMaxConcurrentRuns = generalQuery.data?.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS;
+  const maxRunDurationMinutes = generalQuery.data?.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES;
+  const silentRunTimeoutMinutes = generalQuery.data?.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES;
   const maxRunsValue = maxRunsDraft ?? String(globalMaxConcurrentRuns);
   const maxRunsParsed = Number(maxRunsValue);
   const maxRunsValid =
@@ -116,7 +180,7 @@ export function InstanceGeneralSettings() {
         </div>
         <p className="text-sm text-muted-foreground">
           Configure instance-wide preferences including log display, keyboard shortcuts, how many
-          agent runs may go at once, backup retention, and data sharing.
+          agent runs may go at once, run time limits, backup retention, and data sharing.
         </p>
       </div>
 
@@ -249,6 +313,39 @@ export function InstanceGeneralSettings() {
                 : `Enter a whole number from ${MIN_GLOBAL_MAX_CONCURRENT_RUNS} to ${MAX_GLOBAL_MAX_CONCURRENT_RUNS}.`}
             </span>
           </form>
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Run time limits</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Paperclip watches every agent run that runs as a program on this server. A run that goes on
+              longer than the first limit without finishing, or whose program is still running but has
+              printed nothing for longer than the second, is stopped, marked as failed in plain words, and
+              retried once. The agent stays available; only if the retry gets stuck too is the agent flagged
+              for attention. This frees the agent&apos;s run slot instead of leaving it held by a run that will
+              never finish. Defaults {DEFAULT_MAX_RUN_DURATION_MINUTES} and {DEFAULT_SILENT_RUN_TIMEOUT_MINUTES};
+              an agent&apos;s own settings (maxRunDurationMinutes / silentRunTimeoutMinutes) can override these.
+            </p>
+          </div>
+          <MinutesLimitField
+            label="Stop a run after"
+            saved={maxRunDurationMinutes}
+            min={MIN_MAX_RUN_DURATION_MINUTES}
+            max={MAX_MAX_RUN_DURATION_MINUTES}
+            pending={updateGeneralMutation.isPending}
+            onSave={(minutes) => updateGeneralMutation.mutate({ maxRunDurationMinutes: minutes })}
+          />
+          <MinutesLimitField
+            label="Stop a silent run after"
+            saved={silentRunTimeoutMinutes}
+            min={MIN_SILENT_RUN_TIMEOUT_MINUTES}
+            max={MAX_SILENT_RUN_TIMEOUT_MINUTES}
+            pending={updateGeneralMutation.isPending}
+            onSave={(minutes) => updateGeneralMutation.mutate({ silentRunTimeoutMinutes: minutes })}
+          />
         </div>
       </section>
 

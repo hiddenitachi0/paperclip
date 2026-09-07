@@ -113,6 +113,7 @@ describe("CompanySettingsSidebar", () => {
       approvals: 0,
       failedRuns: 0,
       joinRequests: 2,
+      checkups: 0,
     });
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableCloudSync: false,

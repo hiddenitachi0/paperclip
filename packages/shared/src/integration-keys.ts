@@ -79,7 +79,8 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
     key: "CLAUDE_CODE_OAUTH_TOKEN",
     label: "Claude subscription token",
     description:
-      "OAuth token for Claude Code subscription billing (the claude_local adapter). From `claude setup-token`.",
+      "OAuth token for Claude Code subscription billing (the claude_local adapter). From `claude setup-token`. " +
+      "Tip: you usually don't need this per agent — sign in once for every Claude agent under Instance settings → Claude sign-in.",
     category: "llm",
   },
   {

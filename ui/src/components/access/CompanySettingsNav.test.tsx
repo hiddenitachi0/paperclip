@@ -76,6 +76,7 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/PAP/company/settings/secrets")).toBe("secrets");
     expect(getCompanySettingsTab("/company/settings/instance/profile")).toBe("instance-profile");
     expect(getCompanySettingsTab("/PAP/company/settings/instance/general")).toBe("instance-general");
+    expect(getCompanySettingsTab("/company/settings/instance/claude")).toBe("instance-claude");
     expect(getCompanySettingsTab("/company/settings/instance/environments")).toBe("instance-environments");
     expect(getCompanySettingsTab("/company/settings/instance/access")).toBe("instance-access");
     expect(getCompanySettingsTab("/company/settings/instance/heartbeats")).toBe("instance-heartbeats");
@@ -104,6 +105,7 @@ describe("CompanySettingsNav", () => {
           { value: "secrets", label: "Secrets" },
           { value: "instance-profile", label: "Instance profile" },
           { value: "instance-general", label: "Instance general" },
+          { value: "instance-claude", label: "Claude sign-in" },
           { value: "instance-environments", label: "Instance environments" },
           { value: "instance-access", label: "Instance access" },
           { value: "instance-heartbeats", label: "Instance heartbeats" },

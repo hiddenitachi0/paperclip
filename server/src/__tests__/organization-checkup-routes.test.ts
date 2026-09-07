@@ -10,6 +10,7 @@ const reportIssueId = "33333333-3333-4333-8333-333333333333";
 const mockCheckupService = vi.hoisted(() => ({
   runCheckup: vi.fn(),
   findOpenCheckup: vi.fn(),
+  summarizeOpenCheckup: vi.fn(),
 }));
 
 vi.mock("../services/organization-checkup.js", () => ({
@@ -81,6 +82,8 @@ describe("organization check-up routes", () => {
     mockCheckupService.runCheckup.mockReset();
     mockCheckupService.findOpenCheckup.mockReset();
     mockCheckupService.findOpenCheckup.mockResolvedValue(null);
+    mockCheckupService.summarizeOpenCheckup.mockReset();
+    mockCheckupService.summarizeOpenCheckup.mockResolvedValue(null);
   });
 
   it("rejects agent keys from running a check-up", async () => {
@@ -149,25 +152,31 @@ describe("organization check-up routes", () => {
     expect(mockCheckupService.runCheckup).not.toHaveBeenCalled();
   });
 
-  it("returns the latest open report for the dashboard, board-only", async () => {
-    mockCheckupService.findOpenCheckup.mockResolvedValue({
-      id: reportIssueId,
-      identifier: "DUR-900",
-      title: "Weekly check-up",
-      status: "todo",
-      createdAt: new Date("2026-09-07T12:00:00.000Z"),
+  it("returns the latest open report with its suggestion counts for the dashboard, board-only", async () => {
+    mockCheckupService.summarizeOpenCheckup.mockResolvedValue({
+      report: {
+        id: reportIssueId,
+        identifier: "DUR-900",
+        title: "Weekly check-up",
+        status: "todo",
+        createdAt: new Date("2026-09-07T12:00:00.000Z"),
+      },
+      suggestionCount: 3,
+      pendingSuggestionCount: 3,
+      suggestionsStatus: "pending",
     });
 
     const ok = await request(await createApp(boardActor())).get(`/api/companies/${companyId}/checkups/latest`);
     expect(ok.status).toBe(200);
     expect(ok.body.report).toMatchObject({ id: reportIssueId, identifier: "DUR-900", status: "todo" });
+    expect(ok.body).toMatchObject({ suggestionCount: 3, pendingSuggestionCount: 3, suggestionsStatus: "pending" });
 
     const denied = await request(await createApp(agentActor())).get(`/api/companies/${companyId}/checkups/latest`);
     expect(denied.status).toBe(403);
 
-    mockCheckupService.findOpenCheckup.mockResolvedValue(null);
+    mockCheckupService.summarizeOpenCheckup.mockResolvedValue(null);
     const none = await request(await createApp(boardActor())).get(`/api/companies/${companyId}/checkups/latest`);
     expect(none.status).toBe(200);
-    expect(none.body).toEqual({ report: null });
+    expect(none.body).toEqual({ report: null, suggestionCount: 0, pendingSuggestionCount: 0, suggestionsStatus: "none" });
   });
 });

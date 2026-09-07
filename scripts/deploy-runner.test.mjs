@@ -738,6 +738,11 @@ test("process_approval posts a skip comment (not a false success) when the backw
     assert.match(comments[0], /Deploy skipped/);
     assert.match(comments[0], /backward/);
     assert.doesNotMatch(comments[0], /is live and healthy/, "a refused backward deploy must never read like a successful one");
+    // DUR-3952 follow-up: the refusal talks to the operator, not to whoever
+    // knows the payload format -- it points at the rollback button instead of
+    // naming a payload field or a ticket number.
+    assert.match(comments[0], /Roll back to previous version/, "the refusal must tell the operator which button to use for a real rollback");
+    assert.doesNotMatch(comments[0], /allowBackwardDeploy|payload\.|DUR-\d+/, "the refusal must not name payload fields or ticket ids");
   } finally {
     scenario.cleanup();
   }

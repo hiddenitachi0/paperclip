@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "@paperclipai/shared";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, ClipboardCheck, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, ClipboardCheck, EyeOff, FileText, GitBranch, ImagePlus, ListChecks, Loader2, MessageSquareQuote, X, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { useGeneralSettings } from "../context/GeneralSettingsContext";
+import { useInboxDismissals } from "../hooks/useInboxBadge";
 import {
   buildSuggestedTaskTree,
   collectSuggestedTaskClientKeys,
@@ -30,6 +31,64 @@ import { Textarea } from "./ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 const OTHER_ANSWER_ID = "__paperclip_other__";
+
+// DUR-62: the weekly check-up files its suggestions as one suggest_tasks card
+// whose drafts are keyed by finding fingerprint. The server stamps the card's
+// idempotency key with this prefix, which is how the UI knows to offer
+// "Hide this for a month" next to each finding.
+export const ORGANIZATION_CHECKUP_INTERACTION_KEY_PREFIX = "organization-checkup:";
+export const CHECKUP_FINDING_DISMISSAL_PREFIX = "checkup-finding:";
+const CHECKUP_DISMISSAL_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
+
+export function isOrganizationCheckupInteraction(interaction: Pick<IssueThreadInteraction, "kind" | "idempotencyKey">) {
+  return interaction.kind === "suggest_tasks"
+    && typeof interaction.idempotencyKey === "string"
+    && interaction.idempotencyKey.startsWith(ORGANIZATION_CHECKUP_INTERACTION_KEY_PREFIX);
+}
+
+/** Which findings this board user has hidden in the last month, and how to hide another. */
+export function resolveHiddenCheckupFindings(
+  dismissedAtByKey: ReadonlyMap<string, number>,
+  now: number = Date.now(),
+): Set<string> {
+  const hidden = new Set<string>();
+  for (const [itemKey, dismissedAt] of dismissedAtByKey) {
+    if (!itemKey.startsWith(CHECKUP_FINDING_DISMISSAL_PREFIX)) continue;
+    if (now - dismissedAt > CHECKUP_DISMISSAL_WINDOW_MS) continue;
+    hidden.add(itemKey.slice(CHECKUP_FINDING_DISMISSAL_PREFIX.length));
+  }
+  return hidden;
+}
+
+type CheckupMute = {
+  hiddenFingerprints: ReadonlySet<string>;
+  hide: (fingerprint: string) => void;
+  isPending: boolean;
+};
+
+/**
+ * Hook carrier for the check-up card only, so ordinary suggest_tasks cards
+ * never touch the inbox-dismissal query.
+ */
+function CheckupFindingMute({
+  companyId,
+  children,
+}: {
+  companyId: string;
+  children: (mute: CheckupMute) => ReactNode;
+}) {
+  const { dismissedAtByKey, dismiss, isPending } = useInboxDismissals(companyId);
+  const hiddenFingerprints = useMemo(() => resolveHiddenCheckupFindings(dismissedAtByKey), [dismissedAtByKey]);
+  const mute = useMemo<CheckupMute>(
+    () => ({
+      hiddenFingerprints,
+      hide: (fingerprint: string) => dismiss(`${CHECKUP_FINDING_DISMISSAL_PREFIX}${fingerprint}`),
+      isPending,
+    }),
+    [hiddenFingerprints, dismiss, isPending],
+  );
+  return <>{children(mute)}</>;
+}
 
 interface IssueThreadInteractionCardProps {
   interaction: IssueThreadInteraction;
@@ -449,6 +508,7 @@ function TaskTreeNode({
   skippedClientKeys,
   showSelection,
   onToggleSelection,
+  checkupMute,
 }: {
   node: SuggestedTaskTreeNode;
   createdByClientKey: ReadonlyMap<string, SuggestTasksResultCreatedTask>;
@@ -460,6 +520,8 @@ function TaskTreeNode({
   skippedClientKeys?: ReadonlySet<string>;
   showSelection?: boolean;
   onToggleSelection?: (node: SuggestedTaskTreeNode, checked: boolean) => void;
+  /** DUR-62: present only on a pending weekly check-up card; each draft is one finding. */
+  checkupMute?: CheckupMute;
 }) {
   const visibleChildren = node.children.filter((child) => !child.task.hiddenInPreview);
   const hiddenChildCount = node.children
@@ -468,6 +530,7 @@ function TaskTreeNode({
   const createdTask = createdByClientKey.get(node.task.clientKey);
   const isSelected = selectedClientKeys?.has(node.task.clientKey) ?? false;
   const isSkipped = skippedClientKeys?.has(node.task.clientKey) ?? false;
+  const isHiddenFinding = checkupMute?.hiddenFingerprints.has(node.task.clientKey) ?? false;
   const assigneeLabel = resolveActorLabel({
     agentId: node.task.assigneeAgentId,
     userId: node.task.assigneeUserId,
@@ -542,6 +605,31 @@ function TaskTreeNode({
             <span className="inline-flex shrink-0 items-center rounded-sm border border-amber-500/60 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-900 dark:text-amber-100">
               Skipped
             </span>
+          ) : checkupMute && depth === 0 ? (
+            isHiddenFinding ? (
+              <span
+                data-testid="checkup-finding-hidden"
+                className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-amber-500/60 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-900 dark:text-amber-100"
+              >
+                <EyeOff className="h-3 w-3" aria-hidden />
+                Hidden for a month
+              </span>
+            ) : (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="shrink-0 text-xs"
+                disabled={checkupMute.isPending}
+                aria-label={`Hide "${node.task.title}" for a month`}
+                onClick={() => {
+                  checkupMute.hide(node.task.clientKey);
+                  onToggleSelection?.(node, false);
+                }}
+              >
+                <EyeOff className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                Hide this for a month
+              </Button>
+            )
           ) : null}
         </div>
 
@@ -689,6 +777,30 @@ function SuggestTasksCard({
     }
   }
 
+  // DUR-62: a weekly check-up card. Each draft is one finding, so every root
+  // gets "Hide this for a month", and unticked drafts are hidden on accept.
+  const isCheckup = isOrganizationCheckupInteraction(interaction);
+
+  const renderTree = (checkupMute?: CheckupMute) => (
+    <div className="overflow-hidden border border-border/70">
+      {roots.map((root) => (
+        <TaskTreeNode
+          key={root.task.clientKey}
+          node={root}
+          createdByClientKey={createdByClientKey}
+          agentMap={agentMap}
+          currentUserId={currentUserId}
+          userLabelMap={userLabelMap}
+          selectedClientKeys={selectedClientKeys}
+          skippedClientKeys={skippedClientKeys}
+          showSelection={interaction.status === "pending"}
+          onToggleSelection={handleToggleSelection}
+          checkupMute={checkupMute}
+        />
+      ))}
+    </div>
+  );
+
   function handleToggleSelection(node: SuggestedTaskTreeNode, checked: boolean) {
     const subtreeClientKeys = collectSuggestedTaskClientKeys(node);
     setSelectedClientKeys((current) => {
@@ -722,22 +834,11 @@ function SuggestTasksCard({
         ) : null}
       </div>
 
-      <div className="overflow-hidden border border-border/70">
-        {roots.map((root) => (
-          <TaskTreeNode
-            key={root.task.clientKey}
-            node={root}
-            createdByClientKey={createdByClientKey}
-            agentMap={agentMap}
-            currentUserId={currentUserId}
-            userLabelMap={userLabelMap}
-            selectedClientKeys={selectedClientKeys}
-            skippedClientKeys={skippedClientKeys}
-            showSelection={interaction.status === "pending"}
-            onToggleSelection={handleToggleSelection}
-          />
-        ))}
-      </div>
+      {isCheckup && interaction.status === "pending" ? (
+        <CheckupFindingMute companyId={interaction.companyId}>{(mute) => renderTree(mute)}</CheckupFindingMute>
+      ) : (
+        renderTree()
+      )}
 
       {interaction.status === "accepted" ? (
         <div className="rounded-sm border border-emerald-500/60 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-900 dark:text-emerald-100">
@@ -745,9 +846,11 @@ function SuggestTasksCard({
             Resolution summary
           </div>
           <p className="mt-1 leading-6">
-            {skippedCount > 0
-              ? `Created ${createdCount} draft ${createdCount === 1 ? "issue" : "issues"} and skipped ${skippedCount} during review.`
-              : `Created all ${createdCount} draft ${createdCount === 1 ? "issue" : "issues"}.`}
+            {isCheckup && skippedCount > 0
+              ? `Created ${createdCount} ${createdCount === 1 ? "task" : "tasks"} and hid ${skippedCount} ${skippedCount === 1 ? "finding" : "findings"} for a month.`
+              : skippedCount > 0
+                ? `Created ${createdCount} draft ${createdCount === 1 ? "issue" : "issues"} and skipped ${skippedCount} during review.`
+                : `Created all ${createdCount} draft ${createdCount === 1 ? "issue" : "issues"}.`}
           </p>
         </div>
       ) : null}
@@ -777,7 +880,9 @@ function SuggestTasksCard({
               </span>
               {selectedCount < totalTasks ? (
                 <span>
-                  {totalTasks - selectedCount} will be skipped if you accept this interaction.
+                  {isCheckup
+                    ? `${totalTasks - selectedCount} will be hidden for a month if you accept.`
+                    : `${totalTasks - selectedCount} will be skipped if you accept this interaction.`}
                 </span>
               ) : null}
             </div>

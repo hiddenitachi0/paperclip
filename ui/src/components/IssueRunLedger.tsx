@@ -336,6 +336,8 @@ function stopReasonLabel(run: RunForIssue) {
   if (stopReason === "cancelled") return "cancelled";
   if (stopReason === "paused") return "paused by board";
   if (stopReason === "process_lost") return "process lost";
+  if (stopReason === "run_too_long") return "stopped: ran too long";
+  if (stopReason === "run_silent") return "stopped: no output";
   if (stopReason === "adapter_failed") return "adapter failed";
   if (stopReason === "completed") return timeoutText ? `completed (${timeoutText})` : "completed";
   return timeoutText;

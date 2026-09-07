@@ -46,6 +46,8 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { runningProcesses } from "../adapters/index.ts";
+import { DEFAULT_SILENT_RUN_TIMEOUT_MINUTES } from "@paperclipai/shared";
+import { instanceSettingsService } from "../services/instance-settings.ts";
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentFirstHeartbeat = vi.hoisted(() => vi.fn());
 const mockTerminateLocalService = vi.hoisted(() => vi.fn());
@@ -449,6 +451,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   async function seedRunFixture(input?: {
     adapterType?: string;
+    adapterConfig?: Record<string, unknown>;
     agentStatus?: "paused" | "idle" | "running";
     runStatus?: "running" | "queued" | "failed";
     processPid?: number | null;
@@ -481,7 +484,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       role: "engineer",
       status: input?.agentStatus ?? "paused",
       adapterType: input?.adapterType ?? "codex_local",
-      adapterConfig: {},
+      adapterConfig: input?.adapterConfig ?? {},
       runtimeConfig: {},
       permissions: {},
     });
@@ -1255,6 +1258,251 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // "error" -- it stays schedulable.
     const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
     expect(agent?.status).not.toBe("error");
+  });
+
+  // DUR-3940 item 2 / run cap: runs whose child is ALIVE but frozen (silent
+  // for too long) or simply running longer than any real run ever finishes
+  // in. Timestamps are set relative to the wall clock because the watchdog
+  // measures against `new Date()`.
+  async function seedAliveRunFixture(input: {
+    ranForMinutes: number;
+    silentForMinutes: number;
+    adapterType?: string;
+    adapterConfig?: Record<string, unknown>;
+    processLossRetryCount?: number;
+    holdHandle?: boolean;
+  }) {
+    const child = spawnAliveProcess();
+    childProcesses.add(child);
+    if (typeof child.pid !== "number") throw new Error("failed to spawn the alive child");
+    const fixture = await seedRunFixture({
+      adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      agentStatus: "running",
+      processPid: child.pid,
+      processLossRetryCount: input.processLossRetryCount ?? 0,
+      includeIssue: false,
+    });
+    const startedAt = new Date(Date.now() - input.ranForMinutes * 60_000);
+    await db
+      .update(heartbeatRuns)
+      .set({
+        startedAt,
+        processStartedAt: startedAt,
+        lastOutputAt: new Date(Date.now() - input.silentForMinutes * 60_000),
+        updatedAt: new Date(),
+      })
+      .where(eq(heartbeatRuns.id, fixture.runId));
+    if (input.holdHandle) {
+      runningProcesses.set(fixture.runId, { child, graceSec: 1, processGroupId: null });
+    }
+    return { ...fixture, child, pid: child.pid };
+  }
+
+  async function readStoppedRunNotice(companyId: string) {
+    const rows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "heartbeat.run_stopped")));
+    return rows;
+  }
+
+  it("DUR-3940 run cap: stops a run past the max duration even though its child is alive and still printing, fails it in plain language, queues one retry, leaves the agent idle and tells the operator", async () => {
+    const { companyId, agentId, runId, wakeupRequestId, pid } = await seedAliveRunFixture({
+      ranForMinutes: 160,
+      silentForMinutes: 1,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).toContain(runId);
+    expect(mockTerminateLocalService).toHaveBeenCalled();
+    expect(await waitForPidExit(pid)).toBe(true);
+
+    const failedRun = await heartbeat.getRun(runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("run_too_long");
+    expect(failedRun?.error).toBe("Stopped after 2 hours 30 minutes with no result; it will be retried.");
+    expect(failedRun?.finishedAt).not.toBeNull();
+    expect((failedRun?.resultJson as Record<string, unknown> | null)?.stopReason).toBe("run_too_long");
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("failed");
+
+    const retry = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.retryOfRunId, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(retry).not.toBeNull();
+    expect(retry?.processLossRetryCount).toBe(1);
+
+    // A retry was queued, so the agent stays schedulable -- never "error".
+    const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
+    expect(agent?.status).not.toBe("error");
+
+    const notices = await readStoppedRunNotice(companyId);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ actorType: "system", actorId: "run-watchdog", entityType: "heartbeat_run", entityId: runId, agentId, runId });
+    const details = notices[0]!.details as Record<string, unknown>;
+    expect(details.stopReason).toBe("too_long");
+    expect(details.limitMinutes).toBe(150);
+    expect(details.retryQueued).toBe(true);
+    expect(details.retryRunId).toBe(retry?.id);
+    expect(details.agentMarkedError).toBe(false);
+    expect(details.message).toBe(
+      "CodexCoder's run was stopped: it had been going for 2 hours 40 minutes without finishing (the limit is 2 hours 30 minutes). Paperclip ended it and queued a fresh run to pick the work up again.",
+    );
+
+    const events = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId));
+    expect(events.some((event) => event.message?.startsWith("Stopped after 2 hours 30 minutes with no result"))).toBe(true);
+  });
+
+  it("DUR-3940 run cap: stops a run whose child is alive but silent past the window, keyed on lastOutputAt, even while this process still holds its handle", async () => {
+    const { companyId, runId, pid } = await seedAliveRunFixture({
+      ranForMinutes: 70,
+      silentForMinutes: 50,
+      holdHandle: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).toContain(runId);
+    expect(runningProcesses.has(runId)).toBe(false);
+    expect(await waitForPidExit(pid)).toBe(true);
+
+    const failedRun = await heartbeat.getRun(runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("run_silent");
+    expect(failedRun?.error).toBe("Stopped after 45 minutes without any output; it will be retried.");
+
+    const notices = await readStoppedRunNotice(companyId);
+    expect(notices).toHaveLength(1);
+    const details = notices[0]!.details as Record<string, unknown>;
+    expect(details.stopReason).toBe("silent");
+    expect(details.message).toBe(
+      "CodexCoder's run was stopped: its process was still running but had shown no output for 50 minutes (the limit is 45 minutes). Paperclip ended it and queued a fresh run to pick the work up again.",
+    );
+  });
+
+  it("DUR-3940 run cap: leaves an alive run alone while it is under both limits (existing detached bookkeeping only)", async () => {
+    const { companyId, runId, pid } = await seedAliveRunFixture({
+      ranForMinutes: 60,
+      silentForMinutes: 10,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).not.toContain(runId);
+    expect(isPidAlive(pid)).toBe(true);
+
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+    expect(run?.errorCode).toBe("process_detached");
+    expect(await readStoppedRunNotice(companyId)).toHaveLength(0);
+  });
+
+  it("DUR-3940 run cap: an agent's adapterConfig overrides the max duration, and 0 switches the silence limit off for that agent", async () => {
+    const shortCap = await seedAliveRunFixture({
+      ranForMinutes: 40,
+      silentForMinutes: 1,
+      adapterConfig: { maxRunDurationMinutes: 30 },
+    });
+    const silenceOff = await seedAliveRunFixture({
+      ranForMinutes: 60,
+      silentForMinutes: 55,
+      adapterConfig: { silentRunTimeoutMinutes: 0 },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).toContain(shortCap.runId);
+    expect(result.runIds).not.toContain(silenceOff.runId);
+
+    const stopped = await heartbeat.getRun(shortCap.runId);
+    expect(stopped?.status).toBe("failed");
+    expect(stopped?.errorCode).toBe("run_too_long");
+    expect(stopped?.error).toBe("Stopped after 30 minutes with no result; it will be retried.");
+
+    const untouched = await heartbeat.getRun(silenceOff.runId);
+    expect(untouched?.status).toBe("running");
+    expect(isPidAlive(silenceOff.pid)).toBe(true);
+  });
+
+  it("DUR-3940 run cap: the instance-wide setting overrides the default silence window", async () => {
+    const settings = instanceSettingsService(db);
+    await settings.updateGeneral({ silentRunTimeoutMinutes: 20 });
+    try {
+      const { runId, pid } = await seedAliveRunFixture({ ranForMinutes: 30, silentForMinutes: 25 });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+      expect(result.runIds).toContain(runId);
+      expect(await waitForPidExit(pid)).toBe(true);
+
+      const stopped = await heartbeat.getRun(runId);
+      expect(stopped?.errorCode).toBe("run_silent");
+      expect(stopped?.error).toBe("Stopped after 20 minutes without any output; it will be retried.");
+    } finally {
+      await settings.updateGeneral({ silentRunTimeoutMinutes: DEFAULT_SILENT_RUN_TIMEOUT_MINUTES });
+    }
+  });
+
+  it("DUR-3940 run cap: never touches a run of an adapter that does not track a local child", async () => {
+    const { companyId, runId, pid } = await seedAliveRunFixture({
+      adapterType: "http",
+      ranForMinutes: 300,
+      silentForMinutes: 1,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).not.toContain(runId);
+    expect(isPidAlive(pid)).toBe(true);
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("running");
+    expect(await readStoppedRunNotice(companyId)).toHaveLength(0);
+  });
+
+  it("DUR-3940 run cap: a frozen retry is not retried again -- the agent is flagged for attention with a plain reason", async () => {
+    const { companyId, agentId, runId, pid } = await seedAliveRunFixture({
+      ranForMinutes: 200,
+      silentForMinutes: 1,
+      processLossRetryCount: 1,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+    expect(result.runIds).toContain(runId);
+    expect(await waitForPidExit(pid)).toBe(true);
+
+    const failedRun = await heartbeat.getRun(runId);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.error).toBe(
+      "Stopped after 2 hours 30 minutes with no result; this was already the retry, so the agent has been flagged for attention.",
+    );
+    const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retries).toHaveLength(0);
+
+    const agent = await db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0] ?? null);
+    expect(agent?.status).toBe("error");
+    expect(agent?.errorReason).toContain("flagged for attention");
+
+    const notices = await readStoppedRunNotice(companyId);
+    expect(notices).toHaveLength(1);
+    const details = notices[0]!.details as Record<string, unknown>;
+    expect(details.retryQueued).toBe(false);
+    expect(details.agentMarkedError).toBe(true);
+    expect(details.message).toBe(
+      "CodexCoder's run was stopped: it had been going for 3 hours 20 minutes without finishing (the limit is 2 hours 30 minutes). Paperclip ended it. That was already the retry, so CodexCoder is now marked as needing attention and will not take new work until someone clears the error.",
+    );
   });
 
   it("DUR-257: reaps a run whose in-memory handle is still held when its recorded pid is dead and it has been silent past the threshold", async () => {

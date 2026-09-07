@@ -533,16 +533,29 @@ function findDuplicateApprovedDeploy(
   return null;
 }
 
+/**
+ * What the duplicate guard found. `blocking: false` means "there is a related open card,
+ * link the new one to it, but do not refuse" -- used for an operator rollback filed while
+ * an ordinary forward deploy is still waiting (see the deploy branch below).
+ */
+type DuplicateGuardResult = { id: string; targetDescription: string; message?: string; blocking: boolean };
+
+function isRollbackDeployPayload(payload: Record<string, unknown> | null | undefined): boolean {
+  return payload?.allowBackwardDeploy === true;
+}
+
 async function findDuplicateOpenApproval(
   svc: ReturnType<typeof approvalService>,
   companyId: string,
   type: unknown,
   payload: Record<string, unknown>,
-): Promise<{ id: string; targetDescription: string; message?: string } | null> {
+): Promise<DuplicateGuardResult | null> {
   if (type === "hire_agent") {
     const role = typeof payload.role === "string" && payload.role.trim() ? payload.role.trim() : "general";
     const existing = await svc.findOpenHireApprovalForRole(companyId, role);
-    return existing ? { id: existing.id, targetDescription: `a hire request for the "${role}" role` } : null;
+    return existing
+      ? { id: existing.id, targetDescription: `a hire request for the "${role}" role`, blocking: true }
+      : null;
   }
   if (isMergePrRequestApproval(type, payload)) {
     const repo = typeof payload.repo === "string" ? payload.repo.trim() : "";
@@ -552,21 +565,55 @@ async function findDuplicateOpenApproval(
         : "";
     if (!repo || !prNumber) return null;
     const existing = await svc.findOpenMergePrApproval(companyId, repo, prNumber);
-    return existing ? { id: existing.id, targetDescription: `a merge approval for ${repo}#${prNumber}` } : null;
+    return existing
+      ? { id: existing.id, targetDescription: `a merge approval for ${repo}#${prNumber}`, blocking: true }
+      : null;
   }
   if (isDeployRequestApproval(type, payload)) {
     const projectId = typeof payload.projectId === "string" ? payload.projectId : "";
     const workspaceId = typeof payload.workspaceId === "string" ? payload.workspaceId : "";
     if (!projectId || !workspaceId) return null;
-    const existing = await svc.findOpenDeployApproval(companyId, projectId, workspaceId);
-    if (existing) return { id: existing.id, targetDescription: "a deploy request for this project/workspace" };
     const commit = typeof payload.commit === "string" ? payload.commit.trim() : "";
-    if (!commit) return null;
+    // DUR-3952 follow-up: a rollback card (allowBackwardDeploy, board-only -- see
+    // assertBackwardDeployOptInIsBoardFiled) is the operator's emergency lever. It is filed
+    // exactly when the situation is messy: the last deploy went wrong and agents may already
+    // have queued the next forward deploy, and the target commit has BY DEFINITION already
+    // gone live once. Neither of those may turn the rollback away with agent-facing
+    // "pass acknowledgedDuplicateOfApprovalId" advice; the only thing a rollback is a real
+    // duplicate of is another open rollback to the same version.
+    const isRollback = isRollbackDeployPayload(payload);
+    const existing = await svc.findOpenDeployApproval(companyId, projectId, workspaceId);
+    if (existing) {
+      if (!isRollback) {
+        return { id: existing.id, targetDescription: "a deploy request for this project/workspace", blocking: true };
+      }
+      const existingPayload = (existing.payload ?? null) as Record<string, unknown> | null;
+      const existingCommit = typeof existingPayload?.commit === "string" ? existingPayload.commit.trim() : "";
+      if (isRollbackDeployPayload(existingPayload) && commit && commitsRefer(existingCommit, commit)) {
+        return {
+          id: existing.id,
+          targetDescription: `a rollback to ${commit.slice(0, 8)}`,
+          message:
+            `A rollback request to ${commit.slice(0, 8)} is already waiting for your decision. ` +
+            "Approve or reject that card instead of filing another one.",
+          blocking: true,
+        };
+      }
+      // A forward deploy is still waiting: keep the rollback linked to it (relatedApprovalId)
+      // so the operator sees both cards belong to the same incident, but let it through.
+      return { id: existing.id, targetDescription: "a deploy request for this project/workspace", blocking: false };
+    }
+    if (!commit || isRollback) return null;
     const approved = await svc.listApprovedDeployApprovalsForCommit(companyId, projectId, workspaceId, commit);
     if (approved.length === 0) return null;
     const duplicate = findDuplicateApprovedDeploy(approved, readDeployRunnerStatus(companyId, 500), commit);
     return duplicate
-      ? { id: duplicate.id, targetDescription: `a deploy of commit ${commit.slice(0, 12)}`, message: duplicate.message }
+      ? {
+          id: duplicate.id,
+          targetDescription: `a deploy of commit ${commit.slice(0, 12)}`,
+          message: duplicate.message,
+          blocking: true,
+        }
       : null;
   }
   if (isInstructionsChangeRequestApproval(type, payload)) {
@@ -575,16 +622,26 @@ async function findDuplicateOpenApproval(
     if (!agentId || !relativePath) return null;
     const existing = await svc.findOpenInstructionsChangeApproval(companyId, agentId, relativePath);
     return existing
-      ? { id: existing.id, targetDescription: "an instructions change proposal for this agent" }
+      ? { id: existing.id, targetDescription: "an instructions change proposal for this agent", blocking: true }
       : null;
   }
   if (isFeatureLaunchRequestApproval(type, payload)) {
     const issueId = typeof payload.issueId === "string" ? payload.issueId : "";
     if (!issueId) return null;
     const existing = await svc.findOpenFeatureLaunchApproval(companyId, issueId);
-    return existing ? { id: existing.id, targetDescription: "a feature launch card for this issue" } : null;
+    return existing
+      ? { id: existing.id, targetDescription: "a feature launch card for this issue", blocking: true }
+      : null;
   }
   return null;
+}
+
+// Same-commit test for two shas that may be logged at different lengths (the runner has
+// written both 7- and 12-char short shas over time; cards may carry the full 40).
+function commitsRefer(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.length >= 7 && longer.toLowerCase().startsWith(shorter.toLowerCase());
 }
 
 /**
@@ -1328,7 +1385,7 @@ export function approvalRoutes(
         typeof approvalInput.payload.acknowledgedDuplicateOfApprovalId === "string"
           ? approvalInput.payload.acknowledgedDuplicateOfApprovalId
           : null;
-      if (acknowledgedDuplicateId !== duplicate.id) {
+      if (duplicate.blocking && acknowledgedDuplicateId !== duplicate.id) {
         throw conflict(
           duplicate.message ??
             `There is already an open approval for ${duplicate.targetDescription}. Review or resolve it instead of filing a second one — pass acknowledgedDuplicateOfApprovalId to confirm you need a genuine second approval.`,

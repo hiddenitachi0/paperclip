@@ -336,7 +336,33 @@ describe("inbox helpers", () => {
       joinRequests: 1,
       mineIssues: 1,
       alerts: 1,
+      checkups: 0,
     });
+  });
+
+  // DUR-62: the weekly check-up counts once while its suggestions wait on the board.
+  it("adds one badge for an open check-up with undecided suggestions, and none once they are decided", () => {
+    const base = {
+      approvals: [],
+      joinRequests: [],
+      dashboard,
+      heartbeatRuns: [],
+      mineIssues: [],
+      dismissedAlerts: new Set<string>(),
+      dismissedAtByKey: new Map<string, number>(),
+      currentUserId: "user-1",
+    };
+
+    const waiting = computeInboxBadgeData({ ...base, pendingCheckupSuggestions: 3 });
+    expect(waiting.checkups).toBe(1);
+    expect(waiting.inbox).toBe(1);
+
+    const decided = computeInboxBadgeData({ ...base, pendingCheckupSuggestions: 0 });
+    expect(decided.checkups).toBe(0);
+    expect(decided.inbox).toBe(0);
+
+    const unknown = computeInboxBadgeData(base);
+    expect(unknown.checkups).toBe(0);
   });
 
   it("drops dismissed runs and alerts from the computed badge", () => {
@@ -358,6 +384,7 @@ describe("inbox helpers", () => {
       joinRequests: 0,
       mineIssues: 0,
       alerts: 0,
+      checkups: 0,
     });
   });
 

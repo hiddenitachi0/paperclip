@@ -82,6 +82,8 @@ export interface InboxBadgeData {
   joinRequests: number;
   mineIssues: number;
   alerts: number;
+  /** DUR-62: 1 while the open weekly check-up has suggestions nobody has decided on, else 0. */
+  checkups: number;
 }
 
 export interface InboxWorkItemGroup {
@@ -1230,6 +1232,7 @@ export function computeInboxBadgeData({
   dismissedAlerts,
   dismissedAtByKey,
   currentUserId,
+  pendingCheckupSuggestions = 0,
 }: {
   approvals: Approval[];
   joinRequests: JoinRequest[];
@@ -1239,6 +1242,8 @@ export function computeInboxBadgeData({
   dismissedAlerts: Set<string>;
   dismissedAtByKey: ReadonlyMap<string, number>;
   currentUserId?: string | null;
+  /** DUR-62: suggestions on the open weekly check-up that still wait on the board. */
+  pendingCheckupSuggestions?: number;
 }): InboxBadgeData {
   const actionableApprovals = approvals.filter(
     (approval) =>
@@ -1265,14 +1270,17 @@ export function computeInboxBadgeData({
     monthUtilizationPercent >= 80 &&
     !dismissedAlerts.has("alert:budget");
   const alerts = Number(showAggregateAgentError) + Number(showBudgetAlert);
+  // One badge, not one per suggestion: the report is a single thing to open.
+  const checkups = pendingCheckupSuggestions > 0 ? 1 : 0;
 
   return {
     // The inbox badge reflects personal/actionable work, not company-wide health alerts.
-    inbox: actionableApprovals + visibleJoinRequests + failedRuns + visibleMineIssues,
+    inbox: actionableApprovals + visibleJoinRequests + failedRuns + visibleMineIssues + checkups,
     approvals: actionableApprovals,
     failedRuns,
     joinRequests: visibleJoinRequests,
     mineIssues: visibleMineIssues,
     alerts,
+    checkups,
   };
 }

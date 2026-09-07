@@ -209,7 +209,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     const summary = summarize({ runs: runs({ zombieCandidates: 2 }) });
     expect(summary.level).toBe("warning");
     expect(summary.headline).toBe(
-      "2 runs have shown no output for 30+ minutes and may be stuck, holding a slot. The watchdog ends a run once its process is confirmed gone.",
+      "2 runs have shown no output for 30+ minutes and may be stuck, holding a slot. The watchdog ends a run once its process is gone, and stops one that stays silent or runs past the time limits under Settings > Instance settings > General.",
     );
   });
 

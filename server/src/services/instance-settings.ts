@@ -6,6 +6,8 @@ import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+  DEFAULT_MAX_RUN_DURATION_MINUTES,
+  DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   DEFAULT_QUIET_MODE_STATE,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
@@ -54,6 +56,8 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
         parsed.data.instructionsStalenessThresholdDays ?? DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
       globalMaxConcurrentRuns:
         parsed.data.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+      maxRunDurationMinutes: parsed.data.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES,
+      silentRunTimeoutMinutes: parsed.data.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
       quietMode: parsed.data.quietMode ?? DEFAULT_QUIET_MODE_STATE,
       mergePrAutomationEnabled: parsed.data.mergePrAutomationEnabled ?? false,
       factCheckCardStrictAllowlist: parsed.data.factCheckCardStrictAllowlist ?? false,
@@ -66,6 +70,8 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     backupRetention: DEFAULT_BACKUP_RETENTION,
     instructionsStalenessThresholdDays: DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
     globalMaxConcurrentRuns: DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
+    maxRunDurationMinutes: DEFAULT_MAX_RUN_DURATION_MINUTES,
+    silentRunTimeoutMinutes: DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
     quietMode: DEFAULT_QUIET_MODE_STATE,
     mergePrAutomationEnabled: false,
     factCheckCardStrictAllowlist: false,
@@ -92,6 +98,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       issueGraphLivenessAutoRecoveryLookbackHours:
         parsed.data.issueGraphLivenessAutoRecoveryLookbackHours ??
         DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+      enableWeeklyCheckup: parsed.data.enableWeeklyCheckup ?? false,
     };
   }
   return {
@@ -110,6 +117,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableIssueGraphLivenessAutoRecovery: false,
     issueGraphLivenessAutoRecoveryLookbackHours:
       DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+    enableWeeklyCheckup: false,
   };
 }
 
