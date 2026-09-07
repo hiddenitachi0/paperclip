@@ -17,6 +17,13 @@ export interface FleetRunCounts {
   cancelledInWindow: number;
   running: number;
   queued: number;
+  /**
+   * Queued runs whose agent has no run in progress right now. Agents run one
+   * at a time, so a run queued behind its own agent's running run is waiting
+   * on that agent, not on the fleet; only this subset says anything about
+   * whether the queue as a whole is moving.
+   */
+  queuedWithNoRunningAgent: number;
   /** How long the oldest queued run has been waiting, in ms (null when nothing is queued). */
   oldestQueuedWaitMs: number | null;
   /**

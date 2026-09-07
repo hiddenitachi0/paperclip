@@ -92,6 +92,16 @@ export async function loadFleetRunCounts(
     .select({
       running: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'running')`.mapWith(Number),
       queued: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'queued')`.mapWith(Number),
+      // Agents run one at a time, so a run queued behind its own agent's
+      // running run is waiting on that agent, not on the fleet. Only queued
+      // rows whose agent has nothing running say the queue itself is stuck.
+      // Written with explicit table names: inside the subquery drizzle
+      // renders `${heartbeatRuns.agentId}` unqualified, which would bind to
+      // the aliased inner table and make the not-exists always false.
+      queuedWithNoRunningAgent: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'queued' and not exists (
+        select 1 from heartbeat_runs as running_runs
+        where running_runs.agent_id = heartbeat_runs.agent_id and running_runs.status = 'running'
+      ))`.mapWith(Number),
       oldestQueuedAt: sql<Date | string | null>`min(${heartbeatRuns.createdAt}) filter (where ${heartbeatRuns.status} = 'queued')`,
       zombies: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'running' and greatest(
         coalesce(${heartbeatRuns.lastOutputAt}, to_timestamp(0)),
@@ -112,6 +122,7 @@ export async function loadFleetRunCounts(
     cancelledInWindow: asCount(windowRow?.cancelled),
     running: asCount(activeRow?.running),
     queued: asCount(activeRow?.queued),
+    queuedWithNoRunningAgent: asCount(activeRow?.queuedWithNoRunningAgent),
     oldestQueuedWaitMs: oldestQueuedAt ? Math.max(0, input.now.getTime() - oldestQueuedAt.getTime()) : null,
     zombieCandidates: asCount(activeRow?.zombies),
     zombieSilenceMinutes: Math.round(input.zombieSilenceMs / 60_000),
@@ -254,10 +265,22 @@ export function summarizeFleetHealth(input: {
 
   const schedulerLooksAlive = scheduler.enabled && !scheduler.stale;
   if (schedulerLooksAlive && runs.queued > 0 && runs.startedInWindow === 0 && !slots.saturated) {
-    findings.push({
-      level: "critical",
-      text: `${plural(runs.queued, "run is", "runs are")} queued but none has started in the last ${runs.windowMinutes} minutes, even though ${plural(slots.available, "slot is", "slots are")} free. Something is holding the queue.`,
-    });
+    // Overnight shape: one long run and its own agent's next run queued
+    // behind it. Agents run one at a time, so that queued run is waiting on
+    // its agent, not on the fleet, and a critical here would be a false
+    // alarm. Only queued runs whose agent has nothing running mean the
+    // queue itself is stuck.
+    if (runs.queuedWithNoRunningAgent > 0) {
+      findings.push({
+        level: "critical",
+        text: `${plural(runs.queuedWithNoRunningAgent, "run is", "runs are")} queued but none has started in the last ${runs.windowMinutes} minutes, even though ${plural(slots.available, "slot is", "slots are")} free. Something is holding the queue.`,
+      });
+    } else {
+      findings.push({
+        level: "ok",
+        text: `${plural(runs.queued, "run is", "runs are")} queued behind a run the same agent already has going. Agents run one at a time, so ${runs.queued === 1 ? "it" : "they"} will start when that run finishes.`,
+      });
+    }
   }
 
   if (slots.saturated && runs.queued > 0) {

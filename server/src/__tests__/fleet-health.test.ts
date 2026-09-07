@@ -49,7 +49,7 @@ const calmDatabase: FleetDatabaseLoad = {
 };
 
 function runs(overrides: Partial<Parameters<typeof summarizeFleetHealth>[0]["runs"]> = {}) {
-  return {
+  const base = {
     windowMinutes: 15,
     startedInWindow: 9,
     succeededInWindow: 7,
@@ -62,6 +62,9 @@ function runs(overrides: Partial<Parameters<typeof summarizeFleetHealth>[0]["run
     zombieSilenceMinutes: 30,
     ...overrides,
   };
+  // Unless a case says otherwise, every queued run is waiting on the fleet
+  // (its agent has nothing running), which is the shape the alarms are about.
+  return { queuedWithNoRunningAgent: base.queued, ...base };
 }
 
 function summarize(input: Partial<Parameters<typeof summarizeFleetHealth>[0]> = {}) {
@@ -153,6 +156,41 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.level).toBe("critical");
     expect(summary.headline).toBe(
       "4 runs are queued but none has started in the last 15 minutes, even though 3 slots are free. Something is holding the queue.",
+    );
+  });
+
+  it("overnight shape: one long run with its own agent's next run queued behind it is not critical", () => {
+    // 1 running for 70 minutes (still producing output, so not a zombie),
+    // 1 queued for the same agent, nothing started in the window, 1 of 4
+    // slots used. Agents run one at a time; the queued run is waiting on
+    // its agent, not on the fleet.
+    const summary = summarize({
+      runs: runs({
+        startedInWindow: 0,
+        succeededInWindow: 0,
+        failedInWindow: 0,
+        running: 1,
+        queued: 1,
+        queuedWithNoRunningAgent: 0,
+        oldestQueuedWaitMs: 70 * 60_000,
+      }),
+      slots: computeFleetSlotUsage(4, 1),
+    });
+    expect(summary.level).toBe("ok");
+    expect(summary.headline).toBe("Runs are flowing: 0 started, 0 finished, 0 failed in the last 15 minutes. 1 of 4 slots in use, 1 queued.");
+    expect(summary.notes).toEqual([
+      "1 run is queued behind a run the same agent already has going. Agents run one at a time, so it will start when that run finishes.",
+    ]);
+  });
+
+  it("only the queued runs whose agent has nothing running count toward the stuck-queue alarm", () => {
+    const summary = summarize({
+      runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 1, queued: 3, queuedWithNoRunningAgent: 2, oldestQueuedWaitMs: 40 * 60_000 }),
+      slots: computeFleetSlotUsage(4, 1),
+    });
+    expect(summary.level).toBe("critical");
+    expect(summary.headline).toBe(
+      "2 runs are queued but none has started in the last 15 minutes, even though 3 slots are free. Something is holding the queue.",
     );
   });
 
@@ -352,9 +390,12 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
     await seedRun({ companyId, agentId: worker, status: "running", createdAt: minutesAgo(60), startedAt: minutesAgo(60), processStartedAt: minutesAgo(60), lastOutputAt: minutesAgo(45) });
     // Started 40 minutes ago (outside the window), still running: counts as running, not as started-in-window.
     await seedRun({ companyId, agentId: worker, status: "running", createdAt: minutesAgo(41), startedAt: minutesAgo(40), processStartedAt: minutesAgo(40), lastOutputAt: minutesAgo(1) });
-    // Two queued: one waiting 20 minutes, one just now.
+    // Two queued for an agent with nothing running: one waiting 20 minutes, one just now.
     await seedRun({ companyId, agentId: broken, status: "queued", createdAt: minutesAgo(20) });
     await seedRun({ companyId, agentId: broken, status: "queued", createdAt: minutesAgo(0) });
+    // One queued behind the worker's own running run: counts as queued, but
+    // not as waiting on the fleet.
+    await seedRun({ companyId, agentId: worker, status: "queued", createdAt: minutesAgo(1) });
 
     const snapshot = await computeFleetHealth(db, {
       now,
@@ -373,7 +414,8 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
       failedInWindow: 2,
       cancelledInWindow: 1,
       running: 3,
-      queued: 2,
+      queued: 3,
+      queuedWithNoRunningAgent: 2,
       zombieCandidates: 1,
       zombieSilenceMinutes: 30,
     });
@@ -399,7 +441,7 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
   it("reads the instance-wide cap from settings when no override is given, and is quiet on an empty database", async () => {
     const snapshot = await computeFleetHealth(db, { scheduler: healthyScheduler, requests: quietRequests });
     expect(snapshot.slots.max).toBeGreaterThan(0);
-    expect(snapshot.runs).toMatchObject({ startedInWindow: 0, running: 0, queued: 0, zombieCandidates: 0, oldestQueuedWaitMs: null });
+    expect(snapshot.runs).toMatchObject({ startedInWindow: 0, running: 0, queued: 0, queuedWithNoRunningAgent: 0, zombieCandidates: 0, oldestQueuedWaitMs: null });
     expect(snapshot.agents).toEqual({ inError: 0, inErrorSample: [] });
     expect(snapshot.summary.level).toBe("ok");
     expect(snapshot.summary.headline).toContain("Quiet:");

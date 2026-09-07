@@ -49,6 +49,7 @@ const testFleet = {
     cancelledInWindow: 0,
     running: 4,
     queued: 15,
+    queuedWithNoRunningAgent: 11,
     oldestQueuedWaitMs: 20 * 60_000,
     zombieCandidates: 0,
     zombieSilenceMinutes: 30,

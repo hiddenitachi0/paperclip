@@ -891,6 +891,7 @@ registry.registerPath({
             cancelledInWindow: z.number().int().nonnegative(),
             running: z.number().int().nonnegative(),
             queued: z.number().int().nonnegative(),
+            queuedWithNoRunningAgent: z.number().int().nonnegative(),
             oldestQueuedWaitMs: z.number().int().nonnegative().nullable(),
             zombieCandidates: z.number().int().nonnegative(),
             zombieSilenceMinutes: z.number().int().nonnegative(),

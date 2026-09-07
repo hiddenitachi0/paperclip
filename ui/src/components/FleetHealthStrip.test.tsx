@@ -32,6 +32,7 @@ const healthyFleet: FleetHealthSnapshot = {
     cancelledInWindow: 0,
     running: 3,
     queued: 0,
+    queuedWithNoRunningAgent: 0,
     oldestQueuedWaitMs: null,
     zombieCandidates: 0,
     zombieSilenceMinutes: 30,

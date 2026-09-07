@@ -188,6 +188,7 @@ const quietRuns: FleetRunCounts = {
   cancelledInWindow: 0,
   running: 0,
   queued: 0,
+  queuedWithNoRunningAgent: 0,
   oldestQueuedWaitMs: null,
   zombieCandidates: 0,
   zombieSilenceMinutes: 30,
