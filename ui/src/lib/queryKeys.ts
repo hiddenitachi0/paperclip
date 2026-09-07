@@ -271,6 +271,9 @@ export const queryKeys = {
   personas: {
     list: (companyId: string) => ["personas", companyId] as const,
     detail: (id: string) => ["personas", "detail", id] as const,
+    accounts: (personaId: string) => ["personas", "accounts", personaId] as const,
+    companyPosts: (companyId: string) => ["persona-posts", companyId] as const,
+    companyPublishing: (companyId: string) => ["persona-publishing-settings", companyId] as const,
   },
   companySearch: {
     search: (companyId: string, q: string, scope: string, limit: number, offset: number) =>
