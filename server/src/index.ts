@@ -50,6 +50,7 @@ import {
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
+  personaPublisherSweepService,
   organizationCheckupService,
   instanceClaudeAuthService,
   instanceSettingsService,
@@ -938,6 +939,9 @@ export async function startServer(): Promise<StartedServer> {
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
+    const personaPublisherSweep = config.personaPublishingSweepEnabled
+      ? personaPublisherSweepService(schedulerDb as any)
+      : null;
     const organizationCheckups = organizationCheckupService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
 
@@ -1239,6 +1243,30 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "untracked-write alert tick failed");
         });
+
+      // DUR-134 review follow-up: move queued/approved persona posts through
+      // the publisher's safety gates (kill switches, warm-up, autonomy gate,
+      // daily cap, one-shot claim). Without this pass nothing ever published
+      // on its own -- an approved post sat waiting for a manual trigger.
+      if (personaPublisherSweep) {
+        void runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: personaPublisherSweep",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:personaPublisherSweep",
+          },
+          () => personaPublisherSweep.tick(),
+        )
+          .then((result) => {
+            if (result.published > 0 || result.failed > 0 || result.pendingApproval > 0 || result.errors > 0) {
+              logger.info({ ...result }, "persona publisher sweep moved posts");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "persona publisher sweep tick failed");
+          });
+      }
 
       // DUR-162: close pending operator-queue cards nobody has answered within
       // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them

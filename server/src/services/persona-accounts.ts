@@ -158,6 +158,13 @@ export function personaAccountsService(db: Db) {
     return updated!;
   }
 
+  async function markConnected(accountId: string): Promise<void> {
+    await db
+      .update(personaAccounts)
+      .set({ connectionStatus: "connected", updatedAt: new Date() })
+      .where(eq(personaAccounts.id, accountId));
+  }
+
   async function deleteAccount(accountId: string): Promise<void> {
     const existing = await getAccountById(accountId);
     if (!existing) throw notFound("Persona account not found");
@@ -170,6 +177,7 @@ export function personaAccountsService(db: Db) {
     listAccountsForPersona,
     listAccountsForCompany,
     updateAccount,
+    markConnected,
     deleteAccount,
     resolvePublishToken,
   };

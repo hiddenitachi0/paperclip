@@ -221,6 +221,77 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("renders a persona_publish card as plain language: the post text, disclosure, why, and what approve does (DUR-134)", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "persona_publish",
+            personaId: "6f1c7f0e-3a1b-4c2d-9e8f-0a1b2c3d4e5f",
+            personaAccountId: "6f1c7f0e-3a1b-4c2d-9e8f-0a1b2c3d4e60",
+            personaPostId: "6f1c7f0e-3a1b-4c2d-9e8f-0a1b2c3d4e61",
+            platform: "fanvue",
+            reason: "warmup",
+            caption: "Golden hour on the pier tonight.",
+            disclosureText: "This content was created with AI assistance.",
+            title: "Post to Maja — Fanvue",
+            summary: "This account is new, so her first 5 posts need your OK before they go out.",
+            isPersonaRequest: true,
+            personaDisplayName: "Maja",
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Post to Maja — Fanvue");
+    expect(text).toContain("What Maja wants to post");
+    expect(text).toContain("Golden hour on the pier tonight.");
+    expect(text).toContain("This content was created with AI assistance.");
+    expect(text).toContain("New account: her first posts need your OK");
+    expect(text).toContain("her first 5 posts need your OK");
+    expect(text).toContain("If you approve");
+    expect(text).toContain("If you reject, it is never posted.");
+    // No plumbing on the card: no UUIDs, no raw JSON keys.
+    expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+    expect(text).not.toContain("personaPostId");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("says plainly when no AI disclosure is added to a persona post", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "persona_publish",
+            reason: "requires_approval_channel",
+            caption: "Hi",
+            disclosureText: null,
+            title: "Post to Maja — X",
+            summary: "Posts to Maja — X always need your OK before they go out.",
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("This account always needs your OK");
+    expect(text).toContain("Not added -- disclosure is switched off for this account.");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("can hide the repeated title when the card header already shows it", () => {
     const root = createRoot(container);
 

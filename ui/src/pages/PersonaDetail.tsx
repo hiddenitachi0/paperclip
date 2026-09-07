@@ -13,6 +13,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { PersonaAvatar } from "../components/PersonaAvatar";
 import { PersonaMcpToolsPanel } from "../components/PersonaMcpToolsPanel";
 import { ApprovalCard } from "../components/ApprovalCard";
+import { PersonaPublishingPanel } from "../components/PersonaPublishingPanel";
 
 // DUR-184: item 15 (capability panel -- what image tools she has) and items
 // 16-17 (plain-language approval UI for her image flows) on one page. Reuses
@@ -130,8 +131,9 @@ export function PersonaDetail() {
           <h2 className="text-sm font-semibold">Before anything goes out</h2>
         </div>
         <p className="text-sm text-muted-foreground">
-          Every picture she makes waits for your OK before it's used anywhere. Nothing she generates posts or
-          publishes itself.
+          Every picture she makes waits for your OK before it's used anywhere. Posts go out on their own only on
+          accounts you set to that, after her first few posts there have had your OK, and never more than the
+          daily limit you gave the account. Anything else waits here.
         </p>
         {approvalsQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
@@ -157,6 +159,8 @@ export function PersonaDetail() {
           </div>
         )}
       </section>
+
+      <PersonaPublishingPanel persona={persona} />
 
       <section className="space-y-1.5">
         <h2 className="text-sm font-semibold">Daily picture limit</h2>
