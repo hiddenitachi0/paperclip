@@ -101,6 +101,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "approval.revision_requested": "requested changes on",
+  "approval.boss_review_requested": "asked the boss to weigh in first on",
+  "approval.boss_review_forwarded": "passed on to the operator with a recommendation",
   "issue.approval_approved": "approved an approval request on",
   "issue.approval_rejected": "rejected an approval request on",
   "issue.approval_revision_requested": "sent an approval request back for changes on",
@@ -175,6 +177,8 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "approval.revision_requested": "requested changes",
+  "approval.boss_review_requested": "asked the boss to weigh in on the boost request first",
+  "approval.boss_review_forwarded": "passed the boost request on to the operator with a recommendation",
   "issue.approval_approved": "approved the approval request",
   "issue.approval_rejected": "rejected the approval request",
   "issue.approval_revision_requested": "sent the approval request back for changes",
@@ -192,6 +196,7 @@ const APPROVAL_TYPE_LABELS: Record<string, string> = {
   deploy: "deploy",
   tool_grant: "tool access",
   instructions_change: "instructions change",
+  model_boost: "temporary model boost",
 };
 
 // DUR-283: the activity actions whose `details.decisionNote` is the reason an

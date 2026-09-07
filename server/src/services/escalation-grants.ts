@@ -1,16 +1,32 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvals, costEvents, escalationGrants } from "@paperclipai/db";
+import { agents, approvals, costEvents, escalationGrants } from "@paperclipai/db";
 import {
   ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
   type EscalationGrant,
   type EscalationGrantWithSpend,
+  type ModelBoostBossReviewState,
   type ModelBoostRequestPayload,
 } from "@paperclipai/shared";
-import { conflict } from "../errors.js";
+import { conflict, forbidden, notFound } from "../errors.js";
 import { issueService } from "./issues.js";
+import { readBossReview, type BossCandidate } from "./model-boost-boss-review.js";
+
+export { buildBossReviewStamp, readBossReview, type BossCandidate } from "./model-boost-boss-review.js";
 
 type EscalationGrantRow = typeof escalationGrants.$inferSelect;
+type ApprovalRow = typeof approvals.$inferSelect;
+
+/** A boss who can actually answer: exists, same company, and not switched off. */
+const BOSS_INELIGIBLE_STATUSES = new Set(["terminated", "paused", "pending_approval"]);
+
+function isPendingModelBoostApproval(row: Pick<ApprovalRow, "type" | "status" | "payload">): boolean {
+  return (
+    row.type === "request_board_approval" &&
+    row.payload?.kind === "model_boost" &&
+    (row.status === "pending" || row.status === "revision_requested")
+  );
+}
 
 function toReadModel(row: EscalationGrantRow): EscalationGrant {
   return {
@@ -221,6 +237,134 @@ export function escalationGrantService(db: Db) {
           );
         }
       }
+    },
+
+    /**
+     * Boss-first routing: walk `reportsTo` up from the requester and return
+     * the nearest boss who can actually answer (same company, not terminated
+     * / paused / still awaiting hire approval). `null` means there is nobody
+     * to ask first and the request goes straight to the operator.
+     */
+    resolveBossForAgent: async (companyId: string, agentId: string): Promise<BossCandidate | null> => {
+      const seen = new Set<string>([agentId]);
+      let cursor: string | null = agentId;
+      for (let hops = 0; cursor && hops < 32; hops += 1) {
+        const [current] = await db
+          .select({ id: agents.id, companyId: agents.companyId, reportsTo: agents.reportsTo })
+          .from(agents)
+          .where(eq(agents.id, cursor))
+          .limit(1);
+        const nextId: string | null = current?.reportsTo ?? null;
+        if (!nextId || seen.has(nextId)) return null;
+        seen.add(nextId);
+        const [boss] = await db
+          .select({ id: agents.id, name: agents.name, companyId: agents.companyId, status: agents.status })
+          .from(agents)
+          .where(eq(agents.id, nextId))
+          .limit(1);
+        if (!boss || boss.companyId !== companyId) return null;
+        if (!BOSS_INELIGIBLE_STATUSES.has(boss.status)) {
+          return { id: boss.id, name: boss.name };
+        }
+        cursor = boss.id;
+      }
+      return null;
+    },
+
+    /**
+     * The boss answers a direct report's boost ask. "decline" ends it there
+     * (approval rejected, requester stays on its normal setting, the operator
+     * is never bothered); "forward" sends it on to the operator with the
+     * boss's take attached. Only the boss named on the ask may answer, and
+     * only while it is still waiting on them.
+     */
+    recordBossDecision: async (input: {
+      approvalId: string;
+      bossAgentId: string;
+      decision: "decline" | "forward";
+      note?: string | null;
+    }): Promise<ApprovalRow> => {
+      const [existing] = await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1);
+      if (!existing) throw notFound("Approval not found");
+      const review = readBossReview(existing.payload);
+      if (!review || existing.payload?.kind !== "model_boost") {
+        throw conflict("This approval is not a boost request waiting on a boss.");
+      }
+      if (review.bossAgentId !== input.bossAgentId) {
+        throw forbidden("Only the boss this boost request is waiting on can answer it.");
+      }
+      if (!isPendingModelBoostApproval(existing)) {
+        throw conflict("This boost request has already been decided.");
+      }
+      if (review.status !== "awaiting_boss") {
+        throw conflict("This boost request is no longer waiting on the boss.");
+      }
+
+      const now = new Date();
+      const note = input.note?.trim() || undefined;
+      const nextReview: ModelBoostBossReviewState = {
+        ...review,
+        status: input.decision === "decline" ? "declined" : "forwarded",
+        decidedAt: now.toISOString(),
+        ...(note ? { note } : {}),
+      };
+      const nextPayload = { ...existing.payload, bossReview: nextReview };
+
+      const [updated] = await db
+        .update(approvals)
+        .set(
+          input.decision === "decline"
+            ? {
+                status: "rejected",
+                payload: nextPayload,
+                decisionNote: note ? `${review.bossName} said no: ${note}` : `${review.bossName} said no.`,
+                decidedAt: now,
+                updatedAt: now,
+              }
+            : { payload: nextPayload, updatedAt: now },
+        )
+        .where(and(eq(approvals.id, existing.id), eq(approvals.status, existing.status)))
+        .returning();
+      if (!updated) throw conflict("This boost request changed while the boss was answering. Try again.");
+      return updated;
+    },
+
+    /**
+     * Scheduler pass: any boost ask still waiting on its boss past the
+     * deadline moves on to the operator by itself, so a silent boss can never
+     * leave a report stuck. Returns the ids that moved on.
+     */
+    sweepBossReviewTimeouts: async (now: Date = new Date()): Promise<string[]> => {
+      const rows = await db
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.type, "request_board_approval"),
+            eq(approvals.status, "pending"),
+            sql`${approvals.payload} ->> 'kind' = 'model_boost'`,
+            sql`${approvals.payload} -> 'bossReview' ->> 'status' = 'awaiting_boss'`,
+          ),
+        );
+      const movedOn: string[] = [];
+      for (const row of rows) {
+        const review = readBossReview(row.payload);
+        if (!review) continue;
+        const deadline = new Date(review.deadlineAt);
+        if (Number.isNaN(deadline.getTime()) || deadline.getTime() > now.getTime()) continue;
+        const nextReview: ModelBoostBossReviewState = {
+          ...review,
+          status: "timed_out",
+          decidedAt: now.toISOString(),
+        };
+        const [updated] = await db
+          .update(approvals)
+          .set({ payload: { ...row.payload, bossReview: nextReview }, updatedAt: now })
+          .where(and(eq(approvals.id, row.id), eq(approvals.status, "pending")))
+          .returning({ id: approvals.id });
+        if (updated) movedOn.push(updated.id);
+      }
+      return movedOn;
     },
 
     getForIssue: async (companyId: string, issueId: string): Promise<EscalationGrantWithSpend | null> => {

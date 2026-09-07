@@ -221,6 +221,90 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("renders a model_boost card in plain language: the ask, why, where the boss stands, and what approve/deny do", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "model_boost",
+            issueId: "11111111-1111-4111-8111-111111111111",
+            agentId: "22222222-2222-4222-8222-222222222222",
+            agentName: "Backend Engineer",
+            requestedModel: "opus",
+            requestedEffort: "high",
+            reason: "This refactor spans 40 files and I keep losing track.",
+            estimatedExtraCostCents: 500,
+            maxSpendCents: 2000,
+            durationMinutes: 240,
+            title: "Paperclip — Backend Engineer asks to use Opus at high effort for this task, up to $20, for the next 4 hours",
+            summary: "Why: This refactor spans 40 files and I keep losing track.",
+            bossReview: {
+              bossAgentId: "33333333-3333-4333-8333-333333333333",
+              bossName: "Engineering Lead",
+              status: "forwarded",
+              requestedAt: "2026-09-07T10:00:00.000Z",
+              deadlineAt: "2026-09-07T10:30:00.000Z",
+              decidedAt: "2026-09-07T10:05:00.000Z",
+              note: "Worth it, the task is genuinely stuck.",
+            },
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Backend Engineer asks to use Opus at high effort for this task, up to $20, for the next 4 hours");
+    expect(text).toContain("This refactor spans 40 files and I keep losing track.");
+    expect(text).toContain("Model: Opus · Effort: high · Money cap: $20 · Time window: 4 hours");
+    expect(text).toContain("Engineering Lead passed this on to you: Worth it, the task is genuinely stuck.");
+    expect(text).toContain("If you deny, it keeps working on its normal setting.");
+    expect(text).not.toContain("estimatedExtraCostCents");
+    expect(text).not.toContain("maxSpendCents");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("tells the operator a model_boost card is still with the boss, and that they may decide anyway", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "model_boost",
+            agentName: "Writer",
+            requestedEffort: "xhigh",
+            reason: "Long piece.",
+            maxSpendCents: 500,
+            title: "Writer asks to work at very high effort for this task, up to $5, for the next 4 hours",
+            bossReview: {
+              bossAgentId: "33333333-3333-4333-8333-333333333333",
+              bossName: "Editor",
+              status: "awaiting_boss",
+              requestedAt: "2026-09-07T10:00:00.000Z",
+              deadlineAt: "2026-09-07T10:30:00.000Z",
+            },
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Waiting for Editor to weigh in first.");
+    expect(text).toContain("You can still decide now if you do not want to wait.");
+    expect(text).toContain("Effort: very high");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("renders a persona_publish card as plain language: the post text, disclosure, why, and what approve does (DUR-134)", () => {
     const root = createRoot(container);
 
