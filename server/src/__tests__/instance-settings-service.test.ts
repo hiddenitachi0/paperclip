@@ -37,7 +37,14 @@ describe("instance settings service", () => {
       autoRestartDevServerWhenIdle: true,
       enableIssueGraphLivenessAutoRecovery: true,
       issueGraphLivenessAutoRecoveryLookbackHours: 48,
+      enableWeeklyCheckup: false,
     });
+  });
+
+  it("defaults the weekly check-up to off and keeps an explicit on", () => {
+    expect(normalizeExperimentalSettings({}).enableWeeklyCheckup).toBe(false);
+    expect(normalizeExperimentalSettings(undefined).enableWeeklyCheckup).toBe(false);
+    expect(normalizeExperimentalSettings({ enableWeeklyCheckup: true }).enableWeeklyCheckup).toBe(true);
   });
 
   it("defaults enableConferenceRoomChat to false for empty and legacy stored settings", () => {

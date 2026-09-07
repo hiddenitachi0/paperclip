@@ -4,6 +4,8 @@ import { act as reactAct, type ComponentProps, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { SuggestTasksInteraction } from "../lib/issue-thread-interactions";
 import { IssueThreadInteractionCard } from "./IssueThreadInteractionCard";
 import { ThemeProvider } from "../context/ThemeContext";
 import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
@@ -761,5 +763,154 @@ describe("IssueThreadInteractionCard", () => {
       expect.objectContaining({ kind: "request_confirmation" }),
       "![bug.png](https://cdn.example/shot.png)",
     );
+  });
+});
+
+// DUR-62: the weekly check-up card offers "Hide this for a month" per finding.
+const mockInboxDismissalsApi = vi.hoisted(() => ({
+  list: vi.fn(async (): Promise<Array<Record<string, unknown>>> => []),
+  dismiss: vi.fn(),
+}));
+
+vi.mock("../api/inboxDismissals", () => ({
+  inboxDismissalsApi: mockInboxDismissalsApi,
+}));
+
+describe("IssueThreadInteractionCard: weekly check-up findings", () => {
+  const checkupInteraction: SuggestTasksInteraction = {
+    ...pendingSuggestedTasksInteraction,
+    id: "interaction-checkup",
+    idempotencyKey: "organization-checkup:issue-checkup-1",
+    continuationPolicy: "none",
+    title: "Suggested fixes",
+    summary: "Tick the suggestions you agree with and press accept.",
+    payload: {
+      version: 1,
+      defaultParentId: null,
+      tasks: [
+        { clientKey: "agent_error:agent-1", title: "Get Builder working again", description: "Builder stopped with an error.", priority: "high" },
+        { clientKey: "stuck_issues", title: "Look at 3 tasks that have not moved", description: "Three tasks have not moved in 5 days.", priority: "medium" },
+      ],
+    },
+  };
+
+  let queryRoot: Root | null = null;
+  let queryContainer: HTMLDivElement | null = null;
+
+  async function renderWithQueries(node: ReactNode) {
+    queryContainer = document.createElement("div");
+    document.body.appendChild(queryContainer);
+    queryRoot = createRoot(queryContainer);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    await act(() => {
+      queryRoot?.render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <ThemeProvider>{node}</ThemeProvider>
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+    });
+    for (let index = 0; index < 3; index += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    return queryContainer;
+  }
+
+  afterEach(async () => {
+    await act(() => {
+      queryRoot?.unmount();
+    });
+    queryRoot = null;
+    queryContainer?.remove();
+    queryContainer = null;
+    mockInboxDismissalsApi.dismiss.mockReset();
+    mockInboxDismissalsApi.list.mockReset();
+    mockInboxDismissalsApi.list.mockResolvedValue([]);
+  });
+
+  it("offers no hide button on an ordinary suggested-tasks card", async () => {
+    const host = await renderWithQueries(
+      <IssueThreadInteractionCard interaction={pendingSuggestedTasksInteraction} />,
+    );
+    expect(host.textContent).not.toContain("Hide this for a month");
+    expect(mockInboxDismissalsApi.list).not.toHaveBeenCalled();
+  });
+
+  it("hides a finding for a month: records the dismissal, unticks it, and says so", async () => {
+    // The server keeps what was dismissed; the list refetch after a dismissal must see it.
+    const recorded: Array<Record<string, unknown>> = [];
+    mockInboxDismissalsApi.list.mockImplementation(async () => [...recorded]);
+    mockInboxDismissalsApi.dismiss.mockImplementation(async (companyId: string, itemKey: string) => {
+      const row = {
+        id: `dismissal-${recorded.length + 1}`,
+        companyId,
+        userId: "user-board",
+        itemKey,
+        dismissedAt: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      recorded.push(row);
+      return row;
+    });
+    const onAcceptInteraction = vi.fn(async () => undefined);
+    const host = await renderWithQueries(
+      <IssueThreadInteractionCard interaction={checkupInteraction} onAcceptInteraction={onAcceptInteraction} />,
+    );
+
+    const hideButtons = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).filter((button) =>
+      button.textContent?.includes("Hide this for a month"),
+    );
+    expect(hideButtons).toHaveLength(2);
+    expect(host.textContent).toContain("All 2 draft issues selected");
+
+    await act(async () => {
+      hideButtons[1]!.click();
+    });
+    for (let index = 0; index < 3; index += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    expect(mockInboxDismissalsApi.dismiss).toHaveBeenCalledWith("company-storybook", "checkup-finding:stuck_issues");
+    expect(host.querySelector('[data-testid="checkup-finding-hidden"]')?.textContent).toContain("Hidden for a month");
+    expect(host.textContent).toContain("1 of 2 draft issues selected");
+    expect(host.textContent).toContain("1 will be hidden for a month if you accept.");
+    const stuckCheckbox = host.querySelector('[aria-label="Include Look at 3 tasks that have not moved"]');
+    expect(stuckCheckbox?.getAttribute("aria-checked")).toBe("false");
+
+    // Accepting now sends only the finding that is still ticked.
+    const acceptButton = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+      button.textContent?.includes("Accept selected drafts"),
+    );
+    await act(async () => {
+      acceptButton?.click();
+    });
+    expect(onAcceptInteraction).toHaveBeenCalledWith(checkupInteraction, ["agent_error:agent-1"]);
+  });
+
+  it("shows a finding this user already hid as hidden, not as a button", async () => {
+    mockInboxDismissalsApi.list.mockResolvedValue([
+      {
+        id: "dismissal-0",
+        companyId: "company-storybook",
+        userId: "user-board",
+        itemKey: "checkup-finding:agent_error:agent-1",
+        dismissedAt: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    const host = await renderWithQueries(<IssueThreadInteractionCard interaction={checkupInteraction} />);
+
+    const hideButtons = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).filter((button) =>
+      button.textContent?.includes("Hide this for a month"),
+    );
+    expect(hideButtons).toHaveLength(1);
+    expect(host.querySelectorAll('[data-testid="checkup-finding-hidden"]')).toHaveLength(1);
   });
 });

@@ -573,6 +573,73 @@ describeEmbeddedPostgres("organization check-up service", () => {
     expect(back.body).not.toContain("Hidden for now");
   });
 
+  it("summarises the open report for the dashboard: how many suggestions still wait, and none once decided", async () => {
+    const seeded = await seedCompany();
+    const service = organizationCheckupService(db);
+    expect(await service.summarizeOpenCheckup(seeded.companyId)).toBeNull();
+
+    await insertIssue(seeded, { status: "todo", updatedAt: daysBefore(10) });
+    await db.update(agents).set({ status: "error", errorReason: "boom", errorAt: hoursBefore(2) }).where(eq(agents.id, seeded.workerId));
+    const created = await service.runCheckup({ companyId: seeded.companyId, now: NOW });
+    expect(created.outcome).toBe("created");
+
+    const waiting = await service.summarizeOpenCheckup(seeded.companyId);
+    expect(waiting).toMatchObject({
+      report: { id: created.reportIssueId, status: "todo" },
+      suggestionCount: created.findings.length,
+      pendingSuggestionCount: created.findings.length,
+      suggestionsStatus: "pending",
+    });
+    expect(waiting?.report.title).toBe(created.title);
+
+    // Once the board has accepted (or rejected) the card, nothing waits any more.
+    const [card] = await listInteractions(created.reportIssueId!);
+    await db.update(issueThreadInteractions).set({ status: "accepted", resolvedAt: NOW }).where(eq(issueThreadInteractions.id, card!.id));
+    expect(await service.summarizeOpenCheckup(seeded.companyId)).toMatchObject({
+      suggestionCount: created.findings.length,
+      pendingSuggestionCount: 0,
+      suggestionsStatus: "accepted",
+    });
+
+    // A closed report is no longer "the open check-up".
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, created.reportIssueId!));
+    expect(await service.summarizeOpenCheckup(seeded.companyId)).toBeNull();
+  });
+
+  it("hideFindings writes one 28-day dismissal per finding for the board user, and the next report honours it", async () => {
+    const seeded = await seedCompany();
+    await insertIssue(seeded, { status: "todo", updatedAt: daysBefore(10) });
+    await db.update(agents).set({ status: "error", errorReason: "boom", errorAt: hoursBefore(2) }).where(eq(agents.id, seeded.workerId));
+    await db.insert(authUsers).values({ id: "user-b", name: "Bjorn", email: "bjorn@example.com", createdAt: NOW, updatedAt: NOW });
+    const service = organizationCheckupService(db);
+
+    const hidden = await service.hideFindings({
+      companyId: seeded.companyId,
+      userId: "user-b",
+      fingerprints: ["stuck_issues", " stuck_issues ", ""],
+      now: NOW,
+    });
+    expect(hidden.itemKeys).toEqual([`${CHECKUP_FINDING_DISMISSAL_PREFIX}stuck_issues`]);
+
+    const rows = await db.select().from(inboxDismissals).where(eq(inboxDismissals.companyId, seeded.companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ userId: "user-b", itemKey: `${CHECKUP_FINDING_DISMISSAL_PREFIX}stuck_issues` });
+
+    const activity = await db.select().from(activityLog).where(and(eq(activityLog.companyId, seeded.companyId), eq(activityLog.action, "inbox.dismissed")));
+    expect(activity).toHaveLength(1);
+    expect(activity[0]?.actorId).toBe("user-b");
+
+    const next = await service.runCheckup({ companyId: seeded.companyId, now: new Date(NOW.getTime() + DAY_MS), dryRun: true });
+    expect(findingsByKind(next.findings, "stuck_issues")).toHaveLength(0);
+    expect(findingsByKind(next.findings, "agent_error")).toHaveLength(1);
+    expect(next.body).toContain("tasks that have not moved, hidden by Bjorn on 2026-09-07.");
+
+    // Nothing to hide: nothing written, no activity row.
+    const nothing = await service.hideFindings({ companyId: seeded.companyId, userId: "user-b", fingerprints: [], now: NOW });
+    expect(nothing.itemKeys).toEqual([]);
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.companyId, seeded.companyId), eq(activityLog.action, "inbox.dismissed")))).toHaveLength(1);
+  });
+
   it("only runs for the companies it is told to, and never for paused ones", async () => {
     const on = await seedCompany({ name: "Switched On" });
     const off = await seedCompany({ name: "Switched Off" });

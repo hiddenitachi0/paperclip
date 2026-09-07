@@ -97,6 +97,7 @@ import {
   documentService,
   documentAnnotationService,
   logActivity,
+  organizationCheckupService,
   projectService,
   routineService,
   workProductService,
@@ -8005,6 +8006,32 @@ export function issueRoutes(
         userId: actor.actorType === "user" ? actor.actorId : null,
       });
       const continuationWakeIssue = continuationIssue ?? issue;
+
+      // DUR-62: on a weekly check-up report, every draft the operator left
+      // unticked is a finding they chose not to act on. Record that as a
+      // "hide this for a month" dismissal so the next report does not nag
+      // about it (and names who hid it). Board users only: agents cannot
+      // reach this line for a check-up report (rejected above).
+      const skippedCheckupFindings =
+        issue.originKind === ORGANIZATION_CHECKUP_ORIGIN_KIND
+        && interaction.kind === "suggest_tasks"
+        && interaction.status === "accepted"
+        && actor.actorType === "user"
+          ? (interaction.result?.skippedClientKeys ?? [])
+          : [];
+      if (skippedCheckupFindings.length > 0) {
+        try {
+          await organizationCheckupService(db).hideFindings({
+            companyId: issue.companyId,
+            userId: actor.actorId,
+            fingerprints: skippedCheckupFindings,
+          });
+        } catch (err) {
+          // The suggestions were already accepted; failing to record the
+          // mute must not turn that into an error for the operator.
+          logger.warn({ err, issueId: issue.id, interactionId }, "could not hide unticked check-up findings");
+        }
+      }
 
       await logActivity(db, {
         companyId: issue.companyId,
