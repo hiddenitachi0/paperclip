@@ -874,7 +874,20 @@ export async function startServer(): Promise<StartedServer> {
     // scope is released. Without `rawDb` here the service falls back to the
     // proxy, whose .transaction() refuses -- every affected run then stayed
     // "running" forever with a dead child (11 such runs in 2h on 2026-09-06).
-    const heartbeat = heartbeatService(schedulerDb as any, {
+    // DUR-381 (2026-09-07): the scheduler's heartbeat service runs on the RAW
+    // db, not the request-scoped proxy. executeRun() is dispatched
+    // fire-and-forget from inside the tick's runInCompanyScopeBypass(); that
+    // scope releases its reserved connection as soon as resumeQueuedRuns()
+    // returns, while executeRun keeps going for minutes. Every proxy query
+    // executeRun made after that point (getAgent, ensureRuntimeState,
+    // workspace resolution, lease acquisition...) was issued through a
+    // released scope and silently never resolved: runs sat "running" with no
+    // pid, no events and no output until reaped (six of them in the 20 min
+    // after the 07:06 deploy). The RLS cutover (DUR-3945) is not live, so raw
+    // access is exactly what the scheduler had before the DUR-277 proxy was
+    // wired here. Re-wire through the proxy only together with DUR-3952,
+    // which gives executeRun its own scope.
+    const heartbeat = heartbeatService(db as any, {
       pluginWorkerManager,
       rawDb: db as any,
       // DUR-273: spread timer wakes so the fleet does not wake as one.
@@ -885,7 +898,9 @@ export async function startServer(): Promise<StartedServer> {
       getInFlightRunCount: () => heartbeat.getInFlightRunCount(),
     };
     const environmentCustomImages = environmentCustomImageService(schedulerDb as any, { pluginWorkerManager });
-    const routines = routineService(schedulerDb as any, { pluginWorkerManager });
+    // Same reason as above: routine-triggered runs dispatch through the
+    // heartbeat service, so they must use the raw-db instance.
+    const routines = routineService(schedulerDb as any, { pluginWorkerManager, heartbeat });
     const mergeDeployVisibility = mergeDeployVisibilityService(schedulerDb as any);
     const deployCarriedIssues = deployCarriedIssuesService(schedulerDb as any);
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
