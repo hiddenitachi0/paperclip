@@ -38,7 +38,16 @@ describe("instance settings service", () => {
       enableIssueGraphLivenessAutoRecovery: true,
       issueGraphLivenessAutoRecoveryLookbackHours: 48,
       enableWeeklyCheckup: false,
+      enableCrossCompanyInstructions: false,
     });
+  });
+
+  it("defaults the cross-company instruction channel to off and keeps an explicit on", () => {
+    expect(normalizeExperimentalSettings({}).enableCrossCompanyInstructions).toBe(false);
+    expect(normalizeExperimentalSettings(undefined).enableCrossCompanyInstructions).toBe(false);
+    expect(
+      normalizeExperimentalSettings({ enableCrossCompanyInstructions: true }).enableCrossCompanyInstructions,
+    ).toBe(true);
   });
 
   it("defaults the weekly check-up to off and keeps an explicit on", () => {

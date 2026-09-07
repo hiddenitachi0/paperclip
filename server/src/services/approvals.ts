@@ -45,6 +45,41 @@ function isPersonaPublishApproval(approval: Pick<typeof approvals.$inferSelect, 
   return approval.type === "request_board_approval" && approval.payload?.kind === "persona_publish";
 }
 
+/**
+ * `request_board_approval` approvals whose payload carries
+ * `kind:"cross_company_instruction"` -- the receiving company's card for an
+ * instruction another company sent through the guarded channel
+ * (services/cross-company-instructions.ts). Deciding one MUST deliver or
+ * refuse the instruction in the same step, so `approve`/`reject` below only
+ * touch such a card when the caller passes the cross-company hooks; every
+ * other approve path (thread interactions, merge automation, hire approve)
+ * is refused with a plain reason and the card stays pending.
+ */
+export function isCrossCompanyInstructionApproval(
+  approval: Pick<typeof approvals.$inferSelect, "type" | "payload">,
+): boolean {
+  return approval.type === "request_board_approval" && approval.payload?.kind === "cross_company_instruction";
+}
+
+/**
+ * Hooks the approvals route passes so approving/rejecting a cross-company
+ * instruction card and delivering/refusing the instruction happen as ONE
+ * decision. If `deliverApproved` throws, the card is put back to where it was
+ * (pending) and the error is rethrown, so a card can never be "approved"
+ * with nothing delivered. Same for `markRejected`.
+ */
+export interface CrossCompanyInstructionDecisionHooks {
+  deliverApproved: (approval: typeof approvals.$inferSelect) => Promise<unknown>;
+  markRejected: (approval: typeof approvals.$inferSelect) => Promise<unknown>;
+}
+
+export interface ApprovalDecisionOptions {
+  crossCompanyInstruction?: CrossCompanyInstructionDecisionHooks;
+}
+
+const CROSS_COMPANY_DECISION_ELSEWHERE =
+  "An instruction from another company can only be approved or declined from this company's approvals page";
+
 export interface InstructionsChangeApplyResult {
   agentId: string;
   companyId: string;
@@ -68,7 +103,13 @@ export function approvalService(db: Db) {
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
   type ApprovalRecord = typeof approvals.$inferSelect;
-  type ResolutionResult = { approval: ApprovalRecord; applied: boolean; toolGrant?: ToolGrantApplyResult | null };
+  type ResolutionResult = {
+    approval: ApprovalRecord;
+    applied: boolean;
+    toolGrant?: ToolGrantApplyResult | null;
+    /** The card as it was before this decision, so a failed side effect can put it back. */
+    previous?: ApprovalRecord;
+  };
 
   function redactApprovalComment<T extends { body: string }>(comment: T, censorUsernameInLogs: boolean): T {
     return {
@@ -92,6 +133,7 @@ export function approvalService(db: Db) {
     targetStatus: "approved" | "rejected",
     decidedByUserId: string,
     decisionNote: string | null | undefined,
+    options: ApprovalDecisionOptions = {},
   ): Promise<ResolutionResult> {
     const existing = await getExistingApproval(id);
     if (!canResolveStatuses.has(existing.status)) {
@@ -101,6 +143,13 @@ export function approvalService(db: Db) {
       throw unprocessable(
         `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
       );
+    }
+    // Cross-company instruction cards: the decision and the delivery or
+    // refusal of the instruction are one step. Without the hooks (any path
+    // other than the approvals route) the decision is refused up front,
+    // before anything is written, and the card stays where it is.
+    if (isCrossCompanyInstructionApproval(existing) && !options.crossCompanyInstruction) {
+      throw unprocessable(CROSS_COMPANY_DECISION_ELSEWHERE, { kind: "cross_company_instruction" });
     }
 
     const now = new Date();
@@ -118,7 +167,7 @@ export function approvalService(db: Db) {
       .then((rows) => rows[0] ?? null);
 
     if (updated) {
-      return { approval: updated, applied: true };
+      return { approval: updated, applied: true, previous: existing };
     }
 
     const latest = await getExistingApproval(id);
@@ -129,6 +178,36 @@ export function approvalService(db: Db) {
     throw unprocessable(
       `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
     );
+  }
+
+  /**
+   * Runs the cross-company delivery/refusal hook for a card that was just
+   * decided. A hook that throws puts the card back exactly as it was and the
+   * error goes to the caller, so a card can never be "approved" with nothing
+   * delivered (or "rejected" with the sender never told).
+   */
+  async function runCrossCompanyHook(
+    resolution: ResolutionResult,
+    hook: (approval: ApprovalRecord) => Promise<unknown>,
+  ) {
+    try {
+      await hook(resolution.approval);
+    } catch (err) {
+      const previous = resolution.previous;
+      if (previous) {
+        await db
+          .update(approvals)
+          .set({
+            status: previous.status,
+            decidedByUserId: previous.decidedByUserId,
+            decisionNote: previous.decisionNote,
+            decidedAt: previous.decidedAt,
+            updatedAt: new Date(),
+          })
+          .where(eq(approvals.id, previous.id));
+      }
+      throw err;
+    }
   }
 
   return {
@@ -284,13 +363,22 @@ export function approvalService(db: Db) {
         .returning()
         .then((rows) => rows[0]),
 
-    approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      const { approval: updated, applied } = await resolveApproval(
-        id,
-        "approved",
-        decidedByUserId,
-        decisionNote,
-      );
+    approve: async (
+      id: string,
+      decidedByUserId: string,
+      decisionNote?: string | null,
+      options: ApprovalDecisionOptions = {},
+    ) => {
+      const resolution = await resolveApproval(id, "approved", decidedByUserId, decisionNote, options);
+      const { approval: updated, applied } = resolution;
+
+      if (applied && isCrossCompanyInstructionApproval(updated) && options.crossCompanyInstruction) {
+        // Guarded cross-company channel: approving the card is the ONLY
+        // place an instruction from another company ever turns into work
+        // here, and it happens in the same step as the approval -- if the
+        // delivery fails the card goes back to pending.
+        await runCrossCompanyHook(resolution, options.crossCompanyInstruction.deliverApproved);
+      }
 
       let hireApprovedAgentId: string | null = null;
       const now = new Date();
@@ -464,13 +552,18 @@ export function approvalService(db: Db) {
       return { approval: updated, applied, toolGrant, instructionsChange };
     },
 
-    reject: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      const { approval: updated, applied } = await resolveApproval(
-        id,
-        "rejected",
-        decidedByUserId,
-        decisionNote,
-      );
+    reject: async (
+      id: string,
+      decidedByUserId: string,
+      decisionNote?: string | null,
+      options: ApprovalDecisionOptions = {},
+    ) => {
+      const resolution = await resolveApproval(id, "rejected", decidedByUserId, decisionNote, options);
+      const { approval: updated, applied } = resolution;
+
+      if (applied && isCrossCompanyInstructionApproval(updated) && options.crossCompanyInstruction) {
+        await runCrossCompanyHook(resolution, options.crossCompanyInstruction.markRejected);
+      }
 
       if (applied && updated.type === "hire_agent") {
         const payload = updated.payload as Record<string, unknown>;

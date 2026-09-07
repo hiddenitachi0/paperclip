@@ -269,6 +269,7 @@ export {
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
   type McpServerConfig,
+  LANE_A_INSTRUCTIONS_MAX_LENGTH,
 } from "./agent.js";
 
 export {
@@ -518,6 +519,8 @@ export {
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
+  modelBoostBossReviewSchema,
+  modelBoostBossReviewDecisionSchema,
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
@@ -530,6 +533,8 @@ export {
   type AddApprovalComment,
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
+  type ModelBoostBossReviewState,
+  type ModelBoostBossReviewDecision,
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
@@ -720,3 +725,11 @@ export {
   type SaveInstanceClaudeAuthTokenInput,
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./instance-claude-auth.js";
+export {
+  sendCrossCompanyInstructionSchema,
+  crossCompanyInstructionRequestPayloadSchema,
+  CROSS_COMPANY_INSTRUCTION_STATUSES,
+  type SendCrossCompanyInstruction,
+  type CrossCompanyInstructionRequestPayload,
+  type CrossCompanyInstructionStatus,
+} from "./cross-company-instruction.js";

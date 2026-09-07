@@ -66,6 +66,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.error_stalled": "is still waiting for someone to clear the error on",
   "heartbeat.run_reaped": "ended a run that had stopped responding for",
   "heartbeat.run_stopped": "stopped a run that was taking too long for",
+  // DUR-3943 item 4: the same task kept running out of turns per run.
+  "heartbeat.turn_limit_repeated": "stopped queuing fresh runs after repeated turn-limit stops for",
   // Admin auth hardening: security notices about operator accounts. The
   // entity is a user, so the verb reads "...for <user>" like the ones above.
   "security.admin_added_outside_app": "noticed a new instance admin added outside the app:",
@@ -101,6 +103,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "approval.revision_requested": "requested changes on",
+  "approval.boss_review_requested": "asked the boss to weigh in first on",
+  "approval.boss_review_forwarded": "passed on to the operator with a recommendation",
   "issue.approval_approved": "approved an approval request on",
   "issue.approval_rejected": "rejected an approval request on",
   "issue.approval_revision_requested": "sent an approval request back for changes on",
@@ -160,6 +164,7 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.error_stalled": "is still waiting for someone to clear the agent error",
   "heartbeat.run_reaped": "ended a run that had stopped responding",
   "heartbeat.run_stopped": "stopped a run that was taking too long",
+  "heartbeat.turn_limit_repeated": "stopped queuing fresh runs after repeated turn-limit stops",
   "persona_post.published": "published a persona post",
   "persona_post.publish_failed": "could not publish a persona post",
   "instance.claude_auth.saved": "saved the shared Claude sign-in",
@@ -175,6 +180,8 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "approval.revision_requested": "requested changes",
+  "approval.boss_review_requested": "asked the boss to weigh in on the boost request first",
+  "approval.boss_review_forwarded": "passed the boost request on to the operator with a recommendation",
   "issue.approval_approved": "approved the approval request",
   "issue.approval_rejected": "rejected the approval request",
   "issue.approval_revision_requested": "sent the approval request back for changes",
@@ -192,6 +199,7 @@ const APPROVAL_TYPE_LABELS: Record<string, string> = {
   deploy: "deploy",
   tool_grant: "tool access",
   instructions_change: "instructions change",
+  model_boost: "temporary model boost",
 };
 
 // DUR-283: the activity actions whose `details.decisionNote` is the reason an
@@ -521,6 +529,9 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "agent.error_stalled",
   "heartbeat.run_reaped",
   "heartbeat.run_stopped",
+  // DUR-3943 item 4: written only after the same task hit the turn cap
+  // three times in a row and the platform stopped queuing fresh runs.
+  "heartbeat.turn_limit_repeated",
   // Admin auth hardening: every security.* entry carries its sentence in
   // details.message (see server/src/services/admin-auth-audit.ts).
   "security.admin_added_outside_app",

@@ -13,7 +13,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "@paperclipai/db";
 import type { ModelBoostRequestPayload } from "@paperclipai/shared";
-import { escalationGrantService } from "../services/escalation-grants.ts";
+import { buildBossReviewStamp, escalationGrantService } from "../services/escalation-grants.ts";
 import { costService } from "../services/costs.ts";
 import { eq } from "drizzle-orm";
 
@@ -246,6 +246,190 @@ describeEmbeddedPostgres("escalation grant service (DUR-31)", () => {
         reason: "  I NEED a bigger model, please.  ",
       }),
     ).rejects.toThrow(/denied for the same reason/i);
+  });
+
+  async function seedBoss(companyId: string, input: { name: string; status?: string; reportsTo?: string | null }) {
+    const id = randomUUID();
+    await db.insert(agents).values({
+      id,
+      companyId,
+      name: input.name,
+      role: "lead",
+      status: input.status ?? "idle",
+      reportsTo: input.reportsTo ?? null,
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    return id;
+  }
+
+  async function setReportsTo(agentId: string, reportsTo: string | null) {
+    await db.update(agents).set({ reportsTo }).where(eq(agents.id, agentId));
+  }
+
+  describe("boss-first routing (agent -> boss -> operator)", () => {
+    it("routes to the direct boss when there is one", async () => {
+      const { companyId, agentId } = await seed();
+      const bossId = await seedBoss(companyId, { name: "Engineering Lead" });
+      await setReportsTo(agentId, bossId);
+
+      await expect(grants.resolveBossForAgent(companyId, agentId)).resolves.toEqual({
+        id: bossId,
+        name: "Engineering Lead",
+      });
+    });
+
+    it("skips a boss who cannot answer (terminated/paused) and keeps walking up", async () => {
+      const { companyId, agentId } = await seed();
+      const ceoId = await seedBoss(companyId, { name: "CEO" });
+      const leadId = await seedBoss(companyId, { name: "Former Lead", status: "terminated", reportsTo: ceoId });
+      await setReportsTo(agentId, leadId);
+
+      await expect(grants.resolveBossForAgent(companyId, agentId)).resolves.toEqual({ id: ceoId, name: "CEO" });
+    });
+
+    it("goes straight to the operator when there is nobody above (or the chain loops)", async () => {
+      const { companyId, agentId } = await seed();
+      await expect(grants.resolveBossForAgent(companyId, agentId)).resolves.toBeNull();
+
+      // A cycle through a boss who cannot answer must not spin forever.
+      const goneId = await seedBoss(companyId, { name: "Gone", status: "terminated" });
+      await setReportsTo(agentId, goneId);
+      await setReportsTo(goneId, agentId);
+      await expect(grants.resolveBossForAgent(companyId, agentId)).resolves.toBeNull();
+    });
+
+    it("lets the boss decline: the ask is rejected in the boss's words and never reaches the operator queue", async () => {
+      const { companyId, agentId, issueId } = await seed();
+      const bossId = await seedBoss(companyId, { name: "Engineering Lead" });
+      const payload = boostPayload({
+        issueId,
+        agentId,
+        bossReview: buildBossReviewStamp({ id: bossId, name: "Engineering Lead" }),
+      });
+      const approval = await insertApproval({ companyId, requestedByAgentId: agentId, status: "pending", payload });
+
+      const updated = await grants.recordBossDecision({
+        approvalId: approval.id,
+        bossAgentId: bossId,
+        decision: "decline",
+        note: "The task is nearly done on the normal setting.",
+      });
+
+      expect(updated.status).toBe("rejected");
+      expect(updated.decisionNote).toBe("Engineering Lead said no: The task is nearly done on the normal setting.");
+      expect((updated.payload.bossReview as Record<string, unknown>).status).toBe("declined");
+      // Deny = stay on base: no grant was ever created.
+      await expect(grants.resolveActiveGrantForDispatch({ companyId, agentId, issueId })).resolves.toBeNull();
+      // And the requester can't re-ask with the same reason right after the boss's no.
+      await expect(
+        grants.assertRequestAllowed({ companyId, issueId, agentId, reason: payload.reason }),
+      ).rejects.toThrow(/denied for the same reason/i);
+    });
+
+    it("lets the boss forward with a recommendation; the ask stays pending for the operator", async () => {
+      const { companyId, agentId, issueId } = await seed();
+      const bossId = await seedBoss(companyId, { name: "Engineering Lead" });
+      const payload = boostPayload({
+        issueId,
+        agentId,
+        bossReview: buildBossReviewStamp({ id: bossId, name: "Engineering Lead" }),
+      });
+      const approval = await insertApproval({ companyId, requestedByAgentId: agentId, status: "pending", payload });
+
+      const updated = await grants.recordBossDecision({
+        approvalId: approval.id,
+        bossAgentId: bossId,
+        decision: "forward",
+        note: "Worth it, the task is genuinely stuck.",
+      });
+
+      expect(updated.status).toBe("pending");
+      const review = updated.payload.bossReview as Record<string, unknown>;
+      expect(review.status).toBe("forwarded");
+      expect(review.note).toBe("Worth it, the task is genuinely stuck.");
+
+      // A second answer is refused: the ask is no longer waiting on the boss.
+      await expect(
+        grants.recordBossDecision({ approvalId: approval.id, bossAgentId: bossId, decision: "decline" }),
+      ).rejects.toThrow(/no longer waiting on the boss/i);
+    });
+
+    it("refuses an answer from anyone but the boss named on the ask", async () => {
+      const { companyId, agentId, issueId } = await seed();
+      const bossId = await seedBoss(companyId, { name: "Engineering Lead" });
+      const impostorId = await seedBoss(companyId, { name: "Someone Else" });
+      const payload = boostPayload({
+        issueId,
+        agentId,
+        bossReview: buildBossReviewStamp({ id: bossId, name: "Engineering Lead" }),
+      });
+      const approval = await insertApproval({ companyId, requestedByAgentId: agentId, status: "pending", payload });
+
+      await expect(
+        grants.recordBossDecision({ approvalId: approval.id, bossAgentId: impostorId, decision: "decline" }),
+      ).rejects.toThrow(/only the boss/i);
+      await expect(
+        grants.recordBossDecision({ approvalId: approval.id, bossAgentId: agentId, decision: "forward" }),
+      ).rejects.toThrow(/only the boss/i);
+    });
+
+    it("moves an ask on to the operator once the boss's time is up, and leaves fresh ones alone", async () => {
+      const { companyId, agentId, issueId } = await seed();
+      const bossId = await seedBoss(companyId, { name: "Engineering Lead" });
+      const stale = buildBossReviewStamp(
+        { id: bossId, name: "Engineering Lead" },
+        new Date(Date.now() - 2 * 60 * 60_000),
+      );
+      const staleApproval = await insertApproval({
+        companyId,
+        requestedByAgentId: agentId,
+        status: "pending",
+        payload: boostPayload({ issueId, agentId, bossReview: stale }),
+      });
+      const otherIssueId = randomUUID();
+      await db.insert(issues).values({ id: otherIssueId, companyId, title: "Another", status: "in_progress", priority: "medium" });
+      const freshApproval = await insertApproval({
+        companyId,
+        requestedByAgentId: agentId,
+        status: "pending",
+        payload: boostPayload({ issueId: otherIssueId, agentId, bossReview: buildBossReviewStamp({ id: bossId, name: "Engineering Lead" }) }),
+      });
+
+      const movedOn = await grants.sweepBossReviewTimeouts(new Date());
+      expect(movedOn).toEqual([staleApproval.id]);
+
+      const [staleRow] = await db.select().from(approvals).where(eq(approvals.id, staleApproval.id));
+      expect(staleRow?.status).toBe("pending");
+      expect((staleRow?.payload.bossReview as Record<string, unknown>).status).toBe("timed_out");
+      const [freshRow] = await db.select().from(approvals).where(eq(approvals.id, freshApproval.id));
+      expect((freshRow?.payload.bossReview as Record<string, unknown>).status).toBe("awaiting_boss");
+
+      // Once timed out, a late boss answer is refused too.
+      await expect(
+        grants.recordBossDecision({ approvalId: staleApproval.id, bossAgentId: bossId, decision: "decline" }),
+      ).rejects.toThrow(/no longer waiting on the boss/i);
+    });
+
+    it("still creates the grant when the operator approves a forwarded ask, capped and time-boxed as asked", async () => {
+      const { companyId, agentId, issueId } = await seed();
+      const bossId = await seedBoss(companyId, { name: "Engineering Lead" });
+      const payload = boostPayload({
+        issueId,
+        agentId,
+        maxSpendCents: 2000,
+        durationMinutes: 240,
+        bossReview: { ...buildBossReviewStamp({ id: bossId, name: "Engineering Lead" }), status: "forwarded" },
+      });
+      const approval = await insertApproval({ companyId, requestedByAgentId: agentId, status: "approved", payload });
+
+      const grant = await grants.createFromApproval({ companyId, approvalId: approval.id, payload });
+      expect(grant.maxSpendCents).toBe(2000);
+      expect(grant.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 241 * 60_000);
+      await expect(grants.resolveActiveGrantForDispatch({ companyId, agentId, issueId })).resolves.not.toBeNull();
+    });
   });
 
   it("allows re-asking after a denial once the reason materially changes", async () => {

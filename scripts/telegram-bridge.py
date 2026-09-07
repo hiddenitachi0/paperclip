@@ -142,7 +142,43 @@ def approval_title(a):
         return f"🚀 Deploy request: {subject or 'to production'}"
     if a.get("type") == "hire_agent":
         return f"🧑‍💼 Hire agent: {subject or ''}".strip()
+    if str(p.get("kind")) == "model_boost":
+        # The server already words the title as "<Agent> asks to use Opus at
+        # high effort for this task, up to $20, for the next 4 hours".
+        return f"⚡ Boost request: {subject or 'a stronger model for one task'}"
     return f"🔔 Approval: {subject or a.get('type')}"
+
+
+def boost_boss_review(a):
+    """The boss-first routing stamp on a model_boost approval, or None."""
+    p = a.get("payload") or {}
+    if str(p.get("kind")) != "model_boost":
+        return None
+    review = p.get("bossReview")
+    return review if isinstance(review, dict) else None
+
+
+def boost_waiting_on_boss(a):
+    """True while a boost ask is still with the requester's boss (agent -> boss
+    -> operator). The dashboard card is already visible, but Telegram holds
+    the ping back until the boss answers or the server times the boss out."""
+    review = boost_boss_review(a)
+    return bool(review) and review.get("status") == "awaiting_boss"
+
+
+def boost_boss_line(a):
+    """One plain line saying what the boss did with a boost ask, or None."""
+    review = boost_boss_review(a)
+    if not review:
+        return None
+    boss = review.get("bossName") or "Their boss"
+    note = (review.get("note") or "").strip()
+    status = review.get("status")
+    if status == "forwarded":
+        return f"{boss} passed this on to you: {note}" if note else f"{boss} passed this on to you without a recommendation."
+    if status == "timed_out":
+        return f"{boss} did not answer in time, so this came to you."
+    return None
 
 
 def notify_approvals(state, bots):
@@ -167,6 +203,8 @@ def notify_approvals(state, bots):
             aid = a.get("id")
             if aid in notified:
                 continue
+            if boost_waiting_on_boss(a):
+                continue
             requester = a.get("requestedByAgentId")
             bot, escalated = resolve_bot(requester, bots_by_agent, reports_to, default_bot)
             p = a.get("payload") or {}
@@ -175,6 +213,9 @@ def notify_approvals(state, bots):
             text = f"*{approval_title(a)}*"
             if detail:
                 text += f"\n{detail[:300]}"
+            boss_line = boost_boss_line(a)
+            if boss_line:
+                text += f"\n_{boss_line[:300]}_"
             # PR/branch/commit trail, if any, stays a small secondary line —
             # never the headline. See DUR-24.
             technical_reference = p.get("technicalReference")

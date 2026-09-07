@@ -3587,6 +3587,53 @@ export interface IssueServiceOptions {
   rawDb?: Db;
 }
 
+/**
+ * Cross-company reference guard (isolation audit): an issue's parent and goal
+ * must live in the issue's own company. Assignee, project and workspace
+ * references were already checked; parent and goal were not, so a caller who
+ * cannot read company B could still point a company-A issue at a company-B
+ * parent or goal and then walk that link (children, ancestors, tree holds,
+ * dashboards) into the other company. Under the database's row-level
+ * security claim a foreign row is simply not found, which is refused the
+ * same way.
+ */
+async function assertIssueReferencesInCompany(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  refs: { parentId?: string | null; goalId?: string | null; projectId?: string | null },
+) {
+  if (refs.projectId) {
+    const project = await dbOrTx
+      .select({ companyId: projects.companyId })
+      .from(projects)
+      .where(eq(projects.id, refs.projectId))
+      .then((rows) => rows[0] ?? null);
+    if (!project || project.companyId !== companyId) {
+      throw unprocessable("Project must belong to the same company");
+    }
+  }
+  if (refs.parentId) {
+    const parent = await dbOrTx
+      .select({ companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, refs.parentId))
+      .then((rows) => rows[0] ?? null);
+    if (!parent || parent.companyId !== companyId) {
+      throw unprocessable("Parent issue must belong to the same company");
+    }
+  }
+  if (refs.goalId) {
+    const goal = await dbOrTx
+      .select({ companyId: goals.companyId })
+      .from(goals)
+      .where(eq(goals.id, refs.goalId))
+      .then((rows) => rows[0] ?? null);
+    if (!goal || goal.companyId !== companyId) {
+      throw unprocessable("Goal must belong to the same company");
+    }
+  }
+}
+
 export function issueService(db: Db, options: IssueServiceOptions = {}) {
   const rawDb = options.rawDb ?? db;
   const instanceSettings = instanceSettingsService(db);
@@ -5642,6 +5689,14 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (data.assigneeUserId) {
         await assertAssignableUser(companyId, data.assigneeUserId);
       }
+      // projectId included: the update path already refused a project from
+      // another company, but create only checked parent and goal (found by
+      // the isolation audit once its seed stopped masking the probe).
+      await assertIssueReferencesInCompany(db, companyId, {
+        parentId: issueData.parentId,
+        goalId: issueData.goalId,
+        projectId: issueData.projectId,
+      });
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
@@ -5969,6 +6024,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
       }
+      // create() already refuses a foreign projectId further down its own
+      // path; update() had no such check, so it is added here.
+      await assertIssueReferencesInCompany(dbOrTx as Db, existing.companyId, {
+        parentId: issueData.parentId,
+        goalId: issueData.goalId,
+        projectId: issueData.projectId,
+      });
       let nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
       const nextProjectWorkspaceId =
         issueData.projectWorkspaceId !== undefined ? issueData.projectWorkspaceId : existing.projectWorkspaceId;

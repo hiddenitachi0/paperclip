@@ -20,6 +20,15 @@ import {
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   MIN_SILENT_RUN_TIMEOUT_MINUTES,
   MAX_SILENT_RUN_TIMEOUT_MINUTES,
+  DEFAULT_MAX_TURNS_PER_RUN,
+  MIN_MAX_TURNS_PER_RUN,
+  MAX_MAX_TURNS_PER_RUN,
+  DEFAULT_SESSION_RESET_AFTER_RUNS,
+  MIN_SESSION_RESET_AFTER_RUNS,
+  MAX_SESSION_RESET_AFTER_RUNS,
+  DEFAULT_SESSION_RESET_AFTER_HOURS,
+  MIN_SESSION_RESET_AFTER_HOURS,
+  MAX_SESSION_RESET_AFTER_HOURS,
   DEFAULT_QUIET_MODE_STATE,
   DONE_GATE_MODES,
   DEFAULT_DONE_GATE_MODE,
@@ -123,6 +132,30 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_SILENT_RUN_TIMEOUT_MINUTES)
     .max(MAX_SILENT_RUN_TIMEOUT_MINUTES)
     .default(DEFAULT_SILENT_RUN_TIMEOUT_MINUTES),
+  // DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
+  // An agent's own adapterConfig.maxTurnsPerRun (> 0) takes precedence.
+  maxTurnsPerRun: z
+    .number()
+    .int()
+    .min(MIN_MAX_TURNS_PER_RUN)
+    .max(MAX_MAX_TURNS_PER_RUN)
+    .default(DEFAULT_MAX_TURNS_PER_RUN),
+  // DUR-3943 item 5: saved-session reset policy for sessioned local agents.
+  // 0 (default) = keep the agent type's built-in behaviour on that
+  // criterion; above 0 = the operator's own limit. Per-agent override lives
+  // in runtimeConfig.heartbeat.sessionCompaction.
+  sessionResetAfterRuns: z
+    .number()
+    .int()
+    .min(MIN_SESSION_RESET_AFTER_RUNS)
+    .max(MAX_SESSION_RESET_AFTER_RUNS)
+    .default(DEFAULT_SESSION_RESET_AFTER_RUNS),
+  sessionResetAfterHours: z
+    .number()
+    .int()
+    .min(MIN_SESSION_RESET_AFTER_HOURS)
+    .max(MAX_SESSION_RESET_AFTER_HOURS)
+    .default(DEFAULT_SESSION_RESET_AFTER_HOURS),
   // DUR-224. Managed exclusively by the quiet-mode activate/deactivate
   // service functions (they need to read+write the `agents` table
   // atomically with the flip), not by the generic general-settings patch --
@@ -174,6 +207,9 @@ export const instanceExperimentalSettingsSchema = z.object({
   // DUR-62: run the weekly check-up for every active company on a schedule.
   // Off by default; PAPERCLIP_WEEKLY_CHECKUP_ENABLED=true also turns it on.
   enableWeeklyCheckup: z.boolean().default(false),
+  // Guarded cross-company instruction channel (migration 0163). Off by
+  // default: with it off, no instruction can be sent between companies at all.
+  enableCrossCompanyInstructions: z.boolean().default(false),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

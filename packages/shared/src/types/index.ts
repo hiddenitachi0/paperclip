@@ -206,7 +206,19 @@ export type {
   DocumentTextRange,
   UpdateDocumentAnnotationThreadRequest,
 } from "./document-annotation.js";
-export type { Project, ProjectBudgetSummary, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
+export type {
+  GitHubTokenCheckReport,
+  GitHubTokenRequirement,
+  GitHubTokenScopeResult,
+  GitHubTokenScopeStatus,
+  Project,
+  ProjectBudgetSummary,
+  ProjectCodebase,
+  ProjectCodebaseOrigin,
+  ProjectGoalRef,
+  ProjectManagedByPlugin,
+  ProjectWorkspace,
+} from "./project.js";
 export type {
   CompanySearchHighlight,
   CompanySearchArtifactSummary,
@@ -653,3 +665,8 @@ export type {
   SignOutEverywhereResult,
   SignOutEverywhereScope,
 } from "./instance-security.js";
+export type {
+  CrossCompanyInstruction,
+  CrossCompanyInstructionSenderView,
+  CrossCompanyInstructionView,
+} from "./cross-company-instruction.js";

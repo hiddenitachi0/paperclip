@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { APPROVAL_TYPES, ESCALATION_GRANT_MAX_DURATION_MINUTES } from "../constants.js";
+import {
+  APPROVAL_TYPES,
+  ESCALATION_GRANT_MAX_DURATION_MINUTES,
+  MODEL_BOOST_BOSS_REVIEW_STATUSES,
+} from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 import { mcpServerConfigSchema } from "./agent.js";
 
@@ -102,6 +106,20 @@ export type DeployRequestPayload = z.infer<typeof deployRequestPayloadSchema>;
  * only. Approving this never hires or creates an agent -- see `escalation_grants`
  * in packages/db, which records the time-boxed, money-capped grant this creates.
  */
+export const modelBoostBossReviewSchema = z
+  .object({
+    bossAgentId: z.string().uuid(),
+    bossName: z.string().min(1),
+    status: z.enum(MODEL_BOOST_BOSS_REVIEW_STATUSES),
+    requestedAt: z.string().datetime(),
+    deadlineAt: z.string().datetime(),
+    decidedAt: z.string().datetime().optional(),
+    note: z.string().optional(),
+  })
+  .strict();
+
+export type ModelBoostBossReviewState = z.infer<typeof modelBoostBossReviewSchema>;
+
 export const modelBoostRequestPayloadSchema = z
   .object({
     kind: z.literal("model_boost"),
@@ -116,6 +134,13 @@ export const modelBoostRequestPayloadSchema = z
     title: z.string().min(1),
     summary: multilineTextSchema,
     acknowledgedDuplicateOfApprovalId: z.string().uuid().optional(),
+    // Server-stamped at filing time (never trusted from the requester):
+    // the requester's display name for the plain-language card, and the
+    // boss-first routing state (agent -> boss -> operator). Absent
+    // `bossReview` means the requester has no boss who can answer, so the
+    // ask went straight to the operator.
+    agentName: z.string().trim().min(1).optional(),
+    bossReview: modelBoostBossReviewSchema.optional(),
   })
   .strict()
   .refine((data) => Boolean(data.requestedModel || data.requestedEffort), {
@@ -124,6 +149,18 @@ export const modelBoostRequestPayloadSchema = z
   });
 
 export type ModelBoostRequestPayload = z.infer<typeof modelBoostRequestPayloadSchema>;
+
+/**
+ * A boss answering a direct report's boost ask (POST /approvals/:id/boss-review).
+ * "decline" ends it there (the requester stays on its normal setting);
+ * "forward" sends it on to the operator with the boss's take attached.
+ */
+export const modelBoostBossReviewDecisionSchema = z.object({
+  decision: z.enum(["decline", "forward"]),
+  note: multilineTextSchema.optional().nullable(),
+});
+
+export type ModelBoostBossReviewDecision = z.infer<typeof modelBoostBossReviewDecisionSchema>;
 
 /**
  * `request_board_approval` payload convention for an agent requesting a new

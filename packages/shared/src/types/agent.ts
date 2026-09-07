@@ -112,6 +112,10 @@ export interface Agent {
   lastHeartbeatAt: Date | null;
   metadata: Record<string, unknown> | null;
   orgChainHealth?: AgentOrgChainHealth;
+  /** Quick agent (Lane A) switch: answers directly in chat instead of running as a full agent. Board-only. */
+  laneAEnabled?: boolean;
+  /** Quick agent instruction set (persona + rules). Board-only, null = none. */
+  laneAInstructions?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

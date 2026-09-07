@@ -524,4 +524,74 @@ describe("agent routes adapter validation", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(422);
     expect(String(res.body.error ?? res.body.message ?? "")).toContain(`Unknown adapter type: ${missingAdapterType}`);
   });
+
+  // Model/effort typo guard: one shared level list per adapter (packages/shared
+  // model-effort.ts). A misspelled effort used to be stored as-is and silently
+  // ignored (or crash) at run time; now the save is refused in plain language.
+  it("rejects a misspelled thinking effort on agent create with a plain-language message", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
+        .send({
+          name: "Typo Agent",
+          adapterType: "claude_local",
+          adapterConfig: { model: "claude-opus-4-1", effort: "hgih" },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    const body = JSON.stringify(res.body);
+    expect(body).toContain("is not a level Claude understands");
+    expect(body).toContain("low, medium, high, xhigh, max");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts every level on the shared list for the agent's adapter, including the new xhigh/max", async () => {
+    const app = await createApp();
+    for (const effort of ["low", "medium", "high", "xhigh", "max", ""]) {
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl)
+          .post("/api/companies/c0000001-0000-4000-8000-000000000001/agents")
+          .send({ name: `Agent ${effort || "auto"}`, adapterType: "claude_local", adapterConfig: { effort } }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+    }
+  });
+
+  it("rejects a Codex-only level on a Claude agent when patched without an adapterType in the body", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...(await mockAgentService.getById()),
+      adapterType: "claude_local",
+      adapterConfig: { model: "claude-opus-4-1", effort: "high" },
+    });
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch("/api/agents/11111111-1111-4111-8111-111111111111")
+        .send({ adapterConfig: { effort: "minimal" } }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(String(res.body.error ?? "")).toContain("Claude");
+    expect(String(res.body.error ?? "")).toContain("low, medium, high, xhigh, max");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts a valid patched effort and the cleared value", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...(await mockAgentService.getById()),
+      adapterType: "claude_local",
+      adapterConfig: { model: "claude-opus-4-1", effort: "high" },
+    });
+    const app = await createApp();
+    for (const effort of ["max", ""]) {
+      const res = await requestApp(app, (baseUrl) =>
+        request(baseUrl)
+          .patch("/api/agents/11111111-1111-4111-8111-111111111111")
+          .send({ adapterConfig: { effort } }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    }
+  });
 });

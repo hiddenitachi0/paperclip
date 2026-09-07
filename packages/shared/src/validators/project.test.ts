@@ -41,6 +41,20 @@ describe("deployPolicySchema", () => {
     expect(() => deployPolicySchema.parse(missingWorkspaceId)).toThrow();
   });
 
+  it("stores a half-filled draft while disabled (completeness is checked server-side)", () => {
+    const draft = { ...valid, enabled: false, workspaceId: "", deployTargetPath: "", healthCheckUrl: "" };
+    expect(deployPolicySchema.parse(draft)).toEqual(draft);
+  });
+
+  it("still rejects a workspace id that is neither empty nor a uuid", () => {
+    expect(() => deployPolicySchema.parse({ ...valid, workspaceId: "not-a-uuid" })).toThrow();
+  });
+
+  it("accepts deployBranch and mirrorBranch", () => {
+    const withBranches = { ...valid, deployBranch: "custom", mirrorBranch: "master" };
+    expect(deployPolicySchema.parse(withBranches)).toEqual(withBranches);
+  });
+
   it("accepts composeFiles and envFile for non-root compose layouts", () => {
     const withCompose = {
       ...valid,

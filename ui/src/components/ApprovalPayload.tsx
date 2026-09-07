@@ -1,4 +1,14 @@
 import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, KeyRound } from "lucide-react";
+import {
+  ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
+  describeModelBoostBossReview,
+  describeModelBoostConsequence,
+  formatBoostDuration,
+  formatBoostMoney,
+  prettyBoostEffort,
+  prettyBoostModel,
+  type ModelBoostBossReview,
+} from "@paperclipai/shared";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
@@ -332,8 +342,117 @@ export function BoardApprovalPayload({
   if (firstNonEmptyString(payload.kind) === "persona_publish") {
     return <PersonaPublishPayloadContent payload={nextPayload} />;
   }
+  if (firstNonEmptyString(payload.kind) === "model_boost") {
+    return <ModelBoostPayloadContent payload={nextPayload} />;
+  }
   return (
     <BoardApprovalPayloadContent payload={nextPayload} />
+  );
+}
+
+/**
+ * Reads the server-stamped boss-review state off a model_boost payload
+ * (see stampModelBoostPlainLanguage in server/src/routes/approvals.ts).
+ * Absent means the ask came straight to the operator (no boss to ask first).
+ */
+export function modelBoostBossReview(payload?: Record<string, unknown> | null): ModelBoostBossReview | null {
+  const raw = payload?.bossReview;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const review = raw as Record<string, unknown>;
+  const bossAgentId = firstNonEmptyString(review.bossAgentId);
+  const status = firstNonEmptyString(review.status);
+  if (!bossAgentId || !status) return null;
+  if (status !== "awaiting_boss" && status !== "forwarded" && status !== "declined" && status !== "timed_out") return null;
+  return {
+    bossAgentId,
+    bossName: firstNonEmptyString(review.bossName) ?? "Their boss",
+    status,
+    requestedAt: firstNonEmptyString(review.requestedAt) ?? "",
+    deadlineAt: firstNonEmptyString(review.deadlineAt) ?? "",
+    decidedAt: firstNonEmptyString(review.decidedAt) ?? undefined,
+    note: firstNonEmptyString(review.note) ?? undefined,
+  };
+}
+
+/**
+ * A working agent asking for a temporary model/effort boost on its current
+ * task (agent -> boss -> operator). The title already reads "<Agent> asks to
+ * use Opus at high effort for this task, up to $20, for the next 4 hours";
+ * the card adds why, where the ask is in the chain, and what approve/deny do.
+ */
+function ModelBoostPayloadContent({ payload }: { payload: Record<string, unknown> }) {
+  const title = firstNonEmptyString(payload.title);
+  const reason = firstNonEmptyString(payload.reason);
+  const agentName = firstNonEmptyString(payload.agentName) ?? "The agent";
+  const model = prettyBoostModel(firstNonEmptyString(payload.requestedModel));
+  const effort = prettyBoostEffort(firstNonEmptyString(payload.requestedEffort));
+  const maxSpendCents = typeof payload.maxSpendCents === "number" ? payload.maxSpendCents : 0;
+  const durationMinutes =
+    typeof payload.durationMinutes === "number" ? payload.durationMinutes : ESCALATION_GRANT_DEFAULT_DURATION_MINUTES;
+  const review = modelBoostBossReview(payload);
+  const reviewLine = describeModelBoostBossReview(review);
+  const consequence = describeModelBoostConsequence({
+    agentName,
+    requestedModel: firstNonEmptyString(payload.requestedModel),
+    requestedEffort: firstNonEmptyString(payload.requestedEffort),
+    maxSpendCents,
+    durationMinutes,
+  });
+  const waitingOnBoss = review?.status === "awaiting_boss";
+
+  return (
+    <div className="mt-4 space-y-3.5 text-sm">
+      {title && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Title</p>
+          <p className="font-medium leading-6 text-foreground">{title}</p>
+        </div>
+      )}
+      {reason && (
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Why {agentName} asks</p>
+          <p className="whitespace-pre-line leading-6 text-foreground/90">{reason}</p>
+        </div>
+      )}
+      <div className="space-y-1">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">What changes</p>
+        <p className="leading-6 text-foreground/90">
+          {[
+            model ? `Model: ${model}` : null,
+            effort ? `Effort: ${effort.replace(/ effort$/, "")}` : null,
+            `Money cap: ${formatBoostMoney(maxSpendCents)}`,
+            `Time window: ${formatBoostDuration(durationMinutes)}`,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+      </div>
+      {reviewLine && (
+        <div
+          className={
+            waitingOnBoss
+              ? "rounded-lg border border-border/60 bg-muted/40 px-3.5 py-3"
+              : "rounded-lg border border-sky-500/20 bg-sky-500/10 px-3.5 py-3"
+          }
+        >
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+            {waitingOnBoss ? "Their boss goes first" : "What their boss said"}
+          </p>
+          <p className="mt-1 leading-6 text-foreground">{reviewLine}</p>
+          {waitingOnBoss && (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              You can still decide now if you do not want to wait.
+            </p>
+          )}
+        </div>
+      )}
+      <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3.5 py-3">
+        <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">
+          If you approve
+        </p>
+        <p className="mt-1 leading-6 text-foreground">{consequence}</p>
+      </div>
+    </div>
   );
 }
 

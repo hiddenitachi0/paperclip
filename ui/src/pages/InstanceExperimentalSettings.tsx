@@ -249,6 +249,7 @@ export function InstanceExperimentalSettings() {
   const enableIssueGraphLivenessAutoRecovery =
     experimentalQuery.data?.enableIssueGraphLivenessAutoRecovery === true;
   const enableWeeklyCheckup = experimentalQuery.data?.enableWeeklyCheckup === true;
+  const enableCrossCompanyInstructions = experimentalQuery.data?.enableCrossCompanyInstructions === true;
   const lookbackHours =
     experimentalQuery.data?.issueGraphLivenessAutoRecoveryLookbackHours ?? 24;
   const parsedLookbackHours = Number.parseInt(lookbackHoursDraft, 10);
@@ -504,6 +505,30 @@ export function InstanceExperimentalSettings() {
             }
             disabled={toggleMutation.isPending}
             aria-label="Toggle weekly check-up experimental setting"
+          />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Instructions between companies</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Lets an agent in one company send a short written instruction to another company&apos;s liaison agent
+              (the agent with the role &quot;tech_boss&quot;). Nothing happens until that company&apos;s board approves the
+              card; on approval the liaison gets the instruction as a task inside its own company. Only the text
+              crosses over: no data, files, keys or access are ever shared. Off means no instruction can be sent at all.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={enableCrossCompanyInstructions}
+            onCheckedChange={(checked) =>
+              toggleMutation.mutate({
+                enableCrossCompanyInstructions: checked,
+              })
+            }
+            disabled={toggleMutation.isPending}
+            aria-label="Toggle instructions between companies experimental setting"
           />
         </div>
       </section>
