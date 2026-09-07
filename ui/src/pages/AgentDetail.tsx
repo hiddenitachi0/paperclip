@@ -48,6 +48,8 @@ import { EmptyState } from "../components/EmptyState";
 import { AgentActionButtons } from "../components/AgentActionButtons";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
+import { QuickAgentSection } from "../components/QuickAgentSection";
+import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
@@ -1204,14 +1206,19 @@ export function AgentDetail() {
 
       {/* View content */}
       {activeView === "dashboard" && (
-        <AgentOverview
-          agent={agent}
-          runs={heartbeats ?? []}
-          assignedIssues={assignedIssues}
-          runtimeState={runtimeState}
-          agentId={agent.id}
-          agentRouteId={canonicalAgentRef}
-        />
+        <div className="space-y-8">
+          {agent.laneAEnabled && resolvedCompanyId && (
+            <QuickAgentChatPanel agentId={agent.id} agentName={agent.name} companyId={resolvedCompanyId} />
+          )}
+          <AgentOverview
+            agent={agent}
+            runs={heartbeats ?? []}
+            assignedIssues={assignedIssues}
+            runtimeState={runtimeState}
+            agentId={agent.id}
+            agentRouteId={canonicalAgentRef}
+          />
+        </div>
       )}
 
       {activeView === "instructions" && (
@@ -1592,6 +1599,7 @@ function AgentConfigurePage({
         hidePromptTemplate
         hideInstructionsFile
       />
+      <QuickAgentSection agent={agent} companyId={companyId} />
       <div>
         <h3 className="text-sm font-medium mb-3">API Keys</h3>
         <KeysTab agentId={agentId} companyId={companyId} />

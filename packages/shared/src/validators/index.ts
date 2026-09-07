@@ -269,6 +269,7 @@ export {
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
   type McpServerConfig,
+  LANE_A_INSTRUCTIONS_MAX_LENGTH,
 } from "./agent.js";
 
 export {

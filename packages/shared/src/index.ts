@@ -1190,6 +1190,7 @@ export {
   type TrustPresetInput,
   type LowTrustBoundaryInput,
   type TrustAuthorizationPolicyInput,
+  LANE_A_INSTRUCTIONS_MAX_LENGTH,
 } from "./validators/index.js";
 
 export {
