@@ -2062,6 +2062,51 @@ export function approvalRoutes(
         await assertMergePrIssueIdsAreRelevant(db, existing.companyId, anchorIssueIds, getActorInfo(req));
         stampOriginalIssueIds(normalizedPayload, anchorIssueIds);
       }
+      if (isModelBoostRequestApproval(existing.type, normalizedPayload)) {
+        // A resubmit body is exactly as caller-controlled as a create body, so
+        // the same rules apply as at filing: the ask stays pinned to the task
+        // and agent it was filed for, the card wording is server-owned, and
+        // the boss's stamp is whatever is ALREADY persisted -- never anything
+        // the requester sends. The boss is not woken again: it already had (or
+        // still has) its turn on this ask, and re-stamping/re-waking here would
+        // let "send back for changes" reset a decline into a fresh review.
+        const boostPayload = modelBoostRequestPayloadSchema.parse(normalizedPayload);
+        const persistedBoost = (existing.payload ?? {}) as Record<string, unknown>;
+        if (typeof persistedBoost.issueId === "string" && boostPayload.issueId !== persistedBoost.issueId) {
+          res.status(422).json({ error: "A boost request cannot be moved to a different task on resubmit" });
+          return;
+        }
+        if (typeof persistedBoost.agentId === "string" && boostPayload.agentId !== persistedBoost.agentId) {
+          res.status(422).json({ error: "A boost request cannot be moved to a different agent on resubmit" });
+          return;
+        }
+        if (req.actor.type === "agent" && req.actor.agentId !== boostPayload.agentId) {
+          res.status(403).json({ error: "An agent can only request a boost for itself" });
+          return;
+        }
+        const boostIssue = await db
+          .select({ id: issues.id, companyId: issues.companyId, assigneeAgentId: issues.assigneeAgentId })
+          .from(issues)
+          .where(eq(issues.id, boostPayload.issueId))
+          .then((rows) => rows[0] ?? null);
+        if (!boostIssue || boostIssue.companyId !== existing.companyId) {
+          res.status(422).json({ error: "A boost request must name a task in this company" });
+          return;
+        }
+        if (boostIssue.assigneeAgentId !== boostPayload.agentId) {
+          res.status(422).json({ error: "A boost can only be asked for the task the agent is currently assigned to" });
+          return;
+        }
+        const boostAgent = await agentsSvc.getById(boostPayload.agentId);
+        if (!boostAgent || boostAgent.companyId !== existing.companyId) {
+          res.status(422).json({ error: "Boost request must come from an agent in this company" });
+          return;
+        }
+        normalizedPayload = stampModelBoostPlainLanguage(boostPayload, {
+          agentName: boostAgent.name || "An agent",
+          bossReview: readBossReview(persistedBoost),
+        });
+      }
     }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {
       // Re-verify the boss/report relationship still holds -- it may have
