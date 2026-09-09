@@ -179,6 +179,14 @@ export interface ProjectDeployPolicy {
   deployBranch?: string;
   /** Read-only upstream mirror branch that is never deployed (DUR-40). */
   mirrorBranch?: string;
+  /**
+   * Command that starts a throwaway copy of the pending code so the operator
+   * can look at it before approving. Runs inside a fresh checkout of the
+   * branch or commit the card would ship, with PORT set for it.
+   */
+  previewCommand?: string;
+  /** Path on the preview that answers OK once it has finished starting. */
+  previewHealthPath?: string;
 }
 
 export interface IssueExecutionWorkspaceSettings {

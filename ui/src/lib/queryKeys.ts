@@ -219,6 +219,7 @@ export const queryKeys = {
     detail: (approvalId: string) => ["approvals", "detail", approvalId] as const,
     comments: (approvalId: string) => ["approvals", "comments", approvalId] as const,
     issues: (approvalId: string) => ["approvals", "issues", approvalId] as const,
+    preview: (approvalId: string) => ["approvals", "preview", approvalId] as const,
   },
   interactions: {
     pendingForCompany: (companyId: string) => ["interactions", "pending", companyId] as const,

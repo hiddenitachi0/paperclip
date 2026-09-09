@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Identity } from "./Identity";
 import { DecisionReasonDialog } from "./DecisionReasonDialog";
+import { ApprovalPreviewPanel } from "./ApprovalPreviewPanel";
 import {
   approvalSubject,
   approvalTechnicalReference,
@@ -169,6 +170,13 @@ export function ApprovalCard({
           hidePrimaryTitle={Boolean(subject)}
         />
       </div>
+
+      <ApprovalPreviewPanel
+        approvalId={approval.id}
+        approvalType={approval.type}
+        payload={payload}
+        approvalStatus={approval.status}
+      />
 
       {approval.decisionNote && (
         <div className="mt-4 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-3 text-xs leading-5 text-muted-foreground">

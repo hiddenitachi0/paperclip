@@ -3,8 +3,10 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Approval, Issue } from "@paperclipai/shared";
+import { ToastProvider } from "../context/ToastContext";
 import { ApprovalCard } from "./ApprovalCard";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -46,12 +48,22 @@ afterEach(() => {
 });
 
 function renderCard(props: Partial<React.ComponentProps<typeof ApprovalCard>>) {
+  // The card carries the "Preview this before approving" panel, which asks the
+  // server what is running -- so it needs the query and toast providers the
+  // real app always has around it.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   act(() => {
     root = createRoot(container);
     root.render(
-      <MemoryRouter>
-        <ApprovalCard approval={makeApproval()} requesterAgent={null} {...props} />
-      </MemoryRouter>,
+      <QueryClientProvider client={queryClient}>
+        <ToastProvider>
+          <MemoryRouter>
+            <ApprovalCard approval={makeApproval()} requesterAgent={null} {...props} />
+          </MemoryRouter>
+        </ToastProvider>
+      </QueryClientProvider>,
     );
   });
 }

@@ -1376,9 +1376,33 @@ function describeApprovalMutationForEscalation(body: unknown): string {
 
 export function approvalRoutes(
   rawDb: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    /**
+     * Previews are disposable: the moment a card is decided (approved,
+     * rejected, sent back, or withdrawn) the copy that was started for it is
+     * thrown away. Passed in from app.ts so the whole process shares one
+     * instance -- that is what enforces "no more than N previews at once".
+     */
+    previewEnvironments?: { stopForApproval: (approvalId: string, reason: string) => Promise<boolean> };
+  } = {},
 ) {
   const router = Router();
+  const previewEnvironments = options.previewEnvironments ?? null;
+
+  /**
+   * Throw away the preview for a card that has just been decided. Never blocks
+   * or fails the decision -- an operator's approve must not depend on a
+   * throwaway process shutting down cleanly.
+   */
+  const discardPreviewFor = async (approvalId: string, reason: string) => {
+    if (!previewEnvironments) return;
+    try {
+      await previewEnvironments.stopForApproval(approvalId, reason);
+    } catch {
+      // Left to the idle sweep in services/preview-environments.ts.
+    }
+  };
   // DUR-394 (DUR-277 Wave 3): this file's own request-scoped instance; rawDb
   // stays unwrapped for the pre-scope approval lookups and access decisions
   // below (see middleware/company-scope.ts).
@@ -2204,6 +2228,7 @@ export function approvalRoutes(
       }
     }
 
+    await discardPreviewFor(id, "approval_approved");
     const approvePersonaNames = await personaDisplayNamesFor([approval]);
     res.json(withPersonaMetadata(approval, approvePersonaNames));
   });
@@ -2252,6 +2277,7 @@ export function approvalRoutes(
       });
     }
 
+    await discardPreviewFor(id, "approval_rejected");
     const rejectPersonaNames = await personaDisplayNamesFor([approval]);
     res.json(withPersonaMetadata(approval, rejectPersonaNames));
   });
@@ -2290,6 +2316,7 @@ export function approvalRoutes(
         decisionNote: revisionDecisionNote,
       });
 
+      await discardPreviewFor(id, "approval_sent_back");
       const revisionPersonaNames = await personaDisplayNamesFor([approval]);
       res.json(withPersonaMetadata(approval, revisionPersonaNames));
     },
@@ -2528,6 +2555,7 @@ export function approvalRoutes(
       details: { type: approval.type },
     });
 
+    await discardPreviewFor(id, "approval_withdrawn");
     const withdrawPersonaNames = await personaDisplayNamesFor([approval]);
     res.json(withPersonaMetadata(approval, withdrawPersonaNames));
   });
