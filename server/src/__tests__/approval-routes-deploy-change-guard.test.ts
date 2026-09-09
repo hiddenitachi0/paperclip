@@ -190,7 +190,10 @@ function deployBody(overrides: Record<string, unknown> = {}) {
  * guard's commit-exists check, and this guard's live...requested compare, whose
  * answer each test supplies.
  */
-function githubAnswers(compare: Record<string, unknown>, options: { commitExists?: boolean } = {}) {
+function githubAnswers(
+  compare: Record<string, unknown>,
+  options: { commitExists?: boolean; repoVisible?: boolean } = {},
+) {
   mockGhFetch.mockImplementation(async (url: string) => {
     if (url.includes(`/compare/${LIVE_COMMIT}`)) return new Response(JSON.stringify(compare), { status: 200 });
     if (url.includes("/compare/")) return new Response(JSON.stringify({ status: "ahead" }), { status: 200 });
@@ -200,9 +203,20 @@ function githubAnswers(compare: Record<string, unknown>, options: { commitExists
         ? new Response(JSON.stringify({ message: "No commit found for SHA" }), { status: 422 })
         : new Response(JSON.stringify({ sha: NEW_COMMIT }), { status: 200 });
     }
+    // The repository itself: /repos/<owner>/<name> with nothing after it. This
+    // is what tells a missing commit apart from a repository GitHub will not
+    // show us at all.
+    if (/\/repos\/[^/]+\/[^/]+$/.test(url)) {
+      return options.repoVisible === false
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+        : new Response(JSON.stringify({ full_name: "acme/widgets", private: true }), { status: 200 });
+    }
     return new Response("{}", { status: 200 });
   });
 }
+
+/** Did anything ask GitHub about this repository, in any way? */
+const githubUrlsCalled = () => mockGhFetch.mock.calls.map((call) => String(call[0]));
 
 function messageOf(res: { body: any }) {
   return res.body.message ?? res.body.error ?? "";
@@ -276,6 +290,28 @@ describe("Pointless deploy cards: deploy cards that would deploy nothing are ref
       expect(messageOf(res)).toMatch(/acme\/widgets/);
       expect(messageOf(res)).toMatch(/aaaaaaaaaaaa/);
       expect(mockApprovalService.create).not.toHaveBeenCalled();
+      // It only says that after checking the repository is really there.
+      expect(githubUrlsCalled()).toContain("https://api.github.com/repos/acme/widgets");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "(a) files the card instead when GitHub will not show us the repository at all (no key saved, or a key without access)",
+    async () => {
+      // A private repository answers 404 to a caller it does not know, exactly
+      // like a commit that is not there. Concluding "no such commit" from that
+      // would refuse every deploy card this company files, for a wrong reason.
+      mockSecretService.resolveGitHubToken.mockResolvedValue(null);
+      githubAnswers({ status: "ahead", files: [] }, { commitExists: false, repoVisible: false });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalled();
+      const stamped = mockApprovalService.create.mock.calls[0]?.[1]?.payload;
+      expect(stamped.changesSinceLive).toBeUndefined();
     },
     TEST_TIMEOUT,
   );
@@ -430,6 +466,70 @@ describe("Pointless deploy cards: deploy cards that would deploy nothing are ref
 
       expect(res.status).toBe(201);
       expect(mockApprovalService.create).toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "files a board rollback even when GitHub cannot be reached at all",
+    async () => {
+      // A rollback is the operator's emergency lever: the commit comes from the
+      // deploy runner's own record of what used to be live, not from GitHub, so
+      // a GitHub outage must never be the reason it cannot be asked for.
+      mockGhFetch.mockRejectedValue(new Error("network down"));
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send(deployBody({ allowBackwardDeploy: true }));
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalled();
+      expect(mockApprovalService.create.mock.calls[0]?.[1]?.payload?.allowBackwardDeploy).toBe(true);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "files a board rollback even when GitHub says it has never heard of the commit",
+    async () => {
+      // The commit that used to be live can be gone from GitHub -- a squashed
+      // branch, a force-push, a deleted fork. The deploy runner can still put it
+      // back, so this guard must not stand in the way.
+      githubAnswers({ status: "behind", files: [] }, { commitExists: false });
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app)
+        .post(`/api/companies/${COMPANY_ID}/approvals`)
+        .send(deployBody({ allowBackwardDeploy: true }));
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalled();
+      const stamped = mockApprovalService.create.mock.calls[0]?.[1]?.payload;
+      expect(stamped.changesSinceLive).toBeUndefined();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "stamps at most a handful of changed files, however big the deploy",
+    async () => {
+      githubAnswers({
+        status: "ahead",
+        files: Array.from({ length: 300 }, (_, i) => ({
+          filename: `server/src/${"deeply-nested-folder/".repeat(15)}file${i}.ts`,
+        })),
+      });
+      const app = await createAgentApp(createRouteDb());
+
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
+
+      expect(res.status).toBe(201);
+      const stamped = mockApprovalService.create.mock.calls[0]?.[1]?.payload;
+      expect(stamped.changesSinceLive.changedFileCount).toBe(300);
+      expect(stamped.changesSinceLive.changedFiles).toHaveLength(12);
+      for (const path of stamped.changesSinceLive.changedFiles) expect(path.length).toBeLessThanOrEqual(160);
+      expect(JSON.stringify(stamped.changesSinceLive).length).toBeLessThan(2500);
     },
     TEST_TIMEOUT,
   );

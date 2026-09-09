@@ -1,4 +1,8 @@
 import type { Db } from "@paperclipai/db";
+import {
+  DEPLOY_CHANGED_FILES_STAMP_LIMIT,
+  DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
+} from "@paperclipai/shared";
 import { readProjectDeployHistory } from "./deploy-history.js";
 import type { DeployRunnerStatusEntry } from "./deploy-runner-status.js";
 
@@ -25,8 +29,13 @@ import type { DeployRunnerStatusEntry } from "./deploy-runner-status.js";
  * for.
  */
 
-/** How many changed paths get stamped onto the card so it can say what changes. */
-export const DEPLOY_CHANGED_FILES_STAMP_LIMIT = 12;
+/**
+ * How many changed paths get stamped onto the card so it can say what changes,
+ * and how long each of those paths may be. Both live in
+ * packages/shared/src/validators/approval.ts next to the schema that enforces
+ * them, so the stamping site and the validator can never drift apart.
+ */
+export { DEPLOY_CHANGED_FILES_STAMP_LIMIT, DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH };
 
 /**
  * GitHub's compare endpoint returns at most 300 files. At (or above) that many
@@ -86,10 +95,27 @@ export function isDocumentationPath(path: string): boolean {
 }
 
 /**
+ * A single path, shortened so one very long repository path cannot bloat the
+ * stored card. The end is kept, because that is where the file name is.
+ */
+export function shortenChangedPath(path: string): string {
+  const trimmed = path.trim();
+  if (trimmed.length <= DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH) return trimmed;
+  return `...${trimmed.slice(trimmed.length - (DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH - 3))}`;
+}
+
+/**
  * Turn the changed paths GitHub reported into the summary stamped onto the
  * card. `documentationOnly` is deliberately false for an empty list only when
  * the caller says the list was truncated -- an empty diff genuinely changes
  * nothing, which the caller treats the same way as a documentation-only one.
+ *
+ * The stamped list is capped in both directions -- at most
+ * DEPLOY_CHANGED_FILES_STAMP_LIMIT paths, each at most
+ * DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH characters -- so a deploy that touches a
+ * thousand files, or one file with an absurdly long path, still writes a small,
+ * fixed-size summary into the approval payload. `changedFileCount` keeps the
+ * real total, so the card can still say "changes 812 files".
  */
 export function summarizeChangedPaths(
   liveCommit: string,
@@ -101,7 +127,7 @@ export function summarizeChangedPaths(
   return {
     liveCommit,
     changedFileCount: unique.length,
-    changedFiles: unique.slice(0, DEPLOY_CHANGED_FILES_STAMP_LIMIT),
+    changedFiles: unique.slice(0, DEPLOY_CHANGED_FILES_STAMP_LIMIT).map(shortenChangedPath),
     documentationOnly,
   };
 }

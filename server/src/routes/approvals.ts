@@ -357,12 +357,14 @@ async function lookupBranchesForCommitHead(
  *
  * (d) applies to agents only: a person on the board may have a reason to
  * re-deploy anyway (a stuck container, a config-only environment change), and
- * refusing them would take away a lever they sometimes need. (b) and (c) are
- * also skipped for a board-filed rollback (`allowBackwardDeploy`), whose whole
- * point is to move production back to an older commit.
+ * refusing them would take away a lever they sometimes need. A board-filed
+ * rollback (`allowBackwardDeploy`) skips the whole check, GitHub calls
+ * included -- its whole point is to move production back to an older commit,
+ * and it must work when everything else is on fire.
  *
  * Fails OPEN exactly like the DUR-227 ancestry pre-check above: no pinned
- * commit, no known live version, no github.com repo, GitHub unreachable or
+ * commit, no known live version, no github.com repo, a repository GitHub will
+ * not show us (no key saved, or a key without access), GitHub unreachable or
  * unparseable -- the card is filed. Only a GitHub-confirmed answer ever blocks.
  *
  * Returns the summary to stamp onto the payload, or null when nothing could be
@@ -407,6 +409,16 @@ async function evaluateDeployCardChange(
   const commit = payload.commit?.trim();
   if (!commit) return null;
 
+  // A rollback is filed exactly to move production back to an older commit, and
+  // only a person on the board can file one
+  // (assertBackwardDeployOptInIsBoardFiled). Its commit is the one the deploy
+  // runner's own status log says used to be live, not something looked up in
+  // GitHub -- so no GitHub answer, and no GitHub outage, may ever refuse it.
+  // Checks (a)-(d) all run against GitHub, so none of them run here. This is the
+  // first thing checked for that reason: putting the operator's emergency lever
+  // behind a network call is how a rollback fails at the worst moment.
+  if (payload.allowBackwardDeploy === true) return null;
+
   const workspaceRow = await db
     .select({ repoUrl: projectWorkspaces.repoUrl })
     .from(projectWorkspaces)
@@ -437,8 +449,7 @@ async function evaluateDeployCardChange(
   const apiBase = gitHubApiBase("github.com");
 
   // (a) Does the commit exist at all? GitHub answers 404 (or 422 for a sha it
-  // cannot even parse) for a mistyped id -- the one failure that is certain
-  // regardless of what is live.
+  // cannot even parse) for a mistyped id.
   let existsResponse: Response;
   try {
     existsResponse = await fetchImpl(
@@ -449,6 +460,34 @@ async function evaluateDeployCardChange(
     return null;
   }
   if (existsResponse.status === 404 || existsResponse.status === 422) {
+    // A 404 on its own does NOT mean "no such commit". GitHub answers 404 for a
+    // private repository it will not show us at all -- which is what happens
+    // when this company has no GitHub key saved, or the saved key has no access
+    // to this repository. Concluding "that commit does not exist" from that
+    // would refuse every single deploy card the company files, and tell the
+    // filer a plainly wrong reason for it.
+    //
+    // So ask about the repository itself before concluding anything: only when
+    // the repository answers plainly that it is there (200) is the missing
+    // commit real. Anything else -- 404, 401/403, an error, no answer -- means
+    // we cannot see the repository, and the card is filed.
+    let repoVisible = false;
+    try {
+      const repoResponse = await fetchImpl(
+        `${apiBase}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}`,
+        { headers },
+      );
+      repoVisible = repoResponse.status === 200;
+    } catch {
+      return null;
+    }
+    if (!repoVisible) {
+      logger.info(
+        { companyId, projectId: payload.projectId, repo: repoLabel, hasToken: Boolean(token) },
+        "cannot see the repository on GitHub, so a missing commit cannot be told apart from a missing key; filing the deploy card anyway (pointless-deploy-card guard)",
+      );
+      return null;
+    }
     throw unprocessable(describeMissingDeployCommit({ commit, repo: repoLabel, liveCommit }), {
       commit,
       repo: repoLabel,
@@ -461,10 +500,6 @@ async function evaluateDeployCardChange(
   // Everything below compares against the live version; without one there is
   // nothing to say about what would change.
   if (!liveCommit) return null;
-  // A rollback is filed exactly to move production back to an older commit, and
-  // only the board can file one (assertBackwardDeployOptInIsBoardFiled). Checks
-  // (b)-(d) would all refuse it by design, so they do not run.
-  if (payload.allowBackwardDeploy === true) return null;
 
   let compareResponse: Response;
   try {

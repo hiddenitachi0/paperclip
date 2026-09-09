@@ -4,9 +4,11 @@
  * the card, and the wording of each refusal (every one of them has to name the
  * version running now and say what to do instead).
  */
+import { deployChangeSummarySchema } from "@paperclipai/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEPLOY_CHANGED_FILES_STAMP_LIMIT,
+  DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
   describeDeployCommitAlreadyLive,
   describeDeployCommitNotBuiltOnLive,
   describeDocumentationOnlyDeploy,
@@ -55,6 +57,27 @@ describe("summarizeChangedPaths", () => {
     const summary = summarizeChangedPaths("aaaaaaaaaaaa", [...many, ...many]);
     expect(summary.changedFileCount).toBe(40);
     expect(summary.changedFiles).toHaveLength(DEPLOY_CHANGED_FILES_STAMP_LIMIT);
+  });
+
+  it("shortens a very long path so one file cannot bloat the stored card", () => {
+    const long = `server/src/${"very-long-folder-name/".repeat(20)}approvals.ts`;
+    const summary = summarizeChangedPaths("aaaaaaaaaaaa", [long]);
+    expect(long.length).toBeGreaterThan(DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH);
+    expect(summary.changedFiles[0]!.length).toBe(DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH);
+    // The end is kept, because that is where the file name is.
+    expect(summary.changedFiles[0]).toMatch(/^\.\.\./);
+    expect(summary.changedFiles[0]!.endsWith("approvals.ts")).toBe(true);
+  });
+
+  it("always produces a summary the deploy payload will accept, however big the diff", () => {
+    const huge = Array.from(
+      { length: 400 },
+      (_, i) => `server/src/${"deeply-nested-folder/".repeat(15)}file${i}.ts`,
+    );
+    const summary = summarizeChangedPaths("aaaaaaaaaaaa", huge);
+    expect(summary.changedFileCount).toBe(400);
+    expect(() => deployChangeSummarySchema.parse(summary)).not.toThrow();
+    expect(JSON.stringify(summary).length).toBeLessThan(2500);
   });
 
   it("never concludes documentation-only from a truncated file list", () => {

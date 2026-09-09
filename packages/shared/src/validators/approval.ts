@@ -58,16 +58,38 @@ export const addApprovalCommentSchema = z.object({
 export type AddApprovalComment = z.infer<typeof addApprovalCommentSchema>;
 
 /**
+ * Pointless deploy cards: how many changed file paths a stamped change summary may
+ * carry. The summary is a hint for the card ("changes 40 files, here are a
+ * few"), not a record of the diff, so it is deliberately short: a deploy that
+ * touches a thousand files must not write a thousand paths into the approval
+ * payload, which is stored, re-read and shipped to the browser on every card.
+ */
+export const DEPLOY_CHANGED_FILES_STAMP_LIMIT = 12;
+
+/**
+ * And how long any one of those paths may be. Repository paths have no real
+ * upper bound, so each one is shortened (keeping the end, where the file name
+ * is) before it is stamped.
+ */
+export const DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH = 160;
+
+/**
  * Pointless deploy cards: the server-resolved answer to "what would this deploy actually
  * change?" -- the version live right now, and the files that differ between it
  * and the commit on the card. Stamped at filing time; see
  * server/src/services/deploy-change-guard.ts.
+ *
+ * Both list limits are enforced here as well as at the stamping site, so a
+ * payload that grew past them (a hand-written one, an older card) is rejected
+ * rather than stored.
  */
 export const deployChangeSummarySchema = z
   .object({
-    liveCommit: z.string().trim().min(1),
+    liveCommit: z.string().trim().min(1).max(200),
     changedFileCount: z.number().int().nonnegative(),
-    changedFiles: z.array(z.string().trim().min(1)).max(50),
+    changedFiles: z
+      .array(z.string().trim().min(1).max(DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH))
+      .max(DEPLOY_CHANGED_FILES_STAMP_LIMIT),
     documentationOnly: z.boolean(),
   })
   .strict();

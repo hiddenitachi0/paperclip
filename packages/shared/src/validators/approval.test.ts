@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEPLOY_CHANGED_FILES_STAMP_LIMIT,
+  DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
@@ -81,6 +83,44 @@ describe("approval validators", () => {
       deployRequestPayloadSchema.parse({
         ...payload,
         changesSinceLive: { ...payload.changesSinceLive, changedFileCount: -1 },
+      }),
+    ).toThrow();
+  });
+
+  it("caps the change summary so a big deploy cannot bloat the stored card", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: "bbbbbbbbbbbb",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+      changesSinceLive: {
+        liveCommit: "aaaaaaaaaaaa",
+        // A deploy really can change hundreds of files; the count stays true,
+        // only the listed paths are capped.
+        changedFileCount: 812,
+        changedFiles: Array.from({ length: DEPLOY_CHANGED_FILES_STAMP_LIMIT }, (_, i) => `server/src/file${i}.ts`),
+        documentationOnly: false,
+      },
+    };
+    expect(deployRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: {
+          ...payload.changesSinceLive,
+          changedFiles: [...payload.changesSinceLive.changedFiles, "server/src/one-too-many.ts"],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: {
+          ...payload.changesSinceLive,
+          changedFiles: ["x".repeat(DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH + 1)],
+        },
       }),
     ).toThrow();
   });

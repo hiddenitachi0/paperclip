@@ -1505,6 +1505,8 @@ export {
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   deployChangeSummarySchema,
+  DEPLOY_CHANGED_FILES_STAMP_LIMIT,
+  DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
   modelBoostRequestPayloadSchema,
   modelBoostBossReviewSchema,
   modelBoostBossReviewDecisionSchema,
