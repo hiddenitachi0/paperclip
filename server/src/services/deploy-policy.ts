@@ -28,5 +28,7 @@ export function parseProjectDeployPolicy(raw: unknown): ProjectDeployPolicy | nu
     rollback: isDeployRollbackStrategy(parsed.rollback) ? parsed.rollback : "none",
     ...(typeof parsed.deployBranch === "string" ? { deployBranch: parsed.deployBranch } : {}),
     ...(typeof parsed.mirrorBranch === "string" ? { mirrorBranch: parsed.mirrorBranch } : {}),
+    ...(typeof parsed.previewCommand === "string" ? { previewCommand: parsed.previewCommand } : {}),
+    ...(typeof parsed.previewHealthPath === "string" ? { previewHealthPath: parsed.previewHealthPath } : {}),
   };
 }
