@@ -1,5 +1,17 @@
-import type { Approval, ApprovalComment, Issue } from "@paperclipai/shared";
+import type {
+  Approval,
+  ApprovalComment,
+  Issue,
+  PreviewEnvironment,
+  PreviewEnvironmentAvailability,
+} from "@paperclipai/shared";
 import { api } from "./client";
+
+/** What the "Preview this before approving" button needs to know. */
+export interface ApprovalPreviewView {
+  preview: PreviewEnvironment | null;
+  availability: PreviewEnvironmentAvailability;
+}
 
 export const approvalsApi = {
   list: (companyId: string, status?: string) =>
@@ -21,4 +33,7 @@ export const approvalsApi = {
   addComment: (id: string, body: string) =>
     api.post<ApprovalComment>(`/approvals/${id}/comments`, { body }),
   listIssues: (id: string) => api.get<Issue[]>(`/approvals/${id}/issues`),
+  getPreview: (id: string) => api.get<ApprovalPreviewView>(`/approvals/${id}/preview`),
+  startPreview: (id: string) => api.post<ApprovalPreviewView>(`/approvals/${id}/preview`, {}),
+  stopPreview: (id: string) => api.delete<ApprovalPreviewView>(`/approvals/${id}/preview`),
 };

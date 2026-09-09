@@ -48,6 +48,8 @@ function toDeployDraft(deployPolicy: ProjectDeployPolicy | null | undefined) {
     healthCheckUrl: deployPolicy?.healthCheckUrl ?? "",
     rollback: deployPolicy?.rollback ?? "git_previous",
     deployBranch: deployPolicy?.deployBranch ?? "",
+    previewCommand: deployPolicy?.previewCommand ?? "",
+    previewHealthPath: deployPolicy?.previewHealthPath ?? "",
     ...(deployPolicy?.mirrorBranch ? { mirrorBranch: deployPolicy.mirrorBranch } : {}),
   };
 }
@@ -56,7 +58,16 @@ type DeployDraft = ReturnType<typeof toDeployDraft>;
 
 /** What gets sent to the server: empty optional strings/lists are dropped so the strict schema stays happy. */
 function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
-  const { deployCommand, composeFiles, envFile, deployBranch, mirrorBranch, ...rest } = draft;
+  const {
+    deployCommand,
+    composeFiles,
+    envFile,
+    deployBranch,
+    mirrorBranch,
+    previewCommand,
+    previewHealthPath,
+    ...rest
+  } = draft;
   return {
     ...rest,
     ...(deployCommand.trim() ? { deployCommand: deployCommand.trim() } : {}),
@@ -64,6 +75,8 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
     ...(envFile.trim() ? { envFile: envFile.trim() } : {}),
     ...(deployBranch.trim() ? { deployBranch: deployBranch.trim() } : {}),
     ...(mirrorBranch ? { mirrorBranch } : {}),
+    ...(previewCommand.trim() ? { previewCommand: previewCommand.trim() } : {}),
+    ...(previewHealthPath.trim() ? { previewHealthPath: previewHealthPath.trim() } : {}),
   };
 }
 
@@ -115,7 +128,9 @@ export type ProjectConfigFieldKey =
   | "deploy_rollback"
   | "deploy_branch"
   | "deploy_env_file"
-  | "deploy_compose_files";
+  | "deploy_compose_files"
+  | "deploy_preview_command"
+  | "deploy_preview_health_path";
 
 function SaveIndicator({ state }: { state: ProjectFieldSaveState }) {
   if (state === "saving") {
@@ -1623,6 +1638,56 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     A web address the runner opens after each deploy. If it does not answer OK, the deploy is treated as failed.
                   </p>
+                </div>
+
+                <div className="rounded-md border border-border/60 bg-muted/20 p-3 space-y-3">
+                  <div className="space-y-0.5">
+                    <div className="text-sm">Let me try it before I approve</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Optional. With a start command here, every merge and deploy card gets a
+                      &ldquo;Preview this before approving&rdquo; button that runs a throwaway copy of the pending
+                      code so you can click around first. The copy shuts itself down when you decide the card.
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>How to start a preview</span>
+                        <SaveIndicator state={fieldState("deploy_preview_command")} />
+                      </label>
+                    </div>
+                    <DraftInput
+                      value={deployDraft.previewCommand}
+                      onCommit={(value) => commitDeployField("deploy_preview_command", { previewCommand: value })}
+                      immediate
+                      className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                      placeholder="pnpm install && pnpm start"
+                    />
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Runs inside a fresh copy of the code the card would ship. Paperclip picks a free port and
+                      passes it as PORT — the command must listen on that.
+                    </p>
+                  </div>
+                  <div>
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>Page that says it is ready (optional)</span>
+                        <SaveIndicator state={fieldState("deploy_preview_health_path")} />
+                      </label>
+                    </div>
+                    <DraftInput
+                      value={deployDraft.previewHealthPath}
+                      onCommit={(value) =>
+                        commitDeployField("deploy_preview_health_path", { previewHealthPath: value })}
+                      immediate
+                      className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                      placeholder="/"
+                    />
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Paperclip waits for this page to answer before it gives you the link. Leave empty to use the
+                      front page.
+                    </p>
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between gap-3">
