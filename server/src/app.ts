@@ -64,6 +64,12 @@ import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
+import { previewEnvironmentRoutes } from "./routes/preview-environments.js";
+import { previewProxyRoutes } from "./routes/preview-proxy.js";
+import {
+  previewEnvironmentService,
+  startPreviewEnvironmentIdleSweep,
+} from "./services/preview-environments.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
@@ -133,6 +139,9 @@ export function shouldServeViteDevHtml(req: ExpressRequest): boolean {
   return req.accepts(["html"]) === "html";
 }
 
+/** How often the "throw away previews nobody is using" sweep runs. */
+const PREVIEW_IDLE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
 export function shouldEnablePrivateHostnameGuard(opts: {
   deploymentMode: DeploymentMode;
   deploymentExposure: DeploymentExposure;
@@ -174,6 +183,12 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    /** Most previews this instance runs at once (default 2). */
+    previewMaxConcurrent?: number;
+    /** Minutes a preview may sit untouched before it is thrown away (default 60). */
+    previewIdleTimeoutMinutes?: number;
+    /** Test seam: use an already-built preview service instead of making one. */
+    previewEnvironmentService?: ReturnType<typeof previewEnvironmentService>;
   },
 ) {
   const app = express();
@@ -230,6 +245,14 @@ export async function createApp(
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
 
   // Mount API routes
+  // One preview service instance for the whole process: it holds the "at most
+  // N previews at a time" limit and the idle timers, both of which have to be
+  // shared between the approval-card API and the proxy.
+  const previewEnvironments = opts.previewEnvironmentService ?? previewEnvironmentService(db, {
+    maxConcurrent: opts.previewMaxConcurrent,
+    idleTimeoutMinutes: opts.previewIdleTimeoutMinutes,
+  });
+
   const api = Router();
   api.use(boardMutationGuard());
   api.use(
@@ -266,11 +289,15 @@ export async function createApp(
   api.use(pipelineRoutes(db));
   api.use(environmentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(executionWorkspaceRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(previewEnvironmentRoutes(db, { service: previewEnvironments }));
   api.use(goalRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(laneARoutes(db));
   api.use(chatRouterRoutes(db));
-  api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(approvalRoutes(db, {
+    pluginWorkerManager: workerManager,
+    previewEnvironments,
+  }));
   api.use(crossCompanyInstructionRoutes(db));
   api.use(deployRunnerRoutes(db));
   api.use(secretRoutes(db));
@@ -376,6 +403,9 @@ export async function createApp(
   app.use(pluginUiStaticRoutes(db, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
   }));
+  // Mounted at the root (not under /api) so a previewed app sees ordinary
+  // paths, and before the SPA fallback so /_preview never lands on the UI.
+  app.use(previewProxyRoutes(db, { service: previewEnvironments }));
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   if (opts.uiMode === "static") {
@@ -589,11 +619,22 @@ export async function createApp(
   }).catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });
+  // Previews are disposable by design: this sweep is the backstop that throws
+  // away any preview whose in-process idle timer was lost (a server restart),
+  // so an abandoned one can never hold a slot forever.
+  const previewIdleSweepTimer = startPreviewEnvironmentIdleSweep(
+    previewEnvironments,
+    PREVIEW_IDLE_SWEEP_INTERVAL_MS,
+  );
+  app.locals.paperclipPreviewEnvironments = previewEnvironments;
+
   let appServicesShutdown = false;
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;
     appServicesShutdown = true;
     disableFeedbackExportFlushes();
+    clearInterval(previewIdleSweepTimer);
+    previewEnvironments.dispose();
     devWatcher?.close();
     viteHtmlRenderer?.dispose();
     hostServiceCleanup.disposeAll();

@@ -5,6 +5,7 @@ import {
   ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
   addApprovalCommentSchema,
   createApprovalSchema,
+  type DeployChangeSummary,
   deployRequestPayloadSchema,
   describeModelBoostConsequence,
   describeModelBoostRequest,
@@ -50,11 +51,20 @@ import {
   describeUnsupportedDeployLikeApproval,
   resolveProjectDeployWorkspaceId,
 } from "../services/deploy-workspace.js";
+import {
+  GITHUB_COMPARE_FILE_LIMIT,
+  describeDeployCommitAlreadyLive,
+  describeDeployCommitNotBuiltOnLive,
+  describeDocumentationOnlyDeploy,
+  describeMissingDeployCommit,
+  resolveLiveDeployCommit,
+  summarizeChangedPaths,
+} from "../services/deploy-change-guard.js";
 import { DEPLOY_SUCCESS_MARKER } from "../services/deploy-completion-gate.js";
 import { readDeployRunnerStatus, type DeployRunnerStatusEntry } from "../services/deploy-runner-status.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
-import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { HttpError, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
 import { crossCompanyInstructionService } from "../services/cross-company-instructions.js";
@@ -324,6 +334,252 @@ async function lookupBranchesForCommitHead(
   } catch {
     return [];
   }
+}
+
+/**
+ * Pointless deploy cards: refuse a deploy card that cannot deploy, or that would deploy
+ * nothing, before it ever reaches the operator's queue.
+ *
+ * Yesterday's incident: one agent filed six deploy cards in a row that all had
+ * to be rejected by hand -- a mistyped commit id, commits already live, a
+ * commit whose only difference from the live one was documentation, and commits
+ * from a rewritten history the deploy runner refuses anyway. Every one of them
+ * looked exactly like an ordinary deploy card.
+ *
+ * Resolves the version live right now (the deploy runner's own status log, via
+ * deploy-change-guard.ts) and asks GitHub what actually differs, then refuses
+ * with a plain-language 422 when:
+ *   (a) the commit does not exist in the repository;
+ *   (b) the commit is already part of what is live (already deployed);
+ *   (c) the live version is not in the commit's history (rewritten/sideways --
+ *       the runner refuses to move the checkout like that);
+ *   (d) the only files that differ are written notes (`*.md`, `docs/**`).
+ *
+ * (d) applies to agents only: a person on the board may have a reason to
+ * re-deploy anyway (a stuck container, a config-only environment change), and
+ * refusing them would take away a lever they sometimes need. A board-filed
+ * rollback (`allowBackwardDeploy`) skips the whole check, GitHub calls
+ * included -- its whole point is to move production back to an older commit,
+ * and it must work when everything else is on fire.
+ *
+ * Fails OPEN exactly like the DUR-227 ancestry pre-check above: no pinned
+ * commit, no known live version, no github.com repo, a repository GitHub will
+ * not show us (no key saved, or a key without access), GitHub unreachable or
+ * unparseable -- the card is filed. Only a GitHub-confirmed answer ever blocks.
+ *
+ * Returns the summary to stamp onto the payload, or null when nothing could be
+ * worked out.
+ */
+async function assertDeployCardWouldChangeSomething(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string; allowBackwardDeploy?: boolean },
+  options: { filedByAgent: boolean; deployBranch?: string | null },
+  deps: {
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+  } = {},
+): Promise<DeployChangeSummary | null> {
+  try {
+    return await evaluateDeployCardChange(db, companyId, payload, options, deps);
+  } catch (err) {
+    // A refusal (422) is the point of this check and must reach the filer. Any
+    // OTHER failure -- a GitHub response in a shape we did not expect, a lookup
+    // that blew up -- is the "unknown" case, and unknown never blocks a deploy
+    // from being asked for.
+    if (err instanceof HttpError) throw err;
+    logger.warn(
+      { err, companyId, projectId: payload.projectId, commit: payload.commit },
+      "could not work out what a deploy card would change; filing it anyway (pointless-deploy-card guard)",
+    );
+    return null;
+  }
+}
+
+async function evaluateDeployCardChange(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string; allowBackwardDeploy?: boolean },
+  options: { filedByAgent: boolean; deployBranch?: string | null },
+  deps: {
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+  } = {},
+): Promise<DeployChangeSummary | null> {
+  const commit = payload.commit?.trim();
+  if (!commit) return null;
+
+  // A rollback is filed exactly to move production back to an older commit, and
+  // only a person on the board can file one
+  // (assertBackwardDeployOptInIsBoardFiled). Its commit is the one the deploy
+  // runner's own status log says used to be live, not something looked up in
+  // GitHub -- so no GitHub answer, and no GitHub outage, may ever refuse it.
+  // Checks (a)-(d) all run against GitHub, so none of them run here. This is the
+  // first thing checked for that reason: putting the operator's emergency lever
+  // behind a network call is how a rollback fails at the worst moment.
+  if (payload.allowBackwardDeploy === true) return null;
+
+  const workspaceRow = await db
+    .select({ repoUrl: projectWorkspaces.repoUrl })
+    .from(projectWorkspaces)
+    .where(and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)))
+    .then((rows) => rows[0] ?? null);
+  const repo = parseGitHubRepoFromUrl(workspaceRow?.repoUrl);
+  if (!repo) return null;
+
+  const fetchImpl = deps.fetchImpl ?? ghFetch;
+  const resolveGitHubToken =
+    deps.resolveGitHubToken ??
+    ((cid: string) =>
+      secretService(db).resolveGitHubToken(cid, {
+        consumerType: "system",
+        consumerId: "deploy-approval-change-precheck",
+      }));
+  const token = await resolveGitHubToken(companyId).catch(() => null);
+
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "paperclip-deploy-approval-change-precheck",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const liveCommit = await resolveLiveDeployCommit(db, companyId, payload.projectId);
+  const repoLabel = `${repo.owner}/${repo.name}`;
+  const apiBase = gitHubApiBase("github.com");
+
+  // (a) Does the commit exist at all? GitHub answers 404 (or 422 for a sha it
+  // cannot even parse) for a mistyped id.
+  let existsResponse: Response;
+  try {
+    existsResponse = await fetchImpl(
+      `${apiBase}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits/${encodeURIComponent(commit)}`,
+      { headers },
+    );
+  } catch {
+    return null;
+  }
+  if (existsResponse.status === 404 || existsResponse.status === 422) {
+    // A 404 on its own does NOT mean "no such commit". GitHub answers 404 for a
+    // private repository it will not show us at all -- which is what happens
+    // when this company has no GitHub key saved, or the saved key has no access
+    // to this repository. Concluding "that commit does not exist" from that
+    // would refuse every single deploy card the company files, and tell the
+    // filer a plainly wrong reason for it.
+    //
+    // So ask about the repository itself before concluding anything: only when
+    // the repository answers plainly that it is there (200) is the missing
+    // commit real. Anything else -- 404, 401/403, an error, no answer -- means
+    // we cannot see the repository, and the card is filed.
+    let repoVisible = false;
+    try {
+      const repoResponse = await fetchImpl(
+        `${apiBase}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}`,
+        { headers },
+      );
+      repoVisible = repoResponse.status === 200;
+    } catch {
+      return null;
+    }
+    if (!repoVisible) {
+      logger.info(
+        { companyId, projectId: payload.projectId, repo: repoLabel, hasToken: Boolean(token) },
+        "cannot see the repository on GitHub, so a missing commit cannot be told apart from a missing key; filing the deploy card anyway (pointless-deploy-card guard)",
+      );
+      return null;
+    }
+    throw unprocessable(describeMissingDeployCommit({ commit, repo: repoLabel, liveCommit }), {
+      commit,
+      repo: repoLabel,
+      liveCommit,
+      reason: "commit_not_found",
+    });
+  }
+  if (!existsResponse.ok) return null;
+
+  // Everything below compares against the live version; without one there is
+  // nothing to say about what would change.
+  if (!liveCommit) return null;
+
+  let compareResponse: Response;
+  try {
+    compareResponse = await fetchImpl(
+      `${apiBase}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/compare/${encodeURIComponent(liveCommit)}...${encodeURIComponent(commit)}`,
+      { headers },
+    );
+  } catch {
+    return null;
+  }
+  if (!compareResponse.ok) return null;
+
+  let body: Record<string, unknown> | null = null;
+  try {
+    body = (await compareResponse.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const status = typeof body?.status === "string" ? body.status : null;
+  if (!status) return null;
+
+  // base = live, head = requested. "identical"/"behind" mean the requested
+  // commit is already inside what is live; "diverged" means the live version is
+  // not in its history at all.
+  // (b) and (c) refuse only an AGENT. Re-deploying the commit that is already
+  // live is the platform's only way to restart production (deploy-runner.sh
+  // runs the recipe even when the target equals HEAD, and there is no restart
+  // button anywhere in the UI), and rolling back to an older commit is a
+  // deliberate board action the runner supports via allowBackwardDeploy. An
+  // operator who files either of those on purpose must not be locked out by a
+  // guard that exists to stop agents filing cards nobody can act on. The board
+  // still gets the plain-language summary stamped on the card, so it can see
+  // "nothing differs from the version running now" before approving.
+  if (status === "identical" || status === "behind") {
+    if (!options.filedByAgent) {
+      return summarizeChangedPaths(liveCommit, [], { truncated: false });
+    }
+    throw unprocessable(
+      describeDeployCommitAlreadyLive({ commit, liveCommit, identical: status === "identical" }),
+      { commit, liveCommit, compareStatus: status, reason: "already_live" },
+    );
+  }
+  if (status === "diverged") {
+    if (!options.filedByAgent) {
+      return summarizeChangedPaths(liveCommit, [], { truncated: false });
+    }
+    throw unprocessable(
+      describeDeployCommitNotBuiltOnLive({ commit, liveCommit, deployBranch: options.deployBranch ?? null }),
+      { commit, liveCommit, compareStatus: status, reason: "not_built_on_live" },
+    );
+  }
+  if (status !== "ahead") return null;
+
+  const rawFiles = Array.isArray(body.files) ? body.files : null;
+  if (!rawFiles) return null;
+  const paths: string[] = [];
+  for (const entry of rawFiles) {
+    if (!entry || typeof entry !== "object") continue;
+    const file = entry as Record<string, unknown>;
+    if (typeof file.filename === "string") paths.push(file.filename);
+    if (typeof file.previous_filename === "string") paths.push(file.previous_filename);
+  }
+  const summary = summarizeChangedPaths(liveCommit, paths, {
+    truncated: rawFiles.length >= GITHUB_COMPARE_FILE_LIMIT,
+  });
+
+  // (d) Only written notes differ -- nothing an operator or a user would see
+  // changes. The board may still file such a deploy on purpose.
+  if (summary.documentationOnly && options.filedByAgent) {
+    throw unprocessable(
+      describeDocumentationOnlyDeploy({
+        commit,
+        liveCommit,
+        changedFiles: summary.changedFiles,
+        changedFileCount: summary.changedFileCount,
+      }),
+      { commit, liveCommit, changedFiles: summary.changedFiles, reason: "documentation_only" },
+    );
+  }
+  return summary;
 }
 
 /**
@@ -1120,9 +1376,33 @@ function describeApprovalMutationForEscalation(body: unknown): string {
 
 export function approvalRoutes(
   rawDb: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    /**
+     * Previews are disposable: the moment a card is decided (approved,
+     * rejected, sent back, or withdrawn) the copy that was started for it is
+     * thrown away. Passed in from app.ts so the whole process shares one
+     * instance -- that is what enforces "no more than N previews at once".
+     */
+    previewEnvironments?: { stopForApproval: (approvalId: string, reason: string) => Promise<boolean> };
+  } = {},
 ) {
   const router = Router();
+  const previewEnvironments = options.previewEnvironments ?? null;
+
+  /**
+   * Throw away the preview for a card that has just been decided. Never blocks
+   * or fails the decision -- an operator's approve must not depend on a
+   * throwaway process shutting down cleanly.
+   */
+  const discardPreviewFor = async (approvalId: string, reason: string) => {
+    if (!previewEnvironments) return;
+    try {
+      await previewEnvironments.stopForApproval(approvalId, reason);
+    } catch {
+      // Left to the idle sweep in services/preview-environments.ts.
+    }
+  };
   // DUR-394 (DUR-277 Wave 3): this file's own request-scoped instance; rawDb
   // stays unwrapped for the pre-scope approval lookups and access decisions
   // below (see middleware/company-scope.ts).
@@ -1394,10 +1674,17 @@ export function approvalRoutes(
         : parsedDeployPayload;
       await assertDeployCommitIsAncestorOfDeployBranch(db, companyId, deployPayload);
       const branchStamp = await resolveDeployApprovalBranchStamp(db, companyId, deployPayload);
+      // Pointless deploy cards: refuse a card that cannot deploy or would deploy nothing, and
+      // stamp what it would actually change onto the payload.
+      const changesSinceLive = await assertDeployCardWouldChangeSomething(db, companyId, deployPayload, {
+        filedByAgent: req.actor.type === "agent",
+        deployBranch: branchStamp.deployBranch ?? null,
+      });
       approvalInput.payload = deployRequestPayloadSchema.parse({
         ...deployPayload,
         sourceBranch: branchStamp.sourceBranch,
         deployBranch: branchStamp.deployBranch,
+        changesSinceLive: changesSinceLive ?? undefined,
       });
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
@@ -1941,6 +2228,7 @@ export function approvalRoutes(
       }
     }
 
+    await discardPreviewFor(id, "approval_approved");
     const approvePersonaNames = await personaDisplayNamesFor([approval]);
     res.json(withPersonaMetadata(approval, approvePersonaNames));
   });
@@ -1989,6 +2277,7 @@ export function approvalRoutes(
       });
     }
 
+    await discardPreviewFor(id, "approval_rejected");
     const rejectPersonaNames = await personaDisplayNamesFor([approval]);
     res.json(withPersonaMetadata(approval, rejectPersonaNames));
   });
@@ -2027,6 +2316,7 @@ export function approvalRoutes(
         decisionNote: revisionDecisionNote,
       });
 
+      await discardPreviewFor(id, "approval_sent_back");
       const revisionPersonaNames = await personaDisplayNamesFor([approval]);
       res.json(withPersonaMetadata(approval, revisionPersonaNames));
     },
@@ -2066,10 +2356,18 @@ export function approvalRoutes(
         : parsedDeployPayload;
       await assertDeployCommitIsAncestorOfDeployBranch(db, existing.companyId, deployPayload);
       const branchStamp = await resolveDeployApprovalBranchStamp(db, existing.companyId, deployPayload);
+      // Pointless deploy cards: a resubmitted card gets the same "would this deploy anything?"
+      // check as a freshly filed one -- resubmit is the path an agent takes
+      // after a rejection, and it was the path the six pointless cards used.
+      const changesSinceLive = await assertDeployCardWouldChangeSomething(db, existing.companyId, deployPayload, {
+        filedByAgent: req.actor.type === "agent",
+        deployBranch: branchStamp.deployBranch ?? null,
+      });
       req.body.payload = deployRequestPayloadSchema.parse({
         ...deployPayload,
         sourceBranch: branchStamp.sourceBranch,
         deployBranch: branchStamp.deployBranch,
+        changesSinceLive: changesSinceLive ?? undefined,
       });
     }
     let normalizedPayload = req.body.payload
@@ -2257,6 +2555,7 @@ export function approvalRoutes(
       details: { type: approval.type },
     });
 
+    await discardPreviewFor(id, "approval_withdrawn");
     const withdrawPersonaNames = await personaDisplayNamesFor([approval]);
     res.json(withPersonaMetadata(approval, withdrawPersonaNames));
   });

@@ -149,6 +149,31 @@ export function approvalDeployBranchInfo(payload?: Record<string, unknown> | nul
 }
 
 /**
+ * Pointless deploy cards: one plain sentence saying what a deploy card would actually change
+ * — the version running now, and how many files differ from it — from the
+ * summary the server stamped on the payload at filing time. Returns null when
+ * the card carries no summary (an older card, or one filed while GitHub could
+ * not be reached): the card then says nothing rather than implying "checked,
+ * this ships real work".
+ */
+export function approvalDeployChangeSummaryText(payload?: Record<string, unknown> | null): string | null {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return null;
+  const summary = payload?.changesSinceLive;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return null;
+  const record = summary as Record<string, unknown>;
+  const liveCommit = firstNonEmptyString(record.liveCommit);
+  if (!liveCommit) return null;
+  const count = typeof record.changedFileCount === "number" ? record.changedFileCount : null;
+  if (count === null) return null;
+  const live = liveCommit.slice(0, 12);
+  if (count === 0) return `Nothing differs from the version running now (${live}).`;
+  const fileWord = count === 1 ? "1 file" : `${count} files`;
+  return record.documentationOnly === true
+    ? `Changes ${fileWord} since the version running now (${live}) — written notes only.`
+    : `Changes ${fileWord} since the version running now (${live}).`;
+}
+
+/**
  * DUR-3923: a board approval whose kind only LOOKS like a deploy ("deploy_pr",
  * "deploy_release", "rollout", ...) is one nothing acts on -- scripts/deploy-runner.sh
  * only handles kind "deploy", and the server refuses to approve these. Mirrors
