@@ -59,6 +59,7 @@ import {
   updateDocumentAnnotationThreadSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
+  validateAdapterModelEffort,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isUuidLike,
@@ -158,6 +159,7 @@ import { assertEnvironmentSelectionForCompany } from "./environment-selection.js
 import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
+import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -3212,6 +3214,33 @@ export function issueRoutes(
     };
   }
 
+  /**
+   * Adapter-aware typo guard for a task's model/effort override. The shared
+   * schema already rejects Codex/OpenCode-keyed typos; this covers the `effort`
+   * key, whose vocabulary depends on the assignee's adapter (Claude levels vs
+   * free text), so it can only run once the assignee is known.
+   */
+  async function assertIssueAssigneeOverridesValid(
+    companyId: string,
+    assigneeAgentId: string | null | undefined,
+    overrides: unknown,
+  ) {
+    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return;
+    const adapterConfig = (overrides as { adapterConfig?: unknown }).adapterConfig;
+    if (!adapterConfig || typeof adapterConfig !== "object") return;
+    if (!assigneeAgentId) return;
+    const agent = await agentsSvc.getById(assigneeAgentId);
+    if (!agent || agent.companyId !== companyId) return;
+    const error = validateAdapterModelEffort({
+      adapterType: agent.adapterType,
+      adapterConfig,
+      agentAdapterConfig: (agent.adapterConfig as Record<string, unknown> | null | undefined) ?? null,
+    });
+    if (error) {
+      throw unprocessable(`This task's model/effort setting can't be saved. ${error}`);
+    }
+  }
+
   async function normalizeIssueAssigneeAgentReference(
     companyId: string,
     rawAssigneeAgentId: string | null | undefined,
@@ -5705,6 +5734,7 @@ export function issueRoutes(
         : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, createBody))) return;
+    await assertIssueAssigneeOverridesValid(companyId, createBody.assigneeAgentId, createBody.assigneeAdapterOverrides);
     const createAssignmentScope = {
       projectId: await resolveAssignmentProjectId({
         companyId,
@@ -6402,6 +6432,13 @@ export function issueRoutes(
       existing.companyId,
       req.body.assigneeAgentId as string | null | undefined,
     );
+    if (req.body.assigneeAdapterOverrides !== undefined) {
+      await assertIssueAssigneeOverridesValid(
+        existing.companyId,
+        normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId,
+        req.body.assigneeAdapterOverrides,
+      );
+    }
     const titleOrDescriptionChanged = req.body.title !== undefined || req.body.description !== undefined;
     const existingRelations =
       Array.isArray(req.body.blockedByIssueIds)
@@ -6494,6 +6531,35 @@ export function issueRoutes(
     });
     if (featureLaunchGateResult) {
       res.status(409).json({ error: featureLaunchGateResult.message });
+      return;
+    }
+    // Done-gate quality check (offensive quality loop): the gates above ask whether the
+    // work was re-checked, judged against a finish line, deployed, or signed off. This one
+    // asks a cheap independent reviewer whether what the agent reports done actually
+    // matches what the task asked for. Ships off (instance setting general.doneGate);
+    // dry run only comments; enforce sends the task back with the findings and, after
+    // maxRounds, asks the operator instead of looping. Never gates a board/human actor.
+    const doneGateCriticResult = await evaluateDoneGateCritic({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        title: existing.title,
+        description: existing.description ?? null,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+      readGeneralSettings: () => instanceSettings.getGeneral(),
+    });
+    if (doneGateCriticResult) {
+      res.status(409).json({
+        error: doneGateCriticResult.message,
+        findings: doneGateCriticResult.findings,
+        escalated: doneGateCriticResult.escalated,
+      });
       return;
     }
     const shouldCancelActiveRunForCancelledStatus =

@@ -14,6 +14,7 @@ import {
   hasEmbeddedGitCredential,
   redactEmbeddedGitCredentials,
   isEnvironmentDriverSupportedForAdapter,
+  DEFAULT_MAX_TURNS_PER_RUN,
   type BillingType,
   type EnvironmentLeaseStatus,
   type ExecutionWorkspace,
@@ -155,7 +156,7 @@ import {
   resolveExecutionWorkspaceEnvironmentId,
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
-import { instanceSettingsService } from "./instance-settings.js";
+import { instanceSettingsService, readMaxTurnsPerRunOverride } from "./instance-settings.js";
 import { CLAUDE_AUTH_FALLBACK_ENV_KEY, instanceClaudeAuthService } from "./instance-claude-auth.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import {
@@ -226,6 +227,8 @@ import {
   buildFrozenRunErrorMessage,
   buildReapedRunOperatorNotice,
   buildStoppedRunOperatorNotice,
+  buildTurnCapContinuationNote,
+  buildTurnCapRepeatedOperatorNotice,
   type FrozenRunStopReason,
 } from "./operator-notices.js";
 import {
@@ -2550,8 +2553,40 @@ function formatCount(value: number | null | undefined) {
   return value.toLocaleString("en-US");
 }
 
-export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
+/**
+ * The session reset/compaction policy for one agent.
+ *
+ * Precedence, per field: the agent's own runtimeConfig.heartbeat.sessionCompaction
+ * override, then (DUR-3943 item 5) the instance-wide "reset a saved session
+ * after N runs / H hours" setting when it is above 0, then the adapter
+ * default. An instance value of 0 (the shipped default) leaves the adapter
+ * default alone, so adapters with native context management (claude_local,
+ * codex_local, acpx_local, hermes_local: never reset) and adapters that
+ * already rotate (cursor, cursor_cloud, gemini_local, opencode_local,
+ * pi_local: 200 runs / 72 hours) behave exactly as before until the
+ * operator opts in. The instance settings only cover the run-count and age
+ * criteria; the raw-token criterion keeps its adapter default unless the
+ * agent overrides it.
+ */
+export function parseSessionCompactionPolicy(
+  agent: Pick<typeof agents.$inferSelect, "adapterType" | "runtimeConfig">,
+  general?: Pick<InstanceGeneralSettings, "sessionResetAfterRuns" | "sessionResetAfterHours"> | null,
+): SessionCompactionPolicy {
+  const resolved = resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig);
+  if (!general) return resolved.policy;
+  const instanceLimit = (value: unknown, adapterDefault: number) => {
+    const parsed = Math.floor(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : adapterDefault;
+  };
+  return {
+    ...resolved.policy,
+    maxSessionRuns:
+      resolved.explicitOverride.maxSessionRuns ??
+      instanceLimit(general.sessionResetAfterRuns, resolved.policy.maxSessionRuns),
+    maxSessionAgeHours:
+      resolved.explicitOverride.maxSessionAgeHours ??
+      instanceLimit(general.sessionResetAfterHours, resolved.policy.maxSessionAgeHours),
+  };
 }
 
 export function resolveRuntimeSessionParamsForWorkspace(input: {
@@ -4457,6 +4492,104 @@ export function resolveFrozenRunCaps(
   };
 }
 
+// DUR-3943 item 4: adapters that get the instance-wide cap injected as
+// adapterConfig.maxTurnsPerRun. An adapter may only be listed here when it
+// BOTH passes the cap to its CLI AND reports the turn-cap stop back to
+// Paperclip (resultJson.stopReason / errorCode "max_turns_exhausted"), because
+// the continuation + "not continued" note below key off that stop reason. An
+// adapter that caps silently would truncate runs with no note and no
+// continuation.
+//
+// Verified 2026-09-07 by reading packages/adapters/*/src/server/execute.ts:
+// - claude_local: passes --max-turns and sets stopReason "max_turns_exhausted"
+//   (execute.ts, via parse.ts isClaudeMaxTurnsResult). Listed.
+// - hermes_local: passes --max-turns but never sets a stopReason/errorCode for
+//   the cap. NOT listed.
+// - gemini_local: reports "max_turns_exhausted" for its own limit but ignores
+//   adapterConfig.maxTurnsPerRun, so the injected cap would be a no-op. NOT listed.
+// - grok_local: reads config.maxTurns (a different key), so the injected cap is
+//   ignored; it only passes through whatever stopReason the CLI emits. NOT listed.
+// - codex_local, acpx_local, cursor, cursor_cloud, opencode_local, pi_local,
+//   openclaw_gateway, hermes_gateway, http, process: no turn cap at all.
+const MAX_TURNS_PER_RUN_ADAPTER_TYPES = new Set(["claude_local"]);
+
+/**
+ * DUR-3943 item 4: the turn ceiling for one run. Precedence: the agent's
+ * own adapterConfig.maxTurnsPerRun (a number above 0) over the instance
+ * setting (default 60). Blank / 0 / junk on the agent means "use the
+ * instance setting". Pure so the precedence is unit-testable.
+ */
+export function resolveMaxTurnsPerRun(
+  adapterConfig: unknown,
+  general: Pick<InstanceGeneralSettings, "maxTurnsPerRun">,
+): { maxTurnsPerRun: number; source: "agent" | "instance" } {
+  const override = readMaxTurnsPerRunOverride(parseObject(adapterConfig));
+  if (override !== null) return { maxTurnsPerRun: override, source: "agent" };
+  const instanceValue = Math.floor(Number(general.maxTurnsPerRun));
+  return {
+    maxTurnsPerRun: Number.isFinite(instanceValue) && instanceValue > 0 ? instanceValue : DEFAULT_MAX_TURNS_PER_RUN,
+    source: "instance",
+  };
+}
+
+export function adapterHonoursMaxTurnsPerRun(adapterType: string): boolean {
+  return MAX_TURNS_PER_RUN_ADAPTER_TYPES.has(adapterType);
+}
+
+export interface SessionResetDecisionInput {
+  policy: Pick<SessionCompactionPolicy, "enabled" | "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours">;
+  /** Runs already recorded against the saved session (on this task). */
+  sessionRunCount: number;
+  /** When the saved session was first used, or null when unknown. */
+  sessionStartedAt: Date | null;
+  /** Raw input tokens of the latest run in the session, when known. */
+  latestRawInputTokens: number | null;
+  now: Date;
+}
+
+/**
+ * DUR-3943 item 5: decides whether a saved session should be dropped before
+ * this run resumes it. Reasons are plain language because they end up in the
+ * run's warnings and in the handoff note the agent reads. Pure so the reset
+ * decisions are unit-testable without a database.
+ */
+export function decideSessionReset(input: SessionResetDecisionInput): { reset: boolean; reason: string | null } {
+  const { policy, sessionRunCount, sessionStartedAt, latestRawInputTokens, now } = input;
+  if (!policy.enabled || !hasSessionCompactionThresholds(policy)) return { reset: false, reason: null };
+  if (policy.maxSessionRuns > 0 && sessionRunCount >= policy.maxSessionRuns) {
+    return {
+      reset: true,
+      reason:
+        `the saved session had already been used for ${sessionRunCount} run${sessionRunCount === 1 ? "" : "s"} on this task ` +
+        `(the limit is ${policy.maxSessionRuns})`,
+    };
+  }
+  if (
+    policy.maxRawInputTokens > 0 &&
+    latestRawInputTokens !== null &&
+    latestRawInputTokens >= policy.maxRawInputTokens
+  ) {
+    return {
+      reset: true,
+      reason:
+        `the saved session had grown to ${formatCount(latestRawInputTokens)} input tokens ` +
+        `(the limit is ${formatCount(policy.maxRawInputTokens)})`,
+    };
+  }
+  if (policy.maxSessionAgeHours > 0 && sessionStartedAt) {
+    const ageHours = Math.max(0, (now.getTime() - sessionStartedAt.getTime()) / (60 * 60 * 1000));
+    if (ageHours >= policy.maxSessionAgeHours) {
+      return {
+        reset: true,
+        reason:
+          `the saved session was ${Math.floor(ageHours)} hour${Math.floor(ageHours) === 1 ? "" : "s"} old ` +
+          `(the limit is ${policy.maxSessionAgeHours})`,
+      };
+    }
+  }
+  return { reset: false, reason: null };
+}
+
 function isHeartbeatRunTerminalStatus(
   status: string | null | undefined,
 ): status is (typeof HEARTBEAT_RUN_TERMINAL_STATUSES)[number] {
@@ -6230,6 +6363,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     sessionId: string | null;
     issueId: string | null;
     continuationSummaryBody?: string | null;
+    /** DUR-3943 item 5: instance-wide reset defaults; fetched when absent. */
+    general?: Pick<InstanceGeneralSettings, "sessionResetAfterRuns" | "sessionResetAfterHours"> | null;
+    now?: Date;
   }): Promise<SessionCompactionDecision> {
     const { agent, sessionId, issueId } = input;
     if (!sessionId) {
@@ -6241,7 +6377,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
-    const policy = parseSessionCompactionPolicy(agent);
+    const general = input.general ?? (await instanceSettings.getGeneral());
+    const policy = parseSessionCompactionPolicy(agent, general);
     if (!policy.enabled || !hasSessionCompactionThresholds(policy)) {
       return {
         rotate: false,
@@ -6280,28 +6417,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? await getOldestRunForSession(agent.id, sessionId)
         : runs[runs.length - 1] ?? latestRun;
     const latestRawUsage = readRawUsageTotals(latestRun?.usageJson);
-    const sessionAgeHours =
-      latestRun && oldestRun
-        ? Math.max(
-            0,
-            (new Date(latestRun.createdAt).getTime() - new Date(oldestRun.createdAt).getTime()) / (1000 * 60 * 60),
-          )
-        : 0;
-
-    let reason: string | null = null;
-    if (policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
-      reason = `session exceeded ${policy.maxSessionRuns} runs`;
-    } else if (
-      policy.maxRawInputTokens > 0 &&
-      latestRawUsage &&
-      latestRawUsage.inputTokens >= policy.maxRawInputTokens
-    ) {
-      reason =
-        `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
-        `(threshold ${formatCount(policy.maxRawInputTokens)})`;
-    } else if (policy.maxSessionAgeHours > 0 && sessionAgeHours >= policy.maxSessionAgeHours) {
-      reason = `session age reached ${Math.floor(sessionAgeHours)} hours`;
-    }
+    // DUR-3943 item 5: the run count and the age are measured the way the
+    // operator reads the setting -- runs recorded against this session so
+    // far, and hours since the session was first used (not since it was
+    // last used, so an idle session still ages out).
+    const decision = decideSessionReset({
+      policy,
+      sessionRunCount: runs.length,
+      sessionStartedAt: oldestRun ? new Date(oldestRun.createdAt) : null,
+      latestRawInputTokens: latestRawUsage ? latestRawUsage.inputTokens : null,
+      now: input.now ?? new Date(),
+    });
+    const reason = decision.reset ? decision.reason : null;
 
     if (!reason || !latestRun) {
       return {
@@ -8102,10 +8229,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { outcome: "retry_exhausted" as const, queuedRun: null };
   }
 
+  /**
+   * Why the previous run was ended before its automatic retry was queued.
+   * "process_lost": the child process was gone (reapOrphanedRuns).
+   * "run_too_long" / "run_silent": the watchdog stopped a live child that
+   * ran past the max duration or the silence window (stopFrozenRun).
+   */
+  type ProcessLossRetryReason = "process_lost" | "run_too_long" | "run_silent";
+
+  function describeProcessLossRetry(reason: ProcessLossRetryReason): string {
+    switch (reason) {
+      case "run_too_long":
+        return "Queued automatic retry after the previous run was stopped for running past the time limit";
+      case "run_silent":
+        return "Queued automatic retry after the previous run was stopped for showing no output past the silence window";
+      case "process_lost":
+      default:
+        return "Queued automatic retry after orphaned child process was confirmed dead";
+    }
+  }
+
   async function enqueueProcessLossRetry(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
     now: Date,
+    reason: ProcessLossRetryReason = "process_lost",
   ) {
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
@@ -8214,9 +8362,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: "Queued automatic retry after orphaned child process was confirmed dead",
+      message: describeProcessLossRetry(reason),
       payload: {
         retryOfRunId: run.id,
+        stopReason: reason,
       },
     });
 
@@ -9510,6 +9659,157 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
+  /**
+   * DUR-3943 item 4: what happens when a run ends because it hit its turn
+   * cap. Reuses the existing max-turn continuation (a bounded scheduled
+   * retry on the same task) rather than a new loop:
+   *
+   * - continuation queued -> the run's error becomes the plain note
+   *   "Stopped after N turns; the work continues in a fresh run" and the
+   *   agent is NOT parked in "error" (the caller finalizes it as cancelled,
+   *   the same rule the frozen-run watchdog uses);
+   * - continuation attempts exhausted (the default policy allows two, so
+   *   this is the third cap hit in a row on the same task) -> the note says
+   *   so and an operator notice is written to the Activity feed;
+   * - continuation not possible (task no longer in progress, lock moved,
+   *   policy switched off) -> the note says the work was not continued and
+   *   why; nothing else changes.
+   */
+  async function continueAfterTurnCapForRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    agent: typeof agents.$inferSelect,
+    opts?: { turnCap?: number | null; now?: Date },
+  ): Promise<{
+    outcome: "scheduled" | "retry_exhausted" | "not_scheduled";
+    timesInARow: number;
+    note: string;
+    reason?: string;
+    reasonCode?: string;
+  }> {
+    const policy = parseMaxTurnContinuationPolicy(agent);
+    const resultJson = parseObject(run.resultJson);
+    const reportedTurns = asNumber(resultJson.num_turns, 0);
+    const turns = opts?.turnCap && opts.turnCap > 0
+      ? opts.turnCap
+      : reportedTurns > 0
+        ? reportedTurns
+        : null;
+    // The chain of max-turn continuations carries scheduledRetryAttempt: 0
+    // on the first run, 1 on the first continuation, and so on. A retry
+    // scheduled for another reason (a transient upstream error) is not a
+    // cap hit, so the count starts over there.
+    const timesInARow =
+      run.scheduledRetryReason === MAX_TURN_CONTINUATION_RETRY_REASON
+        ? (run.scheduledRetryAttempt ?? 0) + 1
+        : 1;
+    const contextSnapshot = parseObject(run.contextSnapshot);
+    const issueId = readNonEmptyString(contextSnapshot.issueId);
+
+    const writeNote = async (note: string) => {
+      await db
+        .update(heartbeatRuns)
+        .set({ error: note, updatedAt: opts?.now ?? new Date() })
+        .where(eq(heartbeatRuns.id, run.id));
+    };
+
+    if (!policy.enabled || policy.maxAttempts <= 0) {
+      const note = buildTurnCapContinuationNote({ turns, outcome: "not_continued", reasonCode: "policy_disabled" });
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: "Max-turn continuation suppressed because the policy is disabled",
+        payload: {
+          retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+          policy,
+        },
+      });
+      await writeNote(note);
+      return { outcome: "not_scheduled", timesInARow, note, reason: "policy_disabled", reasonCode: "policy_disabled" };
+    }
+
+    const scheduled = await scheduleBoundedRetryForRun(run, agent, {
+      now: opts?.now,
+      retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+      wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+      maxAttempts: policy.maxAttempts,
+      delayMs: policy.delayMs,
+    });
+
+    if (scheduled.outcome === "scheduled") {
+      const note = buildTurnCapContinuationNote({ turns, outcome: "continued" });
+      await writeNote(note);
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: note,
+        payload: {
+          retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+          turns,
+          timesInARow,
+          continuationRunId: scheduled.run.id,
+          scheduledRetryAttempt: scheduled.attempt,
+          maxAttempts: scheduled.maxAttempts,
+        },
+      });
+      return { outcome: "scheduled", timesInARow, note };
+    }
+
+    if (scheduled.outcome === "retry_exhausted") {
+      const note = buildTurnCapContinuationNote({ turns, outcome: "exhausted", timesInARow });
+      await writeNote(note);
+      const issue = issueId
+        ? await db
+            .select({ identifier: issues.identifier, title: issues.title })
+            .from(issues)
+            .where(eq(issues.id, issueId))
+            .then((rows) => rows[0] ?? null)
+        : null;
+      const message = buildTurnCapRepeatedOperatorNotice({
+        agentName: agent.name,
+        issueIdentifier: issue?.identifier ?? null,
+        issueTitle: issue?.title ?? null,
+        turns,
+        timesInARow,
+      });
+      await logActivity(db, {
+        companyId: run.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: agent.id,
+        runId: run.id,
+        action: "heartbeat.turn_limit_repeated",
+        entityType: "heartbeat_run",
+        entityId: run.id,
+        details: {
+          message,
+          // ActivityRow links heartbeat_run entries to the agent via details.agentId.
+          agentId: agent.id,
+          agentName: agent.name,
+          issueId,
+          issueIdentifier: issue?.identifier ?? null,
+          turns,
+          timesInARow,
+          maxAttempts: scheduled.maxAttempts,
+        },
+      }).catch((err) => {
+        logger.warn({ err, runId: run.id }, "failed to log operator notice for repeated turn-limit stops");
+      });
+      return { outcome: "retry_exhausted", timesInARow, note };
+    }
+
+    // scheduled.reason is the internal gate wording (for the run events);
+    // the note the operator sees is built from the error code instead.
+    const note = buildTurnCapContinuationNote({
+      turns,
+      outcome: "not_continued",
+      reasonCode: scheduled.errorCode,
+    });
+    await writeNote(note);
+    return { outcome: "not_scheduled", timesInARow, note, reason: scheduled.reason, reasonCode: scheduled.errorCode };
+  }
+
   function issueRunPriorityRank(priority: string | null | undefined) {
     switch (priority) {
       case "critical":
@@ -10432,7 +10732,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (shouldRetry) {
       const agent = await getAgent(run.agentId);
       if (agent) {
-        retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
+        retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now, errorCode);
       } else {
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
@@ -11497,7 +11797,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const effectiveExecutionWorkspaceMode: ReturnType<typeof resolveExecutionWorkspaceMode> =
       requestedExecutionWorkspaceMode;
-    const executionPolicy = { executionMode: (await instanceSettings.getGeneral()).executionMode };
+    // Read once per run: the execution policy, the turn cap (DUR-3943 item 4)
+    // and the saved-session reset policy (item 5) all come from here.
+    const generalSettingsForRun = await instanceSettings.getGeneral();
+    const executionPolicy = { executionMode: generalSettingsForRun.executionMode };
     let selectedEnvironmentId = environmentResolution.environmentId;
     if (isExecutionForcedToKubernetes(executionPolicy)) {
       let kubernetesEnvironment = await environmentsSvc.findKubernetesEnvironment(agent.companyId);
@@ -12327,6 +12630,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
       issueId,
       continuationSummaryBody: continuationSummary?.body ?? null,
+      general: generalSettingsForRun,
     });
     if (sessionCompaction.rotate) {
       context.paperclipSessionHandoffMarkdown = sessionCompaction.handoffMarkdown;
@@ -12868,15 +13172,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         | undefined;
       let costAnomalyNotified = false;
 
+      // DUR-3943 item 4: the effective turn cap (agent override, else the
+      // instance setting) goes to the adapter as adapterConfig.maxTurnsPerRun.
+      // It is added here, after the session/config fingerprints were taken
+      // from runtimeConfig, so changing the instance default never counts as
+      // a config change that would reset saved sessions.
+      const turnCap = adapterHonoursMaxTurnsPerRun(agent.adapterType)
+        ? resolveMaxTurnsPerRun(runtimeConfig, generalSettingsForRun)
+        : null;
+      const configForAdapter = turnCap
+        ? { ...runtimeConfig, maxTurnsPerRun: turnCap.maxTurnsPerRun }
+        : runtimeConfig;
+      if (turnCap && turnCap.source === "instance") {
+        await onLog(
+          "stdout",
+          `[paperclip] This run may use at most ${turnCap.maxTurnsPerRun} turns (the instance-wide setting; the agent has no limit of its own).\n`,
+        );
+      }
+
+      let turnCapContinuation: Awaited<ReturnType<typeof continueAfterTurnCapForRun>> | null = null;
+
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,
           runtime: runtimeForAdapter,
-          config: runtimeConfig,
+          config: configForAdapter,
           context,
-          runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+          runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(configForAdapter) ?? null,
           executionTarget,
           executionTransport: remoteExecution
             ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
@@ -13212,26 +13536,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         }
         if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
-          const policy = parseMaxTurnContinuationPolicy(agent);
-          if (policy.enabled && policy.maxAttempts > 0) {
-            await scheduleBoundedRetryForRun(livenessRun, agent, {
-              retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
-              wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
-              maxAttempts: policy.maxAttempts,
-              delayMs: policy.delayMs,
-            });
-          } else {
-            await appendRunEvent(livenessRun, await nextRunEventSeq(livenessRun.id), {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: "Max-turn continuation suppressed because the policy is disabled",
-              payload: {
-                retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
-                policy,
-              },
-            });
-          }
+          turnCapContinuation = await continueAfterTurnCapForRun(livenessRun, agent, {
+            turnCap: turnCap?.maxTurnsPerRun ?? null,
+          });
         } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
@@ -13358,10 +13665,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         }
       }
+      // DUR-3943 item 4: hitting the turn cap with a fresh run already queued
+      // is not a reason to park the agent in "error" (and fire the
+      // needs-attention notice) -- same rule as the frozen-run watchdog. The
+      // operator is told only when the continuations run out.
+      const turnCapContinued = outcome === "failed" && turnCapContinuation?.outcome === "scheduled";
       await finalizeAgentStatus(
         agent.id,
-        outcome,
-        outcome === "succeeded" ? null : (adapterResult.errorMessage ?? null),
+        turnCapContinued ? "cancelled" : outcome,
+        outcome === "succeeded" ? null : (turnCapContinuation?.note ?? adapterResult.errorMessage ?? null),
       );
     } catch (err) {
       const message = redactCurrentUserText(
@@ -15855,6 +16167,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const agent = await getAgent(run.agentId);
       if (!agent) return { outcome: "missing_agent" as const };
       return scheduleBoundedRetryForRun(run, agent, opts);
+    },
+
+    // DUR-3943 item 5: the saved-session reset decision the run path makes
+    // before resuming, exposed so it can be driven directly in tests.
+    evaluateSessionReset: async (input: { agentId: string; sessionId: string; issueId?: string | null; now?: Date }) => {
+      const agent = await getAgent(input.agentId);
+      if (!agent) return { rotate: false, reason: null, handoffMarkdown: null, previousRunId: null };
+      return evaluateSessionCompaction({
+        agent,
+        sessionId: input.sessionId,
+        issueId: input.issueId ?? null,
+        now: input.now,
+      });
+    },
+
+    // DUR-3943 item 4: the turn-cap handling the run finalizer applies to a
+    // failed max-turn run, exposed so it can be driven directly in tests.
+    continueAfterTurnCap: async (runId: string, opts?: { turnCap?: number | null; now?: Date }) => {
+      const run = await getRun(runId, { unsafeFullResultJson: true });
+      if (!run) return { outcome: "missing_run" as const };
+      const agent = await getAgent(run.agentId);
+      if (!agent) return { outcome: "missing_agent" as const };
+      return continueAfterTurnCapForRun(run, agent, opts);
     },
 
     reconcileStrandedAssignedIssues,

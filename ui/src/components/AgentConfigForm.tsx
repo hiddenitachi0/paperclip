@@ -9,6 +9,8 @@ import type {
 } from "@paperclipai/shared";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  DEFAULT_MAX_RUN_DURATION_MINUTES,
+  DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   supportedEnvironmentDriversForAdapter,
 } from "@paperclipai/shared";
 import type { AdapterModel } from "../api/agents";
@@ -30,7 +32,7 @@ import { Button } from "@/components/ui/button";
 import { FolderOpen, Heart, ChevronDown, X } from "lucide-react";
 import { asBoolean, asFiniteNumber, asObject, cn } from "../lib/utils";
 import { extractModelName, extractProviderId } from "../lib/model-utils";
-import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "../lib/agent-model-effort";
+import { getThinkingEffortKey, getThinkingEffortOptions, supportsThinkingEffort } from "@paperclipai/shared";
 import { queryKeys } from "../lib/queryKeys";
 import { useCompany } from "../context/CompanyContext";
 import {
@@ -118,6 +120,26 @@ const emptyOverlay: AgentConfigOverlay = {
 
 /** Stable empty object used as fallback for missing env config to avoid new-object-per-render. */
 const EMPTY_ENV: Record<string, EnvBinding> = {};
+
+/**
+ * Per-agent run time limit fields (polish round 3): the stored value is a
+ * whole number of minutes, absent when the agent follows the instance-wide
+ * setting. Shown as "" when absent; "" commits as undefined so the key is
+ * dropped from adapterConfig (buildAgentUpdatePatch omits undefined entries).
+ */
+export function formatOptionalMinutes(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  const parsed = typeof value === "number" ? value : Number(String(value).trim());
+  return Number.isFinite(parsed) ? String(parsed) : "";
+}
+
+export function parseOptionalMinutes(raw: string): number | undefined | "invalid" {
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) return "invalid";
+  return Math.floor(parsed);
+}
 
 export function supportsAdapterModelRefresh(adapterType: string): boolean {
   return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "acpx_local";
@@ -1417,6 +1439,41 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       onCommit={(v) => mark("adapterConfig", "graceSec", v)}
                       immediate
                       className={inputClass}
+                    />
+                  </Field>
+                  {/* Polish round 3: per-agent overrides of the instance-wide run
+                      time limits (DUR-3940). Empty = instance default, 0 = off for
+                      this agent; the heartbeat's resolveFrozenRunCaps reads them. */}
+                  <Field label="Stop a run after (min)" hint={help.maxRunDurationMinutes}>
+                    <DraftInput
+                      data-testid="agent-max-run-duration-minutes"
+                      type="number"
+                      min={0}
+                      step={1}
+                      inputMode="numeric"
+                      value={formatOptionalMinutes(eff("adapterConfig", "maxRunDurationMinutes", config.maxRunDurationMinutes))}
+                      onCommit={(v) => {
+                        const parsed = parseOptionalMinutes(v);
+                        if (parsed !== "invalid") mark("adapterConfig", "maxRunDurationMinutes", parsed);
+                      }}
+                      className={inputClass}
+                      placeholder={`Instance default: ${generalSettings?.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES} min`}
+                    />
+                  </Field>
+                  <Field label="Stop a silent run after (min)" hint={help.silentRunTimeoutMinutes}>
+                    <DraftInput
+                      data-testid="agent-silent-run-timeout-minutes"
+                      type="number"
+                      min={0}
+                      step={1}
+                      inputMode="numeric"
+                      value={formatOptionalMinutes(eff("adapterConfig", "silentRunTimeoutMinutes", config.silentRunTimeoutMinutes))}
+                      onCommit={(v) => {
+                        const parsed = parseOptionalMinutes(v);
+                        if (parsed !== "invalid") mark("adapterConfig", "silentRunTimeoutMinutes", parsed);
+                      }}
+                      className={inputClass}
+                      placeholder={`Instance default: ${generalSettings?.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES} min`}
                     />
                   </Field>
                 </>

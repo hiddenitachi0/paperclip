@@ -92,6 +92,47 @@ describe("activity formatting", () => {
     expect(formatActivityVerb("heartbeat.run_stopped")).toBe("stopped a run that was taking too long for");
     expect(formatIssueActivityAction("heartbeat.run_stopped")).toBe("stopped a run that was taking too long");
     expect(isOperatorNoticeAction("heartbeat.run_stopped")).toBe(true);
+    // DUR-3943 item 4: repeated turn-limit stops on one task.
+    expect(formatActivityVerb("heartbeat.turn_limit_repeated")).toBe(
+      "stopped queuing fresh runs after repeated turn-limit stops for",
+    );
+    expect(formatIssueActivityAction("heartbeat.turn_limit_repeated")).toBe(
+      "stopped queuing fresh runs after repeated turn-limit stops",
+    );
+    expect(isOperatorNoticeAction("heartbeat.turn_limit_repeated")).toBe(true);
+    expect(
+      formatOperatorNotice("heartbeat.turn_limit_repeated", {
+        message: "Backend Engineer hit the limit of 60 turns per run on \"Cut agent context cost\" (DUR-3943) 3 times in a row.",
+      }),
+    ).toContain("3 times in a row");
+    // Polish round 3: the daily check of the shared Claude sign-in.
+    expect(formatActivityVerb("instance.claude_auth.check_failed")).toBe("found that the shared Claude sign-in stopped working");
+    expect(formatActivityVerb("instance.claude_auth.expiring")).toBe("warned that the shared Claude sign-in expires soon");
+    expect(formatIssueActivityAction("instance.claude_auth.saved")).toBe("saved the shared Claude sign-in");
+    expect(isOperatorNoticeAction("instance.claude_auth.check_failed")).toBe(true);
+    expect(isOperatorNoticeAction("instance.claude_auth.expiring")).toBe(true);
+    expect(isOperatorNoticeAction("instance.claude_auth.saved")).toBe(false);
+    expect(
+      formatOperatorNotice("instance.claude_auth.expiring", { message: "The shared Claude sign-in expires in about 2 days." }),
+    ).toBe("The shared Claude sign-in expires in about 2 days.");
+  });
+
+  // Admin auth hardening: security notices about operator accounts render
+  // their server-written sentence, and never fall back to a raw action key.
+  it("treats admin-account security entries as operator notices with plain verbs", () => {
+    expect(isOperatorNoticeAction("security.admin_added_outside_app")).toBe(true);
+    expect(isOperatorNoticeAction("security.admin_signed_in_new_device")).toBe(true);
+    expect(isOperatorNoticeAction("security.signed_out_everywhere")).toBe(true);
+    expect(
+      formatOperatorNotice("security.admin_password_changed_outside_app", {
+        message: "The password for instance admin Filip was changed without going through the app.",
+      }),
+    ).toBe("The password for instance admin Filip was changed without going through the app.");
+    expect(formatActivityVerb("security.admin_added_outside_app")).toBe("noticed a new instance admin added outside the app:");
+    expect(formatActivityVerb("security.admin_promoted")).toBe("made an instance admin of");
+    expect(formatActivityVerb("security.admin_record_tampered")).not.toContain("security.");
+    expect(isOperatorNoticeAction("security.admin_record_baseline")).toBe(true);
+    expect(formatActivityVerb("security.admin_record_baseline")).toBe("took a fresh record of the admin list");
   });
 
   it("surfaces the server-written message for operator notices only", () => {
@@ -103,6 +144,20 @@ describe("activity formatting", () => {
     expect(formatOperatorNotice("issue.updated", { message: "not a notice" })).toBeNull();
     expect(formatOperatorNotice("heartbeat.run_reaped", { message: "" })).toBeNull();
     expect(formatOperatorNotice("heartbeat.run_reaped", null)).toBeNull();
+  });
+
+  it("treats a failed persona post as an operator notice (DUR-134 item 10)", () => {
+    expect(isOperatorNoticeAction("persona_post.publish_failed")).toBe(true);
+    expect(isOperatorNoticeAction("persona_post.published")).toBe(false);
+    expect(
+      formatOperatorNotice("persona_post.publish_failed", {
+        message: "A post to Maja — Fanvue could not be published and will not be retried on its own. Reason: token expired.",
+      }),
+    ).toBe("A post to Maja — Fanvue could not be published and will not be retried on its own. Reason: token expired.");
+    expect(
+      formatOperatorNotice("persona_post.publish_failed", { accountLabel: "Maja — Fanvue", failureReason: "token expired" }),
+    ).toBe("A post to Maja — Fanvue could not be published and will not be retried on its own. Reason: token expired");
+    expect(formatActivityVerb("persona_post.published")).toBe("published a post for");
   });
 
   it("builds a sentence for legacy stall alerts that carry no message", () => {

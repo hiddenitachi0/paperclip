@@ -221,6 +221,161 @@ describe("ApprovalPayloadRenderer", () => {
     });
   });
 
+  it("renders a model_boost card in plain language: the ask, why, where the boss stands, and what approve/deny do", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "model_boost",
+            issueId: "11111111-1111-4111-8111-111111111111",
+            agentId: "22222222-2222-4222-8222-222222222222",
+            agentName: "Backend Engineer",
+            requestedModel: "opus",
+            requestedEffort: "high",
+            reason: "This refactor spans 40 files and I keep losing track.",
+            estimatedExtraCostCents: 500,
+            maxSpendCents: 2000,
+            durationMinutes: 240,
+            title: "Paperclip — Backend Engineer asks to use Opus at high effort for this task, up to $20, for the next 4 hours",
+            summary: "Why: This refactor spans 40 files and I keep losing track.",
+            bossReview: {
+              bossAgentId: "33333333-3333-4333-8333-333333333333",
+              bossName: "Engineering Lead",
+              status: "forwarded",
+              requestedAt: "2026-09-07T10:00:00.000Z",
+              deadlineAt: "2026-09-07T10:30:00.000Z",
+              decidedAt: "2026-09-07T10:05:00.000Z",
+              note: "Worth it, the task is genuinely stuck.",
+            },
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Backend Engineer asks to use Opus at high effort for this task, up to $20, for the next 4 hours");
+    expect(text).toContain("This refactor spans 40 files and I keep losing track.");
+    expect(text).toContain("Model: Opus · Effort: high · Money cap: $20 · Time window: 4 hours");
+    expect(text).toContain("Engineering Lead passed this on to you: Worth it, the task is genuinely stuck.");
+    expect(text).toContain("If you deny, it keeps working on its normal setting.");
+    expect(text).not.toContain("estimatedExtraCostCents");
+    expect(text).not.toContain("maxSpendCents");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("tells the operator a model_boost card is still with the boss, and that they may decide anyway", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "model_boost",
+            agentName: "Writer",
+            requestedEffort: "xhigh",
+            reason: "Long piece.",
+            maxSpendCents: 500,
+            title: "Writer asks to work at very high effort for this task, up to $5, for the next 4 hours",
+            bossReview: {
+              bossAgentId: "33333333-3333-4333-8333-333333333333",
+              bossName: "Editor",
+              status: "awaiting_boss",
+              requestedAt: "2026-09-07T10:00:00.000Z",
+              deadlineAt: "2026-09-07T10:30:00.000Z",
+            },
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Waiting for Editor to weigh in first.");
+    expect(text).toContain("You can still decide now if you do not want to wait.");
+    expect(text).toContain("Effort: very high");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("renders a persona_publish card as plain language: the post text, disclosure, why, and what approve does (DUR-134)", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "persona_publish",
+            personaId: "6f1c7f0e-3a1b-4c2d-9e8f-0a1b2c3d4e5f",
+            personaAccountId: "6f1c7f0e-3a1b-4c2d-9e8f-0a1b2c3d4e60",
+            personaPostId: "6f1c7f0e-3a1b-4c2d-9e8f-0a1b2c3d4e61",
+            platform: "fanvue",
+            reason: "warmup",
+            caption: "Golden hour on the pier tonight.",
+            disclosureText: "This content was created with AI assistance.",
+            title: "Post to Maja — Fanvue",
+            summary: "This account is new, so her first 5 posts need your OK before they go out.",
+            isPersonaRequest: true,
+            personaDisplayName: "Maja",
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Post to Maja — Fanvue");
+    expect(text).toContain("What Maja wants to post");
+    expect(text).toContain("Golden hour on the pier tonight.");
+    expect(text).toContain("This content was created with AI assistance.");
+    expect(text).toContain("New account: her first posts need your OK");
+    expect(text).toContain("her first 5 posts need your OK");
+    expect(text).toContain("If you approve");
+    expect(text).toContain("If you reject, it is never posted.");
+    // No plumbing on the card: no UUIDs, no raw JSON keys.
+    expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+    expect(text).not.toContain("personaPostId");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("says plainly when no AI disclosure is added to a persona post", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "persona_publish",
+            reason: "requires_approval_channel",
+            caption: "Hi",
+            disclosureText: null,
+            title: "Post to Maja — X",
+            summary: "Posts to Maja — X always need your OK before they go out.",
+          }}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("This account always needs your OK");
+    expect(text).toContain("Not added -- disclosure is switched off for this account.");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("can hide the repeated title when the card header already shows it", () => {
     const root = createRoot(container);
 
@@ -239,6 +394,61 @@ describe("ApprovalPayloadRenderer", () => {
 
     expect(container.textContent).toContain("Board asked for approval before posting the frog.");
     expect(container.textContent).not.toContain("TitleReply with an ASCII frog");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("shows the quality check's findings on a done_gate_exhausted card (plainSummary, no summary)", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "done_gate_exhausted",
+            issueId: "8e6f9a2e-9e2a-4f7a-9c8b-1a2b3c4d5e6f",
+            title: "Paperclip — decide whether \"Add a language switcher\" is really finished",
+            plainSummary:
+              "The agent has said \"Add a language switcher\" (PAP-12) is finished 3 times, and an independent quality check disagreed 2 times.\n\nThe last time, the check found:\n1. No test was added for the switcher.",
+            recommendedAction:
+              "Look at the task and the findings. If the work is actually fine, mark the task done yourself.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("disagreed 2 times");
+    expect(container.textContent).toContain("1. No test was added for the switcher.");
+    expect(container.textContent).toContain("mark the task done yourself");
+    expect(container.textContent).not.toContain("\"plainSummary\"");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("prefers summary over plainSummary when a card carries both", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="request_board_approval"
+          payload={{
+            kind: "done_gate_exhausted",
+            title: "decide whether the task is really finished",
+            summary: "Summary text the card should show.",
+            plainSummary: "Duplicate text that must not be shown twice.",
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Summary text the card should show.");
+    expect(container.textContent).not.toContain("Duplicate text that must not be shown twice.");
 
     act(() => {
       root.unmount();

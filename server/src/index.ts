@@ -51,7 +51,10 @@ import {
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
+  personaPublisherSweepService,
+  escalationGrantService,
   organizationCheckupService,
+  instanceClaudeAuthService,
   instanceSettingsService,
   issueThreadInteractionService,
   reconcileCloudUpstreamRunsOnStartup,
@@ -73,6 +76,13 @@ import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
+import {
+  reconcileAdminAuthSnapshot,
+  recordAdminSessionCreated,
+  recordPasswordChangedViaApp,
+  recordUserUpdatedViaApp,
+  resolveAdminAuthSigningSecret,
+} from "./services/admin-auth-audit.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
@@ -654,7 +664,27 @@ export async function startServer(): Promise<StartedServer> {
       },
       "Authenticated mode auth origin configuration",
     );
-    const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
+    // Admin auth hardening: better-auth tells us when a session is created,
+    // a user row is updated, or a password changes through its endpoints;
+    // each becomes an operator notice (see services/admin-auth-audit.ts).
+    // The hooks are best-effort and never interrupt the login flow.
+    const adminAuthSecret = resolveAdminAuthSigningSecret();
+    const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins, {
+      onSessionCreated: async (session) => {
+        await recordAdminSessionCreated(db as any, session);
+      },
+      onUserUpdated: async (user) => {
+        await recordUserUpdatedViaApp(db as any, { secret: adminAuthSecret, userId: user.id, email: user.email, name: user.name });
+      },
+      onPasswordChanged: async ({ userId }) => {
+        if (userId) {
+          await recordPasswordChangedViaApp(db as any, { secret: adminAuthSecret, userId });
+        } else {
+          // reset-password has no session; the periodic check attributes it.
+          await reconcileAdminAuthSnapshot(db as any, { secret: adminAuthSecret, trigger: "app_change" });
+        }
+      },
+    });
     betterAuthHandler = createBetterAuthHandler(auth);
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
@@ -770,6 +800,7 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: config.host,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
+    adminAuthCheckIntervalMinutes: config.adminAuthCheckIntervalMinutes,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
@@ -968,8 +999,12 @@ export async function startServer(): Promise<StartedServer> {
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
+    const personaPublisherSweep = config.personaPublishingSweepEnabled
+      ? personaPublisherSweepService(schedulerDb as any)
+      : null;
     const organizationCheckups = organizationCheckupService(schedulerDb as any);
     const issueThreadInteractions = issueThreadInteractionService(schedulerDb as any);
+    const escalationGrants = escalationGrantService(schedulerDb as any);
 
     // Reap orphaned runs before timer ticks start so wakeups cannot coalesce
     // into a dead "running" row during startup recovery. Wrapped in
@@ -1169,6 +1204,15 @@ export async function startServer(): Promise<StartedServer> {
       "heartbeat scheduler tick: untrackedWriteAlerts",
       () => untrackedWriteAlerts.tick(new Date()),
     );
+    // DUR-134 review follow-up: move queued/approved persona posts through
+    // the publisher's safety gates (kill switches, warm-up, autonomy gate,
+    // daily cap, one-shot claim). Without this pass nothing ever published
+    // on its own -- an approved post sat waiting for a manual trigger.
+    const personaPublisherSweepChain = personaPublisherSweep
+      ? schedulerChain("personaPublisherSweep", "heartbeat scheduler tick: personaPublisherSweep", () =>
+          personaPublisherSweep.tick(),
+        )
+      : null;
     // DUR-162: close pending operator-queue cards nobody has answered within
     // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them
     // to pile up in the live decision queue forever.
@@ -1176,6 +1220,14 @@ export async function startServer(): Promise<StartedServer> {
       "issueThreadInteractionsAbandonment",
       "heartbeat scheduler tick: issueThreadInteractions abandonment",
       () => issueThreadInteractions.expireAbandonedPending(new Date()),
+    );
+    // Boost asks waiting on a boss (agent -> boss -> operator) move on to the
+    // operator by themselves once the boss's time is up, so a silent boss
+    // can never leave a report stuck on its normal setting forever.
+    const modelBoostBossReviewTimeoutsChain = schedulerChain(
+      "modelBoostBossReviewTimeouts",
+      "heartbeat scheduler tick: model boost boss-review timeouts",
+      () => escalationGrants.sweepBossReviewTimeouts(new Date()),
     );
     const environmentCustomImagesCleanupChain = schedulerChain(
       "environmentCustomImagesCleanup",
@@ -1352,6 +1404,19 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "untracked-write alert tick failed");
         });
 
+      if (personaPublisherSweepChain) {
+        void personaPublisherSweepChain()
+          .then((result) => {
+            if (!result) return;
+            if (result.published > 0 || result.failed > 0 || result.pendingApproval > 0 || result.errors > 0) {
+              logger.info({ ...result }, "persona publisher sweep moved posts");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "persona publisher sweep tick failed");
+          });
+      }
+
       void issueThreadInteractionsAbandonmentChain()
         .then((expired) => {
           if (expired && expired.length > 0) {
@@ -1363,6 +1428,16 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "issue-thread-interaction abandonment tick failed");
+        });
+
+      void modelBoostBossReviewTimeoutsChain()
+        .then((movedOn) => {
+          if (movedOn && movedOn.length > 0) {
+            logger.info({ movedOn: movedOn.length }, "boost requests moved on to the operator after the boss did not answer");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "model boost boss-review timeout tick failed");
         });
 
       void environmentCustomImagesCleanupChain()
@@ -1443,6 +1518,79 @@ export async function startServer(): Promise<StartedServer> {
     // settled and the first report does not describe a restart in progress.
     setTimeout(tickWeeklyCheckup, 2 * 60 * 1000).unref?.();
     setInterval(tickWeeklyCheckup, config.weeklyCheckupTickMinutes * 60 * 1000);
+
+    // Admin auth hardening: periodically compare the live instance-admin
+    // set (plus each admin's email and password fingerprint) against the
+    // signed record and report anything that changed outside the app. The
+    // first run after boot takes the baseline if there is none. Bypass
+    // scope like the check-up above: reads auth tables, writes one notice
+    // per company.
+    const adminAuthSecret = resolveAdminAuthSigningSecret();
+    // Same DUR-385 single-flight as the chains above. The trigger is set
+    // immediately before the call and read when the chain actually starts, so
+    // a skipped tick (the previous check still running) cannot change what the
+    // in-flight check is doing.
+    let adminAuthCheckTrigger: "startup" | "scheduled" = "startup";
+    const adminAuthCheckChain = schedulerChain(
+      "adminAuthCheck",
+      "heartbeat scheduler tick: admin auth record check",
+      () => reconcileAdminAuthSnapshot(schedulerDb as any, { secret: adminAuthSecret, trigger: adminAuthCheckTrigger }),
+    );
+    const tickAdminAuthCheck = (trigger: "startup" | "scheduled") => {
+      if (heartbeatDrainState?.isDraining) return;
+      adminAuthCheckTrigger = trigger;
+      void adminAuthCheckChain()
+        .then((result) => {
+          if (!result) return;
+          if (result.status !== "unchanged") {
+            logger.warn({ ...result }, "admin auth record check found something to report");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "admin auth record check failed");
+        });
+    };
+    setTimeout(() => tickAdminAuthCheck("startup"), 90 * 1000).unref?.();
+    if (config.adminAuthCheckIntervalMinutes > 0) {
+      setInterval(() => tickAdminAuthCheck("scheduled"), config.adminAuthCheckIntervalMinutes * 60 * 1000);
+    }
+
+    // Polish round 3: re-test the shared Claude sign-in once a day. The tick
+    // is hourly but the service only makes a CLI call when the last check is
+    // a day old, and leaves a plain notice in every company's Activity feed
+    // when the check fails or the token is a few days from expiring. Bypass
+    // scope for the same reason as the check-up: instance-wide row, notices
+    // written across every company. Always on: there is nothing to do when
+    // no sign-in is saved.
+    const claudeAuthChecks = instanceClaudeAuthService(schedulerDb as any);
+    // Single-flight like every other chain (DUR-385): the CLI call this makes
+    // can outlive its own tick, and a second copy would hold a second bypass
+    // connection while the first one is still waiting on the CLI.
+    const claudeAuthCheckChain = schedulerChain(
+      "claudeAuthCheck",
+      "heartbeat scheduler tick: daily Claude sign-in check",
+      () => claudeAuthChecks.runScheduledCheck(),
+    );
+    const tickClaudeAuthCheck = () => {
+      if (heartbeatDrainState?.isDraining) return;
+      void claudeAuthCheckChain()
+        .then((result) => {
+          if (!result || result.outcome !== "checked") return;
+          if (result.notice) {
+            logger.warn(
+              { health: result.status.health, expiresInDays: result.status.expiresInDays, companies: result.noticedCompanyIds.length },
+              `daily Claude sign-in check: ${result.notice.message}`,
+            );
+          } else {
+            logger.info({ health: result.status.health, expiresInDays: result.status.expiresInDays }, "daily Claude sign-in check passed");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "daily Claude sign-in check failed to run");
+        });
+    };
+    setTimeout(tickClaudeAuthCheck, 5 * 60 * 1000).unref?.();
+    setInterval(tickClaudeAuthCheck, 60 * 60 * 1000);
   }
   
   // DUR-352 (DUR-277 Wave 6): deliberately stays bypass-scoped forever, not a

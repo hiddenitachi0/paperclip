@@ -1,15 +1,21 @@
 import { Router, type Request } from "express";
 import { and, eq, inArray } from "drizzle-orm";
-import { companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
+import { approvals, companies, heartbeatRuns, issues, projectWorkspaces, projects, createRequestScopedDb, type Db } from "@paperclipai/db";
 import {
+  ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
   addApprovalCommentSchema,
   createApprovalSchema,
   deployRequestPayloadSchema,
+  describeModelBoostConsequence,
+  describeModelBoostRequest,
   featureLaunchRequestPayloadSchema,
   formatApprovalTechnicalReference,
   formatApprovalTitle,
   type InstructionsChangeRequestPayload,
   instructionsChangeRequestPayloadSchema,
+  type ModelBoostBossReviewState,
+  type ModelBoostRequestPayload,
+  modelBoostBossReviewDecisionSchema,
   modelBoostRequestPayloadSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
@@ -19,6 +25,7 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
+import type { CrossCompanyInstructionDecisionHooks } from "../services/approvals.js";
 import {
   approvalService,
   accessService,
@@ -50,9 +57,13 @@ import { redactEventPayload } from "../redaction.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
 import { describeToolCapability, summarizeMcpServer } from "../services/agent-tool-audit.js";
+import { crossCompanyInstructionService } from "../services/cross-company-instructions.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { isStatusOnlyCheapRecoveryContext } from "../services/recovery/model-profile-hint.js";
 import { recordCheapRunEscalation } from "../services/recovery/cheap-run-escalation.js";
+// Pure helpers only -- never the full escalation-grants service module here
+// (it pulls in the issue/heartbeat graph, which route tests mock away).
+import { buildBossReviewStamp, readBossReview } from "../services/model-boost-boss-review.js";
 import { ghFetch, gitHubApiBase } from "../services/github-fetch.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
@@ -389,6 +400,107 @@ function isModelBoostRequestApproval(type: unknown, payload: Record<string, unkn
 }
 
 /**
+ * Rewrites a boost ask's title/summary into the operator's words ("Backend
+ * Engineer asks to use Opus at high effort for this task, up to $20, for the
+ * next 4 hours") and attaches the boss-first routing stamp. The requester's
+ * own title/summary never reach the card: the wording is server-owned so the
+ * dashboard, the Telegram message and the activity log all say the same thing.
+ */
+export function stampModelBoostPlainLanguage(
+  payload: ModelBoostRequestPayload,
+  input: { agentName: string; bossReview: ModelBoostBossReviewState | null },
+): ModelBoostRequestPayload {
+  const description = {
+    agentName: input.agentName,
+    requestedModel: payload.requestedModel ?? null,
+    requestedEffort: payload.requestedEffort ?? null,
+    maxSpendCents: payload.maxSpendCents,
+    durationMinutes: payload.durationMinutes ?? ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
+  };
+  const { bossReview: _ignoredBossReview, ...rest } = payload;
+  return modelBoostRequestPayloadSchema.parse({
+    ...rest,
+    agentName: input.agentName,
+    title: describeModelBoostRequest(description),
+    summary: `Why: ${payload.reason.trim()}\n\n${describeModelBoostConsequence(description)}`,
+    ...(input.bossReview ? { bossReview: input.bossReview } : {}),
+  });
+}
+
+/**
+ * Wakes the boss named on a freshly filed boost ask so they can answer it
+ * (decline, or pass it on to the operator with their take). Best-effort: a
+ * failed wake is logged, and the timeout sweep still moves the ask on to the
+ * operator, so a boss that never wakes cannot leave the requester stuck.
+ */
+async function queueBossReviewWakeup(
+  db: Db,
+  heartbeat: { wakeup: (agentId: string, options: Record<string, unknown>) => Promise<{ id: string } | null> },
+  input: {
+    approval: { id: string; companyId: string; requestedByAgentId: string | null; payload: Record<string, unknown> };
+    review: ModelBoostBossReviewState;
+    linkedIssueIds: string[];
+  },
+) {
+  const { approval, review } = input;
+  const issueId = typeof approval.payload.issueId === "string" ? approval.payload.issueId : null;
+  const title = typeof approval.payload.title === "string" ? approval.payload.title : "A teammate asks for a boost";
+  const requesterName = typeof approval.payload.agentName === "string" ? approval.payload.agentName : "A teammate";
+  try {
+    const wakeRun = await heartbeat.wakeup(review.bossAgentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "model_boost_boss_review",
+      payload: {
+        approvalId: approval.id,
+        issueId,
+        issueIds: input.linkedIssueIds,
+        requesterAgentId: approval.requestedByAgentId,
+      },
+      requestedByActorType: "system",
+      requestedByActorId: null,
+      contextSnapshot: {
+        source: "approval.model_boost_boss_review",
+        approvalId: approval.id,
+        issueId,
+        issueIds: input.linkedIssueIds,
+        taskId: issueId,
+        wakeReason: "model_boost_boss_review",
+        bossReviewDeadlineAt: review.deadlineAt,
+        requesterAgentId: approval.requestedByAgentId,
+        requesterName,
+        boostRequestTitle: title,
+        instructions:
+          `${requesterName} (your direct report) asks for a temporary model/effort boost on their current task: "${title}". ` +
+          `Read the request (GET /api/approvals/${approval.id}) and answer with POST /api/approvals/${approval.id}/boss-review ` +
+          `and a JSON body {"decision":"decline"|"forward","note":"..."}: "decline" if the task does not need it (they keep working on their normal setting); ` +
+          `"forward" if you think the operator should consider it, with your recommendation in plain words. ` +
+          `If you do not answer by ${review.deadlineAt} the request goes to the operator on its own.`,
+      },
+    });
+    await logActivity(db, {
+      companyId: approval.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "approval.boss_review_requested",
+      entityType: "approval",
+      entityId: approval.id,
+      details: {
+        bossAgentId: review.bossAgentId,
+        requesterAgentId: approval.requestedByAgentId,
+        deadlineAt: review.deadlineAt,
+        wakeRunId: wakeRun?.id ?? null,
+      },
+    });
+  } catch (err) {
+    logger.warn(
+      { err, approvalId: approval.id, bossAgentId: review.bossAgentId },
+      "failed to queue boss wakeup for a boost request; the timeout sweep will move it on to the operator",
+    );
+  }
+}
+
+/**
  * `request_board_approval` approvals whose payload carries `kind:"merge_pr"`
  * ask an operator to merge a pull request. DUR-40: a merge approval targeting
  * a project's declared upstream-mirror branch (read-only, never deployed)
@@ -650,17 +762,21 @@ function commitsRefer(a: string, b: string): boolean {
  * Never the repository slug — see DUR-24.
  */
 async function resolveApprovalProjectLabel(db: Db, companyId: string, issueIds: string[]) {
+  // Both lookups are pinned to the filing company: an issue id from another
+  // company must never resolve to that company's project name (the link to
+  // the issue itself is refused a few steps later, and the card is then
+  // removed again -- see the create route).
   for (const issueId of issueIds) {
     const issueRow = await db
       .select({ projectId: issues.projectId })
       .from(issues)
-      .where(eq(issues.id, issueId))
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (!issueRow?.projectId) continue;
     const projectRow = await db
       .select({ name: projects.name })
       .from(projects)
-      .where(eq(projects.id, issueRow.projectId))
+      .where(and(eq(projects.id, issueRow.projectId), eq(projects.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (projectRow?.name) return projectRow.name;
   }
@@ -757,12 +873,12 @@ function parseOwnerSlashRepo(repo: unknown): { owner: string; name: string } | n
   return { owner, name: rawName.replace(/\.git$/i, "") };
 }
 
-async function resolveProjectIdForIssues(db: Db, issueIds: string[]): Promise<string | null> {
+async function resolveProjectIdForIssues(db: Db, companyId: string, issueIds: string[]): Promise<string | null> {
   for (const issueId of issueIds) {
     const row = await db
       .select({ projectId: issues.projectId })
       .from(issues)
-      .where(eq(issues.id, issueId))
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (row?.projectId) return row.projectId;
   }
@@ -811,7 +927,7 @@ async function assertMergePrRepoMatchesProject(
   if (payload.kind !== "merge_pr") return;
   const claimed = parseOwnerSlashRepo(payload.repo);
   if (!claimed) return;
-  const projectId = await resolveProjectIdForIssues(db, issueIds);
+  const projectId = await resolveProjectIdForIssues(db, companyId, issueIds);
   if (!projectId) return;
   const registered = await resolveProjectPrimaryRepo(db, companyId, projectId);
   if (!registered) return;
@@ -1023,6 +1139,41 @@ export function approvalRoutes(
   const secretsSvc = secretService(db, rawDb);
   const escalationGrantsSvc = escalationGrantService(db);
   const personasSvc = personaService(db);
+  const crossCompanyInstructionsSvc = crossCompanyInstructionService(db, { rawDb });
+
+  /**
+   * Guarded cross-company channel: the hooks approvalService runs INSIDE
+   * approve/reject for a cross_company_instruction card, so the decision and
+   * the delivery (or refusal) are one step -- if delivery fails the card
+   * goes back to pending. The liaison gets the instruction as an issue in
+   * THIS company and is woken; the sending company only learns the outcome.
+   */
+  function crossCompanyDecisionHooks(decidedByUserId: string, decisionNote: string | null | undefined): CrossCompanyInstructionDecisionHooks {
+    return {
+      deliverApproved: (card) =>
+        crossCompanyInstructionsSvc.deliverApproved(card, {
+          userId: decidedByUserId,
+          decisionNote,
+          wakeLiaison: (agentId, issueId) =>
+            heartbeat.wakeup(agentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "cross_company_instruction_approved",
+              payload: { approvalId: card.id, issueId },
+              requestedByActorType: "user",
+              requestedByActorId: decidedByUserId,
+              contextSnapshot: {
+                source: "cross_company_instruction.approved",
+                approvalId: card.id,
+                issueId,
+                taskId: issueId,
+                wakeReason: "cross_company_instruction_approved",
+              },
+            }),
+        }),
+      markRejected: (card) => crossCompanyInstructionsSvc.markRejected(card, { userId: decidedByUserId, decisionNote }),
+    };
+  }
 
   /** Look up persona display names for one or more approvals in a single query. */
   async function personaDisplayNamesFor(
@@ -1270,6 +1421,34 @@ export function approvalRoutes(
         agentId: boostPayload.agentId,
         reason: boostPayload.reason,
       });
+      // A boost is for the requester's CURRENT task only: the grant is
+      // enforced at dispatch against the issue's assignee, so an ask for a
+      // task the agent does not hold would be approved and then never apply.
+      const boostIssue = await db
+        .select({ id: issues.id, companyId: issues.companyId, assigneeAgentId: issues.assigneeAgentId })
+        .from(issues)
+        .where(eq(issues.id, boostPayload.issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!boostIssue || boostIssue.companyId !== companyId) {
+        res.status(422).json({ error: "A boost request must name a task in this company" });
+        return;
+      }
+      if (boostIssue.assigneeAgentId !== boostPayload.agentId) {
+        res.status(422).json({ error: "A boost can only be asked for the task the agent is currently assigned to" });
+        return;
+      }
+      const boostAgent = await agentsSvc.getById(boostPayload.agentId);
+      if (!boostAgent || boostAgent.companyId !== companyId) {
+        res.status(422).json({ error: "Boost request must come from an agent in this company" });
+        return;
+      }
+      // Boss-first routing: the ask walks up reportsTo to the nearest boss
+      // who can answer. Nobody there -> straight to the operator (no stamp).
+      const boss = await escalationGrantsSvc.resolveBossForAgent(companyId, boostPayload.agentId);
+      approvalInput.payload = stampModelBoostPlainLanguage(boostPayload, {
+        agentName: boostAgent.name || "An agent",
+        bossReview: boss ? buildBossReviewStamp(boss) : null,
+      });
     }
     if (isToolGrantRequestApproval(approvalInput.type, approvalInput.payload)) {
       const toolGrantPayload = toolGrantRequestPayloadSchema.parse(approvalInput.payload);
@@ -1419,10 +1598,19 @@ export function approvalRoutes(
     });
 
     if (uniqueIssueIds.length > 0) {
-      await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
-        agentId: actor.agentId,
-        userId: actor.actorType === "user" ? actor.actorId : null,
-      });
+      try {
+        await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
+          agentId: actor.agentId,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        });
+      } catch (err) {
+        // Isolation audit: linking is refused when an issue id belongs to
+        // another company (or does not exist). The card was already written
+        // above; take it back out so a refused request never leaves a card
+        // behind in this company's inbox.
+        await db.delete(approvals).where(and(eq(approvals.id, approval.id), eq(approvals.companyId, companyId)));
+        throw err;
+      }
     }
 
     await logActivity(db, {
@@ -1436,9 +1624,140 @@ export function approvalRoutes(
       details: { type: approval.type, issueIds: uniqueIssueIds },
     });
 
+    // Boss-first routing: a boost ask stamped with a boss goes to that boss
+    // first. The card is already visible to the operator, but the Telegram
+    // bridge holds it back while the boss is on the clock.
+    if (isModelBoostRequestApproval(approval.type, approval.payload)) {
+      const review = readBossReview(approval.payload);
+      if (review && review.status === "awaiting_boss") {
+        await queueBossReviewWakeup(db, heartbeat, { approval, review, linkedIssueIds: uniqueIssueIds });
+      }
+    }
+
     const personaNames = await personaDisplayNamesFor([approval]);
     res.status(201).json(withPersonaMetadata(approval, personaNames));
   });
+
+  // Boss-first routing for a boost ask (agent -> boss -> operator): the boss
+  // named on the ask answers here. Agent-only, like /withdraw -- the operator
+  // keeps approve/reject and can still decide the card at any point.
+  router.post(
+    "/approvals/:id/boss-review",
+    scopeFromApprovalIdParam(checkCompanyAccess),
+    validate(modelBoostBossReviewDecisionSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Approval not found" });
+        return;
+      }
+      if (req.actor.type !== "agent" || !req.actor.agentId) {
+        res.status(403).json({ error: "Only the boss this boost request is waiting on can answer it" });
+        return;
+      }
+      if (
+        !(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId, {
+          describeBlockedAction: () => "answer a teammate's boost request",
+          resolveIssueId: () => firstLinkedIssueId(issueApprovalsSvc, existing.id),
+        }))
+      ) return;
+
+      const bossAgentId = req.actor.agentId;
+      const approval = await escalationGrantsSvc.recordBossDecision({
+        approvalId: id,
+        bossAgentId,
+        decision: req.body.decision,
+        note: req.body.note,
+      });
+      const review = readBossReview(approval.payload);
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+
+      if (req.body.decision === "decline") {
+        await interactionsSvc.resolveInteractionsLinkedToApproval(approval, { agentId: bossAgentId, userId: null });
+        await logActivity(db, {
+          companyId: approval.companyId,
+          actorType: "agent",
+          actorId: bossAgentId,
+          agentId: bossAgentId,
+          action: "approval.rejected",
+          entityType: "approval",
+          entityId: approval.id,
+          details: {
+            type: approval.type,
+            requestedByAgentId: approval.requestedByAgentId,
+            linkedIssueIds,
+            decisionNote: approval.decisionNote,
+            decidedByBossAgentId: bossAgentId,
+          },
+        });
+        for (const issueId of linkedIssueIds) {
+          await logActivity(db, {
+            companyId: approval.companyId,
+            actorType: "agent",
+            actorId: bossAgentId,
+            agentId: bossAgentId,
+            action: "issue.approval_rejected",
+            entityType: "issue",
+            entityId: issueId,
+            details: {
+              approvalId: approval.id,
+              approvalType: approval.type,
+              decision: "rejected",
+              decisionNote: approval.decisionNote,
+              requestedByAgentId: approval.requestedByAgentId ?? null,
+            },
+          });
+        }
+        // Deny = stay on base. Wake the requester so it carries on instead of
+        // sitting idle waiting for an answer that is not coming.
+        if (approval.requestedByAgentId) {
+          const primaryIssueId = linkedIssueIds[0] ?? null;
+          try {
+            await heartbeat.wakeup(approval.requestedByAgentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "approval_rejected",
+              payload: { approvalId: approval.id, approvalStatus: approval.status, issueId: primaryIssueId, issueIds: linkedIssueIds },
+              requestedByActorType: "agent",
+              requestedByActorId: bossAgentId,
+              contextSnapshot: {
+                source: "approval.rejected_by_boss",
+                approvalId: approval.id,
+                approvalStatus: approval.status,
+                issueId: primaryIssueId,
+                issueIds: linkedIssueIds,
+                taskId: primaryIssueId,
+                wakeReason: "approval_rejected",
+                decisionNote: approval.decisionNote,
+              },
+            });
+          } catch (err) {
+            logger.warn({ err, approvalId: approval.id }, "failed to queue requester wakeup after a boss declined a boost");
+          }
+        }
+      } else {
+        await logActivity(db, {
+          companyId: approval.companyId,
+          actorType: "agent",
+          actorId: bossAgentId,
+          agentId: bossAgentId,
+          action: "approval.boss_review_forwarded",
+          entityType: "approval",
+          entityId: approval.id,
+          details: {
+            requestedByAgentId: approval.requestedByAgentId,
+            linkedIssueIds,
+            note: review?.note ?? null,
+          },
+        });
+      }
+
+      const bossReviewPersonaNames = await personaDisplayNamesFor([approval]);
+      res.json(withPersonaMetadata(approval, bossReviewPersonaNames));
+    },
+  );
 
   router.get("/approvals/:id/issues", scopeFromApprovalIdParam(checkApprovalReadAccess), async (req, res) => {
     const id = req.params.id as string;
@@ -1468,6 +1787,7 @@ export function approvalRoutes(
       id,
       decidedByUserId,
       req.body.decisionNote,
+      { crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote) },
     );
 
     if (applied) {
@@ -1632,7 +1952,9 @@ export function approvalRoutes(
     async (req, res) => {
     const id = req.params.id as string;
     const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
+    const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote, {
+      crossCompanyInstruction: crossCompanyDecisionHooks(decidedByUserId, req.body.decisionNote),
+    });
 
     if (applied) {
       // DUR-29: resolve any request_confirmation linked to this approval too.
@@ -1792,6 +2114,51 @@ export function approvalRoutes(
         // resubmit is exactly as caller-controlled as create per the DUR-252 comment above.
         await assertMergePrIssueIdsAreRelevant(db, existing.companyId, anchorIssueIds, getActorInfo(req));
         stampOriginalIssueIds(normalizedPayload, anchorIssueIds);
+      }
+      if (isModelBoostRequestApproval(existing.type, normalizedPayload)) {
+        // A resubmit body is exactly as caller-controlled as a create body, so
+        // the same rules apply as at filing: the ask stays pinned to the task
+        // and agent it was filed for, the card wording is server-owned, and
+        // the boss's stamp is whatever is ALREADY persisted -- never anything
+        // the requester sends. The boss is not woken again: it already had (or
+        // still has) its turn on this ask, and re-stamping/re-waking here would
+        // let "send back for changes" reset a decline into a fresh review.
+        const boostPayload = modelBoostRequestPayloadSchema.parse(normalizedPayload);
+        const persistedBoost = (existing.payload ?? {}) as Record<string, unknown>;
+        if (typeof persistedBoost.issueId === "string" && boostPayload.issueId !== persistedBoost.issueId) {
+          res.status(422).json({ error: "A boost request cannot be moved to a different task on resubmit" });
+          return;
+        }
+        if (typeof persistedBoost.agentId === "string" && boostPayload.agentId !== persistedBoost.agentId) {
+          res.status(422).json({ error: "A boost request cannot be moved to a different agent on resubmit" });
+          return;
+        }
+        if (req.actor.type === "agent" && req.actor.agentId !== boostPayload.agentId) {
+          res.status(403).json({ error: "An agent can only request a boost for itself" });
+          return;
+        }
+        const boostIssue = await db
+          .select({ id: issues.id, companyId: issues.companyId, assigneeAgentId: issues.assigneeAgentId })
+          .from(issues)
+          .where(eq(issues.id, boostPayload.issueId))
+          .then((rows) => rows[0] ?? null);
+        if (!boostIssue || boostIssue.companyId !== existing.companyId) {
+          res.status(422).json({ error: "A boost request must name a task in this company" });
+          return;
+        }
+        if (boostIssue.assigneeAgentId !== boostPayload.agentId) {
+          res.status(422).json({ error: "A boost can only be asked for the task the agent is currently assigned to" });
+          return;
+        }
+        const boostAgent = await agentsSvc.getById(boostPayload.agentId);
+        if (!boostAgent || boostAgent.companyId !== existing.companyId) {
+          res.status(422).json({ error: "Boost request must come from an agent in this company" });
+          return;
+        }
+        normalizedPayload = stampModelBoostPlainLanguage(boostPayload, {
+          agentName: boostAgent.name || "An agent",
+          bossReview: readBossReview(persistedBoost),
+        });
       }
     }
     if (normalizedPayload && isInstructionsChangeRequestApproval(existing.type, normalizedPayload)) {

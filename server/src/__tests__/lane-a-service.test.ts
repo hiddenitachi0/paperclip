@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
+  activityLog,
   agents,
   companies,
   companyMcpTools,
+  companyMemberships,
   companySecretBindings,
   companySecretProviderConfigs,
   companySecretVersions,
@@ -12,6 +14,7 @@ import {
   costEvents,
   createDb,
   laneAConversations,
+  laneAMessages,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -49,7 +52,9 @@ describeEmbeddedPostgres("lane A service", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(laneAMessages);
     await db.delete(laneAConversations);
+    await db.delete(activityLog);
     await db.delete(costEvents);
     await db.delete(companySecretBindings);
     await db.delete(companySecretVersions);
@@ -57,6 +62,7 @@ describeEmbeddedPostgres("lane A service", () => {
     await db.delete(companySecretProviderConfigs);
     await db.delete(companyMcpTools);
     await db.delete(agents);
+    await db.delete(companyMemberships);
     await db.delete(companies);
     if (previousApiKey === undefined) {
       delete process.env.ANTHROPIC_API_KEY;
@@ -416,9 +422,13 @@ describeEmbeddedPostgres("lane A service", () => {
 
     expect(result.response).toBe("Here you go: https://cdn.fal/image.png");
     expect(mockCreate).toHaveBeenCalledTimes(2);
-    expect(mockCreate.mock.calls[0][0].tools).toEqual([
-      expect.objectContaining({ name: qualifiedToolName }),
-    ]);
+    // Built-in quick-agent tools ride alongside the granted Tools-library tool.
+    expect(mockCreate.mock.calls[0][0].tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: qualifiedToolName }),
+        expect.objectContaining({ name: "route_to_agent" }),
+      ]),
+    );
     expect(mockCallTool).toHaveBeenCalledTimes(1);
     expect(mockCallTool).toHaveBeenCalledWith({ name: "generate_image", arguments: { prompt: "a cat" } });
     expect(mockConnect).toHaveBeenCalledTimes(1);
@@ -486,6 +496,347 @@ describeEmbeddedPostgres("lane A service", () => {
     expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 1);
 
     unmockMcpSdk();
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  // ─── Quick agents (round 2): instructions, memory, built-in actions ─────────
+
+  it("stores each turn and replays the earlier transcript on the next message", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+    target.role = "secretary";
+    target.laneAInstructions = "Always answer in Norwegian.";
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Hei! Jeg heter Ada." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Du spurte hva jeg heter." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db);
+
+    const first = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "What is your name?",
+    });
+    const second = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "What did I just ask?",
+      conversationId: first.conversationId,
+    });
+
+    expect(second.turnCount).toBe(2);
+    expect(second.actions).toEqual([]);
+    const secondCall = mockCreate.mock.calls[1][0];
+    expect(secondCall.system).toContain("You are Ada");
+    expect(secondCall.system).toContain("Your role is secretary");
+    expect(secondCall.system).toContain("Always answer in Norwegian.");
+    expect(secondCall.messages).toEqual([
+      { role: "user", content: "What is your name?" },
+      { role: "assistant", content: "Hei! Jeg heter Ada." },
+      { role: "user", content: "What did I just ask?" },
+    ]);
+
+    const transcript = await svc.getConversation({
+      companyId,
+      targetAgentId: target.id,
+      conversationId: first.conversationId,
+      requester: { userId: "user-1", agentId: null },
+    });
+    expect(transcript.messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "What is your name?"],
+      ["assistant", "Hei! Jeg heter Ada."],
+      ["user", "What did I just ask?"],
+      ["assistant", "Du spurte hva jeg heter."],
+    ]);
+    await expect(
+      svc.getConversation({
+        companyId,
+        targetAgentId: target.id,
+        conversationId: first.conversationId,
+        requester: { userId: "someone-else", agentId: null },
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("refuses to continue another person's conversation: 403, no model call, no replay", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+
+    const mockCreate = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "ok" }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "end_turn",
+    });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db);
+
+    const alice = { userId: "alice", agentId: null };
+    const mallory = { userId: "mallory", agentId: null };
+    const first = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: alice,
+      message: "my secret plan is X",
+    });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+
+    // A second person in the same company holding the conversation id.
+    await expect(
+      svc.sendMessage({
+        companyId,
+        targetAgent: target,
+        requester: mallory,
+        message: "what was the plan?",
+        conversationId: first.conversationId,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    // Nothing reached the model, so Alice's stored turns were never replayed.
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+
+    // Nothing was written to Alice's conversation either.
+    const [conversation] = await db
+      .select()
+      .from(laneAConversations)
+      .where(eq(laneAConversations.id, first.conversationId));
+    expect(conversation?.turnCount).toBe(1);
+    const stored = await db.select().from(laneAMessages).where(eq(laneAMessages.conversationId, first.conversationId));
+    expect(stored.map((row) => row.content)).toEqual(["my secret plan is X", "ok"]);
+
+    // An agent requester cannot pick up a person's conversation, and vice versa.
+    await expect(
+      svc.sendMessage({
+        companyId,
+        targetAgent: target,
+        requester: { userId: null, agentId: target.id },
+        message: "what was the plan?",
+        conversationId: first.conversationId,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    // The owner can still continue it and gets the replay.
+    const second = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: alice,
+      message: "what was the plan?",
+      conversationId: first.conversationId,
+    });
+    expect(second.turnCount).toBe(2);
+    expect(mockCreate.mock.calls[1][0].messages).toEqual([
+      { role: "user", content: "my secret plan is X" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "what was the plan?" },
+    ]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("route_to_agent runs the tasks:assign check: a member without that right gets a refusal, an operator gets a task", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+    const bob = await seedAgent(companyId, false, "Bob");
+    // A viewer may look but not assign; an operator may assign.
+    await db.insert(companyMemberships).values([
+      { companyId, principalType: "user", principalId: "viewer-1", status: "active", membershipRole: "viewer" },
+      { companyId, principalType: "user", principalId: "operator-1", status: "active", membershipRole: "operator" },
+    ]);
+
+    const toolTurn = {
+      content: [
+        { type: "tool_use", id: "call_1", name: "route_to_agent", input: { agent: "Bob", request: "Fix the login page" } },
+      ],
+      usage: { input_tokens: 50, output_tokens: 20 },
+      stop_reason: "tool_use",
+    };
+    const textTurn = (text: string) => ({
+      content: [{ type: "text", text }],
+      usage: { input_tokens: 60, output_tokens: 15 },
+      stop_reason: "end_turn",
+    });
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce(toolTurn)
+      .mockResolvedValueOnce(textTurn("Sorry, I can't hand that to Bob for you."))
+      .mockResolvedValueOnce(toolTurn)
+      .mockResolvedValueOnce(textTurn("Done — Bob has it as DUR-12."));
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-1", identifier: "DUR-12", status: "todo" }));
+    // Only the task creation is faked; the permission decision is the real one.
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent } });
+
+    const denied = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "viewer-1", agentId: null },
+      actor: { type: "board", userId: "viewer-1", companyIds: [companyId], source: "session", isInstanceAdmin: false },
+      message: "Get Bob to fix the login page",
+    });
+    expect(denied.actions).toEqual([
+      { tool: "route_to_agent", summary: "Refused to hand work to Bob: the person asking may not assign tasks to them.", ok: false },
+    ]);
+    expect(createIssueForAgent).not.toHaveBeenCalled();
+    const deniedToolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0];
+    expect(deniedToolResult).toMatchObject({ type: "tool_result", tool_use_id: "call_1", is_error: true });
+    expect(deniedToolResult.content).toContain("no task was created");
+
+    const allowed = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "operator-1", agentId: null },
+      actor: { type: "board", userId: "operator-1", companyIds: [companyId], source: "session", isInstanceAdmin: false },
+      message: "Get Bob to fix the login page",
+    });
+    expect(allowed.actions).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+    expect(createIssueForAgent).toHaveBeenCalledTimes(1);
+    expect(createIssueForAgent).toHaveBeenCalledWith(expect.objectContaining({ companyId, assigneeAgentId: bob.id }));
+
+    // With no actor at all (a caller that forgot to pass one) the hand-over is refused too.
+    mockCreate.mockResolvedValueOnce(toolTurn).mockResolvedValueOnce(textTurn("Sorry."));
+    const noActor = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "operator-1", agentId: null },
+      message: "Get Bob to fix the login page",
+    });
+    expect(noActor.actions[0]).toMatchObject({ tool: "route_to_agent", ok: false });
+    expect(createIssueForAgent).toHaveBeenCalledTimes(1);
+
+    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    expect(logged.map((row) => (row.details as { ok: boolean }).ok)).toEqual([false, true, false]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("hands work to a colleague through route_to_agent and logs the action", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+    const bob = await seedAgent(companyId, false, "Bob");
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [
+          { type: "tool_use", id: "call_1", name: "route_to_agent", input: { agent: "Bob", request: "Fix the login page" } },
+        ],
+        usage: { input_tokens: 50, output_tokens: 20 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Done — Bob has it as DUR-12." }],
+        usage: { input_tokens: 60, output_tokens: 15 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-1", identifier: "DUR-12", status: "todo" }));
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent } });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      // The local board may assign anything; the real tasks:assign check runs.
+      actor: { type: "board", userId: "user-1", companyIds: [companyId], source: "local_implicit" },
+      message: "Can you get someone to fix the login page?",
+    });
+
+    expect(result.response).toBe("Done — Bob has it as DUR-12.");
+    expect(result.actions).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+    expect(createIssueForAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ companyId, assigneeAgentId: bob.id, title: "Fix the login page" }),
+    );
+    // The colleague roster is in the prompt, minus the quick agent itself.
+    expect(mockCreate.mock.calls[0][0].system).toContain("- Bob — engineer");
+    expect(mockCreate.mock.calls[0][0].system).not.toContain("- Ada — engineer");
+    // The model saw the tool's confirmation.
+    const toolResultTurn = mockCreate.mock.calls[1][0].messages.at(-1);
+    expect(toolResultTurn.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "call_1", is_error: false });
+    expect(toolResultTurn.content[0].content).toContain("DUR-12");
+
+    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ companyId, actorType: "user", actorId: "user-1", agentId: target.id });
+    expect(logged[0]?.details).toMatchObject({ tool: "route_to_agent", ok: true, summary: "Handed to Bob as task DUR-12." });
+
+    const stored = await db.select().from(laneAMessages).where(eq(laneAMessages.conversationId, result.conversationId));
+    const assistantRow = stored.find((row) => row.role === "assistant");
+    expect(assistantRow?.toolCalls).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("refuses a tool outside the allow-list, logs the refusal, and still answers", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Ada");
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "call_x", name: "delete_all_tasks", input: {} }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "I can't do that." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn();
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent } });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "delete everything",
+    });
+
+    expect(result.response).toBe("I can't do that.");
+    expect(result.actions).toEqual([
+      { tool: "delete_all_tasks", summary: 'Refused a tool that is not on the allow-list ("delete_all_tasks").', ok: false },
+    ]);
+    expect(createIssueForAgent).not.toHaveBeenCalled();
+    const toolResultTurn = mockCreate.mock.calls[1][0].messages.at(-1);
+    expect(toolResultTurn.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "call_x", is_error: true });
+
+    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.details).toMatchObject({ tool: "delete_all_tasks", ok: false });
+
     vi.doUnmock("@anthropic-ai/sdk");
     vi.resetModules();
   });

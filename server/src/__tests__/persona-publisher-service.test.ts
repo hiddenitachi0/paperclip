@@ -14,6 +14,8 @@ import {
   companySecretVersions,
   companySecrets,
   createDb,
+  createRequestScopedDb,
+  runInPooledScope,
   personaAccountPublishCounters,
   personaAccounts,
   personaPosts,
@@ -355,6 +357,79 @@ describeEmbeddedPostgres("persona-publisher-service attemptPublish", () => {
     const [reloaded] = await db.select().from(personaPosts).where(eq(personaPosts.id, post.id));
     expect(reloaded!.status).toBe("failed");
     expect(reloaded!.failureReason).toContain("expired or insufficient scope");
+  });
+
+  it("publishes through the request-scoped db proxy (the routes' and scheduler's db) without db.transaction()", async () => {
+    // Regression: the merged version called db.transaction() for the
+    // post-publish bookkeeping. Every route (and the scheduler sweep) hands
+    // this service createRequestScopedDb(rawDb), whose .transaction() throws
+    // by design -- so a post Fanvue had already accepted was recorded as
+    // "failed" and the warm-up counter never moved.
+    const companyId = await seedCompany();
+    const persona = await seedPersona(companyId);
+    const account = await seedAccount(companyId, persona.id, { autonomyMode: "autonomous", warmupPostsRequired: 0 });
+    await bindPublishToken(companyId, account.id);
+    const post = await seedPost(companyId, persona.id, account.id);
+    stubSuccessfulFanvueFetch("fv_proxy");
+
+    const scoped = createRequestScopedDb(db);
+    const outcome = await runInPooledScope(db, () => personaPublisherService(scoped).attemptPublish(post.id));
+    expect(outcome).toEqual({ outcome: "published", externalPostId: "fv_proxy" });
+
+    const [reloaded] = await db.select().from(personaPosts).where(eq(personaPosts.id, post.id));
+    expect(reloaded!.status).toBe("published");
+    expect(reloaded!.failureReason).toBeNull();
+    const [reloadedAccount] = await db.select().from(personaAccounts).where(eq(personaAccounts.id, account.id));
+    expect(reloadedAccount!.publishedPostCount).toBe(1);
+
+    const published = await db.select().from(activityLog).where(eq(activityLog.action, "persona_post.published"));
+    expect(published).toHaveLength(1);
+    expect(published[0]!.agentId).toBe(persona.agentId);
+  });
+
+  it("files the approval card on behalf of the persona's agent, in plain language", async () => {
+    const companyId = await seedCompany();
+    const persona = await seedPersona(companyId);
+    const account = await seedAccount(companyId, persona.id, {
+      autonomyMode: "autonomous",
+      warmupPostsRequired: 5,
+      publishedPostCount: 2,
+      dailyPostCap: 3,
+    });
+    const post = await seedPost(companyId, persona.id, account.id, { caption: "sunset today" });
+
+    const outcome = await personaPublisherService(db).attemptPublish(post.id);
+    expect(outcome.outcome).toBe("pending_approval");
+
+    const [reloaded] = await db.select().from(personaPosts).where(eq(personaPosts.id, post.id));
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, reloaded!.approvalId!));
+    // requestedByAgentId is what makes the approval UI treat it as a persona
+    // request (DUR-177) and wakes her with the decision.
+    expect(approval!.requestedByAgentId).toBe(persona.agentId);
+    const payload = approval!.payload as Record<string, unknown>;
+    expect(payload.title).toBe("Post to Maja — Fanvue");
+    expect(payload.caption).toBe("sunset today");
+    expect(payload.disclosureText).toBe(PERSONA_POST_AI_DISCLOSURE_TEXT);
+    expect(String(payload.summary)).toContain("post 3 of 5");
+    expect(String(payload.summary)).toContain("up to 3 a day");
+    expect(String(payload.summary)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}/);
+  });
+
+  it("writes an operator notice with a plain message when the platform rejects the post", async () => {
+    const companyId = await seedCompany();
+    const persona = await seedPersona(companyId);
+    const account = await seedAccount(companyId, persona.id, { autonomyMode: "autonomous", warmupPostsRequired: 0 });
+    await bindPublishToken(companyId, account.id);
+    const post = await seedPost(companyId, persona.id, account.id);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("forbidden", { status: 403 })));
+
+    await personaPublisherService(db).attemptPublish(post.id);
+
+    const rows = await db.select().from(activityLog).where(eq(activityLog.action, "persona_post.publish_failed"));
+    expect(rows).toHaveLength(1);
+    const details = rows[0]!.details as Record<string, unknown>;
+    expect(String(details.message)).toContain("A post to Maja — Fanvue could not be published");
+    expect(rows[0]!.agentId).toBe(persona.agentId);
   });
 
   it("returns not_claimable for a post that is already terminal", async () => {

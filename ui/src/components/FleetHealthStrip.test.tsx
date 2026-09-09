@@ -134,13 +134,42 @@ describe("formatFleetDuration", () => {
 describe("fleetHealthFacts", () => {
   it("summarises the numbers and flags the ones that need a look", () => {
     const facts = fleetHealthFacts(starvedFleet);
-    expect(facts.map((fact) => fact.key)).toEqual(["runs", "slots", "zombies", "agents", "scheduler", "requests"]);
+    expect(facts.map((fact) => fact.key)).toEqual(["runs", "slots", "queue", "zombies", "agents", "scheduler", "requests"]);
     expect(facts[0]).toEqual({ key: "runs", text: "9 started · 7 finished · 1 failed (last 15 min)", alert: false });
     expect(facts[1]).toEqual({ key: "slots", text: "4 of 4 slots in use · 15 queued (oldest 20 min)", alert: true });
-    expect(facts[2]).toEqual({ key: "zombies", text: "1 run silent for 30+ min", alert: true });
-    expect(facts[3]).toEqual({ key: "agents", text: "2 agents need attention", alert: true });
-    expect(facts[4]).toEqual({ key: "scheduler", text: "Scheduler ticked 12s ago", alert: false });
-    expect(facts[5]).toEqual({ key: "requests", text: "2 requests in flight", alert: false });
+    expect(facts[2]).toEqual({ key: "queue", text: "0 queued with a free agent · 15 queued behind their own agent", alert: false });
+    expect(facts[3]).toEqual({ key: "zombies", text: "1 run silent for 30+ min", alert: true });
+    expect(facts[4]).toEqual({ key: "agents", text: "2 agents need attention", alert: true });
+    expect(facts[5]).toEqual({ key: "scheduler", text: "Scheduler ticked 12s ago", alert: false });
+    expect(facts[6]).toEqual({ key: "requests", text: "2 requests in flight", alert: false });
+  });
+
+  it("shows how many queued runs wait on nothing, and flags them only once nothing has started for the whole window", () => {
+    // Overnight shape: one long run and its own agent's next run queued behind it. Not an alert.
+    const behindOwnAgent = fleetHealthFacts({
+      ...healthyFleet,
+      runs: { ...healthyFleet.runs, startedInWindow: 0, running: 1, queued: 1, queuedWithNoRunningAgent: 0 },
+      slots: { max: 4, used: 1, available: 3, saturated: false },
+    });
+    expect(behindOwnAgent[2]).toEqual({ key: "queue", text: "0 queued with a free agent · 1 queued behind its own agent", alert: false });
+
+    // A free agent, free slots, and still nothing started: the queue itself is stuck.
+    const stuck = fleetHealthFacts({
+      ...healthyFleet,
+      runs: { ...healthyFleet.runs, startedInWindow: 0, running: 0, queued: 3, queuedWithNoRunningAgent: 2 },
+      slots: { max: 4, used: 0, available: 4, saturated: false },
+    });
+    expect(stuck[2]).toEqual({ key: "queue", text: "2 queued with a free agent · 1 queued behind its own agent", alert: true });
+
+    // Same numbers while runs are still starting: information, not an alarm.
+    const moving = fleetHealthFacts({
+      ...healthyFleet,
+      runs: { ...healthyFleet.runs, startedInWindow: 4, queued: 2, queuedWithNoRunningAgent: 2 },
+    });
+    expect(moving[2]).toEqual({ key: "queue", text: "2 queued with a free agent", alert: false });
+
+    // No queue at all: the fact is not shown.
+    expect(fleetHealthFacts(healthyFleet).some((fact) => fact.key === "queue")).toBe(false);
   });
 
   it("reads calmly when nothing is wrong and loudly when the scheduler is off", () => {

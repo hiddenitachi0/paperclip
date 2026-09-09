@@ -3587,6 +3587,53 @@ export interface IssueServiceOptions {
   rawDb?: Db;
 }
 
+/**
+ * Cross-company reference guard (isolation audit): an issue's parent and goal
+ * must live in the issue's own company. Assignee, project and workspace
+ * references were already checked; parent and goal were not, so a caller who
+ * cannot read company B could still point a company-A issue at a company-B
+ * parent or goal and then walk that link (children, ancestors, tree holds,
+ * dashboards) into the other company. Under the database's row-level
+ * security claim a foreign row is simply not found, which is refused the
+ * same way.
+ */
+async function assertIssueReferencesInCompany(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  refs: { parentId?: string | null; goalId?: string | null; projectId?: string | null },
+) {
+  if (refs.projectId) {
+    const project = await dbOrTx
+      .select({ companyId: projects.companyId })
+      .from(projects)
+      .where(eq(projects.id, refs.projectId))
+      .then((rows) => rows[0] ?? null);
+    if (!project || project.companyId !== companyId) {
+      throw unprocessable("Project must belong to the same company");
+    }
+  }
+  if (refs.parentId) {
+    const parent = await dbOrTx
+      .select({ companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, refs.parentId))
+      .then((rows) => rows[0] ?? null);
+    if (!parent || parent.companyId !== companyId) {
+      throw unprocessable("Parent issue must belong to the same company");
+    }
+  }
+  if (refs.goalId) {
+    const goal = await dbOrTx
+      .select({ companyId: goals.companyId })
+      .from(goals)
+      .where(eq(goals.id, refs.goalId))
+      .then((rows) => rows[0] ?? null);
+    if (!goal || goal.companyId !== companyId) {
+      throw unprocessable("Goal must belong to the same company");
+    }
+  }
+}
+
 export function issueService(db: Db, options: IssueServiceOptions = {}) {
   const rawDb = options.rawDb ?? db;
   const instanceSettings = instanceSettingsService(db);
@@ -4439,10 +4486,10 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
 
       await Promise.all([
         tx.execute(
-          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.expectedCheckoutRunId} for update`,
+          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.expectedCheckoutRunId} for no key update`,
         ),
         tx.execute(
-          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
+          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for no key update`,
         ),
       ]);
       const [existingRun, actorRun] = await Promise.all([
@@ -4515,8 +4562,18 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
     const companyId = await companyIdForIssue(input.issueId);
     if (!companyId) return null;
     return withCompanyScope(rawDb, companyId, async (tx) => {
+      // DUR-3931: issue row first, then the run row -- the same order as
+      // clearExecutionRunIfTerminal / clearCheckoutRunIfTerminal /
+      // adoptStaleCheckoutRun above. This used to lock only the run and then
+      // UPDATE the issue, so two overlapping requests from the same agent (one
+      // in a clear* helper holding the issue and waiting for the run, this one
+      // holding the run and waiting for the issue) deadlocked. Regression test:
+      // issue-checkout-run-finalize-deadlock.test.ts.
       await tx.execute(
-        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
+        sql`select ${issues.id} from ${issues} where ${issues.id} = ${input.issueId} for update`,
+      );
+      await tx.execute(
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for no key update`,
       );
       const actorRun = await tx
         .select({ status: heartbeatRuns.status })
@@ -4570,8 +4627,23 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
         .then((rows) => rows[0] ?? null);
       if (!issue?.executionRunId) return false;
 
+      // DUR-3931: `for no key update`, not `for update`, on the run row (same
+      // in the sibling helpers below). The point of this lock is to keep the
+      // run's status from flipping underneath us while we decide whether the
+      // issue's lock is stale, and an UPDATE of heartbeat_runs.status takes
+      // exactly `no key update`, so that is fully preserved. What `for update`
+      // additionally conflicted with is `for key share` -- the lock every
+      // foreign-key check takes on the parent row. The finalizing run's own
+      // bookkeeping (recordWorkspaceFinalize's INSERT into
+      // workspace_operations, which references both the run and the issue;
+      // issue_comments / activity_log rows behave the same) key-shares the run
+      // first and the issue second, in one statement, so with `for update`
+      // here the two met head-on: we held the issue and waited for the run, it
+      // held the run and waited for the issue -- "deadlock detected" on the
+      // signoff-policy e2e (CI runs 34025840842 / 34101687694). Regression
+      // test: issue-checkout-run-finalize-deadlock.test.ts.
       await tx.execute(
-        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for no key update`,
       );
       const run = await tx
         .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
@@ -4621,7 +4693,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (!issue?.checkoutRunId) return false;
 
       await tx.execute(
-        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.checkoutRunId} for update`,
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.checkoutRunId} for no key update`,
       );
       const run = await tx
         .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
@@ -4632,7 +4704,7 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
 
       if (issue.executionRunId && issue.executionRunId !== issue.checkoutRunId) {
         await tx.execute(
-          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
+          sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for no key update`,
         );
         const executionRun = await tx
           .select({ status: heartbeatRuns.status, scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
@@ -5617,6 +5689,14 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (data.assigneeUserId) {
         await assertAssignableUser(companyId, data.assigneeUserId);
       }
+      // projectId included: the update path already refused a project from
+      // another company, but create only checked parent and goal (found by
+      // the isolation audit once its seed stopped masking the probe).
+      await assertIssueReferencesInCompany(db, companyId, {
+        parentId: issueData.parentId,
+        goalId: issueData.goalId,
+        projectId: issueData.projectId,
+      });
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
@@ -5944,6 +6024,13 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
       }
+      // create() already refuses a foreign projectId further down its own
+      // path; update() had no such check, so it is added here.
+      await assertIssueReferencesInCompany(dbOrTx as Db, existing.companyId, {
+        parentId: issueData.parentId,
+        goalId: issueData.goalId,
+        projectId: issueData.projectId,
+      });
       let nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
       const nextProjectWorkspaceId =
         issueData.projectWorkspaceId !== undefined ? issueData.projectWorkspaceId : existing.projectWorkspaceId;

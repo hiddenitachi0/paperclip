@@ -58,12 +58,36 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "agent.paused": "paused",
   "agent.resumed": "resumed",
   "agent.error_cleared": "cleared error on",
+  "persona_post.published": "published a post for",
+  "persona_post.publish_failed": "could not publish a post for",
   // DUR-98 / DUR-128: operator notices written by the platform itself when it
   // knows something is wrong -- plain language, see formatOperatorNotice.
   "agent.entered_error": "flagged that attention is needed for",
   "agent.error_stalled": "is still waiting for someone to clear the error on",
   "heartbeat.run_reaped": "ended a run that had stopped responding for",
   "heartbeat.run_stopped": "stopped a run that was taking too long for",
+  // DUR-3943 item 4: the same task kept running out of turns per run.
+  "heartbeat.turn_limit_repeated": "stopped queuing fresh runs after repeated turn-limit stops for",
+  // Admin auth hardening: security notices about operator accounts. The
+  // entity is a user, so the verb reads "...for <user>" like the ones above.
+  "security.admin_added_outside_app": "noticed a new instance admin added outside the app:",
+  "security.admin_removed_outside_app": "noticed an instance admin removed outside the app:",
+  "security.admin_email_changed_outside_app": "noticed a sign-in email changed outside the app for",
+  "security.admin_password_changed_outside_app": "noticed a password changed outside the app for",
+  "security.admin_record_tampered": "noticed the signed admin record was edited outside the app",
+  "security.admin_record_baseline": "took a fresh record of the admin list",
+  "security.admin_promoted": "made an instance admin of",
+  "security.admin_demoted": "removed instance admin access from",
+  "security.password_changed": "changed the password of",
+  "security.email_changed": "changed the sign-in email of",
+  "security.admin_signed_in_new_device": "noticed a sign-in from a new device for",
+  "security.signed_out_everywhere": "signed out every device for",
+  "security.session_revoked": "ended a signed-in session for",
+  // Polish round 3: the daily check of the shared Claude sign-in.
+  "instance.claude_auth.saved": "saved the shared Claude sign-in",
+  "instance.claude_auth.removed": "removed the shared Claude sign-in",
+  "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
+  "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -79,6 +103,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "approval.revision_requested": "requested changes on",
+  "approval.boss_review_requested": "asked the boss to weigh in first on",
+  "approval.boss_review_forwarded": "passed on to the operator with a recommendation",
   "issue.approval_approved": "approved an approval request on",
   "issue.approval_rejected": "rejected an approval request on",
   "issue.approval_revision_requested": "sent an approval request back for changes on",
@@ -138,6 +164,13 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "agent.error_stalled": "is still waiting for someone to clear the agent error",
   "heartbeat.run_reaped": "ended a run that had stopped responding",
   "heartbeat.run_stopped": "stopped a run that was taking too long",
+  "heartbeat.turn_limit_repeated": "stopped queuing fresh runs after repeated turn-limit stops",
+  "persona_post.published": "published a persona post",
+  "persona_post.publish_failed": "could not publish a persona post",
+  "instance.claude_auth.saved": "saved the shared Claude sign-in",
+  "instance.claude_auth.removed": "removed the shared Claude sign-in",
+  "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
+  "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -147,6 +180,8 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "approval.revision_requested": "requested changes",
+  "approval.boss_review_requested": "asked the boss to weigh in on the boost request first",
+  "approval.boss_review_forwarded": "passed the boost request on to the operator with a recommendation",
   "issue.approval_approved": "approved the approval request",
   "issue.approval_rejected": "rejected the approval request",
   "issue.approval_revision_requested": "sent the approval request back for changes",
@@ -164,6 +199,7 @@ const APPROVAL_TYPE_LABELS: Record<string, string> = {
   deploy: "deploy",
   tool_grant: "tool access",
   instructions_change: "instructions change",
+  model_boost: "temporary model boost",
 };
 
 // DUR-283: the activity actions whose `details.decisionNote` is the reason an
@@ -493,6 +529,29 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "agent.error_stalled",
   "heartbeat.run_reaped",
   "heartbeat.run_stopped",
+  // DUR-3943 item 4: written only after the same task hit the turn cap
+  // three times in a row and the platform stopped queuing fresh runs.
+  "heartbeat.turn_limit_repeated",
+  // Admin auth hardening: every security.* entry carries its sentence in
+  // details.message (see server/src/services/admin-auth-audit.ts).
+  "security.admin_added_outside_app",
+  "security.admin_removed_outside_app",
+  "security.admin_email_changed_outside_app",
+  "security.admin_password_changed_outside_app",
+  "security.admin_record_tampered",
+  "security.admin_record_baseline",
+  "security.admin_promoted",
+  "security.admin_demoted",
+  "security.password_changed",
+  "security.email_changed",
+  "security.admin_signed_in_new_device",
+  "security.signed_out_everywhere",
+  "security.session_revoked",
+  // DUR-134 item 10: a persona post the platform refused, or that never
+  // went out because the account's credential is missing/expired.
+  "persona_post.publish_failed",
+  "instance.claude_auth.check_failed",
+  "instance.claude_auth.expiring",
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {
@@ -503,6 +562,13 @@ export function formatOperatorNotice(action: string, details?: Record<string, un
   if (!isOperatorNoticeAction(action)) return null;
   const message = details?.message;
   if (typeof message === "string" && message.trim()) return message.trim();
+  if (action === "persona_post.publish_failed") {
+    const accountLabel =
+      typeof details?.accountLabel === "string" && details.accountLabel.trim() ? details.accountLabel.trim() : "a persona account";
+    const reason =
+      typeof details?.failureReason === "string" && details.failureReason.trim() ? ` Reason: ${details.failureReason.trim()}` : "";
+    return `A post to ${accountLabel} could not be published and will not be retried on its own.${reason}`;
+  }
   if (action === "agent.error_stalled") {
     // DUR-128 rows predate the message field: build the sentence here.
     const agentName = typeof details?.agentName === "string" && details.agentName.trim() ? details.agentName.trim() : "This agent";

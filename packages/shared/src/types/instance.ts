@@ -50,6 +50,36 @@ export const DEFAULT_SILENT_RUN_TIMEOUT_MINUTES = 45;
 export const MIN_SILENT_RUN_TIMEOUT_MINUTES = 5;
 export const MAX_SILENT_RUN_TIMEOUT_MINUTES = 12 * 60;
 
+// DUR-3943 item 4: every turn of a run re-sends the whole standing context,
+// so the turn ceiling is the single biggest multiplier on what a run can
+// cost. Instance-wide default for Claude-style local agents; an agent's own
+// adapterConfig.maxTurnsPerRun (when set, > 0) takes precedence. A run that
+// hits the cap ends with a plain note and the work continues in a fresh run
+// through the existing max-turn continuation; after three cap hits in a row
+// on the same task the operator is told instead.
+export const DEFAULT_MAX_TURNS_PER_RUN = 60;
+export const MIN_MAX_TURNS_PER_RUN = 1;
+export const MAX_MAX_TURNS_PER_RUN = 1000;
+
+// DUR-3943 item 5: instance-wide reset policy for saved (resumable)
+// sessions. When set above 0, a saved session is dropped after this many
+// runs on the same task, or once it is older than this many hours, and the
+// next run starts fresh with the full task block. 0 (the default) means
+// "leave it to the agent type": Claude, Codex, Hermes and ACP agents manage
+// their own context and are never reset by Paperclip; Cursor, Gemini,
+// OpenCode and Pi agents keep their built-in reset (200 runs / 72 hours).
+// Off by default on purpose: the ticket's own measurements show a resumed
+// session costs about a third of a fresh one in cached tokens, so resetting
+// is something the operator opts into, not something the platform imposes.
+// Per-agent override (wins over both):
+// runtimeConfig.heartbeat.sessionCompaction.{maxSessionRuns,maxSessionAgeHours}.
+export const DEFAULT_SESSION_RESET_AFTER_RUNS = 0;
+export const MIN_SESSION_RESET_AFTER_RUNS = 0;
+export const MAX_SESSION_RESET_AFTER_RUNS = 1000;
+export const DEFAULT_SESSION_RESET_AFTER_HOURS = 0;
+export const MIN_SESSION_RESET_AFTER_HOURS = 0;
+export const MAX_SESSION_RESET_AFTER_HOURS = 24 * 30;
+
 /**
  * Instance-wide execution policy.
  *
@@ -103,6 +133,48 @@ export const DEFAULT_QUIET_MODE_STATE: QuietModeState = {
 // case (~22h) so that expected usage never trips the warning.
 export const QUIET_MODE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Done-gate quality check ("critic"): when an AGENT tries to move a task to
+ * done, a second, cheap model call compares the task's description and
+ * acceptance criteria against the agent's final comment (and the change
+ * summary when a merge was involved) and answers pass / needs work.
+ *
+ * - "off": nothing happens (the default -- ships dormant).
+ * - "dry_run": the check runs and its verdict is posted as a comment, but the
+ *   task is never held back. Use this to see what the critic would say.
+ * - "enforce": a "needs work" verdict sends the task back to in progress with
+ *   the findings as a comment. After `maxRounds` such rounds the platform
+ *   stops looping and asks the operator instead.
+ *
+ * A board/human actor is never gated, whatever the mode.
+ */
+export type DoneGateMode = "off" | "dry_run" | "enforce";
+
+export const DONE_GATE_MODES: readonly DoneGateMode[] = ["off", "dry_run", "enforce"];
+export const DEFAULT_DONE_GATE_MODE: DoneGateMode = "off";
+export const DEFAULT_DONE_GATE_MAX_ROUNDS = 2;
+export const MIN_DONE_GATE_MAX_ROUNDS = 1;
+export const MAX_DONE_GATE_MAX_ROUNDS = 5;
+
+export interface DoneGateCompanyOverride {
+  mode?: DoneGateMode;
+  maxRounds?: number;
+}
+
+export interface DoneGateSettings {
+  mode: DoneGateMode;
+  /** How many "needs work" rounds an agent gets before the operator is asked. */
+  maxRounds: number;
+  /** Per-company override keyed by company id; absent keys fall back to the instance default. */
+  companyOverrides: Record<string, DoneGateCompanyOverride>;
+}
+
+export const DEFAULT_DONE_GATE_SETTINGS: DoneGateSettings = {
+  mode: DEFAULT_DONE_GATE_MODE,
+  maxRounds: DEFAULT_DONE_GATE_MAX_ROUNDS,
+  companyOverrides: {},
+};
+
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   keyboardShortcuts: boolean;
@@ -129,6 +201,23 @@ export interface InstanceGeneralSettings {
    * adapterConfig.silentRunTimeoutMinutes.
    */
   silentRunTimeoutMinutes: number;
+  /**
+   * DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
+   * Per-agent override: adapterConfig.maxTurnsPerRun (> 0 wins).
+   */
+  maxTurnsPerRun: number;
+  /**
+   * DUR-3943 item 5: drop an agent's saved session after this many runs on
+   * the same task (0 = keep the agent type's built-in behaviour). Per-agent
+   * override: runtimeConfig.heartbeat.sessionCompaction.maxSessionRuns.
+   */
+  sessionResetAfterRuns: number;
+  /**
+   * DUR-3943 item 5: drop an agent's saved session once it is older than
+   * this many hours (0 = keep the agent type's built-in behaviour). Per-agent
+   * override: runtimeConfig.heartbeat.sessionCompaction.maxSessionAgeHours.
+   */
+  sessionResetAfterHours: number;
   /** DUR-224 quiet-mode state; not settable via the general-settings patch route. */
   quietMode: QuietModeState;
   /**
@@ -144,6 +233,12 @@ export interface InstanceGeneralSettings {
    * behaviour; turning it on can only make the UI stricter.
    */
   factCheckCardStrictAllowlist: boolean;
+  /**
+   * Done-gate quality check (see DoneGateSettings). Defaults to mode "off"
+   * with 2 rounds -- ships dormant; an operator opts in per instance and can
+   * override per company.
+   */
+  doneGate: DoneGateSettings;
 }
 
 export interface InstanceExperimentalSettings {
@@ -163,6 +258,8 @@ export interface InstanceExperimentalSettings {
   issueGraphLivenessAutoRecoveryLookbackHours: number;
   /** DUR-62: run the weekly check-up for every active company on a schedule. */
   enableWeeklyCheckup: boolean;
+  /** Guarded cross-company instruction channel; off means nothing can be sent between companies. */
+  enableCrossCompanyInstructions: boolean;
 }
 
 export interface InstanceSettings {

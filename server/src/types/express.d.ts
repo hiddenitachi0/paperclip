@@ -19,6 +19,9 @@ declare global {
           status?: string;
         }>;
         isInstanceAdmin?: boolean;
+        // Present only when source === "session": the better-auth session row
+        // id, so a route can tell "this device" apart from the others.
+        sessionId?: string;
         keyId?: string;
         keyScope?: AgentApiKeyScope;
         runId?: string;

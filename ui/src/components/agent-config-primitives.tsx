@@ -43,7 +43,8 @@ export const help: Record<string, string> = {
   worktreeParentDir: "Directory where derived worktrees should be created. Absolute, ~-prefixed, and repo-relative paths are supported.",
   runtimeServicesJson: "Optional workspace runtime service definitions. Use this for shared app servers, workers, or other long-lived companion processes attached to the workspace.",
   mcpServers: "Optional list of MCP (Model Context Protocol) servers this agent can use, e.g. connecting it to Higgsfield or another external tool. Stdio servers need \"name\" and \"command\" (optionally \"args\"/\"env\"); remote servers need \"name\" and \"url\" (optionally \"headers\"). Only this agent's configured servers are used at runtime — not any shared servers configured on the host.",
-  maxTurnsPerRun: "Maximum number of agentic turns (tool calls) per heartbeat run.",
+  maxTurnsPerRun:
+    "How many turns (model steps, mostly tool calls) one run may use before it is stopped and the work continues in a fresh run. Every turn re-sends the whole context, so this is the biggest lever on what a run can cost. Leave empty to follow the instance-wide setting under Settings > Instance settings > General.",
   command: "The command to execute (e.g. node, python).",
   localCommand: "Override the path to the CLI command you want the adapter to call (e.g. /usr/local/bin/claude, codex, opencode).",
   args: "Command-line arguments, comma-separated.",
@@ -56,6 +57,10 @@ export const help: Record<string, string> = {
   intervalSec: "Seconds between automatic heartbeat invocations.",
   timeoutSec: "Maximum seconds a run can take before being terminated. 0 means no timeout.",
   graceSec: "Seconds to wait after sending interrupt before force-killing the process.",
+  maxRunDurationMinutes:
+    "Minutes a run may go on before Paperclip stops it and retries once. Leave empty to use the instance-wide limit under Settings > Instance settings > General > Run time limits. 0 switches this limit off for this agent only.",
+  silentRunTimeoutMinutes:
+    "Minutes a run may print nothing before Paperclip stops it and retries once. Leave empty to use the instance-wide limit under Settings > Instance settings > General > Run time limits. 0 switches this limit off for this agent only.",
   wakeOnDemand: "Allow this agent to be woken by assignments, API calls, UI actions, or automated systems.",
   cooldownSec: "Minimum seconds between consecutive heartbeat runs.",
   maxConcurrentRuns: "Maximum number of heartbeat runs that can execute simultaneously for this agent.",

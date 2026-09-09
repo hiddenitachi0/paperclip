@@ -25,7 +25,9 @@ export const defaultCreateValues: CreateConfigValues = {
   workspaceBranchTemplate: "",
   worktreeParentDir: "",
   runtimeServicesJson: "",
-  maxTurnsPerRun: 1000,
+  // DUR-3943 item 4: 0 = follow the instance-wide "Max turns per run"
+  // setting (the key is left out of adapterConfig).
+  maxTurnsPerRun: 0,
   heartbeatEnabled: false,
   intervalSec: 300,
   // openclaw_gateway defaults

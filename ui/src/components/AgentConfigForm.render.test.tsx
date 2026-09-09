@@ -450,4 +450,70 @@ describe("AgentConfigForm environment selector", () => {
     expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
     expect(result.container.textContent).toContain("Network unavailable");
   });
+
+  // Polish round 3: per-agent run time limits on the agent settings page.
+  it("shows the per-agent run time limits with the instance default as placeholder, and saves a cleared field as 'use the instance default'", async () => {
+    mockInstanceSettingsApi.getGeneral.mockResolvedValue({
+      executionMode: "any",
+      maxRunDurationMinutes: 150,
+      silentRunTimeoutMinutes: 20,
+    });
+    mockEnvironmentsApi.list.mockResolvedValue([makeEnvironment({ id: "local-1", name: "Local", driver: "local" })]);
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    let saveAction: (() => void | Promise<void>) | null = null;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <AgentConfigForm
+              mode="edit"
+              agent={makeAgent({ adapterConfig: { maxRunDurationMinutes: 30 } })}
+              onSave={onSave}
+              onSaveActionChange={(action) => {
+                saveAction = action;
+              }}
+              hidePromptTemplate
+              showAdapterTypeField={false}
+              showAdapterTestEnvironmentButton={false}
+            />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    const maxInput = container.querySelector<HTMLInputElement>('[data-testid="agent-max-run-duration-minutes"]');
+    const silentInput = container.querySelector<HTMLInputElement>('[data-testid="agent-silent-run-timeout-minutes"]');
+    expect(maxInput?.value).toBe("30");
+    expect(silentInput?.value).toBe("");
+    expect(silentInput?.placeholder).toBe("Instance default: 20 min");
+    expect(container.textContent).toContain("Stop a run after (min)");
+    expect(container.textContent).toContain("Stop a silent run after (min)");
+
+    // Switch the silence limit off for this agent, and go back to the
+    // instance default for the max duration.
+    await act(async () => {
+      setInputValue(silentInput!, "0");
+      silentInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      setInputValue(maxInput!, "");
+      maxInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(saveAction).not.toBeNull();
+    await act(async () => {
+      await saveAction!();
+    });
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const patch = onSave.mock.calls[0]![0] as { adapterConfig: Record<string, unknown>; replaceAdapterConfig: boolean };
+    expect(patch.replaceAdapterConfig).toBe(true);
+    expect(patch.adapterConfig.silentRunTimeoutMinutes).toBe(0);
+    expect(patch.adapterConfig).not.toHaveProperty("maxRunDurationMinutes");
+  });
 });

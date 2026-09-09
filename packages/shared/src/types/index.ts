@@ -34,8 +34,17 @@ export type {
   QuietModeActor,
   QuietModeAgentSnapshotEntry,
   QuietModeState,
+  DoneGateMode,
+  DoneGateCompanyOverride,
+  DoneGateSettings,
 } from "./instance.js";
 export {
+  DONE_GATE_MODES,
+  DEFAULT_DONE_GATE_MODE,
+  DEFAULT_DONE_GATE_MAX_ROUNDS,
+  MIN_DONE_GATE_MAX_ROUNDS,
+  MAX_DONE_GATE_MAX_ROUNDS,
+  DEFAULT_DONE_GATE_SETTINGS,
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
@@ -197,7 +206,19 @@ export type {
   DocumentTextRange,
   UpdateDocumentAnnotationThreadRequest,
 } from "./document-annotation.js";
-export type { Project, ProjectBudgetSummary, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
+export type {
+  GitHubTokenCheckReport,
+  GitHubTokenRequirement,
+  GitHubTokenScopeResult,
+  GitHubTokenScopeStatus,
+  Project,
+  ProjectBudgetSummary,
+  ProjectCodebase,
+  ProjectCodebaseOrigin,
+  ProjectGoalRef,
+  ProjectManagedByPlugin,
+  ProjectWorkspace,
+} from "./project.js";
 export type {
   CompanySearchHighlight,
   CompanySearchArtifactSummary,
@@ -626,3 +647,26 @@ export type {
   InstanceClaudeSignInSession,
   InstanceClaudeSignInStatus,
 } from "./instance-claude-auth.js";
+export {
+  ADMIN_AUTH_CHECK_STATUSES,
+  ADMIN_AUTH_CHECK_TRIGGERS,
+  SIGN_OUT_EVERYWHERE_SCOPES,
+  describeUserAgent,
+} from "./instance-security.js";
+export type {
+  AdminAuthCheckResult,
+  AdminAuthCheckStatus,
+  AdminAuthCheckTrigger,
+  AdminAuthLastCheck,
+  InstanceSecurityAdmin,
+  InstanceSecurityOverview,
+  InstanceSecuritySession,
+  RevokeSessionResult,
+  SignOutEverywhereResult,
+  SignOutEverywhereScope,
+} from "./instance-security.js";
+export type {
+  CrossCompanyInstruction,
+  CrossCompanyInstructionSenderView,
+  CrossCompanyInstructionView,
+} from "./cross-company-instruction.js";

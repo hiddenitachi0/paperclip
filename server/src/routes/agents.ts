@@ -25,6 +25,7 @@ import {
   updateAgentInstructionsPathSchema,
   wakeAgentSchema,
   updateAgentSchema,
+  validateAdapterModelEffort,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
   extractSorteringsreglerBlock,
@@ -1466,6 +1467,15 @@ export function agentRoutes(
     adapterType: string | null | undefined,
     adapterConfig: Record<string, unknown>,
   ) {
+    // Typo guard for model + thinking effort (one shared level list per adapter,
+    // packages/shared/src/model-effort.ts). Runs for create, patch, and the cheap
+    // model profile alike, because every persistence path funnels through here --
+    // a PATCH body may omit adapterType, so the create-schema refine alone is not
+    // enough.
+    const modelEffortError = validateAdapterModelEffort({ adapterType, adapterConfig });
+    if (modelEffortError) {
+      throw unprocessable(modelEffortError);
+    }
     if (adapterType !== "opencode_local") return;
     try {
       requireOpenCodeModelId(adapterConfig.model);
@@ -1573,11 +1583,19 @@ export function agentRoutes(
     await assertBoardCanManageAgentsForCompany(req, targetAgent.companyId);
   }
 
+  // Quick-agent fields guarded by the board-only Lane A rule: the on/off switch
+  // and the instruction set the quick agent follows.
+  const LANE_A_BOARD_ONLY_FIELDS = ["laneAEnabled", "laneAInstructions"] as const;
+  function patchTouchesLaneAFields(patchData: Record<string, unknown>) {
+    return LANE_A_BOARD_ONLY_FIELDS.some((key) => hasOwn(patchData, key));
+  }
+
   // Mirrors assertNoAgentInstructionsConfigMutation: an agent PATCHing its own
-  // config cannot flip its own laneAEnabled flag, even to false.
+  // config cannot flip its own laneAEnabled flag (even to false) or rewrite
+  // its own quick-agent instructions.
   function assertNoAgentLaneAFlagMutation(req: Request, patchData: Record<string, unknown>) {
-    if (req.actor.type !== "agent" || !hasOwn(patchData, "laneAEnabled")) return;
-    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled");
+    if (req.actor.type !== "agent" || !patchTouchesLaneAFields(patchData)) return;
+    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled or laneAInstructions");
   }
 
   function assertNoAgentInstructionsConfigMutation(
@@ -3373,7 +3391,7 @@ export function agentRoutes(
 
     const patchData = { ...(req.body as Record<string, unknown>) };
     assertNoAgentLaneAFlagMutation(req, patchData);
-    if (hasOwn(patchData, "laneAEnabled")) {
+    if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
     }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;

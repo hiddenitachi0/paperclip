@@ -601,12 +601,12 @@ export function IssueProperties({
             <div className="flex items-center gap-1.5 flex-wrap">
               {thinkingEffortOptionsFor(assigneeAdapterType).map((option) => (
                 <button
-                  key={option.value || "default"}
+                  key={option.id || "default"}
                   className={cn(
                     "px-2 py-1 rounded-md text-xs border border-border hover:bg-accent/50 transition-colors",
-                    assigneeOverrideThinkingEffort === option.value && "bg-accent",
+                    assigneeOverrideThinkingEffort === option.id && "bg-accent",
                   )}
-                  onClick={() => updateAssigneeOverrideThinkingEffort(option.value)}
+                  onClick={() => updateAssigneeOverrideThinkingEffort(option.id)}
                 >
                   {option.label}
                 </button>

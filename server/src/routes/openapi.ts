@@ -59,6 +59,7 @@ import {
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
   withdrawApprovalSchema,
+  modelBoostBossReviewDecisionSchema,
   addApprovalCommentSchema,
   // Cost / budget
   createCostEventSchema,
@@ -142,7 +143,9 @@ import {
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
   sendLaneAMessageSchema,
+  sendCrossCompanyInstructionSchema,
   saveInstanceClaudeAuthTokenSchema,
+  signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
 } from "@paperclipai/shared";
 
@@ -711,6 +714,10 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   "GET /api/instance/claude-auth/sign-in/{sessionId}",
   "POST /api/instance/claude-auth/sign-in/{sessionId}/code",
   "POST /api/instance/claude-auth/sign-in/{sessionId}/cancel",
+  "GET /api/instance/security",
+  "POST /api/instance/security/check",
+  "POST /api/instance/security/sign-out-everywhere",
+  "DELETE /api/instance/security/sessions/{sessionId}",
 ]);
 
 const CREATED_OPERATIONS = new Set([
@@ -2142,6 +2149,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/projects/{id}/github-token-check",
+  tags: ["projects"],
+  summary: "Check whether the project's GitHub token has the scopes the project needs (board only; never returns the token)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/projects/{id}/workspaces",
   tags: ["projects"],
@@ -2558,6 +2574,18 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/boss-review",
+  tags: ["approvals"],
+  summary: "Boss answers a direct report's model boost request (decline, or forward to the operator)",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(modelBoostBossReviewDecisionSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/approvals/{id}/comments",
   tags: ["approvals"],
@@ -2905,6 +2933,22 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/instance/settings/general/max-turns-per-run/agent-overrides",
+  tags: ["instance"],
+  summary: "List agents that override the instance-wide max turns per run",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/instance/settings/general/max-turns-per-run/clear-agent-overrides",
+  tags: ["instance"],
+  summary: "Make every agent follow the instance-wide max turns per run",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/instance/settings/experimental",
   tags: ["instance"],
   summary: "Get experimental instance settings",
@@ -2965,6 +3009,23 @@ for (const route of [
   });
 }
 
+// ─── Security section of Instance settings (admin auth hardening) ───────────
+// Never returns a session token, a password hash, or the signed admin record.
+for (const route of [
+  ["get", "/api/instance/security", "List instance admins, open sessions (device, address, last seen) and the last admin-record check", undefined],
+  ["post", "/api/instance/security/check", "Compare the live admin set against the signed record right now and report any change made outside the app", undefined],
+  ["post", "/api/instance/security/sign-out-everywhere", "End the caller's sessions on every device, or everyone's sessions on the server", signOutEverywhereSchema],
+  ["delete", "/api/instance/security/sessions/{sessionId}", "End one open session so that device has to sign in again", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["instance"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
 registry.registerPath({
   method: "post",
   path: "/api/instance/heartbeat-runs/pause-for-restart",
@@ -2998,7 +3059,7 @@ registry.registerPath({
   method: "post",
   path: "/api/lane-a/{agentId}/messages",
   tags: ["agents"],
-  summary: "Send a message to a Lane A-enabled agent (direct model call, no tools, no runtime)",
+  summary: "Send a message to a quick agent (Lane A: direct model call, allow-listed tools, conversation memory)",
   request: {
     params: z.object({ agentId: z.string() }),
     body: jsonBody(sendLaneAMessageSchema),
@@ -3011,6 +3072,71 @@ registry.registerPath({
     404: r.notFound,
     409: r.conflict,
     429: r.tooManyRequests,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/lane-a/{agentId}/conversations/{conversationId}",
+  tags: ["agents"],
+  summary: "Read the stored transcript of one quick-agent conversation (only the person who started it)",
+  query: z.object({ companyId: z.string().uuid() }),
+  responses: {
+    200: r.ok(
+      z.object({
+        conversationId: z.string(),
+        turnCount: z.number(),
+        expired: z.boolean(),
+        turnCapReached: z.boolean(),
+        messages: z.array(
+          z.object({
+            id: z.string(),
+            role: z.enum(["user", "assistant"]),
+            content: z.string(),
+            actions: z.array(z.object({ tool: z.string(), summary: z.string(), ok: z.boolean() })),
+            createdAt: z.string(),
+          }),
+        ),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+// ─── Cross-company instruction channel (guarded, feature-flagged) ─────────────
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/cross-company-instructions",
+  tags: ["companies"],
+  summary:
+    "Send a plain-text instruction to another company's liaison agent; it is only delivered after that company's board approves (off unless the instance flag is on)",
+  query: z.object({ fromAgentId: z.string().uuid().optional() }),
+  body: sendCrossCompanyInstructionSchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/cross-company-instructions",
+  tags: ["companies"],
+  summary: "List the instructions this company has sent to, or received from, other companies",
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
   },
 });
 

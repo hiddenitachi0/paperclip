@@ -13,6 +13,17 @@ export {
   type ApprovalTechnicalReference,
 } from "./approval-title.js";
 export {
+  describeModelBoostRequest,
+  describeModelBoostConsequence,
+  describeModelBoostBossReview,
+  formatBoostDuration,
+  formatBoostMoney,
+  prettyBoostEffort,
+  prettyBoostModel,
+  type ModelBoostBossReview,
+  type ModelBoostDescriptionInput,
+} from "./model-boost.js";
+export {
   getAgentOrgChainHealth,
   getAgentWorkEligibility,
   isAgentAssignableToWork,
@@ -27,6 +38,23 @@ export {
   type AgentOrgChainInvalidReason,
   type AgentWorkEligibility,
 } from "./agent-eligibility.js";
+export {
+  CLAUDE_THINKING_EFFORT_LEVELS,
+  CODEX_THINKING_EFFORT_LEVELS,
+  OPENCODE_THINKING_EFFORT_LEVELS,
+  CURSOR_MODE_LEVELS,
+  getThinkingEffortKey,
+  getThinkingEffortVocabulary,
+  getThinkingEffortLevels,
+  getThinkingEffortOptions,
+  supportsThinkingEffort,
+  isThinkingEffortValid,
+  validateAdapterModelEffort,
+  type ThinkingEffortKey,
+  type ThinkingEffortVocabulary,
+  type ThinkingEffortOption,
+  type ModelEffortValidationInput,
+} from "./model-effort.js";
 export {
   computePipelineHealth,
   groupWarningsByStage,
@@ -202,6 +230,8 @@ export {
   ESCALATION_GRANT_EXPIRED_REASONS,
   ESCALATION_GRANT_DEFAULT_DURATION_MINUTES,
   ESCALATION_GRANT_MAX_DURATION_MINUTES,
+  MODEL_BOOST_BOSS_REVIEW_STATUSES,
+  MODEL_BOOST_BOSS_REVIEW_TIMEOUT_MINUTES,
   SECRET_PROVIDERS,
   SECRET_PROVIDER_CONFIG_STATUSES,
   SECRET_PROVIDER_CONFIG_HEALTH_STATUSES,
@@ -342,6 +372,7 @@ export {
   type ApprovalStatus,
   type EscalationGrantStatus,
   type EscalationGrantExpiredReason,
+  type ModelBoostBossReviewStatus,
   type SecretProvider,
   type SecretProviderConfigStatus,
   type SecretProviderConfigHealthStatus,
@@ -541,6 +572,9 @@ export type {
   InstanceExperimentalSettings,
   InstanceGeneralSettings,
   InstanceSettings,
+  DoneGateMode,
+  DoneGateCompanyOverride,
+  DoneGateSettings,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
   QuietModeActor,
@@ -567,6 +601,10 @@ export type {
   Project,
   ProjectBudgetSummary,
   ProjectCodebase,
+  GitHubTokenCheckReport,
+  GitHubTokenRequirement,
+  GitHubTokenScopeResult,
+  GitHubTokenScopeStatus,
   ProjectCodebaseOrigin,
   ProjectGoalRef,
   ProjectManagedByPlugin,
@@ -1050,6 +1088,12 @@ export {
 } from "./types/feedback.js";
 
 export {
+  DONE_GATE_MODES,
+  DEFAULT_DONE_GATE_MODE,
+  DEFAULT_DONE_GATE_MAX_ROUNDS,
+  MIN_DONE_GATE_MAX_ROUNDS,
+  MAX_DONE_GATE_MAX_ROUNDS,
+  DEFAULT_DONE_GATE_SETTINGS,
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
@@ -1069,6 +1113,15 @@ export {
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   MIN_SILENT_RUN_TIMEOUT_MINUTES,
   MAX_SILENT_RUN_TIMEOUT_MINUTES,
+  DEFAULT_MAX_TURNS_PER_RUN,
+  MIN_MAX_TURNS_PER_RUN,
+  MAX_MAX_TURNS_PER_RUN,
+  DEFAULT_SESSION_RESET_AFTER_RUNS,
+  MIN_SESSION_RESET_AFTER_RUNS,
+  MAX_SESSION_RESET_AFTER_RUNS,
+  DEFAULT_SESSION_RESET_AFTER_HOURS,
+  MIN_SESSION_RESET_AFTER_HOURS,
+  MAX_SESSION_RESET_AFTER_HOURS,
   DEFAULT_QUIET_MODE_STATE,
   QUIET_MODE_STALE_AFTER_MS,
 } from "./types/instance.js";
@@ -1092,6 +1145,28 @@ export {
   type SaveInstanceClaudeAuthTokenInput,
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./validators/instance-claude-auth.js";
+export {
+  ADMIN_AUTH_CHECK_STATUSES,
+  ADMIN_AUTH_CHECK_TRIGGERS,
+  SIGN_OUT_EVERYWHERE_SCOPES,
+  describeUserAgent,
+} from "./types/instance-security.js";
+export type {
+  AdminAuthCheckResult,
+  AdminAuthCheckStatus,
+  AdminAuthCheckTrigger,
+  AdminAuthLastCheck,
+  InstanceSecurityAdmin,
+  InstanceSecurityOverview,
+  InstanceSecuritySession,
+  RevokeSessionResult,
+  SignOutEverywhereResult,
+  SignOutEverywhereScope,
+} from "./types/instance-security.js";
+export {
+  signOutEverywhereSchema,
+  type SignOutEverywhereInput,
+} from "./validators/instance-security.js";
 
 export type {
   CloudUpstreamConnectStartResponse,
@@ -1146,6 +1221,9 @@ export {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceSettingsSchema,
   issueGraphLivenessAutoRecoveryRequestSchema,
+  doneGateModeSchema,
+  doneGateCompanyOverrideSchema,
+  doneGateSettingsSchema,
   trustPresetSchema,
   lowTrustBoundarySchema,
   lowTrustReviewPresetPolicySchema,
@@ -1156,7 +1234,22 @@ export {
   type TrustPresetInput,
   type LowTrustBoundaryInput,
   type TrustAuthorizationPolicyInput,
+  LANE_A_INSTRUCTIONS_MAX_LENGTH,
 } from "./validators/index.js";
+
+export {
+  sendCrossCompanyInstructionSchema,
+  crossCompanyInstructionRequestPayloadSchema,
+  CROSS_COMPANY_INSTRUCTION_STATUSES,
+  type SendCrossCompanyInstruction,
+  type CrossCompanyInstructionRequestPayload,
+  type CrossCompanyInstructionStatus,
+} from "./validators/cross-company-instruction.js";
+export type {
+  CrossCompanyInstruction,
+  CrossCompanyInstructionSenderView,
+  CrossCompanyInstructionView,
+} from "./types/cross-company-instruction.js";
 
 export {
   createCompanySchema,
@@ -1412,6 +1505,8 @@ export {
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
+  modelBoostBossReviewSchema,
+  modelBoostBossReviewDecisionSchema,
   toolGrantRequestPayloadSchema,
   instructionsChangeRequestPayloadSchema,
   personaPublishRequestPayloadSchema,
@@ -1426,6 +1521,8 @@ export {
   type AddApprovalComment,
   type DeployRequestPayload,
   type ModelBoostRequestPayload,
+  type ModelBoostBossReviewState,
+  type ModelBoostBossReviewDecision,
   type ToolGrantRequestPayload,
   type InstructionsChangeRequestPayload,
   type PersonaPublishRequestPayload,
