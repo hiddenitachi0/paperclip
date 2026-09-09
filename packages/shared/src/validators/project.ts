@@ -70,6 +70,19 @@ export const deployPolicySchema = z
      * — see isMergePrRequestApproval in routes/approvals.ts (DUR-40).
      */
     mirrorBranch: z.string().min(1).optional(),
+    /**
+     * How to run a throwaway copy of the pending code so the operator can look
+     * at it before approving a merge or a deploy. Optional: with no command,
+     * the approval cards simply say a preview cannot be started for this
+     * project instead of pretending one is available.
+     */
+    previewCommand: z.string().optional(),
+    /**
+     * A path on the previewed app that answers OK once it has finished
+     * starting, e.g. "/" or "/api/health". Used only to decide when the
+     * preview link is worth handing to the operator.
+     */
+    previewHealthPath: z.string().optional(),
   })
   .strict();
 

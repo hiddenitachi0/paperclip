@@ -5,10 +5,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Identity } from "./Identity";
 import { DecisionReasonDialog } from "./DecisionReasonDialog";
+import { ApprovalPreviewPanel } from "./ApprovalPreviewPanel";
 import {
   approvalSubject,
   approvalTechnicalReference,
   approvalDeployBranchInfo,
+  approvalDeployChangeSummaryText,
   approvalIsRollbackDeploy,
   typeIcon,
   defaultTypeIcon,
@@ -62,6 +64,7 @@ export function ApprovalCard({
   const technicalReference = approvalTechnicalReference(payload);
   const branchInfo = approvalDeployBranchInfo(payload);
   const isRollback = approvalIsRollbackDeploy(payload);
+  const deployChangeSummary = approvalDeployChangeSummaryText(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -145,6 +148,9 @@ export function ApprovalCard({
                 <p className="text-xs leading-5 text-muted-foreground">
                   Approval request created {timeAgo(approval.createdAt)}
                 </p>
+                {deployChangeSummary && (
+                  <p className="text-xs leading-5 text-muted-foreground">{deployChangeSummary}</p>
+                )}
               </div>
             </div>
           </div>
@@ -164,6 +170,13 @@ export function ApprovalCard({
           hidePrimaryTitle={Boolean(subject)}
         />
       </div>
+
+      <ApprovalPreviewPanel
+        approvalId={approval.id}
+        approvalType={approval.type}
+        payload={payload}
+        approvalStatus={approval.status}
+      />
 
       {approval.decisionNote && (
         <div className="mt-4 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-3 text-xs leading-5 text-muted-foreground">

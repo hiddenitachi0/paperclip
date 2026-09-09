@@ -29,6 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
 import type { ApprovalComment } from "@paperclipai/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
+import { ApprovalPreviewPanel } from "../components/ApprovalPreviewPanel";
 
 export function ApprovalDetail() {
   const { approvalId } = useParams<{ approvalId: string }>();
@@ -304,6 +305,12 @@ export function ApprovalDetail() {
             </div>
           )}
           <ApprovalPayloadRenderer type={approval.type} payload={payload} />
+          <ApprovalPreviewPanel
+            approvalId={approval.id}
+            approvalType={approval.type}
+            payload={payload}
+            approvalStatus={approval.status}
+          />
           <button
             type="button"
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors mt-2"

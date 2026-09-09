@@ -46,6 +46,10 @@ const apiPrefixes: Record<string, string> = {
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
+  "preview-environments.ts": "/api",
+  // Mounted at the server root (like plugin-ui-static.ts), documented under
+  // /api so this coverage check still sees every method the proxy answers.
+  "preview-proxy.ts": "/api",
   "projects.ts": "/api",
   "resource-memberships.ts": "/api",
   "routines.ts": "/api",
