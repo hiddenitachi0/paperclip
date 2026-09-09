@@ -65,8 +65,17 @@ beforeAll(async () => {
         res.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
           "set-cookie": "sid=preview-secret; Path=/",
+          "service-worker-allowed": "/",
         });
         res.end("<html><head><title>t</title></head><body>hello</body></html>");
+        return;
+      }
+      if (req.url?.startsWith("/withcsp")) {
+        res.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "content-security-policy": "default-src 'none'",
+        });
+        res.end("<html><head></head><body>x</body></html>");
         return;
       }
       if (req.url?.startsWith("/go")) {
@@ -74,7 +83,10 @@ beforeAll(async () => {
         res.end();
         return;
       }
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "service-worker-allowed": "/",
+      });
       res.end(JSON.stringify({ saw: req.url }));
     });
   });
@@ -139,6 +151,24 @@ describe("preview proxy access gating", () => {
     const { service } = fakeService();
     const res = await request(createApp(agentActor(), service)).get(`/_preview/${WORKSPACE_ID}/`);
     expect(res.status).toBe(403);
+    expect(service.resolveProxyTarget).not.toHaveBeenCalled();
+    expect(received).toHaveLength(0);
+  });
+
+  it("refuses an unauthenticated caller on the bare link too, without redirecting", async () => {
+    const { service } = fakeService();
+    const res = await request(createApp(anonymousActor(), service)).get(`/_preview/${WORKSPACE_ID}`);
+    expect(res.status).toBe(403);
+    expect(res.headers.location).toBeUndefined();
+    expect(service.resolveProxyTarget).not.toHaveBeenCalled();
+    expect(received).toHaveLength(0);
+  });
+
+  it("refuses an agent on the bare link too, without redirecting", async () => {
+    const { service } = fakeService();
+    const res = await request(createApp(agentActor(), service)).get(`/_preview/${WORKSPACE_ID}`);
+    expect(res.status).toBe(403);
+    expect(res.headers.location).toBeUndefined();
     expect(service.resolveProxyTarget).not.toHaveBeenCalled();
     expect(received).toHaveLength(0);
   });
@@ -270,11 +300,64 @@ describe("preview proxy secrecy", () => {
     expect(res.headers["x-robots-tag"]).toContain("noindex");
   });
 
+  it("never lets the previewed app widen where a service worker may run", async () => {
+    const { service } = fakeService();
+    const app = createApp(boardActor([COMPANY_ID]), service);
+
+    const html = await request(app).get(`/_preview/${WORKSPACE_ID}/page`);
+    expect(html.headers["service-worker-allowed"]).toBeUndefined();
+
+    const json = await request(app).get(`/_preview/${WORKSPACE_ID}/data.json`);
+    expect(json.headers["service-worker-allowed"]).toBeUndefined();
+  });
+
   it("adds a base tag so relative links stay inside the preview", async () => {
     const { service } = fakeService();
     const res = await request(createApp(boardActor([COMPANY_ID]), service))
       .get(`/_preview/${WORKSPACE_ID}/page`);
     expect(res.text).toContain(`<base href="/_preview/${WORKSPACE_ID}/">`);
+  });
+});
+
+/**
+ * The preview is served from Paperclip's own web address, so without this the
+ * previewed code would count as Paperclip in the browser. The sandbox policy
+ * takes that away, and it has to be on everything the route returns — pages,
+ * assets, API answers and refusals alike.
+ */
+describe("preview proxy sandbox policy", () => {
+  const sandbox = "sandbox allow-scripts allow-forms allow-popups allow-modals";
+
+  it("sandboxes an HTML page", async () => {
+    const { service } = fakeService();
+    const res = await request(createApp(boardActor([COMPANY_ID]), service))
+      .get(`/_preview/${WORKSPACE_ID}/page`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-security-policy"]).toContain(sandbox);
+    expect(res.headers["content-security-policy"]).not.toContain("allow-same-origin");
+  });
+
+  it("sandboxes a non-HTML response too", async () => {
+    const { service } = fakeService();
+    const res = await request(createApp(boardActor([COMPANY_ID]), service))
+      .get(`/_preview/${WORKSPACE_ID}/data.json`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-security-policy"]).toContain(sandbox);
+  });
+
+  it("keeps the sandbox even when the previewed app sends a policy of its own", async () => {
+    const { service } = fakeService();
+    const res = await request(createApp(boardActor([COMPANY_ID]), service))
+      .get(`/_preview/${WORKSPACE_ID}/withcsp`);
+    expect(res.headers["content-security-policy"]).toContain(sandbox);
+    expect(res.headers["content-security-policy"]).toContain("default-src 'none'");
+  });
+
+  it("sandboxes the pages shown when nothing is running", async () => {
+    const { service } = fakeService({ found: false });
+    const res = await request(createApp(boardActor([COMPANY_ID]), service)).get(`/_preview/${WORKSPACE_ID}/`);
+    expect(res.status).toBe(404);
+    expect(res.headers["content-security-policy"]).toContain(sandbox);
   });
 });
 

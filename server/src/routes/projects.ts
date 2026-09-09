@@ -29,6 +29,7 @@ import {
 } from "../services/workspace-runtime.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
+  collectDeployPolicyCommandPaths,
   collectProjectExecutionWorkspaceCommandPaths,
   collectProjectWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
@@ -286,6 +287,7 @@ export function projectRoutes(rawDb: Db) {
       [
         ...collectProjectExecutionWorkspaceCommandPaths(projectData.executionWorkspacePolicy),
         ...collectProjectWorkspaceCommandPaths(workspace, "workspace"),
+        ...collectDeployPolicyCommandPaths(projectData.deployPolicy),
       ],
     );
     if (projectData.env !== undefined) {
@@ -348,7 +350,10 @@ export function projectRoutes(rawDb: Db) {
     const body = { ...req.body };
     assertNoAgentHostWorkspaceCommandMutation(
       req,
-      collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
+      [
+        ...collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
+        ...collectDeployPolicyCommandPaths(body.deployPolicy),
+      ],
     );
     await assertProjectEnvironmentSelection(
       existing.companyId,

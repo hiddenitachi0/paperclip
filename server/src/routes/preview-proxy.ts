@@ -45,11 +45,34 @@ const RESPONSE_HEADERS_NEVER_RETURNED = new Set([
   "set-cookie2",
   "strict-transport-security",
   "public-key-pins",
+  // A previewed app must never widen the scope a service worker may claim on
+  // the Paperclip origin. Belt and braces next to the sandbox policy below,
+  // which already denies the previewed page a service worker at all.
+  "service-worker-allowed",
   "connection",
   "keep-alive",
   "transfer-encoding",
   "upgrade",
 ]);
+
+/**
+ * Every byte this route returns is served from Paperclip's own web address, so
+ * without this header the previewed app would count as Paperclip: it could read
+ * the operator's session cookie and browser storage, call Paperclip's own API as
+ * the operator, and install a service worker over the whole site.
+ *
+ * The `sandbox` policy drops the page into an origin of its own. It is left
+ * with no cookies, no storage, no service worker and no same-origin API calls,
+ * while scripts, forms, pop-ups and dialogs still work so the preview is worth
+ * looking at. `allow-same-origin` is deliberately absent — adding it would give
+ * the previewed code the operator's Paperclip session.
+ */
+export const PREVIEW_SANDBOX_CSP = "sandbox allow-scripts allow-forms allow-popups allow-modals";
+
+/** Set before anything else, so even a refusal page is sandboxed. */
+function applyPreviewSandbox(res: Response) {
+  res.setHeader("Content-Security-Policy", PREVIEW_SANDBOX_CSP);
+}
 
 /** Cap on an HTML page we rewrite in memory; anything bigger is streamed untouched. */
 const HTML_REWRITE_MAX_BYTES = 4 * 1024 * 1024;
@@ -163,6 +186,7 @@ export function previewProxyRoutes(
   const previews = opts.service ?? previewEnvironmentService(rawDb);
 
   async function handle(req: Request, res: Response) {
+    applyPreviewSandbox(res);
     // Operator-only. An agent key or an anonymous caller is refused here,
     // before anything is looked up, so a preview is never an agent's side door
     // into a running app.
@@ -227,6 +251,13 @@ export function previewProxyRoutes(
             if (RESPONSE_HEADERS_NEVER_RETURNED.has(lower)) continue;
             if (lower === "location" && typeof value === "string") {
               res.setHeader(key, rewriteLocationHeader(value, target, previewBase));
+              continue;
+            }
+            if (lower === "content-security-policy") {
+              // The previewed app may have a policy of its own; it is added
+              // alongside ours rather than replacing it, and a browser applies
+              // both. The sandbox can only ever be made tighter this way.
+              res.append(key, value as string | string[]);
               continue;
             }
             if (isHtml && (lower === "content-length" || lower === "content-encoding")) continue;
@@ -315,6 +346,11 @@ export function previewProxyRoutes(
    * would resolve one level too high.
    */
   async function handleRoot(req: Request, res: Response) {
+    applyPreviewSandbox(res);
+    // Same operator-only rule as the main handler, and it comes first: an agent
+    // or a signed-out caller is refused outright rather than being told where
+    // the preview lives by a redirect.
+    assertBoard(req);
     if (req.method === "GET" && !req.path.endsWith("/")) {
       res.redirect(302, `${PREVIEW_PROXY_PATH_PREFIX}/${encodeURIComponent(String(req.params.workspaceId))}/`);
       return;

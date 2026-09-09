@@ -66,6 +66,24 @@ export function collectProjectExecutionWorkspaceCommandPaths(policy: unknown): s
   );
 }
 
+/**
+ * The deploy policy carries two commands the box runs as itself: the one that
+ * starts a preview copy and the one that deploys. They are host commands like
+ * any other, so an agent key must not be able to set or change them from a
+ * project write.
+ */
+export function collectDeployPolicyCommandPaths(deployPolicy: unknown): string[] {
+  if (!isRecord(deployPolicy)) return [];
+  const paths: string[] = [];
+  if (hasOwn(deployPolicy, "previewCommand")) {
+    paths.push("deployPolicy.previewCommand");
+  }
+  if (hasOwn(deployPolicy, "deployCommand")) {
+    paths.push("deployPolicy.deployCommand");
+  }
+  return paths;
+}
+
 export function collectProjectWorkspaceCommandPaths(
   workspacePatch: unknown,
   prefix = "",
