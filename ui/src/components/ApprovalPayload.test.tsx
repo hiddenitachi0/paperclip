@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ApprovalPayloadRenderer,
   approvalDeployBranchInfo,
+  approvalDeployChangeSummaryText,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
   approvalIsRollbackDeploy,
@@ -121,6 +122,43 @@ describe("approvalDeployBranchInfo", () => {
   it("returns null for non-deploy approvals", () => {
     expect(approvalDeployBranchInfo({ kind: "merge_pr", sourceBranch: "master" })).toBeNull();
     expect(approvalDeployBranchInfo(null)).toBeNull();
+  });
+});
+
+describe("approvalDeployChangeSummaryText (pointless-deploy-card guard)", () => {
+  it("says how much changes since the version running now", () => {
+    expect(
+      approvalDeployChangeSummaryText({
+        kind: "deploy",
+        commit: "bbbbbbbbbbbb",
+        changesSinceLive: {
+          liveCommit: "aaaaaaaaaaaa",
+          changedFileCount: 4,
+          changedFiles: ["server/src/app.ts"],
+          documentationOnly: false,
+        },
+      }),
+    ).toBe("Changes 4 files since the version running now (aaaaaaaaaaaa).");
+  });
+
+  it("says when the only difference is written notes", () => {
+    expect(
+      approvalDeployChangeSummaryText({
+        kind: "deploy",
+        changesSinceLive: {
+          liveCommit: "aaaaaaaaaaaa",
+          changedFileCount: 1,
+          changedFiles: ["README.md"],
+          documentationOnly: true,
+        },
+      }),
+    ).toBe("Changes 1 file since the version running now (aaaaaaaaaaaa) \u2014 written notes only.");
+  });
+
+  it("stays silent on a card the server could not check", () => {
+    expect(approvalDeployChangeSummaryText({ kind: "deploy", commit: "abc1234" })).toBeNull();
+    expect(approvalDeployChangeSummaryText({ kind: "merge_pr", changesSinceLive: { liveCommit: "a" } })).toBeNull();
+    expect(approvalDeployChangeSummaryText(null)).toBeNull();
   });
 });
 

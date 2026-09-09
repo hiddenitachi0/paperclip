@@ -378,7 +378,15 @@ describe("DUR-284: deploy approval branch stamp", () => {
       const res = await request(app).post("/api/companies/22222222-2222-4222-8222-222222222222/approvals").send(deployBody());
 
       expect(res.status).toBe(201);
-      expect(mockGhFetch).not.toHaveBeenCalled();
+      // The branch stamp asks GitHub nothing without a deploy branch. (The
+      // "would this deploy change anything?" guard does make its own
+      // commit-exists call here, so this asserts no branch lookup happened
+      // rather than no GitHub call at all.)
+      expect(
+        mockGhFetch.mock.calls.filter((call: unknown[]) =>
+          typeof call[0] === "string" ? call[0].includes("branches-where-head") : false,
+        ),
+      ).toEqual([]);
       const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
       expect(createdPayload.sourceBranch).toBeUndefined();
       expect(createdPayload.deployBranch).toBeUndefined();

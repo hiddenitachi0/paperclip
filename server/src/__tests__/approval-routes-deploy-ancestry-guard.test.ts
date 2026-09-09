@@ -170,6 +170,13 @@ async function createAgentApp(db: any) {
   return app;
 }
 
+/** Which compare calls the filing path made (the pointless-deploy-card guard added other GitHub calls). */
+function comparesRequested(): string[] {
+  return mockGhFetch.mock.calls
+    .map((call: unknown[]) => (typeof call[0] === "string" ? call[0] : ""))
+    .filter((url: string) => url.includes("/compare/"));
+}
+
 function deployBody(commit?: string) {
   return {
     type: "request_board_approval",
@@ -337,7 +344,11 @@ describe("DUR-227: deploy approval ancestry guard", () => {
         .send(deployBody("d55e5704"));
 
       expect(res.status).toBe(201);
-      expect(mockGhFetch).not.toHaveBeenCalled();
+      // No branch to compare against, so this guard asks GitHub nothing. (The
+      // pointless-deploy-card guard ("would this change anything?") still makes its own
+      // commit-exists lookup here, so this asserts on the compare call
+      // specifically rather than on GitHub being untouched.)
+      expect(comparesRequested()).toEqual([]);
       expect(mockApprovalService.create).toHaveBeenCalled();
     },
     TEST_TIMEOUT,

@@ -9,6 +9,7 @@ import {
   approvalSubject,
   approvalTechnicalReference,
   approvalDeployBranchInfo,
+  approvalDeployChangeSummaryText,
   approvalIsRollbackDeploy,
   typeIcon,
   defaultTypeIcon,
@@ -62,6 +63,7 @@ export function ApprovalCard({
   const technicalReference = approvalTechnicalReference(payload);
   const branchInfo = approvalDeployBranchInfo(payload);
   const isRollback = approvalIsRollbackDeploy(payload);
+  const deployChangeSummary = approvalDeployChangeSummaryText(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -145,6 +147,9 @@ export function ApprovalCard({
                 <p className="text-xs leading-5 text-muted-foreground">
                   Approval request created {timeAgo(approval.createdAt)}
                 </p>
+                {deployChangeSummary && (
+                  <p className="text-xs leading-5 text-muted-foreground">{deployChangeSummary}</p>
+                )}
               </div>
             </div>
           </div>

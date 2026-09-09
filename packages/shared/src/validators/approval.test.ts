@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEPLOY_CHANGED_FILES_STAMP_LIMIT,
+  DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
   addApprovalCommentSchema,
   deployRequestPayloadSchema,
   featureLaunchRequestPayloadSchema,
@@ -51,6 +53,76 @@ describe("approval validators", () => {
     // "unrecognized key" the strict parse throws on.
     expect(deployRequestPayloadSchema.parse({ ...payload, allowBackwardDeploy: true }).allowBackwardDeploy).toBe(true);
     expect(() => deployRequestPayloadSchema.parse({ ...payload, allowBackwardDeploy: "yes" })).toThrow();
+  });
+
+  it("accepts the server-stamped change summary on the deploy payload (pointless-deploy-card guard)", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: "bbbbbbbbbbbb",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+      changesSinceLive: {
+        liveCommit: "aaaaaaaaaaaa",
+        changedFileCount: 2,
+        changedFiles: ["server/src/app.ts", "docs/notes.md"],
+        documentationOnly: false,
+      },
+    };
+    expect(deployRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(deployRequestPayloadSchema.parse({ ...payload, changesSinceLive: undefined }).changesSinceLive)
+      .toBeUndefined();
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: { ...payload.changesSinceLive, extra: "nope" },
+      }),
+    ).toThrow();
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: { ...payload.changesSinceLive, changedFileCount: -1 },
+      }),
+    ).toThrow();
+  });
+
+  it("caps the change summary so a big deploy cannot bloat the stored card", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: "bbbbbbbbbbbb",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+      changesSinceLive: {
+        liveCommit: "aaaaaaaaaaaa",
+        // A deploy really can change hundreds of files; the count stays true,
+        // only the listed paths are capped.
+        changedFileCount: 812,
+        changedFiles: Array.from({ length: DEPLOY_CHANGED_FILES_STAMP_LIMIT }, (_, i) => `server/src/file${i}.ts`),
+        documentationOnly: false,
+      },
+    };
+    expect(deployRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: {
+          ...payload.changesSinceLive,
+          changedFiles: [...payload.changesSinceLive.changedFiles, "server/src/one-too-many.ts"],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: {
+          ...payload.changesSinceLive,
+          changedFiles: ["x".repeat(DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH + 1)],
+        },
+      }),
+    ).toThrow();
   });
 
   it("accepts acknowledgedDuplicateOfApprovalId on the deploy payload (DUR-138)", () => {
