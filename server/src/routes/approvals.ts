@@ -524,13 +524,28 @@ async function evaluateDeployCardChange(
   // base = live, head = requested. "identical"/"behind" mean the requested
   // commit is already inside what is live; "diverged" means the live version is
   // not in its history at all.
+  // (b) and (c) refuse only an AGENT. Re-deploying the commit that is already
+  // live is the platform's only way to restart production (deploy-runner.sh
+  // runs the recipe even when the target equals HEAD, and there is no restart
+  // button anywhere in the UI), and rolling back to an older commit is a
+  // deliberate board action the runner supports via allowBackwardDeploy. An
+  // operator who files either of those on purpose must not be locked out by a
+  // guard that exists to stop agents filing cards nobody can act on. The board
+  // still gets the plain-language summary stamped on the card, so it can see
+  // "nothing differs from the version running now" before approving.
   if (status === "identical" || status === "behind") {
+    if (!options.filedByAgent) {
+      return summarizeChangedPaths(liveCommit, [], { truncated: false });
+    }
     throw unprocessable(
       describeDeployCommitAlreadyLive({ commit, liveCommit, identical: status === "identical" }),
       { commit, liveCommit, compareStatus: status, reason: "already_live" },
     );
   }
   if (status === "diverged") {
+    if (!options.filedByAgent) {
+      return summarizeChangedPaths(liveCommit, [], { truncated: false });
+    }
     throw unprocessable(
       describeDeployCommitNotBuiltOnLive({ commit, liveCommit, deployBranch: options.deployBranch ?? null }),
       { commit, liveCommit, compareStatus: status, reason: "not_built_on_live" },

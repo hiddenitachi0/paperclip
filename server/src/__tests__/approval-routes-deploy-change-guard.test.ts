@@ -365,6 +365,35 @@ describe("Pointless deploy cards: deploy cards that would deploy nothing are ref
   );
 
   it(
+    "(b) does NOT block the board from re-deploying what is already live (the only way to restart production)",
+    async () => {
+      githubAnswers({ status: "identical", files: [] });
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
+
+      expect(res.status).toBe(201);
+      const stamped = mockApprovalService.create.mock.calls[0]?.[1]?.payload;
+      expect(stamped.changesSinceLive).toMatchObject({ liveCommit: LIVE_COMMIT, changedFileCount: 0 });
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "(c) does NOT block the board from deploying a commit the live version is not part of (a deliberate rollback)",
+    async () => {
+      githubAnswers({ status: "diverged", files: [] });
+      const app = await createBoardApp(createRouteDb());
+
+      const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody());
+
+      expect(res.status).toBe(201);
+      expect(mockApprovalService.create).toHaveBeenCalled();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
     "(d) refuses an agent's card when only written notes changed since the live version",
     async () => {
       githubAnswers({
