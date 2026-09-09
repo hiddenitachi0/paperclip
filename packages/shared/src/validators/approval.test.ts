@@ -53,6 +53,38 @@ describe("approval validators", () => {
     expect(() => deployRequestPayloadSchema.parse({ ...payload, allowBackwardDeploy: "yes" })).toThrow();
   });
 
+  it("accepts the server-stamped change summary on the deploy payload (pointless-deploy-card guard)", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      commit: "bbbbbbbbbbbb",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+      changesSinceLive: {
+        liveCommit: "aaaaaaaaaaaa",
+        changedFileCount: 2,
+        changedFiles: ["server/src/app.ts", "docs/notes.md"],
+        documentationOnly: false,
+      },
+    };
+    expect(deployRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(deployRequestPayloadSchema.parse({ ...payload, changesSinceLive: undefined }).changesSinceLive)
+      .toBeUndefined();
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: { ...payload.changesSinceLive, extra: "nope" },
+      }),
+    ).toThrow();
+    expect(() =>
+      deployRequestPayloadSchema.parse({
+        ...payload,
+        changesSinceLive: { ...payload.changesSinceLive, changedFileCount: -1 },
+      }),
+    ).toThrow();
+  });
+
   it("accepts acknowledgedDuplicateOfApprovalId on the deploy payload (DUR-138)", () => {
     const payload = {
       kind: "deploy" as const,

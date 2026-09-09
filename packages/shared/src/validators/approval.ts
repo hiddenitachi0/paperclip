@@ -58,6 +58,23 @@ export const addApprovalCommentSchema = z.object({
 export type AddApprovalComment = z.infer<typeof addApprovalCommentSchema>;
 
 /**
+ * Pointless deploy cards: the server-resolved answer to "what would this deploy actually
+ * change?" -- the version live right now, and the files that differ between it
+ * and the commit on the card. Stamped at filing time; see
+ * server/src/services/deploy-change-guard.ts.
+ */
+export const deployChangeSummarySchema = z
+  .object({
+    liveCommit: z.string().trim().min(1),
+    changedFileCount: z.number().int().nonnegative(),
+    changedFiles: z.array(z.string().trim().min(1)).max(50),
+    documentationOnly: z.boolean(),
+  })
+  .strict();
+
+export type DeployChangeSummary = z.infer<typeof deployChangeSummarySchema>;
+
+/**
  * `request_board_approval` payload convention for deploy requests filed against
  * a project's `deployPolicy`. Formalizes the `{kind:"deploy", ...}` shape the
  * on-box deploy runner already expects informally.
@@ -95,6 +112,15 @@ export const deployRequestPayloadSchema = z
     // server/src/routes/approvals.ts); the UI shows such a card as a
     // rollback so approving it is a deliberate choice.
     allowBackwardDeploy: z.boolean().optional(),
+    // Pointless deploy cards: what actually differs between the version running right now and
+    // the commit this card asks to deploy -- stamped server-side at filing time
+    // (server/src/routes/approvals.ts, alongside the branch stamp) so the card
+    // can say what will change instead of showing a bare commit id. Never
+    // trusted from the filer: a card must not be able to claim its own "this
+    // ships real work". Absent when it could not be worked out (no live version
+    // known, no GitHub repo, GitHub unreachable) -- absent means "not checked",
+    // never "nothing changes".
+    changesSinceLive: deployChangeSummarySchema.optional(),
   })
   .strict();
 
