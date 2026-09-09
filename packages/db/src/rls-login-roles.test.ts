@@ -25,12 +25,12 @@ const SCOPED_LOGIN = "paperclip_app_scoped_login";
 const BYPASS_LOGIN = "paperclip_app_bypass_login";
 const TEST_PASSWORD = "dur3945-test-only";
 
-// DUR-3945 (DUR-244 item 3): proves migration 0161's two LOGIN roles behave
+// DUR-3945 (DUR-244 item 3): proves migration 0164's two LOGIN roles behave
 // the way docs/rls-cutover-runbook.md promises -- by actually logging in as
 // them over the wire with a password (set here the same way the runbook has
 // the operator set it), not just SET ROLE from the superuser. Everything the
 // app does after the cutover goes through exactly these connections.
-describeEmbeddedPostgres("DUR-3945: RLS login roles (migration 0161)", () => {
+describeEmbeddedPostgres("DUR-3945: RLS login roles (migration 0164)", () => {
   let db!: Db;
   let connectionString!: string;
   let scopedUrl!: string;
@@ -231,7 +231,7 @@ describeEmbeddedPostgres("DUR-3945: RLS login roles (migration 0161)", () => {
 
   it("the scoped login can reach the instance-wide tables 0149 never granted (auth users, cross_company_access_log)", async () => {
     await withPool(scopedUrl, async (scopedPool) => {
-      // Would be "permission denied for table user" before 0161.
+      // Would be "permission denied for table user" before 0164.
       const users = (await scopedPool.execute(sql`select count(*)::int as count from "user"`)) as unknown as {
         count: number;
       }[];
@@ -257,7 +257,7 @@ describeEmbeddedPostgres("DUR-3945: RLS login roles (migration 0161)", () => {
     `)) as unknown as { table_name: string }[];
     expect(
       rows.map((r) => r.table_name),
-      "a migration added a tenant table without an RLS policy -- add a paperclip_company_scope policy for it in that migration (see 0149/0161)",
+      "a migration added a tenant table without an RLS policy -- add a paperclip_company_scope policy for it in that migration (see 0149/0164)",
     ).toEqual([]);
   });
 

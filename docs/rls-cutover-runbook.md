@@ -16,11 +16,11 @@ database *superuser* and it *owns* every table. Two things follow from that:
    agent that shouldn't have it) can read and change **every company's data**,
    and can change the database structure itself.
 2. The company-isolation rules already in the database (row-level security,
-   added in migrations 0149/0150/0161) **do not apply to it**. Postgres never
+   added in migrations 0149/0150/0164) **do not apply to it**. Postgres never
    applies those rules to a superuser or to the owner of a table.
 
 This runbook replaces that single login with two limited ones, both created by
-migration 0161 and both without a password until you set one:
+migration 0164 and both without a password until you set one:
 
 | Login | Can see | Can change tables' structure? | Used for |
 |---|---|---|---|
@@ -35,7 +35,7 @@ the database structure; the migration only adds roles and permissions.
 ## Before you start
 
 - This change must be deployed first (the branch with migration
-  `0161_rls_login_roles`). When the server starts it applies the migration
+  `0164_rls_login_roles`). When the server starts it applies the migration
   automatically and then prints one log line that starts with
   **"Database credential check (RLS cutover posture)"**. That line is your
   dashboard for this whole runbook: it names the login the app is using
@@ -130,7 +130,7 @@ passwords.
    docker exec docker-db-1 psql -U paperclip -d paperclip -c "SELECT rolname, rolcanlogin, rolsuper, pg_has_role(rolname, 'paperclip_app_scoped', 'member') AS scoped, pg_has_role(rolname, 'paperclip_app_bypass', 'member') AS bypass FROM pg_roles WHERE rolname LIKE 'paperclip_app_%_login';"
    ```
 
-   **If you get zero rows, migration 0161 has not run on this database: stop
+   **If you get zero rows, migration 0164 has not run on this database: stop
    here.** The deploy that carries it has not happened yet (or failed at
    startup -- check the server log). Nothing below can work until the query
    returns two rows.
@@ -415,7 +415,7 @@ no `error` lines.
   paperclip_app_bypass"**: `DATABASE_BYPASS_URL` points at a login that cannot
   bypass. Set it to the bypass login (step 2) and restart.
 - **"permission denied for table ..." in the log**: a table the new logins were
-  not granted. Migration 0161 grants every table that exists when it runs and
+  not granted. Migration 0164 grants every table that exists when it runs and
   sets defaults for future ones, so this means a table was created outside a
   migration. As the owner:
 

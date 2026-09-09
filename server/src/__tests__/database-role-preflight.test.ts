@@ -97,7 +97,7 @@ describe("database role preflight (DUR-3945): pure classification and wording", 
   });
 });
 
-describeEmbeddedPostgres("database role preflight (DUR-3945): against the real roles from migration 0161", () => {
+describeEmbeddedPostgres("database role preflight (DUR-3945): against the real roles from migration 0164", () => {
   let db!: ReturnType<typeof createDb>;
   let connectionString!: string;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
