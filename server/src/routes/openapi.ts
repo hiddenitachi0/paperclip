@@ -4053,6 +4053,68 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
+// ─── Preview environments ─────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/approvals/{id}/preview",
+  tags: ["approvals"],
+  summary: "Get the preview running for an approval, if any",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/approvals/{id}/preview",
+  tags: ["approvals"],
+  summary: "Start a preview of the code an approval would ship",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 202: r.ok(), 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/approvals/{id}/preview",
+  tags: ["approvals"],
+  summary: "Stop and throw away an approval's preview",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
+});
+
+// The preview proxy is mounted at the server root, not under /api (same as the
+// plugin UI static route above). It is documented here so the route-coverage
+// test still sees every method it answers.
+for (const method of ["get", "post", "put", "patch", "delete"] as const) {
+  registry.registerPath({
+    method,
+    path: "/api/_preview/{workspaceId}",
+    tags: ["approvals"],
+    summary: "Proxy a request to the root of a running preview (operator only)",
+    request: { params: z.object({ workspaceId: z.string() }) },
+    responses: {
+      200: { description: "Response from the previewed app" },
+      302: { description: "Redirect to the preview root" },
+      401: r.unauthorized,
+      403: r.forbidden,
+      404: r.notFound,
+    },
+  });
+  registry.registerPath({
+    method,
+    path: "/api/_preview/{workspaceId}/{previewPath}",
+    tags: ["approvals"],
+    summary: "Proxy a request to a running preview (operator only)",
+    request: { params: z.object({ workspaceId: z.string(), previewPath: z.string() }) },
+    responses: {
+      200: { description: "Response from the previewed app" },
+      401: r.unauthorized,
+      403: r.forbidden,
+      404: r.notFound,
+    },
+  });
+}
+
 // ─── Environments ─────────────────────────────────────────────────────────────
 
 registry.registerPath({
