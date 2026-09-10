@@ -53,6 +53,7 @@ diagnostics/
 
 # deploy-runner.sh local runtime state (default paths, see scripts/deploy-runner.sh)
 /.deploy-runner-processed
+/.deploy-runner-ci-waiting
 /.deploy-runner-quiet-mode-pending
 /deploy-runner.log
 /deploy-failure-logs/

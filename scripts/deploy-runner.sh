@@ -23,15 +23,24 @@
 #      (server/src/routes/secrets.ts) — never a general secret-value read.
 #   3. DUR-3905: before touching the checkout at all, query GitHub's combined
 #      commit status + check-runs for payload.commit (or the workspace's
-#      repoRef) via check_ci_status(). A red or still-running check holds the
-#      deploy with an explanatory comment instead of shipping it and relying
-#      on the health-check + rollback below to catch it after the fact. A repo
+#      repoRef) via check_ci_status(). A red check stops the deploy with an
+#      explanatory comment instead of shipping it and relying on the
+#      health-check + rollback below to catch it after the fact. DUR-3967: a
+#      still-RUNNING check is not a verdict — the card is left unprocessed and
+#      re-checked on each 60s tick (bounded by CI_WAIT_SECONDS from the
+#      approval's decidedAt) so it ships by itself the moment the checks go
+#      green, with no second approval from the operator. A check that has
+#      already finished RED counts as red even while other checks are still
+#      running. A repo
 #      with no CI configured at all (both endpoints empty) is treated the same
 #      as today — absence of CI is not evidence of failure, so it doesn't
 #      block a deploy that would otherwise always have gone through; likewise
 #      a GitHub API/network failure fails OPEN (unknown), matching how the
 #      merge-pr-automation service treats the same ambiguity elsewhere in this
-#      codebase, so a GitHub outage can't itself become a deploy outage.
+#      codebase, so a GitHub outage can't itself become a deploy outage — with
+#      one exception (DUR-3967): a card that an earlier tick already saw
+#      mid-check keeps waiting on an "unknown" instead of shipping, because
+#      there we have positive evidence that checks exist and were unfinished.
 #   4. In deployTargetPath: git fetch + reset --hard to payload.commit (if
 #      pinned) or the workspace's repoRef, authenticating with the resolved
 #      token via the SAME credential-helper script the container image uses
@@ -194,6 +203,39 @@ QUIET_MODE_PENDING_MARKER="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_MARKER:-$REPO_DI
 # server/src/services/deploy-approval-feedback.ts. Real kind:"deploy" cards
 # are NOT bounded by this: a deploy that was approved is still meant to happen.
 UNSUPPORTED_KIND_MAX_AGE_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_UNSUPPORTED_MAX_AGE_SECONDS:-86400}"
+# DUR-3967: a still-running build is a WAIT, not a verdict. The normal
+# sequence is: an agent merges, files the deploy card, GitHub starts CI on the
+# merge commit, and the operator approves within the minute -- so the very
+# first time this runner looks at a freshly approved card, CI is almost always
+# still "pending". Until now that answer was terminal: the card was commented
+# on, marked processed, and never looked at again, so a build that went green
+# two minutes later simply never shipped and the card sat there reading
+# "approved" forever (card ca143f73 / commit 3a372317, 2026-09-10 -- recovered
+# only by hand-editing the processed-set file on the box). A pending build now
+# leaves the card UNPROCESSED so the next timer tick (every 60s) re-checks it,
+# bounded by this deadline measured from the approval's own decidedAt. Only
+# when the deadline passes does the card become terminal. "failure" (a build
+# that actually went red) is deliberately NOT covered by any of this: that
+# needs a person, and stays terminal exactly as before.
+CI_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS:-2700}"
+# The runner ticks every 60s; a card can legitimately wait out the whole
+# deadline above. Neither the log nor the machine-readable status feed may get
+# a line per tick for the same waiting card, or a held deploy drowns out
+# everything else in them. The operator-facing COMMENT is stricter still:
+# exactly one when the wait starts and one at the deadline, never on the ticks
+# in between (see handle_ci_pending).
+CI_WAIT_LOG_INTERVAL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_LOG_INTERVAL_SECONDS:-600}"
+# Which cards are currently waiting on their checks, and when each one was
+# last mentioned in the log/status feed. One TAB-separated line per approval:
+# `<approval id>\t<first seen epoch>\t<last announced epoch>`. Kept next to the
+# processed-set for the same reason it is a file at all -- each tick is a
+# separate process, so "have I already said this?" has to survive on disk.
+CI_WAIT_STATE="${PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_STATE:-$REPO_DIR/.deploy-runner-ci-waiting}"
+# process_approval's exit status for "this card is not finished with -- leave
+# it unprocessed and look again next tick". Distinct from 0 (done, a comment
+# was delivered) and 1 (no comment could be delivered), both of which already
+# mean something specific to run_one_approval.
+DEPLOY_HELD_STATUS=10
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -288,7 +330,77 @@ for i in items:
 }
 
 already_processed() { grep -qxF "$1" "$PROCESSED" 2>/dev/null; }
-mark_processed() { echo "$1" >> "$PROCESSED"; }
+# DUR-3967: marking a card processed is the ONE place every terminal outcome
+# passes through -- a deploy, a red build, a superseded card, an unsupported
+# kind, the crash fallback, and every early return in process_approval that
+# never reaches the CI gate at all. Dropping the wait-state row here means no
+# path can end a card and leave it listed as "waiting on its checks" forever.
+mark_processed() { echo "$1" >> "$PROCESSED"; ci_wait_state_clear "$1"; }
+
+now_epoch() { date -u +%s; }
+
+# DUR-3967: ISO-8601 (with or without a trailing Z) -> epoch seconds. Prints
+# nothing when the value is missing or unparseable, and every caller treats
+# that as "I don't know when this was decided" rather than as a number.
+epoch_of() { # iso8601 -> stdout: epoch seconds, or empty
+  [ -n "${1:-}" ] || return 0
+  python3 -c '
+import sys
+from datetime import datetime, timezone
+text = sys.argv[1].strip()
+if text.endswith("Z") or text.endswith("z"):
+    text = text[:-1] + "+00:00"
+try:
+    parsed = datetime.fromisoformat(text)
+except ValueError:
+    raise SystemExit(0)
+if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=timezone.utc)
+print(int(parsed.timestamp()))
+' "$1" 2>/dev/null
+}
+
+# DUR-3967 wait-state file (see CI_WAIT_STATE). Three tiny helpers rather than
+# inline awk at each call site, so the "one line per approval" invariant lives
+# in one place.
+ci_wait_state_get() { # aid -> stdout: "<first seen epoch>\t<last announced epoch>"; exit 1 if this card is not waiting
+  [ -f "$CI_WAIT_STATE" ] || return 1
+  awk -F'\t' -v id="$1" '$1 == id { print $2 "\t" $3; found = 1; exit } END { if (!found) exit 1 }' "$CI_WAIT_STATE" 2>/dev/null
+}
+
+ci_wait_state_put() { # aid, first_seen_epoch, last_announced_epoch
+  local aid="$1" first="$2" last="$3" tmp="$CI_WAIT_STATE.tmp.$$"
+  {
+    if [ -f "$CI_WAIT_STATE" ]; then awk -F'\t' -v id="$aid" '$1 != id' "$CI_WAIT_STATE"; fi
+    printf '%s\t%s\t%s\n' "$aid" "$first" "$last"
+  } > "$tmp" 2>>"$LOG" && mv "$tmp" "$CI_WAIT_STATE" 2>>"$LOG" || {
+    rm -f "$tmp" 2>/dev/null
+    log "runner: $aid could not update the waiting-for-checks state file $CI_WAIT_STATE (it may be announced again next tick)"
+  }
+}
+
+ci_wait_state_clear() { # aid
+  [ -f "$CI_WAIT_STATE" ] || return 0
+  local tmp="$CI_WAIT_STATE.tmp.$$"
+  awk -F'\t' -v id="$1" '$1 != id' "$CI_WAIT_STATE" > "$tmp" 2>>"$LOG" && mv "$tmp" "$CI_WAIT_STATE" 2>>"$LOG" || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# DUR-3967: belt and braces for the file above. mark_processed() clears a
+# card's row as it ends, but this file also survives crashes, kill -9 mid-
+# deploy, and rows written by an older version of this script that had no
+# clearing at all. Anything already in the processed set is finished with by
+# definition, so its row is dead weight -- and a stale row is not inert: the
+# "unknown means keep waiting" guard in process_approval keys off exactly this
+# file. Runs once per poll cycle.
+ci_wait_state_prune() {
+  [ -f "$CI_WAIT_STATE" ] || return 0
+  [ -f "$PROCESSED" ] || return 0
+  local tmp="$CI_WAIT_STATE.tmp.$$"
+  awk -F'\t' 'NR == FNR { done[$0] = 1; next } !($1 in done)' "$PROCESSED" "$CI_WAIT_STATE" > "$tmp" 2>>"$LOG" \
+    && mv "$tmp" "$CI_WAIT_STATE" 2>>"$LOG" || rm -f "$tmp" 2>/dev/null
+  return 0
+}
 
 # Resolve approval + project JSON into a shell-safe block of KEY='value'
 # assignments (via `eval`) so bash never has to hand-parse JSON itself.
@@ -484,11 +596,21 @@ print(f"{m.group(1)}/{m.group(2)}" if m else "")
 # the local checkout. Always prints exactly one of:
 #   success  - CI configured and every status/check-run is green
 #   failure  - CI configured and at least one status/check-run is red
-#   pending  - CI configured but still running
+#   pending  - CI configured, nothing red yet, and something is still running
 #   unknown  - no CI configured at all, the repo isn't github.com, or the
 #              GitHub API call itself failed -- treated as fail-open by the
 #              caller, same ambiguity-handling choice merge-pr-automation.ts
 #              makes for the equivalent merge_pr gate.
+#
+# DUR-3967: "red beats still-running" is deliberate and is checked BEFORE
+# pending. A check-run that has already COMPLETED with a failing conclusion is
+# a known-red build even while some other job is still going, and the runner
+# must stop on it rather than sit in the wait loop. The old ordering returned
+# "pending" there, which since DUR-3967 means "hold the card and re-check it
+# every 60s" -- so if somebody re-ran just the failed job and it went green
+# inside the wait window, a build the operator had been told nothing about
+# would ship on their original approval. A person deciding to re-run a red
+# job is welcome to; they just have to file the deploy again afterwards.
 check_ci_status() { # repo_url, ref_or_commit, github_token
   local repo_url="$1" ref="$2" token="$3" owner_repo status_json checkruns_json
   owner_repo="$(github_owner_repo "$repo_url")"
@@ -523,16 +645,25 @@ checkruns = load("CHECKRUNS_JSON")
 total_status = status.get("total_count") or 0
 runs = checkruns.get("check_runs") or []
 
+def completed_red(run):
+    # A check-run only has a verdict once it has completed; an unfinished one
+    # has conclusion None and is "pending", not "red".
+    return run.get("status") == "completed" and run.get(
+        "conclusion"
+    ) not in ("success", "neutral", "skipped")
+
 if not total_status and not runs:
     print("unknown")
 elif total_status and status.get("state") not in ("success", "pending"):
+    print("failure")
+elif any(completed_red(r) for r in runs):
+    # DUR-3967: a check that has already finished red is terminal even while
+    # other checks are still running -- see the ordering note above.
     print("failure")
 elif total_status and status.get("state") == "pending":
     print("pending")
 elif any(r.get("status") != "completed" for r in runs):
     print("pending")
-elif any(r.get("conclusion") not in ("success", "neutral", "skipped") for r in runs):
-    print("failure")
 else:
     print("success")
 '
@@ -877,7 +1008,115 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   )
 }
 
-process_approval() { # approval_id, company_id -> exit status is comment()'s delivery status
+# DUR-3967: what to do about a card whose automated checks have not (yet) come
+# back green -- either they are still running, or a later tick could no longer
+# get an answer out of GitHub for a card we already know was mid-check.
+# Returns $DEPLOY_HELD_STATUS while the card should stay unprocessed (the next
+# tick re-checks it), or comment()'s delivery status once the deadline has
+# passed and the card is finished with.
+#
+# Three things have to be true at once here:
+#   * the wait must end (CI_WAIT_SECONDS from the approval's own decidedAt --
+#     a card approved 40 minutes ago has 5 minutes left, not another 45),
+#   * the operator gets exactly two comments across the whole wait: one when
+#     it starts, one at the deadline. Nothing on the ticks in between, or a
+#     45-minute wait posts 45 comments,
+#   * the wait is still visible while it lasts -- so the log line and the
+#     machine-readable status line are throttled (CI_WAIT_LOG_INTERVAL_SECONDS)
+#     rather than dropped.
+# The "have I already said this?" answer lives in $CI_WAIT_STATE because every
+# tick is a fresh process. It is only written once the announcing comment has
+# actually been DELIVERED, so a card whose comment could not be posted (server
+# container mid-recreate) is announced properly on a later tick instead of
+# waiting out its deadline in silence.
+handle_ci_pending() { # aid, company_id, target_ref, decided_at, why(pending|unknown)
+  local aid="$1" company_id="$2" target_ref="$3" decided_at="${4:-}" why="${5:-pending}"
+  local now state first_seen last_announced decided_epoch started waited waited_minutes wait_minutes what
+
+  # How the log describes what the last check actually returned. Never
+  # operator-facing: from the card's point of view "still being checked" and
+  # "we could not find out whether it is still being checked" are the same
+  # situation and get the same two comments.
+  if [ "$why" = "unknown" ]; then
+    what="could not be read back from GitHub at all"
+  else
+    what="are still running"
+  fi
+
+  now="$(now_epoch)"
+  first_seen=""
+  last_announced=""
+  if state="$(ci_wait_state_get "$aid")"; then
+    first_seen="$(printf '%s' "$state" | cut -f1)"
+    last_announced="$(printf '%s' "$state" | cut -f2)"
+  fi
+  case "$first_seen" in ''|*[!0-9]*) first_seen="" ;; esac
+  case "$last_announced" in ''|*[!0-9]*) last_announced="" ;; esac
+
+  # When the clock started. The wait is measured from the EARLIEST of: the
+  # operator's own decision time (what the spec measures from and what the
+  # comment quotes back), the first tick that saw this card waiting, and now.
+  #
+  # Taking the earliest, rather than preferring decidedAt outright, is what
+  # keeps the wait bounded no matter what the timestamp says. A decidedAt
+  # AHEAD of this host's clock -- a clock skew between the app container and
+  # the box, a hand-edited row, a timezone bug upstream -- used to make
+  # `now - started` negative, and clamping that to 0 pinned the wait at zero
+  # seconds forever: the card was announced once and then held indefinitely,
+  # re-hitting GitHub every 60s, never reaching the deadline and never telling
+  # the operator anything again. min() cannot do that: `first_seen` and `now`
+  # are both this host's own clock, so the elapsed time can only grow.
+  decided_epoch="$(epoch_of "$decided_at")"
+  case "$decided_epoch" in ''|*[!0-9]*) decided_epoch="" ;; esac
+  started="$now"
+  if [ -n "$first_seen" ] && [ "$first_seen" -lt "$started" ]; then started="$first_seen"; fi
+  if [ -n "$decided_epoch" ] && [ "$decided_epoch" -lt "$started" ]; then started="$decided_epoch"; fi
+  waited=$(( now - started ))
+  [ "$waited" -lt 0 ] && waited=0
+  # Rounded to the nearest minute, floor 1: the deadline note quotes how long
+  # this card ACTUALLY waited, not the configured budget. A card the runner
+  # only got back to after 90 minutes (single-flight: no tick happens at all
+  # while another deploy is running) must not claim it gave up after 45.
+  waited_minutes=$(( (waited + 30) / 60 ))
+  [ "$waited_minutes" -lt 1 ] && waited_minutes=1
+  wait_minutes=$(( CI_WAIT_SECONDS / 60 ))
+
+  if [ "$waited" -ge "$CI_WAIT_SECONDS" ]; then
+    log "runner: $aid giving up — the automated checks for $target_ref $what ${waited}s after the approval was decided (deadline ${CI_WAIT_SECONDS}s); nothing deployed"
+    # Deliberately NOT clearing the wait state here. mark_processed() clears it
+    # on every delivered/terminal path, and clearing it first is actively
+    # dangerous: if this comment cannot be delivered (server container mid-
+    # recreate), the card stays UNPROCESSED with its wait row already erased —
+    # and a card with no wait row is exactly what tells the next tick that an
+    # "unknown" verdict is a repo with no checks rather than one we have
+    # already seen mid-check. That combination silently deploys an unproven
+    # build. Losing state before the outcome is confirmed is the bug; keep the
+    # row until something durable has actually happened.
+    comment "$aid" "$company_id" "Deploy not started — the automated checks on this version had still not passed about $waited_minutes minutes after it was approved, so this deploy stopped waiting for them. Nothing was deployed and whatever was already live is untouched. Once the checks have passed, ask the agent that filed this deploy to file a new deploy approval for the same version. If the checks keep hanging or finish red, asking again will hit the same wall — someone has to fix what is failing first." "checks_timed_out"
+    return
+  fi
+
+  if [ -z "$first_seen" ]; then
+    log "runner: $aid waiting — the automated checks for $target_ref $what; will re-check every poll cycle for up to ${CI_WAIT_SECONDS}s from the approval"
+    if comment "$aid" "$company_id" "Waiting for the automated checks — this version is still being checked automatically before it can go live, so the deploy has not started yet. You do not need to do anything: it will start on its own, usually within a minute or two of the checks passing, longer if another deploy is already running. If they are still not finished about $wait_minutes minutes after this was approved, the deploy will not go ahead and a note will be posted here saying so." "waiting_for_checks"; then
+      ci_wait_state_put "$aid" "$now" "$now"
+    else
+      log "runner: $aid could not post the waiting-for-checks note — will try again next poll cycle"
+    fi
+    return "$DEPLOY_HELD_STATUS"
+  fi
+
+  # Already announced on an earlier tick: no comment, and only an occasional
+  # log/status line so a long wait stays visible without flooding either.
+  if [ -z "$last_announced" ] || [ $(( now - last_announced )) -ge "$CI_WAIT_LOG_INTERVAL_SECONDS" ]; then
+    log "runner: $aid still waiting — the automated checks for $target_ref $what, ${waited}s into the ${CI_WAIT_SECONDS}s the runner will wait"
+    record_status "$aid" "$company_id" "Still waiting for the automated checks on this version to finish before the deploy starts (${waited}s of up to ${CI_WAIT_SECONDS}s)." 1 "waiting_for_checks"
+    ci_wait_state_put "$aid" "$first_seen" "$now"
+  fi
+  return "$DEPLOY_HELD_STATUS"
+}
+
+process_approval() { # approval_id, company_id -> comment()'s delivery status, or $DEPLOY_HELD_STATUS to be re-checked next tick
   local aid="$1" company_id="$2"
 
   local approval_json project_json
@@ -886,6 +1125,14 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     comment "$aid" "$company_id" "Deploy failed — could not re-fetch the approval. Check deploy-runner.log on the server."
     return
   }
+
+  # DUR-3967: when the operator actually decided this card. The wait deadline
+  # for still-running checks is measured from here, not from whenever this
+  # runner first happened to look at it.
+  local decided_at
+  decided_at="$(printf '%s' "$approval_json" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/dev/null)" || decided_at=""
 
   local project_id
   project_id="$(printf '%s' "$approval_json" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("payload") or {}).get("projectId") or "")')"
@@ -930,11 +1177,55 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
   # a way CI doesn't catch).
   local ci_status
   ci_status="$(check_ci_status "$DV_REPO_URL" "$target_ref" "$token")"
-  if [ "$ci_status" = "failure" ] || [ "$ci_status" = "pending" ]; then
-    log "runner: $aid holding — GitHub CI for $target_ref is $ci_status"
-    comment "$aid" "$company_id" "Deploy held — GitHub CI for $target_ref is $( [ "$ci_status" = "pending" ] && echo "still running" || echo "red (failing checks)" ). Refusing to deploy an unproven build. Re-approve/re-file this deploy once CI is green."
+  # DUR-3905 + DUR-3967: red and still-running are NOT the same finding.
+  #   failure - the checks ran and something is actually broken. Terminal, as
+  #             it has always been: no amount of waiting fixes it, a person
+  #             has to change the code.
+  #   pending - the checks simply have not finished yet. Handled by
+  #             handle_ci_pending, which leaves the card unprocessed so a
+  #             later tick can ship it by itself once they pass.
+  #   unknown - no checks configured at all, a non-github.com repo, or the
+  #             GitHub API call itself failed (unreachable, timed out, a 403
+  #             rate-limit body, unparseable JSON -- they are all one answer).
+  #             Deliberately fail-open (falls through to the deploy below):
+  #             absence of checks is not evidence of failure, and a GitHub
+  #             outage must not become a deploy outage. But see the
+  #             wait-state guard directly below for the one case where it is
+  #             NOT fail-open any more.
+  if [ "$ci_status" = "failure" ]; then
+    log "runner: $aid holding — GitHub CI for $target_ref is failure"
+    ci_wait_state_clear "$aid"
+    comment "$aid" "$company_id" "Deploy stopped — the automated checks on this version did not pass, so nothing was deployed and whatever was already live is untouched. Approving this again will not help on its own: someone needs to fix what is failing first, and then this version can be put live." "checks_failed"
     return
   fi
+  if [ "$ci_status" = "pending" ]; then
+    handle_ci_pending "$aid" "$company_id" "$target_ref" "$decided_at" "pending"
+    return
+  fi
+  # DUR-3967: fail-open has to survive exactly where it is justified, and only
+  # there. Before this ticket a card was looked at ONCE, so exactly one GitHub
+  # API sample decided it and fail-open risked one coin toss. A held card now
+  # re-samples every 60s for up to CI_WAIT_SECONDS -- ~45 chances for a single
+  # unreachable API, timeout or 403 rate-limit body to turn into "unknown" and
+  # ship a build we had already been told was mid-check. (The connect timeout
+  # is HEALTH_CONNECT_TIMEOUT_SECONDS against api.github.com from a box that
+  # runs at load 13+ during a deploy; this is not exotic.)
+  #
+  # So: an "unknown" for a card that is ALREADY WAITING is not evidence that
+  # there is nothing to wait for -- we have positive evidence from an earlier
+  # tick that checks exist and were incomplete. Keep waiting, bounded by the
+  # SAME deadline, so a genuine GitHub outage still ends in the terminal
+  # "stopped waiting" note rather than an unbounded hold. A repo that never
+  # had checks, a non-github remote and a FIRST look that finds nothing all
+  # still fail open, because none of them has any wait state.
+  if [ "$ci_status" = "unknown" ] && ci_wait_state_get "$aid" >/dev/null 2>&1; then
+    log "runner: $aid still waiting — could not get a check verdict for $target_ref out of GitHub, and an earlier tick already saw its checks running; not treating that as 'no checks'"
+    handle_ci_pending "$aid" "$company_id" "$target_ref" "$decided_at" "unknown"
+    return
+  fi
+  # Checks passed (or there are none to consult) — this card is no longer
+  # waiting on anything, so drop any wait-state left from earlier ticks.
+  ci_wait_state_clear "$aid"
 
   local before_commit
   # DUR-420: `--short=12` (not the 7-char default) so the logged/commented commit prefix is
@@ -1117,15 +1408,32 @@ run_one_approval() { # approval_id, company_id
   result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
   (
     trap 'deploy_approval_exit_guard "$aid" "$company_id" "$result_file"' EXIT
-    if process_approval "$aid" "$company_id"; then
+    process_approval "$aid" "$company_id"
+    local status=$?
+    # DUR-3967: three outcomes, not two. "held" is written so the EXIT trap's
+    # crash fallback (which fires only on an EMPTY result file) knows this
+    # subshell finished deliberately — but it is not "ok", so the approval is
+    # NOT added to the processed set and the next tick re-evaluates it.
+    if [ "$status" -eq "$DEPLOY_HELD_STATUS" ]; then
+      echo held > "$result_file"
+    elif [ "$status" -eq 0 ]; then
       echo ok > "$result_file"
     fi
   )
-  if [ -s "$result_file" ]; then
-    mark_processed "$aid"
-  else
-    log "runner: $aid — no comment could be delivered after retries; leaving unprocessed so it is retried next poll cycle"
-  fi
+  local result=""
+  [ -s "$result_file" ] && result="$(cat "$result_file" 2>/dev/null)"
+  case "$result" in
+    ok)
+      mark_processed "$aid"
+      ;;
+    held)
+      # Intentionally unprocessed and intentionally quiet: handle_ci_pending
+      # has already logged (throttled) why this card is still waiting.
+      ;;
+    *)
+      log "runner: $aid — no comment could be delivered after retries; leaving unprocessed so it is retried next poll cycle"
+      ;;
+  esac
   rm -f "$result_file"
 }
 
@@ -1166,6 +1474,11 @@ check_commit_already_live() { # approval_id, company_id
 
 run_superseded_approval() { # approval_id, company_id, keep_approval_id
   local aid="$1" company_id="$2" keep_id="$3" result_file
+  # DUR-3967: a superseded card is never going through the CI gate again --
+  # this runner will not deploy it at all -- so it stops waiting for its
+  # checks right here, whether or not the comment below can be delivered.
+  # (mark_processed() clears the row too, but only on the delivered path.)
+  ci_wait_state_clear "$aid"
   result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
   (
     trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
@@ -1223,6 +1536,9 @@ main() {
   # muted. This must run even when there is nothing else to do this cycle --
   # a stuck quiet mode means zero approvals will ever be filed either.
   retry_pending_quiet_mode_deactivate
+  # DUR-3967: drop waiting-for-checks rows belonging to cards that are already
+  # finished with, before anything reads that file this cycle.
+  ci_wait_state_prune
 
   local companies company_ids
   companies="$(cli_json company list)" || {

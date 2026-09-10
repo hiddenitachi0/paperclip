@@ -216,8 +216,12 @@ function makeScenario() {
   };
 }
 
-function runMain(scenario, extraEnv = {}) {
-  return run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\nmain`], {
+// `overrides` is extra bash injected between `source deploy-runner.sh` and
+// `main` — the same stubbing trick the single-function tests below use, but
+// for a whole poll cycle, so a test can drive main() end to end without
+// reaching the real GitHub API, git, docker compose or health-check URL.
+function runMain(scenario, extraEnv = {}, overrides = "") {
+  return run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\n${overrides}\nmain`], {
     env: {
       ...process.env,
       PATH: `${scenario.binDir}:${process.env.PATH}`,
@@ -1444,7 +1448,7 @@ function makeCiScenarioProject(scenario, targetPath) {
   });
 }
 
-test("process_approval holds the deploy and never touches the checkout when GitHub CI is red", () => {
+test("process_approval stops the deploy for good, and never touches the checkout, when GitHub CI is red", () => {
   const scenario = makeScenario();
   try {
     const targetPath = path.join(scenario.dir, "target-repo");
@@ -1464,47 +1468,267 @@ test("process_approval holds the deploy and never touches the checkout when GitH
         PATH: `${scenario.binDir}:${process.env.PATH}`,
         SCENARIO_DIR: scenario.dir,
         PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_STATE: path.join(scenario.dir, "ci-waiting"),
       },
     });
+    // DUR-3967: red is terminal — process_approval must return comment()'s
+    // own delivery status (0 here), NOT the "held, re-check me" status that
+    // a still-running build now returns.
     assertSuccess(result, "process_approval");
 
     const comments = scenario.commentsFor("aid-1");
     assert.equal(comments.length, 1);
-    assert.match(comments[0], /Deploy held/);
-    assert.match(comments[0], /red/);
+    assert.match(comments[0], /did not pass/);
+    assert.doesNotMatch(comments[0], /\bCI\b/, "operator-facing wording must say 'the automated checks', never 'CI'");
     assert.match(scenario.readLog(), /holding — GitHub CI for deadbeef is failure/);
   } finally {
     scenario.cleanup();
   }
 });
 
-test("process_approval holds the deploy with a distinct comment when GitHub CI is still running", () => {
+// DUR-3967: the bug this whole block exists for. On 2026-09-10 card ca143f73
+// (commit 3a372317) was approved seconds after its merge, so GitHub CI on the
+// merge commit was still running when the runner first looked. "pending" was
+// terminal: the card was commented, marked processed and never looked at
+// again. CI went green two minutes later and nothing happened — the card read
+// "approved" forever and had to be recovered by hand-editing the box's
+// processed-set file. This is the ordinary case, not an edge case.
+
+function makeCiPollScenario(scenario, { decidedAt } = {}) {
+  const targetPath = path.join(scenario.dir, "target-repo");
+  makeCiScenarioProject(scenario, targetPath);
+  scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+  scenario.writeJson("approval_list.json", [
+    {
+      id: "aid-1",
+      type: "request_board_approval",
+      status: "approved",
+      decidedAt: decidedAt ?? isoAgo(60 * 1000),
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef" },
+    },
+  ]);
+  scenario.writeJson("approval-aid-1.json", {
+    id: "aid-1",
+    status: "approved",
+    decidedAt: decidedAt ?? isoAgo(60 * 1000),
+    payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef" },
+  });
+  return targetPath;
+}
+
+// check_ci_status is read from a scenario file so a test can change the
+// answer BETWEEN poll cycles, which is the whole point: tick 1 sees a build
+// that is still running, tick 2 sees the same build green.
+const CI_STATUS_OVERRIDES = [
+  'check_ci_status() { cat "$SCENARIO_DIR/ci-status"; }',
+  'git_fetch_reset() { echo "$(date -u +%s) fetch" >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'run_recipe() { return 0; }',
+  'health_check() { return 0; }',
+].join("\n");
+
+const NO_DEPLOY_OVERRIDES = [
+  'check_ci_status() { cat "$SCENARIO_DIR/ci-status"; }',
+  'git_fetch_reset() { echo fetch >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'run_recipe() { echo recipe >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'health_check() { return 0; }',
+].join("\n");
+
+function ciPollEnv(scenario, extra = {}) {
+  return {
+    PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_STATE: path.join(scenario.dir, "ci-waiting"),
+    ...extra,
+  };
+}
+
+function setCiStatus(scenario, value) {
+  writeFileSync(path.join(scenario.dir, "ci-status"), `${value}\n`);
+}
+
+// Same stubs as NO_DEPLOY_OVERRIDES, but WITHOUT stubbing check_ci_status —
+// so the real function runs against a real (fake) GitHub over HTTP. Needed for
+// any test about what happens when the API answer itself changes shape, which
+// a stub returning canned words can't reach.
+const REAL_CI_OVERRIDES = [
+  'git_fetch_reset() { echo fetch >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'run_recipe() { echo recipe >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'health_check() { return 0; }',
+].join("\n");
+
+function deployAttempts(scenario) {
+  const file = path.join(scenario.dir, "deploys.log");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean);
+}
+
+// The waiting-for-checks state file (one TAB-separated row per held card).
+function ciWaitStatePath(scenario) {
+  return path.join(scenario.dir, "ci-waiting");
+}
+
+function ciWaitRows(scenario) {
+  const file = ciWaitStatePath(scenario);
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean);
+}
+
+test("a deploy whose checks are still running on the first tick ships by itself on a later tick once they pass", () => {
   const scenario = makeScenario();
   try {
-    const targetPath = path.join(scenario.dir, "target-repo");
-    makeCiScenarioProject(scenario, targetPath);
+    makeCiPollScenario(scenario);
 
-    const script = `
-      set -uo pipefail
-      source "${SCRIPT}"
-      check_ci_status() { echo pending; }
-      git_fetch_reset() { echo "git_fetch_reset must not run while CI is pending" >&2; exit 9; }
-      process_approval "aid-1" "co-1"
-    `;
-    const result = run("bash", ["-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${scenario.binDir}:${process.env.PATH}`,
-        SCENARIO_DIR: scenario.dir,
-        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
-      },
-    });
-    assertSuccess(result, "process_approval");
+    // Tick 1: the automated checks are still running.
+    setCiStatus(scenario, "pending");
+    assertSuccess(runMain(scenario, ciPollEnv(scenario), CI_STATUS_OVERRIDES), "main() tick 1");
+
+    assert.deepEqual(deployAttempts(scenario), [], "nothing may be deployed while the checks are still running");
+    assert.deepEqual(
+      scenario.processedIds(),
+      [],
+      "a still-running build must NOT be terminal — the card has to stay unprocessed so the next tick re-checks it",
+    );
+    const afterFirstTick = scenario.commentsFor("aid-1");
+    assert.equal(afterFirstTick.length, 1, `expected exactly one waiting note, got: ${JSON.stringify(afterFirstTick)}`);
+    assert.match(afterFirstTick[0], /Waiting for the automated checks/);
+    assert.match(afterFirstTick[0], /will start on its own/, "the operator must be told the deploy resumes by itself");
+    assert.doesNotMatch(
+      afterFirstTick[0],
+      /Re-approve|re-file/i,
+      "the old wording taught the operator to approve the same commit twice for no safety reason",
+    );
+
+    // Tick 2: the same build has gone green. Nobody re-approved anything.
+    setCiStatus(scenario, "success");
+    assertSuccess(runMain(scenario, ciPollEnv(scenario), CI_STATUS_OVERRIDES), "main() tick 2");
+
+    assert.equal(deployAttempts(scenario).length, 1, "the deploy must happen on its own once the checks pass");
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 2, `expected the waiting note plus one outcome, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[1], /is live and healthy/);
+    assert.deepEqual(scenario.processedIds(), ["aid-1"], "once it has actually deployed the card is finished with");
+    assert.equal(
+      existsSync(path.join(scenario.dir, "ci-waiting")) &&
+        readFileSync(path.join(scenario.dir, "ci-waiting"), "utf8").includes("aid-1"),
+      false,
+      "the wait state must be cleared once the card stops waiting",
+    );
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("a deploy whose checks never finish gives up at the deadline with exactly one note, and deploys nothing", () => {
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario, { decidedAt: isoAgo(10 * 60 * 1000) });
+    setCiStatus(scenario, "pending");
+
+    // Tick 1, well inside the deadline: one waiting note, still unprocessed.
+    assertSuccess(
+      runMain(scenario, ciPollEnv(scenario, { PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600" }), NO_DEPLOY_OVERRIDES),
+      "main() tick 1",
+    );
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.deepEqual(scenario.processedIds(), []);
+
+    // Ticks 2 and 3 with the deadline already behind us (the card was decided
+    // 10 minutes ago; a 0-second budget puts it past the deadline). The card
+    // must give up ONCE — the second of these two ticks must find it already
+    // processed and say nothing at all.
+    for (const label of ["tick 2", "tick 3"]) {
+      assertSuccess(
+        runMain(scenario, ciPollEnv(scenario, { PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), NO_DEPLOY_OVERRIDES),
+        `main() ${label}`,
+      );
+    }
 
     const comments = scenario.commentsFor("aid-1");
-    assert.equal(comments.length, 1);
-    assert.match(comments[0], /Deploy held/);
-    assert.match(comments[0], /still running/);
+    assert.equal(comments.length, 2, `expected the waiting note plus exactly one deadline note, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[1], /Deploy not started/);
+    assert.match(comments[1], /stopped waiting/);
+    assert.doesNotMatch(comments[1], /\bCI\b/, "operator-facing wording must say 'the automated checks', never 'CI'");
+    assert.deepEqual(scenario.processedIds(), ["aid-1"], "at the deadline the card becomes terminal");
+    assert.deepEqual(deployAttempts(scenario), [], "an unproven build must never be deployed, deadline or not");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("a card waiting on its checks does not post a comment on every tick, but stays visible in the log", () => {
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario);
+    setCiStatus(scenario, "pending");
+
+    // The runner ticks every 60s. Three ticks, one waiting note.
+    for (const label of ["tick 1", "tick 2", "tick 3"]) {
+      assertSuccess(
+        runMain(
+          scenario,
+          ciPollEnv(scenario, {
+            PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600",
+            // Nothing may be re-announced within the throttle window.
+            PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_LOG_INTERVAL_SECONDS: "3600",
+          }),
+          NO_DEPLOY_OVERRIDES,
+        ),
+        `main() ${label}`,
+      );
+    }
+
+    assert.equal(
+      scenario.commentsFor("aid-1").length,
+      1,
+      `a held card must be commented on once, not once per tick, got: ${JSON.stringify(scenario.commentsFor("aid-1"))}`,
+    );
+    assert.deepEqual(scenario.processedIds(), []);
+    const throttledLog = scenario.readLog();
+    assert.equal(
+      (throttledLog.match(/still waiting — the automated checks/g) || []).length,
+      0,
+      "inside the throttle window the log must not repeat itself either",
+    );
+    assert.equal(
+      (throttledLog.match(/waiting — the automated checks/g) || []).length,
+      1,
+      "…but the card entering the waiting state must be logged once",
+    );
+
+    // With the throttle window elapsed the wait stays visible: one more tick
+    // logs it again (and mirrors a machine-readable line into the status feed
+    // that the API already exposes), without adding another comment.
+    assertSuccess(
+      runMain(
+        scenario,
+        ciPollEnv(scenario, {
+          PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600",
+          PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_LOG_INTERVAL_SECONDS: "0",
+        }),
+        NO_DEPLOY_OVERRIDES,
+      ),
+      "main() tick 4",
+    );
+    assert.match(scenario.readLog(), /still waiting — the automated checks/, "a long wait must not go dark in the log");
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "logging again must not mean commenting again");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("a red build is terminal on the very first tick — commented once, marked processed, never retried", () => {
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario);
+    setCiStatus(scenario, "failure");
+
+    assertSuccess(runMain(scenario, ciPollEnv(scenario), NO_DEPLOY_OVERRIDES), "main() tick 1");
+    assert.deepEqual(scenario.processedIds(), ["aid-1"], "a build that actually failed needs a person, not a retry");
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /did not pass/);
+    assert.deepEqual(deployAttempts(scenario), []);
+
+    assertSuccess(runMain(scenario, ciPollEnv(scenario), NO_DEPLOY_OVERRIDES), "main() tick 2");
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "a terminal card must not be re-commented on the next tick");
+    assert.deepEqual(deployAttempts(scenario), []);
   } finally {
     scenario.cleanup();
   }
@@ -1531,6 +1755,7 @@ test("process_approval still deploys when GitHub CI is unknown (no checks config
         PATH: `${scenario.binDir}:${process.env.PATH}`,
         SCENARIO_DIR: scenario.dir,
         PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+        PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_STATE: path.join(scenario.dir, "ci-waiting"),
       },
     });
     assertSuccess(result, "process_approval");
@@ -1538,6 +1763,329 @@ test("process_approval still deploys when GitHub CI is unknown (no checks config
     const comments = scenario.commentsFor("aid-1");
     assert.equal(comments.length, 1);
     assert.match(comments[0], /is live and healthy/, "no CI configured must not itself block a deploy that would otherwise have gone through");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3967 safety: the retry loop multiplied the fail-open sample.
+//
+// Before this ticket a card was looked at ONCE, so exactly one GitHub API
+// sample decided it and "unknown" was one coin toss. A held card now
+// re-samples every 60s for up to 45 minutes, and check_ci_status collapses an
+// unreachable API, a 403 rate-limit body, a timeout and unparseable JSON all
+// into the same "unknown" — so without this guard, ~45 chances existed for a
+// build we had positive evidence was still being checked to ship anyway. The
+// api.github.com connect timeout is 5s from a box that runs at load 13+
+// during a deploy; this is not exotic.
+//
+// This test deliberately does NOT stub check_ci_status: the pending -> unknown
+// transition only exists in the real function, so a stub returning canned
+// words would prove nothing about it.
+test("a card already waiting on its checks does not fail open into a deploy when GitHub stops answering", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ci-outage-root-"));
+  writeGitHubFixture(webRoot, "deadbeef", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "in_progress", conclusion: null }] },
+  });
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  let stopped = false;
+  const stopGitHub = async () => {
+    if (stopped) return;
+    stopped = true;
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    child.kill();
+    await exited;
+  };
+  try {
+    makeCiPollScenario(scenario);
+    const env = (extra = {}) =>
+      ciPollEnv(scenario, {
+        PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE: `http://127.0.0.1:${port}`,
+        PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600",
+        ...extra,
+      });
+
+    // Tick 1: a real fixture, checks genuinely still running. The card is held
+    // and the operator is told so — positive evidence that checks exist here.
+    assertSuccess(runMain(scenario, env(), REAL_CI_OVERRIDES), "main() tick 1");
+    assert.deepEqual(deployAttempts(scenario), []);
+    assert.deepEqual(scenario.processedIds(), []);
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /Waiting for the automated checks/);
+
+    // Tick 2: GitHub is simply gone. check_ci_status can only say "unknown",
+    // and "unknown" must NOT be read as "there was nothing to wait for".
+    await stopGitHub();
+    assertSuccess(runMain(scenario, env(), REAL_CI_OVERRIDES), "main() tick 2");
+    assert.deepEqual(
+      deployAttempts(scenario),
+      [],
+      "a build we already know was mid-check must not ship just because GitHub went unreachable",
+    );
+    assert.deepEqual(scenario.processedIds(), [], "it is still waiting, not finished with");
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "and the wait is not re-announced on every tick");
+
+    // Tick 3: the hold is bounded by the SAME deadline, so a genuine GitHub
+    // outage ends in the terminal note rather than holding the card forever.
+    assertSuccess(
+      runMain(scenario, env({ PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), REAL_CI_OVERRIDES),
+      "main() tick 3",
+    );
+    assert.deepEqual(deployAttempts(scenario), []);
+    assert.deepEqual(scenario.processedIds(), ["aid-1"]);
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 2, `expected the waiting note plus one deadline note, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[1], /Deploy not started/);
+    assert.deepEqual(ciWaitRows(scenario), [], "and the wait state does not outlive the card");
+  } finally {
+    await stopGitHub();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
+// DUR-3967 safety: the wait-state row must outlive an undeliverable terminal
+// comment. The deadline branch used to clear the row BEFORE posting its note.
+// If that note could not be delivered (the server container is mid-recreate,
+// which is exactly when a deploy is in flight), run_one_approval leaves the
+// card UNPROCESSED — but its wait row is already gone. A card with no wait row
+// is precisely what tells the next tick that an "unknown" verdict means "this
+// repo has no checks" rather than "we have already seen this one mid-check",
+// so the guard above silently disarms itself and an unproven build ships.
+//
+// The rule this encodes: never drop state that a later decision depends on
+// until something durable has actually happened. mark_processed() clears the
+// row on every path that really did end the card.
+test("a deadline note that cannot be delivered still leaves the card protected against a later unknown", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ci-deadline-undeliverable-"));
+  writeGitHubFixture(webRoot, "deadbeef", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "in_progress", conclusion: null }] },
+  });
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  let stopped = false;
+  const stopGitHub = async () => {
+    if (stopped) return;
+    stopped = true;
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    child.kill();
+    await exited;
+  };
+  try {
+    makeCiPollScenario(scenario);
+    const env = (extra = {}) =>
+      ciPollEnv(scenario, {
+        PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE: `http://127.0.0.1:${port}`,
+        PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600",
+        ...extra,
+      });
+
+    // Tick 1: checks genuinely still running, card held and announced.
+    assertSuccess(runMain(scenario, env(), REAL_CI_OVERRIDES), "main() tick 1");
+    assert.deepEqual(scenario.processedIds(), []);
+    assert.equal(ciWaitRows(scenario).length, 1, "the card is on record as waiting");
+
+    // Tick 2: past the deadline, but every comment delivery fails.
+    scenario.setFailCount("aid-1", 50);
+    assertSuccess(
+      runMain(scenario, env({ PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), REAL_CI_OVERRIDES),
+      "main() tick 2",
+    );
+    assert.deepEqual(
+      scenario.processedIds(),
+      [],
+      "an undelivered terminal comment must leave the card unprocessed, so it is retried",
+    );
+
+    // Tick 3: comments work again, but GitHub is now unreachable -> "unknown".
+    // The card is still one we have seen mid-check, so it must not deploy.
+    scenario.setFailCount("aid-1", 0);
+    await stopGitHub();
+    assertSuccess(
+      runMain(scenario, env({ PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), REAL_CI_OVERRIDES),
+      "main() tick 3",
+    );
+    assert.deepEqual(
+      deployAttempts(scenario),
+      [],
+      "a build whose checks never passed must not ship just because its deadline note failed to send",
+    );
+  } finally {
+    await stopGitHub();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
+// DUR-3967 safety: fail-open must still survive where it is justified. A repo
+// that never had checks gets an "unknown" on its FIRST look, with no wait
+// state behind it — no positive evidence that anything is being checked — and
+// must deploy exactly as it always has.
+test("a first look that finds no checks at all still fails open and deploys, even over the real GitHub call", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ci-nochecks-root-"));
+  writeGitHubFixture(webRoot, "deadbeef", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [] },
+  });
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario);
+    assertSuccess(
+      runMain(
+        scenario,
+        ciPollEnv(scenario, { PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE: `http://127.0.0.1:${port}` }),
+        REAL_CI_OVERRIDES,
+      ),
+      "main()",
+    );
+    assert.equal(deployAttempts(scenario).length, 2, "absence of checks must not block a deploy that would otherwise go through");
+    assert.deepEqual(scenario.processedIds(), ["aid-1"]);
+    assert.match(scenario.commentsFor("aid-1")[0], /is live and healthy/);
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
+// DUR-3967: a decidedAt AHEAD of this host's clock used to disable the
+// deadline outright. `waited = now - decidedAt` went negative, the clamp
+// pinned it at 0, and the card was announced once and then held forever:
+// re-hitting GitHub every 60s, never reaching the deadline, never telling the
+// operator anything again.
+test("an approval timestamped in the future still gets a bounded wait, not a card held forever", () => {
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario, { decidedAt: new Date(Date.now() + 2 * ONE_HOUR_MS).toISOString() });
+    setCiStatus(scenario, "pending");
+    // 30 minutes of budget — deliberately different from the hour this card
+    // ends up actually waiting, so the deadline note can't fake the number.
+    const env = ciPollEnv(scenario, { PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "1800" });
+
+    // A timestamp from the future must not make the card give up instantly
+    // either: it is announced and held like any other.
+    assertSuccess(runMain(scenario, env, NO_DEPLOY_OVERRIDES), "main() tick 1");
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /Waiting for the automated checks/);
+    assert.deepEqual(scenario.processedIds(), []);
+    assert.equal(ciWaitRows(scenario).length, 1);
+
+    // Age the wait state by an hour — what an hour of 60s ticks does to it.
+    const anHourAgo = Math.floor(Date.now() / 1000) - 3600;
+    writeFileSync(ciWaitStatePath(scenario), `aid-1\t${anHourAgo}\t${anHourAgo}\n`);
+
+    assertSuccess(runMain(scenario, env, NO_DEPLOY_OVERRIDES), "main() tick 2");
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(
+      comments.length,
+      2,
+      `the wait must end at the deadline whatever the approval's timestamp says, got: ${JSON.stringify(comments)}`,
+    );
+    assert.match(comments[1], /Deploy not started/);
+    assert.deepEqual(scenario.processedIds(), ["aid-1"]);
+    assert.deepEqual(deployAttempts(scenario), []);
+    assert.deepEqual(ciWaitRows(scenario), []);
+
+    // …and the note quotes how long it ACTUALLY waited (an hour), not the
+    // configured budget (30 minutes). A card the runner only got back to after
+    // 90 minutes must not claim it gave up after 45.
+    assert.match(comments[1], /about 60 minutes/);
+    assert.doesNotMatch(comments[1], /about 30 minutes/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3967 operator wording: this is the one message that has to tell a
+// non-technical operator what to do next, and every claim in it has to be
+// true. See handle_ci_pending.
+test("the two waiting-for-checks notes say something a non-technical operator can act on, and nothing untrue", () => {
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario, { decidedAt: isoAgo(10 * 60 * 1000) });
+    setCiStatus(scenario, "pending");
+
+    assertSuccess(
+      runMain(scenario, ciPollEnv(scenario, { PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600" }), NO_DEPLOY_OVERRIDES),
+      "main() tick 1",
+    );
+    const waiting = scenario.commentsFor("aid-1")[0];
+    // The single-flight lock means no tick happens AT ALL while another deploy
+    // is running (~26 minutes has really happened), so "within a minute or two"
+    // on its own is a promise this runner cannot keep.
+    assert.match(waiting, /usually within a minute or two of the checks passing, longer if another deploy is already running/);
+
+    assertSuccess(
+      runMain(scenario, ciPollEnv(scenario, { PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), NO_DEPLOY_OVERRIDES),
+      "main() tick 2",
+    );
+    const deadline = scenario.commentsFor("aid-1")[1];
+    assert.match(deadline, /Once the checks have passed/, "'finished' includes finished red — which is not a green light");
+    assert.match(
+      deadline,
+      /ask the agent that filed this deploy to file a new deploy approval/,
+      "the operator must be told who to ask, the way the sibling messages in this file name a button or an agent",
+    );
+    assert.match(
+      deadline,
+      /If the checks keep hanging or finish red/,
+      "asking again hits the same wall unless someone fixes what is failing — say so",
+    );
+    assert.doesNotMatch(deadline, /deploy runner/, "the other two messages manage without naming the machinery");
+    assert.doesNotMatch(deadline, /\bCI\b/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3967: nothing may leave a row behind in the waiting-for-checks file. A
+// stale row is not inert — the "unknown means keep waiting" guard in
+// process_approval keys off exactly this file.
+test("a waiting card leaves no row behind when it is superseded, and stale rows for finished cards are pruned", () => {
+  const scenario = makeScenario();
+  try {
+    makeCiPollScenario(scenario);
+    // aid-2: same project/workspace, decided later — so aid-1 is superseded.
+    const aid2 = {
+      id: "aid-2",
+      type: "request_board_approval",
+      status: "approved",
+      decidedAt: isoAgo(0),
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef" },
+    };
+    scenario.writeJson("approval-aid-2.json", aid2);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-1",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: isoAgo(60 * 1000),
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1", commit: "deadbeef" },
+      },
+      aid2,
+    ]);
+    setCiStatus(scenario, "success");
+
+    // aid-1 was left waiting by an earlier cycle; aid-old is a row from a card
+    // that is already finished with (a crash, a kill -9, or a version of this
+    // script that never cleared rows at all).
+    const now = Math.floor(Date.now() / 1000);
+    writeFileSync(ciWaitStatePath(scenario), `aid-1\t${now}\t${now}\naid-old\t${now}\t${now}\n`);
+    writeFileSync(scenario.processed, "aid-old\n");
+
+    assertSuccess(runMain(scenario, ciPollEnv(scenario), NO_DEPLOY_OVERRIDES), "main()");
+
+    assert.ok(scenario.processedIds().includes("aid-2"), "the newest approval for the group runs");
+    assert.ok(scenario.processedIds().includes("aid-1"), "the superseded one is answered and finished with");
+    assert.deepEqual(
+      ciWaitRows(scenario),
+      [],
+      "neither the superseded card nor the already-processed one may keep a waiting-for-checks row",
+    );
   } finally {
     scenario.cleanup();
   }
@@ -1576,6 +2124,37 @@ test("check_ci_status classifies GitHub's combined status + check-runs responses
     status: { total_count: 0, state: "pending" },
     checkRuns: { check_runs: [] },
   });
+  // DUR-3967: one check has already finished RED while another is still
+  // running. "Still running" now means "hold this card and re-check it every
+  // 60s", so calling this pending would leave a build with a known-failed
+  // check sitting in the wait loop — and if somebody re-ran just the failed
+  // job and it went green inside the window, it would ship on the operator's
+  // original approval. Red beats still-running.
+  writeGitHubFixture(webRoot, "red-plus-running-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: {
+      check_runs: [
+        { status: "completed", conclusion: "failure" },
+        { status: "in_progress", conclusion: null },
+      ],
+    },
+  });
+  // Same finding, reached the other way: the combined commit status is still
+  // pending, but a check-run under it has already concluded red.
+  writeGitHubFixture(webRoot, "combined-pending-red-run-sha", {
+    status: { total_count: 1, state: "pending" },
+    checkRuns: { check_runs: [{ status: "completed", conclusion: "failure" }] },
+  });
+  // …and the mirror image: nothing red, one job still going. Still pending.
+  writeGitHubFixture(webRoot, "green-plus-running-sha", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: {
+      check_runs: [
+        { status: "completed", conclusion: "success" },
+        { status: "in_progress", conclusion: null },
+      ],
+    },
+  });
 
   const { child, port } = await startPythonHttpServer(webRoot);
   const scenario = makeScenario();
@@ -1597,6 +2176,9 @@ test("check_ci_status classifies GitHub's combined status + check-runs responses
     assert.equal(check("bad-check-run-sha"), "failure");
     assert.equal(check("pending-sha"), "pending");
     assert.equal(check("unknown-sha"), "unknown");
+    assert.equal(check("red-plus-running-sha"), "failure", "a check that already finished red is terminal even while others run");
+    assert.equal(check("combined-pending-red-run-sha"), "failure");
+    assert.equal(check("green-plus-running-sha"), "pending", "…but nothing red and something still running is still just a wait");
   } finally {
     child.kill();
     scenario.cleanup();
