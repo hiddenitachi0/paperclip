@@ -305,6 +305,64 @@ export interface CompanyScopeBypassOptions {
   actorId?: string | null;
   route?: string | null;
   companyIdsTouched?: string[] | null;
+  /**
+   * DUR-386: when set to a positive number of milliseconds, the
+   * cross_company_access_log row for this (route, reason) pair is written at
+   * most once per window per process; calls inside the window still verify
+   * role membership and still run, they just don't add another identical
+   * audit row. Meant for the scheduler's forever-bypass tick chains, which
+   * would otherwise write ~9 identical rows every 30s (~25k/day) and drown
+   * out the rare, genuinely notable bypass uses the table exists to surface.
+   * Leave unset (the default) for anything actor-driven or one-off -- those
+   * rows are the signal.
+   */
+  auditCoalesceMs?: number;
+}
+
+// DUR-3945 (DUR-244 item 3): once a deployment sets DATABASE_BYPASS_URL to a
+// distinct, bypass-capable login role, EVERY bypass helper must open its
+// connection on that pool -- not on whatever `db` the caller happens to hold,
+// which after the cutover is the scoped, non-bypass pool and would fail the
+// membership check above on every call. Rather than thread a second Db
+// through ~10 service/route constructors, the app registers its bypass pool
+// here once at startup (see server/src/index.ts) and both helpers below
+// route through it. Unset (the default, and every test) means "use the db the
+// caller passed", i.e. exactly today's behaviour.
+let registeredBypassPool: Db | null = null;
+
+export function setCompanyScopeBypassPool(db: Db | null): void {
+  registeredBypassPool = db;
+}
+
+export function getCompanyScopeBypassPool(): Db | null {
+  return registeredBypassPool;
+}
+
+function resolveBypassPool(db: Db): Db {
+  return registeredBypassPool ?? unwrapRequestScopedDb(db);
+}
+
+// DUR-386: last time an audit row was written per (route, reason) key, for
+// auditCoalesceMs. Module-level so every call site sharing a key shares the
+// window; bounded by the number of distinct keys (a few dozen at most --
+// scheduler chains and fixed route reasons), never by call volume.
+const lastAuditWriteAtByKey = new Map<string, number>();
+
+function shouldWriteAuditRow(opts: CompanyScopeBypassOptions, nowMs: number = Date.now()): boolean {
+  const windowMs = opts.auditCoalesceMs;
+  if (!windowMs || !(windowMs > 0)) return true;
+  // The separator is written as an escape sequence (not a raw byte in the source) so
+  // the file stays plain text; a NUL can never occur inside a route or a reason.
+  const key = `${opts.route ?? ""}\u0000${opts.reason}`;
+  const last = lastAuditWriteAtByKey.get(key);
+  if (last !== undefined && nowMs - last < windowMs) return false;
+  lastAuditWriteAtByKey.set(key, nowMs);
+  return true;
+}
+
+/** Test hook: forget every coalescing window so the next bypass call writes an audit row again. */
+export function resetCompanyScopeBypassAuditCoalescing(): void {
+  lastAuditWriteAtByKey.clear();
 }
 
 export async function withCompanyScopeBypass<T>(
@@ -312,7 +370,7 @@ export async function withCompanyScopeBypass<T>(
   opts: CompanyScopeBypassOptions,
   fn: (scopedDb: ScopedDb) => Promise<T>,
 ): Promise<T> {
-  return unwrapRequestScopedDb(db).transaction(async (tx) => {
+  return resolveBypassPool(db).transaction(async (tx) => {
     const [membership] = (await tx.execute(
       sql`SELECT pg_has_role(current_user, 'paperclip_app_bypass', 'member') AS has_bypass`,
     )) as unknown as { has_bypass: boolean }[];
@@ -325,13 +383,15 @@ export async function withCompanyScopeBypass<T>(
       );
     }
 
-    await tx.insert(crossCompanyAccessLog).values({
-      reason: opts.reason,
-      actorType: opts.actorType ?? null,
-      actorId: opts.actorId ?? null,
-      route: opts.route ?? null,
-      companyIdsTouched: opts.companyIdsTouched ?? null,
-    });
+    if (shouldWriteAuditRow(opts)) {
+      await tx.insert(crossCompanyAccessLog).values({
+        reason: opts.reason,
+        actorType: opts.actorType ?? null,
+        actorId: opts.actorId ?? null,
+        route: opts.route ?? null,
+        companyIdsTouched: opts.companyIdsTouched ?? null,
+      });
+    }
     return fn(tx);
   });
 }
@@ -821,10 +881,13 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
  * for why this is a role-membership check, not a settable session GUC.
  */
 export async function runInCompanyScopeBypass<T>(
-  rawDb: Db,
+  db: Db,
   opts: CompanyScopeBypassOptions,
   fn: () => Promise<T>,
 ): Promise<T> {
+  // DUR-3945: see setCompanyScopeBypassPool -- the reservation comes from the
+  // registered bypass pool when one is configured, else from `db` as before.
+  const rawDb = resolveBypassPool(db);
   const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
   const fence = fenceReservedConnection(reserved);
   const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
@@ -842,13 +905,15 @@ export async function runInCompanyScopeBypass<T>(
     }
 
     const scopedDb = drizzlePg(fence.client, { schema });
-    await scopedDb.insert(crossCompanyAccessLog).values({
-      reason: opts.reason,
-      actorType: opts.actorType ?? null,
-      actorId: opts.actorId ?? null,
-      route: opts.route ?? null,
-      companyIdsTouched: opts.companyIdsTouched ?? null,
-    });
+    if (shouldWriteAuditRow(opts)) {
+      await scopedDb.insert(crossCompanyAccessLog).values({
+        reason: opts.reason,
+        actorType: opts.actorType ?? null,
+        actorId: opts.actorId ?? null,
+        route: opts.route ?? null,
+        companyIdsTouched: opts.companyIdsTouched ?? null,
+      });
+    }
 
     return await requestCompanyScopeStorage.run({ kind: "bypass", scopedDb, liveness }, fn);
   } finally {

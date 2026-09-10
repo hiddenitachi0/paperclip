@@ -68,16 +68,29 @@ const CLAIM_RESET_RE = /^\s*reset\s+app\.current_company_id\b/i;
 const BEGIN_RE = /^\s*begin\b/i;
 const ROLLBACK_TO_RE = /^\s*rollback\s+to\b/i;
 const TX_END_RE = /^\s*(commit|rollback)\b/i;
-// withCompanyScopeBypass/runInCompanyScopeBypass both insert one row here,
-// on the same connection, before running any of the caller's own queries
-// (see company-scope.ts) -- an already-audited legitimate cross-company use,
-// not a gap this log needs to also flag.
+// withCompanyScopeBypass/runInCompanyScopeBypass both verify
+// paperclip_app_bypass membership on the connection before running any of
+// the caller's own queries, and (unless DUR-386 audit coalescing skips it)
+// insert one cross_company_access_log row right after -- an already-audited
+// legitimate cross-company use, not a gap this log needs to also flag.
+// Either statement counts as the acknowledgement: the membership check is
+// the one that always happens, the insert is kept for completeness.
+const BYPASS_MEMBERSHIP_CHECK_RE = /pg_has_role\(\s*current_user\s*,\s*'paperclip_app_bypass'/i;
 const BYPASS_AUDIT_INSERT_RE = /insert\s+into\s+"?cross_company_access_log"?/i;
 
+// Mirrors the claim's own local-vs-session split: withCompanyScopeBypass
+// acknowledges inside its transaction (gone at COMMIT/ROLLBACK, like a SET
+// LOCAL claim), runInCompanyScopeBypass acknowledges on the reserved
+// connection outside any transaction (session-level -- it must survive the
+// BEGIN/COMMIT pairs a nested withCompanyScope issues on that same
+// connection, and only ends when company-scope.ts RESETs the connection
+// before releasing it).
 interface ConnectionClaimState {
   claim: string | null;
   localClaimActive: boolean;
-  bypassAcknowledged: boolean;
+  inTransaction: boolean;
+  localBypassAcknowledged: boolean;
+  sessionBypassAcknowledged: boolean;
 }
 
 export interface UnscopedTenantAccessDebugHook {
@@ -105,7 +118,13 @@ export function createUnscopedTenantAccessDebugHook(applicationName: string): Un
   function stateFor(connectionId: number): ConnectionClaimState {
     let state = connectionStates.get(connectionId);
     if (!state) {
-      state = { claim: null, localClaimActive: false, bypassAcknowledged: false };
+      state = {
+        claim: null,
+        localClaimActive: false,
+        inTransaction: false,
+        localBypassAcknowledged: false,
+        sessionBypassAcknowledged: false,
+      };
       connectionStates.set(connectionId, state);
     }
     return state;
@@ -115,7 +134,8 @@ export function createUnscopedTenantAccessDebugHook(applicationName: string): Un
     const state = stateFor(connectionId);
 
     if (BEGIN_RE.test(query)) {
-      state.bypassAcknowledged = false;
+      state.inTransaction = true;
+      state.localBypassAcknowledged = false;
       return;
     }
     if (LOCAL_CLAIM_SET_RE.test(query) || SESSION_CLAIM_SET_RE.test(query)) {
@@ -127,22 +147,28 @@ export function createUnscopedTenantAccessDebugHook(applicationName: string): Un
     if (CLAIM_RESET_RE.test(query)) {
       state.claim = null;
       state.localClaimActive = false;
-      state.bypassAcknowledged = false;
+      state.localBypassAcknowledged = false;
+      state.sessionBypassAcknowledged = false;
       return;
     }
     if (TX_END_RE.test(query) && !ROLLBACK_TO_RE.test(query)) {
+      state.inTransaction = false;
+      state.localBypassAcknowledged = false;
       if (state.localClaimActive) {
         state.claim = null;
         state.localClaimActive = false;
       }
       return;
     }
-    if (BYPASS_AUDIT_INSERT_RE.test(query)) {
-      state.bypassAcknowledged = true;
+    if (BYPASS_MEMBERSHIP_CHECK_RE.test(query) || BYPASS_AUDIT_INSERT_RE.test(query)) {
+      if (state.inTransaction) state.localBypassAcknowledged = true;
+      else state.sessionBypassAcknowledged = true;
       return;
     }
 
-    if (state.claim || state.bypassAcknowledged || !tenantTableRegex) return;
+    if (state.claim || state.localBypassAcknowledged || state.sessionBypassAcknowledged || !tenantTableRegex) {
+      return;
+    }
 
     const match = query.match(tenantTableRegex);
     if (!match) return;
