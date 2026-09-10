@@ -24,22 +24,12 @@
 #   BETTER_AUTH_SECRET=<openssl rand -hex 32>
 #   PAPERCLIP_PUBLIC_URL=https://<host>.<tailnet>.ts.net
 #   PAPERCLIP_ALLOWED_HOSTNAMES=<host>.<tailnet>.ts.net,localhost,127.0.0.1
-#
-# Optional in .env -- the RLS cutover credentials (DUR-3945, see
-# docs/rls-cutover-runbook.md). All three default to today's behaviour when
-# unset: the app keeps using the base compose's DATABASE_URL for everything.
-#   DATABASE_URL=postgres://<app login>:<password>@db:5432/paperclip
-#   DATABASE_BYPASS_URL=postgres://paperclip_app_bypass_login:<password>@db:5432/paperclip
-#   DATABASE_MIGRATION_URL=postgres://paperclip:paperclip@db:5432/paperclip   (the table owner)
 services:
   server:
     restart: unless-stopped
     stop_grace_period: 260s
     environment:
       PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
-      DATABASE_URL: "${DATABASE_URL:-postgres://paperclip:paperclip@db:5432/paperclip}"
-      DATABASE_BYPASS_URL: "${DATABASE_BYPASS_URL:-}"
-      DATABASE_MIGRATION_URL: "${DATABASE_MIGRATION_URL:-}"
     ports: !override
       - "127.0.0.1:3100:3100"
   db:

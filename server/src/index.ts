@@ -16,7 +16,6 @@ import {
   createDb,
   createRequestScopedDb,
   runInCompanyScopeBypass,
-  setCompanyScopeBypassPool,
   ensurePostgresDatabase,
   formatEmbeddedPostgresError,
   getPostgresDataDirectory,
@@ -86,9 +85,6 @@ import {
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
-import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
-import { singleFlight } from "./services/single-flight.js";
-import { resolveDatabaseRolePreflightMode, runDatabaseRolePreflight } from "./services/database-role-preflight.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -533,56 +529,6 @@ export async function startServer(): Promise<StartedServer> {
   // fn_flag_untracked_write trigger (DUR-130) still recognizes writes made
   // through it as service-layer, not out-of-band.
   const bypassDb = createDb(config.databaseBypassUrl || activeDatabaseConnectionString);
-  // DUR-3945: when DATABASE_BYPASS_URL names a different credential than the
-  // request pool, every withCompanyScopeBypass/runInCompanyScopeBypass call
-  // site in the app (board claim, first-admin bootstrap, CLI auth, cross-
-  // company access lists, the scheduler) must open its connection on THAT
-  // pool -- after the cutover the request pool's role cannot bypass at all.
-  // See setCompanyScopeBypassPool in packages/db/src/company-scope.ts.
-  const bypassCredentialIsShared =
-    !config.databaseBypassUrl || config.databaseBypassUrl === activeDatabaseConnectionString;
-  if (!bypassCredentialIsShared) {
-    setCompanyScopeBypassPool(bypassDb as any);
-  }
-
-  // DUR-3945: say out loud which database credentials this process is
-  // running with, and refuse to start (PAPERCLIP_DB_ROLE_PREFLIGHT=strict) or
-  // at least shout (default) when the combination cannot work -- an app role
-  // with no scope membership shows an empty instance rather than an error,
-  // and a bypass role without bypass membership fails every scheduler tick.
-  {
-    const preflightMode = resolveDatabaseRolePreflightMode();
-    try {
-      const preflight = await runDatabaseRolePreflight({
-        appDb: db as any,
-        bypassDb: bypassDb as any,
-        sharedCredential: bypassCredentialIsShared,
-      });
-      logger.info(
-        {
-          appRole: preflight.app.role,
-          appPosture: preflight.app.posture,
-          bypassRole: preflight.bypass.role,
-          bypassPosture: preflight.bypass.posture,
-          rlsBindsAppPool: preflight.rlsBindsAppPool,
-          sharedCredential: preflight.sharedCredential,
-        },
-        "Database credential check (RLS cutover posture)",
-      );
-      for (const note of preflight.notes) logger.info(note);
-      for (const problem of preflight.problems) logger.error(problem);
-      if (preflight.problems.length > 0 && preflightMode === "strict") {
-        throw new Error(
-          `Refusing to start: the database credentials cannot work together (${preflight.problems.length} problem(s) ` +
-            "listed above). Fix DATABASE_URL/DATABASE_BYPASS_URL as docs/rls-cutover-runbook.md describes, or unset " +
-            "PAPERCLIP_DB_ROLE_PREFLIGHT=strict to start anyway.",
-        );
-      }
-    } catch (err) {
-      if (preflightMode === "strict") throw err;
-      logger.error({ err }, "Database credential check could not run; continuing without it");
-    }
-  }
 
   if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(
@@ -728,13 +674,8 @@ export async function startServer(): Promise<StartedServer> {
       const generalSettings = await backupSettingsSvc.getGeneral();
       const retention = generalSettings.backupRetention;
 
-      // DUR-3945: pg_dump needs a credential that can read every row of every
-      // table -- RLS applies to pg_dump too, and it errors (rather than
-      // silently dumping less) on a role that cannot bypass. After the
-      // cutover that is the owner credential in DATABASE_MIGRATION_URL, not
-      // the app's request pool.
       const result = await runDatabaseBackup({
-        connectionString: config.databaseMigrationUrl ?? activeDatabaseConnectionString,
+        connectionString: activeDatabaseConnectionString,
         backupDir: config.databaseBackupDir,
         retention,
         filenamePrefix: "paperclip",
@@ -1113,189 +1054,6 @@ export async function startServer(): Promise<StartedServer> {
     // so it does not need to sit inside the reconciliation IIFE above.
     startSecretSurfaceScanner(db as any);
 
-    // DUR-352: each independent tick chain below reserves its own bypass
-    // scope/connection (from the decoupled bypassDb pool, not the
-    // request-serving one) for exactly the duration of that chain, then
-    // releases it -- preserving today's concurrent/independent dispatch
-    // (no chain waits on another) while giving heartbeat/routines/etc. the
-    // AsyncLocalStorage scope their request-scoped db now requires.
-    //
-    // DUR-385: every chain is wrapped in singleFlight() ONCE here, outside the
-    // interval, so a chain still running from a previous tick is skipped (and
-    // logged) instead of reserving a second bypass connection on top of the
-    // one it already holds -- the overlap that could exhaust the bypass pool
-    // and stall every other chain behind postgres.js's never-timing-out
-    // reserve().
-    //
-    // DUR-386: these chains are documented forever-bypass consumers, so their
-    // cross_company_access_log row is coalesced to one per chain per window
-    // (config.schedulerBypassAuditCoalesceMs) rather than one per tick.
-    const schedulerChain = <T>(key: string, reason: string, run: () => Promise<T>) =>
-      singleFlight(key, () =>
-        runInCompanyScopeBypass(
-          bypassDb,
-          {
-            reason,
-            actorType: "scheduler",
-            route: `heartbeat-scheduler:${key}`,
-            auditCoalesceMs: config.schedulerBypassAuditCoalesceMs,
-          },
-          run,
-        ),
-      );
-
-    const tickTimersChain = schedulerChain("tickTimers", "heartbeat scheduler tick: tickTimers", () =>
-      heartbeat.tickTimers(new Date()),
-    );
-    const tickScheduledTriggersChain = schedulerChain(
-      "tickScheduledTriggers",
-      "heartbeat scheduler tick: tickScheduledTriggers",
-      () => routines.tickScheduledTriggers(new Date()),
-    );
-    // DUR-40: flag any merge_pr approval that landed on a project's deploy
-    // branch without a follow-up deploy approval (see merge-deploy-visibility.ts).
-    const mergeDeployVisibilityChain = schedulerChain(
-      "mergeDeployVisibility",
-      "heartbeat scheduler tick: mergeDeployVisibility",
-      () => mergeDeployVisibility.tick(new Date()),
-    );
-    // DUR-3923: an approved deploy card the runner never picks up (wrong kind, wrong
-    // workspace, runner stopped) must get a plain-language note instead of silence
-    // (see deploy-approval-feedback.ts). Bypass scope for the same reason as above.
-    const deployApprovalFeedbackChain = schedulerChain(
-      "deployApprovalFeedback",
-      "heartbeat scheduler tick: deployApprovalFeedback",
-      () => deployApprovalFeedback.tick(new Date()),
-    );
-    // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
-    // issue in the same project whose merge commit shipped as part of it (exact match or a
-    // confirmed git ancestor) instead of leaving each to wait for its own agent to retry the
-    // done PATCH (see deploy-carried-issues.ts). Wrapped in runInCompanyScopeBypass (DUR-352)
-    // for the same reason as mergeDeployVisibility above: its tick() scans approvals across
-    // every company in one sweep, so bypass (not per-company scope) is the right primitive.
-    const deployCarriedIssuesChain = schedulerChain(
-      "deployCarriedIssues",
-      "heartbeat scheduler tick: deployCarriedIssues",
-      () => deployCarriedIssues.tick(),
-    );
-    // DUR-299 point 6 / DUR-314: delegate the "61 percent" of merge_pr
-    // approvals (CI green + no fundamental-surface path touched +
-    // independent agent review) so they never reach the operator. Gated by
-    // its own live kill switch (general.mergePrAutomationEnabled, checked
-    // inside tick()) in addition to the startup flag above -- see
-    // merge-pr-automation.ts for the full set of hard rules.
-    const mergePrAutomationChain = mergePrAutomation
-      ? schedulerChain("mergePrAutomation", "heartbeat scheduler tick: mergePrAutomation", () =>
-          mergePrAutomation.tick(new Date()),
-        )
-      : null;
-    // DUR-128: an agent left sitting in "error" is invisible until someone
-    // happens to look. Raise it as soon as it crosses the stall threshold
-    // (see agent-error-alerts.ts) instead of waiting to be discovered.
-    const agentErrorAlertsChain = schedulerChain("agentErrorAlerts", "heartbeat scheduler tick: agentErrorAlerts", () =>
-      agentErrorAlerts.tick(new Date()),
-    );
-    // DUR-130: the fn_flag_untracked_write trigger (migration 0139) records
-    // any write to a DUR-128-relevant table not made through the service
-    // layer, migration runner, or restore path. Surface each new row as an
-    // operator-visible alert instead of leaving it a quiet DB-only row.
-    const untrackedWriteAlertsChain = schedulerChain(
-      "untrackedWriteAlerts",
-      "heartbeat scheduler tick: untrackedWriteAlerts",
-      () => untrackedWriteAlerts.tick(new Date()),
-    );
-    // DUR-134 review follow-up: move queued/approved persona posts through
-    // the publisher's safety gates (kill switches, warm-up, autonomy gate,
-    // daily cap, one-shot claim). Without this pass nothing ever published
-    // on its own -- an approved post sat waiting for a manual trigger.
-    const personaPublisherSweepChain = personaPublisherSweep
-      ? schedulerChain("personaPublisherSweep", "heartbeat scheduler tick: personaPublisherSweep", () =>
-          personaPublisherSweep.tick(),
-        )
-      : null;
-    // DUR-162: close pending operator-queue cards nobody has answered within
-    // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them
-    // to pile up in the live decision queue forever.
-    const issueThreadInteractionsAbandonmentChain = schedulerChain(
-      "issueThreadInteractionsAbandonment",
-      "heartbeat scheduler tick: issueThreadInteractions abandonment",
-      () => issueThreadInteractions.expireAbandonedPending(new Date()),
-    );
-    // Boost asks waiting on a boss (agent -> boss -> operator) move on to the
-    // operator by themselves once the boss's time is up, so a silent boss
-    // can never leave a report stuck on its normal setting forever.
-    const modelBoostBossReviewTimeoutsChain = schedulerChain(
-      "modelBoostBossReviewTimeouts",
-      "heartbeat scheduler tick: model boost boss-review timeouts",
-      () => escalationGrants.sweepBossReviewTimeouts(new Date()),
-    );
-    const environmentCustomImagesCleanupChain = schedulerChain(
-      "environmentCustomImagesCleanup",
-      "heartbeat scheduler tick: environmentCustomImages cleanup",
-      () => environmentCustomImages.cleanupExpiredSetupSessions(),
-    );
-    // Periodically reap orphaned runs (5-min staleness threshold) and make sure
-    // persisted queued work is still being driven forward. One shared bypass
-    // scope for the whole chained pipeline below (not one per step) --
-    // each step depends on the previous one's result, so this is one unit
-    // of work, not independent iterations. This is the chain DUR-385 was most
-    // worried about: unbounded multi-step, one reservation for all of it.
-    const periodicRecoveryPipelineChain = schedulerChain(
-      "periodicRecoveryPipeline",
-      "heartbeat scheduler tick: periodic recovery pipeline",
-      () =>
-        heartbeat
-          .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-          .then(() => heartbeat.promoteDueScheduledRetries())
-          .then(async (promotion) => {
-            await heartbeat.resumeQueuedRuns();
-            const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-            if (
-              promotion.promoted > 0 ||
-              reconciled.assignmentDispatched > 0 ||
-              reconciled.dispatchRequeued > 0 ||
-              reconciled.continuationRequeued > 0 ||
-              reconciled.successfulRunHandoffEscalated > 0 ||
-              reconciled.escalated > 0
-            ) {
-              logger.warn(
-                { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-                "periodic heartbeat recovery changed assigned issue state",
-              );
-            }
-          })
-          .then(async () => {
-            const reconciled = await heartbeat.reconcileIssueGraphLiveness();
-            if (reconciled.escalationsCreated > 0 || reconciled.dependencyWakesHealed > 0) {
-              logger.warn({ ...reconciled }, "periodic issue-graph liveness reconciliation changed issue graph state");
-            }
-          })
-          .then(async () => {
-            const reconciled = await heartbeat.reconcileTaskWatchdogs();
-            if (reconciled.triggered > 0) {
-              logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
-            }
-          })
-          .then(async () => {
-            const scanned = await heartbeat.scanSilentActiveRuns();
-            if (scanned.created > 0 || scanned.escalated > 0) {
-              logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
-            }
-          })
-          .then(async () => {
-            const swept = await heartbeat.sweepStaleIssueLocks();
-            if (swept.cleared > 0) {
-              logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
-            }
-          })
-          .then(async () => {
-            const reviewed = await heartbeat.reconcileProductivityReviews();
-            if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
-              logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
-            }
-          }),
-    );
-
     setInterval(() => {
       // DUR-257: once shutdown() has started draining, stop dispatching new work --
       // anything the tick starts now would just get orphaned by the imminent
@@ -1311,17 +1069,21 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
-      // Each chain resolves `undefined` when DUR-385 skipped it because the
-      // previous tick's copy is still running -- nothing to report then.
+      // DUR-352: each independent tick chain below reserves its own bypass
+      // scope/connection (from the decoupled bypassDb pool, not the
+      // request-serving one) for exactly the duration of that chain, then
+      // releases it -- preserving today's concurrent/independent dispatch
+      // (no chain waits on another) while giving heartbeat/routines/etc. the
+      // AsyncLocalStorage scope their request-scoped db now requires.
       // DUR-3939/DUR-3940: record every tick so /api/health can say whether
       // the scheduler itself is alive, separately from whether runs start.
-      // A DUR-385 skip is deliberately NOT recorded as a finish: the copy
-      // still running reports when it ends, and if it never does, liveness
-      // goes stale after three intervals -- which is exactly the signal.
       schedulerLiveness.tickStarted();
-      void tickTimersChain()
+      void runInCompanyScopeBypass(
+        bypassDb,
+        { reason: "heartbeat scheduler tick: tickTimers", actorType: "scheduler", route: "heartbeat-scheduler:tickTimers" },
+        () => heartbeat.tickTimers(new Date()),
+      )
         .then((result) => {
-          if (!result) return;
           schedulerLiveness.tickFinished(result);
           if (result.enqueued > 0) {
             logger.info({ ...result }, "heartbeat timer tick enqueued runs");
@@ -1332,9 +1094,17 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "heartbeat timer tick failed");
         });
 
-      void tickScheduledTriggersChain()
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: tickScheduledTriggers",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:tickScheduledTriggers",
+        },
+        () => routines.tickScheduledTriggers(new Date()),
+      )
         .then((result) => {
-          if (result && result.triggered > 0) {
+          if (result.triggered > 0) {
             logger.info({ ...result }, "routine scheduler tick enqueued runs");
           }
         })
@@ -1342,9 +1112,19 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "routine scheduler tick failed");
         });
 
-      void mergeDeployVisibilityChain()
+      // DUR-40: flag any merge_pr approval that landed on a project's deploy
+      // branch without a follow-up deploy approval (see merge-deploy-visibility.ts).
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: mergeDeployVisibility",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:mergeDeployVisibility",
+        },
+        () => mergeDeployVisibility.tick(new Date()),
+      )
         .then((result) => {
-          if (result && (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0)) {
+          if (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0) {
             logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
           }
         })
@@ -1352,9 +1132,20 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "merge-deploy visibility tick failed");
         });
 
-      void deployApprovalFeedbackChain()
+      // DUR-3923: an approved deploy card the runner never picks up (wrong kind, wrong
+      // workspace, runner stopped) must get a plain-language note instead of silence
+      // (see deploy-approval-feedback.ts). Bypass scope for the same reason as above.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: deployApprovalFeedback",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:deployApprovalFeedback",
+        },
+        () => deployApprovalFeedback.tick(new Date()),
+      )
         .then((result) => {
-          if (result && result.flagged > 0) {
+          if (result.flagged > 0) {
             logger.info({ ...result }, "deploy-approval feedback tick flagged approved deploys nothing acted on");
           }
         })
@@ -1362,9 +1153,23 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "deploy-approval feedback tick failed");
         });
 
-      void deployCarriedIssuesChain()
+      // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
+      // issue in the same project whose merge commit shipped as part of it (exact match or a
+      // confirmed git ancestor) instead of leaving each to wait for its own agent to retry the
+      // done PATCH (see deploy-carried-issues.ts). Wrapped in runInCompanyScopeBypass (DUR-352)
+      // for the same reason as mergeDeployVisibility above: its tick() scans approvals across
+      // every company in one sweep, so bypass (not per-company scope) is the right primitive.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: deployCarriedIssues",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:deployCarriedIssues",
+        },
+        () => deployCarriedIssues.tick(),
+      )
         .then((result) => {
-          if (result && result.closed > 0) {
+          if (result.closed > 0) {
             logger.info({ ...result }, "deploy-carried-issues tick auto-closed issues carried by a completed deploy");
           }
         })
@@ -1372,10 +1177,24 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "deploy-carried-issues tick failed");
         });
 
-      if (mergePrAutomationChain) {
-        void mergePrAutomationChain()
+      // DUR-299 point 6 / DUR-314: delegate the "61 percent" of merge_pr
+      // approvals (CI green + no fundamental-surface path touched +
+      // independent agent review) so they never reach the operator. Gated by
+      // its own live kill switch (general.mergePrAutomationEnabled, checked
+      // inside tick()) in addition to the startup flag above -- see
+      // merge-pr-automation.ts for the full set of hard rules.
+      if (mergePrAutomation) {
+        void runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mergePrAutomation",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mergePrAutomation",
+          },
+          () => mergePrAutomation.tick(new Date()),
+        )
           .then((result) => {
-            if (result && result.approved > 0) {
+            if (result.approved > 0) {
               logger.info({ ...result }, "merge-pr automation tick approved delegated merge_pr approvals");
             }
           })
@@ -1384,9 +1203,20 @@ export async function startServer(): Promise<StartedServer> {
           });
       }
 
-      void agentErrorAlertsChain()
+      // DUR-128: an agent left sitting in "error" is invisible until someone
+      // happens to look. Raise it as soon as it crosses the stall threshold
+      // (see agent-error-alerts.ts) instead of waiting to be discovered.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: agentErrorAlerts",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:agentErrorAlerts",
+        },
+        () => agentErrorAlerts.tick(new Date()),
+      )
         .then((result) => {
-          if (result && result.alerted > 0) {
+          if (result.alerted > 0) {
             logger.warn({ ...result }, "agent-error alert tick raised stalled-agent alerts");
           }
         })
@@ -1394,9 +1224,21 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "agent-error alert tick failed");
         });
 
-      void untrackedWriteAlertsChain()
+      // DUR-130: the fn_flag_untracked_write trigger (migration 0139) records
+      // any write to a DUR-128-relevant table not made through the service
+      // layer, migration runner, or restore path. Surface each new row as an
+      // operator-visible alert instead of leaving it a quiet DB-only row.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: untrackedWriteAlerts",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:untrackedWriteAlerts",
+        },
+        () => untrackedWriteAlerts.tick(new Date()),
+      )
         .then((result) => {
-          if (result && result.alerted > 0) {
+          if (result.alerted > 0) {
             logger.warn({ ...result }, "untracked-write alert tick raised out-of-band write alerts");
           }
         })
@@ -1404,10 +1246,21 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "untracked-write alert tick failed");
         });
 
-      if (personaPublisherSweepChain) {
-        void personaPublisherSweepChain()
+      // DUR-134 review follow-up: move queued/approved persona posts through
+      // the publisher's safety gates (kill switches, warm-up, autonomy gate,
+      // daily cap, one-shot claim). Without this pass nothing ever published
+      // on its own -- an approved post sat waiting for a manual trigger.
+      if (personaPublisherSweep) {
+        void runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: personaPublisherSweep",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:personaPublisherSweep",
+          },
+          () => personaPublisherSweep.tick(),
+        )
           .then((result) => {
-            if (!result) return;
             if (result.published > 0 || result.failed > 0 || result.pendingApproval > 0 || result.errors > 0) {
               logger.info({ ...result }, "persona publisher sweep moved posts");
             }
@@ -1417,9 +1270,20 @@ export async function startServer(): Promise<StartedServer> {
           });
       }
 
-      void issueThreadInteractionsAbandonmentChain()
+      // DUR-162: close pending operator-queue cards nobody has answered within
+      // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them
+      // to pile up in the live decision queue forever.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: issueThreadInteractions abandonment",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:issueThreadInteractionsAbandonment",
+        },
+        () => issueThreadInteractions.expireAbandonedPending(new Date()),
+      )
         .then((expired) => {
-          if (expired && expired.length > 0) {
+          if (expired.length > 0) {
             logger.info(
               { expired: expired.length },
               "issue-thread-interaction abandonment tick closed unanswered operator cards",
@@ -1430,9 +1294,20 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "issue-thread-interaction abandonment tick failed");
         });
 
-      void modelBoostBossReviewTimeoutsChain()
+      // Boost asks waiting on a boss (agent -> boss -> operator) move on to the
+      // operator by themselves once the boss's time is up, so a silent boss
+      // can never leave a report stuck on its normal setting forever.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: model boost boss-review timeouts",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:modelBoostBossReviewTimeouts",
+        },
+        () => escalationGrants.sweepBossReviewTimeouts(new Date()),
+      )
         .then((movedOn) => {
-          if (movedOn && movedOn.length > 0) {
+          if (movedOn.length > 0) {
             logger.info({ movedOn: movedOn.length }, "boost requests moved on to the operator after the boss did not answer");
           }
         })
@@ -1440,9 +1315,17 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "model boost boss-review timeout tick failed");
         });
 
-      void environmentCustomImagesCleanupChain()
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: environmentCustomImages cleanup",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:environmentCustomImagesCleanup",
+        },
+        () => environmentCustomImages.cleanupExpiredSetupSessions(),
+      )
         .then((result) => {
-          if (result && (result.timedOut > 0 || result.failed > 0)) {
+          if (result.timedOut > 0 || result.failed > 0) {
             logger.warn({ ...result }, "environment customImage setup cleanup changed sessions");
           }
         })
@@ -1450,9 +1333,73 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "environment customImage setup cleanup failed");
         });
 
-      void periodicRecoveryPipelineChain().catch((err) => {
-        logger.error({ err }, "periodic heartbeat recovery failed");
-      });
+      // Periodically reap orphaned runs (5-min staleness threshold) and make sure
+      // persisted queued work is still being driven forward. One shared bypass
+      // scope for the whole chained pipeline below (not one per step) --
+      // each step depends on the previous one's result, so this is one unit
+      // of work, not independent iterations.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: periodic recovery pipeline",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:periodicRecoveryPipeline",
+        },
+        () =>
+          heartbeat
+            .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
+            .then(() => heartbeat.promoteDueScheduledRetries())
+            .then(async (promotion) => {
+          await heartbeat.resumeQueuedRuns();
+          const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
+          if (
+            promotion.promoted > 0 ||
+            reconciled.assignmentDispatched > 0 ||
+            reconciled.dispatchRequeued > 0 ||
+            reconciled.continuationRequeued > 0 ||
+            reconciled.successfulRunHandoffEscalated > 0 ||
+            reconciled.escalated > 0
+          ) {
+            logger.warn(
+              { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+              "periodic heartbeat recovery changed assigned issue state",
+            );
+          }
+        })
+        .then(async () => {
+          const reconciled = await heartbeat.reconcileIssueGraphLiveness();
+          if (reconciled.escalationsCreated > 0 || reconciled.dependencyWakesHealed > 0) {
+            logger.warn({ ...reconciled }, "periodic issue-graph liveness reconciliation changed issue graph state");
+          }
+        })
+        .then(async () => {
+          const reconciled = await heartbeat.reconcileTaskWatchdogs();
+          if (reconciled.triggered > 0) {
+            logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
+          }
+        })
+        .then(async () => {
+          const scanned = await heartbeat.scanSilentActiveRuns();
+          if (scanned.created > 0 || scanned.escalated > 0) {
+            logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
+          }
+        })
+        .then(async () => {
+          const swept = await heartbeat.sweepStaleIssueLocks();
+          if (swept.cleared > 0) {
+            logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+          }
+        })
+            .then(async () => {
+              const reviewed = await heartbeat.reconcileProductivityReviews();
+              if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
+                logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
+              }
+            }),
+      )
+        .catch((err) => {
+          logger.error({ err }, "periodic heartbeat recovery failed");
+        });
     }, config.heartbeatSchedulerIntervalMs);
 
     // DUR-62: the weekly check-up. Its own, much slower interval: the tick
@@ -1478,33 +1425,31 @@ export async function startServer(): Promise<StartedServer> {
     }
     const weeklyCheckupSettings = instanceSettingsService(schedulerDb as any);
     let weeklyCheckupWasOn = config.weeklyCheckupEnabled;
-    // Same DUR-385 single-flight + DUR-386 audit coalescing as the chains
-    // above: a check-up that outlives its hourly tick must not stack a
-    // second bypass reservation on top of the one it still holds. The
-    // enabled check lives inside the chain so the instance-setting read
-    // shares the tick's bypass scope (it is always armed; off = quick no-op).
-    const organizationCheckupsChain = schedulerChain(
-      "organizationCheckups",
-      "heartbeat scheduler tick: weekly organization check-up",
-      async () => {
-        const enabled =
-          config.weeklyCheckupEnabled || (await weeklyCheckupSettings.getExperimental()).enableWeeklyCheckup;
-        if (enabled !== weeklyCheckupWasOn) {
-          logger.info({ enabled }, enabled ? "Weekly check-up switched on in instance settings" : "Weekly check-up switched off");
-          weeklyCheckupWasOn = enabled;
-        }
-        if (!enabled) return null;
-        return organizationCheckups.reconcileOrganizationCheckups({
-          now: new Date(),
-          intervalDays: config.weeklyCheckupIntervalDays,
-          dryRun: config.weeklyCheckupDryRun,
-          companyIds: config.weeklyCheckupCompanyIds,
-        });
-      },
-    );
     const tickWeeklyCheckup = () => {
       if (heartbeatDrainState?.isDraining) return;
-      void organizationCheckupsChain()
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: weekly organization check-up",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:organizationCheckups",
+        },
+        async () => {
+          const enabled =
+            config.weeklyCheckupEnabled || (await weeklyCheckupSettings.getExperimental()).enableWeeklyCheckup;
+          if (enabled !== weeklyCheckupWasOn) {
+            logger.info({ enabled }, enabled ? "Weekly check-up switched on in instance settings" : "Weekly check-up switched off");
+            weeklyCheckupWasOn = enabled;
+          }
+          if (!enabled) return null;
+          return organizationCheckups.reconcileOrganizationCheckups({
+            now: new Date(),
+            intervalDays: config.weeklyCheckupIntervalDays,
+            dryRun: config.weeklyCheckupDryRun,
+            companyIds: config.weeklyCheckupCompanyIds,
+          });
+        },
+      )
         .then((result) => {
           if (result && (result.created > 0 || result.failed > 0 || result.dryRun > 0)) {
             logger.warn({ ...result }, "weekly check-up tick wrote or previewed reports");
@@ -1526,22 +1471,18 @@ export async function startServer(): Promise<StartedServer> {
     // scope like the check-up above: reads auth tables, writes one notice
     // per company.
     const adminAuthSecret = resolveAdminAuthSigningSecret();
-    // Same DUR-385 single-flight as the chains above. The trigger is set
-    // immediately before the call and read when the chain actually starts, so
-    // a skipped tick (the previous check still running) cannot change what the
-    // in-flight check is doing.
-    let adminAuthCheckTrigger: "startup" | "scheduled" = "startup";
-    const adminAuthCheckChain = schedulerChain(
-      "adminAuthCheck",
-      "heartbeat scheduler tick: admin auth record check",
-      () => reconcileAdminAuthSnapshot(schedulerDb as any, { secret: adminAuthSecret, trigger: adminAuthCheckTrigger }),
-    );
     const tickAdminAuthCheck = (trigger: "startup" | "scheduled") => {
       if (heartbeatDrainState?.isDraining) return;
-      adminAuthCheckTrigger = trigger;
-      void adminAuthCheckChain()
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: admin auth record check",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:adminAuthCheck",
+        },
+        () => reconcileAdminAuthSnapshot(schedulerDb as any, { secret: adminAuthSecret, trigger }),
+      )
         .then((result) => {
-          if (!result) return;
           if (result.status !== "unchanged") {
             logger.warn({ ...result }, "admin auth record check found something to report");
           }
@@ -1563,19 +1504,19 @@ export async function startServer(): Promise<StartedServer> {
     // written across every company. Always on: there is nothing to do when
     // no sign-in is saved.
     const claudeAuthChecks = instanceClaudeAuthService(schedulerDb as any);
-    // Single-flight like every other chain (DUR-385): the CLI call this makes
-    // can outlive its own tick, and a second copy would hold a second bypass
-    // connection while the first one is still waiting on the CLI.
-    const claudeAuthCheckChain = schedulerChain(
-      "claudeAuthCheck",
-      "heartbeat scheduler tick: daily Claude sign-in check",
-      () => claudeAuthChecks.runScheduledCheck(),
-    );
     const tickClaudeAuthCheck = () => {
       if (heartbeatDrainState?.isDraining) return;
-      void claudeAuthCheckChain()
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: daily Claude sign-in check",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:claudeAuthCheck",
+        },
+        () => claudeAuthChecks.runScheduledCheck(),
+      )
         .then((result) => {
-          if (!result || result.outcome !== "checked") return;
+          if (result.outcome !== "checked") return;
           if (result.notice) {
             logger.warn(
               { health: result.status.health, expiresInDays: result.status.expiresInDays, companies: result.noticedCompanyIds.length },
@@ -1635,25 +1576,6 @@ export async function startServer(): Promise<StartedServer> {
       db,
       config.heartbeatRunRetentionIntervalMinutes * 60 * 1000,
       config.heartbeatRunRetentionDays,
-    );
-  }
-
-  // DUR-386: bound the RLS bypass audit trail (cross_company_access_log).
-  // Runs on the bypass pool: the table has no company_id, so this is a
-  // forever-bypass consumer like the heartbeat_runs sweep above, and after
-  // the DUR-3945 cutover the bypass pool is the one guaranteed to reach it.
-  if (config.crossCompanyAccessLogRetentionEnabled) {
-    logger.info(
-      {
-        retentionDays: config.crossCompanyAccessLogRetentionDays,
-        intervalMinutes: config.crossCompanyAccessLogRetentionIntervalMinutes,
-      },
-      "Cross-company access log retention sweep enabled",
-    );
-    startCrossCompanyAccessLogRetention(
-      bypassDb as any,
-      config.crossCompanyAccessLogRetentionIntervalMinutes * 60 * 1000,
-      config.crossCompanyAccessLogRetentionDays,
     );
   }
 
