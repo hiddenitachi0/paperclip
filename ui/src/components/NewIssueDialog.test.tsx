@@ -1678,6 +1678,83 @@ describe("NewIssueDialog", () => {
 
       act(() => rendered.root.unmount());
     });
+
+    it("keeps the operator's effort when the agent list refreshes underneath them", async () => {
+      dialogState.newIssueDefaults = { title: "Effort task", assigneeAgentId: "agent-2" };
+      const rendered = renderDialog(container);
+      await waitForAssertion(() => {
+        expect(container.textContent).toContain("Codex options");
+        expect(pressedEffort()).toEqual(["Minimal"]);
+      });
+
+      act(() => {
+        effortButton("High")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      expect(pressedEffort()).toEqual(["High"]);
+
+      // The agent list refreshes in the background while the dialog sits open (only a field
+      // the block does not read changes, so the agent's saved model and effort are the same
+      // before and after). The re-fill this triggers must not undo the operator's choice.
+      mockAgentsApi.list.mockResolvedValue([claudeAgent, { ...codexAgent, status: "working" }]);
+      await act(async () => {
+        await rendered.queryClient.refetchQueries({ queryKey: ["agents", "company-1"] });
+      });
+      await flush();
+
+      expect(pressedEffort()).toEqual(["High"]);
+      await submit();
+      expect(mockIssuesApi.create).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({
+          assigneeAgentId: "agent-2",
+          assigneeAdapterOverrides: { adapterConfig: { model: "gpt-5-codex", modelReasoningEffort: "high" } },
+        }),
+      );
+
+      act(() => rendered.root.unmount());
+    });
+
+    it("starts a new dialog session from the assignee's settings, not the last session's override", async () => {
+      dialogState.newIssueOpen = false;
+      dialogState.newIssueDefaults = {};
+      const rendered = renderDialog(container);
+      await flush();
+
+      // Session one: the operator overrides the effort, then closes the dialog.
+      dialogState.newIssueDefaults = { title: "First task", assigneeAgentId: "agent-1" };
+      dialogState.newIssueOpen = true;
+      rerenderDialog(rendered);
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+      await act(async () => {
+        effortButton("Max")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      expect(pressedEffort()).toEqual(["Max"]);
+
+      dialogState.newIssueOpen = false;
+      rerenderDialog(rendered);
+      await flush();
+
+      // Session two starts fresh: the block shows the agent's own saved settings again and
+      // sends no override.
+      dialogState.newIssueDefaults = { title: "Second task", assigneeAgentId: "agent-1" };
+      dialogState.newIssueOpen = true;
+      rerenderDialog(rendered);
+      await waitForAssertion(() => {
+        expect(pressedEffort()).toEqual(["High"]);
+      });
+      expect(container.querySelector('[data-testid="assignee-model-options"]')?.textContent).toContain("claude-opus-4-1");
+
+      mockIssuesApi.create.mockClear();
+      await submit();
+      const payload = mockIssuesApi.create.mock.calls[0][1] as Record<string, unknown>;
+      expect(payload).not.toHaveProperty("assigneeAdapterOverrides");
+
+      act(() => rendered.root.unmount());
+    });
   });
 
   describe("graduated work-mode labels and status hues", () => {

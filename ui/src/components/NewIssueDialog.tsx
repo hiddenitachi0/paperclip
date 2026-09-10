@@ -415,6 +415,19 @@ export function NewIssueDialog() {
   const [projectWorkspaceId, setProjectWorkspaceId] = useState("");
   const [goalId, setGoalId] = useState("");
   const [assigneeModelLane, setAssigneeModelLane] = useState<IssueModelLane>("primary");
+  // The lane records whether the operator has explicitly chosen a model/effort ("custom") or
+  // is just looking at the assignee's saved defaults ("primary"/"cheap"). `assigneeModelLane`
+  // above is a per-render snapshot, and an effect can run against a snapshot taken *before*
+  // the operator's click: React flushes pending passive effects at the start of the render
+  // the click schedules, so a seeding effect left over from an earlier commit still sees
+  // "primary" and re-seeds over the choice that has already been made (DUR-3966). This ref is
+  // written in the same synchronous step as the state, so it is never behind — it, not the
+  // snapshot, is the authority for "the operator has chosen".
+  const assigneeModelLaneRef = useRef<IssueModelLane>("primary");
+  const applyAssigneeModelLane = useCallback((lane: IssueModelLane) => {
+    assigneeModelLaneRef.current = lane;
+    setAssigneeModelLane(lane);
+  }, []);
   const [assigneeModelOverride, setAssigneeModelOverride] = useState("");
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
   const [assigneeChrome, setAssigneeChrome] = useState(false);
@@ -785,7 +798,7 @@ export function NewIssueDialog() {
       setProjectWorkspaceId(defaultProjectWorkspaceId);
       setGoalId(newIssueDefaults.goalId ?? "");
       setAssigneeValue(assigneeValueFromSelection(newIssueDefaults));
-      setAssigneeModelLane("primary");
+      applyAssigneeModelLane("primary");
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
@@ -820,6 +833,10 @@ export function NewIssueDialog() {
       setGoalConditionMaxAttemptsInput("");
       setGoalAdvancedOpen(false);
       setGoalSuggestion(null);
+      // A fresh dialog session carries no override, so the lane resets with the values it
+      // describes — otherwise a "custom" lane left over from the previous session would make
+      // the block show "Default" instead of this assignee's saved settings.
+      applyAssigneeModelLane("primary");
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
@@ -866,7 +883,7 @@ export function NewIssueDialog() {
           : (draft.projectWorkspaceId ?? defaultProjectWorkspaceIdForProject(restoredProject)),
       );
       setGoalId(newIssueDefaults.goalId ?? draft.goalId ?? "");
-      setAssigneeModelLane(draft.assigneeModelLane ?? "primary");
+      applyAssigneeModelLane(draft.assigneeModelLane ?? "primary");
       setAssigneeModelOverride(draft.assigneeModelOverride ?? "");
       setAssigneeThinkingEffort(draft.assigneeThinkingEffort ?? "");
       setAssigneeChrome(draft.assigneeChrome ?? false);
@@ -912,6 +929,8 @@ export function NewIssueDialog() {
       setGoalConditionMaxAttemptsInput("");
       setGoalAdvancedOpen(false);
       setGoalSuggestion(null);
+      // Same fresh-session reset as the branch above: no draft, so no override.
+      applyAssigneeModelLane("primary");
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
@@ -921,7 +940,7 @@ export function NewIssueDialog() {
         ? defaultProjectId || null
         : null;
     }
-  }, [newIssueOpen, newIssueDefaults, orderedProjects, selectedCompanyId, setIssueText]);
+  }, [newIssueOpen, newIssueDefaults, orderedProjects, selectedCompanyId, setIssueText, applyAssigneeModelLane]);
 
   const currentAssignee = selectedAssigneeAgentId
     ? (agents ?? []).find((a) => a.id === selectedAssigneeAgentId)
@@ -943,14 +962,17 @@ export function NewIssueDialog() {
     if (assigneeAgentPending) return;
     if (!supportsAssigneeOverrides) {
       seededAssigneeDefaultsRef.current = { model: "", effort: "", chrome: false };
-      setAssigneeModelLane("primary");
+      applyAssigneeModelLane("primary");
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       return;
     }
-    if (!assigneeSupportsCheapLane && assigneeModelLane === "cheap") {
-      setAssigneeModelLane("primary");
+    // Read the operator's lane from the ref, never from the render snapshot: this pass may
+    // have been queued before their most recent click (see assigneeModelLaneRef).
+    const chosenLane = assigneeModelLaneRef.current;
+    if (!assigneeSupportsCheapLane && chosenLane === "cheap") {
+      applyAssigneeModelLane("primary");
     }
 
     const config = (currentAssignee?.adapterConfig ?? {}) as Record<string, unknown>;
@@ -966,18 +988,24 @@ export function NewIssueDialog() {
     const seededChrome = assigneeAdapterType === "claude_local" && config.chrome === true;
     seededAssigneeDefaultsRef.current = { model: seededModel, effort: seededEffort, chrome: seededChrome };
 
-    if (assigneeModelLane === "custom") {
-      // An explicit override is active (e.g. restored from a draft) — keep the operator's
-      // values, only dropping an effort that is not valid for this adapter.
-      if (!validThinkingValues.some((option) => option.id === assigneeThinkingEffort)) {
-        setAssigneeThinkingEffort("");
-      }
+    if (chosenLane === "custom") {
+      // An explicit override is active (chosen by the operator, or restored from a draft) —
+      // keep their values, only dropping an effort this adapter cannot do. The updater form
+      // checks the effort React is actually holding rather than this pass's snapshot, which
+      // may predate the operator's last click.
+      setAssigneeThinkingEffort((current) =>
+        validThinkingValues.some((option) => option.id === current) ? current : "",
+      );
       return;
     }
     // Display-only: reflect the assignee's saved defaults in the controls.
     setAssigneeModelOverride(seededModel);
     setAssigneeThinkingEffort(seededEffort);
     setAssigneeChrome(seededChrome);
+    // `assigneeThinkingEffort` and `assigneeModelLane` are listed so this effect re-runs when
+    // they change (e.g. the operator switching the lane back to "primary" has to re-seed the
+    // display). The body deliberately reads the lane from assigneeModelLaneRef and the effort
+    // through an updater instead of from these snapshots — see assigneeModelLaneRef.
   }, [
     initGeneration,
     assigneeAgentPending,
@@ -987,6 +1015,7 @@ export function NewIssueDialog() {
     assigneeSupportsCheapLane,
     assigneeModelLane,
     currentAssignee,
+    applyAssigneeModelLane,
   ]);
 
   // Cleanup timer on unmount
@@ -1017,7 +1046,7 @@ export function NewIssueDialog() {
     setProjectId("");
     setProjectWorkspaceId("");
     setGoalId("");
-    setAssigneeModelLane("primary");
+    applyAssigneeModelLane("primary");
     setAssigneeModelOverride("");
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
@@ -1054,7 +1083,7 @@ export function NewIssueDialog() {
     setProjectId("");
     setProjectWorkspaceId("");
     setGoalId("");
-    setAssigneeModelLane("primary");
+    applyAssigneeModelLane("primary");
     setAssigneeModelOverride("");
     setAssigneeThinkingEffort("");
     setAssigneeChrome(false);
@@ -1365,21 +1394,22 @@ export function NewIssueDialog() {
     const seed = seededAssigneeDefaultsRef.current;
     const matchesSeed = model === seed.model && effort === seed.effort && chrome === seed.chrome;
     if (matchesSeed) {
-      return assigneeModelLane === "custom" ? "primary" : assigneeModelLane;
+      const chosenLane = assigneeModelLaneRef.current;
+      return chosenLane === "custom" ? "primary" : chosenLane;
     }
     return "custom";
   };
   const handleAssigneeModelOverrideChange = (next: string) => {
     setAssigneeModelOverride(next);
-    setAssigneeModelLane(laneAfterAssigneeEdit(next, assigneeThinkingEffort, assigneeChrome));
+    applyAssigneeModelLane(laneAfterAssigneeEdit(next, assigneeThinkingEffort, assigneeChrome));
   };
   const handleAssigneeThinkingEffortChange = (next: string) => {
     setAssigneeThinkingEffort(next);
-    setAssigneeModelLane(laneAfterAssigneeEdit(assigneeModelOverride, next, assigneeChrome));
+    applyAssigneeModelLane(laneAfterAssigneeEdit(assigneeModelOverride, next, assigneeChrome));
   };
   const handleAssigneeChromeChange = (next: boolean) => {
     setAssigneeChrome(next);
-    setAssigneeModelLane(laneAfterAssigneeEdit(assigneeModelOverride, assigneeThinkingEffort, next));
+    applyAssigneeModelLane(laneAfterAssigneeEdit(assigneeModelOverride, assigneeThinkingEffort, next));
   };
   const currentWorkMode = workModeMetaFor(workMode);
   const CurrentWorkModeIcon = currentWorkMode.icon;
@@ -2138,7 +2168,7 @@ export function NewIssueDialog() {
                           "flex-1 px-2 py-1 text-xs capitalize transition-colors hover:bg-accent/40",
                           assigneeModelLane === lane && "bg-accent text-foreground",
                         )}
-                        onClick={() => setAssigneeModelLane(lane)}
+                        onClick={() => applyAssigneeModelLane(lane)}
                       >
                         {lane === "primary"
                           ? "Primary"
