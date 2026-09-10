@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   applyCompanyPrefix,
@@ -5,6 +8,36 @@ import {
   isBoardPathWithoutPrefix,
   toCompanyRelativePath,
 } from "./company-routes";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The sidebar and BOARD_ROUTE_ROOTS are two lists that have to agree, and
+ * nothing used to make them. When a page was missing from BOARD_ROUTE_ROOTS its
+ * first path segment was read as a COMPANY prefix instead of a page name, so
+ * applyCompanyPrefix left the link alone and the operator landed on a broken
+ * page. Personas, Changelog, Pipelines and Ask Paperclip all shipped that way
+ * and stayed broken for days, because clicking them looks like a routing bug
+ * rather than a missing entry in a list nobody thinks to check.
+ *
+ * Reading the sidebar source is deliberate: a hand-copied list of links here
+ * would be a third list to keep in sync, which is the same bug again.
+ */
+describe("every page in the sidebar is recognised as a page, not a company", () => {
+  const sidebar = readFileSync(path.join(HERE, "../components/Sidebar.tsx"), "utf8");
+  const links = [...new Set([...sidebar.matchAll(/SidebarNavItem\s+to="(\/[^"]+)"/g)].map((m) => m[1]!))];
+
+  it("finds the sidebar links (guards the regex itself)", () => {
+    expect(links.length).toBeGreaterThan(10);
+    expect(links).toContain("/personas");
+    expect(links).toContain("/changelog");
+  });
+
+  it.each(links)("%s keeps its company prefix", (link) => {
+    expect(isBoardPathWithoutPrefix(link)).toBe(true);
+    expect(applyCompanyPrefix(link, "DUR")).toBe(`/DUR${link}`);
+  });
+});
 
 describe("company routes", () => {
   it("treats execution workspace paths as board routes that need a company prefix", () => {
