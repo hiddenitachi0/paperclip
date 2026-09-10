@@ -21,7 +21,10 @@ const COMPANY_ID = "22222222-2222-4222-8222-222222222222";
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const LIVE_COMMIT = "aaaaaaaaaaaa";
-const NEW_COMMIT = "bbbbbbbbbbbb";
+// DUR-3964: an agent-filed deploy card must name the commit in full, so the
+// commit under test is written out to 40 characters. Every refusal still
+// prints it short, which is what the assertions below read.
+const NEW_COMMIT = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const mockApprovalService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -649,14 +652,24 @@ describe("Pointless deploy cards: deploy cards that would deploy nothing are ref
   );
 
   it(
-    "does not call GitHub at all when the card pins no commit",
+    "says nothing about what would change when the card pins no commit",
     async () => {
-      const app = await createAgentApp(createRouteDb());
+      // DUR-3964: only the board may file without a commit; there is then
+      // nothing to compare against the live version, so no summary is stamped.
+      // (The branch-tip lookup that stamps "what will really deploy" is a
+      // separate call and is covered by its own suite.)
+      githubAnswers({ status: "ahead", files: [] });
+      const app = await createBoardApp(createRouteDb());
 
       const res = await request(app).post(`/api/companies/${COMPANY_ID}/approvals`).send(deployBody({ commit: undefined }));
 
       expect(res.status).toBe(201);
-      expect(mockGhFetch).not.toHaveBeenCalled();
+      expect(
+        mockGhFetch.mock.calls.filter((call: unknown[]) =>
+          typeof call[0] === "string" ? call[0].includes("/compare/") : false,
+        ),
+      ).toEqual([]);
+      expect(mockApprovalService.create.mock.calls[0]?.[1]?.payload?.changesSinceLive).toBeUndefined();
     },
     TEST_TIMEOUT,
   );

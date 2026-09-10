@@ -216,6 +216,8 @@ POST /api/companies/{companyId}/approvals
 
 **Title convention (required).** The operator runs many companies/projects from one approvals list, so `payload.title` must never lead with a PR number, branch name, commit hash, or other internal field — those look identical across unrelated repos. Write it as plain words: what this does, not how you did it. The server rewrites `request_board_approval` titles server-side to enforce `"<project> — <what this does>"` (resolved from the linked issue's project, or the company name if no project applies), so a bare description like `"put the 2026 look live"` is enough — don't hand-prefix it yourself.
 
+**A deploy card must name the commit, in full (required).** On a `kind:"deploy"` payload, `commit` must be the whole 40-character commit id — run `git rev-parse HEAD` in the checkout you tested and paste exactly what it prints. Writing the commit id into the note instead leaves the field empty, and a card with an empty commit field deploys whatever happens to be at the top of the branch when the operator approves it, not the change you checked; the server refuses an agent-filed card with no commit id, and one with a shortened id, for that reason. Likewise, do not file a `merge_pr` card for a commit the base branch already contains — there is nothing left to merge, and the server refuses it; if you want that change live, file a deploy card with the commit id.
+
 For merge/deploy approvals, put PR number, repo, branch, and commit in dedicated payload fields (`prNumber`, `repo`, `branch`, `base`, `commit`) instead of the title — the server composes a small "Technical reference" line from them for the approval detail view:
 
 ```json

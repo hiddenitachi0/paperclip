@@ -11,6 +11,7 @@ import {
   approvalTechnicalReference,
   approvalDeployBranchInfo,
   approvalDeployChangeSummaryText,
+  approvalDeployTargetCommitText,
   approvalIsRollbackDeploy,
   typeIcon,
   defaultTypeIcon,
@@ -65,6 +66,7 @@ export function ApprovalCard({
   const branchInfo = approvalDeployBranchInfo(payload);
   const isRollback = approvalIsRollbackDeploy(payload);
   const deployChangeSummary = approvalDeployChangeSummaryText(payload);
+  const deployTargetCommit = approvalDeployTargetCommitText(payload);
   const issueRefs = (linkedIssues ?? [])
     .map((issue) => issue.identifier)
     .filter((identifier): identifier is string => Boolean(identifier));
@@ -148,6 +150,9 @@ export function ApprovalCard({
                 <p className="text-xs leading-5 text-muted-foreground">
                   Approval request created {timeAgo(approval.createdAt)}
                 </p>
+                {deployTargetCommit && (
+                  <p className="text-xs leading-5 text-muted-foreground">{deployTargetCommit}</p>
+                )}
                 {deployChangeSummary && (
                   <p className="text-xs leading-5 text-muted-foreground">{deployChangeSummary}</p>
                 )}

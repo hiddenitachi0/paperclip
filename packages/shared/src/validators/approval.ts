@@ -143,6 +143,19 @@ export const deployRequestPayloadSchema = z
     // known, no GitHub repo, GitHub unreachable) -- absent means "not checked",
     // never "nothing changes".
     changesSinceLive: deployChangeSummarySchema.optional(),
+    // DUR-3964: the commit this card would actually deploy, worked out
+    // server-side at filing time and stamped here so the card always shows what
+    // will really ship. When the card pins a commit that is the same commit;
+    // when it pins none (the board deploying the top of the branch on purpose)
+    // it is the commit at the top of that branch right now, and
+    // `resolvedCommitSource` says which of the two it is. Informational only --
+    // the deploy runner still reads `commit` (or, with none, the branch) -- and
+    // never trusted from the filer: a card must not be able to claim its own
+    // "this is what will ship". Absent when it could not be worked out (no
+    // GitHub repo, GitHub unreachable): absent means "not checked", never
+    // "nothing".
+    resolvedCommit: z.string().trim().min(1).max(200).optional(),
+    resolvedCommitSource: z.enum(["pinned", "branch_tip"]).optional(),
   })
   .strict();
 
