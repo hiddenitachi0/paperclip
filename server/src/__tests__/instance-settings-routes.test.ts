@@ -522,6 +522,56 @@ describe("instance settings routes", () => {
     });
   });
 
+  // DUR-3968: the quality check fails open, so the board needs a read that says
+  // whether it can actually run -- otherwise "on but broken" looks like "on".
+  it("reports the quality check's saved mode next to whether it can actually run", async () => {
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      mockInstanceSettingsService.getGeneral.mockResolvedValue({
+        doneGate: { mode: "enforce", maxRounds: 3, companyOverrides: { "company-1": { mode: "off" } } },
+      });
+      const app = await createApp({
+        type: "board",
+        userId: "user-1",
+        source: "session",
+        isInstanceAdmin: false,
+        companyIds: ["company-1"],
+      });
+
+      const res = await request(app).get("/api/instance/settings/general/done-gate/status");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        mode: "enforce",
+        maxRounds: 3,
+        companyOverrideCount: 1,
+        ready: false,
+      });
+      expect(res.body.notReadyReason).toContain("no Anthropic API key");
+      expect(res.body.maxCostCentsPerCheck).toBeGreaterThan(0);
+    } finally {
+      if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousKey;
+    }
+  });
+
+  it("rejects signed-in users without company access from reading the quality check status", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-2",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [],
+      memberships: [],
+    });
+
+    const res = await request(app).get("/api/instance/settings/general/done-gate/status");
+
+    expect(res.status).toBe(403);
+    expect(mockInstanceSettingsService.getGeneral).not.toHaveBeenCalled();
+  });
+
   it("rejects signed-in users without company access from reading general settings", async () => {
     const app = await createApp({
       type: "board",

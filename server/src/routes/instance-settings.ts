@@ -13,6 +13,7 @@ import { heartbeatService, instanceSettingsService, logActivity } from "../servi
 import { environmentService } from "../services/environments.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { assertBoardOrgAccess, getActorInfo } from "./authz.js";
+import { buildDoneGateStatus } from "../services/done-gate-critic.js";
 
 function assertCanManageInstanceSettings(req: Request) {
   if (req.actor.type !== "board") {
@@ -119,6 +120,18 @@ export function instanceSettingsRoutes(db: Db) {
       res.json(updated.general);
     },
   );
+
+  // DUR-3968: what the "quality check before a task is marked done" is actually
+  // doing right now -- the saved mode, plus whether the reviewer can be reached
+  // at all. The gate fails open on purpose, so "switched on but unable to run"
+  // would otherwise be indistinguishable from "switched off" everywhere except
+  // the server log, which the operator never reads. Readable by any org member,
+  // like the general settings GET it sits next to; it exposes no secret, only
+  // whether one is present.
+  router.get("/instance/settings/general/done-gate/status", async (req, res) => {
+    assertBoardOrgAccess(req);
+    res.json(buildDoneGateStatus(await svc.getGeneral()));
+  });
 
   // DUR-3943 item 4: which agents carry their own "max turns per run" (their
   // number wins over the instance setting), and a one-click way to make every
