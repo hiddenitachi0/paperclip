@@ -9,11 +9,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEPLOY_CHANGED_FILES_STAMP_LIMIT,
   DEPLOY_CHANGED_FILE_PATH_MAX_LENGTH,
+  describeDeployCardPartialCommitId,
+  describeDeployCardWithoutCommitId,
   describeDeployCommitAlreadyLive,
   describeDeployCommitNotBuiltOnLive,
   describeDocumentationOnlyDeploy,
+  describeMergeCommitAlreadyInBase,
   describeMissingDeployCommit,
+  findCommitIdLikeText,
   isDocumentationPath,
+  isFullCommitId,
   resolveLiveDeployCommit,
   shortCommit,
   summarizeChangedPaths,
@@ -193,5 +198,59 @@ describe("resolveLiveDeployCommit", () => {
     await expect(
       resolveLiveDeployCommit(db as never, "company-1", "project-1", { readStatusLog: () => [] }),
     ).resolves.toBeNull();
+  });
+});
+
+describe("DUR-3964: a card must name the exact commit, and say so plainly when it does not", () => {
+  it("only accepts a written-out 40-character commit id", () => {
+    expect(isFullCommitId("8623c28bd1234567890abcdef1234567890abcde")).toBe(true);
+    expect(isFullCommitId("  8623C28BD1234567890ABCDEF1234567890ABCDE  ")).toBe(true);
+    expect(isFullCommitId("8623c28")).toBe(false);
+    expect(isFullCommitId("8623c28bd1234567890abcdef1234567890abcd")).toBe(false);
+    expect(isFullCommitId("custom")).toBe(false);
+    expect(isFullCommitId("")).toBe(false);
+  });
+
+  it("spots a commit id written into a note, and is not fooled by ordinary text", () => {
+    expect(findCommitIdLikeText("Deploying 8623c28f after the merge.")).toBe("8623c28f");
+    expect(findCommitIdLikeText("commit 8623c28bd1234567890abcdef1234567890abcde")).toBe(
+      "8623c28bd1234567890abcdef1234567890abcde",
+    );
+    // A plain number, a plain word, and anything too short are not commit ids.
+    expect(findCommitIdLikeText("Ships invoice page 1234567 of the redesign.")).toBeNull();
+    expect(findCommitIdLikeText("Deploy the accessible dashboard.")).toBeNull();
+    expect(findCommitIdLikeText("Fixes bug abc12.")).toBeNull();
+  });
+
+  it("tells an agent where to get the commit id, and names the one it wrote in the note", () => {
+    const withNote = describeDeployCardWithoutCommitId({ commitIdInText: "8623c28f" });
+    expect(withNote).toMatch(/does not say which commit to deploy/i);
+    expect(withNote).toMatch(/commit field is empty/i);
+    expect(withNote).toContain("8623c28f");
+    expect(withNote).toContain("git rev-parse HEAD");
+
+    const without = describeDeployCardWithoutCommitId({ commitIdInText: null });
+    expect(without).toMatch(/does not say which commit to deploy/i);
+    expect(without).not.toMatch(/commit field is empty/i);
+    expect(without).toContain("git rev-parse HEAD");
+  });
+
+  it("says why a shortened commit id is not enough", () => {
+    const message = describeDeployCardPartialCommitId({ commit: "8623c28" });
+    expect(message).toContain("8623c28");
+    expect(message).toMatch(/not a full commit id/i);
+    expect(message).toContain("40 characters");
+    expect(message).toContain("git rev-parse HEAD");
+  });
+
+  it("points an already-merged change at the deploy card the agent actually wanted", () => {
+    const message = describeMergeCommitAlreadyInBase({
+      commit: "8623c28bd1234567890abcdef1234567890abcde",
+      base: "custom",
+    });
+    expect(message).toMatch(/already merged into "custom"/i);
+    expect(message).toContain("8623c28bd123");
+    expect(message).toMatch(/file a deploy card with the commit id/i);
+    expect(message).toContain("8623c28bd1234567890abcdef1234567890abcde");
   });
 });
