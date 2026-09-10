@@ -14,6 +14,18 @@ import { validateAdapterModelEffort } from "../model-effort.js";
 /** Upper bound for agents.laneAInstructions (roughly 2k tokens); it is prepended to every quick-agent call. */
 export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
 
+/**
+ * The quick-agent ("Lane A") fields, named once. Several places have to agree
+ * on exactly this list — the create/hire schema below, the board-only guard in
+ * server/src/routes/agents.ts, and the hire approval payload that carries the
+ * choice from "employ someone" to "board approves the hire". DUR-3971 added a
+ * test (server/src/__tests__/agents-quick-agent-hire.test.ts) that reads THIS
+ * array and asserts each of those places handles every name in it, so the
+ * lists cannot drift apart silently.
+ */
+export const QUICK_AGENT_FIELDS = ["laneAEnabled", "laneAInstructions"] as const;
+export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
+
 export const agentPermissionsSchema = z.object({
   canCreateAgents: z.boolean().optional().default(false),
   canCreateSkills: z.boolean().optional().default(true),
@@ -250,6 +262,14 @@ const createAgentObjectSchema = z.object({
   budgetMonthlyCents: z.number().int().nonnegative().optional().default(0),
   permissions: agentPermissionsSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
+  // DUR-3971: whether this hire answers straight away in chat (quick agent)
+  // or goes away and works on tasks. It is a hiring decision — the operator
+  // pictures the role before the person exists — so it belongs on the create
+  // path, not only on PATCH. Still board-only: the server refuses an
+  // agent-authenticated caller that sets either field (routes/agents.ts).
+  // Left out entirely => false, i.e. exactly today's behaviour.
+  laneAEnabled: z.boolean().optional(),
+  laneAInstructions: z.string().max(LANE_A_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);
@@ -288,12 +308,11 @@ export const updateAgentSchema = createAgentObjectSchema
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
-    // Lane A (DUR-217) opt-in — board-settable only, enforced in
+    // Lane A (DUR-217) opt-in — laneAEnabled/laneAInstructions are inherited
+    // from createAgentObjectSchema via .partial() above (DUR-3971 moved them
+    // there so the same choice can be made when the agent is employed).
+    // Board-settable only on both paths, enforced in
     // server/src/routes/agents.ts (assertCanManageLaneAFlag), not here.
-    laneAEnabled: z.boolean().optional(),
-    // Quick agent instruction set — board-settable only, same guard as
-    // laneAEnabled. Kept short: it is prepended to every Lane A call.
-    laneAInstructions: z.string().max(LANE_A_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
   });
 
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;

@@ -406,6 +406,14 @@ export function approvalService(db: Db) {
               typeof payload.metadata === "object" && payload.metadata !== null
                 ? (payload.metadata as Record<string, unknown>)
                 : null,
+            // DUR-3971: this branch rebuilds the agent from the card alone, so
+            // the working-style choice the operator made when employing this
+            // person has to be read back off the card here — otherwise
+            // approving the hire silently turns a quick agent into an
+            // ordinary one.
+            laneAEnabled: payload.laneAEnabled === true,
+            laneAInstructions:
+              typeof payload.laneAInstructions === "string" ? payload.laneAInstructions : null,
             status: "idle",
             spentMonthlyCents: 0,
             permissions: undefined,
