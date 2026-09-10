@@ -7,6 +7,7 @@ import {
   ApprovalPayloadRenderer,
   approvalDeployBranchInfo,
   approvalDeployChangeSummaryText,
+  approvalDeployTargetCommitText,
   approvalDuplicateKey,
   approvalIsPersonaRequest,
   approvalIsRollbackDeploy,
@@ -122,6 +123,36 @@ describe("approvalDeployBranchInfo", () => {
   it("returns null for non-deploy approvals", () => {
     expect(approvalDeployBranchInfo({ kind: "merge_pr", sourceBranch: "master" })).toBeNull();
     expect(approvalDeployBranchInfo(null)).toBeNull();
+  });
+});
+
+describe("approvalDeployTargetCommitText (DUR-3964)", () => {
+  it("names the commit a pinned card would deploy", () => {
+    expect(
+      approvalDeployTargetCommitText({
+        kind: "deploy",
+        commit: "8623c28bd1234567890abcdef1234567890abcde",
+        resolvedCommit: "8623c28bd1234567890abcdef1234567890abcde",
+        resolvedCommitSource: "pinned",
+      }),
+    ).toBe("Will deploy commit 8623c28bd123.");
+  });
+
+  it("says a card with no commit ships the top of the branch, and which commit that was", () => {
+    expect(
+      approvalDeployTargetCommitText({
+        kind: "deploy",
+        deployBranch: "custom",
+        resolvedCommit: "f00dcafe0123456789abcdef0123456789abcdef",
+        resolvedCommitSource: "branch_tip",
+      }),
+    ).toBe("Will deploy the top of custom \u2014 that was commit f00dcafe0123 when this card was filed.");
+  });
+
+  it("stays silent on a card the server could not check", () => {
+    expect(approvalDeployTargetCommitText({ kind: "deploy", commit: "abc1234" })).toBeNull();
+    expect(approvalDeployTargetCommitText({ kind: "merge_pr", resolvedCommit: "abc1234" })).toBeNull();
+    expect(approvalDeployTargetCommitText(null)).toBeNull();
   });
 });
 
