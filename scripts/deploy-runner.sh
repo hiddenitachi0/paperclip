@@ -153,6 +153,24 @@ STATUS_PATH="${PAPERCLIP_DEPLOY_RUNNER_STATUS_PATH:-/paperclip/deploy-runner/sta
 # once the recreate actually starts either way.
 QUIET_MODE_DRAIN_TIMEOUT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS:-240}"
 QUIET_MODE_DRAIN_POLL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS:-5}"
+# DUR-3965: quiet mode lives in Paperclip's OWN database and is only reachable
+# through Paperclip's OWN API. When the deploy being rolled back IS Paperclip,
+# that API is down at exactly the moment this runner needs to undo the drain --
+# which on 2026-09-10 left the whole instance muted for 27 minutes (both
+# companies idle, nothing on screen saying why) after a single failed deploy.
+# So the deactivate is retried, with a bounded wait for the server to answer
+# its health check again in between, and if it still cannot be delivered the
+# failure is written to a marker file that the NEXT poll cycle picks up and
+# retries -- silence must never be the resting state.
+QUIET_MODE_DEACTIVATE_ATTEMPTS="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_DEACTIVATE_ATTEMPTS:-5}"
+QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS:-5}"
+# How long to wait for the health-check URL to answer 200 again before
+# spending the next deactivate attempt on a server that is still booting.
+QUIET_MODE_RECOVERY_HEALTH_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_RECOVERY_HEALTH_SECONDS:-180}"
+# Durable, on-host record of "quiet mode is still on and I could not turn it
+# off". Deliberately outside deployTargetPath and outside any container, for
+# the same reason FAILURE_LOG_DIR is: the thing that failed is the container.
+QUIET_MODE_PENDING_MARKER="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_MARKER:-$REPO_DIR/.deploy-runner-quiet-mode-pending}"
 # DUR-3923: only deploy-LOOKING cards (deploy_pr, rollout, ...) approved within
 # this window get the "nothing acts on this" comment. Without a bound, the
 # first poll cycle after this runner ships would comment on every historically
@@ -412,6 +430,25 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
     fi
     log "runner: health probe $attempt/$HEALTH_RETRIES $verdict (curl_status=$curl_status http_code=${code:-000} load=$load)"
     sleep "$HEALTH_SLEEP_SECONDS"
+  done
+  return 1
+}
+
+# DUR-3965: a small, separately-budgeted "is the server answering again yet?"
+# wait, used only while trying to undo the quiet-mode drain after a failed
+# deploy. Deliberately NOT health_check(): that one owns the deploy's own
+# pass/fail verdict and its full HEALTH_RETRIES budget, and calling it here
+# would both re-log a deploy verdict that was already decided and blow the
+# time budget of a recovery step that must stay short.
+wait_for_health() { # url, budget_seconds -> 0 as soon as a probe returns 200, 1 if the budget runs out
+  local url="$1" budget="${2:-0}" waited=0 code curl_status
+  [ -n "$url" ] || return 1
+  while [ "$waited" -lt "$budget" ]; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time "$HEALTH_MAX_TIME_SECONDS" "$url")"
+    curl_status=$?
+    [ "$(probe_verdict "$curl_status" "$code")" = ok ] && return 0
+    sleep "$HEALTH_SLEEP_SECONDS"
+    waited=$((waited + HEALTH_SLEEP_SECONDS))
   done
   return 1
 }
@@ -685,13 +722,85 @@ maybe_begin_quiet_mode_drain() { # aid, kind
   fi
 }
 
-maybe_end_quiet_mode_drain() { # aid
-  local aid="$1"
-  [ "$QUIET_MODE_OWNED_BY_RUNNER" -eq 1 ] || return 0
-  if ! cli_json instance quiet-mode:deactivate >/dev/null; then
-    log "runner: $aid could not deactivate quiet mode after deploy — an operator may need to run \`instance quiet-mode:deactivate\` manually"
-  fi
+# DUR-3965: one deactivate call is not enough. The failure mode that muted the
+# instance for 27 minutes on 2026-09-10 is: the deploy fails, the rollback
+# recreates the shared container, and the single `quiet-mode:deactivate` call
+# lands while the server it is talking to is still booting (or crash-looping),
+# so it fails and quiet mode simply stays on with nothing on screen saying so.
+# Retries with backoff, and once waits (bounded) for the health-check URL to
+# answer 200 again before spending a further attempt on a server that is
+# demonstrably not up yet.
+quiet_mode_deactivate_with_retries() { # aid, health_url -> 0 delivered, 1 gave up
+  local aid="$1" health_url="${2:-}" attempt=1 delay="$QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS" waited_for_health=0
+  while :; do
+    if cli_json instance quiet-mode:deactivate >/dev/null; then
+      [ "$attempt" -gt 1 ] && log "runner: $aid deactivated quiet mode on attempt $attempt of $QUIET_MODE_DEACTIVATE_ATTEMPTS — agents can take work again"
+      return 0
+    fi
+    log "runner: $aid could not deactivate quiet mode (attempt $attempt of $QUIET_MODE_DEACTIVATE_ATTEMPTS) — Paperclip's own API may still be coming back up after this deploy"
+    [ "$attempt" -ge "$QUIET_MODE_DEACTIVATE_ATTEMPTS" ] && return 1
+    if [ -n "$health_url" ] && [ "$waited_for_health" -eq 0 ]; then
+      waited_for_health=1
+      if wait_for_health "$health_url" "$QUIET_MODE_RECOVERY_HEALTH_SECONDS"; then
+        log "runner: $aid $health_url is answering again — retrying the quiet-mode deactivate"
+      else
+        log "runner: $aid $health_url still not answering after ${QUIET_MODE_RECOVERY_HEALTH_SECONDS}s — retrying the quiet-mode deactivate anyway"
+      fi
+    else
+      sleep "$delay"
+      delay=$((delay * 2))
+    fi
+    attempt=$((attempt + 1))
+  done
+}
+
+quiet_mode_pending_marker_write() { # aid
+  printf '%s\t%s\n' "$(ts)" "$1" > "$QUIET_MODE_PENDING_MARKER" 2>>"$LOG" || \
+    log "runner: $1 could not write the quiet-mode marker file $QUIET_MODE_PENDING_MARKER"
+}
+
+maybe_end_quiet_mode_drain() { # aid, health_url(optional)
+  local aid="$1" health_url="${2:-}"
+  [ "${QUIET_MODE_OWNED_BY_RUNNER:-0}" -eq 1 ] || return 0
+  # Cleared up front so this is idempotent: the outcome paths in
+  # process_approval call it explicitly (so the drain ends before the
+  # operator-facing comment is posted) and the EXIT trap in run_one_approval
+  # calls it again as a safety net. Only the first call does any work.
   QUIET_MODE_OWNED_BY_RUNNER=0
+  if quiet_mode_deactivate_with_retries "$aid" "$health_url"; then
+    rm -f "$QUIET_MODE_PENDING_MARKER" 2>/dev/null
+    return 0
+  fi
+  log "runner: $aid QUIET MODE IS STILL ON and could not be turned off after $QUIET_MODE_DEACTIVATE_ATTEMPTS attempts — no agent in ANY company will start work until it is cleared. Left a marker at $QUIET_MODE_PENDING_MARKER for the next poll cycle to retry; an operator can also clear it under Settings > Instance settings > General, or with \`instance quiet-mode:deactivate\`."
+  quiet_mode_pending_marker_write "$aid"
+  return 1
+}
+
+# DUR-3965: the next-tick half of the recovery. Runs at the top of every poll
+# cycle, before any approval is dispatched, so an instance left muted by a
+# deploy that failed while the API was down gets un-muted about a minute
+# later instead of staying silent until a person happens to notice.
+retry_pending_quiet_mode_deactivate() {
+  [ -f "$QUIET_MODE_PENDING_MARKER" ] || return 0
+  local marker status active
+  marker="$(tr -d '\n' < "$QUIET_MODE_PENDING_MARKER" 2>/dev/null)"
+  status="$(cli_json instance quiet-mode:status)" || {
+    log "runner: quiet mode was left on by an earlier failed deploy ($marker) and the status endpoint is still unreachable — will retry next poll cycle"
+    return 0
+  }
+  active="$(quiet_mode_field "$status" active)"
+  if [ -z "$active" ]; then
+    log "runner: quiet mode is off again (someone cleared it, or a later deploy did) — clearing the leftover marker from $marker"
+    rm -f "$QUIET_MODE_PENDING_MARKER"
+    return 0
+  fi
+  if cli_json instance quiet-mode:deactivate >/dev/null; then
+    log "runner: quiet mode was still on after the failed deploy recorded at $marker — turned it off now; every agent can take work again"
+    rm -f "$QUIET_MODE_PENDING_MARKER"
+    return 0
+  fi
+  log "runner: quiet mode is STILL on after the failed deploy recorded at $marker and could not be turned off — no agent in any company will do any work until it is cleared (Settings > Instance settings > General, or \`instance quiet-mode:deactivate\`)"
+  return 1
 }
 
 run_recipe() { # target_dir, kind, services, command, compose_files, env_file
@@ -864,7 +973,7 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
-    maybe_end_quiet_mode_drain "$aid"
+    maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
     comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
@@ -875,12 +984,12 @@ process_approval() { # approval_id, company_id -> exit status is comment()'s del
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
-    maybe_end_quiet_mode_drain "$aid"
+    maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
     comment "$aid" "$company_id" "Deploy failed — health check against $DV_HEALTH_CHECK_URL never returned 200 after deploying $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit and re-recreated." || echo "No rollback configured; the running version may be unhealthy." )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
   fi
 
-  maybe_end_quiet_mode_drain "$aid"
+  maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
   # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
   # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only
@@ -956,11 +1065,24 @@ crash_fallback_comment() { # approval_id, company_id, result_file
   fi
 }
 
+# DUR-3965: the single EXIT handler for a deploy's subshell. Undoing the
+# quiet-mode drain comes FIRST and unconditionally: every explicit outcome
+# path in process_approval already ends the drain itself (this is a no-op
+# then), but an early return that a future change forgets to cover, an
+# unbound-variable crash, or the subshell being killed mid-deploy would
+# otherwise leave the whole instance muted with nothing saying why -- exactly
+# the 2026-09-10 incident. Telling the operator about the approval is the
+# second job, and must not be able to skip the first.
+deploy_approval_exit_guard() { # approval_id, company_id, result_file
+  maybe_end_quiet_mode_drain "$1" "${DV_HEALTH_CHECK_URL:-}"
+  crash_fallback_comment "$1" "$2" "$3"
+}
+
 run_one_approval() { # approval_id, company_id
   local aid="$1" company_id="$2" result_file
   result_file="$(mktemp "${TMPDIR:-/tmp}/paperclip-deploy-runner-result.XXXXXX")"
   (
-    trap 'crash_fallback_comment "$aid" "$company_id" "$result_file"' EXIT
+    trap 'deploy_approval_exit_guard "$aid" "$company_id" "$result_file"' EXIT
     if process_approval "$aid" "$company_id"; then
       echo ok > "$result_file"
     fi
@@ -1063,6 +1185,11 @@ run_unsupported_kind_approval() { # approval_id, company_id, kind
 }
 
 main() {
+  # DUR-3965: before anything else, un-mute an instance a previous cycle left
+  # muted. This must run even when there is nothing else to do this cycle --
+  # a stuck quiet mode means zero approvals will ever be filed either.
+  retry_pending_quiet_mode_deactivate
+
   local companies company_ids
   companies="$(cli_json company list)" || {
     log "runner: company list failed (auth expired? re-run 'auth login' inside $DOCKER_SERVER_CONTAINER)"
