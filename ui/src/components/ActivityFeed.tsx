@@ -5,6 +5,7 @@ import { activityApi } from "../api/activity";
 import { agentsApi } from "../api/agents";
 import { issuesApi } from "../api/issues";
 import { queryKeys } from "../lib/queryKeys";
+import { isOperatorNoticeAction } from "../lib/activity-format";
 import { useCompany } from "../context/CompanyContext";
 import { FeedCard } from "./FeedCard";
 import { cn } from "../lib/utils";
@@ -102,12 +103,20 @@ const ACTION_TIER: Record<string, EventTier> = {
   "cost.recorded": 3,
 };
 
-function getEventTier(event: ActivityEvent): EventTier {
+export function getEventTier(event: ActivityEvent): EventTier {
   // Special case: issue.updated with status → in_review is tier 1
   if (event.action === "issue.updated" && event.details) {
     const details = event.details as Record<string, unknown>;
     if (details.status === "in_review") return 1;
   }
+  // Operator notices are things the operator has to know about and act on --
+  // an expiring sign-in, an instance left paused after a failed deploy. They
+  // carry their own plain-language sentence and they are always shown: the
+  // tier-3 default would hide them behind the "show all activity" tick, and an
+  // alert nobody sees is not an alert. Deriving this from the same set that
+  // renders the notice means a new notice can never be silently hidden by
+  // forgetting to add it here (DUR-3965).
+  if (isOperatorNoticeAction(event.action)) return 1;
   return ACTION_TIER[event.action] ?? 3;
 }
 
