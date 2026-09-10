@@ -1,5 +1,26 @@
+/**
+ * Every first path segment that names a PAGE rather than a company.
+ *
+ * This drives whether a link like "/personas" gets the company prefix added.
+ * Anything not listed here is assumed to be a company prefix instead, so a page
+ * missing from this set silently loses its prefix: the operator clicks Personas,
+ * the URL stays "/personas", the app reads "PERSONAS" as the company, and the
+ * page is broken. Personas, Changelog, Pipelines and Ask Paperclip were all
+ * missing and all broken exactly that way.
+ *
+ * company-routes.test.ts asserts that every page the sidebar links to appears
+ * here, so adding a page to the sidebar without adding it here fails the build
+ * rather than shipping a dead link.
+ */
 const BOARD_ROUTE_ROOTS = new Set([
   "dashboard",
+  "personas",
+  "changelog",
+  "pipelines",
+  "simple",
+  "learnings",
+  "review-queue",
+  "plugins",
   "companies",
   "company",
   "skills",
