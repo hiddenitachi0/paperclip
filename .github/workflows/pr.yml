@@ -59,6 +59,12 @@ jobs:
       - name: Test deploy runner comment guarantee
         run: node --test ./scripts/deploy-runner.test.mjs
 
+      # Checks the migration-rehearsal script itself (safety refusals, failure
+      # reporting). The rehearsal proper needs a dump of real data, so it is an
+      # operator step (docs/rls-cutover-runbook.md), never a CI step.
+      - name: Test migration rehearsal harness
+        run: node --test ./scripts/__tests__/rehearse-migrations.test.mjs
+
       - name: Test general-server shard partition
         run: node --test ./scripts/__tests__/run-vitest-stable-shard.test.mjs
 

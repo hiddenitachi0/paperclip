@@ -50,6 +50,7 @@ import {
   mergePrAutomationService,
   agentErrorAlertsService,
   untrackedWriteAlertsService,
+  quietModeAlertsService,
   personaPublisherSweepService,
   escalationGrantService,
   organizationCheckupService,
@@ -940,6 +941,7 @@ export async function startServer(): Promise<StartedServer> {
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
+    const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
       ? personaPublisherSweepService(schedulerDb as any)
       : null;
@@ -1222,6 +1224,29 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "agent-error alert tick failed");
+        });
+
+      // DUR-3965: quiet mode freezes every agent in every company. A deploy
+      // that failed while it was on left the instance completely silent for 27
+      // minutes on 2026-09-10 with nothing anywhere saying why. Once it has
+      // been on longer than the configured window, say so in each company's
+      // Activity feed. Never clears it: someone may have set it deliberately.
+      void runInCompanyScopeBypass(
+        bypassDb,
+        {
+          reason: "heartbeat scheduler tick: quietModeAlerts",
+          actorType: "scheduler",
+          route: "heartbeat-scheduler:quietModeAlerts",
+        },
+        () => quietModeAlerts.tick(new Date()),
+      )
+        .then((result) => {
+          if (result.alerted > 0) {
+            logger.warn({ ...result }, "quiet mode has been active too long — operator notice written to every company");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "quiet-mode alert tick failed");
         });
 
       // DUR-130: the fn_flag_untracked_write trigger (migration 0139) records

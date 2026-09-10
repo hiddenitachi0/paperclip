@@ -88,6 +88,9 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "instance.claude_auth.removed": "removed the shared Claude sign-in",
   "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
   "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
+  // DUR-3965: quiet mode is still on and every agent in every company is
+  // still frozen. The row carries the whole plain sentence in details.message.
+  "instance.quiet_mode_stuck": "reported that every agent is still paused (quiet mode)",
   "agent.terminated": "terminated",
   "agent.key_created": "created API key for",
   "agent.budget_updated": "updated budget for",
@@ -171,6 +174,7 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "instance.claude_auth.removed": "removed the shared Claude sign-in",
   "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
   "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
+  "instance.quiet_mode_stuck": "reported that every agent is still paused (quiet mode)",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",
   "heartbeat.cancelled": "cancelled a heartbeat",
@@ -552,6 +556,12 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   "persona_post.publish_failed",
   "instance.claude_auth.check_failed",
   "instance.claude_auth.expiring",
+  // DUR-3965: the whole instance is paused and nothing else on the page says
+  // so. server/src/services/quiet-mode-alerts.ts writes the sentence into
+  // details.message; without this line the feed would show the bare action
+  // name and throw that sentence away -- which is how the feature shipped
+  // broken with every suite green.
+  "instance.quiet_mode_stuck",
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {

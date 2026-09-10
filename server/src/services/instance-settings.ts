@@ -12,6 +12,7 @@ import {
   DEFAULT_SESSION_RESET_AFTER_RUNS,
   DEFAULT_SESSION_RESET_AFTER_HOURS,
   DEFAULT_QUIET_MODE_STATE,
+  QUIET_MODE_REASON_MANUAL,
   DEFAULT_DONE_GATE_SETTINGS,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
@@ -351,13 +352,42 @@ export function instanceSettingsService(db: Db) {
       return { ...quietMode, activeRunCount };
     },
 
+    /**
+     * DUR-3965: records that the operator has been told, in the Activity feed,
+     * that quiet mode has been on too long -- or clears that record. Only a
+     * bookkeeping flag: it never turns quiet mode itself on or off. Surfacing
+     * a stuck quiet mode is safe; auto-clearing an instance-wide switch a
+     * person may have set on purpose is not, so the server never does that.
+     */
+    setQuietModeStuckNoticeAt: async (at: Date | null): Promise<QuietModeState> => {
+      const current = await getOrCreateRow();
+      const general = normalizeGeneralSettings(current.general);
+      const nextValue = at ? at.toISOString() : null;
+      if (general.quietMode.stuckNoticeAt === nextValue) return general.quietMode;
+      const nextQuietMode: QuietModeState = { ...general.quietMode, stuckNoticeAt: nextValue };
+      await db
+        .update(instanceSettings)
+        .set({ general: { ...general, quietMode: nextQuietMode }, updatedAt: new Date() })
+        .where(eq(instanceSettings.id, current.id));
+      return nextQuietMode;
+    },
+
     // DUR-224: freezes every agent (both timer and on-demand wakes) across
     // every company without touching runs already in flight -- deliberately
     // NOT the same as Pause, which cancels active runs. Snapshots each
     // agent's exact prior flags first so deactivateQuietMode can restore
     // them precisely instead of blanket re-enabling agents that were
     // deliberately asleep beforehand.
-    activateQuietMode: async (actor: QuietModeActor): Promise<QuietModeState> => {
+    activateQuietMode: async (
+      actor: QuietModeActor,
+      // DUR-3965: WHY, recorded at the moment it happens. The deploy runner
+      // signs in as an instance admin, so the actor alone cannot tell a
+      // deploy's drain apart from a person deliberately quieting the fleet
+      // for the night -- and those two want opposite treatment. Anything that
+      // does not say defaults to "manual": a switch flipped without a stated
+      // machine reason is somebody's decision.
+      options: { reason?: string | null } = {},
+    ): Promise<QuietModeState> => {
       const current = await getOrCreateRow();
       const existing = normalizeGeneralSettings(current.general).quietMode;
       if (existing.active) return existing;
@@ -386,8 +416,11 @@ export function instanceSettingsService(db: Db) {
         active: true,
         activatedAt: new Date().toISOString(),
         activatedBy: actor,
+        activatedReason: options.reason?.trim() || QUIET_MODE_REASON_MANUAL,
         deactivatedAt: null,
         snapshot,
+        // DUR-3965: a fresh activation has not been reported as stuck yet.
+        stuckNoticeAt: null,
       };
       const nextGeneral = { ...normalizeGeneralSettings(current.general), quietMode: nextQuietMode };
       await db
@@ -426,8 +459,12 @@ export function instanceSettingsService(db: Db) {
         active: false,
         activatedAt: quietMode.activatedAt,
         activatedBy: quietMode.activatedBy,
+        activatedReason: quietMode.activatedReason,
         deactivatedAt: new Date().toISOString(),
         snapshot: null,
+        // DUR-3965: nothing is paused any more, so the "still paused" notice
+        // must be able to fire again if a future deploy gets stuck.
+        stuckNoticeAt: null,
       };
       const nextGeneral = { ...normalizeGeneralSettings(current.general), quietMode: nextQuietMode };
       await db

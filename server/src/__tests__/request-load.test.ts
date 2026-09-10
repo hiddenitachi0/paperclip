@@ -158,6 +158,15 @@ describe("request load tracker (DUR-272)", () => {
         scheduler: healthyScheduler,
         requests: snap,
         database: calmDatabase,
+        quietMode: {
+          active: false,
+          activatedAt: null,
+          activeForMs: null,
+          activatedReason: null,
+          stuckAfterMinutes: 30,
+          stuck: false,
+          activatedForDeploy: false,
+        },
       });
       expect(summary.level).toBe("ok");
       expect(summary.headline).toContain("Quiet");

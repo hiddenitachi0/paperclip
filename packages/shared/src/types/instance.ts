@@ -105,6 +105,30 @@ export interface QuietModeActor {
   agentId: string | null;
 }
 
+/**
+ * DUR-3965: WHY quiet mode was switched on, recorded at activation time
+ * instead of guessed afterwards from the actor.
+ *
+ * The distinction is load-bearing, not cosmetic. The deploy runner
+ * authenticates as an instance admin, so on the wire it looks exactly like a
+ * person clicking the switch -- and the two cases need opposite handling:
+ *
+ * - `"deploy"`: nobody chose the silence. A deploy that has not switched it
+ *   back off within half an hour is the 2026-09-10 incident, and is reported
+ *   as a critical, everything-is-paused finding.
+ * - `"manual"`: a person switched it on deliberately (the overnight
+ *   Claude-quota window is ~22 hours of exactly this). It stays a quiet note
+ *   until the long QUIET_MODE_STALE_AFTER_MS window, and is never described
+ *   as forgotten.
+ *
+ * `null` means the state predates this field; callers fall back to inferring
+ * from `activatedBy.actorType`.
+ */
+export const QUIET_MODE_REASON_DEPLOY = "deploy";
+export const QUIET_MODE_REASON_MANUAL = "manual";
+export const QUIET_MODE_REASONS = [QUIET_MODE_REASON_DEPLOY, QUIET_MODE_REASON_MANUAL] as const;
+export type QuietModeActivationReason = (typeof QUIET_MODE_REASONS)[number];
+
 export interface QuietModeAgentSnapshotEntry {
   agentId: string;
   companyId: string;
@@ -116,17 +140,49 @@ export interface QuietModeState {
   active: boolean;
   activatedAt: string | null;
   activatedBy: QuietModeActor | null;
+  /**
+   * DUR-3965: why it was switched on ("deploy" | "manual", or any future
+   * caller-supplied slug). Null only for state written before this field
+   * existed -- see QUIET_MODE_REASON_DEPLOY for why it is recorded rather
+   * than inferred.
+   */
+  activatedReason: string | null;
   deactivatedAt: string | null;
   snapshot: QuietModeAgentSnapshotEntry[] | null;
+  /**
+   * DUR-3965: when the operator was last told, in the Activity feed, that this
+   * quiet mode has been on too long to be a deliberate maintenance window.
+   * Null while nothing has been said. Only there so the notice is written once
+   * per activation instead of on every scheduler tick; cleared whenever quiet
+   * mode is switched on or off again.
+   */
+  stuckNoticeAt: string | null;
 }
 
 export const DEFAULT_QUIET_MODE_STATE: QuietModeState = {
   active: false,
   activatedAt: null,
   activatedBy: null,
+  activatedReason: null,
   deactivatedAt: null,
   snapshot: null,
+  stuckNoticeAt: null,
 };
+
+/**
+ * DUR-3965: how long a DEPLOY-activated quiet mode may stay on before the
+ * fleet health signal calls it out as a critical finding ("everything is
+ * paused and nobody chose that"). Deliberately far shorter than
+ * QUIET_MODE_STALE_AFTER_MS below, and deliberately applied ONLY to the
+ * deploy case: nobody decided on that silence, so half an hour of it is an
+ * incident -- 2026-09-10 was 27 minutes.
+ *
+ * A quiet mode a person switched on is a decision, not an incident, and is
+ * held to QUIET_MODE_STALE_AFTER_MS instead. The overnight Claude-quota
+ * window (~22 hours) is normal, expected use and must never paint the strip
+ * red or write a nightly notice.
+ */
+export const QUIET_MODE_STUCK_AFTER_MS = 30 * 60 * 1000;
 
 // How long Quiet Mode can stay active before the UI warns that it may have
 // been left on by mistake. Sized above the normal overnight-quota-reset use

@@ -273,7 +273,26 @@ export function registerAccessCommands(program: Command): void {
   // instance-wide — without touching runs already in flight — before a
   // container recreate, then restore prior heartbeat flags afterward.
   addSimpleGet(instance, "quiet-mode:status", "Get instance-wide quiet mode status (includes activeRunCount)", "/api/instance/settings/quiet-mode");
-  addSimplePost(instance, "quiet-mode:activate", "Activate quiet mode instance-wide (freezes new agent wakes, does not touch in-flight runs)", "/api/instance/settings/quiet-mode/activate");
+  // DUR-3965: --reason records WHY, at the moment it happens, instead of
+  // leaving readers to guess from the actor. The deploy runner signs in as an
+  // instance admin, so without this a drain it forgot to undo is
+  // indistinguishable from an operator deliberately quieting the fleet for
+  // the night -- and the two need opposite handling. Omitted = "manual".
+  addCommonClientOptions(
+    instance
+      .command("quiet-mode:activate")
+      .description("Activate quiet mode instance-wide (freezes new agent wakes, does not touch in-flight runs)")
+      .option("--reason <slug>", 'Why it is being switched on, e.g. "deploy" (default: manual)')
+      .action(async (opts: BaseClientOptions & { reason?: string }) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const body = opts.reason ? { reason: opts.reason } : {};
+          printOutput(await ctx.api.post("/api/instance/settings/quiet-mode/activate", body), { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
   addSimplePost(instance, "quiet-mode:deactivate", "Deactivate quiet mode instance-wide (restores each agent's prior heartbeat flags)", "/api/instance/settings/quiet-mode/deactivate");
   addCommonClientOptions(
     instance

@@ -55,6 +55,25 @@ describe("approval validators", () => {
     expect(() => deployRequestPayloadSchema.parse({ ...payload, allowBackwardDeploy: "yes" })).toThrow();
   });
 
+  it("accepts the server-stamped 'what will really deploy' commit on the deploy payload (DUR-3964)", () => {
+    const payload = {
+      kind: "deploy" as const,
+      projectId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      title: "Deploy dashboard main",
+      note: "Routine deploy after merge.",
+      resolvedCommit: "8623c28bd1234567890abcdef1234567890abcde",
+      resolvedCommitSource: "branch_tip" as const,
+    };
+    expect(deployRequestPayloadSchema.parse(payload)).toEqual(payload);
+    expect(deployRequestPayloadSchema.parse({ ...payload, resolvedCommitSource: "pinned" }).resolvedCommitSource)
+      .toBe("pinned");
+    expect(deployRequestPayloadSchema.parse({ ...payload, resolvedCommit: undefined }).resolvedCommit)
+      .toBeUndefined();
+    expect(() => deployRequestPayloadSchema.parse({ ...payload, resolvedCommitSource: "guessed" })).toThrow();
+    expect(() => deployRequestPayloadSchema.parse({ ...payload, resolvedCommit: "" })).toThrow();
+  });
+
   it("accepts the server-stamped change summary on the deploy payload (pointless-deploy-card guard)", () => {
     const payload = {
       kind: "deploy" as const,

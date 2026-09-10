@@ -5,6 +5,7 @@ import {
   patchInstanceSettingsSchema,
   patchInstanceExperimentalSettingsSchema,
   patchInstanceGeneralSettingsSchema,
+  quietModeActivateRequestSchema,
 } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -218,11 +219,19 @@ export function instanceSettingsRoutes(db: Db) {
   router.post("/instance/settings/quiet-mode/activate", async (req, res) => {
     assertCanManageInstanceSettings(req);
     const actor = getActorInfo(req);
-    const result = await svc.activateQuietMode({
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-    });
+    // DUR-3965: an optional, explicit reason ("deploy" from the deploy
+    // runner). Absent = a person switched it on deliberately; the service
+    // records that as "manual". Never inferred from the actor -- the deploy
+    // runner authenticates as an instance admin and looks like a person.
+    const body = quietModeActivateRequestSchema.parse(req.body ?? {});
+    const result = await svc.activateQuietMode(
+      {
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+      },
+      { reason: body.reason ?? null },
+    );
     const companyIds = await svc.listCompanyIds();
     await Promise.all(
       companyIds.map((companyId) =>
@@ -235,7 +244,7 @@ export function instanceSettingsRoutes(db: Db) {
           action: "instance.settings.quiet_mode_activated",
           entityType: "instance_settings",
           entityId: "default",
-          details: { agentCount: result.snapshot?.length ?? 0 },
+          details: { agentCount: result.snapshot?.length ?? 0, reason: result.activatedReason },
         }),
       ),
     );

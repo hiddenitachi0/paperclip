@@ -183,7 +183,8 @@ function deployBody(overrides: Record<string, unknown> = {}) {
       kind: "deploy",
       projectId: PROJECT_ID,
       workspaceId: WORKSPACE_ID,
-      commit: "abc1234",
+      // DUR-3964: an agent-filed deploy card must name the commit in full.
+      commit: "abc1234def5678901234567890abcdef12345678",
       title: "Deploy widgets",
       note: "Ship it",
       ...overrides,
@@ -352,16 +353,24 @@ describe("DUR-284: deploy approval branch stamp", () => {
   );
 
   it(
-    "stamps deployBranch only, with no GitHub call, when the payload pins no commit",
+    "stamps deployBranch only, and looks up no source branch, when the payload pins no commit",
     async () => {
-      const app = await createAgentApp(createRouteDb());
+      // DUR-3964: only the board may file without a commit now, and the
+      // branch-tip lookup that stamps "what will really deploy" does call
+      // GitHub -- so this asserts no *source branch* lookup happened, which is
+      // what the DUR-284 stamp is about.
+      const app = await createBoardApp(createRouteDb());
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
         .send(deployBody({ commit: undefined }));
 
       expect(res.status).toBe(201);
-      expect(mockGhFetch).not.toHaveBeenCalled();
+      expect(
+        mockGhFetch.mock.calls.filter((call: unknown[]) =>
+          typeof call[0] === "string" ? call[0].includes("branches-where-head") : false,
+        ),
+      ).toEqual([]);
       const createdPayload = mockApprovalService.create.mock.calls[0][1].payload;
       expect(createdPayload.sourceBranch).toBeUndefined();
       expect(createdPayload.deployBranch).toBe("custom");

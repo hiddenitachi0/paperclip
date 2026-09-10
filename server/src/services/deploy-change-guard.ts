@@ -195,6 +195,84 @@ export function describeDeployCommitNotBuiltOnLive(input: {
   );
 }
 
+/**
+ * DUR-3964 (a): how long a commit id is when it is written out in full. Git's
+ * own `rev-parse` prints all 40 characters; anything shorter is an abbreviation
+ * that only means something inside one particular checkout.
+ */
+export const FULL_COMMIT_ID_LENGTH = 40;
+
+const FULL_COMMIT_ID_PATTERN = /^[0-9a-f]{40}$/i;
+
+/** True only for a written-out 40-character commit id. */
+export function isFullCommitId(value: string): boolean {
+  return FULL_COMMIT_ID_PATTERN.test(value.trim());
+}
+
+/**
+ * DUR-3964 (a): does this text contain something that looks like a commit id?
+ *
+ * Used only to word the refusal, never to decide it: the mistake actually made
+ * was an agent writing the commit id into the card's note ("deploying 8623c28")
+ * while leaving the card's own commit field empty, so the refusal should say
+ * that in as many words instead of a generic "no commit id".
+ *
+ * Requires a run of 7-40 hex characters containing BOTH a digit and one of
+ * a-f, which is what every real commit id looks like and what an ordinary
+ * number ("1234567") or an ordinary word is not.
+ */
+export function findCommitIdLikeText(text: string): string | null {
+  const match = text.match(/\b(?=[0-9a-f]{7,40}\b)(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/i);
+  return match ? match[0] : null;
+}
+
+const HOW_TO_GET_THE_COMMIT_ID =
+  "Run `git rev-parse HEAD` in the checkout you tested -- it prints the full 40-character commit id -- and file " +
+  "the card again with that.";
+
+/**
+ * DUR-3964 (a): the card carries no commit id at all, so approving it would
+ * deploy whatever happens to be at the top of the branch at that moment rather
+ * than the change that was actually reviewed.
+ */
+export function describeDeployCardWithoutCommitId(input: { commitIdInText?: string | null }): string {
+  const noteClause = input.commitIdInText
+    ? `The card's own commit field is empty, even though its note mentions ${shortCommit(input.commitIdInText)} -- ` +
+      "the note is just text, nothing reads it. "
+    : "";
+  return (
+    "This deploy card does not say which commit to deploy. " +
+    noteClause +
+    "Approving it would ship whatever happens to be at the top of the branch at that moment, which may not be the " +
+    `change that was checked. ${HOW_TO_GET_THE_COMMIT_ID}`
+  );
+}
+
+/**
+ * DUR-3964 (a): the card carries a shortened (or otherwise not-40-character)
+ * commit id. A short id only means something inside one particular checkout,
+ * and one wrong character in it is exactly how a deploy card ends up pointing
+ * at a commit nobody reviewed.
+ */
+export function describeDeployCardPartialCommitId(input: { commit: string }): string {
+  return (
+    `"${input.commit}" is not a full commit id, so it does not pin down which change this card would deploy. ` +
+    `A deploy card needs all ${FULL_COMMIT_ID_LENGTH} characters. ${HOW_TO_GET_THE_COMMIT_ID}`
+  );
+}
+
+/**
+ * DUR-3964 (c): the change on a merge card is already contained in the branch
+ * it asks to merge into, so approving it would merge nothing.
+ */
+export function describeMergeCommitAlreadyInBase(input: { commit: string; base: string }): string {
+  return (
+    `That change is already merged into "${input.base}" -- commit ${shortCommit(input.commit)} is already part of ` +
+    "it, so approving this card would merge nothing. If you want it live, file a deploy card with the commit id " +
+    `${input.commit} instead.`
+  );
+}
+
 /** (d) Nothing but documentation changed since the live version. */
 export function describeDocumentationOnlyDeploy(input: {
   commit: string;

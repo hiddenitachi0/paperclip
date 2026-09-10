@@ -149,6 +149,29 @@ export function approvalDeployBranchInfo(payload?: Record<string, unknown> | nul
 }
 
 /**
+ * DUR-3964: one plain sentence naming the commit this deploy card would really
+ * ship, from the stamp the server worked out at filing time. A card that pins a
+ * commit ships that commit; a card that pins none (the board deploying the top
+ * of a branch on purpose) ships whatever is at the top of that branch when it is
+ * approved, and the sentence says so rather than showing a blank where the
+ * commit should be. Returns null when the card carries no stamp (an older card,
+ * or one filed while GitHub could not be reached) — the card then says nothing
+ * rather than implying "checked".
+ */
+export function approvalDeployTargetCommitText(payload?: Record<string, unknown> | null): string | null {
+  if (firstNonEmptyString(payload?.kind) !== "deploy") return null;
+  const resolvedCommit = firstNonEmptyString(payload?.resolvedCommit);
+  if (!resolvedCommit) return null;
+  const short = resolvedCommit.slice(0, 12);
+  if (firstNonEmptyString(payload?.resolvedCommitSource) !== "branch_tip") {
+    return `Will deploy commit ${short}.`;
+  }
+  const branch = firstNonEmptyString(payload?.deployBranch);
+  const branchClause = branch ? `the top of ${branch}` : "the top of the branch";
+  return `Will deploy ${branchClause} — that was commit ${short} when this card was filed.`;
+}
+
+/**
  * Pointless deploy cards: one plain sentence saying what a deploy card would actually change
  * — the version running now, and how many files differ from it — from the
  * summary the server stamped on the payload at filing time. Returns null when
