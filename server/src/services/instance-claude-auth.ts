@@ -42,6 +42,11 @@ import { badRequest, notFound, unprocessable } from "../errors.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import { logActivity } from "./activity-log.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import {
+  CLAUDE_AUTH_SETTINGS_PATH,
+  buildClaudeAuthOperatorMessage,
+  type ClaudeCredentialSource,
+} from "./claude-credential-source.js";
 
 const SINGLETON_KEY = "default";
 const SEALED_PREFIX = "instance-claude-auth:";
@@ -50,7 +55,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const FINISHED_SIGNIN_RETENTION_MS = 15 * 60 * 1000;
 /** `lastUsedAt` is informational; don't write it on every single run. */
 const LAST_USED_WRITE_THROTTLE_MS = 5 * 60 * 1000;
-export const CLAUDE_AUTH_FALLBACK_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
+// Both constants now live with the resolution order they belong to
+// (claude-credential-source.ts) and are re-exported here so every existing
+// importer keeps working unchanged.
+export { CLAUDE_AUTH_FALLBACK_ENV_KEY, CLAUDE_AUTH_SETTINGS_PATH } from "./claude-credential-source.js";
 /**
  * Polish round 3: the stored token is re-tested with one real CLI call once a
  * day (the scheduler ticks more often; `runScheduledCheck` only acts when the
@@ -61,7 +69,14 @@ export const CLAUDE_AUTH_SCHEDULED_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const CLAUDE_AUTH_NOTICE_EXPIRY_DAYS = 3;
 export const CLAUDE_AUTH_CHECK_FAILED_ACTION = "instance.claude_auth.check_failed";
 export const CLAUDE_AUTH_EXPIRING_ACTION = "instance.claude_auth.expiring";
-export const CLAUDE_AUTH_SETTINGS_PATH = "Settings > Instance settings > Claude sign-in";
+/**
+ * DUR-3969 item 5: an expired/absent shared sign-in is an INSTANCE fact. Every
+ * agent that inherits it fails at once, and telling the operator once per agent
+ * turns one problem into N identical alarms. A run-time auth failure on the
+ * shared sign-in therefore leaves the operator notice at most once per this
+ * window, however many agents hit it.
+ */
+export const CLAUDE_AUTH_RUN_FAILURE_NOTICE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export interface InstanceClaudeAuthServiceDeps {
   command?: string;
@@ -161,6 +176,13 @@ type ActiveSignIn = {
 // must see the same in-flight sign-in (there is one CLI process behind it).
 let activeSignIn: ActiveSignIn | null = null;
 let lastUsedWriteAt = 0;
+/**
+ * Process-wide de-duplication for the instance-level run-failure notice (see
+ * CLAUDE_AUTH_RUN_FAILURE_NOTICE_INTERVAL_MS). Keyed by the credential source
+ * so "the shared sign-in stopped working" and "there is no sign-in at all"
+ * each get their own one notice, and neither is repeated per agent.
+ */
+const lastRunFailureNoticeAt = new Map<ClaudeCredentialSource, number>();
 
 export function resetInstanceClaudeAuthStateForTests() {
   if (activeSignIn) {
@@ -172,6 +194,7 @@ export function resetInstanceClaudeAuthStateForTests() {
   }
   activeSignIn = null;
   lastUsedWriteAt = 0;
+  lastRunFailureNoticeAt.clear();
 }
 
 async function sealToken(token: string): Promise<string> {
@@ -479,6 +502,78 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
       .where(eq(instanceClaudeAuth.id, row.id));
   }
 
+  /**
+   * DUR-3969 item 5. A run failed because Claude would not accept the
+   * credential it was given. Expiry (and absence) of the SHARED sign-in is an
+   * instance fact, so:
+   *   - `source: "agent"` is not ours at all — that agent's own token was
+   *     rejected. Nothing instance-wide is recorded and no notice is left; the
+   *     run's own plain-language error already names the fix.
+   *   - `source: "instance"` marks the stored sign-in as failing (so the
+   *     sign-in page stops looking healthy) and leaves ONE operator notice per
+   *     CLAUDE_AUTH_RUN_FAILURE_NOTICE_INTERVAL_MS, no matter how many agents
+   *     hit it in that window.
+   *   - `source: "process_env"` / `"none"` have no stored row to mark, but the
+   *     operator still needs telling once — same one-notice rule.
+   * Agents need no per-agent intervention afterwards: they stay invokable, and
+   * the next run after the sign-in is renewed simply succeeds.
+   */
+  async function reportRunAuthFailure(input: {
+    source: ClaudeCredentialSource;
+    agentName?: string | null;
+  }): Promise<{ marked: boolean; noticed: boolean; message: string | null }> {
+    if (input.source === "agent") {
+      return { marked: false, noticed: false, message: null };
+    }
+    let marked = false;
+    if (input.source === "instance") {
+      const row = await getRow();
+      if (row) {
+        const current = now();
+        await db
+          .update(instanceClaudeAuth)
+          .set({ lastAuthFailureAt: current, updatedAt: current })
+          .where(eq(instanceClaudeAuth.id, row.id));
+        marked = true;
+      }
+    }
+
+    const nowMs = now().getTime();
+    const previous = lastRunFailureNoticeAt.get(input.source);
+    if (previous !== undefined && nowMs - previous < CLAUDE_AUTH_RUN_FAILURE_NOTICE_INTERVAL_MS) {
+      return { marked, noticed: false, message: null };
+    }
+    lastRunFailureNoticeAt.set(input.source, nowMs);
+
+    // Deliberately worded without the agent's name: this is the instance-level
+    // notice, and naming one agent would make an instance fact look like that
+    // agent's problem.
+    const message = buildClaudeAuthOperatorMessage({ source: input.source, agentName: null });
+    const companyIds = await listCompanyIds().catch(() => [] as string[]);
+    for (const companyId of companyIds) {
+      try {
+        await logActivity(db, {
+          companyId,
+          actorType: "system",
+          actorId: "claude-auth-check",
+          action: CLAUDE_AUTH_CHECK_FAILED_ACTION,
+          entityType: "instance_claude_auth",
+          entityId: SINGLETON_KEY,
+          details: {
+            message,
+            source: input.source,
+            reportedBy: "heartbeat_run",
+          },
+        });
+      } catch (err) {
+        console.warn(
+          `[instance-claude-auth] could not write the sign-in notice for company ${companyId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return { marked, noticed: true, message };
+  }
+
   function startInteractiveSignIn(input: { userId: string | null }): InstanceClaudeSignInSession {
     const support = automaticSupport();
     if (!support.supported) {
@@ -542,6 +637,7 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
     runScheduledCheck,
     resolveFallbackToken,
     markAuthFailure,
+    reportRunAuthFailure,
     startInteractiveSignIn,
     getSignIn,
     submitSignInCode,
