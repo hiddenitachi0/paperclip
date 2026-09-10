@@ -25,6 +25,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useToastActions } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
+import { INSTANCE_SETTINGS_PATH_PREFIX } from "../lib/instance-settings";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import { AgentJobSection } from "../components/jobs/AgentJobSection";
 import { jobsApi } from "../api/jobs";
@@ -3606,6 +3607,21 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
             )}
             {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && (
               <div className="space-y-2">
+                {/* DUR-3969: almost every Claude agent shares one sign-in, so
+                    the first thing to offer is that one page — signing in there
+                    once fixes every agent that shares it. The per-agent login
+                    below stays for the agent that deliberately uses its own
+                    account. */}
+                <p className="text-xs text-muted-foreground">
+                  Most agents share one Claude sign-in.{" "}
+                  <Link
+                    to={`${INSTANCE_SETTINGS_PATH_PREFIX}/claude`}
+                    className="text-blue-600 underline underline-offset-2 dark:text-blue-400"
+                  >
+                    Open the shared Claude sign-in
+                  </Link>{" "}
+                  and sign in again there — every agent using it starts working again on its own.
+                </p>
                 <Button
                   variant="outline"
                   size="sm"
