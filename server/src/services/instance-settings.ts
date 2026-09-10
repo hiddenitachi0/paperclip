@@ -12,6 +12,7 @@ import {
   DEFAULT_SESSION_RESET_AFTER_RUNS,
   DEFAULT_SESSION_RESET_AFTER_HOURS,
   DEFAULT_QUIET_MODE_STATE,
+  QUIET_MODE_REASON_MANUAL,
   DEFAULT_DONE_GATE_SETTINGS,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
@@ -377,7 +378,16 @@ export function instanceSettingsService(db: Db) {
     // agent's exact prior flags first so deactivateQuietMode can restore
     // them precisely instead of blanket re-enabling agents that were
     // deliberately asleep beforehand.
-    activateQuietMode: async (actor: QuietModeActor): Promise<QuietModeState> => {
+    activateQuietMode: async (
+      actor: QuietModeActor,
+      // DUR-3965: WHY, recorded at the moment it happens. The deploy runner
+      // signs in as an instance admin, so the actor alone cannot tell a
+      // deploy's drain apart from a person deliberately quieting the fleet
+      // for the night -- and those two want opposite treatment. Anything that
+      // does not say defaults to "manual": a switch flipped without a stated
+      // machine reason is somebody's decision.
+      options: { reason?: string | null } = {},
+    ): Promise<QuietModeState> => {
       const current = await getOrCreateRow();
       const existing = normalizeGeneralSettings(current.general).quietMode;
       if (existing.active) return existing;
@@ -406,6 +416,7 @@ export function instanceSettingsService(db: Db) {
         active: true,
         activatedAt: new Date().toISOString(),
         activatedBy: actor,
+        activatedReason: options.reason?.trim() || QUIET_MODE_REASON_MANUAL,
         deactivatedAt: null,
         snapshot,
         // DUR-3965: a fresh activation has not been reported as stuck yet.
@@ -448,6 +459,7 @@ export function instanceSettingsService(db: Db) {
         active: false,
         activatedAt: quietMode.activatedAt,
         activatedBy: quietMode.activatedBy,
+        activatedReason: quietMode.activatedReason,
         deactivatedAt: new Date().toISOString(),
         snapshot: null,
         // DUR-3965: nothing is paused any more, so the "still paused" notice

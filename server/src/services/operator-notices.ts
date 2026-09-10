@@ -33,41 +33,56 @@ export function formatOperatorClockTime(value: string | Date | null | undefined)
   return `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
 }
 
-export interface QuietModeStuckOperatorNoticeInput {
+export interface QuietModeNoticeInput {
   /** When quiet mode was switched on (ISO), if known. */
   activatedAt: string | null;
   /** How long it has been on, in ms. */
   activeForMs: number | null;
   /**
-   * Who switched it on. Only used to say "for a deploy" when it was the deploy
-   * runner rather than a person -- never rendered as a raw id.
+   * True when quiet mode was switched on BY A DEPLOY (recorded at activation
+   * time, see QUIET_MODE_REASON_DEPLOY) rather than by a person. This picks
+   * which of the two sentences below is written, and they are deliberately
+   * very different: one reports an incident, the other reports a fact.
    */
-  activatedByActorType?: string | null;
-  /** True when the platform can tell it was switched on as part of a deploy. */
   activatedForDeploy?: boolean;
 }
 
 /**
- * DUR-3965: the one sentence that has to appear when the whole instance is
- * paused and nobody has said so. Written both as the critical fleet-health
- * finding on the Now page strip and as an Activity-feed notice (DUR-98), so an
- * operator who is not looking at the Now page still finds out.
+ * DUR-3965: the sentence written when the whole instance is paused, as the
+ * fleet-health finding on the Now page strip AND as an Activity-feed notice
+ * (DUR-98), so an operator who is not looking at the Now page still finds out.
  *
- * Deliberately does NOT promise the platform will fix it: the server never
- * auto-clears quiet mode, because someone may have set it on purpose.
+ * Two cases, on purpose:
+ *
+ * - A DEPLOY switched it on and never switched it back off. Nobody chose that
+ *   silence, so it is an incident and reads like one -- this is the
+ *   2026-09-10 shape, 27 minutes of a completely idle fleet.
+ * - A PERSON switched it on. That is a decision, and Filip makes it most
+ *   nights (the overnight Claude-quota window is about 22 hours of exactly
+ *   this). It is stated as a fact, with no suggestion anyone forgot anything,
+ *   and only after the long QUIET_MODE_STALE_AFTER_MS window.
+ *
+ * Neither promises the platform will fix it: the server never auto-clears
+ * quiet mode, because someone may have set it on purpose.
  */
-export function buildQuietModeStuckNotice(input: QuietModeStuckOperatorNoticeInput): string {
+export function buildQuietModeNotice(input: QuietModeNoticeInput): string {
   const clock = formatOperatorClockTime(input.activatedAt);
-  const why = input.activatedForDeploy ? " for a deploy" : "";
   const when = clock
     ? ` at ${clock}${input.activeForMs !== null ? ` (${formatOperatorDuration(input.activeForMs)} ago)` : ""}`
     : input.activeForMs !== null
       ? ` ${formatOperatorDuration(input.activeForMs)} ago`
       : "";
+  if (input.activatedForDeploy) {
+    return (
+      `Everything is paused. Paperclip was put in quiet mode for a deploy${when} and never taken out of it; ` +
+      `no agent in any company will do any work until it is cleared. ` +
+      `Clear it under Settings > Instance settings > General, using the quiet-mode switch.`
+    );
+  }
   return (
-    `Everything is paused. Paperclip was put in quiet mode${why}${when} and never taken out of it; ` +
-    `no agent in any company will do any work until it is cleared. ` +
-    `Clear it under Settings > Instance settings > General, using the quiet-mode switch.`
+    `Quiet mode has been on${when} and is still on, so no agent in any company is starting new work. ` +
+    `If that is still what you want, nothing needs doing. ` +
+    `To start the agents again, switch it off under Settings > Instance settings > General.`
   );
 }
 

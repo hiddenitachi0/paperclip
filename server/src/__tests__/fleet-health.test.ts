@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { FleetRequestLoad, FleetSchedulerStatus, FleetDatabaseLoad } from "@paperclipai/shared";
+import { QUIET_MODE_STALE_AFTER_MS, type FleetRequestLoad, type FleetSchedulerStatus, type FleetDatabaseLoad } from "@paperclipai/shared";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -10,6 +10,8 @@ import {
   computeFleetHealth,
   computeFleetQuietMode,
   computeFleetSlotUsage,
+  isDeployQuietMode,
+  quietModeThresholdMs,
   FLEET_HEALTH_WINDOW_MS,
   FLEET_ZOMBIE_SILENCE_MS,
   resolveQuietModeStuckMs,
@@ -73,6 +75,7 @@ const quietModeOff = {
   active: false,
   activatedAt: null,
   activeForMs: null,
+  activatedReason: null,
   stuckAfterMinutes: 30,
   stuck: false,
   activatedForDeploy: false,
@@ -291,15 +294,25 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
 // was the thing being redeployed), and the instance sat completely silent for
 // 27 minutes: both companies idle, 17 agents asleep, and every number in the
 // health signal reading as an unremarkable quiet night.
+//
+// And the mirror image of that mistake, which matters just as much: Filip
+// puts the fleet in quiet mode most nights for the Claude quota reset, about
+// 22 hours at a time, on purpose. Treating that as the same event would paint
+// this strip red every single night and tell him he forgot something he
+// decided. So the two cases are separated by the reason recorded at
+// activation time, never guessed from the actor.
 describe("quiet mode as a fleet-health finding (DUR-3965)", () => {
   const activatedAt = "2026-09-10T13:20:00.000Z";
   const now = new Date("2026-09-10T13:47:00.000Z"); // 27 minutes later
 
-  function quietModeState(overrides: Record<string, unknown> = {}) {
+  function deployQuietMode(overrides: Record<string, unknown> = {}) {
     return {
       active: true,
       activatedAt,
-      activatedBy: { actorType: "system", actorId: "deploy-runner", agentId: null },
+      // The deploy runner signs in as an instance admin, so in production it
+      // reads as a plain user actor -- the reason is what identifies it.
+      activatedBy: { actorType: "user", actorId: "u-admin", agentId: null },
+      activatedReason: "deploy",
       deactivatedAt: null,
       snapshot: null,
       stuckNoticeAt: null,
@@ -307,27 +320,55 @@ describe("quiet mode as a fleet-health finding (DUR-3965)", () => {
     } as Parameters<typeof computeFleetQuietMode>[0];
   }
 
+  function manualQuietMode(overrides: Record<string, unknown> = {}) {
+    return deployQuietMode({ activatedReason: "manual", ...overrides });
+  }
+
+  const windows = { deployStuckAfterMs: 30 * 60_000 };
+
   it("computes how long the fleet has been paused and whether that is past the window", () => {
-    const under = computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 30 * 60_000 });
+    const under = computeFleetQuietMode(deployQuietMode(), { now, ...windows });
     expect(under).toMatchObject({ active: true, activeForMs: 27 * 60_000, stuck: false, stuckAfterMinutes: 30, activatedForDeploy: true });
 
-    const over = computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 20 * 60_000 });
+    const over = computeFleetQuietMode(deployQuietMode(), { now, deployStuckAfterMs: 20 * 60_000 });
     expect(over).toMatchObject({ stuck: true, stuckAfterMinutes: 20 });
 
-    const off = computeFleetQuietMode(quietModeState({ active: false }), { now, stuckAfterMs: 30 * 60_000 });
+    const off = computeFleetQuietMode(deployQuietMode({ active: false }), { now, ...windows });
     expect(off).toMatchObject({ active: false, activeForMs: null, stuck: false });
 
     // "We cannot tell how long the fleet has been paused" is never a reason
     // to report it as fine (DUR-98 item 4).
-    const unknownStart = computeFleetQuietMode(quietModeState({ activatedAt: null }), { now, stuckAfterMs: 30 * 60_000 });
+    const unknownStart = computeFleetQuietMode(deployQuietMode({ activatedAt: null }), { now, ...windows });
     expect(unknownStart).toMatchObject({ active: true, activeForMs: null, stuck: true });
+  });
+
+  it("identifies a deploy by the reason it recorded, not by the actor it happens to authenticate as", () => {
+    // The real incident: an instance-admin actor, because that is what the
+    // deploy runner is. The old actor-type guess called this a person.
+    expect(isDeployQuietMode(deployQuietMode())).toBe(true);
+    // And the mirror: a scheduler-looking actor that was NOT a deploy. The
+    // old guess called this one a deploy.
+    expect(
+      isDeployQuietMode(manualQuietMode({ activatedBy: { actorType: "scheduler", actorId: null, agentId: null } })),
+    ).toBe(false);
+    // Only state written before the reason existed falls back to the guess.
+    expect(isDeployQuietMode({ activatedReason: null, activatedBy: { actorType: "deploy_runner", actorId: null, agentId: null } })).toBe(true);
+    expect(isDeployQuietMode({ activatedReason: null, activatedBy: { actorType: "user", actorId: "u1", agentId: null } })).toBe(false);
+  });
+
+  it("holds a deploy to half an hour and a person's own quiet mode to the 24h convention", () => {
+    expect(quietModeThresholdMs({ activatedForDeploy: true, deployStuckAfterMs: 30 * 60_000 })).toBe(30 * 60_000);
+    expect(quietModeThresholdMs({ activatedForDeploy: false, deployStuckAfterMs: 30 * 60_000 })).toBe(QUIET_MODE_STALE_AFTER_MS);
+    // The 24h convention is sized above the ~22h overnight quota window on
+    // purpose; if that ever stops being true, this fails.
+    expect(QUIET_MODE_STALE_AFTER_MS).toBeGreaterThan(22 * 60 * 60_000);
   });
 
   it("reads a quiet mode inside the window as an explanation, not an alarm", () => {
     const summary = summarize({
       runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 0, queued: 0 }),
       slots: computeFleetSlotUsage(4, 0),
-      quietMode: computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 30 * 60_000 }),
+      quietMode: computeFleetQuietMode(deployQuietMode(), { now, ...windows }),
     });
     expect(summary.level).toBe("ok");
     expect(summary.notes[0]).toBe(
@@ -335,14 +376,14 @@ describe("quiet mode as a fleet-health finding (DUR-3965)", () => {
     );
   });
 
-  it("reports a quiet mode past the window as critical, in plain words, above every other finding", () => {
+  it("reports a DEPLOY's forgotten quiet mode as critical, in plain words, above every other finding", () => {
     const summary = summarize({
       runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 0, queued: 0 }),
       slots: computeFleetSlotUsage(4, 0),
       // Something else is wrong too: the paused-fleet line still has to win,
       // because everything else is downstream of it.
       agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] },
-      quietMode: computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 20 * 60_000 }),
+      quietMode: computeFleetQuietMode(deployQuietMode(), { now, deployStuckAfterMs: 20 * 60_000 }),
     });
     expect(summary.level).toBe("critical");
     expect(summary.headline).toContain("Everything is paused.");
@@ -355,17 +396,52 @@ describe("quiet mode as a fleet-health finding (DUR-3965)", () => {
     expect(summary.notes.some((note) => note.includes("Reviewer"))).toBe(true);
   });
 
-  it("says 'for a deploy' only when a deploy switched it on", () => {
-    const byPerson = computeFleetQuietMode(
-      quietModeState({ activatedBy: { actorType: "user", actorId: "u1", agentId: null } }),
-      { now, stuckAfterMs: 20 * 60_000 },
-    );
-    const summary = summarize({ quietMode: byPerson });
-    expect(summary.headline).toContain("Everything is paused. Paperclip was put in quiet mode at ");
+  // The one that matters most in daily use: the overnight Claude-quota
+  // window. Two hours in, this must look like a calm, explained pause -- not
+  // a red strip, and not an accusation.
+  it("never escalates a deliberate quiet mode: two hours in it is still just an explanation", () => {
+    const twoHoursIn = new Date("2026-09-10T15:20:00.000Z");
+    const quietMode = computeFleetQuietMode(manualQuietMode(), { now: twoHoursIn, ...windows });
+    expect(quietMode).toMatchObject({ active: true, stuck: false, activatedForDeploy: false });
+    expect(quietMode.stuckAfterMinutes).toBe(24 * 60);
+
+    const summary = summarize({
+      runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 0, queued: 0 }),
+      slots: computeFleetSlotUsage(4, 0),
+      quietMode,
+    });
+    expect(summary.level).toBe("ok");
+    expect(summary.headline).not.toContain("Everything is paused");
+    expect(summary.notes.join(" ")).not.toContain("never taken out of it");
+  });
+
+  it("still covers a 22-hour overnight window without a single alarm", () => {
+    const nextMorning = new Date("2026-09-11T11:20:00.000Z"); // 22 hours in
+    const quietMode = computeFleetQuietMode(manualQuietMode(), { now: nextMorning, ...windows });
+    expect(quietMode.stuck).toBe(false);
+    expect(summarize({ quietMode }).level).toBe("ok");
+  });
+
+  it("mentions a person's quiet mode only after the long window, as a warning that accuses nobody", () => {
+    const dayLater = new Date("2026-09-11T14:20:00.000Z"); // 25 hours in
+    const quietMode = computeFleetQuietMode(manualQuietMode(), { now: dayLater, ...windows });
+    expect(quietMode).toMatchObject({ stuck: true, activatedForDeploy: false });
+
+    const summary = summarize({ quietMode });
+    // A warning, never critical: nothing is broken, the fleet is where
+    // somebody put it.
+    expect(summary.level).toBe("warning");
+    expect(summary.headline).toContain("Quiet mode has been on");
+    expect(summary.headline).toContain("is still on, so no agent in any company is starting new work");
+    expect(summary.headline).toContain("If that is still what you want, nothing needs doing.");
+    // The three things this sentence must never say about a window the
+    // operator set on purpose.
+    expect(summary.headline).not.toContain("never taken out of it");
+    expect(summary.headline).not.toContain("Everything is paused");
     expect(summary.headline).not.toContain("for a deploy");
   });
 
-  it("takes the window from PAPERCLIP_QUIET_MODE_STUCK_MINUTES, and falls back to 30 minutes", () => {
+  it("takes the deploy window from PAPERCLIP_QUIET_MODE_STUCK_MINUTES, and falls back to 30 minutes", () => {
     expect(resolveQuietModeStuckMs({})).toBe(30 * 60_000);
     expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "" })).toBe(30 * 60_000);
     expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "5" })).toBe(5 * 60_000);

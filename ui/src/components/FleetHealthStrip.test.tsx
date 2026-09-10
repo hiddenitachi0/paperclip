@@ -67,6 +67,7 @@ const healthyFleet: FleetHealthSnapshot = {
     active: false,
     activatedAt: null,
     activeForMs: null,
+    activatedReason: null,
     stuckAfterMinutes: 30,
     stuck: false,
     activatedForDeploy: false,
@@ -209,19 +210,37 @@ describe("fleetHealthFacts", () => {
   // DUR-3965: on 2026-09-10 a failed deploy left quiet mode on for 27 minutes.
   // Every number in this row read as an unremarkable quiet night; nothing said
   // the whole instance was paused. It is now the first thing in the row.
-  it("puts 'everything paused' first and flags it whenever quiet mode is on", () => {
+  it("puts 'everything paused' first whenever quiet mode is on", () => {
     const paused = fleetHealthFacts({
       ...healthyFleet,
       quietMode: {
         active: true,
         activatedAt: "2026-09-10T13:20:00.000Z",
         activeForMs: 27 * 60_000,
+        activatedReason: "deploy",
         stuckAfterMinutes: 30,
         stuck: false,
         activatedForDeploy: true,
       },
     });
-    expect(paused[0]).toEqual({ key: "quiet", text: "Everything paused (quiet mode) for 27 min", alert: true });
+    // Within its own window it is an explanation, not an alarm: the operator
+    // pauses the whole fleet most nights on purpose, and an amber line every
+    // night teaches him to ignore the one night it matters.
+    expect(paused[0]).toEqual({ key: "quiet", text: "Everything paused (quiet mode) for 27 min", alert: false });
+
+    const stuck = fleetHealthFacts({
+      ...healthyFleet,
+      quietMode: {
+        active: true,
+        activatedAt: "2026-09-10T13:20:00.000Z",
+        activeForMs: 47 * 60_000,
+        activatedReason: "deploy",
+        stuckAfterMinutes: 30,
+        stuck: true,
+        activatedForDeploy: true,
+      },
+    });
+    expect(stuck[0]).toEqual({ key: "quiet", text: "Everything paused (quiet mode) for 47 min", alert: true });
 
     expect(fleetHealthFacts(healthyFleet).some((fact) => fact.key === "quiet")).toBe(false);
   });

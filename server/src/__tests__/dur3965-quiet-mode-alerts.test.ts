@@ -54,8 +54,21 @@ describeEmbeddedPostgres("DUR-3965: a quiet mode nobody turned off is never sile
     return companyId;
   }
 
-  /** Puts the instance into quiet mode as of `activatedAt`, the way the deploy runner does. */
-  async function setQuietMode(input: { activatedAt: string | null; actorType?: string; stuckNoticeAt?: string | null }) {
+  /**
+   * Puts the instance into quiet mode as of `activatedAt`.
+   *
+   * `reason` is the whole point: the deploy runner records "deploy", a person
+   * clicking the switch records "manual", and both authenticate as an
+   * instance admin, so the actor below is deliberately identical in the two
+   * cases -- if the code ever goes back to guessing from the actor, the
+   * deliberate-window tests fail.
+   */
+  async function setQuietMode(input: {
+    activatedAt: string | null;
+    reason?: string | null;
+    actorType?: string;
+    stuckNoticeAt?: string | null;
+  }) {
     const svc = instanceSettingsService(db);
     const general = await svc.getGeneral();
     const [row] = await db.select().from(instanceSettings);
@@ -67,7 +80,8 @@ describeEmbeddedPostgres("DUR-3965: a quiet mode nobody turned off is never sile
           quietMode: {
             active: true,
             activatedAt: input.activatedAt,
-            activatedBy: { actorType: input.actorType ?? "system", actorId: "deploy-runner", agentId: null },
+            activatedBy: { actorType: input.actorType ?? "user", actorId: "u-admin", agentId: null },
+            activatedReason: input.reason === undefined ? "deploy" : input.reason,
             deactivatedAt: null,
             snapshot: [],
             stuckNoticeAt: input.stuckNoticeAt ?? null,
@@ -163,7 +177,87 @@ describeEmbeddedPostgres("DUR-3965: a quiet mode nobody turned off is never sile
     expect(await noticeRows()).toHaveLength(2);
   });
 
-  it("defaults the window to 30 minutes", async () => {
+  // The half of DUR-3965 that protects normal life. Filip puts the whole
+  // fleet in quiet mode most nights for the Claude quota reset -- about 22
+  // hours, deliberately. Escalating that would write "everything is paused
+  // and nobody took it out" into both companies' feeds every single night,
+  // and the sentence would be false: he took it out in the morning, on
+  // purpose, exactly as planned.
+  it("says nothing at all about a deliberate two-hour quiet mode", async () => {
+    await seedCompany("Interiørdesign AS");
+    await setQuietMode({ activatedAt: "2026-09-10T22:00:00.000Z", reason: "manual" });
+
+    const svc = quietModeAlertsService(db);
+    const result = await svc.tick(new Date("2026-09-11T00:00:00.000Z")); // 2 hours
+
+    expect(result).toMatchObject({ active: true, stuck: false, alerted: 0, activatedForDeploy: false });
+    expect(await noticeRows()).toHaveLength(0);
+    // And it is held to the long window, not the deploy one.
+    expect(result.thresholdMs).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it("stays silent through a whole 22-hour overnight quota window", async () => {
+    await seedCompany("Interiørdesign AS");
+    await setQuietMode({ activatedAt: "2026-09-10T22:00:00.000Z", reason: "manual" });
+
+    const svc = quietModeAlertsService(db);
+    expect((await svc.tick(new Date("2026-09-11T08:00:00.000Z"))).alerted).toBe(0); // 10 hours
+    expect((await svc.tick(new Date("2026-09-11T20:00:00.000Z"))).alerted).toBe(0); // 22 hours
+    expect(await noticeRows()).toHaveLength(0);
+  });
+
+  it("mentions a person's quiet mode only after a full day, and never says they forgot", async () => {
+    await seedCompany("Interiørdesign AS");
+    await setQuietMode({ activatedAt: "2026-09-10T22:00:00.000Z", reason: "manual" });
+
+    const result = await quietModeAlertsService(db).tick(new Date("2026-09-11T23:00:00.000Z")); // 25 hours
+    expect(result).toMatchObject({ active: true, stuck: true, alerted: 1, activatedForDeploy: false });
+
+    const [row] = await noticeRows();
+    const message = String((row!.details as Record<string, unknown>).message ?? "");
+    expect(message).toContain("Quiet mode has been on");
+    expect(message).toContain("is still on, so no agent in any company is starting new work");
+    expect(message).toContain("If that is still what you want, nothing needs doing.");
+    // Never an accusation about a window nobody said was accidental.
+    expect(message).not.toContain("never taken out of it");
+    expect(message).not.toContain("Everything is paused");
+    expect(message).not.toContain("for a deploy");
+  });
+
+  it("records why quiet mode was switched on, instead of leaving it to be guessed from the actor", async () => {
+    const settings = instanceSettingsService(db);
+    // The deploy runner: an instance-admin actor, indistinguishable from a
+    // person -- the reason is the only thing that tells them apart.
+    const byDeploy = await settings.activateQuietMode(
+      { actorType: "user", actorId: "u-admin", agentId: null },
+      { reason: "deploy" },
+    );
+    expect(byDeploy.activatedReason).toBe("deploy");
+    await settings.deactivateQuietMode({ actorType: "user", actorId: "u-admin", agentId: null });
+
+    // A person clicking the switch says nothing, and that is recorded as the
+    // decision it is.
+    const byPerson = await settings.activateQuietMode({ actorType: "user", actorId: "u-admin", agentId: null });
+    expect(byPerson.activatedReason).toBe("manual");
+  });
+
+  it("falls back to the old actor guess only for quiet-mode state written before the reason existed", async () => {
+    await seedCompany("Interiørdesign AS");
+    // No recorded reason at all (a row from before this change), activated by
+    // the runner's own actor type: still treated as a deploy, short window.
+    await setQuietMode({ activatedAt: "2026-09-10T13:20:00.000Z", reason: null, actorType: "deploy_runner" });
+    const asDeploy = await quietModeAlertsService(db).tick(new Date("2026-09-10T14:20:00.000Z"));
+    expect(asDeploy).toMatchObject({ activatedForDeploy: true, stuck: true, alerted: 1 });
+
+    await db.delete(activityLog);
+    // Same age, no reason, a person's actor: the long window applies.
+    await setQuietMode({ activatedAt: "2026-09-10T13:20:00.000Z", reason: null, actorType: "user" });
+    const asPerson = await quietModeAlertsService(db).tick(new Date("2026-09-10T14:20:00.000Z"));
+    expect(asPerson).toMatchObject({ activatedForDeploy: false, stuck: false, alerted: 0 });
+    expect(await noticeRows()).toHaveLength(0);
+  });
+
+  it("defaults the deploy window to 30 minutes", async () => {
     await seedCompany("Interiørdesign AS");
     const svc = quietModeAlertsService(db);
     await setQuietMode({ activatedAt: "2026-09-10T13:20:00.000Z" });

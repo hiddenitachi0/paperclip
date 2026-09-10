@@ -1144,6 +1144,10 @@ export {
   DEFAULT_QUIET_MODE_STATE,
   QUIET_MODE_STALE_AFTER_MS,
   QUIET_MODE_STUCK_AFTER_MS,
+  QUIET_MODE_REASON_DEPLOY,
+  QUIET_MODE_REASON_MANUAL,
+  QUIET_MODE_REASONS,
+  type QuietModeActivationReason,
 } from "./types/instance.js";
 
 export {
@@ -1236,6 +1240,9 @@ export {
 export {
   instanceSettingsSchema,
   instanceGeneralSettingsSchema,
+  quietModeReasonSchema,
+  quietModeActivateRequestSchema,
+  type QuietModeActivateRequest,
   patchInstanceGeneralSettingsSchema,
   type PatchInstanceGeneralSettings,
   instanceExperimentalSettingsSchema,

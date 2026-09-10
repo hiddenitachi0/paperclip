@@ -162,6 +162,14 @@ QUIET_MODE_DRAIN_POLL_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS:-5}"
 # its health check again in between, and if it still cannot be delivered the
 # failure is written to a marker file that the NEXT poll cycle picks up and
 # retries -- silence must never be the resting state.
+# DUR-3965: the reason this runner records when it switches quiet mode on.
+# The runner authenticates as an instance admin, so without an explicit
+# reason its activation is indistinguishable from an operator switching quiet
+# mode on for the night — and the two need opposite treatment (the operator's
+# overnight quota window is ~22 hours of deliberate silence; a drain the
+# deploy never lifted is an incident after half an hour). Both the wording the
+# operator sees and the retry below key off this value.
+QUIET_MODE_ACTIVATE_REASON="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_REASON:-deploy}"
 QUIET_MODE_DEACTIVATE_ATTEMPTS="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_DEACTIVATE_ATTEMPTS:-5}"
 QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS:-5}"
 # How long to wait for the health-check URL to answer 200 again before
@@ -170,6 +178,11 @@ QUIET_MODE_RECOVERY_HEALTH_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_RECOVER
 # Durable, on-host record of "quiet mode is still on and I could not turn it
 # off". Deliberately outside deployTargetPath and outside any container, for
 # the same reason FAILURE_LOG_DIR is: the thing that failed is the container.
+# Written at the START of the drain, not when the retries give up: the EXIT
+# trap that normally undoes the drain does not run on SIGTERM or SIGKILL, so
+# `systemctl stop` mid-deploy or the box rebooting would otherwise leave quiet
+# mode on with no marker at all — and the next-cycle retry below would have
+# nothing to act on. Removed again as soon as a deactivate succeeds.
 QUIET_MODE_PENDING_MARKER="${PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_MARKER:-$REPO_DIR/.deploy-runner-quiet-mode-pending}"
 # DUR-3923: only deploy-LOOKING cards (deploy_pr, rollout, ...) approved within
 # this window get the "nothing acts on this" comment. Without a bound, the
@@ -679,11 +692,16 @@ maybe_begin_quiet_mode_drain() { # aid, kind
   active="$(quiet_mode_field "$status" active)"
 
   if [ -z "$active" ]; then
-    if ! cli_json instance quiet-mode:activate >/dev/null; then
+    if ! cli_json instance quiet-mode:activate --reason "$QUIET_MODE_ACTIVATE_REASON" >/dev/null; then
       log "runner: $aid could not activate quiet mode before deploy — proceeding without a drain wait"
       return 0
     fi
     QUIET_MODE_OWNED_BY_RUNNER=1
+    # The marker goes down BEFORE the risky part, not after the retries fail:
+    # a SIGTERM from `systemctl stop`, or the box rebooting mid-deploy, kills
+    # this process without ever running the EXIT trap, and an instance left
+    # muted with no marker is one nobody comes back for.
+    quiet_mode_pending_marker_write "$aid"
     log "runner: $aid activated quiet mode instance-wide before recreating the shared container"
   else
     log "runner: $aid quiet mode was already active (external maintenance window) — draining under it, will leave it active afterward"
@@ -771,7 +789,7 @@ maybe_end_quiet_mode_drain() { # aid, health_url(optional)
     rm -f "$QUIET_MODE_PENDING_MARKER" 2>/dev/null
     return 0
   fi
-  log "runner: $aid QUIET MODE IS STILL ON and could not be turned off after $QUIET_MODE_DEACTIVATE_ATTEMPTS attempts — no agent in ANY company will start work until it is cleared. Left a marker at $QUIET_MODE_PENDING_MARKER for the next poll cycle to retry; an operator can also clear it under Settings > Instance settings > General, or with \`instance quiet-mode:deactivate\`."
+  log "runner: $aid QUIET MODE IS STILL ON and could not be turned off after $QUIET_MODE_DEACTIVATE_ATTEMPTS attempts — no agent in ANY company will start work until it is cleared. The marker at $QUIET_MODE_PENDING_MARKER stays in place for the next poll cycle to retry; an operator can also clear it under Settings > Instance settings > General, or with \`instance quiet-mode:deactivate\`."
   quiet_mode_pending_marker_write "$aid"
   return 1
 }
@@ -782,7 +800,7 @@ maybe_end_quiet_mode_drain() { # aid, health_url(optional)
 # later instead of staying silent until a person happens to notice.
 retry_pending_quiet_mode_deactivate() {
   [ -f "$QUIET_MODE_PENDING_MARKER" ] || return 0
-  local marker status active
+  local marker status active reason
   marker="$(tr -d '\n' < "$QUIET_MODE_PENDING_MARKER" 2>/dev/null)"
   status="$(cli_json instance quiet-mode:status)" || {
     log "runner: quiet mode was left on by an earlier failed deploy ($marker) and the status endpoint is still unreachable — will retry next poll cycle"
@@ -794,6 +812,22 @@ retry_pending_quiet_mode_deactivate() {
     rm -f "$QUIET_MODE_PENDING_MARKER"
     return 0
   fi
+  # DUR-3965: the quiet mode that is on NOW may not be the one this marker is
+  # about — the operator can perfectly well have switched it on themselves
+  # after the failed deploy (the overnight quota window is exactly that). The
+  # server refuses to auto-clear a deliberate quiet mode; so does this. Only a
+  # quiet mode whose recorded reason is this runner's own gets turned off.
+  reason="$(quiet_mode_field "$status" activatedReason)"
+  if [ -n "$reason" ] && [ "$reason" != "$QUIET_MODE_ACTIVATE_REASON" ]; then
+    log "runner: quiet mode is on, but it was switched on deliberately (reason: $reason), not left behind by the failed deploy recorded at $marker — leaving it exactly as it is and dropping the leftover marker"
+    rm -f "$QUIET_MODE_PENDING_MARKER"
+    return 0
+  fi
+  # An empty reason means the server predates the recorded-reason field; the
+  # marker is then the only evidence there is, and the 2026-09-10 failure
+  # mode (an instance left muted with nobody coming back for it) is the worse
+  # of the two risks.
+  [ -z "$reason" ] && log "runner: quiet mode is on and this server does not record why — treating it as the drain left behind by the failed deploy recorded at $marker"
   if cli_json instance quiet-mode:deactivate >/dev/null; then
     log "runner: quiet mode was still on after the failed deploy recorded at $marker — turned it off now; every agent can take work again"
     rm -f "$QUIET_MODE_PENDING_MARKER"

@@ -162,6 +162,7 @@ describe("request load tracker (DUR-272)", () => {
           active: false,
           activatedAt: null,
           activeForMs: null,
+          activatedReason: null,
           stuckAfterMinutes: 30,
           stuck: false,
           activatedForDeploy: false,

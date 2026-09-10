@@ -88,7 +88,11 @@ export { deployApprovalFeedbackService, DEPLOY_APPROVAL_FEEDBACK_DELAY_MS } from
 export { mergePrAutomationService } from "./merge-pr-automation.js";
 export { agentErrorAlertsService, DEFAULT_AGENT_ERROR_STALL_THRESHOLD_MS } from "./agent-error-alerts.js";
 export { untrackedWriteAlertsService } from "./untracked-write-alerts.js";
-export { quietModeAlertsService, DEFAULT_QUIET_MODE_STUCK_THRESHOLD_MS } from "./quiet-mode-alerts.js";
+export {
+  quietModeAlertsService,
+  DEFAULT_QUIET_MODE_STUCK_THRESHOLD_MS,
+  DEFAULT_QUIET_MODE_MANUAL_THRESHOLD_MS,
+} from "./quiet-mode-alerts.js";
 export { personaPublisherSweepService } from "./persona-publisher-sweep.js";
 export {
   resolveProjectDeployBranches,

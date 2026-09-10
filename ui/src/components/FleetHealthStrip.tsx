@@ -57,6 +57,11 @@ export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: strin
   // is a consequence of it. "0 started, 0 queued" with no explanation is the
   // shape of the 2026-09-10 incident, where a failed deploy left the whole
   // instance muted for 27 minutes and nothing on screen said so.
+  //
+  // Stated as a plain fact while it is within its own window, and only
+  // highlighted once it is past it. The operator pauses the whole fleet most
+  // nights on purpose (the overnight Claude-quota window); an amber line
+  // every night would train him to ignore the one night it means something.
   if (quietMode.active) {
     facts.push({
       key: "quiet",
@@ -64,7 +69,7 @@ export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: strin
         quietMode.activeForMs === null
           ? "Everything paused (quiet mode)"
           : `Everything paused (quiet mode) for ${formatFleetDuration(quietMode.activeForMs)}`,
-      alert: true,
+      alert: quietMode.stuck,
     });
   }
 

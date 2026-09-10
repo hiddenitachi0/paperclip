@@ -122,6 +122,7 @@ import {
   // Instance settings
   patchInstanceGeneralSettingsSchema,
   patchInstanceExperimentalSettingsSchema,
+  quietModeActivateRequestSchema,
   patchInstanceSettingsSchema,
   issueGraphLivenessAutoRecoveryRequestSchema,
   // Resource memberships
@@ -967,11 +968,15 @@ registry.registerPath({
           // deploy that failed while it was on left the whole instance silent
           // for 27 minutes on 2026-09-10 with nothing saying why, so it is
           // part of the signal now. `stuck` = on for longer than
-          // `stuckAfterMinutes`, reported as a critical finding in `summary`.
+          // `stuckAfterMinutes`; that window and the severity depend on
+          // `activatedForDeploy` -- a deploy's forgotten drain is critical
+          // after 30 minutes, a person's deliberate quiet mode is a warning
+          // only after 24h.
           quietMode: z.object({
             active: z.boolean(),
             activatedAt: z.string().datetime().nullable(),
             activeForMs: z.number().int().nonnegative().nullable(),
+            activatedReason: z.string().nullable(),
             stuckAfterMinutes: z.number().int().positive(),
             stuck: z.boolean(),
             activatedForDeploy: z.boolean(),
@@ -2990,7 +2995,11 @@ registry.registerPath({
   path: "/api/instance/settings/quiet-mode/activate",
   tags: ["instance"],
   summary: "Stop every agent in every company from starting new work, without cancelling active runs (DUR-224)",
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+  // DUR-3965: an optional, explicit reason. The deploy runner sends
+  // "deploy" so a quiet mode it left behind is recognisable as an incident;
+  // anything that says nothing is recorded as "manual" (somebody's choice).
+  request: { body: jsonBody(quietModeActivateRequestSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
