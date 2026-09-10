@@ -170,12 +170,46 @@ async function createAgentApp(db: any) {
   return app;
 }
 
+/**
+ * DUR-3964: filing a deploy card with no commit id -- deploying whatever is at
+ * the top of the branch -- is something only the board may do now.
+ */
+async function createBoardApp(db: any) {
+  const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
+    import("../middleware/index.js"),
+    import("../routes/approvals.js"),
+  ]);
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).actor = {
+      type: "board",
+      userId: "user-1",
+      companyIds: ["22222222-2222-4222-8222-222222222222"],
+      source: "session",
+      isInstanceAdmin: false,
+    };
+    next();
+  });
+  app.use("/api", approvalRoutes(db));
+  app.use(errorHandler);
+  return app;
+}
+
 /** Which compare calls the filing path made (the pointless-deploy-card guard added other GitHub calls). */
 function comparesRequested(): string[] {
   return mockGhFetch.mock.calls
     .map((call: unknown[]) => (typeof call[0] === "string" ? call[0] : ""))
     .filter((url: string) => url.includes("/compare/"));
 }
+
+/**
+ * DUR-3964: an agent-filed deploy card must name the commit in full, so these
+ * are the same two commits this suite always used, written out to 40
+ * characters. Every assertion still reads the short form the messages print.
+ */
+const OFF_BRANCH_COMMIT = "d55e57041234567890abcdef1234567890abcdef";
+const ON_BRANCH_COMMIT = "abc1234def5678901234567890abcdef12345678";
 
 function deployBody(commit?: string) {
   return {
@@ -243,7 +277,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
-        .send(deployBody("d55e5704"));
+        .send(deployBody(OFF_BRANCH_COMMIT));
 
       expect(res.status).toBe(422);
       const message = res.body.message ?? res.body.error ?? "";
@@ -266,7 +300,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
-        .send(deployBody("d55e5704"));
+        .send(deployBody(OFF_BRANCH_COMMIT));
 
       expect(res.status).toBe(422);
       const message = res.body.message ?? res.body.error ?? "";
@@ -293,7 +327,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/approvals/approval-1/resubmit")
-        .send({ payload: deployBody("d55e5704").payload });
+        .send({ payload: deployBody(OFF_BRANCH_COMMIT).payload });
 
       expect(res.status).toBe(422);
       expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
@@ -309,7 +343,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
-        .send(deployBody("abc1234"));
+        .send(deployBody(ON_BRANCH_COMMIT));
 
       expect(res.status).toBe(201);
       expect(mockApprovalService.create).toHaveBeenCalled();
@@ -318,16 +352,19 @@ describe("DUR-227: deploy approval ancestry guard", () => {
   );
 
   it(
-    "is a no-op when the payload pins no commit (deploys current branch tip)",
+    "is a no-op when the payload pins no commit (a board card deploying the current branch tip)",
     async () => {
-      const app = await createAgentApp(createRouteDb());
+      const app = await createBoardApp(createRouteDb());
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
         .send(deployBody());
 
       expect(res.status).toBe(201);
-      expect(mockGhFetch).not.toHaveBeenCalled();
+      // No commit to place, so this guard asks GitHub for no comparison. (The
+      // DUR-3964 branch-tip lookup that stamps "what will really deploy" does
+      // make its own call, so this asserts on the compare call specifically.)
+      expect(comparesRequested()).toEqual([]);
       expect(mockApprovalService.create).toHaveBeenCalled();
     },
     TEST_TIMEOUT,
@@ -341,7 +378,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
-        .send(deployBody("d55e5704"));
+        .send(deployBody(OFF_BRANCH_COMMIT));
 
       expect(res.status).toBe(201);
       // No branch to compare against, so this guard asks GitHub nothing. (The
@@ -361,7 +398,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
-        .send(deployBody("d55e5704"));
+        .send(deployBody(OFF_BRANCH_COMMIT));
 
       expect(res.status).toBe(201);
       expect(mockGhFetch).not.toHaveBeenCalled();
@@ -378,7 +415,7 @@ describe("DUR-227: deploy approval ancestry guard", () => {
 
       const res = await request(app)
         .post("/api/companies/22222222-2222-4222-8222-222222222222/approvals")
-        .send(deployBody("d55e5704"));
+        .send(deployBody(OFF_BRANCH_COMMIT));
 
       expect(res.status).toBe(201);
       expect(mockApprovalService.create).toHaveBeenCalled();

@@ -53,10 +53,15 @@ import {
 } from "../services/deploy-workspace.js";
 import {
   GITHUB_COMPARE_FILE_LIMIT,
+  describeDeployCardPartialCommitId,
+  describeDeployCardWithoutCommitId,
   describeDeployCommitAlreadyLive,
   describeDeployCommitNotBuiltOnLive,
   describeDocumentationOnlyDeploy,
+  describeMergeCommitAlreadyInBase,
   describeMissingDeployCommit,
+  findCommitIdLikeText,
+  isFullCommitId,
   resolveLiveDeployCommit,
   summarizeChangedPaths,
 } from "../services/deploy-change-guard.js";
@@ -191,6 +196,42 @@ function assertBackwardDeployOptInIsBoardFiled(req: Request, payload: { allowBac
       "File the deploy without that flag; if it really should move production back to an older commit, " +
       "a person can re-file it as a rollback from the board.",
   );
+}
+
+/**
+ * DUR-3964 (a): a deploy card filed by an AGENT must name the exact commit it
+ * wants deployed, written out in full.
+ *
+ * What went wrong: an agent filed a deploy card with the commit id written into
+ * the card's note ("deploying 8623c28...") but the card's own `commit` field
+ * left empty. Nothing reads the note -- the deploy runner falls back to the top
+ * of the branch when no commit is pinned -- so approving that card would have
+ * deployed whatever the branch tip happened to be at that moment, not the
+ * commit that had been reviewed. A second card carried a mistyped id, which is
+ * why all 40 characters are required rather than an abbreviation: a short id
+ * only means something inside one particular checkout, and one wrong character
+ * in a short id is far easier to miss.
+ *
+ * The BOARD may still file without a commit -- deploying the top of the branch
+ * is a legitimate thing for a person to ask for on purpose -- and may still use
+ * a short id, since a person filing by hand is the one taking the risk.
+ */
+function assertAgentDeployCardPinsAFullCommitId(
+  req: Request,
+  payload: { commit?: string; title?: string; note?: string },
+) {
+  if (req.actor.type !== "agent") return;
+  const commit = payload.commit?.trim() ?? "";
+  if (!commit) {
+    throw unprocessable(
+      describeDeployCardWithoutCommitId({
+        commitIdInText: findCommitIdLikeText(`${payload.title ?? ""}\n${payload.note ?? ""}`),
+      }),
+      { reason: "commit_missing" },
+    );
+  }
+  if (isFullCommitId(commit)) return;
+  throw unprocessable(describeDeployCardPartialCommitId({ commit }), { commit, reason: "commit_not_full" });
 }
 
 function parseGitHubRepoFromUrl(repoUrl: string | null | undefined): { owner: string; name: string } | null {
@@ -334,6 +375,167 @@ async function lookupBranchesForCommitHead(
   } catch {
     return [];
   }
+}
+
+type GitHubRepoAccess = {
+  repo: { owner: string; name: string };
+  headers: Record<string, string>;
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response>;
+  apiBase: string;
+};
+
+type GitHubDeps = {
+  fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+  resolveGitHubToken?: (companyId: string) => Promise<string | null>;
+};
+
+/**
+ * The repo/token/header plumbing every GitHub-backed filing-time check in this
+ * file needs, in one place. Returns null when there is nothing to ask GitHub
+ * about (no github.com repo), which every caller treats as "unknown" -- and
+ * unknown never refuses a card.
+ */
+async function resolveGitHubRepoAccess(
+  db: Db,
+  companyId: string,
+  repo: { owner: string; name: string } | null,
+  consumerId: string,
+  deps: GitHubDeps = {},
+): Promise<GitHubRepoAccess | null> {
+  if (!repo) return null;
+  const fetchImpl = deps.fetchImpl ?? ghFetch;
+  const resolveGitHubToken =
+    deps.resolveGitHubToken ??
+    ((cid: string) => secretService(db).resolveGitHubToken(cid, { consumerType: "system", consumerId }));
+  const token = await resolveGitHubToken(companyId).catch(() => null);
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": `paperclip-${consumerId}`,
+    "x-github-api-version": "2022-11-28",
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return { repo, headers, fetchImpl, apiBase: gitHubApiBase("github.com") };
+}
+
+/**
+ * DUR-3964 (a): what commit would this card ACTUALLY deploy?
+ *
+ * A card that pins a commit deploys that commit. A card that pins none -- which
+ * only the board may file -- deploys whatever is at the top of the branch the
+ * deploy runner checks out (`repo_ref`, falling back to `default_ref` and then
+ * "main", exactly as scripts/deploy-runner.sh resolves it). Stamping the answer
+ * onto the payload means the card shows what will really ship in both cases,
+ * instead of showing a blank where the commit should be.
+ *
+ * Never throws and never refuses anything: when GitHub cannot answer, the
+ * pinned commit is stamped as-is if there is one, and otherwise nothing is
+ * stamped at all -- an absent stamp means "not checked", never "nothing".
+ */
+async function resolveDeployTargetCommit(
+  db: Db,
+  companyId: string,
+  payload: { projectId: string; workspaceId: string; commit?: string },
+  deps: GitHubDeps = {},
+): Promise<{ resolvedCommit?: string; resolvedCommitSource?: "pinned" | "branch_tip" }> {
+  const pinned = payload.commit?.trim() ?? "";
+  const fallback = pinned ? { resolvedCommit: pinned, resolvedCommitSource: "pinned" as const } : {};
+  // A commit id written out in full already IS the answer -- there is nothing
+  // GitHub could add, so don't put a network call in the way of filing (a board
+  // rollback, filed while production is on fire, goes through here too).
+  if (pinned && isFullCommitId(pinned)) return fallback;
+  try {
+    const workspaceRow = await db
+      .select({
+        repoUrl: projectWorkspaces.repoUrl,
+        repoRef: projectWorkspaces.repoRef,
+        defaultRef: projectWorkspaces.defaultRef,
+      })
+      .from(projectWorkspaces)
+      .where(and(eq(projectWorkspaces.id, payload.workspaceId), eq(projectWorkspaces.projectId, payload.projectId)))
+      .then((rows) => rows[0] ?? null);
+    const access = await resolveGitHubRepoAccess(
+      db,
+      companyId,
+      parseGitHubRepoFromUrl(workspaceRow?.repoUrl),
+      "deploy-approval-target-commit",
+      deps,
+    );
+    if (!access) return fallback;
+
+    const ref = pinned || workspaceRow?.repoRef?.trim() || workspaceRow?.defaultRef?.trim() || "main";
+    const response = await access.fetchImpl(
+      `${access.apiBase}/repos/${encodeURIComponent(access.repo.owner)}/${encodeURIComponent(access.repo.name)}/commits/${encodeURIComponent(ref)}`,
+      { headers: access.headers },
+    );
+    if (!response.ok) return fallback;
+    const body = (await response.json()) as Record<string, unknown>;
+    const sha = typeof body?.sha === "string" ? body.sha.trim() : "";
+    if (!sha) return fallback;
+    return { resolvedCommit: sha, resolvedCommitSource: pinned ? "pinned" : "branch_tip" };
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * DUR-3964 (c): refuse an AGENT's merge card when the change it names is
+ * already contained in the branch it asks to merge into.
+ *
+ * What went wrong: an agent filed a merge card whose commit was already an
+ * ancestor of `payload.base`, so there was nothing left to merge -- the
+ * operator had to work that out by hand and reject it. The card looked exactly
+ * like an ordinary merge request.
+ *
+ * base=commit, head=payload.base: GitHub reports "ahead" or "identical" exactly
+ * when the base branch already contains that commit, the same reading the
+ * DUR-227 deploy ancestry pre-check relies on.
+ *
+ * Fails OPEN exactly like the deploy guards: no commit or base on the card, no
+ * github.com repo, a repository GitHub will not show us, GitHub unreachable or
+ * unparseable -- the card is filed. Only a GitHub-confirmed answer ever
+ * refuses, and only for an agent: a person on the board may have a reason to
+ * file a merge card anyway.
+ */
+async function assertMergeCommitIsNotAlreadyInBase(
+  db: Db,
+  companyId: string,
+  issueIds: string[],
+  payload: Record<string, unknown>,
+  options: { filedByAgent: boolean },
+  deps: GitHubDeps = {},
+) {
+  if (!options.filedByAgent) return;
+  const commit = typeof payload.commit === "string" ? payload.commit.trim() : "";
+  const base = typeof payload.base === "string" ? payload.base.trim() : "";
+  if (!commit || !base) return;
+
+  try {
+    const claimed = parseOwnerSlashRepo(payload.repo);
+    const projectId = claimed ? null : await resolveProjectIdForIssues(db, companyId, issueIds);
+    const repo = claimed ?? (projectId ? await resolveProjectPrimaryRepo(db, companyId, projectId) : null);
+    const access = await resolveGitHubRepoAccess(db, companyId, repo, "merge-approval-already-merged-precheck", deps);
+    if (!access) return;
+    const response = await access.fetchImpl(
+      `${access.apiBase}/repos/${encodeURIComponent(access.repo.owner)}/${encodeURIComponent(access.repo.name)}/compare/${encodeURIComponent(commit)}...${encodeURIComponent(base)}`,
+      { headers: access.headers },
+    );
+    if (!response.ok) return;
+    const body = (await response.json()) as Record<string, unknown>;
+    const status = typeof body?.status === "string" ? body.status : null;
+    if (status !== "ahead" && status !== "identical") return;
+  } catch (err) {
+    logger.warn(
+      { err, companyId, commit, base },
+      "could not work out whether a merge card's change is already merged; filing it anyway (DUR-3964)",
+    );
+    return;
+  }
+
+  throw unprocessable(describeMergeCommitAlreadyInBase({ commit, base }), {
+    commit,
+    base,
+    reason: "already_merged",
+  });
 }
 
 /**
@@ -1654,6 +1856,10 @@ export function approvalRoutes(
       if (!(await assertApprovalRequestPermissionAllowed(req, res, companyId, "deploys:request"))) return;
       const parsedDeployPayload = deployRequestPayloadSchema.parse(approvalInput.payload);
       assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
+      // DUR-3964 (a): an agent's deploy card must name the exact commit, in
+      // full, before anything else looks at it -- a card with no commit id
+      // deploys the top of the branch, not the change that was reviewed.
+      assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, companyId, parsedDeployPayload);
       // DUR-3926: stamp the project's real deploy workspace over whatever the
       // filer supplied -- the runner silently refuses any other workspace.
@@ -1680,11 +1886,16 @@ export function approvalRoutes(
         filedByAgent: req.actor.type === "agent",
         deployBranch: branchStamp.deployBranch ?? null,
       });
+      // DUR-3964 (a): stamp what this card would really deploy -- the pinned
+      // commit, or the top of the branch when the board pinned none.
+      const targetCommit = await resolveDeployTargetCommit(db, companyId, deployPayload);
       approvalInput.payload = deployRequestPayloadSchema.parse({
         ...deployPayload,
         sourceBranch: branchStamp.sourceBranch,
         deployBranch: branchStamp.deployBranch,
         changesSinceLive: changesSinceLive ?? undefined,
+        resolvedCommit: targetCommit.resolvedCommit,
+        resolvedCommitSource: targetCommit.resolvedCommitSource,
       });
     }
     if (isMergePrRequestApproval(approvalInput.type, approvalInput.payload)) {
@@ -1825,6 +2036,14 @@ export function approvalRoutes(
           );
         }
       }
+      // DUR-3964 (c): nothing left to merge -- the change is already in the base.
+      await assertMergeCommitIsNotAlreadyInBase(
+        db,
+        companyId,
+        uniqueIssueIds,
+        approvalInput.payload as Record<string, unknown>,
+        { filedByAgent: req.actor.type === "agent" },
+      );
     }
     let normalizedPayload =
       approvalInput.type === "hire_agent"
@@ -2348,6 +2567,10 @@ export function approvalRoutes(
     if (req.body.payload && isDeployRequestApproval(existing.type, req.body.payload)) {
       const parsedDeployPayload = deployRequestPayloadSchema.parse(req.body.payload);
       assertBackwardDeployOptInIsBoardFiled(req, parsedDeployPayload);
+      // DUR-3964 (a): a resubmitted card gets the same "name the exact commit"
+      // rule as a freshly filed one -- resubmit is the path an agent takes
+      // after a rejection, and it was one of the paths the unusable cards used.
+      assertAgentDeployCardPinsAFullCommitId(req, parsedDeployPayload);
       await assertDeployRequestProjectExists(db, existing.companyId, parsedDeployPayload);
       // DUR-3926: same deploy-workspace stamp as the filing path above.
       const deployWorkspaceId = await resolveProjectDeployWorkspaceId(db, parsedDeployPayload.projectId);
@@ -2363,11 +2586,14 @@ export function approvalRoutes(
         filedByAgent: req.actor.type === "agent",
         deployBranch: branchStamp.deployBranch ?? null,
       });
+      const targetCommit = await resolveDeployTargetCommit(db, existing.companyId, deployPayload);
       req.body.payload = deployRequestPayloadSchema.parse({
         ...deployPayload,
         sourceBranch: branchStamp.sourceBranch,
         deployBranch: branchStamp.deployBranch,
         changesSinceLive: changesSinceLive ?? undefined,
+        resolvedCommit: targetCommit.resolvedCommit,
+        resolvedCommitSource: targetCommit.resolvedCommitSource,
       });
     }
     let normalizedPayload = req.body.payload

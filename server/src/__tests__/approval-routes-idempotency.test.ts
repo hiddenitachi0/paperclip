@@ -598,7 +598,7 @@ describe("approval routes idempotent retries", () => {
       kind: "deploy",
       projectId: "11111111-1111-4111-8111-111111111111",
       workspaceId: "22222222-2222-4222-8222-222222222222",
-      commit: "abc1234",
+      commit: "abc1234def5678901234567890abcdef12345678",
       title: "Deploy dashboard main",
       note: "Routine deploy after merge.",
     };
