@@ -111,10 +111,6 @@ export interface Config {
   heartbeatRunRetentionEnabled: boolean;
   heartbeatRunRetentionDays: number;
   heartbeatRunRetentionIntervalMinutes: number;
-  crossCompanyAccessLogRetentionEnabled: boolean;
-  crossCompanyAccessLogRetentionDays: number;
-  crossCompanyAccessLogRetentionIntervalMinutes: number;
-  schedulerBypassAuditCoalesceMs: number;
   shutdownDrainTimeoutMs: number;
   companyDeletionEnabled: boolean;
   mergePrAutomationEnabled: boolean;
@@ -168,50 +164,6 @@ export function resolveHeartbeatRunRetentionEnabled(
   env: { PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED?: string } = process.env,
 ): boolean {
   return env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true";
-}
-
-/**
- * DUR-386: retention for `cross_company_access_log` (the RLS bypass audit
- * trail, migration 0149). Unlike heartbeat_runs retention (DUR-366, opt-in
- * because those rows were still wanted for forensics), this defaults ON: the
- * table is transition-visibility mechanics, not evidence, and with nothing
- * pruning it the scheduler alone grew it by ~25k rows a day. Set
- * PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_ENABLED=false to keep every
- * row; PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_DAYS (default 30) and
- * PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_INTERVAL_MINUTES (default 60)
- * tune the window and the sweep cadence.
- */
-export function resolveCrossCompanyAccessLogRetention(
-  env: {
-    PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_ENABLED?: string;
-    PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_DAYS?: string;
-    PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_INTERVAL_MINUTES?: string;
-  } = process.env,
-): { enabled: boolean; retentionDays: number; intervalMinutes: number } {
-  const enabledRaw = env.PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_ENABLED?.trim().toLowerCase();
-  return {
-    enabled: !(enabledRaw === "false" || enabledRaw === "0"),
-    retentionDays: Math.max(1, Number(env.PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_DAYS) || 30),
-    intervalMinutes: Math.max(1, Number(env.PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_INTERVAL_MINUTES) || 60),
-  };
-}
-
-/**
- * DUR-386: how often each scheduler tick chain writes its bypass audit row.
- * Every chain still verifies role membership on every tick; only the
- * identical cross_company_access_log row is coalesced to one per window per
- * chain (default 60 minutes, i.e. ~9 rows an hour instead of ~9 every 30s).
- * PAPERCLIP_SCHEDULER_BYPASS_AUDIT_COALESCE_MINUTES=0 restores one row per
- * tick for a debugging window.
- */
-export function resolveSchedulerBypassAuditCoalesceMs(
-  env: { PAPERCLIP_SCHEDULER_BYPASS_AUDIT_COALESCE_MINUTES?: string } = process.env,
-): number {
-  const raw = env.PAPERCLIP_SCHEDULER_BYPASS_AUDIT_COALESCE_MINUTES?.trim();
-  if (raw === undefined || raw === "") return 60 * 60 * 1000;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return 60 * 60 * 1000;
-  return Math.round(parsed * 60 * 1000);
 }
 
 /**
@@ -421,7 +373,6 @@ export function loadConfig(): Config {
   // Defaults to DATABASE_URL so bypass connections behave exactly like today's
   // until a deployment opts into a distinct bypass role via pure config.
   const databaseBypassUrl = process.env.DATABASE_BYPASS_URL?.trim() || resolvedDatabaseUrl;
-  const crossCompanyAccessLogRetention = resolveCrossCompanyAccessLogRetention();
 
   return {
     deploymentMode,
@@ -436,10 +387,7 @@ export function loadConfig(): Config {
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
     databaseUrl: resolvedDatabaseUrl,
-    // Empty string counts as unset: docker-compose.prod.yml passes
-    // `${DATABASE_MIGRATION_URL:-}` through, which is "" until the operator
-    // sets it in .env (DUR-3945 runbook step 2).
-    databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL?.trim() || undefined,
+    databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
     databaseBypassUrl,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
@@ -515,10 +463,6 @@ export function loadConfig(): Config {
       1,
       Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_INTERVAL_MINUTES) || 60,
     ),
-    crossCompanyAccessLogRetentionEnabled: crossCompanyAccessLogRetention.enabled,
-    crossCompanyAccessLogRetentionDays: crossCompanyAccessLogRetention.retentionDays,
-    crossCompanyAccessLogRetentionIntervalMinutes: crossCompanyAccessLogRetention.intervalMinutes,
-    schedulerBypassAuditCoalesceMs: resolveSchedulerBypassAuditCoalesceMs(),
     // DUR-257: on SIGTERM/SIGINT, shutdown() waits this long for in-flight heartbeat
     // runs to finish naturally before it calls process.exit(0), instead of letting
     // Docker SIGKILL them mid-run (which the next boot then books as process_lost).

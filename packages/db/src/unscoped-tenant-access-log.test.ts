@@ -99,38 +99,10 @@ describe("createUnscopedTenantAccessDebugHook", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it("a bypass acknowledged inside a transaction (withCompanyScopeBypass) ends with that transaction", () => {
+  it("re-arms bypass acknowledgment on the next transaction (BEGIN)", () => {
     const hook = hookWithTables("paperclip-app", ["issues"]);
-    hook.debug(1, "BEGIN", []);
-    hook.debug(1, "SELECT pg_has_role(current_user, 'paperclip_app_bypass', 'member') AS has_bypass", []);
     hook.debug(1, 'insert into "cross_company_access_log" ("reason") values ($1)', ["board review"]);
-    hook.debug(1, 'select * from "issues"', []);
-    hook.debug(1, "COMMIT", []);
-    hook.debug(1, 'select * from "issues"', []);
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-  });
-
-  // DUR-386: the scheduler's coalesced ticks skip the audit insert, so the
-  // membership check -- which every bypass helper always issues first -- has
-  // to count as the acknowledgement on its own.
-  it("treats the paperclip_app_bypass membership check as a bypass acknowledgement even with no audit insert", () => {
-    const hook = hookWithTables("paperclip-app", ["issues"]);
-    hook.debug(1, "select pg_has_role(current_user, 'paperclip_app_bypass', 'member') as has_bypass", []);
-    hook.debug(1, 'select * from "issues"', []);
-    expect(warnSpy).not.toHaveBeenCalled();
-  });
-
-  it("a session-level bypass acknowledgement (runInCompanyScopeBypass) survives nested BEGIN/COMMIT pairs until RESET", () => {
-    const hook = hookWithTables("paperclip-app", ["issues"]);
-    hook.debug(1, "select pg_has_role(current_user, 'paperclip_app_bypass', 'member') as has_bypass", []);
-    hook.debug(1, 'insert into "cross_company_access_log" ("reason") values ($1)', ["scheduler tick"]);
-    // withCompanyScope nested inside the bypass scope: runOnReservedScope's own BEGIN/COMMIT
     hook.debug(1, "BEGIN", []);
-    hook.debug(1, 'select * from "issues"', []);
-    hook.debug(1, "COMMIT", []);
-    hook.debug(1, 'select * from "issues"', []);
-    expect(warnSpy).not.toHaveBeenCalled();
-    hook.debug(1, "RESET app.current_company_id", []);
     hook.debug(1, 'select * from "issues"', []);
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });

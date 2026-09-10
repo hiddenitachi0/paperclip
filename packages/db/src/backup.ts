@@ -40,11 +40,6 @@ function resolveEmbeddedPort(config: PartialConfig | null): number {
 }
 
 function resolveConnectionString(config: PartialConfig | null): string {
-  // DUR-3945: after the RLS cutover DATABASE_URL is a role that cannot read
-  // every company's rows, and pg_dump refuses to run under such a role.
-  // The owner credential lives in DATABASE_MIGRATION_URL from then on.
-  const migrationUrl = process.env.DATABASE_MIGRATION_URL?.trim();
-  if (migrationUrl) return migrationUrl;
   const envUrl = process.env.DATABASE_URL?.trim();
   if (envUrl) return envUrl;
 

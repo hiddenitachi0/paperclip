@@ -84,7 +84,6 @@
               "deploy/docker",
               "deploy/deployment-modes",
               "deploy/database",
-              "rls-cutover-runbook",
               "deploy/secrets",
               "deploy/storage",
               "deploy/environment-variables"
