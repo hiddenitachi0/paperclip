@@ -1083,7 +1083,15 @@ handle_ci_pending() { # aid, company_id, target_ref, decided_at, why(pending|unk
 
   if [ "$waited" -ge "$CI_WAIT_SECONDS" ]; then
     log "runner: $aid giving up — the automated checks for $target_ref $what ${waited}s after the approval was decided (deadline ${CI_WAIT_SECONDS}s); nothing deployed"
-    ci_wait_state_clear "$aid"
+    # Deliberately NOT clearing the wait state here. mark_processed() clears it
+    # on every delivered/terminal path, and clearing it first is actively
+    # dangerous: if this comment cannot be delivered (server container mid-
+    # recreate), the card stays UNPROCESSED with its wait row already erased —
+    # and a card with no wait row is exactly what tells the next tick that an
+    # "unknown" verdict is a repo with no checks rather than one we have
+    # already seen mid-check. That combination silently deploys an unproven
+    # build. Losing state before the outcome is confirmed is the bug; keep the
+    # row until something durable has actually happened.
     comment "$aid" "$company_id" "Deploy not started — the automated checks on this version had still not passed about $waited_minutes minutes after it was approved, so this deploy stopped waiting for them. Nothing was deployed and whatever was already live is untouched. Once the checks have passed, ask the agent that filed this deploy to file a new deploy approval for the same version. If the checks keep hanging or finish red, asking again will hit the same wall — someone has to fix what is failing first." "checks_timed_out"
     return
   fi

@@ -1846,6 +1846,80 @@ test("a card already waiting on its checks does not fail open into a deploy when
   }
 });
 
+// DUR-3967 safety: the wait-state row must outlive an undeliverable terminal
+// comment. The deadline branch used to clear the row BEFORE posting its note.
+// If that note could not be delivered (the server container is mid-recreate,
+// which is exactly when a deploy is in flight), run_one_approval leaves the
+// card UNPROCESSED — but its wait row is already gone. A card with no wait row
+// is precisely what tells the next tick that an "unknown" verdict means "this
+// repo has no checks" rather than "we have already seen this one mid-check",
+// so the guard above silently disarms itself and an unproven build ships.
+//
+// The rule this encodes: never drop state that a later decision depends on
+// until something durable has actually happened. mark_processed() clears the
+// row on every path that really did end the card.
+test("a deadline note that cannot be delivered still leaves the card protected against a later unknown", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-ci-deadline-undeliverable-"));
+  writeGitHubFixture(webRoot, "deadbeef", {
+    status: { total_count: 0, state: "pending" },
+    checkRuns: { check_runs: [{ status: "in_progress", conclusion: null }] },
+  });
+  const { child, port } = await startPythonHttpServer(webRoot);
+  const scenario = makeScenario();
+  let stopped = false;
+  const stopGitHub = async () => {
+    if (stopped) return;
+    stopped = true;
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    child.kill();
+    await exited;
+  };
+  try {
+    makeCiPollScenario(scenario);
+    const env = (extra = {}) =>
+      ciPollEnv(scenario, {
+        PAPERCLIP_DEPLOY_RUNNER_GITHUB_API_BASE: `http://127.0.0.1:${port}`,
+        PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "3600",
+        ...extra,
+      });
+
+    // Tick 1: checks genuinely still running, card held and announced.
+    assertSuccess(runMain(scenario, env(), REAL_CI_OVERRIDES), "main() tick 1");
+    assert.deepEqual(scenario.processedIds(), []);
+    assert.equal(ciWaitRows(scenario).length, 1, "the card is on record as waiting");
+
+    // Tick 2: past the deadline, but every comment delivery fails.
+    scenario.setFailCount("aid-1", 50);
+    assertSuccess(
+      runMain(scenario, env({ PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), REAL_CI_OVERRIDES),
+      "main() tick 2",
+    );
+    assert.deepEqual(
+      scenario.processedIds(),
+      [],
+      "an undelivered terminal comment must leave the card unprocessed, so it is retried",
+    );
+
+    // Tick 3: comments work again, but GitHub is now unreachable -> "unknown".
+    // The card is still one we have seen mid-check, so it must not deploy.
+    scenario.setFailCount("aid-1", 0);
+    await stopGitHub();
+    assertSuccess(
+      runMain(scenario, env({ PAPERCLIP_DEPLOY_RUNNER_CI_WAIT_SECONDS: "0" }), REAL_CI_OVERRIDES),
+      "main() tick 3",
+    );
+    assert.deepEqual(
+      deployAttempts(scenario),
+      [],
+      "a build whose checks never passed must not ship just because its deadline note failed to send",
+    );
+  } finally {
+    await stopGitHub();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+  }
+});
+
 // DUR-3967 safety: fail-open must still survive where it is justified. A repo
 // that never had checks gets an "unknown" on its FIRST look, with no wait
 // state behind it — no positive evidence that anything is being checked — and
