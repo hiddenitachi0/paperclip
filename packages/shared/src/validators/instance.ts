@@ -87,6 +87,10 @@ export const quietModeStateSchema = z.object({
   activatedBy: quietModeActorSchema.nullable().default(null),
   deactivatedAt: z.string().nullable().default(null),
   snapshot: z.array(quietModeAgentSnapshotEntrySchema).nullable().default(null),
+  // DUR-3965: set once the operator has been told (in the Activity feed) that
+  // quiet mode has been on too long; cleared on every activate/deactivate.
+  // Defaults to null so rows written before this field existed still parse.
+  stuckNoticeAt: z.string().nullable().default(null),
 }).strict();
 
 export const instanceGeneralSettingsSchema = z.object({

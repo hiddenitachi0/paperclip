@@ -8,9 +8,11 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   computeFleetHealth,
+  computeFleetQuietMode,
   computeFleetSlotUsage,
   FLEET_HEALTH_WINDOW_MS,
   FLEET_ZOMBIE_SILENCE_MS,
+  resolveQuietModeStuckMs,
   summarizeFleetHealth,
 } from "../services/fleet-health.js";
 
@@ -67,6 +69,15 @@ function runs(overrides: Partial<Parameters<typeof summarizeFleetHealth>[0]["run
   return { queuedWithNoRunningAgent: base.queued, ...base };
 }
 
+const quietModeOff = {
+  active: false,
+  activatedAt: null,
+  activeForMs: null,
+  stuckAfterMinutes: 30,
+  stuck: false,
+  activatedForDeploy: false,
+} as const;
+
 function summarize(input: Partial<Parameters<typeof summarizeFleetHealth>[0]> = {}) {
   const runCounts = input.runs ?? runs();
   return summarizeFleetHealth({
@@ -76,6 +87,7 @@ function summarize(input: Partial<Parameters<typeof summarizeFleetHealth>[0]> = 
     scheduler: input.scheduler ?? healthyScheduler,
     requests: input.requests ?? quietRequests,
     database: input.database ?? calmDatabase,
+    quietMode: input.quietMode ?? quietModeOff,
   });
 }
 
@@ -271,6 +283,97 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.notes[1]).toContain("Reviewer");
     expect(summary.notes[2]).toContain("All 4 run slots are in use");
     expect(summary.notes[3]).toContain("Runs are flowing");
+  });
+});
+
+// DUR-3965: the 2026-09-10 incident. A deploy failed, could not switch quiet
+// mode back off (the undo call goes through Paperclip's own API, and Paperclip
+// was the thing being redeployed), and the instance sat completely silent for
+// 27 minutes: both companies idle, 17 agents asleep, and every number in the
+// health signal reading as an unremarkable quiet night.
+describe("quiet mode as a fleet-health finding (DUR-3965)", () => {
+  const activatedAt = "2026-09-10T13:20:00.000Z";
+  const now = new Date("2026-09-10T13:47:00.000Z"); // 27 minutes later
+
+  function quietModeState(overrides: Record<string, unknown> = {}) {
+    return {
+      active: true,
+      activatedAt,
+      activatedBy: { actorType: "system", actorId: "deploy-runner", agentId: null },
+      deactivatedAt: null,
+      snapshot: null,
+      stuckNoticeAt: null,
+      ...overrides,
+    } as Parameters<typeof computeFleetQuietMode>[0];
+  }
+
+  it("computes how long the fleet has been paused and whether that is past the window", () => {
+    const under = computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 30 * 60_000 });
+    expect(under).toMatchObject({ active: true, activeForMs: 27 * 60_000, stuck: false, stuckAfterMinutes: 30, activatedForDeploy: true });
+
+    const over = computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 20 * 60_000 });
+    expect(over).toMatchObject({ stuck: true, stuckAfterMinutes: 20 });
+
+    const off = computeFleetQuietMode(quietModeState({ active: false }), { now, stuckAfterMs: 30 * 60_000 });
+    expect(off).toMatchObject({ active: false, activeForMs: null, stuck: false });
+
+    // "We cannot tell how long the fleet has been paused" is never a reason
+    // to report it as fine (DUR-98 item 4).
+    const unknownStart = computeFleetQuietMode(quietModeState({ activatedAt: null }), { now, stuckAfterMs: 30 * 60_000 });
+    expect(unknownStart).toMatchObject({ active: true, activeForMs: null, stuck: true });
+  });
+
+  it("reads a quiet mode inside the window as an explanation, not an alarm", () => {
+    const summary = summarize({
+      runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 0, queued: 0 }),
+      slots: computeFleetSlotUsage(4, 0),
+      quietMode: computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 30 * 60_000 }),
+    });
+    expect(summary.level).toBe("ok");
+    expect(summary.notes[0]).toBe(
+      "Quiet mode is on, so no agent will start new work. It was switched on 27 minutes ago; if that was not deliberate, clear it under Settings > Instance settings > General.",
+    );
+  });
+
+  it("reports a quiet mode past the window as critical, in plain words, above every other finding", () => {
+    const summary = summarize({
+      runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 0, queued: 0 }),
+      slots: computeFleetSlotUsage(4, 0),
+      // Something else is wrong too: the paused-fleet line still has to win,
+      // because everything else is downstream of it.
+      agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] },
+      quietMode: computeFleetQuietMode(quietModeState(), { now, stuckAfterMs: 20 * 60_000 }),
+    });
+    expect(summary.level).toBe("critical");
+    expect(summary.headline).toContain("Everything is paused.");
+    expect(summary.headline).toContain("put in quiet mode for a deploy at");
+    expect(summary.headline).toContain("(27 minutes ago) and never taken out of it");
+    expect(summary.headline).toContain("no agent in any company will do any work until it is cleared");
+    expect(summary.headline).toContain("Settings > Instance settings > General");
+    // No jargon, no ids, no internal field names in the operator's sentence.
+    expect(summary.headline).not.toMatch(/quietMode|activatedBy|actorType|DUR-/);
+    expect(summary.notes.some((note) => note.includes("Reviewer"))).toBe(true);
+  });
+
+  it("says 'for a deploy' only when a deploy switched it on", () => {
+    const byPerson = computeFleetQuietMode(
+      quietModeState({ activatedBy: { actorType: "user", actorId: "u1", agentId: null } }),
+      { now, stuckAfterMs: 20 * 60_000 },
+    );
+    const summary = summarize({ quietMode: byPerson });
+    expect(summary.headline).toContain("Everything is paused. Paperclip was put in quiet mode at ");
+    expect(summary.headline).not.toContain("for a deploy");
+  });
+
+  it("takes the window from PAPERCLIP_QUIET_MODE_STUCK_MINUTES, and falls back to 30 minutes", () => {
+    expect(resolveQuietModeStuckMs({})).toBe(30 * 60_000);
+    expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "" })).toBe(30 * 60_000);
+    expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "5" })).toBe(5 * 60_000);
+    expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "120" })).toBe(120 * 60_000);
+    // Junk or a nonsensical value must not disable the finding.
+    expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "soon" })).toBe(30 * 60_000);
+    expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "0" })).toBe(30 * 60_000);
+    expect(resolveQuietModeStuckMs({ PAPERCLIP_QUIET_MODE_STUCK_MINUTES: "-10" })).toBe(30 * 60_000);
   });
 });
 

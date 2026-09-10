@@ -963,6 +963,19 @@ registry.registerPath({
             idleInTransaction: z.number().int().nonnegative().nullable(),
             waitingOnLocks: z.number().int().nonnegative().nullable(),
           }),
+          // DUR-3965: quiet mode freezes every agent in every company. A
+          // deploy that failed while it was on left the whole instance silent
+          // for 27 minutes on 2026-09-10 with nothing saying why, so it is
+          // part of the signal now. `stuck` = on for longer than
+          // `stuckAfterMinutes`, reported as a critical finding in `summary`.
+          quietMode: z.object({
+            active: z.boolean(),
+            activatedAt: z.string().datetime().nullable(),
+            activeForMs: z.number().int().nonnegative().nullable(),
+            stuckAfterMinutes: z.number().int().positive(),
+            stuck: z.boolean(),
+            activatedForDeploy: z.boolean(),
+          }),
           summary: z.object({
             level: z.enum(["ok", "warning", "critical"]),
             headline: z.string(),

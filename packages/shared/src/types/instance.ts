@@ -118,6 +118,14 @@ export interface QuietModeState {
   activatedBy: QuietModeActor | null;
   deactivatedAt: string | null;
   snapshot: QuietModeAgentSnapshotEntry[] | null;
+  /**
+   * DUR-3965: when the operator was last told, in the Activity feed, that this
+   * quiet mode has been on too long to be a deliberate maintenance window.
+   * Null while nothing has been said. Only there so the notice is written once
+   * per activation instead of on every scheduler tick; cleared whenever quiet
+   * mode is switched on or off again.
+   */
+  stuckNoticeAt: string | null;
 }
 
 export const DEFAULT_QUIET_MODE_STATE: QuietModeState = {
@@ -126,7 +134,17 @@ export const DEFAULT_QUIET_MODE_STATE: QuietModeState = {
   activatedBy: null,
   deactivatedAt: null,
   snapshot: null,
+  stuckNoticeAt: null,
 };
+
+/**
+ * DUR-3965: how long quiet mode may stay active before the fleet health signal
+ * calls it out as a critical finding ("everything is paused and nobody said
+ * so"). Deliberately far shorter than QUIET_MODE_STALE_AFTER_MS above: that one
+ * asks "did someone forget this yesterday?", this one asks "is the platform
+ * silently doing nothing right now?" -- the 2026-09-10 incident was 27 minutes.
+ */
+export const QUIET_MODE_STUCK_AFTER_MS = 30 * 60 * 1000;
 
 // How long Quiet Mode can stay active before the UI warns that it may have
 // been left on by mistake. Sized above the normal overnight-quota-reset use

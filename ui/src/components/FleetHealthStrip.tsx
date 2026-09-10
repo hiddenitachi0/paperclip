@@ -50,8 +50,23 @@ export function formatFleetDuration(ms: number | null | undefined): string {
 
 /** The compact facts row under the headline, in the order an operator scans them. */
 export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: string; text: string; alert: boolean }> {
-  const { runs, slots, agents, scheduler, requests } = fleet;
+  const { runs, slots, agents, scheduler, requests, quietMode } = fleet;
   const facts: Array<{ key: string; text: string; alert: boolean }> = [];
+
+  // DUR-3965: first fact, because when quiet mode is on every number after it
+  // is a consequence of it. "0 started, 0 queued" with no explanation is the
+  // shape of the 2026-09-10 incident, where a failed deploy left the whole
+  // instance muted for 27 minutes and nothing on screen said so.
+  if (quietMode.active) {
+    facts.push({
+      key: "quiet",
+      text:
+        quietMode.activeForMs === null
+          ? "Everything paused (quiet mode)"
+          : `Everything paused (quiet mode) for ${formatFleetDuration(quietMode.activeForMs)}`,
+      alert: true,
+    });
+  }
 
   facts.push({
     key: "runs",

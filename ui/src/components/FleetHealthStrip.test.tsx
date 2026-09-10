@@ -63,6 +63,14 @@ const healthyFleet: FleetHealthSnapshot = {
     totalFinished: 98,
   },
   database: { available: true, poolMax: 20, connections: 5, active: 1, idleInTransaction: 0, waitingOnLocks: 0 },
+  quietMode: {
+    active: false,
+    activatedAt: null,
+    activeForMs: null,
+    stuckAfterMinutes: 30,
+    stuck: false,
+    activatedForDeploy: false,
+  },
   summary: {
     level: "ok",
     headline: "Runs are flowing: 9 started, 7 finished, 1 failed in the last 15 minutes. 3 of 4 slots in use.",
@@ -196,6 +204,26 @@ describe("fleetHealthFacts", () => {
       requests: { ...healthyFleet.requests, inFlight: 60, overloaded: true },
     });
     expect(overloaded[5]).toEqual({ key: "requests", text: "60 requests in flight", alert: true });
+  });
+
+  // DUR-3965: on 2026-09-10 a failed deploy left quiet mode on for 27 minutes.
+  // Every number in this row read as an unremarkable quiet night; nothing said
+  // the whole instance was paused. It is now the first thing in the row.
+  it("puts 'everything paused' first and flags it whenever quiet mode is on", () => {
+    const paused = fleetHealthFacts({
+      ...healthyFleet,
+      quietMode: {
+        active: true,
+        activatedAt: "2026-09-10T13:20:00.000Z",
+        activeForMs: 27 * 60_000,
+        stuckAfterMinutes: 30,
+        stuck: false,
+        activatedForDeploy: true,
+      },
+    });
+    expect(paused[0]).toEqual({ key: "quiet", text: "Everything paused (quiet mode) for 27 min", alert: true });
+
+    expect(fleetHealthFacts(healthyFleet).some((fact) => fact.key === "quiet")).toBe(false);
   });
 });
 

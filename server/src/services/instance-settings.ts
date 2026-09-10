@@ -351,6 +351,26 @@ export function instanceSettingsService(db: Db) {
       return { ...quietMode, activeRunCount };
     },
 
+    /**
+     * DUR-3965: records that the operator has been told, in the Activity feed,
+     * that quiet mode has been on too long -- or clears that record. Only a
+     * bookkeeping flag: it never turns quiet mode itself on or off. Surfacing
+     * a stuck quiet mode is safe; auto-clearing an instance-wide switch a
+     * person may have set on purpose is not, so the server never does that.
+     */
+    setQuietModeStuckNoticeAt: async (at: Date | null): Promise<QuietModeState> => {
+      const current = await getOrCreateRow();
+      const general = normalizeGeneralSettings(current.general);
+      const nextValue = at ? at.toISOString() : null;
+      if (general.quietMode.stuckNoticeAt === nextValue) return general.quietMode;
+      const nextQuietMode: QuietModeState = { ...general.quietMode, stuckNoticeAt: nextValue };
+      await db
+        .update(instanceSettings)
+        .set({ general: { ...general, quietMode: nextQuietMode }, updatedAt: new Date() })
+        .where(eq(instanceSettings.id, current.id));
+      return nextQuietMode;
+    },
+
     // DUR-224: freezes every agent (both timer and on-demand wakes) across
     // every company without touching runs already in flight -- deliberately
     // NOT the same as Pause, which cancels active runs. Snapshots each
@@ -388,6 +408,8 @@ export function instanceSettingsService(db: Db) {
         activatedBy: actor,
         deactivatedAt: null,
         snapshot,
+        // DUR-3965: a fresh activation has not been reported as stuck yet.
+        stuckNoticeAt: null,
       };
       const nextGeneral = { ...normalizeGeneralSettings(current.general), quietMode: nextQuietMode };
       await db
@@ -428,6 +450,9 @@ export function instanceSettingsService(db: Db) {
         activatedBy: quietMode.activatedBy,
         deactivatedAt: new Date().toISOString(),
         snapshot: null,
+        // DUR-3965: nothing is paused any more, so the "still paused" notice
+        // must be able to fire again if a future deploy gets stuck.
+        stuckNoticeAt: null,
       };
       const nextGeneral = { ...normalizeGeneralSettings(current.general), quietMode: nextQuietMode };
       await db

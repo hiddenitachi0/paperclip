@@ -21,6 +21,56 @@ export function formatOperatorDuration(ms: number | null | undefined): string {
   return parts.join(" ");
 }
 
+/**
+ * DUR-3965: the wall-clock time an operator would read off their own screen,
+ * as HH:MM in the server's own timezone. Used where "27 minutes ago" alone is
+ * not enough to recognise the event ("...was put in quiet mode at 13:20").
+ */
+export function formatOperatorClockTime(value: string | Date | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const when = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(when.getTime())) return null;
+  return `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+}
+
+export interface QuietModeStuckOperatorNoticeInput {
+  /** When quiet mode was switched on (ISO), if known. */
+  activatedAt: string | null;
+  /** How long it has been on, in ms. */
+  activeForMs: number | null;
+  /**
+   * Who switched it on. Only used to say "for a deploy" when it was the deploy
+   * runner rather than a person -- never rendered as a raw id.
+   */
+  activatedByActorType?: string | null;
+  /** True when the platform can tell it was switched on as part of a deploy. */
+  activatedForDeploy?: boolean;
+}
+
+/**
+ * DUR-3965: the one sentence that has to appear when the whole instance is
+ * paused and nobody has said so. Written both as the critical fleet-health
+ * finding on the Now page strip and as an Activity-feed notice (DUR-98), so an
+ * operator who is not looking at the Now page still finds out.
+ *
+ * Deliberately does NOT promise the platform will fix it: the server never
+ * auto-clears quiet mode, because someone may have set it on purpose.
+ */
+export function buildQuietModeStuckNotice(input: QuietModeStuckOperatorNoticeInput): string {
+  const clock = formatOperatorClockTime(input.activatedAt);
+  const why = input.activatedForDeploy ? " for a deploy" : "";
+  const when = clock
+    ? ` at ${clock}${input.activeForMs !== null ? ` (${formatOperatorDuration(input.activeForMs)} ago)` : ""}`
+    : input.activeForMs !== null
+      ? ` ${formatOperatorDuration(input.activeForMs)} ago`
+      : "";
+  return (
+    `Everything is paused. Paperclip was put in quiet mode${why}${when} and never taken out of it; ` +
+    `no agent in any company will do any work until it is cleared. ` +
+    `Clear it under Settings > Instance settings > General, using the quiet-mode switch.`
+  );
+}
+
 export interface ReapedRunOperatorNoticeInput {
   agentName: string | null | undefined;
   /** How long the run had shown no sign of progress before it was ended. */
