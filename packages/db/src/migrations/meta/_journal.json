@@ -1142,6 +1142,13 @@
       "when": 1787160340000,
       "tag": "0163_cross_company_instructions",
       "breakpoints": true
+    },
+    {
+      "idx": 164,
+      "version": "7",
+      "when": 1787160350000,
+      "tag": "0164_rls_login_roles",
+      "breakpoints": true
     }
   ]
 }
