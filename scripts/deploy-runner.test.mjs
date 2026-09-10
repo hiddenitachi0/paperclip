@@ -131,11 +131,31 @@ const FAKE_DOCKER = [
   '    fixture="$SCENARIO_DIR/quiet-mode-status.json"',
   '    if [ -f "$fixture" ]; then cat "$fixture"; else printf \'{"active":false,"activeRunCount":0}\'; fi',
   '    ;;',
+  // DUR-3965: the full command line is recorded too, so a test can assert
+  // the runner names ITSELF as the reason ("--reason deploy") instead of
+  // leaving readers to guess from the actor -- it signs in as an instance
+  // admin, so by actor alone it looks exactly like a person.
   '  *"instance quiet-mode:activate"*)',
   '    echo activate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '    printf \'%s\\n\' "$cmd" >> "$SCENARIO_DIR/quiet-mode-activate-cmd.log"',
   '    printf \'{"active":true}\'',
   '    ;;',
+  // DUR-3965: a deactivate can fail because Paperclip's own API is down --
+  // which is exactly the case when the deploy being rolled back IS Paperclip.
+  // $SCENARIO_DIR/deactivate-fail-count says how many of the next deactivate
+  // calls must fail; each failed attempt is logged as "deactivate-failed" so
+  // the retry sequence itself is assertable.
   '  *"instance quiet-mode:deactivate"*)',
+  '    fail_count_file="$SCENARIO_DIR/deactivate-fail-count"',
+  '    if [ -f "$fail_count_file" ]; then',
+  '      remaining="$(cat "$fail_count_file")"',
+  '      if [ "$remaining" -gt 0 ]; then',
+  '        echo $((remaining - 1)) > "$fail_count_file"',
+  '        echo deactivate-failed >> "$SCENARIO_DIR/quiet-mode-calls.log"',
+  '        echo "fake: quiet-mode:deactivate failed (server down)" >&2',
+  '        exit 1',
+  '      fi',
+  '    fi',
   '    echo deactivate >> "$SCENARIO_DIR/quiet-mode-calls.log"',
   '    printf \'{"active":false}\'',
   '    ;;',
@@ -1639,6 +1659,13 @@ function quietModeCallsLog(scenario) {
   return readFileSync(file, "utf8").split("\n").filter(Boolean);
 }
 
+/** DUR-3965: the full `quiet-mode:activate` command lines, so --reason is assertable. */
+function quietModeActivateCommands(scenario) {
+  const file = path.join(scenario.dir, "quiet-mode-activate-cmd.log");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean);
+}
+
 test("DUR-259: a compose_recreate deploy activates quiet mode, drains immediately when nothing's in flight, then deactivates", () => {
   const scenario = makeScenario();
   let dir;
@@ -1654,14 +1681,7 @@ test("DUR-259: a compose_recreate deploy activates quiet mode, drains immediatel
       health_check() { return 0; }
       process_approval "aid-1" "co-1"
     `;
-    const result = run("bash", ["-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${scenario.binDir}:${process.env.PATH}`,
-        SCENARIO_DIR: scenario.dir,
-        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
-      },
-    });
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
     assertSuccess(result, "process_approval");
 
     assert.equal(scenario.commentsFor("aid-1").length, 1);
@@ -1669,6 +1689,14 @@ test("DUR-259: a compose_recreate deploy activates quiet mode, drains immediatel
     assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"], "the runner activated quiet mode itself, so it must also be the one to deactivate it again");
     assert.match(scenario.readLog(), /activated quiet mode instance-wide before recreating/);
     assert.match(scenario.readLog(), /drain complete after 0s/);
+    // DUR-3965 must-fix 3: the activation says WHY. Without it the server
+    // cannot tell this apart from the operator switching quiet mode on for
+    // the night — the runner authenticates as an instance admin.
+    assert.match(
+      quietModeActivateCommands(scenario).join("\n"),
+      /instance quiet-mode:activate --reason deploy/,
+      "the runner must name itself as the reason instead of leaving the server to guess from the actor",
+    );
   } finally {
     scenario.cleanup();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -1690,19 +1718,17 @@ test("DUR-259: quiet mode already active (external maintenance window) is left a
       health_check() { return 0; }
       process_approval "aid-1" "co-1"
     `;
-    const result = run("bash", ["-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${scenario.binDir}:${process.env.PATH}`,
-        SCENARIO_DIR: scenario.dir,
-        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
-      },
-    });
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
     assertSuccess(result, "process_approval");
 
     assert.equal(scenario.commentsFor("aid-1").length, 1);
     assert.deepEqual(quietModeCallsLog(scenario), [], "quiet mode was already active — the runner must not call activate or deactivate itself");
     assert.match(scenario.readLog(), /quiet mode was already active \(external maintenance window\)/);
+    assert.equal(
+      existsSync(path.join(scenario.dir, "quiet-mode-pending")),
+      false,
+      "the runner never activated it, so it owns nothing to retry and must leave no marker behind",
+    );
   } finally {
     scenario.cleanup();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -1726,14 +1752,10 @@ test("DUR-259: a drain that never reaches zero times out and still proceeds with
       process_approval "aid-1" "co-1"
     `;
     const result = run("bash", ["-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${scenario.binDir}:${process.env.PATH}`,
-        SCENARIO_DIR: scenario.dir,
-        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      env: quietModeEnv(scenario, {
         PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS: "1",
         PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS: "1",
-      },
+      }),
     });
     assertSuccess(result, "process_approval");
 
@@ -1768,14 +1790,10 @@ test("DUR-257: when pause-for-restart itself fails, the runner logs it and still
       process_approval "aid-1" "co-1"
     `;
     const result = run("bash", ["-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${scenario.binDir}:${process.env.PATH}`,
-        SCENARIO_DIR: scenario.dir,
-        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+      env: quietModeEnv(scenario, {
         PAPERCLIP_DEPLOY_RUNNER_DRAIN_TIMEOUT_SECONDS: "1",
         PAPERCLIP_DEPLOY_RUNNER_DRAIN_POLL_SECONDS: "1",
-      },
+      }),
     });
     assertSuccess(result, "process_approval");
 
@@ -1804,22 +1822,302 @@ test("DUR-259: a custom deployKind never touches the quiet-mode drain at all", (
       health_check() { return 0; }
       process_approval "aid-1" "co-1"
     `;
-    const result = run("bash", ["-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${scenario.binDir}:${process.env.PATH}`,
-        SCENARIO_DIR: scenario.dir,
-        PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
-      },
-    });
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
     assertSuccess(result, "process_approval");
 
     assert.equal(scenario.commentsFor("aid-1").length, 1);
     assert.deepEqual(quietModeCallsLog(scenario), [], "an operator-authored custom command isn't known to touch the shared container, so it must not pay for a drain wait");
     assert.doesNotMatch(scenario.readLog(), /quiet mode/, "no quiet-mode drain logging at all for a custom deployKind");
+    assert.equal(existsSync(path.join(scenario.dir, "quiet-mode-pending")), false, "nothing was drained, so there is nothing to retry later");
   } finally {
     scenario.cleanup();
     if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DUR-3965: on 2026-09-10 a failed deploy left the whole instance in quiet
+// mode for 27 minutes -- both companies idle, 17 agents asleep, nothing in the
+// UI saying why. Quiet mode lives in Paperclip's own database and is only
+// reachable through Paperclip's own API, so when the deploy being rolled back
+// IS Paperclip, the undo call lands while that API is down. These tests lock
+// in the two halves of the fix: the undo happens on the FAILING paths too, and
+// it survives a server that is not answering yet.
+function quietModeEnv(scenario, extra = {}) {
+  return {
+    ...process.env,
+    PATH: `${scenario.binDir}:${process.env.PATH}`,
+    SCENARIO_DIR: scenario.dir,
+    PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+    PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_MARKER: path.join(scenario.dir, "quiet-mode-pending"),
+    // Keep the retry loop instant: no backoff sleeps, and a zero-second
+    // budget for the "has the server come back?" wait (the fake health URL
+    // never answers, which is precisely the case being simulated).
+    PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS: "0",
+    PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_RECOVERY_HEALTH_SECONDS: "0",
+    ...extra,
+  };
+}
+
+test("DUR-3965: a deploy whose health check fails still ends quiet mode — the call log's last entry is deactivate", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 1; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /health check against .* never returned 200/);
+    const calls = quietModeCallsLog(scenario);
+    assert.deepEqual(calls, ["activate", "deactivate"]);
+    assert.equal(
+      calls.at(-1),
+      "deactivate",
+      "a failed deploy must never be the reason the whole instance stays muted — the last quiet-mode call has to be the undo",
+    );
+    assert.equal(existsSync(path.join(scenario.dir, "quiet-mode-pending")), false, "the undo succeeded, so no retry marker is left behind");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3965: a deploy whose recipe fails still ends quiet mode", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 1; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    assert.equal(scenario.commentsFor("aid-1").length, 1);
+    assert.match(scenario.commentsFor("aid-1")[0], /recipe failed at commit/);
+    assert.equal(quietModeCallsLog(scenario).at(-1), "deactivate");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3965: when the first deactivate calls fail (Paperclip's own API is down), a later retry succeeds and quiet mode is lifted", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+    // The first two attempts hit a server that is still coming back up.
+    writeFileSync(path.join(scenario.dir, "deactivate-fail-count"), "2");
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 1; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    assert.deepEqual(
+      quietModeCallsLog(scenario),
+      ["activate", "deactivate-failed", "deactivate-failed", "deactivate"],
+      "the runner must keep trying to undo its own drain instead of giving up after one failed call",
+    );
+    assert.match(scenario.readLog(), /could not deactivate quiet mode \(attempt 1 of 5\)/);
+    assert.match(scenario.readLog(), /deactivated quiet mode on attempt 3 of 5 — agents can take work again/);
+    assert.equal(existsSync(path.join(scenario.dir, "quiet-mode-pending")), false, "the undo eventually succeeded, so nothing is left for the next cycle");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3965: when every deactivate attempt fails, the runner logs it loudly, leaves a marker, and the next poll cycle clears quiet mode", () => {
+  const scenario = makeScenario();
+  let dir;
+  const marker = path.join(scenario.dir, "quiet-mode-pending");
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+    // More failures than there are attempts: this deploy can never undo it.
+    writeFileSync(path.join(scenario.dir, "deactivate-fail-count"), "99");
+
+    const deployScript = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { return 0; }
+      health_check() { return 1; }
+      process_approval "aid-1" "co-1"
+    `;
+    const deployResult = run("bash", ["-c", deployScript], { env: quietModeEnv(scenario) });
+    assertSuccess(deployResult, "process_approval");
+
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", ...Array(5).fill("deactivate-failed")]);
+    assert.match(scenario.readLog(), /QUIET MODE IS STILL ON and could not be turned off after 5 attempts/);
+    assert.match(scenario.readLog(), /no agent in ANY company will start work until it is cleared/);
+    assert.equal(existsSync(marker), true, "the failure has to survive this process so the next tick can retry it");
+    assert.match(readFileSync(marker, "utf8"), /\taid-1\n$/, "the marker records which approval left quiet mode on");
+
+    // Next poll cycle: quiet mode still reads as active — and says it was
+    // this runner's deploy that switched it on, so it is safe to lift — and
+    // the server is answering again, so the retry lifts it and clears the
+    // marker.
+    scenario.writeJson("quiet-mode-status.json", { active: true, activatedReason: "deploy", activeRunCount: 0 });
+    writeFileSync(path.join(scenario.dir, "deactivate-fail-count"), "0");
+    const retryResult = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\nretry_pending_quiet_mode_deactivate`], {
+      env: quietModeEnv(scenario),
+    });
+    assertSuccess(retryResult, "retry_pending_quiet_mode_deactivate");
+
+    assert.equal(quietModeCallsLog(scenario).at(-1), "deactivate");
+    assert.match(scenario.readLog(), /turned it off now; every agent can take work again/);
+    assert.equal(existsSync(marker), false, "a successful retry clears the marker so it is not retried forever");
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3965: a deploy that dies mid-flight still has quiet mode undone by the exit trap", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    // `exit 1` inside the recipe stands in for every way a deploy can die
+    // after the drain is active and before any outcome path is reached: an
+    // unbound-variable bug, the unit being stopped, the box rebooting. None
+    // of them may leave the instance muted.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      run_recipe() { exit 1; }
+      health_check() { return 0; }
+      run_one_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "run_one_approval");
+
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate", "deactivate"]);
+    assert.equal(scenario.commentsFor("aid-1").length, 1, "the crash fallback comment still tells the operator the deploy died");
+    assert.match(scenario.commentsFor("aid-1")[0], /exited unexpectedly/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3965: a leftover marker whose quiet mode is already off is just cleared, with no deactivate call", () => {
+  const scenario = makeScenario();
+  const marker = path.join(scenario.dir, "quiet-mode-pending");
+  try {
+    writeFileSync(marker, "2026-09-10T13:20:00Z\taid-1\n");
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const result = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\nretry_pending_quiet_mode_deactivate`], {
+      env: quietModeEnv(scenario),
+    });
+    assertSuccess(result, "retry_pending_quiet_mode_deactivate");
+
+    assert.deepEqual(quietModeCallsLog(scenario), [], "someone already cleared it — do not touch an instance-wide switch that is already in the right place");
+    assert.match(scenario.readLog(), /quiet mode is off again/);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3965 recommendation A: the EXIT trap that undoes the drain does not run
+// on SIGTERM or SIGKILL. `systemctl stop` overrunning its timeout, or the box
+// rebooting mid-deploy, kills the runner outright — quiet mode stays on and
+// nothing in this process ever gets to turn it off. That is only recoverable
+// if the marker was written when the drain STARTED.
+test("DUR-3965: a reboot mid-deploy leaves quiet mode on with a marker, and the next runner start lifts it", () => {
+  const scenario = makeScenario();
+  const marker = path.join(scenario.dir, "quiet-mode-pending");
+  try {
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+    // SIGKILL to this shell: no EXIT trap, no undo, exactly like the box
+    // going down between the drain and the recreate.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      maybe_begin_quiet_mode_drain "aid-1" "compose_recreate"
+      kill -9 $$
+    `;
+    run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+
+    assert.deepEqual(quietModeCallsLog(scenario), ["activate"], "the runner was killed before it could undo its own drain");
+    assert.equal(
+      existsSync(marker),
+      true,
+      "with no EXIT trap and no marker there would be nothing at all left saying the fleet is muted — the marker must be written at drain start, not when the retries give up",
+    );
+    assert.match(readFileSync(marker, "utf8"), /\taid-1\n$/);
+
+    // Next runner start: quiet mode is still on and still says a deploy did
+    // it, so the retry lifts it about a minute later instead of leaving the
+    // instance silent until a person notices.
+    scenario.writeJson("quiet-mode-status.json", { active: true, activatedReason: "deploy", activeRunCount: 0 });
+    const retry = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\nretry_pending_quiet_mode_deactivate`], {
+      env: quietModeEnv(scenario),
+    });
+    assertSuccess(retry, "retry_pending_quiet_mode_deactivate");
+
+    assert.equal(quietModeCallsLog(scenario).at(-1), "deactivate");
+    assert.match(scenario.readLog(), /turned it off now; every agent can take work again/);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+// DUR-3965 recommendation B: the marker means "a deploy left quiet mode on",
+// not "quiet mode is on". If the operator switched it on themselves after the
+// failed deploy — the overnight Claude-quota window is exactly that, most
+// nights — un-muting the fleet from under them is the same mistake the server
+// refuses to make.
+test("DUR-3965: a quiet mode the operator switched on deliberately is never lifted by the marker retry", () => {
+  const scenario = makeScenario();
+  const marker = path.join(scenario.dir, "quiet-mode-pending");
+  try {
+    writeFileSync(marker, "2026-09-10T13:20:00Z\taid-1\n");
+    scenario.writeJson("quiet-mode-status.json", { active: true, activatedReason: "manual", activeRunCount: 0 });
+
+    const result = run("bash", ["-c", `set -uo pipefail\nsource "${SCRIPT}"\nretry_pending_quiet_mode_deactivate`], {
+      env: quietModeEnv(scenario),
+    });
+    assertSuccess(result, "retry_pending_quiet_mode_deactivate");
+
+    assert.deepEqual(quietModeCallsLog(scenario), [], "somebody chose this silence — the runner must not undo an operator's own switch");
+    assert.match(scenario.readLog(), /switched on deliberately \(reason: manual\)/);
+    assert.equal(existsSync(marker), false, "the marker is stale either way and must not keep re-firing every poll cycle");
+  } finally {
+    scenario.cleanup();
   }
 });
 

@@ -117,6 +117,38 @@ describe("activity formatting", () => {
     ).toBe("The shared Claude sign-in expires in about 2 days.");
   });
 
+  // DUR-3965: the whole instance being paused is written into every company's
+  // Activity feed by server/src/services/quiet-mode-alerts.ts, with the entire
+  // plain-language sentence in details.message. The first cut of that feature
+  // shipped with every server suite green and the operator never seeing a
+  // word of it, because the action was registered in none of these three
+  // places: the row rendered the bare "instance quiet mode stuck" and threw
+  // the sentence away. This test is the reason that cannot happen again.
+  it("renders the paused-fleet notice as an operator notice, not a bare action name", () => {
+    expect(isOperatorNoticeAction("instance.quiet_mode_stuck")).toBe(true);
+
+    const deployMessage =
+      "Everything is paused. Paperclip was put in quiet mode for a deploy at 13:20 (27 minutes ago) and never taken out of it; " +
+      "no agent in any company will do any work until it is cleared. " +
+      "Clear it under Settings > Instance settings > General, using the quiet-mode switch.";
+    expect(formatOperatorNotice("instance.quiet_mode_stuck", { message: deployMessage })).toBe(deployMessage);
+
+    // The deliberate-window wording goes through the same path untouched.
+    const manualMessage =
+      "Quiet mode has been on at 23:40 (25 hours ago) and is still on, so no agent in any company is starting new work. " +
+      "If that is still what you want, nothing needs doing. " +
+      "To start the agents again, switch it off under Settings > Instance settings > General.";
+    expect(formatOperatorNotice("instance.quiet_mode_stuck", { message: manualMessage })).toBe(manualMessage);
+
+    // And the one-line verb is a sentence, not the action key with the dots
+    // swapped for spaces.
+    expect(formatActivityVerb("instance.quiet_mode_stuck")).toBe("reported that every agent is still paused (quiet mode)");
+    expect(formatIssueActivityAction("instance.quiet_mode_stuck")).toBe(
+      "reported that every agent is still paused (quiet mode)",
+    );
+    expect(formatActivityVerb("instance.quiet_mode_stuck")).not.toBe("instance quiet mode stuck");
+  });
+
   // Admin auth hardening: security notices about operator accounts render
   // their server-written sentence, and never fall back to a raw action key.
   it("treats admin-account security entries as operator notices with plain verbs", () => {

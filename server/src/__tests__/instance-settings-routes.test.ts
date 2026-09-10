@@ -706,11 +706,11 @@ describe("instance settings routes", () => {
     const res = await request(app).post("/api/instance/settings/quiet-mode/activate").send({});
 
     expect(res.status).toBe(200);
-    expect(mockInstanceSettingsService.activateQuietMode).toHaveBeenCalledWith({
-      actorType: "user",
-      actorId: "local-board",
-      agentId: null,
-    });
+    // DUR-3965: no stated reason means a person switched it on deliberately.
+    expect(mockInstanceSettingsService.activateQuietMode).toHaveBeenCalledWith(
+      { actorType: "user", actorId: "local-board", agentId: null },
+      { reason: null },
+    );
     expect(res.body.active).toBe(true);
     expect(res.body.snapshot).toEqual([
       { agentId: "agent-1", companyId: "company-1", enabled: true, wakeOnDemand: true },
@@ -720,6 +720,43 @@ describe("instance settings routes", () => {
       expect.anything(),
       expect.objectContaining({ action: "instance.settings.quiet_mode_activated", companyId: "company-1" }),
     );
+  });
+
+  // DUR-3965: the deploy runner authenticates as an instance admin, so the
+  // actor cannot tell its drain apart from a person quieting the fleet for
+  // the night. It says so explicitly instead, and that reason is what the
+  // fleet-health finding and the operator notice key off.
+  it("records the caller's stated reason so a deploy's drain is identifiable later", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app).post("/api/instance/settings/quiet-mode/activate").send({ reason: "deploy" });
+
+    expect(res.status).toBe(200);
+    expect(mockInstanceSettingsService.activateQuietMode).toHaveBeenCalledWith(
+      { actorType: "user", actorId: "local-board", agentId: null },
+      { reason: "deploy" },
+    );
+  });
+
+  it("refuses a reason that is not a short plain slug", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app)
+      .post("/api/instance/settings/quiet-mode/activate")
+      .send({ reason: "Deploy of PR #281 <script>" });
+
+    expect(res.status).toBe(400);
+    expect(mockInstanceSettingsService.activateQuietMode).not.toHaveBeenCalled();
   });
 
   it("lets an instance admin deactivate quiet mode", async () => {

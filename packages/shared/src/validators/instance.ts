@@ -74,6 +74,25 @@ export const quietModeActorSchema = z.object({
   agentId: z.string().nullable(),
 }).strict();
 
+/**
+ * DUR-3965: a short lowercase slug ("deploy", "manual", ...). Kept open
+ * rather than a closed enum so a future automated caller can name itself
+ * without a schema migration; readers only ever compare it against
+ * QUIET_MODE_REASON_DEPLOY and treat anything else as "somebody chose this".
+ */
+export const quietModeReasonSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_-]*$/, "reason must be a short lowercase slug such as \"deploy\"");
+
+/** Optional body of POST /api/instance/settings/quiet-mode/activate. */
+export const quietModeActivateRequestSchema = z
+  .object({ reason: quietModeReasonSchema.optional() })
+  .strict();
+export type QuietModeActivateRequest = z.infer<typeof quietModeActivateRequestSchema>;
+
 export const quietModeAgentSnapshotEntrySchema = z.object({
   agentId: z.string(),
   companyId: z.string(),
@@ -85,8 +104,19 @@ export const quietModeStateSchema = z.object({
   active: z.boolean().default(false),
   activatedAt: z.string().nullable().default(null),
   activatedBy: quietModeActorSchema.nullable().default(null),
+  // DUR-3965: why it was switched on -- "deploy" (the runner, nobody chose
+  // the silence) vs "manual" (a person, on purpose). Recorded rather than
+  // inferred, because the deploy runner authenticates as an instance admin
+  // and is indistinguishable from a person by actor alone. Defaults to null
+  // so state written before this field existed still parses; readers fall
+  // back to the old actor-type inference for those.
+  activatedReason: quietModeReasonSchema.nullable().default(null),
   deactivatedAt: z.string().nullable().default(null),
   snapshot: z.array(quietModeAgentSnapshotEntrySchema).nullable().default(null),
+  // DUR-3965: set once the operator has been told (in the Activity feed) that
+  // quiet mode has been on too long; cleared on every activate/deactivate.
+  // Defaults to null so rows written before this field existed still parse.
+  stuckNoticeAt: z.string().nullable().default(null),
 }).strict();
 
 export const instanceGeneralSettingsSchema = z.object({

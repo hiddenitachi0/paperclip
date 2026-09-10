@@ -99,6 +99,38 @@ export interface FleetDatabaseLoad {
   waitingOnLocks: number | null;
 }
 
+/**
+ * DUR-3965: quiet mode freezes every agent in every company. A deploy that
+ * fails while switching it on can leave it on with nothing on screen saying
+ * so -- 27 minutes of complete silence on 2026-09-10. This is the part of the
+ * fleet signal that makes that state impossible to mistake for "quiet night".
+ */
+export interface FleetQuietMode {
+  active: boolean;
+  activatedAt: string | null;
+  /** How long it has been on, in ms (null when it is off or the time is unknown). */
+  activeForMs: number | null;
+  /**
+   * Why it was switched on, as recorded at activation time ("deploy",
+   * "manual", ...). Null for state written before the reason was recorded.
+   */
+  activatedReason: string | null;
+  /**
+   * How long THIS quiet mode may stay on before it is surfaced -- half an
+   * hour for a deploy's drain (nobody chose that silence), the full 24h
+   * convention for one a person switched on deliberately.
+   */
+  stuckAfterMinutes: number;
+  /** On for longer than `stuckAfterMinutes`. */
+  stuck: boolean;
+  /**
+   * True when a DEPLOY switched it on. Decides both the wording and the
+   * severity: a deploy that never lifted its own drain is a critical
+   * incident, a person's quiet mode is at most a warning.
+   */
+  activatedForDeploy: boolean;
+}
+
 export interface FleetHealthSummary {
   level: FleetHealthLevel;
   /** One plain-language sentence for the strip. */
@@ -116,6 +148,7 @@ export interface FleetHealthSnapshot {
   scheduler: FleetSchedulerStatus;
   requests: FleetRequestLoad;
   database: FleetDatabaseLoad;
+  quietMode: FleetQuietMode;
   summary: FleetHealthSummary;
 }
 

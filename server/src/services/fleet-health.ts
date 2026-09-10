@@ -1,18 +1,23 @@
 import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
 import { agents, companies, getAppPoolMax, heartbeatRuns, type Db } from "@paperclipai/db";
-import type {
-  FleetAgentCounts,
-  FleetDatabaseLoad,
-  FleetHealthLevel,
-  FleetHealthSnapshot,
-  FleetHealthSummary,
-  FleetRequestLoad,
-  FleetRunCounts,
-  FleetSchedulerStatus,
-  FleetSlotUsage,
+import {
+  QUIET_MODE_REASON_DEPLOY,
+  QUIET_MODE_STALE_AFTER_MS,
+  QUIET_MODE_STUCK_AFTER_MS,
+  type FleetAgentCounts,
+  type FleetDatabaseLoad,
+  type FleetHealthLevel,
+  type FleetHealthSnapshot,
+  type FleetHealthSummary,
+  type FleetQuietMode,
+  type FleetRequestLoad,
+  type FleetRunCounts,
+  type FleetSchedulerStatus,
+  type FleetSlotUsage,
+  type QuietModeState,
 } from "@paperclipai/shared";
 import { instanceSettingsService } from "./instance-settings.js";
-import { formatOperatorDuration } from "./operator-notices.js";
+import { buildQuietModeNotice, formatOperatorDuration } from "./operator-notices.js";
 import { logger } from "../middleware/logger.js";
 
 // DUR-3939/DUR-3940 (with DUR-272 and DUR-98): one computed, on-demand
@@ -26,6 +31,24 @@ import { logger } from "../middleware/logger.js";
 
 export const FLEET_HEALTH_WINDOW_MS = 15 * 60 * 1000;
 export const FLEET_ZOMBIE_SILENCE_MS = 30 * 60 * 1000;
+/**
+ * DUR-3965: how long a DEPLOY-activated quiet mode may stay on before the
+ * fleet signal calls it out as critical. Override per instance with
+ * PAPERCLIP_QUIET_MODE_STUCK_MINUTES.
+ *
+ * This window applies ONLY to a quiet mode a deploy switched on -- nobody
+ * chose that silence, so half an hour of it is an incident. A quiet mode a
+ * person switched on is a deliberate decision (Filip's overnight
+ * Claude-quota window is ~22 hours of exactly that) and is held to
+ * QUIET_MODE_STALE_AFTER_MS instead; see quietModeThresholdMs.
+ */
+export function resolveQuietModeStuckMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PAPERCLIP_QUIET_MODE_STUCK_MINUTES;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return QUIET_MODE_STUCK_AFTER_MS;
+  const parsed = Number(String(raw).trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) return QUIET_MODE_STUCK_AFTER_MS;
+  return Math.floor(parsed) * 60_000;
+}
 /** Queued runs waiting longer than this behind a full cap are called out more loudly. */
 export const FLEET_QUEUE_WAIT_WARN_MS = 15 * 60 * 1000;
 export const FLEET_AGENTS_IN_ERROR_SAMPLE_LIMIT = 5;
@@ -44,6 +67,20 @@ export interface ComputeFleetHealthOptions {
   requests: FleetRequestLoad;
   /** Skip the pg_stat_activity probe (tests on a mocked db). */
   includeDatabaseLoad?: boolean;
+  /** Override for tests; otherwise read from instance settings. */
+  quietMode?: QuietModeState;
+  /**
+   * How long a DEPLOY-activated quiet mode may stay on before it is critical.
+   * Override for tests; otherwise PAPERCLIP_QUIET_MODE_STUCK_MINUTES / 30 min.
+   */
+  quietModeStuckMs?: number;
+  /**
+   * How long a HUMAN-activated quiet mode may stay on before it is even
+   * mentioned as a warning. Override for tests; otherwise the 24h
+   * QUIET_MODE_STALE_AFTER_MS convention, which is sized above the ~22h
+   * overnight quota window on purpose.
+   */
+  quietModeManualStuckMs?: number;
 }
 
 function asCount(value: unknown): number {
@@ -201,6 +238,87 @@ export function computeFleetSlotUsage(globalMaxConcurrentRuns: number, running: 
   };
 }
 
+/**
+ * DUR-3965: LEGACY inference, kept only for quiet-mode state written before
+ * `activatedReason` existed. It is a guess and a bad one -- the deploy runner
+ * authenticates as an instance admin, so in production its activation reads
+ * as a plain user actor, while "scheduler"/"system" activations that were
+ * never a deploy read as one. Everything written from now on records the
+ * reason explicitly; see isDeployQuietMode below.
+ */
+const DEPLOY_QUIET_MODE_ACTOR_TYPES: ReadonlySet<string> = new Set(["deploy_runner", "deploy-runner"]);
+
+export function isDeployQuietModeActor(actorType: string | null | undefined): boolean {
+  return DEPLOY_QUIET_MODE_ACTOR_TYPES.has(actorType ?? "");
+}
+
+/**
+ * DUR-3965: was this quiet mode switched on by a deploy (nobody chose the
+ * silence) or by a person (a decision)? Read off the reason recorded at
+ * activation time; the actor-type guess above is used only when the state
+ * predates that field.
+ */
+export function isDeployQuietMode(
+  quietMode: Pick<QuietModeState, "activatedBy"> & { activatedReason?: string | null },
+): boolean {
+  const reason = quietMode.activatedReason?.trim();
+  if (reason) return reason === QUIET_MODE_REASON_DEPLOY;
+  return isDeployQuietModeActor(quietMode.activatedBy?.actorType);
+}
+
+/**
+ * DUR-3965: how long THIS quiet mode may stay on before it is surfaced.
+ *
+ * A deploy's drain gets the short window (30 min): nothing about it was
+ * chosen, and an instance sitting idle that long because a deploy failed is
+ * the incident this whole ticket exists for. A person's quiet mode gets the
+ * long-standing 24h window, sized above the ~22h overnight Claude-quota
+ * window so that normal, deliberate use never trips it.
+ */
+export function quietModeThresholdMs(input: {
+  activatedForDeploy: boolean;
+  deployStuckAfterMs: number;
+  manualStuckAfterMs?: number;
+}): number {
+  return input.activatedForDeploy
+    ? input.deployStuckAfterMs
+    : (input.manualStuckAfterMs ?? QUIET_MODE_STALE_AFTER_MS);
+}
+
+export function computeFleetQuietMode(
+  quietMode: QuietModeState,
+  input: { now: Date; deployStuckAfterMs: number; manualStuckAfterMs?: number },
+): FleetQuietMode {
+  if (!quietMode.active) {
+    return {
+      active: false,
+      activatedAt: null,
+      activeForMs: null,
+      activatedReason: quietMode.activatedReason ?? null,
+      stuckAfterMinutes: Math.max(1, Math.round(input.deployStuckAfterMs / 60_000)),
+      stuck: false,
+      activatedForDeploy: false,
+    };
+  }
+  const activatedForDeploy = isDeployQuietMode(quietMode);
+  const thresholdMs = quietModeThresholdMs({ activatedForDeploy, ...input });
+  const activatedAt = asDate(quietMode.activatedAt);
+  const activeForMs = activatedAt ? Math.max(0, input.now.getTime() - activatedAt.getTime()) : null;
+  return {
+    active: true,
+    activatedAt: activatedAt ? activatedAt.toISOString() : null,
+    activeForMs,
+    activatedReason: quietMode.activatedReason ?? null,
+    stuckAfterMinutes: Math.max(1, Math.round(thresholdMs / 60_000)),
+    // A quiet mode with no recorded start time is past its window by
+    // default: "we cannot tell how long the whole fleet has been paused" is
+    // not a reason to stay silent (DUR-98 item 4). How loudly it is then
+    // reported still depends on who switched it on.
+    stuck: activeForMs === null || activeForMs >= thresholdMs,
+    activatedForDeploy,
+  };
+}
+
 const LEVEL_RANK: Record<FleetHealthLevel, number> = { ok: 0, warning: 1, critical: 2 };
 
 function plural(count: number, singular: string, pluralWord = `${singular}s`): string {
@@ -219,9 +337,40 @@ export function summarizeFleetHealth(input: {
   scheduler: FleetSchedulerStatus;
   requests: FleetRequestLoad;
   database: FleetDatabaseLoad;
+  quietMode: FleetQuietMode;
 }): FleetHealthSummary {
   const findings: Array<{ level: FleetHealthLevel; text: string }> = [];
-  const { runs, slots, agents: agentCounts, scheduler, requests, database } = input;
+  const { runs, slots, agents: agentCounts, scheduler, requests, database, quietMode } = input;
+
+  // DUR-3965: first, because it outranks everything below it -- when quiet
+  // mode is on, "no runs started" and "nothing queued" are consequences, not
+  // separate problems, and an operator reading "Quiet: nothing started" with
+  // no explanation is exactly the 27 minutes of unexplained silence this
+  // finding exists to prevent.
+  //
+  // How loudly depends on WHO paused the fleet, and the difference matters
+  // every single night: a deploy that never lifted its own drain is an
+  // incident and goes critical after half an hour, while the operator's own
+  // overnight quota window is a deliberate ~22h decision that must never
+  // paint this strip red. See quietModeThresholdMs.
+  if (quietMode.stuck) {
+    findings.push({
+      level: quietMode.activatedForDeploy ? "critical" : "warning",
+      text: buildQuietModeNotice({
+        activatedAt: quietMode.activatedAt,
+        activeForMs: quietMode.activeForMs,
+        activatedForDeploy: quietMode.activatedForDeploy,
+      }),
+    });
+  } else if (quietMode.active) {
+    findings.push({
+      level: "ok",
+      text:
+        `Quiet mode is on, so no agent will start new work. It was switched on ` +
+        `${formatOperatorDuration(quietMode.activeForMs)} ago; if that was not deliberate, clear it under ` +
+        `Settings > Instance settings > General.`,
+    });
+  }
 
   if (!scheduler.enabled) {
     findings.push({
@@ -339,8 +488,11 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
   const now = options.now ?? new Date();
   const windowMs = options.windowMs ?? FLEET_HEALTH_WINDOW_MS;
 
+  // One read of the general settings covers the run cap, the watchdog's
+  // silence window AND (DUR-3965) the quiet-mode state; it is skipped only
+  // when every one of those was passed in (tests on a mocked db).
   const general =
-    options.globalMaxConcurrentRuns !== undefined && options.zombieSilenceMs !== undefined
+    options.globalMaxConcurrentRuns !== undefined && options.zombieSilenceMs !== undefined && options.quietMode !== undefined
       ? null
       : await instanceSettingsService(db).getGeneral();
   const globalMaxConcurrentRuns = options.globalMaxConcurrentRuns ?? general!.globalMaxConcurrentRuns;
@@ -350,6 +502,12 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
   const zombieSilenceMs =
     options.zombieSilenceMs ??
     (general && general.silentRunTimeoutMinutes > 0 ? general.silentRunTimeoutMinutes * 60_000 : FLEET_ZOMBIE_SILENCE_MS);
+
+  const quietMode = computeFleetQuietMode(options.quietMode ?? general!.quietMode, {
+    now,
+    deployStuckAfterMs: options.quietModeStuckMs ?? resolveQuietModeStuckMs(),
+    manualStuckAfterMs: options.quietModeManualStuckMs,
+  });
 
   const [runs, agentCounts, database] = await Promise.all([
     loadFleetRunCounts(db, { now, windowMs, zombieSilenceMs }),
@@ -373,6 +531,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
     scheduler: options.scheduler,
     requests: options.requests,
     database,
+    quietMode,
   });
 
   return {
@@ -384,6 +543,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
     scheduler: options.scheduler,
     requests: options.requests,
     database,
+    quietMode,
     summary,
   };
 }
