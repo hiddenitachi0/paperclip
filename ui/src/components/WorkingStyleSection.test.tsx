@@ -26,7 +26,7 @@ describe("working style choice (DUR-3971)", () => {
   });
 
   it("reads the stored flag back in the same words it was offered in", () => {
-    expect(workingStyleTitle(true)).toBe("Answers straight away in chat");
+    expect(workingStyleTitle(true)).toBe("Also answers straight away in chat");
     expect(workingStyleTitle(false)).toBe("Goes away and works on tasks");
     // A hire card from before this choice existed carries no flag at all.
     expect(workingStyleTitle(undefined)).toBe("Goes away and works on tasks");
@@ -70,7 +70,7 @@ describe("WorkingStyleSection", () => {
     const options = radios();
     expect(options).toHaveLength(2);
     expect(container.textContent).toContain("Goes away and works on tasks");
-    expect(container.textContent).toContain("Answers straight away in chat");
+    expect(container.textContent).toContain("Also answers straight away in chat");
     expect(options[0].getAttribute("aria-checked")).toBe("true");
     expect(options[1].getAttribute("aria-checked")).toBe("false");
 
@@ -102,5 +102,35 @@ describe("WorkingStyleSection", () => {
     expect(container.textContent).toContain("You can change this later");
 
     act(() => root.unmount());
+  });
+});
+
+/**
+ * The quick-agent flag is ADDITIVE — nothing gates task assignment, heartbeats
+ * or lane-B routing on it. An earlier draft of this component told the operator
+ * a quick agent "cannot take a job and work through it itself", which is simply
+ * untrue and would have made him avoid the option for roles it suits fine.
+ *
+ * Wrong operator text is not a cosmetic bug: it is the operator making a worse
+ * decision because we told him something false. This pins the claim rather than
+ * the phrasing, so the wording can still be improved.
+ */
+describe("the working-style options tell the truth", () => {
+  it("never claims a quick agent cannot be given jobs", () => {
+    const prose = WORKING_STYLE_OPTIONS.map((o) => `${o.title} ${o.line}`).join(" ").toLowerCase();
+    for (const lie of [
+      "cannot take a job",
+      "can not take a job",
+      "cannot be given",
+      "instead of working on tasks",
+      "not able to take",
+    ]) {
+      expect(prose).not.toContain(lie);
+    }
+  });
+
+  it("says out loud that the chat option is an addition, not a replacement", () => {
+    const chat = WORKING_STYLE_OPTIONS.find((o) => o.value === "answers_in_chat")!;
+    expect(`${chat.title} ${chat.line}`.toLowerCase()).toMatch(/also|as well|still be given/);
   });
 });

@@ -622,7 +622,7 @@ describe("ApprovalPayloadRenderer", () => {
     });
 
     expect(container.textContent).toContain("Front desk");
-    expect(container.textContent).toContain("Answers straight away in chat");
+    expect(container.textContent).toContain("Also answers straight away in chat");
     expect(container.textContent).not.toContain("laneAEnabled");
 
     act(() => {

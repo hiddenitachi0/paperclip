@@ -6,11 +6,17 @@ import { cn } from "../lib/utils";
  *
  * Internally this is the quick-agent flag (agents.lane_a_enabled), but the
  * operator is picturing a role, not a lane, so the choice is worded as what
- * the person does. "Goes away and works on tasks" is the default because it
- * is what every agent employed before this existed does, and because it is
- * the safer wrong answer: a working agent that should have been a quick one
- * still does the work, just slower, while a quick agent that should have
- * been a working one cannot take the job at all.
+ * the person does.
+ *
+ * The flag is ADDITIVE. Nothing gates task assignment, heartbeats or lane-B
+ * routing on it: a quick agent can still be given jobs exactly like anyone
+ * else, it can simply also hold a fast conversation. Any wording here that
+ * implies otherwise is a lie to the operator, and an earlier draft of this
+ * file contained one ("it cannot take a job and work through it itself").
+ *
+ * "Goes away and works on tasks" is the default because it is what every
+ * agent employed before this choice existed does, so an operator who ignores
+ * the question gets exactly today's behaviour.
  */
 
 export const WORKING_STYLE_OPTIONS = [
@@ -21,8 +27,8 @@ export const WORKING_STYLE_OPTIONS = [
   },
   {
     value: "answers_in_chat",
-    title: "Answers straight away in chat",
-    line: "Replies in seconds, remembers the conversation and can pass work on to a colleague. It cannot take a job and work through it itself.",
+    title: "Also answers straight away in chat",
+    line: "Replies in seconds, remembers the conversation and can pass work on to a colleague - and can still be given jobs like anyone else. Pick this for a front-desk sort of role.",
   },
 ] as const;
 
@@ -59,7 +65,8 @@ export function WorkingStyleSection({
     <div>
       <h3 className="mb-1 text-sm font-medium">How this person works</h3>
       <p className="mb-3 text-xs text-muted-foreground">
-        Pick the one that matches the job you have in mind.
+        Everyone here can be given jobs. The second option adds being able to chat with
+        them as well.
       </p>
       <div className="space-y-2" role="radiogroup" aria-label="How this person works">
         {WORKING_STYLE_OPTIONS.map((option) => {
