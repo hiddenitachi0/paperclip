@@ -1,4 +1,5 @@
 import type {
+  DoneGateStatus,
   InstanceExperimentalSettings,
   InstanceGeneralSettings,
   InstanceSettings,
@@ -31,6 +32,10 @@ export const instanceSettingsApi = {
       "/instance/settings/general/max-turns-per-run/clear-agent-overrides",
       undefined,
     ),
+  // DUR-3968: the quality check's saved mode plus whether the reviewer can be
+  // reached at all, so "on but unable to run" never looks like "on".
+  getDoneGateStatus: () =>
+    api.get<DoneGateStatus>("/instance/settings/general/done-gate/status"),
   get: () =>
     api.get<InstanceSettings>("/instance/settings"),
   update: (patch: PatchInstanceSettings) =>

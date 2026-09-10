@@ -7,6 +7,7 @@ import {
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
   DEFAULT_DONE_GATE_SETTINGS,
+  DONE_GATE_MODES,
   MIN_DONE_GATE_MAX_ROUNDS,
   MAX_DONE_GATE_MAX_ROUNDS,
   DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS,
@@ -191,6 +192,13 @@ export function InstanceGeneralSettings() {
     queryKey: queryKeys.instance.generalSettings,
     queryFn: () => instanceSettingsApi.getGeneral(),
   });
+  // DUR-3968: the quality check fails open, so "switched on but unable to run"
+  // has to be visible here or it is invisible everywhere.
+  const doneGateStatusQuery = useQuery({
+    queryKey: queryKeys.instance.doneGateStatus,
+    queryFn: () => instanceSettingsApi.getDoneGateStatus(),
+    retry: false,
+  });
   const healthQuery = useQuery({
     queryKey: queryKeys.health,
     queryFn: () => healthApi.get(),
@@ -227,12 +235,33 @@ export function InstanceGeneralSettings() {
   const factCheckCardStrictAllowlist = generalQuery.data?.factCheckCardStrictAllowlist === true;
   const doneGate: DoneGateSettings = generalQuery.data?.doneGate ?? DEFAULT_DONE_GATE_SETTINGS;
   const saveDoneGate = (patch: Partial<DoneGateSettings>) =>
-    updateGeneralMutation.mutate({ doneGate: { ...doneGate, ...patch } });
-  const doneGateModeOptions: Array<{ value: DoneGateMode; label: string }> = [
-    { value: "off", label: "Off" },
-    { value: "dry_run", label: "Comment only" },
-    { value: "enforce", label: "On" },
-  ];
+    updateGeneralMutation.mutate(
+      { doneGate: { ...doneGate, ...patch } },
+      {
+        onSuccess: () => {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.instance.doneGateStatus });
+        },
+      },
+    );
+  // Every mode in DONE_GATE_MODES must have a button here; InstanceGeneralSettings.test.tsx
+  // reads that list and fails if one is missing, so a new mode can't ship unreachable.
+  const doneGateModeLabels: Record<DoneGateMode, string> = {
+    off: "Off",
+    dry_run: "Comment only",
+    enforce: "On",
+  };
+  const doneGateModeOptions: Array<{ value: DoneGateMode; label: string }> = DONE_GATE_MODES.map((value) => ({
+    value,
+    label: doneGateModeLabels[value],
+  }));
+  const doneGateStatus = doneGateStatusQuery.data ?? null;
+  const doneGateNotReady = doneGateStatus !== null && doneGate.mode !== "off" && !doneGateStatus.ready;
+  const doneGateStateLine =
+    doneGate.mode === "off"
+      ? "Right now: off. When an agent says a task is finished, it is finished -- nothing checks it first."
+      : doneGate.mode === "dry_run"
+        ? "Right now: comment only. Tasks agents mark done get the reviewer's verdict as a note, and still go to done."
+        : "Right now: on. Every task an agent marks done is checked before it lands.";
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
   const globalMaxConcurrentRuns = generalQuery.data?.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS;
@@ -546,6 +575,30 @@ export function InstanceGeneralSettings() {
               </Button>
             ))}
           </div>
+          <p className="max-w-2xl text-sm font-medium" data-testid="done-gate-state">
+            {doneGateStateLine}
+          </p>
+          {doneGateNotReady ? (
+            <div
+              className="max-w-2xl space-y-1 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              data-testid="done-gate-not-ready"
+            >
+              <p className="font-medium">The check is switched on, but it cannot run.</p>
+              <p>{doneGateStatus?.notReadyReason}</p>
+              <p>
+                Tasks are still going to done, unchecked. Each task that goes through this way gets a note on it saying
+                the check could not run, so nothing quietly looks approved.
+              </p>
+            </div>
+          ) : null}
+          {doneGateStatus ? (
+            <p className="max-w-2xl text-xs text-muted-foreground" data-testid="done-gate-cost">
+              What it costs: one short call to a small model ({doneGateStatus.model}) each time an agent marks a task
+              done -- at most about {doneGateStatus.maxCostCentsPerCheck} cent
+              {doneGateStatus.maxCostCentsPerCheck === 1 ? "" : "s"} per check, usually well under that, plus a few
+              seconds' wait for the agent. Nothing runs when you mark a task done yourself.
+            </p>
+          ) : null}
           <MinutesLimitField
             label="Ask me after"
             unit={"rounds of \"needs work\""}
