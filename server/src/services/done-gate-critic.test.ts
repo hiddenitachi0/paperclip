@@ -20,12 +20,18 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import {
+  DONE_GATE_COMMENT_LIKE,
+  DONE_GATE_COMMENT_PREFIXES,
   DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX,
   DONE_GATE_ESCALATED_PREFIX,
   DONE_GATE_NEEDS_WORK_PREFIX,
   DONE_GATE_PASS_PREFIX,
+  DONE_GATE_UNAVAILABLE_PREFIX,
   buildDoneGateCriticUserMessage,
   buildDoneGateNeedsWorkComment,
+  buildDoneGateStatus,
+  describeDoneGateReadiness,
+  estimateDoneGateCriticMaxCostCents,
   countDoneGateNeedsWorkRounds,
   evaluateDoneGateCritic,
   findDoneGateLoopResetAt,
@@ -106,6 +112,61 @@ describe("prompt and comment text", () => {
     const dry = buildDoneGateNeedsWorkComment({ round: 1, maxRounds: 2, findings: ["x"], dryRun: true });
     expect(dry.startsWith(DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX)).toBe(true);
     expect(dry).toContain("dry run");
+  });
+});
+
+describe("done-gate comment prefixes", () => {
+  // Two lists that must agree: every prefix the gate writes, and the single LIKE
+  // pattern every read uses to find its own comments. A prefix that stopped matching
+  // would make those comments invisible to the round counter -- silently unbounded.
+  it("every prefix the gate writes is found by the one LIKE the reads use", () => {
+    const likePrefix = DONE_GATE_COMMENT_LIKE.replace(/%$/, "");
+    expect(DONE_GATE_COMMENT_LIKE.endsWith("%")).toBe(true);
+    for (const prefix of DONE_GATE_COMMENT_PREFIXES) {
+      expect(prefix.startsWith(likePrefix)).toBe(true);
+    }
+    expect(new Set(DONE_GATE_COMMENT_PREFIXES).size).toBe(DONE_GATE_COMMENT_PREFIXES.length);
+  });
+});
+
+describe("describeDoneGateReadiness / buildDoneGateStatus", () => {
+  const originalKey = process.env.ANTHROPIC_API_KEY;
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = originalKey;
+  });
+
+  it("is not ready, with a plain reason, when the instance has no key of its own", () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    const readiness = describeDoneGateReadiness();
+    expect(readiness.ready).toBe(false);
+    expect(readiness.notReadyReason).toContain("no Anthropic API key");
+    expect(readiness.notReadyReason).toContain("unchecked");
+  });
+
+  it("is ready when a key is present", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    expect(describeDoneGateReadiness()).toMatchObject({ ready: true, notReadyReason: null });
+  });
+
+  it("reports the saved setting next to whether it can actually run", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    const status = buildDoneGateStatus({
+      doneGate: { mode: "enforce", maxRounds: 3, companyOverrides: { "company-a": { mode: "off" } } },
+    });
+    expect(status).toMatchObject({ mode: "enforce", maxRounds: 3, companyOverrideCount: 1, ready: true });
+    expect(status.maxCostCentsPerCheck).toBeGreaterThan(0);
+    expect(status.model.length).toBeGreaterThan(0);
+  });
+
+  it("falls back to the shipped default (off) when nothing is saved", () => {
+    expect(buildDoneGateStatus(null)).toMatchObject({ mode: "off", maxRounds: 2, companyOverrideCount: 0 });
+  });
+
+  it("keeps the worst-case cost small enough to be an easy operator decision", () => {
+    // Not a magic number: derived from the input caps. If a cap grows a lot this
+    // fails, and the operator-facing cost line gets revisited on purpose.
+    expect(estimateDoneGateCriticMaxCostCents()).toBeLessThanOrEqual(5);
   });
 });
 
@@ -584,7 +645,36 @@ describeEmbeddedPostgres("evaluateDoneGateCritic (DB-backed, mocked critic)", ()
     expect(await findLastDoneGateFindings(db, { companyId: f.companyId, issueId: f.issueId })).toEqual([]);
   });
 
-  it("a critic that cannot run never blocks the transition", async () => {
+  it("a critic that cannot run never blocks the transition, but says so on the task", async () => {
+    const f = await seedFixture();
+    const critic: DoneGateCritic = async () => {
+      throw new Error("ANTHROPIC_API_KEY unset");
+    };
+    const attempt = () =>
+      evaluateDoneGateCritic({
+        db,
+        issue: { id: f.issueId, identifier: "T-1", companyId: f.companyId, title: "t", description: "d" },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus: "in_review",
+        readGeneralSettings: settings("enforce"),
+        critic,
+      });
+    expect(await attempt()).toBeNull();
+    expect(await issueStatus(f.issueId)).toBe("in_review");
+    const comments = await systemComments(f.issueId);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].startsWith(DONE_GATE_UNAVAILABLE_PREFIX)).toBe(true);
+    expect(comments[0]).toContain("without being checked");
+    // A note that the check could not run is not a "needs work" round: a broken
+    // reviewer must never eat the agent's rounds or trigger an escalation.
+    expect(await countDoneGateNeedsWorkRounds(db, { companyId: f.companyId, issueId: f.issueId })).toBe(0);
+    // ...and one note per loop, not one per attempt.
+    expect(await attempt()).toBeNull();
+    expect(await systemComments(f.issueId)).toHaveLength(1);
+  });
+
+  it("says nothing when the check is off, even if the critic would have failed", async () => {
     const f = await seedFixture();
     const critic: DoneGateCritic = async () => {
       throw new Error("ANTHROPIC_API_KEY unset");
@@ -595,12 +685,56 @@ describeEmbeddedPostgres("evaluateDoneGateCritic (DB-backed, mocked critic)", ()
       actor: agentActor(f),
       requestedStatus: "done",
       currentStatus: "in_review",
-      readGeneralSettings: settings("enforce"),
+      readGeneralSettings: settings("off"),
       critic,
     });
     expect(result).toBeNull();
-    expect(await issueStatus(f.issueId)).toBe("in_review");
     expect(await systemComments(f.issueId)).toEqual([]);
+  });
+
+  it("a 'comment only' trial also says when the reviewer could not be reached", async () => {
+    const f = await seedFixture();
+    const critic: DoneGateCritic = async () => {
+      throw new Error("upstream exploded");
+    };
+    expect(
+      await evaluateDoneGateCritic({
+        db,
+        issue: { id: f.issueId, identifier: "T-1", companyId: f.companyId, title: "t", description: "d" },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus: "in_review",
+        readGeneralSettings: settings("dry_run"),
+        critic,
+      }),
+    ).toBeNull();
+    const comments = await systemComments(f.issueId);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].startsWith(DONE_GATE_UNAVAILABLE_PREFIX)).toBe(true);
+  });
+
+  it("gives a fresh note after the operator intervenes, so a still-broken reviewer stays visible", async () => {
+    const f = await seedFixture({ status: "in_progress" });
+    const critic: DoneGateCritic = async () => {
+      throw new Error("ANTHROPIC_API_KEY unset");
+    };
+    const attempt = () =>
+      evaluateDoneGateCritic({
+        db,
+        issue: { id: f.issueId, identifier: "T-1", companyId: f.companyId, title: "t", description: "d" },
+        actor: agentActor(f),
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+        readGeneralSettings: settings("enforce"),
+        critic,
+      });
+    await attempt();
+    expect(await systemComments(f.issueId)).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await operatorMovesIssueTo(f, "in_progress", "done");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await attempt();
+    expect(await systemComments(f.issueId)).toHaveLength(2);
   });
 
   it("ignores transitions that are not an agent moving to done", async () => {

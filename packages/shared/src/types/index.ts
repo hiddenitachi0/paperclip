@@ -37,6 +37,7 @@ export type {
   DoneGateMode,
   DoneGateCompanyOverride,
   DoneGateSettings,
+  DoneGateStatus,
 } from "./instance.js";
 export {
   DONE_GATE_MODES,
