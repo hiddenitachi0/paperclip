@@ -145,6 +145,50 @@ the ticket and let the operator decide — do not force it from a run.`,
  * @param {string} text
  * @returns {Array<[number, number]>} [start, end) of each separator
  */
+/**
+ * The spans of `text` that sit inside single or double quotes.
+ *
+ * A `git push --force` inside quotes is TEXT ABOUT a push, not a push: a commit
+ * message, a PR body, a heredoc line, a grep pattern. Refusing those blocks
+ * ordinary work and tells the agent something untrue about what it just ran —
+ * and this branch's own commit messages and docs are full of the literal string
+ * `git push --force`, so the guard would have refused the work that built it.
+ *
+ * A false refusal is worse than a gap: the gap loses a guard, the false refusal
+ * wedges the fleet and teaches agents the tool is lying to them.
+ */
+function quotedRanges(text) {
+  const ranges = [];
+  let quote = null;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote !== null) {
+      if (quote === '"' && ch === "\\") i += 1;
+      else if (ch === quote) {
+        ranges.push([start, i + 1]);
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      start = i;
+    }
+  }
+  // An unterminated quote runs to the end of the command.
+  if (quote !== null) ranges.push([start, text.length]);
+  return ranges;
+}
+
+function isInside(ranges, index) {
+  return ranges.some(([start, end]) => index >= start && index < end);
+}
+
 function separatorRanges(text) {
   const ranges = [];
   let quote = null;
@@ -232,11 +276,17 @@ export function classifyPushCommand(command, context = {}) {
   }
 
   const separators = separatorRanges(text);
+  const quoted = quotedRanges(text);
   const pushRe = new RegExp(GIT_PUSH_RE.source, "g");
   // A line can chain more than one push (`git push --dry-run … && git push
   // --force …`); each is judged on its own, and the first refusal wins.
   for (let match = pushRe.exec(text); match !== null; match = pushRe.exec(text)) {
     const gitIndex = match.index + match[1].length;
+    // Inside quotes it is text about a push, not a push. See quotedRanges.
+    if (isInside(quoted, gitIndex)) {
+      if (pushRe.lastIndex <= match.index) pushRe.lastIndex = match.index + 1;
+      continue;
+    }
     const verdict = classifyPushSegment(commandSegment(text, separators, gitIndex), context);
     if (verdict.blocked) return verdict;
     if (pushRe.lastIndex <= match.index) pushRe.lastIndex = match.index + 1;

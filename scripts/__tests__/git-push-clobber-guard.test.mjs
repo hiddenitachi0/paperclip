@@ -574,3 +574,70 @@ test("the policy CI job runs this test file", () => {
     "the push-clobber guard tests must run in the required policy job, or they protect nothing",
   );
 });
+
+/**
+ * Text ABOUT a push is not a push.
+ *
+ * A `git push --force` inside quotes is a commit message, a PR body, a heredoc
+ * line or a grep pattern. Refusing those blocks ordinary work and tells the
+ * agent something untrue about the command it just ran — and this branch's own
+ * commit messages and docs contain the literal string, so the guard would have
+ * refused the work that built it.
+ *
+ * There was no test in this direction, which is why the false positive survived
+ * a full round of review. A false refusal is worse than a gap: the gap loses a
+ * guard, the false refusal wedges the fleet and teaches agents that the tool
+ * lies to them.
+ */
+test("quoted text mentioning a push is allowed — it is prose, not a push", () => {
+  for (const command of [
+    `git commit -m "DUR-3975: refuse git push --force on shared branches"`,
+    `git commit -m 'never git push --no-verify a shared branch'`,
+    `gh pr create --body "Agents can no longer git push --force a shared branch"`,
+    `echo "Never run git push --force on a shared branch." >> FORK.md`,
+    `grep -rn "git push --force" docs/`,
+    `git commit -m "docs: explain why git push --force is refused" && git push origin HEAD`,
+  ]) {
+    assert.deepEqual(
+      classifyPushCommand(command, { prePushGuardActive: true }),
+      { blocked: false, reason: null },
+      `expected to allow (prose about pushing, not a push): ${command}`,
+    );
+  }
+});
+
+/**
+ * The true positives must survive the quote-skipping above.
+ *
+ * Note which context each case needs. With a pre-push hook installed, git
+ * itself refuses a plain `--force`, so this layer deliberately allows it and
+ * only blocks the ways AROUND the hook. A bare force is therefore tested with
+ * no guard installed, and the bypasses with one — testing them the other way
+ * round asserts the opposite of the design, which is the mistake that produced
+ * this comment.
+ */
+test("the bypasses are still refused after the quoted-text fix", () => {
+  for (const command of [
+    "ls && git -c core.hooksPath=/tmp/empty push origin main",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/empty git push origin main",
+    "git push --no-verify origin main",
+    "head -n 20 log && git push --no-verify origin main",
+  ]) {
+    const verdict = classifyPushCommand(command, { prePushGuardActive: true });
+    assert.equal(verdict.blocked, true, `expected to block: ${command}`);
+    assert.ok(verdict.reason in BLOCK_REASONS, `no operator message for reason ${verdict.reason}: ${command}`);
+  }
+});
+
+test("a force-shaped push with no guard installed is still refused", () => {
+  for (const command of [
+    "git push --force origin main",
+    "git push -f origin main",
+    "git push --delete origin some-branch",
+    "grep -n foo file && git push --force origin main",
+  ]) {
+    const verdict = classifyPushCommand(command, { prePushGuardActive: false });
+    assert.equal(verdict.blocked, true, `expected to block: ${command}`);
+    assert.ok(verdict.reason in BLOCK_REASONS, `no operator message for reason ${verdict.reason}: ${command}`);
+  }
+});
