@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 /**
@@ -26,6 +26,12 @@ export const companyServiceTokens = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id),
     name: text("name").notNull(),
     tokenHash: text("token_hash").notNull(),
+    // Allowlist of service-token scope strings (SERVICE_TOKEN_SCOPES in
+    // packages/shared/src/validators/company-service-token.ts), modelled on
+    // board_delegate_tokens.scopes. Default `[]` is default-DENY: a row with
+    // no scopes reaches nothing, so a token written by some future path that
+    // forgets to set scopes is inert rather than omnipotent.
+    scopes: jsonb("scopes").notNull().$type<string[]>().default([]),
     createdByUserId: text("created_by_user_id"),
     revokedByUserId: text("revoked_by_user_id"),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),

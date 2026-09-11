@@ -81,6 +81,15 @@ export function laneARoutes(db: Db) {
         laneAEnabled: targetAgent.laneAEnabled,
         laneAInstructions: targetAgent.laneAInstructions ?? null,
         mcpToolIds: (targetAgent.mcpToolIds as string[] | null) ?? [],
+        // DUR-3977: the per-agent model and output ceiling have to reach the
+        // chat path too. `sendMessage` calls resolveLaneASettings and comments
+        // that chat runs on the same model as batch — but it only got what
+        // this object carries, so omitting these two silently fell back to the
+        // platform default. An operator who picks "Rask og billig" would have
+        // got haiku in batch and sonnet in chat, billed at two different rates
+        // for the same agent.
+        laneAModel: targetAgent.laneAModel ?? null,
+        laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
       },
       requester: requesterFor(req),
       actor: req.actor,
@@ -110,7 +119,7 @@ export function laneARoutes(db: Db) {
    *      the caller learns nothing about the other company's agents.
    */
   router.post("/lane-a/:agentId/transform", validate(laneATransformSchema), async (req, res) => {
-    assertServiceOrBoard(req);
+    assertServiceOrBoard(req, "lane_a:transform");
     const targetAgentId = req.params.agentId as string;
     const { input, variables, maxOutputChars } = req.body as {
       input: string;
@@ -136,6 +145,9 @@ export function laneARoutes(db: Db) {
         role: targetAgent.role,
         laneAEnabled: targetAgent.laneAEnabled,
         laneAInstructions: targetAgent.laneAInstructions ?? null,
+        // So the service can refuse a paused agent instead of spending on its
+        // behalf — see the pause checks at the top of `transform`.
+        status: targetAgent.status ?? null,
         laneAModel: targetAgent.laneAModel ?? null,
         laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
         laneATransformDailyCallCap: targetAgent.laneATransformDailyCallCap ?? null,
@@ -145,6 +157,31 @@ export function laneARoutes(db: Db) {
       maxOutputChars,
     });
 
+    res.json(result);
+  });
+
+  /**
+   * DUR-3977 addendum: agent discovery, so the caller does not hardcode UUIDs.
+   *
+   * Registered BEFORE `/lane-a/:agentId/...` would be a real concern if any of
+   * those were GETs on a bare `/lane-a/:agentId` — they are not (`/messages`,
+   * `/transform`, `/conversations/...` all have a further segment), so
+   * `/lane-a/agents` cannot be shadowed. It is still declared here, next to
+   * the transform route it belongs with, rather than at the end.
+   *
+   * Scoping is byte-for-byte the transform route's: the same
+   * `assertServiceOrBoard` with the same scope, the same
+   * `resolveTransformCompanyId` (company off the credential, never off the
+   * request), the same `assertCompanyAccess`. There is no agentId in the path
+   * and no companyId a service token can influence, so there is no shape in
+   * which this answers with another company's agents.
+   */
+  router.get("/lane-a/agents", async (req, res) => {
+    assertServiceOrBoard(req, "lane_a:transform");
+    const companyId = resolveTransformCompanyId(req);
+    assertCompanyAccess(req, companyId);
+
+    const result = await laneA.listTransformAgents(companyId);
     res.json(result);
   });
 

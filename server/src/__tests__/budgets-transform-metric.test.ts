@@ -17,6 +17,7 @@ import {
   BUDGET_METRICS_WITHOUT_SCOPE_PAUSE,
   LANE_A_TRANSFORM_BILLING_CODE,
   budgetMetricPausesScope,
+  upsertBudgetPolicySchema,
   type BudgetMetric,
 } from "@paperclipai/shared";
 import {
@@ -83,6 +84,45 @@ describe("budget metric list", () => {
     for (const metric of BUDGET_METRICS) {
       if ((BUDGET_METRICS_WITHOUT_SCOPE_PAUSE as readonly string[]).includes(metric)) continue;
       expect(budgetMetricPausesScope(metric)).toBe(true);
+    }
+  });
+});
+
+/**
+ * The other half of the same bug class, at the validator rather than the
+ * observer: a scope/metric pairing that saves cleanly and then enforces
+ * nothing. `lane_a_transform_cents` cost rows carry a companyId and an
+ * agentId and never a projectId, so only two of the three scopes can work.
+ */
+describe("which scopes a lane_a_transform_cents budget may use", () => {
+  const base = {
+    scopeId: randomUUID(),
+    metric: "lane_a_transform_cents" as const,
+    windowKind: "calendar_month_utc" as const,
+    amount: 5_000,
+  };
+
+  it("accepts an agent-scope policy", () => {
+    expect(upsertBudgetPolicySchema.safeParse({ ...base, scopeType: "agent" }).success).toBe(true);
+  });
+
+  it("accepts a company-scope policy, which findExceededTransformBudget reads", () => {
+    expect(upsertBudgetPolicySchema.safeParse({ ...base, scopeType: "company" }).success).toBe(true);
+  });
+
+  it("refuses a project-scope policy rather than saving one that stops nothing", () => {
+    const parsed = upsertBudgetPolicySchema.safeParse({ ...base, scopeType: "project" });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).toContain("scopeType");
+    }
+  });
+
+  it("leaves every other metric free to use any scope", () => {
+    for (const scopeType of ["agent", "company", "project"] as const) {
+      expect(
+        upsertBudgetPolicySchema.safeParse({ ...base, metric: "billed_cents", scopeType }).success,
+      ).toBe(true);
     }
   });
 });

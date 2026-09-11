@@ -3510,6 +3510,9 @@ export function accessRoutes(
       const created = await serviceTokens.createToken({
         companyId,
         name: req.body.name,
+        // Validated against SERVICE_TOKEN_SCOPES by the schema, and defaulted
+        // there rather than here so the grant is explicit on the stored row.
+        scopes: req.body.scopes,
         createdByUserId: req.actor.userId ?? null,
         expiresAt: req.body.expiresAt ?? null,
       });
@@ -3524,6 +3527,7 @@ export function accessRoutes(
         details: {
           serviceId: created.id,
           name: created.name,
+          scopes: created.scopes,
           expiresAt: created.expiresAt?.toISOString() ?? null,
         },
       });

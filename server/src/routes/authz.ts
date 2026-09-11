@@ -1,5 +1,5 @@
 import type { Request } from "express";
-import type { DelegateTokenScope } from "@paperclipai/shared";
+import type { DelegateTokenScope, ServiceTokenScope } from "@paperclipai/shared";
 import { forbidden, unauthorized } from "../errors.js";
 import type { accessService } from "../services/access.js";
 import { logger } from "../middleware/logger.js";
@@ -73,8 +73,38 @@ export function assertInstanceAdmin(req: Request) {
 // company) and it is not an agent (so it carries no agent identity). A board
 // user is also allowed through, so an operator can exercise the same route
 // from the UI without minting a token first.
-export function assertServiceOrBoard(req: Request) {
-  if (req.actor.type === "service") return;
+//
+// Two things make that paragraph true rather than aspirational, and both are
+// enforced here:
+//
+//   1. The token must actually HOLD the named scope. Scopes are stored on the
+//      token row (company_service_tokens.scopes) exactly as board_delegate
+//      tokens store theirs, so a credential minted for the transform lane
+//      cannot reach a future route that asks for a different scope, even
+//      after that route is written.
+//   2. Reaching this function is what marks the request as service-eligible
+//      (`req.serviceRouteOptIn`). `assertCompanyAccess` below refuses a
+//      service actor without that marker, so every other route in the API —
+//      the ~300 that call assertCompanyAccess and were written years before
+//      this actor type existed — stays closed by default. A route that wants
+//      the machine lane has to say so, here, on purpose.
+export function assertServiceOrBoard(req: Request, requiredScope: ServiceTokenScope) {
+  if (req.actor.type === "service") {
+    const scopes = req.actor.serviceScopes ?? [];
+    if (!scopes.includes(requiredScope)) {
+      logger.warn({
+        event: "security.service_token_scope_denied",
+        actorCompanyId: req.actor.companyId,
+        serviceTokenId: req.actor.serviceTokenId ?? null,
+        requiredScope,
+        method: req.method,
+        path: req.originalUrl ?? req.path,
+      }, "Refused a service token that does not hold the scope this route requires");
+      throw forbidden(`Service token is not scoped for ${requiredScope}`);
+    }
+    req.serviceRouteOptIn = true;
+    return;
+  }
   if (req.actor.type === "board") {
     assertBoardOrgAccess(req);
     return;
@@ -84,6 +114,27 @@ export function assertServiceOrBoard(req: Request) {
 
 export function assertCompanyAccess(req: Request, companyId: string) {
   assertAuthenticated(req);
+  // DUR-3977 default-deny. A company service token is the first credential
+  // Paperclip has ever issued to a system outside itself, so "which routes can
+  // it reach" must be a list someone wrote down, not a side effect of which
+  // assert helper a route happened to pick years ago. Without this branch a
+  // service token would pass every one of the ~300 assertCompanyAccess call
+  // sites for its own company — the company dashboard, issue attachments, and
+  // POST /api/chat/classify, which is an uncapped metered Anthropic call.
+  //
+  // The marker is set by assertServiceOrBoard and nowhere else, so the
+  // allowed set is exactly "the routes that named a service-token scope".
+  if (req.actor.type === "service" && req.serviceRouteOptIn !== true) {
+    logger.error({
+      event: "security.service_token_route_denied",
+      actorCompanyId: req.actor.companyId,
+      serviceTokenId: req.actor.serviceTokenId ?? null,
+      targetCompanyId: companyId,
+      method: req.method,
+      path: req.originalUrl ?? req.path,
+    }, "Refused a company service token on a route that does not accept service tokens");
+    throw forbidden("This endpoint does not accept company service tokens");
+  }
   // A service token authenticates AS one company. Same rule, and the same
   // loud refusal, as an agent key reaching for another company's data — this
   // is the check that keeps the standing cross-company isolation requirement

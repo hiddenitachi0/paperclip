@@ -245,4 +245,32 @@ describe("lane A routes", () => {
       });
     });
   });
+
+  // DUR-3977: chat and batch must bill at the same rate for the same agent.
+  // resolveLaneASettings falls back to the platform default for anything the
+  // caller does not pass, so omitting these here meant an operator who picked
+  // haiku got haiku in batch and sonnet in chat — silently, and at two
+  // different prices.
+  it("passes the per-agent model and output ceiling into the chat path", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400 } as never),
+    );
+    mockLaneAService.sendMessage.mockResolvedValue({ text: "hei" });
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["11111111-1111-4111-8111-111111111112"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    await request(app)
+      .post("/api/lane-a/11111111-1111-4111-8111-111111111111/messages")
+      .send({ companyId: "11111111-1111-4111-8111-111111111112", message: "hi" });
+
+    expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+      laneAModel: "claude-haiku-4-5",
+      laneAMaxOutputTokens: 400,
+    });
+  });
 });

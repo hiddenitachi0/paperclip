@@ -19,6 +19,7 @@ const mockLaneAService = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   getConversation: vi.fn(),
   transform: vi.fn(),
+  listTransformAgents: vi.fn(),
 }));
 
 vi.mock("../services/index.js", () => ({
@@ -57,11 +58,12 @@ async function createApp(actor: Record<string, unknown>) {
   return app;
 }
 
-const serviceActor = (companyId: string) => ({
+const serviceActor = (companyId: string, scopes: string[] = ["lane_a:transform"]) => ({
   type: "service",
   companyId,
   serviceTokenId: "aaaaaaaa-0000-4000-8000-000000000001",
   serviceTokenName: "Nordstrand dashboard",
+  serviceScopes: scopes,
   source: "company_service_token",
 });
 
@@ -241,5 +243,141 @@ describe("POST /api/lane-a/:agentId/transform", () => {
 
     expect(res.status).toBe(429);
     expect(JSON.stringify(res.body)).toContain("daily_call_cap");
+  });
+
+  it("refuses a service token that does not hold the transform scope", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    const app = await createApp(serviceActor(COMPANY_A, []));
+
+    const res = await request(app).post(`/api/lane-a/${AGENT_ID}/transform`).send({ input: "Stol i eik." });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("not scoped for lane_a:transform");
+    expect(mockLaneAService.transform).not.toHaveBeenCalled();
+  });
+
+  it("passes the agent's status through so a paused agent can be refused", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent({ status: "paused" }));
+    const app = await createApp(serviceActor(COMPANY_A));
+
+    await request(app).post(`/api/lane-a/${AGENT_ID}/transform`).send({ input: "Stol i eik." });
+
+    expect(mockLaneAService.transform.mock.calls[0][0].targetAgent).toMatchObject({ status: "paused" });
+  });
+
+  it("rejects a payload whose fields are each legal but whose total is not", async () => {
+    // The bound that matters is on the WHOLE request. Each of these ten
+    // variables is well inside the per-variable limit, and the input text is
+    // exactly at the per-field limit — every field passes its own check, and
+    // the combined payload is more than double what one call may carry.
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    const app = await createApp(serviceActor(COMPANY_A));
+
+    const variables: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) variables[`field${i}`] = "x".repeat(3000);
+
+    const res = await request(app)
+      .post(`/api/lane-a/${AGENT_ID}/transform`)
+      .send({ input: "x".repeat(24_000), variables });
+
+    expect(res.status).toBe(400);
+    expect(mockLaneAService.transform).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * DUR-3977 addendum: agent discovery. Same tenancy shape as transform, because
+ * it is the same credential answering the question "which agents may I name".
+ */
+describe("GET /api/lane-a/agents", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLaneAService.listTransformAgents.mockResolvedValue({ agents: [] });
+  });
+
+  it("lists the calling company's quick agents for a service token", async () => {
+    mockLaneAService.listTransformAgents.mockResolvedValue({
+      agents: [{ id: AGENT_ID, name: "Produkttekster", usable: true, unavailableReason: null }],
+    });
+    const app = await createApp(serviceActor(COMPANY_A));
+
+    const res = await request(app).get("/api/lane-a/agents");
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.agents[0]).toMatchObject({ id: AGENT_ID, usable: true });
+    expect(mockLaneAService.listTransformAgents).toHaveBeenCalledWith(COMPANY_A);
+  });
+
+  // The isolation test. A token for company A must not be able to name
+  // company B, by any route into this handler.
+  it("reads the company off the token, never off the query string", async () => {
+    const app = await createApp(serviceActor(COMPANY_A));
+
+    const res = await request(app).get(`/api/lane-a/agents?companyId=${COMPANY_B}`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockLaneAService.listTransformAgents).toHaveBeenCalledWith(COMPANY_A);
+    expect(mockLaneAService.listTransformAgents).not.toHaveBeenCalledWith(COMPANY_B);
+  });
+
+  it("refuses an agent-authenticated caller", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: COMPANY_A,
+      source: "agent_key",
+    });
+
+    const res = await request(app).get("/api/lane-a/agents");
+
+    expect(res.status).toBe(403);
+    expect(mockLaneAService.listTransformAgents).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unauthenticated caller", async () => {
+    const app = await createApp({ type: "none", source: "none" });
+
+    const res = await request(app).get("/api/lane-a/agents");
+
+    expect(res.status).toBe(403);
+    expect(mockLaneAService.listTransformAgents).not.toHaveBeenCalled();
+  });
+
+  it("refuses a service token without the transform scope", async () => {
+    const app = await createApp(serviceActor(COMPANY_A, []));
+
+    const res = await request(app).get("/api/lane-a/agents");
+
+    expect(res.status).toBe(403);
+    expect(mockLaneAService.listTransformAgents).not.toHaveBeenCalled();
+  });
+
+  it("lets a board user list one of their own companies", async () => {
+    const app = await createApp(boardActor([COMPANY_A]));
+
+    const res = await request(app).get(`/api/lane-a/agents?companyId=${COMPANY_A}`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockLaneAService.listTransformAgents).toHaveBeenCalledWith(COMPANY_A);
+  });
+
+  it("refuses a board user reaching for a company they are not in", async () => {
+    const app = await createApp(boardActor([COMPANY_A]));
+
+    const res = await request(app).get(`/api/lane-a/agents?companyId=${COMPANY_B}`);
+
+    expect(res.status).toBe(403);
+    expect(mockLaneAService.listTransformAgents).not.toHaveBeenCalled();
+  });
+
+  it("is not shadowed by the /:agentId routes", async () => {
+    // "agents" is a legal :agentId, so if the parameterised routes were
+    // declared first with a bare GET this would silently resolve elsewhere.
+    const app = await createApp(serviceActor(COMPANY_A));
+
+    const res = await request(app).get("/api/lane-a/agents");
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.getById).not.toHaveBeenCalled();
   });
 });

@@ -140,6 +140,12 @@ export function chatRouterRoutes(db: Db) {
           laneAEnabled: targetAgent.laneAEnabled,
           laneAInstructions: targetAgent.laneAInstructions ?? null,
           mcpToolIds: (targetAgent.mcpToolIds as string[] | null) ?? [],
+          // DUR-3977: same two fields the Lane A route passes. Omitting them
+          // silently falls back to the platform default inside
+          // resolveLaneASettings, so an operator who picks a cheaper model for
+          // a quick agent would get it on one chat path and not the other.
+          laneAModel: targetAgent.laneAModel ?? null,
+          laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
         },
         requester,
         actor: req.actor,

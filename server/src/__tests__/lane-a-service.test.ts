@@ -30,6 +30,7 @@ import {
   laneAService,
   type LaneATargetAgent,
 } from "../services/lane-a.ts";
+import { LANE_A_DEFAULT_MAX_OUTPUT_TOKENS, LANE_A_DEFAULT_MODEL } from "@paperclipai/shared";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -307,6 +308,55 @@ describeEmbeddedPostgres("lane A service", () => {
       .from(laneAConversations)
       .where(eq(laneAConversations.id, result.conversationId));
     expect(conversation?.turnCount).toBe(1);
+    // DUR-3977: chat runs on the agent's own model, at its own output
+    // ceiling — the same numbers the transform path uses. This asserts the
+    // claim rather than the comment: default here, since the seeded agent
+    // sets neither.
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({
+      model: LANE_A_DEFAULT_MODEL,
+      max_tokens: LANE_A_DEFAULT_MAX_OUTPUT_TOKENS,
+    });
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("runs a chat turn on the agent's own model, not the platform default", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true);
+
+    const mockCreate = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "hei" }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+      stop_reason: "end_turn",
+    });
+    vi.doMock("@anthropic-ai/sdk", async () => {
+      const actual = await vi.importActual<typeof import("@anthropic-ai/sdk")>("@anthropic-ai/sdk");
+      const RealDefault = (actual as { default: typeof actual.default }).default;
+      class FakeAnthropic {
+        static AuthenticationError = RealDefault.AuthenticationError;
+        static RateLimitError = RealDefault.RateLimitError;
+        static APIError = RealDefault.APIError;
+        messages = { create: mockCreate };
+        constructor(_opts: unknown) {}
+      }
+      return { ...actual, default: FakeAnthropic };
+    });
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+
+    await freshLaneAService(db).sendMessage({
+      companyId,
+      targetAgent: { ...target, laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400 },
+      requester: { userId: "user-1", agentId: null },
+      message: "hei",
+    });
+
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({
+      model: "claude-haiku-4-5",
+      max_tokens: 400,
+    });
 
     vi.doUnmock("@anthropic-ai/sdk");
     vi.resetModules();

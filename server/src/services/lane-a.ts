@@ -3,10 +3,12 @@ import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { and, asc, count, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  agents,
   budgetPolicies,
+  companies,
   costEvents,
   laneAConversations,
   laneAMessages,
@@ -281,10 +283,47 @@ export interface LaneATargetAgent {
   laneAInstructions?: string | null;
   /** Tools-library grants (same field full agents use) — optional so existing callers/tests are unaffected. */
   mcpToolIds?: string[];
+  /**
+   * The agent's runtime status (agents.status). `paused` is the one value
+   * transform() refuses on: an agent-scope `billed_cents` hard stop, a
+   * company-scope hard stop and an operator clicking pause all land here, and
+   * before DUR-3977's review this endpoint kept spending straight through all
+   * three. Optional so existing callers and tests are unaffected; absent is
+   * read as "not paused".
+   */
+  status?: string | null;
   /** DUR-3977 per-agent settings. Null/absent on all three = platform default. */
   laneAModel?: string | null;
   laneAMaxOutputTokens?: number | null;
   laneATransformDailyCallCap?: number | null;
+}
+
+/**
+ * The `max_tokens` a transform call is actually made with.
+ *
+ * `maxOutputChars` used to do nothing but add a sentence to the system prompt
+ * and slice the answer afterwards — so a caller asking for a 200-character
+ * blurb still paid for up to the agent's full output ceiling and threw most of
+ * it away. Across Nordstrand's ~1400 items that difference IS the parameter.
+ *
+ * The conversion is deliberately generous: ~4 characters per token is the
+ * usual English/Norwegian estimate, and the slack term covers the cases where
+ * that estimate is wrong in the expensive direction (accented characters,
+ * long compound words, a model that opens with a stray newline). The result is
+ * never raised above the agent's own ceiling — a caller can ask for less than
+ * the operator allowed, never more.
+ */
+export const LANE_A_TRANSFORM_OUTPUT_TOKEN_SLACK = 64;
+
+export function resolveTransformMaxTokens(input: {
+  maxOutputTokens: number;
+  maxOutputChars?: number;
+}): number {
+  if (typeof input.maxOutputChars !== "number" || input.maxOutputChars <= 0) {
+    return input.maxOutputTokens;
+  }
+  const fromChars = Math.ceil(input.maxOutputChars / 4) + LANE_A_TRANSFORM_OUTPUT_TOKEN_SLACK;
+  return Math.max(1, Math.min(input.maxOutputTokens, fromChars));
 }
 
 /** The per-agent settings a transform call runs under, defaults already applied. */
@@ -939,11 +978,22 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   }
 
   /**
-   * The monthly transform budget, expressed as an ordinary budget policy
-   * (scope `agent`, metric `lane_a_transform_cents`) so the operator sets it,
-   * sees it and raises it through the machinery that already exists — the
-   * same budget_override_required card that stopped an agent correctly today.
+   * The transform budget, expressed as an ordinary budget policy (metric
+   * `lane_a_transform_cents`) so the operator sets it, sees it and raises it
+   * through the machinery that already exists — the same
+   * budget_override_required card that stopped an agent correctly today.
    * Returns the policy that is already over its limit, or null.
+   *
+   * BOTH scopes are read, and that is load-bearing rather than a nicety.
+   * `upsertBudgetPolicySchema` accepts scope `company` for this metric, the
+   * budgets overview computes its observed amount, and the operator sees a
+   * card — so a company-scope policy that this function ignored would be a
+   * budget that looks set and stops nothing, which is worse than no budget at
+   * all. (Scope `project` is refused by the validator instead: transform cost
+   * rows carry no projectId, so such a policy could only ever observe zero.)
+   * A company ceiling is also the shape Filip's group of specialised quick
+   * agents actually needs — one number for "what rewriting text may cost us",
+   * not one per specialist.
    */
   async function findExceededTransformBudget(companyId: string, agentId: string) {
     const policies = await db
@@ -952,11 +1002,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       .where(
         and(
           eq(budgetPolicies.companyId, companyId),
-          eq(budgetPolicies.scopeType, "agent"),
-          eq(budgetPolicies.scopeId, agentId),
           eq(budgetPolicies.metric, "lane_a_transform_cents"),
           eq(budgetPolicies.isActive, true),
           eq(budgetPolicies.hardStopEnabled, true),
+          or(
+            and(eq(budgetPolicies.scopeType, "agent"), eq(budgetPolicies.scopeId, agentId)),
+            and(eq(budgetPolicies.scopeType, "company"), eq(budgetPolicies.scopeId, companyId)),
+          ),
         ),
       );
 
@@ -965,9 +1017,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       const { start, end } = transformBudgetWindow(policy.windowKind);
       const conditions = [
         eq(costEvents.companyId, companyId),
-        eq(costEvents.agentId, agentId),
         eq(costEvents.billingCode, LANE_A_TRANSFORM_BILLING_CODE),
       ];
+      // An agent-scope policy counts only that agent's rows; a company-scope
+      // policy counts every agent's, which is the whole point of it.
+      if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, agentId));
       if (policy.windowKind !== "lifetime") {
         conditions.push(gte(costEvents.occurredAt, start));
         conditions.push(lt(costEvents.occurredAt, end));
@@ -1018,6 +1072,36 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       throw forbidden("Lane A is not enabled for this agent");
     }
 
+    // DUR-3977 review: "paused" has to mean paused here too.
+    //
+    // Three separate mechanisms pause an agent — an operator clicking pause,
+    // an agent-scope `billed_cents` hard stop, and a company-scope hard stop
+    // cascading down — and every one of them is a decision that this agent
+    // should stop spending. Before this check, all three left the transform
+    // endpoint spending happily: the metric-aware pausing added for
+    // `lane_a_transform_cents` correctly stopped that narrow metric from
+    // pausing the whole agent, but nothing then covered the metrics that DO
+    // still pause. A paused agent that keeps billing is the exact failure the
+    // hard stop exists to prevent.
+    //
+    // 403 rather than 429: a 429 invites a batch caller to retry, and no
+    // amount of waiting un-pauses an agent — a person has to act.
+    if (params.targetAgent.status === "paused") {
+      throw forbidden(
+        "This quick agent is paused, so it is not doing any work right now — including rewriting text. " +
+          "Resume it in Paperclip (or answer the budget question that paused it) and try again.",
+      );
+    }
+    const [company] = await db
+      .select({ status: companies.status, name: companies.name })
+      .from(companies)
+      .where(eq(companies.id, params.companyId));
+    if (company && company.status !== "active") {
+      throw forbidden(
+        `This company is ${company.status} in Paperclip, so its quick agents are not doing any work right now.`,
+      );
+    }
+
     const settings = resolveLaneASettings(params.targetAgent);
 
     const callsToday = await countTransformCallsToday(params.companyId, params.targetAgent.id);
@@ -1053,7 +1137,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         }),
         message: buildTransformUserMessage({ input: params.input, variables: params.variables }),
         model: settings.model,
-        maxOutputTokens: settings.maxOutputTokens,
+        // Not settings.maxOutputTokens: a caller asking for a short answer
+        // must actually be billed for a short answer, not for the agent's
+        // full ceiling with the surplus thrown away afterwards.
+        maxOutputTokens: resolveTransformMaxTokens({
+          maxOutputTokens: settings.maxOutputTokens,
+          maxOutputChars: params.maxOutputChars,
+        }),
       });
     } finally {
       release();
@@ -1139,7 +1229,139 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
   }
 
-  return { sendMessage, getConversation, transform };
+  /**
+   * DUR-3977 addendum: which quick agents this company has, and which of them
+   * can take a transform call right now.
+   *
+   * Exists so the dashboard does not have to hardcode agent UUIDs. Filip is
+   * standing up a GROUP of specialists (one for product descriptions, one for
+   * extracting fields, a boss for overviews) and expects to employ more; with
+   * hardcoded ids, every new specialist is a dashboard code change and a
+   * deploy, and a retired one is a 404 in the middle of a 1400-item run.
+   *
+   * Company-scoped exactly like transform: the companyId comes from the
+   * caller's credential, never from the request, and this function filters on
+   * it. It is the only company whose agents can appear in the answer.
+   *
+   * `usable` is computed from the same three things transform() checks, in the
+   * same order, so a caller that picks a usable agent does not then get a
+   * refusal it could have predicted. It is a snapshot, not a reservation —
+   * between this read and the call, another caller may consume the last of a
+   * daily cap — so a caller must still handle 403/429 from transform itself.
+   */
+  async function listTransformAgents(companyId: string) {
+    const [company] = await db
+      .select({ status: companies.status })
+      .from(companies)
+      .where(eq(companies.id, companyId));
+    const companyPaused = !!company && company.status !== "active";
+
+    const rows = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        role: agents.role,
+        title: agents.title,
+        status: agents.status,
+        laneAInstructions: agents.laneAInstructions,
+        laneAModel: agents.laneAModel,
+        laneAMaxOutputTokens: agents.laneAMaxOutputTokens,
+        laneATransformDailyCallCap: agents.laneATransformDailyCallCap,
+      })
+      .from(agents)
+      .where(
+        and(
+          eq(agents.companyId, companyId),
+          eq(agents.laneAEnabled, true),
+          ne(agents.status, "terminated"),
+        ),
+      )
+      .orderBy(asc(agents.name));
+
+    if (rows.length === 0) return { agents: [] };
+
+    const agentIds = rows.map((row) => row.id);
+    const dayStart = utcDayStart();
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+    // One grouped query for the whole roster rather than one per agent: this
+    // read is on the hot path of a batch run's startup, and a company with a
+    // dozen specialists should not cost a dozen round trips.
+    const callCountRows = await db
+      .select({ agentId: costEvents.agentId, calls: count() })
+      .from(costEvents)
+      .where(
+        and(
+          eq(costEvents.companyId, companyId),
+          inArray(costEvents.agentId, agentIds),
+          eq(costEvents.billingCode, LANE_A_TRANSFORM_BILLING_CODE),
+          gte(costEvents.occurredAt, dayStart),
+          lt(costEvents.occurredAt, dayEnd),
+        ),
+      )
+      .groupBy(costEvents.agentId);
+    const callsByAgentId = new Map(
+      callCountRows.map((row) => [row.agentId as string, Number(row.calls ?? 0)]),
+    );
+
+    const results = [];
+    for (const row of rows) {
+      const settings = resolveLaneASettings({
+        id: row.id,
+        companyId,
+        name: row.name,
+        laneAEnabled: true,
+        laneAModel: row.laneAModel,
+        laneAMaxOutputTokens: row.laneAMaxOutputTokens,
+        laneATransformDailyCallCap: row.laneATransformDailyCallCap,
+      });
+      const callsToday = callsByAgentId.get(row.id) ?? 0;
+      const exceededBudget = await findExceededTransformBudget(companyId, row.id);
+
+      let unavailableReason: string | null = null;
+      if (companyPaused) unavailableReason = "company_paused";
+      else if (row.status === "paused") unavailableReason = "agent_paused";
+      else if (callsToday >= settings.dailyCallCap) unavailableReason = "daily_call_cap";
+      else if (exceededBudget) unavailableReason = "monthly_budget";
+
+      results.push({
+        id: row.id,
+        name: row.name,
+        role: row.role,
+        title: row.title ?? null,
+        status: row.status,
+        // Enough for an operator-facing picker to say what a specialist is
+        // for, without shipping the whole instruction set to an outside
+        // system: the first line of the operator's instructions, trimmed.
+        instructionsSummary: summarizeInstructions(row.laneAInstructions),
+        model: settings.model,
+        maxOutputTokens: settings.maxOutputTokens,
+        dailyCallCap: settings.dailyCallCap,
+        callsToday,
+        usable: unavailableReason === null,
+        unavailableReason,
+      });
+    }
+
+    return { agents: results };
+  }
+
+  return { sendMessage, getConversation, transform, listTransformAgents };
+}
+
+/**
+ * The one-line "what is this specialist for" a picker can show. The operator's
+ * full instruction set can be long and is written for the model, not for an
+ * outside system, so only its first line goes out, capped.
+ */
+export const LANE_A_INSTRUCTIONS_SUMMARY_MAX_LENGTH = 200;
+
+export function summarizeInstructions(instructions?: string | null): string | null {
+  const firstLine = instructions?.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
+  if (!firstLine) return null;
+  return firstLine.length > LANE_A_INSTRUCTIONS_SUMMARY_MAX_LENGTH
+    ? `${firstLine.slice(0, LANE_A_INSTRUCTIONS_SUMMARY_MAX_LENGTH - 1)}…`
+    : firstLine;
 }
 
 /** Sum of cost_cents as a plain number, same shape budgets.ts uses. */

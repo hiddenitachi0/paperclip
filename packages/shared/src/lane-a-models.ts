@@ -86,6 +86,48 @@ export const LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP = 1;
 export const LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP = 100_000;
 
 /**
+ * What a day of transform calls could cost this quick agent if every call ran
+ * at the limit, in whole US cents.
+ *
+ * DUR-3977 review: "no monthly budget set" is the default, and it is the
+ * default on the first thing that can spend Paperclip's money from outside
+ * Paperclip. "Tomt = ingen grense" is honest but it is not informative — this
+ * turns it into a number the operator can react to. Worst case means: every
+ * call carries the maximum payload the validator allows
+ * (LANE_A_TRANSFORM_MAX_TOTAL_CHARS, at the usual ~4 characters per token),
+ * every call produces the agent's full output ceiling, and the agent uses its
+ * whole daily call cap.
+ *
+ * Deliberately an over-estimate. A real product-description call is an order
+ * of magnitude smaller on both sides; the point of the number is that the
+ * ceiling is knowable before the first run, not that it is likely.
+ */
+export function laneATransformWorstCaseDailyCents(input: {
+  model?: string | null;
+  maxOutputTokens?: number | null;
+  dailyCallCap?: number | null;
+  /** Defaults to LANE_A_TRANSFORM_MAX_TOTAL_CHARS; injectable so the bound lives in one place. */
+  maxTotalInputChars?: number;
+}): number {
+  const pricing = isLaneAModel(input.model)
+    ? LANE_A_MODEL_CATALOGUE[input.model]
+    : LANE_A_MODEL_CATALOGUE[LANE_A_DEFAULT_MODEL];
+  const inputTokens = Math.ceil((input.maxTotalInputChars ?? 24_000) / 4);
+  const outputTokens =
+    typeof input.maxOutputTokens === "number" && input.maxOutputTokens > 0
+      ? input.maxOutputTokens
+      : LANE_A_DEFAULT_MAX_OUTPUT_TOKENS;
+  const calls =
+    typeof input.dailyCallCap === "number" && input.dailyCallCap > 0
+      ? input.dailyCallCap
+      : LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP;
+  const usdPerCall =
+    (inputTokens / 1_000_000) * pricing.inputUsdPerMillion +
+    (outputTokens / 1_000_000) * pricing.outputUsdPerMillion;
+  return Math.round(usdPerCall * calls * 100);
+}
+
+/**
  * The billing code stamped on every cost row a transform call produces. Three
  * separate things read it: the daily call cap counts rows carrying it, the
  * `lane_a_transform_cents` budget metric sums their cost, and the per-agent

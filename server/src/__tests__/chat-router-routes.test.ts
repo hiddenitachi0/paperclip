@@ -315,4 +315,29 @@ describe("POST /chat/classify", () => {
     expect(res.status).toBe(400);
     expect(mockSecretaryClassifierService.classify).not.toHaveBeenCalled();
   });
+
+  // DUR-3977: the second way into Lane A chat. It has to carry the per-agent
+  // model too, or the same agent is billed at two different rates depending
+  // on which endpoint the UI happened to call.
+  it("passes the per-agent model and output ceiling into Lane A", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400 } as never),
+    );
+    mockLaneAService.sendMessage.mockResolvedValue({
+      conversationId: "conv-1",
+      response: "All green.",
+      turnCount: 1,
+      stopReason: "end_turn",
+    });
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: "how many agents are on the team right now?" });
+
+    expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
+      laneAModel: "claude-haiku-4-5",
+      laneAMaxOutputTokens: 400,
+    });
+  });
 });

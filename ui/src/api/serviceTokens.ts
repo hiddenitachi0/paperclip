@@ -9,6 +9,12 @@ export type ServiceTokenSummary = {
   id: string;
   companyId: string;
   name: string;
+  /**
+   * What this key may reach. Today the only value is "lane_a:transform" — the
+   * rewrite call plus the read that lists which quick agents it may name. A
+   * key with an empty list reaches nothing.
+   */
+  scopes: string[];
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;

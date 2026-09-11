@@ -16,6 +16,16 @@ import { Input } from "@/components/ui/input";
  * that can be added later — the copy says so plainly, in Norwegian, before
  * the operator navigates away and loses it.
  */
+/**
+ * Scopes exist so a key's reach is a stored fact rather than an assumption.
+ * The operator should be able to read what they just handed out without
+ * knowing what a scope string is, so each one gets a plain sentence.
+ */
+function describeScope(scope: string): string {
+  if (scope === "lane_a:transform") return "be hurtigansatte om å skrive om tekst";
+  return scope;
+}
+
 export function ServiceTokensSection({ companyId }: { companyId: string }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
@@ -64,8 +74,9 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
         <CardTitle>Nøkler for andre systemer</CardTitle>
         <CardDescription>
           En nøkkel lar et annet system — for eksempel dashbordet — be en hurtigansatt om å skrive om tekst,
-          uten at noen må logge inn. Nøkkelen gjelder bare dette selskapet, og den kan ikke brukes til å
-          godkjenne noe eller endre noe. Du kan sperre den når som helst.
+          uten at noen må logge inn. Nøkkelen gjelder bare dette selskapet, og den kan bare gjøre det som
+          står under hver nøkkel i listen: den når verken oversikter, saker, vedlegg eller noe annet i
+          Paperclip, og kan ikke godkjenne eller endre noe. Du kan sperre den når som helst.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -132,6 +143,10 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
                     {token.lastUsedAt
                       ? `Sist brukt ${new Date(token.lastUsedAt).toLocaleString("nb-NO")}`
                       : "Aldri brukt"}
+                    {" · "}
+                    {token.scopes.length > 0
+                      ? `Kan bare: ${token.scopes.map(describeScope).join(", ")}`
+                      : "Kan ingenting (ingen tilganger)"}
                   </p>
                 </div>
                 <Button

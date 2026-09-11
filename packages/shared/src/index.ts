@@ -55,6 +55,7 @@ export {
   LANE_A_TRANSFORM_BILLING_CODE,
   isLaneAModel,
   laneAModelCostCents,
+  laneATransformWorstCaseDailyCents,
   type LaneAModel,
 } from "./lane-a-models.js";
 export {
@@ -1390,8 +1391,14 @@ export {
   LANE_A_TRANSFORM_VARIABLE_VALUE_MAX_LENGTH,
   LANE_A_TRANSFORM_MAX_OUTPUT_CHARS,
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
+  LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  laneATransformPayloadChars,
   createCompanyServiceTokenSchema,
+  SERVICE_TOKEN_SCOPES,
+  isServiceTokenScope,
+  normalizeServiceTokenScopes,
   type CreateCompanyServiceToken,
+  type ServiceTokenScope,
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,

@@ -321,11 +321,17 @@ export {
   LANE_A_TRANSFORM_VARIABLE_VALUE_MAX_LENGTH,
   LANE_A_TRANSFORM_MAX_OUTPUT_CHARS,
   LANE_A_TRANSFORM_MAX_CONCURRENCY,
+  LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  laneATransformPayloadChars,
 } from "./lane-a.js";
 
 export {
   createCompanyServiceTokenSchema,
+  SERVICE_TOKEN_SCOPES,
+  isServiceTokenScope,
+  normalizeServiceTokenScopes,
   type CreateCompanyServiceToken,
+  type ServiceTokenScope,
 } from "./company-service-token.js";
 
 export {

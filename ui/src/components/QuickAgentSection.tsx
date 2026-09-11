@@ -11,6 +11,8 @@ import {
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_MODELS,
   LANE_A_MODEL_CATALOGUE,
+  LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  laneATransformWorstCaseDailyCents,
 } from "@paperclipai/shared";
 import { agentsApi } from "../api/agents";
 import { budgetsApi } from "../api/budgets";
@@ -213,7 +215,16 @@ export function QuickAgentSection({
             onSave={(next) => settingMutation.mutate({ laneATransformDailyCallCap: next })}
           />
 
-          <MonthlyTransformBudget agentId={agent.id} companyId={companyId ?? agent.companyId} />
+          <MonthlyTransformBudget
+            agentId={agent.id}
+            companyId={companyId ?? agent.companyId}
+            worstCaseDailyCents={laneATransformWorstCaseDailyCents({
+              model: agent.laneAModel,
+              maxOutputTokens: agent.laneAMaxOutputTokens,
+              dailyCallCap: agent.laneATransformDailyCallCap,
+              maxTotalInputChars: LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+            })}
+          />
         </div>
       </CardContent>
     </Card>
@@ -274,13 +285,37 @@ function NumberSetting({
   );
 }
 
+/** Whole US cents -> "12,34" for display. */
+function centsToDollarString(cents: number): string {
+  return (cents / 100).toFixed(2);
+}
+
 /**
  * The monthly ceiling on what rewriting text may cost for this one agent.
  * It is an ordinary budget policy (scope `agent`, metric
  * `lane_a_transform_cents`) — the same mechanism every other budget uses, so
  * hitting it produces the same card the operator already knows how to answer.
+ *
+ * THE UNIT IS DOLLARS, and saying so is the whole point of this comment.
+ * `budget_policies.amount` is US cents everywhere in Paperclip — it is what
+ * BudgetPolicyCard labels "Budget (USD)", and what cost_events.cost_cents is
+ * summed in, because the bill Paperclip pays is Anthropic's and Anthropic
+ * bills in dollars. An earlier version of this field was labelled kroner while
+ * storing and enforcing the same cents, which made every ceiling Filip set
+ * about 11x looser than he believed and every spend read-back about 11x too
+ * small. Converting NOK->USD here would need a live rate the rest of the
+ * system does not have; matching the rest of the system is the honest fix.
  */
-function MonthlyTransformBudget({ agentId, companyId }: { agentId: string; companyId: string }) {
+function MonthlyTransformBudget({
+  agentId,
+  companyId,
+  worstCaseDailyCents,
+}: {
+  agentId: string;
+  companyId: string;
+  /** What a full day at this agent's own limits could cost, if no budget is set. */
+  worstCaseDailyCents: number;
+}) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const [draft, setDraft] = useState<string | null>(null);
@@ -294,18 +329,18 @@ function MonthlyTransformBudget({ agentId, companyId }: { agentId: string; compa
   const policy = overviewQuery.data?.policies.find(
     (entry) => entry.scopeType === "agent" && entry.scopeId === agentId && entry.metric === "lane_a_transform_cents",
   );
-  const savedKroner = policy && policy.amount > 0 ? String(Math.round(policy.amount / 100)) : "";
-  const shown = draft ?? savedKroner;
-  const dirty = draft !== null && draft !== savedKroner;
+  const savedDollars = policy && policy.amount > 0 ? centsToDollarString(policy.amount) : "";
+  const shown = draft ?? savedDollars;
+  const dirty = draft !== null && draft !== savedDollars;
 
   const saveMutation = useMutation({
-    mutationFn: (kroner: number) =>
+    mutationFn: (dollars: number) =>
       budgetsApi.upsertPolicy(companyId, {
         scopeType: "agent",
         scopeId: agentId,
         metric: "lane_a_transform_cents",
         windowKind: "calendar_month_utc",
-        amount: Math.round(kroner * 100),
+        amount: Math.round(dollars * 100),
       }),
     onSuccess: () => {
       setDraft(null);
@@ -318,15 +353,18 @@ function MonthlyTransformBudget({ agentId, companyId }: { agentId: string; compa
     },
   });
 
-  const spentKroner = policy ? Math.round(policy.observedAmount / 100) : 0;
+  const spentDollars = policy ? centsToDollarString(policy.observedAmount) : "0.00";
 
   return (
     <label className="block space-y-1">
-      <span className="text-xs text-muted-foreground">Maks kostnad per måned for omskriving (kroner)</span>
+      <span className="text-xs text-muted-foreground">
+        Maks kostnad per måned for omskriving (dollar)
+      </span>
       <div className="flex items-center gap-2">
         <Input
           type="number"
-          inputMode="numeric"
+          inputMode="decimal"
+          step="0.01"
           min={0}
           value={shown}
           placeholder="Ingen grense"
@@ -343,8 +381,15 @@ function MonthlyTransformBudget({ agentId, companyId }: { agentId: string; compa
       </div>
       <span className="block text-xs text-muted-foreground">
         {policy && policy.amount > 0
-          ? `Brukt så langt denne måneden: ${spentKroner} kr. Når grensen er nådd slutter den å skrive om tekst, men jobber ellers videre — og du får spørsmål om å heve grensen.`
-          : "Tomt = ingen grense. Sett et tall hvis du vil være sikker på hva dette kan koste."}
+          ? `Brukt så langt denne måneden: $${spentDollars}. Når grensen er nådd slutter den å skrive om tekst, men jobber ellers videre — og du får spørsmål om å heve grensen.`
+          : // "Tomt = ingen grense" is true but useless as a default on the
+            // first thing that can spend Paperclip's money from outside
+            // Paperclip. Say what no-limit actually means, in money.
+            `Tomt = ingen grense. Uten grense kan denne hurtigansatte i verste fall bruke rundt $${centsToDollarString(worstCaseDailyCents)} på ett døgn, med dagsgrensen og modellen som er satt over. Sett et tall hvis du vil være sikker.`}
+      </span>
+      <span className="block text-xs text-muted-foreground">
+        Beløpet er i dollar fordi modellkjøringen faktureres i dollar — samme enhet som de andre
+        budsjettene i Paperclip.
       </span>
       {error && <span className="block text-xs text-destructive">{error}</span>}
     </label>

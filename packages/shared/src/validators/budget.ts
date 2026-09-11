@@ -16,6 +16,26 @@ export const upsertBudgetPolicySchema = z.object({
   hardStopEnabled: z.boolean().optional().default(true),
   notifyEnabled: z.boolean().optional().default(true),
   isActive: z.boolean().optional().default(true),
+}).superRefine((value, ctx) => {
+  // DUR-3977: a budget that can be saved but enforces nothing is worse than
+  // no budget, because the operator believes they set a ceiling. Lane A
+  // transform cost rows carry a companyId and an agentId and never a
+  // projectId, so an agent-scope or company-scope policy on this metric is
+  // real (both are read by findExceededTransformBudget in
+  // server/src/services/lane-a.ts and summed by computeObservedAmount in
+  // server/src/services/budgets.ts) and a project-scope one could only ever
+  // observe zero. Refuse the one that cannot work rather than accept it and
+  // stop nothing.
+  if (value.metric === "lane_a_transform_cents" && value.scopeType === "project") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "lane_a_transform_cents budgets apply to a single quick agent (scope 'agent') or to a whole " +
+        "company (scope 'company'). Transform spend is not attributed to a project, so a project-scope " +
+        "policy on this metric would never observe anything.",
+      path: ["scopeType"],
+    });
+  }
 });
 
 export type UpsertBudgetPolicy = z.infer<typeof upsertBudgetPolicySchema>;

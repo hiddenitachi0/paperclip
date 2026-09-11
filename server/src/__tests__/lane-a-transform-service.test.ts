@@ -459,6 +459,318 @@ describeEmbeddedPostgres("lane A transform (DUR-3977)", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("actually lowers the model's token cap for a short maxOutputChars", async () => {
+    // The parameter has to make the call CHEAPER, not just trim the answer
+    // afterwards. Across a 1400-item run, paying for the agent's full output
+    // ceiling and discarding most of it is the entire cost of the feature.
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, { laneAMaxOutputTokens: 4000 });
+
+    await laneAService(db).transform({
+      companyId,
+      targetAgent: target,
+      input: "x",
+      maxOutputChars: 200,
+    });
+
+    const requested = modelStub.create.mock.calls[0][0].max_tokens as number;
+    expect(requested).toBeLessThan(4000);
+    // ceil(200/4) + slack. Generous, but bounded by the ask rather than by
+    // the agent's ceiling.
+    expect(requested).toBe(50 + 64);
+  });
+
+  it("never raises the token cap above the agent's own ceiling", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, { laneAMaxOutputTokens: 128 });
+
+    await laneAService(db).transform({
+      companyId,
+      targetAgent: target,
+      input: "x",
+      maxOutputChars: 40_000,
+    });
+
+    expect(modelStub.create.mock.calls[0][0].max_tokens).toBe(128);
+  });
+
+  // ─── Paused means paused ──────────────────────────────────────────────────
+
+  it("refuses a paused agent before any model call", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, { status: "paused" });
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(modelStub.create).not.toHaveBeenCalled();
+    expect(await db.select().from(costEvents)).toHaveLength(0);
+  });
+
+  it("refuses once an ordinary billed_cents hard stop has paused the agent", async () => {
+    // The realistic path: the agent's own spend budget pauses it, and this
+    // endpoint has to notice. Before this check, a paused agent kept serving
+    // transform calls and kept billing — the exact thing the hard stop exists
+    // to prevent.
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db
+      .update(agents)
+      .set({ status: "paused", pauseReason: "budget", pausedAt: new Date() })
+      .where(eq(agents.id, target.id));
+
+    const reloaded = await agentService(db).getById(target.id);
+    await expect(
+      laneAService(db).transform({
+        companyId,
+        targetAgent: { ...target, status: reloaded!.status },
+        input: "x",
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(modelStub.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the company itself is paused", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.update(companies).set({ status: "paused" }).where(eq(companies.id, companyId));
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(modelStub.create).not.toHaveBeenCalled();
+  });
+
+  it("still runs for an agent in an ordinary non-paused status", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, { status: "idle" });
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).resolves.toMatchObject({ text: "Ny tekst." });
+  });
+
+  // ─── Company-scope budgets enforce something ──────────────────────────────
+
+  it("stops at a COMPANY-scope transform budget, not only an agent-scope one", async () => {
+    // A budget the operator can save but that enforces nothing is worse than
+    // no budget: it looks set. upsertBudgetPolicySchema accepts company scope
+    // for this metric and the overview computes its spend, so the refusal has
+    // to read it too.
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "company",
+      scopeId: companyId,
+      metric: "lane_a_transform_cents",
+      windowKind: "calendar_month_utc",
+      amount: 100,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await seedTransformCostEvents(companyId, target.id, 10, 10);
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).rejects.toMatchObject({ status: 429, details: { reason: "monthly_budget" } });
+    expect(modelStub.create).not.toHaveBeenCalled();
+  });
+
+  it("counts every agent's transform spend against a company-scope budget", async () => {
+    // The point of a company ceiling with a group of specialists: one
+    // specialist's spend must be able to exhaust it for the others.
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    const other = await seedAgent(companyId);
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "company",
+      scopeId: companyId,
+      metric: "lane_a_transform_cents",
+      windowKind: "calendar_month_utc",
+      amount: 100,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await seedTransformCostEvents(companyId, other.id, 10, 10);
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).rejects.toMatchObject({ status: 429, details: { reason: "monthly_budget" } });
+  });
+
+  it("lets the call through while a company-scope budget still has room", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "company",
+      scopeId: companyId,
+      metric: "lane_a_transform_cents",
+      windowKind: "calendar_month_utc",
+      amount: 10_000,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await seedTransformCostEvents(companyId, target.id, 1, 5);
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).resolves.toMatchObject({ text: "Ny tekst." });
+  });
+
+  it("ignores another company's transform budget entirely", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany("Annet selskap");
+    const target = await seedAgent(companyId);
+    await db.insert(budgetPolicies).values({
+      companyId: otherCompanyId,
+      scopeType: "company",
+      scopeId: otherCompanyId,
+      metric: "lane_a_transform_cents",
+      windowKind: "calendar_month_utc",
+      amount: 1,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).resolves.toMatchObject({ text: "Ny tekst." });
+  });
+
+  // ─── Agent discovery ──────────────────────────────────────────────────────
+
+  it("lists only the calling company's Lane-A-enabled agents", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany("Annet selskap");
+    const mine = await seedAgent(companyId);
+    const theirs = await seedAgent(otherCompanyId);
+    // A colleague at the same company who is not a quick agent at all.
+    const notQuick = await seedAgent(companyId);
+    await db.update(agents).set({ laneAEnabled: false }).where(eq(agents.id, notQuick.id));
+
+    const result = await laneAService(db).listTransformAgents(companyId);
+
+    expect(result.agents.map((a) => a.id)).toEqual([mine.id]);
+    expect(JSON.stringify(result)).not.toContain(theirs.id);
+    expect(JSON.stringify(result)).not.toContain(otherCompanyId);
+  });
+
+  it("never returns another company's agents, even when that company has more", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany("Annet selskap");
+    await seedAgent(otherCompanyId);
+    await seedAgent(otherCompanyId);
+
+    expect((await laneAService(db).listTransformAgents(companyId)).agents).toEqual([]);
+    expect((await laneAService(db).listTransformAgents(otherCompanyId)).agents).toHaveLength(2);
+  });
+
+  it("says what each agent is for and which model it runs on", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db
+      .update(agents)
+      .set({
+        title: "Produkttekstforfatter",
+        laneAInstructions: "Skriv om produktteksten på norsk.\nBehold målene.",
+        laneAModel: "claude-haiku-4-5",
+      })
+      .where(eq(agents.id, target.id));
+
+    const [listed] = (await laneAService(db).listTransformAgents(companyId)).agents;
+
+    expect(listed).toMatchObject({
+      id: target.id,
+      name: "Produkttekster",
+      title: "Produkttekstforfatter",
+      instructionsSummary: "Skriv om produktteksten på norsk.",
+      model: "claude-haiku-4-5",
+      usable: true,
+      unavailableReason: null,
+    });
+  });
+
+  it("marks a paused agent unusable, and says why", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, target.id));
+
+    const [listed] = (await laneAService(db).listTransformAgents(companyId)).agents;
+
+    expect(listed).toMatchObject({ usable: false, unavailableReason: "agent_paused" });
+  });
+
+  it("marks an agent over its daily cap unusable, and says why", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.update(agents).set({ laneATransformDailyCallCap: 2 }).where(eq(agents.id, target.id));
+    await seedTransformCostEvents(companyId, target.id, 2);
+
+    const [listed] = (await laneAService(db).listTransformAgents(companyId)).agents;
+
+    expect(listed).toMatchObject({
+      usable: false,
+      unavailableReason: "daily_call_cap",
+      dailyCallCap: 2,
+      callsToday: 2,
+    });
+  });
+
+  it("marks an agent over its budget unusable, and says why", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "agent",
+      scopeId: target.id,
+      metric: "lane_a_transform_cents",
+      windowKind: "calendar_month_utc",
+      amount: 10,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await seedTransformCostEvents(companyId, target.id, 2, 10);
+
+    const [listed] = (await laneAService(db).listTransformAgents(companyId)).agents;
+
+    expect(listed).toMatchObject({ usable: false, unavailableReason: "monthly_budget" });
+  });
+
+  it("marks everyone unusable when the company is paused", async () => {
+    const companyId = await seedCompany();
+    await seedAgent(companyId);
+    await db.update(companies).set({ status: "paused" }).where(eq(companies.id, companyId));
+
+    const [listed] = (await laneAService(db).listTransformAgents(companyId)).agents;
+
+    expect(listed).toMatchObject({ usable: false, unavailableReason: "company_paused" });
+  });
+
+  it("leaves out a terminated agent entirely", async () => {
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+    await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, target.id));
+
+    expect((await laneAService(db).listTransformAgents(companyId)).agents).toEqual([]);
+  });
+
+  it("agrees with transform: an agent it calls usable is one transform accepts", async () => {
+    // The two must not drift. If discovery says yes and transform says no, a
+    // 1400-item run stalls on an answer the caller could not have predicted.
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId);
+
+    const [listed] = (await laneAService(db).listTransformAgents(companyId)).agents;
+    expect(listed!.usable).toBe(true);
+
+    await expect(
+      laneAService(db).transform({ companyId, targetAgent: target, input: "x" }),
+    ).resolves.toMatchObject({ text: "Ny tekst." });
+  });
+
   it("releases its concurrency slot even when the model call throws", async () => {
     const companyId = await seedCompany();
     const target = await seedAgent(companyId);

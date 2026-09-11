@@ -604,11 +604,16 @@ type OpenApiAuthLevel =
   | "public"
   | "authenticated"
   | "board"
+  // DUR-3977: the machine-to-machine lane. A per-company service token, or a
+  // board user. NOT an agent bearer token — assertServiceOrBoard refuses one
+  // with a 403 — which is why this cannot be folded into "authenticated".
+  | "service_or_board"
   | "instance_admin";
 
 const BOARD_SESSION_AUTH_SCHEME = "BoardSessionAuth";
 const BOARD_API_KEY_AUTH_SCHEME = "BoardApiKeyAuth";
 const AGENT_BEARER_AUTH_SCHEME = "AgentBearerAuth";
+const SERVICE_TOKEN_AUTH_SCHEME = "ServiceTokenAuth";
 
 function securityRequirement(name: string): Record<string, string[]> {
   return { [name]: [] };
@@ -623,6 +628,36 @@ const AUTHENTICATED_SECURITY: Array<Record<string, string[]>> = [
   ...BOARD_SECURITY,
   securityRequirement(AGENT_BEARER_AUTH_SCHEME),
 ];
+
+/**
+ * DUR-3977: the credentials the transform lane actually accepts. The service
+ * token is listed FIRST because it is the realistic caller — the board
+ * session/key alternatives exist so an operator can exercise the endpoint from
+ * their own browser without minting a token.
+ *
+ * Before this, these operations fell through to AUTHENTICATED_SECURITY and
+ * advertised AgentBearerAuth, which the route refuses outright, while the only
+ * credential that works had no scheme in the document at all. Anyone
+ * generating a client from the spec wired up the wrong auth.
+ */
+const SERVICE_OR_BOARD_SECURITY: Array<Record<string, string[]>> = [
+  securityRequirement(SERVICE_TOKEN_AUTH_SCHEME),
+  ...BOARD_SECURITY,
+];
+
+/**
+ * The operations a company service token may present its credential to. This
+ * list and SERVICE_TOKEN_SCOPES in
+ * packages/shared/src/validators/company-service-token.ts are the two
+ * written-down answers to "what can the outside system reach"; the enforcement
+ * is assertServiceOrBoard in server/src/routes/authz.ts, and
+ * server/src/__tests__/company-service-token-route-table.test.ts pins the two
+ * together against the real route table.
+ */
+const SERVICE_TOKEN_OPERATIONS = new Set([
+  "POST /api/lane-a/{agentId}/transform",
+  "GET /api/lane-a/agents",
+]);
 
 const PUBLIC_OPERATIONS = new Set([
   "GET /api/health",
@@ -806,6 +841,7 @@ function resolveOperationAuthLevel(method: string, path: string): OpenApiAuthLev
   const key = operationKey(method, path);
   if (PUBLIC_OPERATIONS.has(key)) return "public";
   if (INSTANCE_ADMIN_OPERATIONS.has(key)) return "instance_admin";
+  if (SERVICE_TOKEN_OPERATIONS.has(key)) return "service_or_board";
   if (isBoardOnlyOperation(method, path)) return "board";
   return "authenticated";
 }
@@ -844,6 +880,18 @@ function applyDocumentFixups(document: any): any {
       description:
         "Agent API key or Paperclip-issued local agent JWT presented in the Authorization bearer header.",
     },
+    [SERVICE_TOKEN_AUTH_SCHEME]: {
+      type: "http",
+      scheme: "bearer",
+      bearerFormat: "Company Service Token",
+      description:
+        "Per-company machine credential (DUR-3977), created by a board user under the company's settings " +
+        "and presented as `Authorization: Bearer pcp_service_…`. It authenticates AS one company: the " +
+        "company is read off the stored token row and can never be named by the caller. It carries no " +
+        "board powers and no agent identity, and it is scoped — it reaches only the operations that " +
+        "require a scope the token holds, and is refused with 403 everywhere else. The value is shown " +
+        "once, at creation, and is stored hashed; a lost token is replaced, not recovered.",
+    },
   };
   document.security = AUTHENTICATED_SECURITY;
 
@@ -854,6 +902,8 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "authenticated") {
         operation.security = AUTHENTICATED_SECURITY;
+      } else if (authLevel === "service_or_board") {
+        operation.security = SERVICE_OR_BOARD_SECURITY;
       } else {
         operation.security = BOARD_SECURITY;
       }
@@ -863,9 +913,19 @@ function applyDocumentFixups(document: any): any {
           ? { actor: "board", instanceAdmin: true }
           : authLevel === "board"
             ? { actor: "board" }
-            : authLevel === "authenticated"
-              ? { actor: "board_or_agent" }
-              : { actor: "public" };
+            : authLevel === "service_or_board"
+              ? {
+                actor: "service_or_board",
+                // Named explicitly so a generated client (or a human reading
+                // the document) knows which scope the token must carry, and
+                // knows an agent bearer token is refused rather than merely
+                // undocumented.
+                serviceTokenScope: "lane_a:transform",
+                agentTokenRefused: true,
+              }
+              : authLevel === "authenticated"
+                ? { actor: "board_or_agent" }
+                : { actor: "public" };
 
       const key = operationKey(method, path);
       if (authLevel !== "public") {
@@ -3112,6 +3172,44 @@ registry.registerPath({
   },
 });
 
+// ─── DUR-3977: the Lane A transform lane, the machine-to-machine entry point ──
+//
+// The one credential that realistically calls these is a company service
+// token, so both operations are in SERVICE_TOKEN_OPERATIONS above and carry
+// ServiceTokenAuth. Their error shapes are written out in full rather than
+// reusing the shared `r.*` helpers, because a caller running 1400 unattended
+// items has to branch on them: the difference between "retry in 5 seconds",
+// "stop until tomorrow" and "a person must act" is the only thing standing
+// between a stuck batch and a good one.
+
+/**
+ * The 429 body. `r.tooManyRequests` resolves to the shared Error schema
+ * (`{error}` only), which hides `details.reason` — the single field the
+ * description tells callers to branch on. A generated type has to carry it.
+ */
+const LaneATransformTooManyRequestsSchema = registry.register(
+  "LaneATransformRateLimit",
+  z.object({
+    error: z.string(),
+    details: z.object({
+      reason: z
+        .enum(["daily_call_cap", "monthly_budget", "concurrency_limit", "upstream_rate_limit"])
+        .describe(
+          "daily_call_cap: this agent has used its calls for the UTC day — stop until after midnight UTC " +
+            "or raise the cap. monthly_budget: the lane_a_transform_cents budget is spent — a person must " +
+            "raise it, retrying will not help. concurrency_limit: too many calls in flight for this agent " +
+            `right now (limit ${LANE_A_TRANSFORM_MAX_CONCURRENCY}) — retry this one item after a short ` +
+            "pause. upstream_rate_limit: Anthropic rate-limited the call — retry this item with backoff.",
+        ),
+      limit: z.number().int().optional().describe("daily_call_cap: the cap. concurrency_limit: the in-flight limit."),
+      used: z.number().int().optional().describe("daily_call_cap only: calls already made today."),
+      limitCents: z.number().int().optional().describe("monthly_budget only: the budget, in US cents."),
+      spentCents: z.number().optional().describe("monthly_budget only: spend so far in the window, in US cents."),
+      policyId: z.string().uuid().optional().describe("monthly_budget only: the budget policy to raise."),
+    }),
+  }),
+);
+
 registry.registerPath({
   method: "post",
   path: "/api/lane-a/{agentId}/transform",
@@ -3120,16 +3218,23 @@ registry.registerPath({
   description:
     "Machine-to-machine entry point for batch text work — rewriting or translating one product description " +
     "per call. Authenticate with a company service token (Authorization: Bearer pcp_service_…) created in " +
-    "the company's settings; the company is read off that token and the named agent must belong to it. " +
-    "Uses the agent's quick-agent instructions as the system prompt, at the agent's configured model and " +
-    "output ceiling.\n\n" +
+    "the company's settings and scoped `lane_a:transform`; the company is read off that token and the named " +
+    "agent must belong to it. An agent API key is REFUSED here with 403. Uses the agent's quick-agent " +
+    "instructions as the system prompt, at the agent's configured model and output ceiling.\n\n" +
+    "Call GET /api/lane-a/agents first to discover which agents this token may name, rather than hardcoding " +
+    "ids.\n\n" +
     "There is no batch endpoint, deliberately. Make parallel single calls instead, at most " +
     `${LANE_A_TRANSFORM_MAX_CONCURRENCY} at a time per agent — the server enforces that and answers 429 ` +
     "above it. A batch of 50 would be one request holding a connection for the sum of 50 model calls, " +
     "lost whole on a disconnect, with no way to retry one failed item.\n\n" +
-    "Limits are checked before the model is called: a per-agent daily call cap and a monthly cost budget " +
-    "(an ordinary budget policy with scope `agent` and metric `lane_a_transform_cents`). A 429 body carries " +
-    "`details.reason`: `daily_call_cap`, `monthly_budget`, `concurrency_limit` or `upstream_rate_limit`.",
+    "Limits are checked before the model is called: a per-agent daily call cap and a cost budget (an " +
+    "ordinary budget policy with metric `lane_a_transform_cents`, at scope `agent` or `company`). A 429 body " +
+    "carries `details.reason`: `daily_call_cap`, `monthly_budget`, `concurrency_limit` or " +
+    "`upstream_rate_limit`.\n\n" +
+    "Retry guidance by status: 429 `concurrency_limit` and `upstream_rate_limit` are retryable for the same " +
+    "item after a backoff; 429 `daily_call_cap` and `monthly_budget` are not retryable until a person or the " +
+    "clock changes something; 502 is retryable (an upstream model error); 503 is not (the instance has no " +
+    "working model credentials) — stop the run and tell someone; 403 and 404 are permanent for that request.",
   request: {
     params: z.object({ agentId: z.string() }),
     query: z.object({
@@ -3153,11 +3258,117 @@ registry.registerPath({
         stopReason: z.string().nullable(),
       }),
     ),
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-    404: r.notFound,
-    429: r.tooManyRequests,
+    400: {
+      description:
+        "The body failed validation — an empty input, an unknown field shape, or a payload over the " +
+        "combined character limit for the input text plus all variable names and values.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    // 401 is deliberately absent, and that is a behaviour statement, not an
+    // omission. An unknown, revoked or expired `pcp_service_` token leaves the
+    // request unauthenticated (middleware/auth.ts falls through to next()),
+    // and assertServiceOrBoard then answers 403 — never 401. A caller that
+    // codes "on 401, rotate the token" would never fire it, and would treat a
+    // revoked token as a permanent config error. Branch on 403 instead.
+    403: {
+      description:
+        "No usable credential, or one that may not do this. Exact messages: " +
+        "\"A company service token or board access is required\" — no credential, or an agent API key " +
+        "(including a revoked or expired service token, which is indistinguishable from no credential by " +
+        "design). \"Service token is not scoped for lane_a:transform\" — a valid token without the scope. " +
+        "\"Service token cannot access another company\" — should be unreachable, the company comes off the " +
+        "token. \"Lane A is not enabled for this agent\" — the agent is not a quick agent. Plus the two " +
+        "pause refusals, which name the reason: the agent is paused, or the company is not active. " +
+        "Nothing here is retryable without a person acting.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    404: {
+      description:
+        "\"Agent not found\". Also the answer when the agent exists but belongs to another company — the " +
+        "caller must not be able to tell those apart.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    429: {
+      description: "A limit was hit. Branch on `details.reason` to decide whether to retry.",
+      content: { "application/json": { schema: LaneATransformTooManyRequestsSchema } },
+    },
+    502: {
+      description:
+        "The upstream model call failed: \"Lane A model call failed: …\". Retryable for this item with " +
+        "backoff; nothing was billed.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    503: {
+      description:
+        "This Paperclip instance has no working model credentials — either ANTHROPIC_API_KEY is unset " +
+        "(\"Lane A is not configured on this instance…\") or it was rejected (\"Lane A model credentials are " +
+        "invalid\"). NOT retryable: every call will fail the same way until an operator fixes it. Stop the " +
+        "run rather than burning through the queue.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/lane-a/agents",
+  tags: ["agents"],
+  summary: "List the quick agents this credential may ask to rewrite text, and whether each can take work now",
+  description:
+    "Discovery for the transform lane, so a caller never hardcodes agent ids. Returns the Lane-A-enabled, " +
+    "non-terminated agents of the calling company — the company read off the service token, exactly as " +
+    "POST /api/lane-a/{agentId}/transform does, so another company's agents can never appear.\n\n" +
+    "`usable` is computed from the same checks, in the same order, that transform performs before spending " +
+    "anything, and `unavailableReason` names the first one that failed: `company_paused`, `agent_paused`, " +
+    "`daily_call_cap`, `monthly_budget`. It is a snapshot, not a reservation — another caller may consume " +
+    "the last of a daily cap between this read and your call — so still handle 403 and 429 from transform.\n\n" +
+    "Requires the same `lane_a:transform` scope as transform itself: discovery without the ability to call " +
+    "is not a thing this credential is for.",
+  request: {
+    query: z.object({
+      companyId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe("Only when calling as a signed-in board user. Ignored for a service token, which carries its own company."),
+    }),
+  },
+  responses: {
+    200: r.ok(
+      z.object({
+        agents: z.array(
+          z.object({
+            id: z.string().uuid().describe("Pass this as {agentId} to the transform route."),
+            name: z.string(),
+            role: z.string().describe("The agent's role slug, e.g. \"general\"."),
+            title: z.string().nullable().describe("Operator-written job title, when one is set."),
+            status: z.string().describe("The agent's runtime status, e.g. \"idle\", \"active\", \"paused\"."),
+            instructionsSummary: z
+              .string()
+              .nullable()
+              .describe("First line of the operator's quick-agent instructions, trimmed — what this specialist is for."),
+            model: z.string().describe("The model this agent's transform calls run on, defaults applied."),
+            maxOutputTokens: z.number().int(),
+            dailyCallCap: z.number().int(),
+            callsToday: z.number().int().describe("Transform calls this agent has completed since 00:00 UTC."),
+            usable: z.boolean(),
+            unavailableReason: z
+              .enum(["company_paused", "agent_paused", "daily_call_cap", "monthly_budget"])
+              .nullable(),
+          }),
+        ),
+      }),
+    ),
+    400: {
+      description: "Board caller only: `companyId` is missing or is not a uuid.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    403: {
+      description:
+        "Same shapes as the transform route's 403: no usable credential, an agent API key, or a service " +
+        "token without the `lane_a:transform` scope.",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
   },
 });
 

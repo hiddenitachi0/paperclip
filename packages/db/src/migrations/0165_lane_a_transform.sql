@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS "company_service_tokens" (
 	"expires_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
+-- Separate ALTER rather than a column in the CREATE above, so a database that
+-- already ran an earlier form of this migration still gets the column. Default
+-- '[]' is default-DENY on purpose: a token row with no scopes can reach
+-- nothing, and every route that accepts a service token names the scope it
+-- needs (assertServiceOrBoard in server/src/routes/authz.ts).
+ALTER TABLE "company_service_tokens" ADD COLUMN IF NOT EXISTS "scopes" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
 DO $$ BEGIN
 	IF NOT EXISTS (
 		SELECT 1 FROM "pg_constraint" WHERE "conname" = 'company_service_tokens_company_id_companies_id_fk'

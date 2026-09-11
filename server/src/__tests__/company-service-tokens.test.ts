@@ -61,6 +61,7 @@ describeEmbeddedPostgres("company service tokens", () => {
       companyId,
       name: "Nordstrand dashboard",
       createdByUserId: "user-1",
+      scopes: ["lane_a:transform"],
     });
 
     const rows = await db.select().from(companyServiceTokens);
@@ -77,6 +78,7 @@ describeEmbeddedPostgres("company service tokens", () => {
       companyId,
       name: "Nordstrand dashboard",
       createdByUserId: "user-1",
+      scopes: ["lane_a:transform"],
     });
 
     const listed = await companyServiceTokenService(db).listTokens(companyId);
@@ -93,8 +95,8 @@ describeEmbeddedPostgres("company service tokens", () => {
     const companyA = await seedCompany("A");
     const companyB = await seedCompany("B");
     const service = companyServiceTokenService(db);
-    const tokenA = await service.createToken({ companyId: companyA, name: "A", createdByUserId: null });
-    await service.createToken({ companyId: companyB, name: "B", createdByUserId: null });
+    const tokenA = await service.createToken({ companyId: companyA, name: "A", createdByUserId: null, scopes: ["lane_a:transform"] });
+    await service.createToken({ companyId: companyB, name: "B", createdByUserId: null, scopes: ["lane_a:transform"] });
 
     const resolved = await service.findByToken(tokenA.token);
     expect(resolved).toMatchObject({ id: tokenA.id, companyId: companyA });
@@ -104,7 +106,7 @@ describeEmbeddedPostgres("company service tokens", () => {
   it("returns null for a revoked token — the same answer as for a token that never existed", async () => {
     const companyId = await seedCompany();
     const service = companyServiceTokenService(db);
-    const created = await service.createToken({ companyId, name: "N", createdByUserId: null });
+    const created = await service.createToken({ companyId, name: "N", createdByUserId: null, scopes: ["lane_a:transform"] });
 
     await service.revokeToken({ tokenId: created.id, companyId, revokedByUserId: "user-1" });
 
@@ -119,6 +121,7 @@ describeEmbeddedPostgres("company service tokens", () => {
       companyId,
       name: "N",
       createdByUserId: null,
+      scopes: ["lane_a:transform"],
       expiresAt: new Date(Date.now() - 1000),
     });
 
@@ -129,7 +132,7 @@ describeEmbeddedPostgres("company service tokens", () => {
     const companyA = await seedCompany("A");
     const companyB = await seedCompany("B");
     const service = companyServiceTokenService(db);
-    const tokenA = await service.createToken({ companyId: companyA, name: "A", createdByUserId: null });
+    const tokenA = await service.createToken({ companyId: companyA, name: "A", createdByUserId: null, scopes: ["lane_a:transform"] });
 
     // Company B's board user, holding A's token id.
     const revoked = await service.revokeToken({
@@ -147,8 +150,8 @@ describeEmbeddedPostgres("company service tokens", () => {
     const companyA = await seedCompany("A");
     const companyB = await seedCompany("B");
     const service = companyServiceTokenService(db);
-    await service.createToken({ companyId: companyA, name: "A token", createdByUserId: null });
-    await service.createToken({ companyId: companyB, name: "B token", createdByUserId: null });
+    await service.createToken({ companyId: companyA, name: "A token", createdByUserId: null, scopes: ["lane_a:transform"] });
+    await service.createToken({ companyId: companyB, name: "B token", createdByUserId: null, scopes: ["lane_a:transform"] });
 
     const listed = await service.listTokens(companyA);
     expect(listed).toHaveLength(1);
@@ -158,7 +161,7 @@ describeEmbeddedPostgres("company service tokens", () => {
   it("hides revoked tokens from the default listing but keeps them on request", async () => {
     const companyId = await seedCompany();
     const service = companyServiceTokenService(db);
-    const created = await service.createToken({ companyId, name: "N", createdByUserId: null });
+    const created = await service.createToken({ companyId, name: "N", createdByUserId: null, scopes: ["lane_a:transform"] });
     await service.revokeToken({ tokenId: created.id, companyId, revokedByUserId: null });
 
     expect(await service.listTokens(companyId)).toHaveLength(0);
@@ -174,5 +177,52 @@ describeEmbeddedPostgres("company service tokens", () => {
   it("ignores a bearer token that is not a service token at all", async () => {
     await seedCompany();
     expect(await companyServiceTokenService(db).findByToken("pcp_board_deadbeef")).toBeNull();
+  });
+
+  it("stores the scopes it was asked for, and hands them back on lookup", async () => {
+    const companyId = await seedCompany();
+    const service = companyServiceTokenService(db);
+    const created = await service.createToken({
+      companyId,
+      name: "Nordstrand dashboard",
+      createdByUserId: null,
+      scopes: ["lane_a:transform"],
+    });
+
+    expect(created.scopes).toEqual(["lane_a:transform"]);
+    expect(await service.findByToken(created.token)).toMatchObject({
+      companyId,
+      scopes: ["lane_a:transform"],
+    });
+    expect((await service.listTokens(companyId))[0]!.scopes).toEqual(["lane_a:transform"]);
+  });
+
+  it("drops a scope it does not recognise rather than storing it", async () => {
+    // Normalisation happens on write AND on every read, so neither a bad
+    // caller here nor a hand-edited row can widen what a token reaches.
+    const companyId = await seedCompany();
+    const service = companyServiceTokenService(db);
+    const created = await service.createToken({
+      companyId,
+      name: "N",
+      createdByUserId: null,
+      scopes: ["lane_a:transform", "board:everything"] as never,
+    });
+
+    expect(created.scopes).toEqual(["lane_a:transform"]);
+  });
+
+  it("accepts a token with no scopes at all, which then reaches nothing", async () => {
+    const companyId = await seedCompany();
+    const service = companyServiceTokenService(db);
+    const created = await service.createToken({
+      companyId,
+      name: "N",
+      createdByUserId: null,
+      scopes: [],
+    });
+
+    expect(created.scopes).toEqual([]);
+    expect(await service.findByToken(created.token)).toMatchObject({ scopes: [] });
   });
 });

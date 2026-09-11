@@ -175,6 +175,10 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         companyId: serviceToken.companyId,
         serviceTokenId: serviceToken.id,
         serviceTokenName: serviceToken.name,
+        // Already normalized against SERVICE_TOKEN_SCOPES by the lookup, so
+        // an unrecognised scope string on the row is dropped rather than
+        // carried onto the request.
+        serviceScopes: serviceToken.scopes,
         runId: runIdHeader || undefined,
         source: "company_service_token",
       };

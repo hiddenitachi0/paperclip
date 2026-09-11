@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companyServiceTokens } from "@paperclipai/db";
+import { normalizeServiceTokenScopes, type ServiceTokenScope } from "@paperclipai/shared";
 import { hashBearerToken } from "./board-auth.js";
 
 /**
@@ -31,6 +32,7 @@ export type CompanyServiceTokenSummary = {
   id: string;
   companyId: string;
   name: string;
+  scopes: ServiceTokenScope[];
   createdAt: Date;
   lastUsedAt: Date | null;
   revokedAt: Date | null;
@@ -42,26 +44,40 @@ const summaryColumns = {
   id: companyServiceTokens.id,
   companyId: companyServiceTokens.companyId,
   name: companyServiceTokens.name,
+  scopes: companyServiceTokens.scopes,
   createdAt: companyServiceTokens.createdAt,
   lastUsedAt: companyServiceTokens.lastUsedAt,
   revokedAt: companyServiceTokens.revokedAt,
   expiresAt: companyServiceTokens.expiresAt,
 };
 
+/**
+ * Every read path runs the stored scopes through the shared allowlist, so a
+ * scope string this build does not know about (an older/newer row, a hand
+ * edit) can never widen what a token reaches — it is simply dropped.
+ */
+function withNormalizedScopes<T extends { scopes: unknown }>(row: T): Omit<T, "scopes"> & { scopes: ServiceTokenScope[] } {
+  return { ...row, scopes: normalizeServiceTokenScopes(row.scopes) };
+}
+
 export function companyServiceTokenService(db: Db) {
   async function createToken(input: {
     companyId: string;
     name: string;
     createdByUserId: string | null;
+    /** What this token may reach. Normalized against the shared allowlist first. */
+    scopes: ServiceTokenScope[];
     expiresAt?: Date | null;
   }): Promise<CompanyServiceTokenSummary & { token: string }> {
     const token = createCompanyServiceTokenValue();
+    const scopes = normalizeServiceTokenScopes(input.scopes);
     const created = await db
       .insert(companyServiceTokens)
       .values({
         companyId: input.companyId,
         name: input.name.trim(),
         tokenHash: hashBearerToken(token),
+        scopes,
         createdByUserId: input.createdByUserId,
         expiresAt: input.expiresAt ?? null,
       })
@@ -69,7 +85,7 @@ export function companyServiceTokenService(db: Db) {
       .then((rows) => rows[0]!);
 
     // The only place the token value ever leaves this module.
-    return { ...created, token };
+    return { ...withNormalizedScopes(created), token };
   }
 
   async function listTokens(
@@ -85,11 +101,12 @@ export function companyServiceTokenService(db: Db) {
       );
       if (stillValid) conditions.push(stillValid);
     }
-    return db
+    const rows = await db
       .select(summaryColumns)
       .from(companyServiceTokens)
       .where(and(...conditions))
       .orderBy(sql`${companyServiceTokens.createdAt} desc`);
+    return rows.map(withNormalizedScopes);
   }
 
   async function getTokenForCompany(
@@ -100,7 +117,7 @@ export function companyServiceTokenService(db: Db) {
       .select(summaryColumns)
       .from(companyServiceTokens)
       .where(and(eq(companyServiceTokens.id, tokenId), eq(companyServiceTokens.companyId, companyId)))
-      .then((rows) => rows[0] ?? null);
+      .then((rows) => (rows[0] ? withNormalizedScopes(rows[0]) : null));
   }
 
   /**
@@ -124,15 +141,18 @@ export function companyServiceTokenService(db: Db) {
         ),
       )
       .returning(summaryColumns)
-      .then((rows) => rows[0] ?? null);
+      .then((rows) => (rows[0] ? withNormalizedScopes(rows[0]) : null));
   }
 
   /**
-   * Authentication lookup. Returns the row (id + companyId only — never the
-   * hash) or null. A revoked or expired token is null, identical to a token
-   * that never existed: the caller must not be able to tell those apart.
+   * Authentication lookup. Returns the row (id, companyId, name and scopes —
+   * never the hash) or null. A revoked or expired token is null, identical to
+   * a token that never existed: the caller must not be able to tell those
+   * apart.
    */
-  async function findByToken(token: string): Promise<{ id: string; companyId: string; name: string } | null> {
+  async function findByToken(
+    token: string,
+  ): Promise<{ id: string; companyId: string; name: string; scopes: ServiceTokenScope[] } | null> {
     if (!token.startsWith("pcp_service_")) return null;
     const now = new Date();
     const row = await db
@@ -140,6 +160,7 @@ export function companyServiceTokenService(db: Db) {
         id: companyServiceTokens.id,
         companyId: companyServiceTokens.companyId,
         name: companyServiceTokens.name,
+        scopes: companyServiceTokens.scopes,
         expiresAt: companyServiceTokens.expiresAt,
       })
       .from(companyServiceTokens)
@@ -152,7 +173,12 @@ export function companyServiceTokenService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!row) return null;
     if (row.expiresAt && row.expiresAt.getTime() <= now.getTime()) return null;
-    return { id: row.id, companyId: row.companyId, name: row.name };
+    return {
+      id: row.id,
+      companyId: row.companyId,
+      name: row.name,
+      scopes: normalizeServiceTokenScopes(row.scopes),
+    };
   }
 
   async function touchToken(tokenId: string): Promise<void> {
