@@ -93,6 +93,19 @@ RUN chmod +x /usr/local/bin/paperclip-git-credential \
   && git config --system 'credential.https://github.com.helper' /usr/local/bin/paperclip-git-credential \
   && git config --system 'credential.https://github.com.useHttpPath' false
 
+# Image-wide git pre-push guard (DUR-3975): refuses any push that would move a
+# branch to a history missing what is already on it — the way one agent's
+# force-push silently deleted another agent's commits, including the parent of
+# a Django migration, so a deploy approved on top of it could not apply.
+# --force and --force-with-lease do not skip pre-push hooks, so this is the one
+# layer an agent cannot argue its way past. Installed via core.hooksPath so it
+# covers every repository an agent clones with no per-repo wiring; the guard
+# chains to a repository's own .git/hooks/pre-push, and a repo that sets its
+# own core.hooksPath still wins (system config is the lowest precedence).
+COPY scripts/paperclip-git-pre-push-guard.sh /usr/local/share/paperclip/githooks/pre-push
+RUN chmod +x /usr/local/share/paperclip/githooks/pre-push \
+  && git config --system core.hooksPath /usr/local/share/paperclip/githooks
+
 # uv: Python package/venv manager for agent workspaces that build Python apps
 # (e.g. the Nordstrand Django dashboard). The base image ships python3 but no
 # pip/ensurepip, so `uv venv` / `uv pip install -r requirements.txt` / `uv sync`
