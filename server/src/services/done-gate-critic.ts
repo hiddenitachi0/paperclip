@@ -7,6 +7,7 @@ import {
   formatApprovalTitle,
   type DoneGateMode,
   type DoneGateSettings,
+  type DoneGateStatus,
   type InstanceGeneralSettings,
 } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
@@ -92,9 +93,24 @@ export const DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX = "Quality check (dry run): nee
 export const DONE_GATE_PASS_PREFIX = "Quality check: passed";
 export const DONE_GATE_DRY_RUN_PASS_PREFIX = "Quality check (dry run): passed";
 export const DONE_GATE_ESCALATED_PREFIX = "Quality check: asking the operator";
+export const DONE_GATE_UNAVAILABLE_PREFIX = "Quality check: could not run";
+
+/**
+ * Every prefix above, so one test can prove they all still match the LIKE below.
+ * A prefix that stops matching would make its comments invisible to the round
+ * counter and to every "has the gate written here?" read.
+ */
+export const DONE_GATE_COMMENT_PREFIXES = [
+  DONE_GATE_NEEDS_WORK_PREFIX,
+  DONE_GATE_DRY_RUN_NEEDS_WORK_PREFIX,
+  DONE_GATE_PASS_PREFIX,
+  DONE_GATE_DRY_RUN_PASS_PREFIX,
+  DONE_GATE_ESCALATED_PREFIX,
+  DONE_GATE_UNAVAILABLE_PREFIX,
+] as const;
 
 // Every comment this gate ever writes starts with this, so one LIKE finds them all.
-const DONE_GATE_COMMENT_LIKE = "Quality check%";
+export const DONE_GATE_COMMENT_LIKE = "Quality check%";
 
 export type DoneGateVerdict = "pass" | "needs_work";
 
@@ -253,6 +269,59 @@ export function computeDoneGateCriticCostCents(inputTokens: number, outputTokens
 }
 
 /**
+ * The most one check can cost, in whole cents, derived from the caps above (not
+ * a hand-written number that would drift when a cap changes). Rough on purpose:
+ * ~4 characters per token, plus a little for the fixed instructions.
+ */
+export function estimateDoneGateCriticMaxCostCents(): number {
+  const maxInputChars =
+    MAX_DESCRIPTION_CHARS +
+    MAX_FINAL_COMMENT_CHARS * 2 + // the agent's final comment and the merge summary share the cap
+    MAX_DIFF_CHARS +
+    MAX_CHANGED_FILES * 120;
+  const maxInputTokens = Math.ceil(maxInputChars / 4) + 500;
+  const usd =
+    (maxInputTokens / 1_000_000) * DONE_GATE_CRITIC_INPUT_USD_PER_MILLION +
+    (DONE_GATE_CRITIC_MAX_OUTPUT_TOKENS / 1_000_000) * DONE_GATE_CRITIC_OUTPUT_USD_PER_MILLION;
+  return Math.max(1, Math.ceil(usd * 100));
+}
+
+/**
+ * Whether the reviewer can actually be asked anything right now.
+ *
+ * This matters more than it looks: the gate fails OPEN by design, so an instance
+ * with the check switched on but no key of its own would let every "done" through
+ * with nothing on screen to say so. The settings page reads this, and
+ * `evaluateDoneGateCritic` writes the same distinction onto the task when a check
+ * could not run, so the two failure cases never look like a passing check.
+ */
+export function describeDoneGateReadiness(): { ready: boolean; notReadyReason: string | null; model: string } {
+  const hasKey = Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+  return {
+    ready: hasKey,
+    notReadyReason: hasKey
+      ? null
+      : "This instance has no Anthropic API key of its own, so the reviewer cannot be asked anything. Until it has one, every task an agent marks done goes through unchecked.",
+    model: DONE_GATE_CRITIC_MODEL,
+  };
+}
+
+/** What the settings page shows: the setting, plus whether it can actually do anything. */
+export function buildDoneGateStatus(general: Pick<InstanceGeneralSettings, "doneGate"> | null | undefined): DoneGateStatus {
+  const settings: DoneGateSettings = general?.doneGate ?? DEFAULT_DONE_GATE_SETTINGS;
+  const readiness = describeDoneGateReadiness();
+  return {
+    mode: settings.mode ?? DEFAULT_DONE_GATE_SETTINGS.mode,
+    maxRounds: settings.maxRounds ?? DEFAULT_DONE_GATE_SETTINGS.maxRounds,
+    companyOverrideCount: Object.keys(settings.companyOverrides ?? {}).length,
+    ready: readiness.ready,
+    notReadyReason: readiness.notReadyReason,
+    model: readiness.model,
+    maxCostCentsPerCheck: estimateDoneGateCriticMaxCostCents(),
+  };
+}
+
+/**
  * The WHERE clause for "a comment this gate wrote on this issue": system-authored with no
  * author agent/user (what postDoneGateComment stamps and what the comment route cannot
  * produce for an agent or a user), optionally only those newer than `since`.
@@ -354,6 +423,24 @@ export async function countDoneGateNeedsWorkRounds(
   return rows.filter((row) => prefixes.some((prefix) => row.body.startsWith(prefix))).length;
 }
 
+/**
+ * Whether this gate has already said on this issue, in the current loop, that a check
+ * could not run. Keeps a broken reviewer to one comment per loop instead of one per
+ * attempt, while still leaving a durable record that the task went to done unchecked.
+ */
+export async function hasDoneGateUnavailableComment(
+  db: Db,
+  input: { companyId: string; issueId: string; since?: Date | null },
+): Promise<boolean> {
+  const row = await db
+    .select({ id: issueComments.id })
+    .from(issueComments)
+    .where(doneGateCommentWhere(input, `${DONE_GATE_UNAVAILABLE_PREFIX}%`))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return Boolean(row);
+}
+
 /** Whether this gate has already asked the operator about the issue in the current loop (newer than `since`). */
 export async function hasDoneGateEscalationComment(
   db: Db,
@@ -435,6 +522,26 @@ export function buildDoneGateNeedsWorkComment(input: {
     );
   }
   return lines.join("\n");
+}
+
+export const DONE_GATE_SETTINGS_PATH = 'Settings > Instance settings > General, "Quality check before a task is marked done"';
+
+/**
+ * What the task says when the check was switched on but could not run. Names WHICH of the
+ * two cases happened, because they need different answers: "not set up" is a one-off setup
+ * job, "could not be reached" is usually temporary.
+ */
+export function buildDoneGateUnavailableComment(input: { reason: string | null }): string {
+  return [
+    `${DONE_GATE_UNAVAILABLE_PREFIX}.`,
+    "",
+    "This task was allowed to finish without being checked.",
+    "",
+    input.reason ??
+      "The reviewer could not be reached this time, or answered with something that could not be read. This is usually temporary; the next task will be checked again.",
+    "",
+    `Nothing here is blocked. You can see and change the check under ${DONE_GATE_SETTINGS_PATH}.`,
+  ].join("\n");
 }
 
 export function buildDoneGateEscalationText(input: {
@@ -596,8 +703,10 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
       maxRounds: config.maxRounds,
     });
   } catch (err) {
-    // The critic not running must never hold real work hostage.
+    // The critic not running must never hold real work hostage -- but it must not look
+    // like a passing check either, or a switched-on gate silently degrades to no gate.
     logger.warn({ err, issueId, round }, "done-gate critic could not run; letting the transition through");
+    await noteDoneGateCouldNotRun({ db, companyId, issueId, sourceRunId, since: resetAt });
     return null;
   }
 
@@ -675,6 +784,32 @@ export async function evaluateDoneGateCritic(input: DoneGateEvaluationInput): Pr
     findings: verdict.findings,
     escalated: false,
   };
+}
+
+/**
+ * Leaves one plain note on the task saying it went to done unchecked, at most once per
+ * loop. Best-effort throughout: a failure to write the note must not turn into a failure
+ * to let the work through.
+ */
+async function noteDoneGateCouldNotRun(input: {
+  db: Db;
+  companyId: string;
+  issueId: string;
+  sourceRunId: string | null;
+  since: Date | null;
+}): Promise<void> {
+  const { db, companyId, issueId } = input;
+  try {
+    if (await hasDoneGateUnavailableComment(db, { companyId, issueId, since: input.since })) return;
+    await postDoneGateComment(db, {
+      companyId,
+      issueId,
+      sourceRunId: input.sourceRunId,
+      body: buildDoneGateUnavailableComment({ reason: describeDoneGateReadiness().notReadyReason }),
+    });
+  } catch (err) {
+    logger.warn({ err, issueId }, "done-gate critic: failed to note that the check could not run");
+  }
 }
 
 async function escalateToBoard(

@@ -2951,6 +2951,14 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/instance/settings/general/done-gate/status",
+  tags: ["instance"],
+  summary: "Whether the done-gate quality check is on and able to run",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/instance/settings/general/max-turns-per-run/agent-overrides",
   tags: ["instance"],
   summary: "List agents that override the instance-wide max turns per run",

@@ -594,6 +594,7 @@ export type {
   DoneGateMode,
   DoneGateCompanyOverride,
   DoneGateSettings,
+  DoneGateStatus,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
   QuietModeActor,

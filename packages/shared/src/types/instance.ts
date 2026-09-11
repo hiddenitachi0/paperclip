@@ -231,6 +231,31 @@ export const DEFAULT_DONE_GATE_SETTINGS: DoneGateSettings = {
   companyOverrides: {},
 };
 
+/**
+ * DUR-3968: what the quality check is actually doing right now, for the settings
+ * page. The check ships "off" on purpose, but "off" and "switched on yet unable
+ * to run" look identical from the board otherwise: the reviewer needs a model
+ * key of the server's own, and when it has none every check silently passes.
+ * This is the read that makes the difference visible.
+ */
+export interface DoneGateStatus {
+  /** The instance-wide mode; per-company overrides are counted separately. */
+  mode: DoneGateMode;
+  maxRounds: number;
+  companyOverrideCount: number;
+  /** True when the reviewer could actually be asked right now. */
+  ready: boolean;
+  /** Plain-language reason it cannot run, or null when it can. */
+  notReadyReason: string | null;
+  /** Which reviewer model would be used. */
+  model: string;
+  /**
+   * Roughly the most one check can cost, in whole cents, so switching it on is
+   * an informed choice. Most checks cost well under this.
+   */
+  maxCostCentsPerCheck: number;
+}
+
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   keyboardShortcuts: boolean;
