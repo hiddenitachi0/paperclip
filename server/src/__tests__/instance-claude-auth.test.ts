@@ -402,6 +402,65 @@ describeEmbeddedPostgres("instance Claude auth service", () => {
       expect(result.notice?.message).toContain("Claude said: spawn claude ENOENT");
       expect(await listNotices(companyId)).toHaveLength(1);
     });
+
+    // DUR-3969 item 5: expiry is an INSTANCE fact. Twenty agents inheriting a
+    // dead sign-in must not become twenty identical alarms.
+    describe("run-time auth failure reporting", () => {
+      it("marks the shared sign-in as failing and tells the operator once, not once per agent", async () => {
+        const savedAt = new Date("2026-09-10T08:00:00.000Z");
+        let current = savedAt;
+        const { svc } = makeService({ now: () => current });
+        await svc.saveToken({ token: GOOD_TOKEN, source: "pasted", userId: null });
+        const companyId = await seedCompany("Durkan");
+
+        const first = await svc.reportRunAuthFailure({ source: "instance", agentName: "Reviewer 2" });
+        expect(first).toMatchObject({ marked: true, noticed: true });
+        expect(first.message).toContain("The shared Claude sign-in has stopped working");
+        // The instance-level notice never names one agent — that would make an
+        // instance fact look like that agent's problem.
+        expect(first.message).not.toContain("Reviewer 2");
+
+        // Nineteen more agents hit the same dead sign-in in the same window.
+        for (let i = 0; i < 19; i += 1) {
+          current = new Date(current.getTime() + 60 * 1000);
+          const repeat = await svc.reportRunAuthFailure({ source: "instance", agentName: `Agent ${i}` });
+          expect(repeat).toMatchObject({ marked: true, noticed: false, message: null });
+        }
+        expect(await listNotices(companyId)).toHaveLength(1);
+
+        // The sign-in page stops looking healthy straight away.
+        expect((await svc.getStatus()).health).toBe("check_failed");
+
+        // A whole window later it is worth saying again.
+        current = new Date(savedAt.getTime() + 7 * 60 * 60 * 1000);
+        expect(await svc.reportRunAuthFailure({ source: "instance" })).toMatchObject({ noticed: true });
+        expect(await listNotices(companyId)).toHaveLength(2);
+      });
+
+      it("stays silent when the failing credential belongs to the agent itself", async () => {
+        const { svc } = makeService();
+        await svc.saveToken({ token: GOOD_TOKEN, source: "pasted", userId: null });
+        const companyId = await seedCompany("Durkan");
+        expect(await svc.reportRunAuthFailure({ source: "agent", agentName: "Reviewer 2" })).toEqual({
+          marked: false,
+          noticed: false,
+          message: null,
+        });
+        expect(await listNotices(companyId)).toHaveLength(0);
+        // The shared sign-in is untouched — the other agents keep working.
+        expect((await svc.getStatus()).health).toBe("ok");
+      });
+
+      it("still tells the operator once when there is no sign-in at all to mark", async () => {
+        const { svc } = makeService();
+        const companyId = await seedCompany("Durkan");
+        const reported = await svc.reportRunAuthFailure({ source: "none" });
+        expect(reported).toMatchObject({ marked: false, noticed: true });
+        expect(reported.message).toContain("There is no Claude sign-in");
+        expect(await svc.reportRunAuthFailure({ source: "none" })).toMatchObject({ noticed: false });
+        expect(await listNotices(companyId)).toHaveLength(1);
+      });
+    });
   });
 
   it("interactive sign-in: start → link → code → token verified and stored, never exposed", async () => {

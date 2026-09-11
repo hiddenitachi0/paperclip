@@ -886,6 +886,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   async function seedAssignedTodoNoRunFixture(input?: {
     agentStatus?: "paused" | "idle" | "running";
+    adapterType?: string;
+    agentName?: string;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -902,10 +904,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.insert(agents).values({
       id: agentId,
       companyId,
-      name: "CodexCoder",
+      name: input?.agentName ?? "CodexCoder",
       role: "engineer",
       status: input?.agentStatus ?? "idle",
-      adapterType: "codex_local",
+      adapterType: input?.adapterType ?? "codex_local",
       adapterConfig: {},
       runtimeConfig: {},
       permissions: {},
@@ -3077,6 +3079,74 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(settled?.errorCode).toBeNull();
     // The error column must never hold the agent-written summary.
     expect(settled?.error).not.toBe(summary);
+  });
+
+  // DUR-3969 item 4: an operator who employs a new agent used to read
+  // "Claude run failed: subtype=success: Not logged in - Please run /login" —
+  // which describes the wrong problem (the instance is not signed out; other
+  // agents keep running) and names an action they cannot take. What is stored
+  // must instead say which case it is and where to fix it.
+  it("replaces the CLI's /login text with a plain sentence naming the case and the place to fix it", async () => {
+    const claudeAuthEnvKeys = [
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "ANTHROPIC_BEDROCK_BASE_URL",
+    ];
+    const savedEnv = new Map(claudeAuthEnvKeys.map((key) => [key, process.env[key]]));
+    for (const key of claudeAuthEnvKeys) delete process.env[key];
+    try {
+      const { agentId, issueId } = await seedAssignedTodoNoRunFixture({
+        adapterType: "claude_local",
+        agentName: "Reviewer 2",
+      });
+      mockAdapterExecute.mockImplementationOnce(async () => ({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "Claude run failed: subtype=success: Not logged in - Please run /login",
+        errorCode: "claude_auth_required",
+        provider: "test",
+        model: "test-model",
+      }));
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.issueIds).toEqual([issueId]);
+
+      const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+      expect(runs).toHaveLength(1);
+      const settled = await waitForRunToSettle(heartbeat, runs[0]!.id);
+
+      expect(settled?.status).toBe("failed");
+      expect(settled?.errorCode).toBe("claude_auth_required");
+      // No instance sign-in is saved in this fixture and the process carries no
+      // Claude token, so this is the "there is no sign-in at all" case.
+      expect(settled?.error).toContain("There is no Claude sign-in for Reviewer 2 to use");
+      expect(settled?.error).toContain("Settings > Instance settings > Claude sign-in");
+      expect(settled?.error).not.toMatch(/\/login/);
+      expect(settled?.error).not.toContain("subtype=");
+
+      // The agent page's own red-marker reason says the same thing.
+      const agentRow = await waitForValue(async () =>
+        db
+          .select()
+          .from(agents)
+          .where(eq(agents.id, agentId))
+          .then((rows) => (rows[0]?.errorReason ? rows[0] : null)),
+      );
+      expect(agentRow?.errorReason).toContain("There is no Claude sign-in for Reviewer 2 to use");
+      expect(agentRow?.errorReason).not.toMatch(/\/login/);
+      // The agent is left invokable — it recovers by itself once the operator
+      // signs in, with no per-agent fixing.
+      expect(agentRow?.status).toBe("error");
+    } finally {
+      for (const [key, value] of savedEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   // DUR-41 Part B: agents have repeatedly ended a turn by arming their own

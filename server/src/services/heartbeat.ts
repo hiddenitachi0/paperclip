@@ -157,7 +157,14 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService, readMaxTurnsPerRunOverride } from "./instance-settings.js";
-import { CLAUDE_AUTH_FALLBACK_ENV_KEY, instanceClaudeAuthService } from "./instance-claude-auth.js";
+import { instanceClaudeAuthService } from "./instance-claude-auth.js";
+import {
+  CLAUDE_AUTH_FALLBACK_ENV_KEY,
+  buildClaudeAuthOperatorMessage,
+  claudeEnvHasOwnCredential as claudeEnvHasOwnCredentialImpl,
+  classifyClaudeCredentialSource,
+  type ClaudeCredentialSource,
+} from "./claude-credential-source.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import {
   evaluateExecutionAllowlist,
@@ -554,24 +561,10 @@ function formatMissingBindingForOperator(missing: MissingRuntimeBinding): string
   return `secret ${secretLabel} not bound at ${missing.consumerType} ${missing.configPath}`;
 }
 
-function hasNonEmptyEnvString(env: Record<string, unknown>, key: string): boolean {
-  const value = env[key];
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-/**
- * Mirrors the claude_local adapter's own auth detection: a subscription
- * token, an API key, or a Bedrock setup each count as "has its own way in".
- */
-export function claudeEnvHasOwnCredential(env: Record<string, unknown>): boolean {
-  if (hasNonEmptyEnvString(env, CLAUDE_AUTH_FALLBACK_ENV_KEY)) return true;
-  if (hasNonEmptyEnvString(env, "ANTHROPIC_API_KEY")) return true;
-  if (hasNonEmptyEnvString(env, "ANTHROPIC_AUTH_TOKEN")) return true;
-  const bedrock = env.CLAUDE_CODE_USE_BEDROCK;
-  if (bedrock === "1" || bedrock === "true" || bedrock === true) return true;
-  if (hasNonEmptyEnvString(env, "ANTHROPIC_BEDROCK_BASE_URL")) return true;
-  return false;
-}
+// The implementation moved to claude-credential-source.ts, next to the
+// resolution order it belongs to. Re-exported here so existing importers
+// (and tests) that reach for it on the heartbeat module keep working.
+export { claudeEnvHasOwnCredential } from "./claude-credential-source.js";
 
 function isConfiguredEnvBindingValue(binding: unknown) {
   const parsed = envBindingSchema.safeParse(binding);
@@ -671,6 +664,14 @@ export async function resolveExecutionRunAdapterConfig(input: {
    * care keep working unchanged.
    */
   instanceClaudeAuth?: { resolveFallbackToken: () => Promise<string | null> } | null;
+  /**
+   * The server process's own environment — step 3 of the resolution order in
+   * claude-credential-source.ts. The adapter spawns the CLI with
+   * `{ ...process.env, ...runEnv }`, so a token here really is what the run
+   * would use; naming it explicitly is what lets the operator message say so.
+   * Injectable for tests.
+   */
+  processEnv?: NodeJS.ProcessEnv;
 }) {
   const executionRunConfig = stripPaperclipRuntimeEnvFromAdapterConfig(input.executionRunConfig);
   const environmentEnv = stripPaperclipRuntimeEnvBindings(input.environmentEnv);
@@ -899,28 +900,49 @@ export async function resolveExecutionRunAdapterConfig(input: {
       secretKeys.add(key);
     }
   }
-  // One-click Claude sign-in fallback. Only for claude_local, and only when
-  // the fully merged env still carries no Claude credential of its own — an
-  // agent-level, project-level, environment or routine token always wins, so
-  // existing per-agent setups are untouched. The injected value is treated
-  // exactly like a bound secret for redaction (key + literal value).
+  // Claude sign-in resolution. The order — own binding, else the instance
+  // sign-in, else the server process's own env, else nothing — is documented
+  // in full in claude-credential-source.ts; this is the only place it runs.
+  //
+  // Only claude_local has a Claude sign-in to resolve, so every other adapter
+  // reports "agent" (its credentials are its own business) and nothing below
+  // changes for it.
+  //
+  // An agent-level, environment, project or routine token always wins, so an
+  // agent deliberately pointed at a different account (a client-owned
+  // subscription, a separate quota) behaves exactly as it did before
+  // inheritance existed. The inherited value is treated exactly like a bound
+  // secret for redaction (key + literal value).
+  let claudeCredentialSource: ClaudeCredentialSource = "agent";
   let usedInstanceClaudeAuth = false;
   const effectiveSecretValues = secretValues ?? new Set<string>();
-  if (input.adapterType === "claude_local" && input.instanceClaudeAuth) {
+  if (input.adapterType === "claude_local") {
     const mergedEnv = parseObject(resolvedConfig.env);
-    if (!claudeEnvHasOwnCredential(mergedEnv)) {
-      const fallbackToken = await input.instanceClaudeAuth.resolveFallbackToken();
-      if (fallbackToken) {
-        resolvedConfig.env = { ...mergedEnv, [CLAUDE_AUTH_FALLBACK_ENV_KEY]: fallbackToken };
-        secretKeys.add(CLAUDE_AUTH_FALLBACK_ENV_KEY);
-        effectiveSecretValues.add(fallbackToken);
-        usedInstanceClaudeAuth = true;
-      }
+    const mergedEnvHasOwnCredential = claudeEnvHasOwnCredentialImpl(mergedEnv);
+    const fallbackToken = mergedEnvHasOwnCredential
+      ? null
+      : (await input.instanceClaudeAuth?.resolveFallbackToken()) ?? null;
+    claudeCredentialSource = classifyClaudeCredentialSource({
+      mergedEnvHasOwnCredential,
+      instanceToken: fallbackToken,
+      processEnv: input.processEnv ?? process.env,
+    });
+    if (claudeCredentialSource === "instance" && fallbackToken) {
+      resolvedConfig.env = { ...mergedEnv, [CLAUDE_AUTH_FALLBACK_ENV_KEY]: fallbackToken };
+      secretKeys.add(CLAUDE_AUTH_FALLBACK_ENV_KEY);
+      effectiveSecretValues.add(fallbackToken);
+      usedInstanceClaudeAuth = true;
     }
   }
   return {
     resolvedConfig,
     secretKeys,
+    /**
+     * Which of the four tiers actually supplied this run's Claude sign-in.
+     * Drives the operator-facing failure message and decides whether an auth
+     * failure is an instance fact (reported once) or this agent's own.
+     */
+    claudeCredentialSource,
     usedInstanceClaudeAuth,
     // DUR-132: literal resolved secret values (currently only ever
     // populated from adapterConfig.mcpServers[*].env/.headers -- see
@@ -5292,7 +5314,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
-  const instanceClaudeAuth = instanceClaudeAuthService(db);
+  // DUR-3969: built on `rawDb`, not the (possibly request-scoped) `db`. It
+  // reads the instance-wide sign-in and, when that sign-in fails, leaves one
+  // operator notice in every company — work that outlives any single company
+  // scope, exactly like the scheduler's own daily check.
+  const instanceClaudeAuth = instanceClaudeAuthService(rawDb);
   const companySkills = companySkillService(db);
   // DUR-240: give issuesSvc's lock-adoption paths a way to check whether a
   // run this server instance still has an in-memory process handle for is
@@ -11972,7 +11998,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
-    const { resolvedConfig, secretKeys, secretValues, secretManifest, usedInstanceClaudeAuth } = await resolveExecutionRunAdapterConfig({
+    const { resolvedConfig, secretKeys, secretValues, secretManifest, claudeCredentialSource } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
       adapterType: agent.adapterType,
@@ -13373,7 +13399,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         rawUsage,
       });
       const normalizedUsage = sessionUsageResolution.normalizedUsage;
-      const runErrorMessage =
+      let runErrorMessage =
         outcome === "cancelled"
           ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
           : outcome === "succeeded"
@@ -13390,11 +13416,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             : outcome === "failed"
               ? (adapterResult.errorCode ?? "adapter_failed")
               : null;
-      if (runErrorCode === "claude_auth_required" && usedInstanceClaudeAuth) {
-        // The instance-wide Claude sign-in was the credential for this run
-        // and Claude asked for a login: surface that on the sign-in page
-        // ("Sign in again") instead of leaving it to look healthy.
-        await instanceClaudeAuth.markAuthFailure().catch(() => undefined);
+      // DUR-3969 items 4 and 5. The CLI says "Not logged in - Please run
+      // /login", which describes the wrong problem (the instance is not signed
+      // out — other agents keep running on the same sign-in) and names an
+      // action the operator cannot take. Replace it with the one sentence that
+      // says which of the cases this is and where to fix it, and report an
+      // instance-wide cause once at instance level instead of once per agent.
+      // The CLI's own text is not lost: it stays in the run's result JSON,
+      // stderr excerpt and run log for diagnosis.
+      let claudeAuthOperatorMessage: string | null = null;
+      if (runErrorCode === "claude_auth_required" && agent.adapterType === "claude_local") {
+        claudeAuthOperatorMessage = buildClaudeAuthOperatorMessage({
+          source: claudeCredentialSource,
+          agentName: agent.name,
+        });
+        runErrorMessage = claudeAuthOperatorMessage;
+        await instanceClaudeAuth
+          .reportRunAuthFailure({ source: claudeCredentialSource, agentName: agent.name })
+          .catch(() => undefined);
       }
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
@@ -13673,7 +13712,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await finalizeAgentStatus(
         agent.id,
         turnCapContinued ? "cancelled" : outcome,
-        outcome === "succeeded" ? null : (turnCapContinuation?.note ?? adapterResult.errorMessage ?? null),
+        outcome === "succeeded"
+          ? null
+          // The agent page's own "why is this red" reason must say the same
+          // plain-language thing the run does, not the CLI's /login text.
+          : (turnCapContinuation?.note ?? claudeAuthOperatorMessage ?? adapterResult.errorMessage ?? null),
       );
     } catch (err) {
       const message = redactCurrentUserText(
