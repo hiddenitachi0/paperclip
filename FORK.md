@@ -243,12 +243,15 @@ is always an agent typing `git push` in its own shell. Every guard around that
 was a Claude Code **PostToolUse** hook — it runs *after* the push and can only
 leave a comment. Nothing checked whether a push was a fast-forward.
 
-So when several agents worked one branch from separate checkouts, git rejected
-the second plain push as non-fast-forward, the agent reached for `--force`, and
-the first agent's commits stopped being reachable. That is how a Django
-migration was left depending on a parent commit that no longer existed in the
-branch: the operator approved a deploy that could not apply, and it rolled back
-with `NodeNotFoundError`.
+The mechanism (reproduced end to end by the test suite below, including a
+negative control that shows it happening without the guard): several agents work
+one branch from separate checkouts, git rejects the second plain push as
+non-fast-forward, the agent reads the rejection and reaches for `--force`, and
+the first agent's commits stop being reachable. The branch still looks complete
+afterwards, so anything that depended on one of those commits — a database
+migration whose parent lived there, for instance — is broken with nothing saying
+so until it is deployed. **DUR-3975** is the incident report; the details of that
+deploy failure live on the ticket, not here.
 
 Fix: a **`pre-push` hook installed image-wide via `core.hooksPath`**. `--force`,
 `--force-with-lease` and `+refs/…` do not skip pre-push hooks, so the bad

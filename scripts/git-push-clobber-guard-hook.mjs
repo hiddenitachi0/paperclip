@@ -4,19 +4,23 @@
  *
  * Claude Code PreToolUse hook (matcher: Bash). Wired via .claude/settings.json.
  *
- * WHAT AND WHY (DUR-3975). Agents do not push through any Paperclip code —
- * `scripts/check-no-git-push.mjs` forbids `git push` anywhere in adapter or
- * runtime source, so the only push path is the agent typing `git push` into its
- * own shell, authenticated by the image-wide github.com credential helper. The
- * four guards already wired around that (pr-base-branch-guard,
- * pr-open-merge-approval, github-workflow-scope-guard,
+ * WHAT AND WHY (see DUR-3975 for the incident this came from). Agents do not
+ * push through any Paperclip code — `scripts/check-no-git-push.mjs` forbids
+ * `git push` anywhere in adapter or runtime source, so the only push path is the
+ * agent typing `git push` into its own shell, authenticated by the image-wide
+ * github.com credential helper. The four guards already wired around that
+ * (pr-base-branch-guard, pr-open-merge-approval, github-workflow-scope-guard,
  * branch-push-duplicate-check) are all *PostToolUse*: they run after the push
  * and can only leave a comment. Nothing ever checked whether a push was a
- * fast-forward, so when two agents worked one branch from separate checkouts,
- * git rejected the second plain push, the agent reached for `--force`, and the
- * first agent's commits stopped being reachable — including the parent of a
- * Django migration, which is why an approved deploy rolled back with
- * NodeNotFoundError.
+ * fast-forward.
+ *
+ * The mechanism that leaves commits unreachable (this part is verified by the
+ * test suite, which reproduces it): two agents work one branch from separate
+ * checkouts, git rejects the second plain push as non-fast-forward, the agent
+ * reads the rejection and reaches for `--force`, and the first agent's commits
+ * stop being reachable from the branch. Anything that depended on one of those
+ * commits — a migration whose parent lived there, for instance — is then broken
+ * on a branch that still looks complete.
  *
  * The real fix is the git `pre-push` guard installed image-wide via
  * core.hooksPath (scripts/paperclip-git-pre-push-guard.sh, wired in the
@@ -53,7 +57,7 @@ const RECOVERY = `Integrate what is already on the branch, then push normally:
   # resolve any conflicts, re-run the tests, then:
   git push <remote> HEAD:<branch>`;
 
-const GIT_PUSH_RE = /(^|[|&;(]|\s)git(\s+-[^\s]+(\s+[^\s-][^\s]*)?)*\s+push(\s|$)/;
+const GIT_PUSH_RE = /(^|[|&;()]|\s)git(\s+-[^\s]+(\s+[^\s-][^\s]*)?)*\s+push(\s|$)/;
 const DRY_RUN_RE = /(^|\s)(--dry-run|-n)(\s|$)/;
 const NO_VERIFY_RE = /(^|\s)--no-verify(\s|$)/;
 const HOOKS_PATH_OVERRIDE_RE = /core\.hookspath|GIT_CONFIG_COUNT=|GIT_CONFIG_KEY_\d/i;
@@ -70,9 +74,10 @@ export const BLOCK_REASONS = {
   gh_api_force_ref: `BLOCKED: this updates a branch through the GitHub API with force=true.
 
 That moves the branch without git ever running, so the guard that checks you are
-not throwing away another agent's commits never gets a say. DUR-3975 is exactly
-that outcome: a migration's parent commit vanished from a shared branch, and the
-deploy approved on top of it could not apply.
+not throwing away another agent's commits never gets a say. Commits another
+agent pushed would stop being reachable, and the branch would still look
+complete — anything that depended on one of them is quietly broken. See
+DUR-3975.
 
 Push with git instead, so the check runs.
 
@@ -81,8 +86,7 @@ ${RECOVERY}`,
   no_verify: `BLOCKED: this push skips git's pre-push hooks (--no-verify).
 
 That hook is the one thing standing between this push and silently discarding
-commits another agent already put on the branch (DUR-3975 — a migration's parent
-commit was lost that way, and the deploy built on it rolled back).
+commits another agent already put on the branch (that is the DUR-3975 failure).
 
 Run the push without --no-verify. If it is then refused, the refusal text names
 the commits you would have dropped and how to keep them.
@@ -101,14 +105,114 @@ ${RECOVERY}`,
 pre-push guard installed — so nothing here can tell whether it would throw away
 commits another agent already pushed.
 
-That is the DUR-3975 failure: a shared branch was moved to a history missing a
-migration's parent commit, and the deploy approved on top of it rolled back.
+Moving a shared branch to a history that does not contain what is already on it
+leaves those commits unreachable while the branch still looks complete — see
+DUR-3975.
 
 ${RECOVERY}
 
 If the branch is genuinely yours alone and the rewrite is intended, say so on
 the ticket and let the operator decide — do not force it from a run.`,
 };
+
+/**
+ * Positions of the *unquoted* shell separators in `text` — the points where one
+ * command ends and the next begins: `;` `\n` `&&` `||` `|` `&` `(` `)`.
+ *
+ * This exists because the flags above must only be read off the `git push`
+ * command itself. Matching them against the whole line is wrong in both
+ * directions, and both directions were live bugs:
+ *
+ *   * false negative — `head -n 20 log && git push --no-verify origin main`:
+ *     grep/head/sed `-n` read as git push's `--dry-run` short flag, so the push
+ *     was waved through and --no-verify (the one thing only this hook catches)
+ *     went unchecked.
+ *   * false positive — `rm -f /tmp/x && git push origin main`, or a
+ *     `gh pr create -f` chained after the push: the unrelated `-f` read as
+ *     `--force`, so an ordinary push was refused *and* told something untrue
+ *     about why. That wedges normal work, which is worse than not guarding.
+ *
+ * Quoting is honoured so a separator inside `git commit -m "a && b"` does not
+ * split the line.
+ *
+ * Known gap, unchanged by this scoping and left alone on purpose: GIT_PUSH_RE
+ * only recognises `git push` at the start of a word, so a push wrapped in a
+ * quoted subshell string (`sh -c 'git push --no-verify …'`) is not seen here.
+ * Matching inside quotes would also match prose about pushing, and refusing an
+ * innocent command with a false explanation is the worse failure. The pre-push
+ * hook still covers the quoted case for everything except `--no-verify`.
+ *
+ * @param {string} text
+ * @returns {Array<[number, number]>} [start, end) of each separator
+ */
+function separatorRanges(text) {
+  const ranges = [];
+  let quote = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote !== null) {
+      if (quote === '"' && ch === "\\") i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === ";" || ch === "\n" || ch === "(" || ch === ")") {
+      ranges.push([i, i + 1]);
+      continue;
+    }
+    if (ch === "&" || ch === "|") {
+      const width = text[i + 1] === ch ? 2 : 1;
+      ranges.push([i, i + width]);
+      i += width - 1;
+    }
+  }
+  return ranges;
+}
+
+/**
+ * The single shell command containing the `git` at `gitIndex`: from the end of
+ * the preceding unquoted separator to the start of the following one.
+ *
+ * It starts at the command, not at the word `git`, so a `GIT_CONFIG_*=…` env
+ * prefix and a `git -c core.hooksPath=… push` flag are both inside the slice —
+ * those legitimately sit before the word `push` and must still be checked.
+ */
+function commandSegment(text, separators, gitIndex) {
+  let start = 0;
+  let end = text.length;
+  for (const [sepStart, sepEnd] of separators) {
+    if (sepEnd <= gitIndex) start = Math.max(start, sepEnd);
+    else if (sepStart >= gitIndex) {
+      end = sepStart;
+      break;
+    }
+  }
+  return text.slice(start, end);
+}
+
+/** Classify one `git push` command, with nothing else on the line in scope. */
+function classifyPushSegment(segment, context) {
+  // `-n` is git push's short flag for --dry-run (--no-verify has no short
+  // form). A dry run changes nothing on the remote, so nothing below applies.
+  if (DRY_RUN_RE.test(segment)) return { blocked: false, reason: null };
+
+  if (NO_VERIFY_RE.test(segment)) return { blocked: true, reason: "no_verify" };
+  if (HOOKS_PATH_OVERRIDE_RE.test(segment)) return { blocked: true, reason: "hooks_path_override" };
+
+  const forceShaped = FORCE_SHAPED_RES.some((pattern) => pattern.test(segment));
+  if (forceShaped && context.prePushGuardActive !== true) {
+    return { blocked: true, reason: "force_without_guard" };
+  }
+
+  return { blocked: false, reason: null };
+}
 
 /**
  * Decide what to do with one Bash command.
@@ -127,18 +231,15 @@ export function classifyPushCommand(command, context = {}) {
     return { blocked: true, reason: "gh_api_force_ref" };
   }
 
-  if (!GIT_PUSH_RE.test(text)) return { blocked: false, reason: null };
-
-  // `-n` is git push's short flag for --dry-run (--no-verify has no short
-  // form). A dry run changes nothing on the remote, so nothing below applies.
-  if (DRY_RUN_RE.test(text)) return { blocked: false, reason: null };
-
-  if (NO_VERIFY_RE.test(text)) return { blocked: true, reason: "no_verify" };
-  if (HOOKS_PATH_OVERRIDE_RE.test(text)) return { blocked: true, reason: "hooks_path_override" };
-
-  const forceShaped = FORCE_SHAPED_RES.some((pattern) => pattern.test(text));
-  if (forceShaped && context.prePushGuardActive !== true) {
-    return { blocked: true, reason: "force_without_guard" };
+  const separators = separatorRanges(text);
+  const pushRe = new RegExp(GIT_PUSH_RE.source, "g");
+  // A line can chain more than one push (`git push --dry-run … && git push
+  // --force …`); each is judged on its own, and the first refusal wins.
+  for (let match = pushRe.exec(text); match !== null; match = pushRe.exec(text)) {
+    const gitIndex = match.index + match[1].length;
+    const verdict = classifyPushSegment(commandSegment(text, separators, gitIndex), context);
+    if (verdict.blocked) return verdict;
+    if (pushRe.lastIndex <= match.index) pushRe.lastIndex = match.index + 1;
   }
 
   return { blocked: false, reason: null };

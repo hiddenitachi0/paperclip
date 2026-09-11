@@ -312,6 +312,108 @@ test("classifier: --dry-run changes nothing on the remote, so it is never blocke
   }
 });
 
+// --- the flags must be read off the `git push` command, not off the whole line -
+
+test("classifier: -n belonging to another command is not git push's --dry-run", () => {
+  // The serious one. `-n` is grep's/head's/sed's flag far more often than it is
+  // git push's, and reading it as --dry-run waved the push through — including
+  // --no-verify, which is the only thing this layer catches at all.
+  assert.deepEqual(
+    classifyPushCommand("head -n 20 log && git push --no-verify origin main", {
+      prePushGuardActive: true,
+    }),
+    { blocked: true, reason: "no_verify" },
+  );
+  assert.deepEqual(
+    classifyPushCommand("grep -n foo file && git push --force origin main", {
+      prePushGuardActive: false,
+    }),
+    { blocked: true, reason: "force_without_guard" },
+  );
+  assert.deepEqual(
+    classifyPushCommand("sed -n '1,5p' notes.txt; git push --no-verify origin main", {
+      prePushGuardActive: true,
+    }),
+    { blocked: true, reason: "no_verify" },
+  );
+});
+
+test("classifier: a -f or --delete belonging to another command is not a force push", () => {
+  // Blocking a legitimate push *and* telling the agent "this is a force push"
+  // when it is not is worse than not guarding: it wedges ordinary work with a
+  // false explanation. Checked with no pre-push guard installed, which is the
+  // state every checkout is in between merge and the image rebuild.
+  for (const command of [
+    "git commit -m x && git push -u origin HEAD && gh pr create -f",
+    "rm -f /tmp/x && git push origin main",
+    "git push origin main && rm -rf node_modules/.cache",
+    "kubectl delete pod x || git push origin HEAD:shared",
+    'git commit -m "drop -f support" && git push origin main',
+  ]) {
+    assert.deepEqual(
+      classifyPushCommand(command, { prePushGuardActive: false }),
+      { blocked: false, reason: null },
+      `expected to allow: ${command}`,
+    );
+  }
+});
+
+test("classifier: each push on a chained line is judged on its own", () => {
+  // A harmless dry run earlier on the line must not excuse a real force push
+  // later on it.
+  assert.deepEqual(
+    classifyPushCommand("git push --dry-run origin main && git push --force origin main", {
+      prePushGuardActive: false,
+    }),
+    { blocked: true, reason: "force_without_guard" },
+  );
+  assert.deepEqual(
+    classifyPushCommand("git push origin main || git push --no-verify --force origin main", {
+      prePushGuardActive: true,
+    }),
+    { blocked: true, reason: "no_verify" },
+  );
+});
+
+test("classifier: a separator inside quotes does not split the command", () => {
+  assert.deepEqual(
+    classifyPushCommand('git commit -m "a && b" && git push --no-verify origin main', {
+      prePushGuardActive: true,
+    }),
+    { blocked: true, reason: "no_verify" },
+  );
+  assert.deepEqual(
+    classifyPushCommand("git commit -m 'x; y' ; git push --force origin main", {
+      prePushGuardActive: false,
+    }),
+    { blocked: true, reason: "force_without_guard" },
+  );
+});
+
+test("classifier: an env/-c hooks-path override still counts, sitting before the word push", () => {
+  // These legitimately appear before `git`, so the slice has to start at the
+  // command, not at the word `git push`.
+  assert.deepEqual(
+    classifyPushCommand("echo hi && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/x git push origin shared", {
+      prePushGuardActive: true,
+    }),
+    { blocked: true, reason: "hooks_path_override" },
+  );
+  assert.deepEqual(
+    classifyPushCommand("cd repo && git -c core.hooksPath=/tmp/empty push origin shared", {
+      prePushGuardActive: true,
+    }),
+    { blocked: true, reason: "hooks_path_override" },
+  );
+  // But the same words in an unrelated command on the line are not a push.
+  assert.deepEqual(
+    classifyPushCommand("git config --get core.hooksPath && git push origin main", {
+      prePushGuardActive: false,
+    }),
+    { blocked: false, reason: null },
+  );
+});
+
 test("every block reason tells the agent what to run instead", () => {
   for (const [reason, text] of Object.entries(BLOCK_REASONS)) {
     assert.match(text, /BLOCKED/, `${reason} must say it was blocked`);

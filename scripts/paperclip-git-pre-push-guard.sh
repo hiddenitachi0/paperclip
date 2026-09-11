@@ -2,7 +2,8 @@
 # Paperclip git `pre-push` guard — refuses a push that would drop commits
 # another working copy already put on a shared branch.
 #
-# WHAT AND WHY (DUR-3975). Agents do not push through any Paperclip code:
+# WHAT AND WHY (see DUR-3975 for the incident this came from). Agents do not
+# push through any Paperclip code:
 # `scripts/check-no-git-push.mjs` forbids a `git push` anywhere in adapter or
 # runtime source, so the only push path is the agent typing `git push` into
 # its own shell, authenticated by the image-wide github.com credential helper
@@ -12,13 +13,13 @@
 # after the push and can only leave a comment. Nothing ever checked whether a
 # push was a fast-forward.
 #
-# So when two agents work the same branch from separate checkouts, git rejects
-# the second plain push as non-fast-forward, the agent reads the rejection and
-# reaches for `--force`, and the first agent's commits stop being reachable.
-# That is how a Django migration (module_financial_kpis.0023) was left pointing
-# at a parent that no longer existed in the branch: the parent migration was on
-# a commit a later force-push discarded. The operator then approved a deploy
-# that could not possibly apply, and it rolled back with NodeNotFoundError.
+# The mechanism, which the test suite reproduces end to end: two agents work the
+# same branch from separate checkouts, git rejects the second plain push as
+# non-fast-forward, the agent reads the rejection and reaches for `--force`, and
+# the first agent's commits stop being reachable. The branch still looks
+# complete afterwards, so anything that depended on one of those commits — a
+# database migration whose parent lived there, for instance — is broken without
+# anything saying so until it is deployed.
 #
 # This hook is the layer that cannot be talked around: `--force`,
 # `--force-with-lease` and `+refs/...` all still run pre-push, so refusing here
@@ -39,7 +40,7 @@
 #
 # Escape hatch: deliberately none that an agent can reach. `git push
 # --no-verify` skips every pre-push hook, which is why the Claude Code
-# PreToolUse hook (scripts/git-push-clobber-guard-hook.sh) refuses a push
+# PreToolUse hook (scripts/git-push-clobber-guard-hook.mjs) refuses a push
 # command carrying it.
 #
 # Repo-local `.git/hooks/pre-push` still runs: this guard chains to it after
@@ -136,8 +137,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   git log --no-decorate --oneline --max-count=20 "$remote_sha" "^$local_sha" 2>/dev/null \
     | while read -r line; do say "  $line"; done
   say ""
-  say "Replacing commits that are already on a shared branch is how DUR-3975"
-  say "lost the parent of a database migration and broke a production deploy."
+  say "Those commits would still be gone even though the branch looks complete,"
+  say "so anything built on them breaks silently. That is DUR-3975."
   say ""
   say "If those commits are someone else's, build on top of them:"
   say "  git fetch $REMOTE_NAME"
