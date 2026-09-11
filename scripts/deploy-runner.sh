@@ -61,6 +61,28 @@
 #   6. Health-check healthCheckUrl for HTTP 200 (retries below); auto-rollback
 #      (git reset --hard to the pre-deploy commit + re-run the recipe) when
 #      rollback is "git_previous" and the health check never passes.
+#   6b. DUR-3974: health-check the APPLICATION, not just an address. Before
+#      anything is touched, record how the project's real pages
+#      (deployPolicy.appHealthCheckPaths, or the front page when none are
+#      configured) answer; after the deploy, open them again and roll back if
+#      a page that WAS working now returns a server error. A single 200 from
+#      one configured address proves nothing: on 2026-09-10 that address was a
+#      login page that renders without touching the database, so it answered
+#      200 throughout five and a half minutes of 500s on every page that
+#      loads companies, and the deploy called itself healthy. Comparing
+#      against the pre-deploy answer (rather than demanding some absolute
+#      notion of "healthy") is what stops this check from rolling back good
+#      deploys: an already-broken page, a login wall, a redirect and a 404 all
+#      answer the same before and after.
+#   6c. DUR-3974 ordering: for compose_recreate nothing is rebuilt, so the
+#      `git reset --hard` in step 4 IS the moment new code goes live, and the
+#      migrations it carries are only applied when the container is recreated
+#      in step 5. The quiet-mode drain (up to 240s) used to sit between those
+#      two, which is most of what made the 2026-09-10 window five and a half
+#      minutes long. The drain and every refusal guard now happen BEFORE the
+#      reset (the guards via a dry-run fetch), and where the project names its
+#      services those are stopped before the files are swapped, so new code is
+#      never served against a schema that has not caught up.
 #   7. Comment the result back on the approval.
 #
 # Idempotent via a processed-set file; flock single-flight — same shape as
@@ -460,6 +482,15 @@ health_check_url = policy.get("healthCheckUrl") or ""
 if not health_check_url:
     print("deploy_policy.healthCheckUrl is empty", file=sys.stderr)
     sys.exit(1)
+# DUR-3974: the real pages that must still work after this deploy. Newline
+# separated (never space) so a path is never split by accident; entries that
+# contain whitespace are dropped here rather than silently probed as two
+# broken half-URLs.
+app_health_paths = "\n".join(
+    entry
+    for entry in (str(p).strip() for p in (policy.get("appHealthCheckPaths") or []))
+    if entry and not any(c.isspace() for c in entry)
+)
 rollback = policy.get("rollback") or "none"
 
 fields = {
@@ -476,6 +507,7 @@ fields = {
     "DV_COMPOSE_FILES": compose_files,
     "DV_ENV_FILE": env_file,
     "DV_HEALTH_CHECK_URL": health_check_url,
+    "DV_APP_HEALTH_PATHS": app_health_paths,
     "DV_ROLLBACK": rollback,
     "DV_ALLOW_BACKWARD_DEPLOY": allow_backward_deploy,
 }
@@ -559,6 +591,167 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
   return 1
 }
 
+# DUR-3974 ---------------------------------------------------------------
+# health_check() above answers one question: did SOMETHING answer 200 at the
+# one address the project has configured. On 2026-09-10 that address was a
+# login page that renders without reading the database at all, so it kept
+# answering 200 through five and a half minutes in which every page that loads
+# companies returned 500. The deploy declared itself healthy, no rollback
+# fired, and the window was only noticed afterwards.
+#
+# So a deploy is also checked against REAL pages of the app — and it is
+# checked DIFFERENTIALLY: how each page answers is recorded immediately before
+# anything is touched, and compared with how it answers afterwards. Only a
+# page that worked before and is broken after — a server error, or no answer
+# at all — can fail a deploy. That is the whole reason this check cannot cause
+# a false rollback:
+#   - a page that is already broken answers the same before and after;
+#   - a login wall (401/403), a redirect (3xx) and a missing page (404) are
+#     all "not broken" and pass;
+#   - a page nothing could reach before (no answer at all) is skipped
+#     entirely, since there is no working state to have regressed from;
+#   - a slow-to-warm app gets PAGE_CHECK_RETRIES attempts before any verdict,
+#     and those attempts now cover "the port isn't open yet" too.
+# The only thing that fails is the thing the operator would call breakage: a
+# page that used to work and now returns a server error or nothing at all.
+PAGE_CHECK_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_RETRIES:-10}"
+PAGE_CHECK_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_SLEEP:-3}"
+# How long to wait for the ROLLED-BACK version to answer before re-checking the
+# pages and telling the operator whether the site came back. `docker compose up
+# -d --force-recreate` returns when the container has started, not when the
+# server inside it is listening, so a re-check fired the instant the rollback
+# recipe returns is reading a booting app — and it is the one re-check whose
+# answer the operator acts on. Same order of magnitude as the deploy's own
+# health budget (HEALTH_RETRIES * HEALTH_SLEEP_SECONDS = 180s by default), and
+# bounded so a rollback into a dead server cannot hang the runner.
+ROLLBACK_HEALTH_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_ROLLBACK_HEALTH_WAIT_SECONDS:-180}"
+
+probe_http_code() { # url -> stdout: the HTTP status, or 000 when nothing answered at all
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time "$HEALTH_MAX_TIME_SECONDS" "$1" 2>/dev/null)"
+  case "$code" in
+    ''|*[!0-9]*) code="000" ;;
+  esac
+  printf '%s' "$code"
+}
+
+is_server_error() { # http code -> 0 if it is a 5xx
+  case "$1" in
+    5[0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# DUR-3974 follow-up: "broken" is not only a 5xx. probe_http_code() prints 000
+# when nothing answered at all — connection refused, the port never reopened,
+# the container gone — and that is the single clearest way a deploy can break a
+# page: the app is simply not there any more. An earlier version of this file
+# only ever asked is_server_error(), so a page that answered 200 before and
+# answered NOTHING after was logged as "still works after the deploy (was 200,
+# now 000)" and passed. That inverted the whole feature: a deploy that took the
+# application completely down sailed through the check written to catch exactly
+# that. Both shapes are "down" now.
+#
+# This deliberately stays a comparison, not a verdict: 000 only counts against
+# a deploy when the page answered something before it (see the baseline skips
+# in verify_pages_after_deploy), so a page that was unreachable all along, or a
+# host that is firewalled from the box, still cannot roll anything back.
+is_page_down() { # http code -> 0 if the page is broken (a 5xx, or no answer at all)
+  [ "$1" = "000" ] && return 0
+  is_server_error "$1"
+}
+
+# 000 is a curl detail, not something to show an operator.
+describe_http_code() { # http code -> stdout: the code, or plain words for "no answer"
+  if [ "$1" = "000" ]; then printf 'nothing at all'; else printf '%s' "$1"; fi
+}
+
+# The absolute addresses of the pages to check. Each configured entry is
+# either already a full http(s) address or a path resolved against the health
+# check address's own origin, so the operator never has to repeat the host.
+# With nothing configured the front page is the only page the runner can name
+# on its own — better than nothing, and the deploy comment says out loud that
+# this is all that was checked.
+app_health_check_urls() { # health_check_url, newline_separated_paths -> stdout: one absolute URL per line
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import sys
+from urllib.parse import urljoin, urlparse
+
+base, raw = sys.argv[1], sys.argv[2]
+parsed = urlparse(base)
+origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+entries = [line.strip() for line in raw.splitlines() if line.strip()]
+if not entries:
+    entries = ["/"]
+urls, seen = [], set()
+for entry in entries:
+    if entry.startswith("http://") or entry.startswith("https://"):
+        url = entry
+    elif origin:
+        url = urljoin(origin + "/", entry.lstrip("/"))
+    else:
+        continue
+    if url not in seen:
+        seen.add(url)
+        urls.append(url)
+print("\n".join(urls))
+PY
+}
+
+# Reads how every page answers RIGHT NOW, before the deploy changes anything.
+# One line per page: "<url><TAB><http code>".
+capture_page_baseline() { # aid, health_check_url, paths -> stdout: the baseline
+  local aid="$1" url code urls
+  urls="$(app_health_check_urls "$2" "$3")"
+  [ -n "${urls//[[:space:]]/}" ] || return 0
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    code="$(probe_http_code "$url")"
+    log "runner: $aid before the deploy: $url answered $code"
+    printf '%s\t%s\n' "$url" "$code"
+  done <<< "$urls"
+}
+
+# Compares the pages against that baseline. Prints the regressed ones (a
+# human-readable, comma-separated list) and returns 1; returns 0 when nothing
+# that worked before is broken now.
+verify_pages_after_deploy() { # aid, baseline -> 0 nothing regressed, 1 something did
+  local aid="$1" baseline="$2" url before now attempt broken=""
+  [ -n "${baseline//[[:space:]]/}" ] || return 0
+  while IFS=$'\t' read -r url before; do
+    [ -n "$url" ] || continue
+    if [ "$before" = "000" ]; then
+      log "runner: $aid skipping $url — nothing answered there before the deploy either, so there is no working state to compare against"
+      continue
+    fi
+    if is_server_error "$before"; then
+      log "runner: $aid skipping $url — it was already answering $before before the deploy, so this deploy did not break it"
+      continue
+    fi
+    # The retry budget is what keeps a slow-starting app from being read as a
+    # failure, and it now covers "nothing answered yet" as well as a 5xx — an
+    # app still opening its port gets every one of these attempts before any
+    # verdict, where before it got none (000 left the loop on the first pass).
+    attempt=1
+    while :; do
+      now="$(probe_http_code "$url")"
+      is_page_down "$now" || break
+      [ "$attempt" -ge "$PAGE_CHECK_RETRIES" ] && break
+      attempt=$((attempt + 1))
+      sleep "$PAGE_CHECK_SLEEP_SECONDS"
+    done
+    if is_page_down "$now"; then
+      log "runner: $aid $url answered $before before the deploy and $(describe_http_code "$now") after it, on all $attempt attempts"
+      broken="${broken}${broken:+, }$url (answered $before before, $(describe_http_code "$now") now)"
+    else
+      log "runner: $aid $url still works after the deploy (was $before, now $now)"
+    fi
+  done <<< "$baseline"
+  [ -z "$broken" ] && return 0
+  printf '%s' "$broken"
+  return 1
+}
+
 # DUR-3965: a small, separately-budgeted "is the server answering again yet?"
 # wait, used only while trying to undo the quiet-mode drain after a failed
 # deploy. Deliberately NOT health_check(): that one owns the deploy's own
@@ -566,14 +759,20 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
 # would both re-log a deploy verdict that was already decided and blow the
 # time budget of a recovery step that must stay short.
 wait_for_health() { # url, budget_seconds -> 0 as soon as a probe returns 200, 1 if the budget runs out
-  local url="$1" budget="${2:-0}" waited=0 code curl_status
+  local url="$1" budget="${2:-0}" waited=0 code curl_status step
   [ -n "$url" ] || return 1
+  # The budget is spent in HEALTH_SLEEP_SECONDS steps — but that is tunable and
+  # can legitimately be 0 (tests, a fast local loop), which would advance the
+  # clock by nothing and spin here forever. Never count a step as less than a
+  # second: this wait is a courtesy on a failure path and must always end.
+  step="$HEALTH_SLEEP_SECONDS"
+  [ "$step" -gt 0 ] 2>/dev/null || step=1
   while [ "$waited" -lt "$budget" ]; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time "$HEALTH_MAX_TIME_SECONDS" "$url")"
     curl_status=$?
     [ "$(probe_verdict "$curl_status" "$code")" = ok ] && return 0
     sleep "$HEALTH_SLEEP_SECONDS"
-    waited=$((waited + HEALTH_SLEEP_SECONDS))
+    waited=$((waited + step))
   done
   return 1
 }
@@ -756,6 +955,13 @@ git_fetch_reset() { # target_dir, repo_url, ref_or_commit, github_token, allow_b
     fi
 
     if [ -n "$dry_run" ]; then
+      # DUR-3974: report which commit the guards above just approved, not only
+      # that they passed. process_approval now does its dry run, then drains,
+      # then resets — and a branch tip can move during a drain that lasts up
+      # to QUIET_MODE_DRAIN_TIMEOUT_SECONDS. Handing this commit back lets the
+      # real reset be pinned to exactly what was checked, instead of
+      # re-resolving the branch and deploying something nobody looked at.
+      printf '%s' "$target_commit"
       exit 0
     fi
 
@@ -968,6 +1174,84 @@ retry_pending_quiet_mode_deactivate() {
   return 1
 }
 
+# DUR-3974: one place that builds a `docker compose` invocation out of the
+# project's optional composeFiles/envFile, so the pre-swap stop below and
+# run_recipe cannot drift into disagreeing about which compose project they
+# are talking to.
+compose_cmd() { # target_dir, compose_files, env_file, args... -> docker compose's own exit status
+  local target_dir="$1" compose_files="$2" env_file="$3"
+  shift 3
+  (
+    cd "$target_dir" || exit 1
+    local compose_args=() f
+    [ -n "$env_file" ] && compose_args+=(--env-file "$env_file")
+    for f in $compose_files; do compose_args+=(-f "$f"); done
+    docker compose "${compose_args[@]}" "$@" >>"$LOG" 2>&1
+  )
+}
+
+# DUR-3974: a compose_recreate deploy does not build anything — the ONLY way
+# its `up -d --force-recreate` can put different code live is by the files in
+# deployTargetPath being what the container runs. Which means the `git reset
+# --hard` IS the moment the new code goes live, minutes before the recreate
+# that applies the migrations the same commit carried. On 2026-09-10 the
+# checkout was reset at 22:25:16 and those migrations did not land until
+# 22:30:55; for five and a half minutes production served new code against the
+# old schema and answered 500 on every page that reads the database.
+#
+# So where the operator has named which services run the code, stop exactly
+# those before swapping the files. The recipe immediately after starts them
+# again and the entrypoint applies the migrations as it does, so the new code
+# is never served against a schema that has not caught up.
+#
+# Deliberately narrow:
+#   - only compose_recreate. compose_build_swap puts code live at the swap,
+#     not at the reset, and a custom command is a black box whose containers
+#     this script has no business stopping.
+#   - only when services are named. With none, `docker compose stop` means
+#     "stop everything in the file", database included — a bigger and riskier
+#     action than the one being made safe. Those deploys fall back to the
+#     before/after page check, which rolls the deploy back rather than leaving
+#     a broken version live.
+# Set PAPERCLIP_DEPLOY_RUNNER_STOP_BEFORE_SWAP=0 on the box to switch it off.
+STOP_BEFORE_SWAP="${PAPERCLIP_DEPLOY_RUNNER_STOP_BEFORE_SWAP:-1}"
+SERVICES_STOPPED_BEFORE_SWAP=0
+stop_services_before_swap() { # aid, target_dir, kind, services, compose_files, env_file -> 0 stopped, 1 not stopped
+  local aid="$1" target_dir="$2" kind="$3" services="$4" compose_files="$5" env_file="$6"
+  SERVICES_STOPPED_BEFORE_SWAP=0
+  [ "$STOP_BEFORE_SWAP" = "1" ] || return 1
+  [ "$kind" = "compose_recreate" ] || return 1
+  if [ -z "${services//[[:space:]]/}" ]; then
+    log "runner: $aid this project names no services, so the runner will not stop anything before swapping the files (stopping every service would take the database down too) — the before/after page check is what guards this deploy"
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  if compose_cmd "$target_dir" "$compose_files" "$env_file" stop $services; then
+    SERVICES_STOPPED_BEFORE_SWAP=1
+    log "runner: $aid stopped $services before swapping the files, so the new code cannot be served before its migrations have run"
+    return 0
+  fi
+  log "runner: $aid could not stop $services before swapping the files — continuing anyway; the before/after page check still guards this deploy"
+  return 1
+}
+
+# The undo for the stop above, for the paths where the deploy gives up between
+# the stop and the recipe that would have started the services again. Never
+# leaves production stopped because a git fetch failed.
+restart_services_after_abandoned_swap() { # aid, target_dir, services, compose_files, env_file
+  local aid="$1" target_dir="$2" services="$3" compose_files="$4" env_file="$5"
+  [ "${SERVICES_STOPPED_BEFORE_SWAP:-0}" -eq 1 ] || return 0
+  SERVICES_STOPPED_BEFORE_SWAP=0
+  [ -n "$target_dir" ] && [ -n "${services//[[:space:]]/}" ] || return 0
+  log "runner: $aid starting $services again — this deploy stopped before it got as far as starting them itself"
+  # shellcheck disable=SC2086
+  compose_cmd "$target_dir" "$compose_files" "$env_file" start $services && return 0
+  # shellcheck disable=SC2086
+  compose_cmd "$target_dir" "$compose_files" "$env_file" up -d $services && return 0
+  log "runner: $aid COULD NOT START $services AGAIN — they are still stopped and need a person. Check deploy-runner.log."
+  return 1
+}
+
 run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   # Exit status: 0 = ok; 3 = compose_build_swap's `build` step failed before
   # anything was swapped (the `&&` short-circuits `up --no-build`), so the
@@ -975,37 +1259,27 @@ run_recipe() { # target_dir, kind, services, command, compose_files, env_file
   # after touching the running container (compose_recreate, the swap half of
   # compose_build_swap, or a custom command we can't reason about).
   local target_dir="$1" kind="$2" services="$3" command="$4" compose_files="$5" env_file="$6"
-  (
-    cd "$target_dir" || exit 1
-    local compose_args=()
-    [ -n "$env_file" ] && compose_args+=(--env-file "$env_file")
-    if [ -n "$compose_files" ]; then
-      local f
-      for f in $compose_files; do
-        compose_args+=(-f "$f")
-      done
-    fi
-    case "$kind" in
-      compose_recreate)
-        # shellcheck disable=SC2086
-        docker compose "${compose_args[@]}" up -d --force-recreate $services >>"$LOG" 2>&1
-        ;;
-      compose_build_swap)
-        # shellcheck disable=SC2086
-        if ! docker compose "${compose_args[@]}" build $services >>"$LOG" 2>&1; then
-          exit 3
-        fi
-        # shellcheck disable=SC2086
-        docker compose "${compose_args[@]}" up -d --no-build $services >>"$LOG" 2>&1
-        ;;
-      custom)
+  case "$kind" in
+    compose_recreate)
+      # shellcheck disable=SC2086
+      compose_cmd "$target_dir" "$compose_files" "$env_file" up -d --force-recreate $services
+      ;;
+    compose_build_swap)
+      # shellcheck disable=SC2086
+      compose_cmd "$target_dir" "$compose_files" "$env_file" build $services || return 3
+      # shellcheck disable=SC2086
+      compose_cmd "$target_dir" "$compose_files" "$env_file" up -d --no-build $services
+      ;;
+    custom)
+      (
+        cd "$target_dir" || exit 1
         bash -c "$command" >>"$LOG" 2>&1
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  )
+      )
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 # DUR-3967: what to do about a card whose automated checks have not (yet) come
@@ -1243,8 +1517,16 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   # the operator the runner service was stopped in the middle of a perfectly normal long deploy.
   # Not a comment (nothing is posted on the card), not an outcome, never affects the processed set.
   record_status "$aid" "$company_id" "Deploy started — the deploy runner is working on this approval (fetching $target_ref, then building and health-checking). The outcome will be posted here when it finishes." 1 "started"
+  # DUR-3974: fetch and run every refusal guard WITHOUT resetting the checkout
+  # yet (dry run). The reset is the point of no return for a compose_recreate
+  # project — the files in the folder are what the running container serves —
+  # so everything that can still say "don't do this deploy" has to happen
+  # before it, and so does the quiet-mode drain, which used to sit BETWEEN the
+  # reset and the recreate and was most of the 2026-09-10 window: the drain
+  # waits up to QUIET_MODE_DRAIN_TIMEOUT_SECONDS (240s by default), all of it
+  # with the new code already live against the old schema.
   local carried_commit
-  carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY" "" "$DV_REPO_REF")"
+  carried_commit="$(git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$target_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY" "dry_run" "$DV_REPO_REF")"
   local fetch_reset_status=$?
   if [ "$fetch_reset_status" -eq 2 ]; then
     log "runner: $aid refused — $target_ref is already reachable from the live commit $before_commit; deploying it would move production backward"
@@ -1274,7 +1556,42 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
     comment "$aid" "$company_id" "Deploy failed — approval target ($target_ref, commit ${carried_commit:-unknown}) is not reachable from \"$DV_REPO_REF\", the branch this project deploys from. It looks like it lives on a different branch entirely. Resetting to it would discard whatever \"$DV_REPO_REF\" has that the other branch doesn't (DUR-229 guard). Re-file the deploy approval against a commit that's actually on \"$DV_REPO_REF\"."
     return
   elif [ "$fetch_reset_status" -ne 0 ]; then
-    log "runner: $aid git fetch/reset failed"
+    log "runner: $aid git fetch failed"
+    comment "$aid" "$company_id" "Deploy failed — git fetch/reset of $DV_DEPLOY_TARGET_PATH to $target_ref failed. Check deploy-runner.log."
+    return
+  fi
+
+  # DUR-3974: how the app's real pages answer RIGHT NOW, while the currently
+  # live version is still the one running. Everything after this is compared
+  # against it, which is what makes a rollback verdict evidence of THIS
+  # deploy breaking something rather than a guess about what "healthy" means.
+  local page_baseline
+  page_baseline="$(capture_page_baseline "$aid" "$DV_HEALTH_CHECK_URL" "$DV_APP_HEALTH_PATHS")"
+
+  # DUR-259: quiet mode stays active (if we're the one who activated it)
+  # across the recipe, health check, AND a possible rollback below — a
+  # rollback re-runs the same recipe, so the shared container can be
+  # recreated a second time for this one approval, and both need to be
+  # covered by the same drained window. Ended right before whichever
+  # comment() call reports this approval's final outcome, on every exit path.
+  # DUR-3974 moved this ahead of the reset: see the dry-run note above.
+  maybe_begin_quiet_mode_drain "$aid" "$DV_DEPLOY_KIND"
+
+  # DUR-3974: stop the services that serve the code before the files change
+  # under them, where that is a safe and well-defined thing to do.
+  stop_services_before_swap "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
+
+  # Pinned to the commit the dry run's guards approved (it prints it), so a
+  # branch tip that moved while we were draining cannot slip a commit nobody
+  # has looked at into this deploy. Falls back to the ref only if the dry run
+  # printed nothing, which an older/stubbed git_fetch_reset may do.
+  local reset_ref="${carried_commit:-$target_ref}"
+  git_fetch_reset "$DV_DEPLOY_TARGET_PATH" "$DV_REPO_URL" "$reset_ref" "$token" "$DV_ALLOW_BACKWARD_DEPLOY" "" "$DV_REPO_REF" >/dev/null
+  fetch_reset_status=$?
+  if [ "$fetch_reset_status" -ne 0 ]; then
+    log "runner: $aid git fetch/reset failed (status $fetch_reset_status) after the guards had already passed"
+    restart_services_after_abandoned_swap "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_SERVICES" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
+    maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
     comment "$aid" "$company_id" "Deploy failed — git fetch/reset of $DV_DEPLOY_TARGET_PATH to $target_ref failed. Check deploy-runner.log."
     return
   fi
@@ -1284,26 +1601,25 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
   # matcher.
   after_commit="$(git -C "$DV_DEPLOY_TARGET_PATH" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
-  # DUR-259: quiet mode stays active (if we're the one who activated it)
-  # across the recipe, health check, AND a possible rollback below — a
-  # rollback re-runs the same recipe, so the shared container can be
-  # recreated a second time for this one approval, and both need to be
-  # covered by the same drained window. Ended right before whichever
-  # comment() call reports this approval's final outcome, on every exit path.
-  maybe_begin_quiet_mode_drain "$aid" "$DV_DEPLOY_KIND"
-
   run_recipe "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_KIND" "$DV_DEPLOY_SERVICES" "$DV_DEPLOY_COMMAND" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
   local recipe_status=$?
   if [ "$recipe_status" -ne 0 ]; then
     log "runner: $aid recipe ($DV_DEPLOY_KIND) failed (status $recipe_status)"
     local diag_path
     diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    # DUR-3974: the recipe is what would have started the services this deploy
+    # stopped before swapping the files. It didn't, so (unless the rollback's
+    # own recipe already did) they are still down — never leave production
+    # stopped because a deploy failed.
+    restart_services_after_abandoned_swap "$aid" "$DV_DEPLOY_TARGET_PATH" "$DV_DEPLOY_SERVICES" "$DV_COMPOSE_FILES" "$DV_ENV_FILE"
     maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
     local broken_note="the running version may be broken."
     [ "$recipe_status" -eq 3 ] && broken_note="the build failed before anything was swapped, so the previously running version was left untouched."
     comment "$aid" "$company_id" "Deploy failed — the $DV_DEPLOY_KIND recipe failed at commit $after_commit. $( [ "$DV_ROLLBACK" = git_previous ] && echo "Rolled back to $before_commit." || echo "No rollback configured; $broken_note" )$( [ -n "$diag_path" ] && echo " Failing container logs captured to $diag_path before rollback." ) Check deploy-runner.log."
     return
   fi
+  # The recipe started the services again; nothing is left stopped by the swap.
+  SERVICES_STOPPED_BEFORE_SWAP=0
 
   if ! health_check "$DV_HEALTH_CHECK_URL"; then
     log "runner: $aid health check failed at $DV_HEALTH_CHECK_URL"
@@ -1314,12 +1630,61 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
     return
   fi
 
+  # DUR-3974: the health check above only proves that SOMETHING answered 200.
+  # This is the part that proves the app itself still works, by comparing real
+  # pages against how the very same pages answered minutes ago, before this
+  # deploy touched anything.
+  local broken_pages
+  if ! broken_pages="$(verify_pages_after_deploy "$aid" "$page_baseline")"; then
+    log "runner: $aid pages that worked before this deploy are failing after it: $broken_pages"
+    local diag_path
+    diag_path="$(maybe_rollback "$aid" "$before_commit" "$after_commit")"
+    # DUR-3974: do not TELL the operator the site is working again — check.
+    # The same pages, the same baseline, after the rollback. A rollback that
+    # did not actually fix it is the one case where he has to be interrupted,
+    # and it is exactly the case a hopeful sentence would hide.
+    local recovery_note="No rollback is set up for this project, so the broken version is still live and someone needs to look at it."
+    if [ "$DV_ROLLBACK" = git_previous ]; then
+      # The rollback's recipe has returned, which only means the container has
+      # been started — not that the old version is listening yet. Re-checking
+      # now would read a booting app as "the rollback did not help", and that
+      # verdict is the one the operator is asked to act on, so wait (bounded)
+      # for the old version to answer first.
+      if wait_for_health "$DV_HEALTH_CHECK_URL" "$ROLLBACK_HEALTH_WAIT_SECONDS"; then
+        log "runner: $aid the rolled-back version is answering at $DV_HEALTH_CHECK_URL — re-checking the pages"
+      else
+        log "runner: $aid the rolled-back version still has not answered at $DV_HEALTH_CHECK_URL after ${ROLLBACK_HEALTH_WAIT_SECONDS}s — re-checking the pages anyway"
+      fi
+      local still_broken
+      if still_broken="$(verify_pages_after_deploy "$aid" "$page_baseline")"; then
+        recovery_note="Production has been put back to the version that was live before this ($before_commit), and those pages have been checked again and are working."
+      else
+        # The worst case there is. Loud in the log, and unmistakable on the
+        # card: do not let this read like the reassuring branch above.
+        log "runner: $aid ROLLBACK DID NOT RESTORE THE APP — after rolling $DV_DEPLOY_TARGET_PATH back to $before_commit these pages are still broken: $still_broken"
+        recovery_note="Production has been put back to the version that was live before this ($before_commit), but these pages are STILL not working: $still_broken. Putting the old version back was not enough, so the app is still down and this needs a person now."
+      fi
+    fi
+    maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
+    comment "$aid" "$company_id" "Deploy failed — the new version answered on its health check address, but pages of the app that were working just before the deploy are now returning an error: $broken_pages. $recovery_note$( [ -n "$diag_path" ] && echo " The failing version's logs were saved to $diag_path first." ) Nothing else was changed."
+    return
+  fi
+
   maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"
   log "runner: $aid deployed OK ($before_commit -> $after_commit)"
+  # DUR-3974: never let the card imply a thorough check that did not happen.
+  # With no pages listed for this project the runner can only reach the front
+  # page on its own, and the operator should be told that in the same breath
+  # as the word "healthy" — the 2026-09-10 deploy was called clean on exactly
+  # this kind of evidence.
+  local checked_note=" The app's own pages were opened afterwards and still work."
+  if [ -z "${DV_APP_HEALTH_PATHS//[[:space:]]/}" ]; then
+    checked_note=" Only the health check address and the front page were opened afterwards, because this project does not list any pages to check. You can add the pages that matter under \"Pages that must still work\" in the project's deploy settings, and future deploys will be undone automatically if one of them breaks."
+  fi
   # DUR-237: record the deployed commit as a structured field here too (not just in the free-text
   # body) so deploy-completion-gate.ts can confirm ANY issue whose merge commit matches — not only
   # the issue this approval happens to be linked to — without parsing prose.
-  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL)." "" "$after_commit"
+  comment "$aid" "$company_id" "Deployed to $DV_DEPLOY_TARGET_PATH — commit $after_commit is live and healthy (health check: $DV_HEALTH_CHECK_URL).$checked_note" "" "$after_commit"
 }
 
 # DUR-163: docker logs for the container being replaced only exist as long as
@@ -1399,6 +1764,12 @@ crash_fallback_comment() { # approval_id, company_id, result_file
 # the 2026-09-10 incident. Telling the operator about the approval is the
 # second job, and must not be able to skip the first.
 deploy_approval_exit_guard() { # approval_id, company_id, result_file
+  # DUR-3974: and before either of those, put back anything this deploy
+  # stopped and never got as far as starting again. A crash between the stop
+  # and the recipe would otherwise leave production down — a strictly worse
+  # outcome than the broken-schema window this stop exists to prevent. A
+  # no-op unless a stop actually happened and nothing has restarted it.
+  restart_services_after_abandoned_swap "$1" "${DV_DEPLOY_TARGET_PATH:-}" "${DV_DEPLOY_SERVICES:-}" "${DV_COMPOSE_FILES:-}" "${DV_ENV_FILE:-}"
   maybe_end_quiet_mode_drain "$1" "${DV_HEALTH_CHECK_URL:-}"
   crash_fallback_comment "$1" "$2" "$3"
 }
