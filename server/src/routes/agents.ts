@@ -1597,7 +1597,7 @@ export function agentRoutes(
   // its own quick-agent instructions.
   function assertNoAgentLaneAFlagMutation(req: Request, patchData: Record<string, unknown>) {
     if (req.actor.type !== "agent" || !patchTouchesLaneAFields(patchData)) return;
-    throw forbidden("Agent-authenticated callers cannot modify laneAEnabled or laneAInstructions");
+    throw forbidden(`Agent-authenticated callers cannot modify quick-agent settings (${QUICK_AGENT_FIELDS.join(", ")})`);
   }
 
   function assertNoAgentInstructionsConfigMutation(
@@ -2819,6 +2819,13 @@ export function agentRoutes(
           // choice must not live only on the row.
           laneAEnabled: agent.laneAEnabled === true,
           laneAInstructions: agent.laneAInstructions ?? null,
+          // DUR-3977: the rest of QUICK_AGENT_FIELDS. Same reason as above —
+          // approvals.ts still has a legacy branch that rebuilds the agent
+          // from this payload, so a quick-agent setting chosen at hire time
+          // must not live only on the row.
+          laneAModel: agent.laneAModel ?? null,
+          laneAMaxOutputTokens: agent.laneAMaxOutputTokens ?? null,
+          laneATransformDailyCallCap: agent.laneATransformDailyCallCap ?? null,
           agentId: agent.id,
           requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
           requestedConfigurationSnapshot: {

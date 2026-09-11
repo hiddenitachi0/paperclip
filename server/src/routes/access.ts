@@ -37,6 +37,7 @@ import {
   createCliAuthChallengeSchema,
   claimJoinRequestApiKeySchema,
   createBoardApiKeySchema,
+  createCompanyServiceTokenSchema,
   createDelegateTokenSchema,
   createCompanyInviteSchema,
   createOpenClawInvitePromptSchema,
@@ -77,11 +78,12 @@ import {
   resolveHumanInviteRole,
 } from "../services/company-member-roles.js";
 import { humanJoinGrantsFromDefaults } from "../services/invite-grants.js";
+import { companyServiceTokenService } from "../services/company-service-tokens.js";
 import {
   collapseDuplicatePendingHumanJoinRequests,
   findReusableHumanJoinRequest,
 } from "../lib/join-request-dedupe.js";
-import { assertAuthenticated, assertCompanyAccess } from "./authz.js";
+import { assertAuthenticated, assertBoard, assertCompanyAccess } from "./authz.js";
 import { companyScope, companyScopeBypass, companyScopeBypassForRoute, companyScopeFromParam } from "../middleware/company-scope.js";
 import {
   claimBoardOwnership,
@@ -2627,6 +2629,7 @@ export function accessRoutes(
   const access = accessService(db, rawDb);
   const boardAuth = boardAuthService(db, rawDb);
   const agents = agentService(db, { rawDb });
+  const serviceTokens = companyServiceTokenService(db);
   const routeInviteResolutionNetwork = opts.inviteResolutionNetwork
     ? { ...defaultInviteResolutionNetwork, ...opts.inviteResolutionNetwork }
     : inviteResolutionNetwork;
@@ -3461,6 +3464,107 @@ export function accessRoutes(
     if (!markdown) throw notFound("Skill not found");
     res.type("text/markdown").send(markdown);
   });
+
+  // ─── DUR-3977: per-company service tokens ──────────────────────────────────
+  //
+  // Machine credentials for server-to-server calls (Nordstrand's dashboard
+  // calling the Lane A transform endpoint). Three deliberate properties:
+  //
+  //   1. `assertBoard` inside the scope callback, so ONLY a signed-in board
+  //      user can mint or revoke one. An agent — even one with every company
+  //      permission — is refused: an agent that could mint its own machine
+  //      credential would be minting itself a way around its own limits.
+  //   2. The token value is in the 201 response and nowhere else. It is not
+  //      in the list response, not in the revoke response, not in the
+  //      activity row, and not in any log line. `logActivity` also redacts
+  //      details keys containing "token", so the field is called `serviceId`
+  //      for the same reason board-delegate-token logging calls its id
+  //      `delegateId`.
+  //   3. Revoking is scoped by companyId as well as token id (see
+  //      companyServiceTokenService.revokeToken), so a board user cannot
+  //      revoke another company's token by guessing a uuid.
+  router.get(
+    "/companies/:companyId/service-tokens",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const tokens = await serviceTokens.listTokens(companyId, {
+        includeInactive: req.query.includeInactive === "true",
+      });
+      res.json(tokens);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/service-tokens",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    validate(createCompanyServiceTokenSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const created = await serviceTokens.createToken({
+        companyId,
+        name: req.body.name,
+        createdByUserId: req.actor.userId ?? null,
+        expiresAt: req.body.expiresAt ?? null,
+      });
+
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "company_service_token.created",
+        entityType: "company",
+        entityId: companyId,
+        details: {
+          serviceId: created.id,
+          name: created.name,
+          expiresAt: created.expiresAt?.toISOString() ?? null,
+        },
+      });
+
+      // `created.token` appears here and is never readable again.
+      res.status(201).json(created);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/service-tokens/:tokenId/revoke",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const tokenId = (req.params.tokenId as string).trim();
+      if (!isUuidLike(tokenId)) {
+        throw badRequest("Invalid service token ID");
+      }
+      const revoked = await serviceTokens.revokeToken({
+        tokenId,
+        companyId,
+        revokedByUserId: req.actor.userId ?? null,
+      });
+      if (!revoked) throw notFound("Service token not found");
+
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "company_service_token.revoked",
+        entityType: "company",
+        entityId: companyId,
+        details: { serviceId: revoked.id, name: revoked.name },
+      });
+
+      res.json({ ok: true, serviceTokenId: revoked.id });
+    },
+  );
 
   router.post(
     "/companies/:companyId/invites",

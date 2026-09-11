@@ -66,6 +66,9 @@ import {
   createFinanceEventSchema,
   updateBudgetSchema,
   upsertBudgetPolicySchema,
+  laneATransformSchema,
+  createCompanyServiceTokenSchema,
+  LANE_A_TRANSFORM_MAX_CONCURRENCY,
   resolveBudgetIncidentSchema,
   // Sidebar
   upsertSidebarOrderPreferenceSchema,
@@ -666,6 +669,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/members/{memberId}/archive",
   "PATCH /api/companies/{companyId}/members/{memberId}/permissions",
   "GET /api/companies/{companyId}/user-directory",
+  "GET /api/companies/{companyId}/service-tokens",
+  "POST /api/companies/{companyId}/service-tokens",
+  "POST /api/companies/{companyId}/service-tokens/{tokenId}/revoke",
   "GET /api/board-api-keys",
   "POST /api/board-api-keys",
   "DELETE /api/board-api-keys/{keyId}",
@@ -734,6 +740,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/cli-auth/challenges",
   "POST /api/board-api-keys",
   "POST /api/board-delegate-tokens",
+  "POST /api/companies/{companyId}/service-tokens",
   "POST /api/companies",
   "POST /api/companies/{companyId}/invites",
   "POST /api/companies/{companyId}/openclaw/invite-prompt",
@@ -3105,6 +3112,55 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/api/lane-a/{agentId}/transform",
+  tags: ["agents"],
+  summary: "Rewrite one piece of text with a quick agent (stateless: no conversation, no transcript, no tools)",
+  description:
+    "Machine-to-machine entry point for batch text work — rewriting or translating one product description " +
+    "per call. Authenticate with a company service token (Authorization: Bearer pcp_service_…) created in " +
+    "the company's settings; the company is read off that token and the named agent must belong to it. " +
+    "Uses the agent's quick-agent instructions as the system prompt, at the agent's configured model and " +
+    "output ceiling.\n\n" +
+    "There is no batch endpoint, deliberately. Make parallel single calls instead, at most " +
+    `${LANE_A_TRANSFORM_MAX_CONCURRENCY} at a time per agent — the server enforces that and answers 429 ` +
+    "above it. A batch of 50 would be one request holding a connection for the sum of 50 model calls, " +
+    "lost whole on a disconnect, with no way to retry one failed item.\n\n" +
+    "Limits are checked before the model is called: a per-agent daily call cap and a monthly cost budget " +
+    "(an ordinary budget policy with scope `agent` and metric `lane_a_transform_cents`). A 429 body carries " +
+    "`details.reason`: `daily_call_cap`, `monthly_budget`, `concurrency_limit` or `upstream_rate_limit`.",
+  request: {
+    params: z.object({ agentId: z.string() }),
+    query: z.object({
+      companyId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe("Only when calling as a signed-in board user. Ignored for a service token, which carries its own company."),
+    }),
+    body: jsonBody(laneATransformSchema),
+  },
+  responses: {
+    200: r.ok(
+      z.object({
+        text: z.string(),
+        model: z.string(),
+        inputTokens: z.number(),
+        outputTokens: z.number(),
+        costCents: z.number(),
+        truncated: z.boolean().describe("True when maxOutputChars cut the answer short."),
+        stopReason: z.string().nullable(),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    429: r.tooManyRequests,
+  },
+});
+
 registerCurrentRoute({
   method: "get",
   path: "/api/lane-a/{agentId}/conversations/{conversationId}",
@@ -5171,6 +5227,36 @@ registerCurrentRoute({
   path: "/api/board-api-keys/{keyId}",
   tags: ["access"],
   summary: "Revoke a board API key",
+});
+
+// ─── DUR-3977: per-company service tokens ────────────────────────────────────
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/service-tokens",
+  tags: ["access"],
+  summary: "List a company's service tokens (never returns the token itself)",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/service-tokens",
+  tags: ["access"],
+  summary:
+    "Create a service token for server-to-server calls (board users only; this response is the only place " +
+    "the token value ever appears — it is stored hashed and cannot be read back, so a lost token is " +
+    "replaced, not recovered)",
+  body: createCompanyServiceTokenSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/service-tokens/{tokenId}/revoke",
+  tags: ["access"],
+  summary: "Revoke a service token immediately",
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registerCurrentRoute({

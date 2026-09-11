@@ -32,7 +32,13 @@ export type AuthorizationActor =
     // synthetic { type: "board", ... } actor from the delegate's own
     // resolved companyIds/memberships instead of forwarding req.actor
     // (see getAccessibleAgent's board_delegate branch in routes/agents.ts).
-    type: "board" | "agent" | "board_delegate" | "none";
+    // "service" (DUR-3977) is likewise NOT given its own branch below, for
+    // exactly the same reason as board_delegate: a company service token has
+    // no userId and no agentId, so every permission decision falls through to
+    // "deny_unauthenticated". It is a machine credential for the one lane
+    // that opts into it (assertServiceOrBoard), and it must never satisfy a
+    // permission check by accident.
+    type: "board" | "agent" | "board_delegate" | "service" | "none";
     userId?: string | null;
     companyIds?: string[];
     memberships?: Array<{ companyId: string; membershipRole?: string | null; status?: string }>;
@@ -50,6 +56,7 @@ export type AuthorizationActor =
       | "agent_jwt"
       | "cloud_tenant"
       | "board_delegate_key"
+      | "company_service_token"
       | "none";
   };
 

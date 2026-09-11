@@ -67,8 +67,38 @@ export function assertInstanceAdmin(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
+// DUR-3977: the machine-to-machine lane. A per-company service token may
+// reach exactly the routes that opt in here, and nothing else — it is not
+// board (so it can never approve, deploy, mint another token, or read another
+// company) and it is not an agent (so it carries no agent identity). A board
+// user is also allowed through, so an operator can exercise the same route
+// from the UI without minting a token first.
+export function assertServiceOrBoard(req: Request) {
+  if (req.actor.type === "service") return;
+  if (req.actor.type === "board") {
+    assertBoardOrgAccess(req);
+    return;
+  }
+  throw forbidden("A company service token or board access is required");
+}
+
 export function assertCompanyAccess(req: Request, companyId: string) {
   assertAuthenticated(req);
+  // A service token authenticates AS one company. Same rule, and the same
+  // loud refusal, as an agent key reaching for another company's data — this
+  // is the check that keeps the standing cross-company isolation requirement
+  // true for the new machine lane.
+  if (req.actor.type === "service" && req.actor.companyId !== companyId) {
+    logger.error({
+      event: "security.cross_company_write_blocked",
+      actorType: "service",
+      actorCompanyId: req.actor.companyId,
+      targetCompanyId: companyId,
+      method: req.method,
+      path: req.originalUrl ?? req.path,
+    }, "Refused a cross-company request: service token does not belong to the target company");
+    throw forbidden("Service token cannot access another company");
+  }
   if (req.actor.type === "agent" && req.actor.companyId !== companyId) {
     logger.error({
       event: "security.cross_company_write_blocked",
@@ -138,6 +168,14 @@ export function getActorInfo(req: Request): (
   }
 ) {
   assertAuthenticated(req);
+  // DUR-3977: a service token is neither a user nor an agent. Falling through
+  // to the user branch below would silently report it as actorId "board",
+  // i.e. attribute a machine call to the operator. Refuse instead — a route
+  // that accepts service tokens must attribute them deliberately rather than
+  // reach for this helper.
+  if (req.actor.type === "service") {
+    throw forbidden("A company service token has no user or agent identity");
+  }
   if (req.actor.type === "agent") {
     const actorSource = req.actor.source === "agent_jwt" ? "agent_jwt" : "agent_key";
     return {

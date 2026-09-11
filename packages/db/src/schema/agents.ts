@@ -62,6 +62,19 @@ export const agents = pgTable(
     // Lane A agent follows (persona + rules). Board-settable only, same guard
     // as laneAEnabled. Null means "no special instructions".
     laneAInstructions: text("lane_a_instructions"),
+    // DUR-3977 (migration 0165). All three are null for every quick agent
+    // that existed before, meaning "use the platform default" — the defaults
+    // themselves live in packages/shared/src/lane-a-models.ts so the UI, the
+    // validators and the runtime read the same numbers.
+    //   lane_a_model                     — which model this quick agent runs on
+    //   lane_a_max_output_tokens         — how long an answer it may produce
+    //   lane_a_transform_daily_call_cap  — how many stateless transform calls
+    //                                      it may serve per UTC day. Separate
+    //                                      from the 200-turn chat cap on
+    //                                      purpose (acceptance item 4).
+    laneAModel: text("lane_a_model"),
+    laneAMaxOutputTokens: integer("lane_a_max_output_tokens"),
+    laneATransformDailyCallCap: integer("lane_a_transform_daily_call_cap"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // DUR-109: last time a human (direct bundle/file edit) or an approved

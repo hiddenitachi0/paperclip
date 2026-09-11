@@ -11,6 +11,7 @@ export { routinesApi } from "./routines";
 export { goalsApi } from "./goals";
 export { approvalsApi } from "./approvals";
 export { costsApi } from "./costs";
+export { serviceTokensApi } from "./serviceTokens";
 export { activityApi } from "./activity";
 export { dashboardApi } from "./dashboard";
 export { heartbeatsApi } from "./heartbeats";

@@ -15,7 +15,10 @@ import type { FleetHealth } from "@paperclipai/shared";
 import { serverVersion } from "../version.js";
 
 function shouldExposeFullHealthDetails(
-  actorType: "none" | "board" | "agent" | "board_delegate" | null | undefined,
+  // "service" is deliberately absent from the full-details branch below: a
+  // company service token gets the same reduced health payload an
+  // unauthenticated caller does (DUR-3977).
+  actorType: "none" | "board" | "agent" | "board_delegate" | "service" | null | undefined,
   deploymentMode: DeploymentMode,
 ) {
   if (deploymentMode !== "authenticated") return true;

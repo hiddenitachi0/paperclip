@@ -371,6 +371,10 @@ describe.sequential("every quick-agent field is handled on the employment path",
   const SAMPLE_VALUES: Record<QuickAgentField, unknown> = {
     laneAEnabled: true,
     laneAInstructions: "Front desk.",
+    // DUR-3977 quick-agent settings.
+    laneAModel: "claude-haiku-4-5",
+    laneAMaxOutputTokens: 512,
+    laneATransformDailyCallCap: 1500,
   };
 
   beforeEach(() => {

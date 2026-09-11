@@ -4,6 +4,7 @@ export const queryKeys = {
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
+    serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
   },
   companySkills: {
     list: (companyId: string) => ["company-skills", companyId] as const,

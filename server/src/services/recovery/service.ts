@@ -163,6 +163,9 @@ type WatchdogDecisionActor =
   // recovery owner" forbidden the same way "none" already does. Widened here
   // for type soundness only, not to grant delegates this action.
   | { type: "board_delegate"; userId?: string | null; runId?: string | null }
+  // "service" (DUR-3977) likewise matches neither branch and hits the same
+  // forbidden. Widened for type soundness only.
+  | { type: "service"; runId?: string | null }
   | { type: "none" };
 
 export type RunOutputSilenceSummary = {

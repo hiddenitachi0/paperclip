@@ -6,6 +6,13 @@ import {
   INBOX_MINE_ISSUE_STATUS_FILTER,
 } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
+import {
+  LANE_A_MAX_MAX_OUTPUT_TOKENS,
+  LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP,
+  LANE_A_MIN_MAX_OUTPUT_TOKENS,
+  LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
+  LANE_A_MODELS,
+} from "../lane-a-models.js";
 import { envBindingSchema, envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
@@ -23,7 +30,17 @@ export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
  * array and asserts each of those places handles every name in it, so the
  * lists cannot drift apart silently.
  */
-export const QUICK_AGENT_FIELDS = ["laneAEnabled", "laneAInstructions"] as const;
+export const QUICK_AGENT_FIELDS = [
+  "laneAEnabled",
+  "laneAInstructions",
+  // DUR-3977: which model this quick agent runs on, how long an answer it may
+  // produce, and how many stateless transform calls it may serve per day.
+  // Board-only for the same reason the switch is: an agent that could set its
+  // own model and its own call cap has no cap.
+  "laneAModel",
+  "laneAMaxOutputTokens",
+  "laneATransformDailyCallCap",
+] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
 export const agentPermissionsSchema = z.object({
@@ -270,6 +287,24 @@ const createAgentObjectSchema = z.object({
   // Left out entirely => false, i.e. exactly today's behaviour.
   laneAEnabled: z.boolean().optional(),
   laneAInstructions: z.string().max(LANE_A_INSTRUCTIONS_MAX_LENGTH).nullable().optional(),
+  // DUR-3977. Null on all three means "use the platform default" — the agent
+  // row stays untouched for every quick agent that existed before this, and
+  // the defaults live in packages/shared/src/lane-a-models.ts.
+  laneAModel: z.enum(LANE_A_MODELS).nullable().optional(),
+  laneAMaxOutputTokens: z
+    .number()
+    .int()
+    .min(LANE_A_MIN_MAX_OUTPUT_TOKENS)
+    .max(LANE_A_MAX_MAX_OUTPUT_TOKENS)
+    .nullable()
+    .optional(),
+  laneATransformDailyCallCap: z
+    .number()
+    .int()
+    .min(LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP)
+    .max(LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP)
+    .nullable()
+    .optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);

@@ -13,6 +13,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Settings, CloudUpload, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
   Field,
@@ -412,6 +413,16 @@ export function CompanySettings() {
           </div>
         </div>
       </div>
+
+      {/* Service tokens (DUR-3977) */}
+      {selectedCompanyId ? (
+        <div className="space-y-4">
+          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Other systems
+          </div>
+          <ServiceTokensSection companyId={selectedCompanyId} />
+        </div>
+      ) : null}
 
       {/* Danger Zone */}
       <div className="space-y-4">

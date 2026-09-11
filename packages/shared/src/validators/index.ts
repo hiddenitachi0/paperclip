@@ -314,7 +314,19 @@ export {
 export {
   sendLaneAMessageSchema,
   type SendLaneAMessage,
+  laneATransformSchema,
+  type LaneATransform,
+  LANE_A_TRANSFORM_INPUT_MAX_LENGTH,
+  LANE_A_TRANSFORM_MAX_VARIABLES,
+  LANE_A_TRANSFORM_VARIABLE_VALUE_MAX_LENGTH,
+  LANE_A_TRANSFORM_MAX_OUTPUT_CHARS,
+  LANE_A_TRANSFORM_MAX_CONCURRENCY,
 } from "./lane-a.js";
+
+export {
+  createCompanyServiceTokenSchema,
+  type CreateCompanyServiceToken,
+} from "./company-service-token.js";
 
 export {
   createProjectSchema,

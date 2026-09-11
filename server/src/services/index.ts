@@ -135,6 +135,7 @@ export type {
   AuthorizationResource,
 } from "./authorization.js";
 export { boardAuthService } from "./board-auth.js";
+export { companyServiceTokenService } from "./company-service-tokens.js";
 export { instanceSettingsService } from "./instance-settings.js";
 export { instanceClaudeAuthService } from "./instance-claude-auth.js";
 export { bootstrapExecutionPolicyFromEnv } from "./execution-policy-bootstrap.js";

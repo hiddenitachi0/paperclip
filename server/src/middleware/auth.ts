@@ -8,6 +8,7 @@ import { normalizeAgentApiKeyScope, normalizeDelegateTokenScopes, type Deploymen
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
+import { companyServiceTokenService } from "../services/company-service-tokens.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 
 function hashToken(token: string) {
@@ -157,6 +158,28 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         next();
         return;
       }
+    }
+
+    // DUR-3977: a per-company service token. It authenticates AS the company
+    // and nothing else — no board access, no agent identity, no instance
+    // admin. `companyId` comes off the stored row, never off the request, so
+    // a caller cannot name a company it was not issued for. Only routes that
+    // explicitly call assertServiceOrBoard (today: the Lane A transform
+    // endpoint) accept this actor; assertBoard and assertBoardOrAgent both
+    // keep refusing it by construction.
+    const serviceToken = await companyServiceTokenService(db).findByToken(token);
+    if (serviceToken) {
+      await companyServiceTokenService(db).touchToken(serviceToken.id);
+      req.actor = {
+        type: "service",
+        companyId: serviceToken.companyId,
+        serviceTokenId: serviceToken.id,
+        serviceTokenName: serviceToken.name,
+        runId: runIdHeader || undefined,
+        source: "company_service_token",
+      };
+      next();
+      return;
     }
 
     const tokenHash = hashToken(token);
