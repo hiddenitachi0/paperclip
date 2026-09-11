@@ -25,6 +25,9 @@ export function parseProjectDeployPolicy(raw: unknown): ProjectDeployPolicy | nu
     ...(Array.isArray(parsed.composeFiles) ? { composeFiles: asStringArray(parsed.composeFiles) } : {}),
     ...(typeof parsed.envFile === "string" ? { envFile: parsed.envFile } : {}),
     healthCheckUrl: asString(parsed.healthCheckUrl, ""),
+    ...(Array.isArray(parsed.appHealthCheckPaths)
+      ? { appHealthCheckPaths: asStringArray(parsed.appHealthCheckPaths) }
+      : {}),
     rollback: isDeployRollbackStrategy(parsed.rollback) ? parsed.rollback : "none",
     ...(typeof parsed.deployBranch === "string" ? { deployBranch: parsed.deployBranch } : {}),
     ...(typeof parsed.mirrorBranch === "string" ? { mirrorBranch: parsed.mirrorBranch } : {}),

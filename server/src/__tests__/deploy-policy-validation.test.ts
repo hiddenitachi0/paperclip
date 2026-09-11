@@ -108,6 +108,30 @@ describe("describeDeployPolicyProblems", () => {
       expect.stringMatching(/Service names cannot contain spaces/),
     ]);
   });
+
+  // DUR-3974: the pages the deploy runner opens after a deploy.
+  it("accepts pages given as paths or as full addresses", () => {
+    expect(
+      describeDeployPolicyProblems(
+        policy({ appHealthCheckPaths: ["/", "/DUR/dashboard/now", "https://other.example.com/status"] }),
+        context,
+      ),
+    ).toEqual([]);
+  });
+
+  it("explains, without jargon, what a page address has to look like", () => {
+    expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: ["dashboard"] }), context)).toEqual([
+      expect.stringMatching(/must start with "\/"/),
+    ]);
+    expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: ["/two pages"] }), context)).toEqual([
+      expect.stringMatching(/cannot contain spaces/),
+    ]);
+  });
+
+  it("never blocks a project for listing no pages — every project that exists today lists none", () => {
+    expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: [] }), context)).toEqual([]);
+    expect(describeDeployPolicyProblems(policy(), context)).toEqual([]);
+  });
 });
 
 describe("formatDeployPolicyProblems", () => {

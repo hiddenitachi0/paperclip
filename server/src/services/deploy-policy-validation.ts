@@ -114,6 +114,26 @@ export function describeDeployPolicyProblems(
     );
   }
 
+  // DUR-3974: the pages that must still work after a deploy. Format only —
+  // leaving the list empty is allowed on purpose (every project that exists
+  // today has an empty one, and blocking on it would turn a safety
+  // improvement into an outage of its own). The runner says out loud on the
+  // card when a deploy was only checked against the one health-check address.
+  for (const page of policy.appHealthCheckPaths ?? []) {
+    const trimmed = page.trim();
+    if (!trimmed) continue;
+    if (hasWhitespace(trimmed)) {
+      problems.push(`A page address cannot contain spaces (got "${trimmed}"). Put each page on its own line.`);
+      continue;
+    }
+    if (!trimmed.startsWith("/") && !isHttpUrl(trimmed)) {
+      problems.push(
+        'Each page to check must start with "/" (for example /dashboard) or be a full web address starting with ' +
+          `http:// or https:// (got "${trimmed}").`,
+      );
+    }
+  }
+
   // Recipe.
   if (policy.deployKind === "custom") {
     if (!deployCommand && enabled) {
