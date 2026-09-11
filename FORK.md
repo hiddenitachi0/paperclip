@@ -235,6 +235,42 @@ nothing when no token is in the environment (public repos and non-agent git are
 unaffected). This is the one credential path — Feature 7's managed clone feeds the
 same helper by putting the resolved secret in `GITHUB_TOKEN`.
 
+### Infra — image-wide git pre-push guard (DUR-3975: no more clobbered branches)
+
+The credential helper above is the whole push path: nothing in Paperclip pushes
+(`scripts/check-no-git-push.mjs` forbids it in adapter/runtime code), so a push
+is always an agent typing `git push` in its own shell. Every guard around that
+was a Claude Code **PostToolUse** hook — it runs *after* the push and can only
+leave a comment. Nothing checked whether a push was a fast-forward.
+
+So when several agents worked one branch from separate checkouts, git rejected
+the second plain push as non-fast-forward, the agent reached for `--force`, and
+the first agent's commits stopped being reachable. That is how a Django
+migration was left depending on a parent commit that no longer existed in the
+branch: the operator approved a deploy that could not apply, and it rolled back
+with `NodeNotFoundError`.
+
+Fix: a **`pre-push` hook installed image-wide via `core.hooksPath`**. `--force`,
+`--force-with-lease` and `+refs/…` do not skip pre-push hooks, so the bad
+outcome is refused rather than discouraged. It refuses (a) any branch update
+whose current remote tip would stop being reachable, (b) deleting a branch, and
+prints the commits at stake plus the commands that make the push legal. A brand
+new branch, and any fast-forward, are untouched. It chains to a repository's own
+`.git/hooks/pre-push`, and a repo that sets its own `core.hooksPath` still wins.
+
+A **PreToolUse** hook closes the routes around it — `--no-verify`,
+`core.hooksPath`/`GIT_CONFIG_*` overrides, a forced ref update via `gh api`, and
+a force push in a checkout where the guard is not installed at all.
+
+| File | Change | Type |
+|---|---|---|
+| `scripts/paperclip-git-pre-push-guard.sh` | The pre-push hook: refuses non-fast-forward updates and branch deletes, with recovery instructions | **New file** |
+| `scripts/git-push-clobber-guard-hook.mjs` | Claude Code PreToolUse hook closing the ways around the pre-push hook | **New file** |
+| `Dockerfile` | Install the hook + `git config --system core.hooksPath` (production stage) | Additive |
+| `.claude/settings.json` | Wire the PreToolUse hook | Additive |
+| `packages/skills-catalog/.../github-pr-workflow/SKILL.md` | Say the rule in words as well as enforcing it | Additive |
+| `scripts/__tests__/git-push-clobber-guard.test.mjs` | Real two-checkout repros, incl. a negative control that shows the clobber without the guard | **New file** |
+
 ### Infra — `uv` in the runtime image (Python-app workspaces)
 
 The base image ships `python3` but no `pip`/`ensurepip`, so agent worktrees can't bootstrap a

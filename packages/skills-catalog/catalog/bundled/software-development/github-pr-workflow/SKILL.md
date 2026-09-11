@@ -26,9 +26,33 @@ Ship a PR a reviewer can land without follow-up clarifying questions. The aim is
 - The change is not yet functionally complete. Finish the work first; draft PRs that bounce on review are noise.
 - The repository uses a non-GitHub forge. Adjust to that forge's conventions; do not force GitHub-isms.
 
+## Never replace what is already on a shared branch
+
+Assume another agent is working from the same branch in a different checkout. A
+push that moves the branch to a history not containing its current tip deletes
+their commits, and nothing tells them: a lost migration parent in exactly this
+way left a branch whose migrations could not apply, and the deploy approved on
+top of it rolled back.
+
+- Never `--force` / `--force-with-lease` a branch you have already pushed. Add a
+  new commit instead of rewriting one that is out there.
+- Squash and rebase *before* the first push, not after.
+- If you need the base branch's newer commits on a branch you already pushed,
+  merge the base in rather than rebasing onto it — a merge keeps every commit
+  that is already on the branch reachable, a rebase does not.
+- If a push is refused, never retry it with force. Fetch, integrate the current
+  tip, re-run the tests, push again.
+- Never delete a shared branch from a run. Say it is finished and let the
+  operator delete it.
+
+A `pre-push` guard enforces this for real, so a forced push is refused rather
+than quietly accepted. Its refusal text names the commits at stake and the
+commands that make the push legal.
+
 ## Branch hygiene before opening
 
-- Rebase or merge from the target base so the diff is current.
+- Rebase or merge from the target base so the diff is current (merge, not
+  rebase, once the branch has been pushed — see above).
 - Squash WIP commits into reviewable units. Prefer one commit per logical change; do not force one-commit-per-PR if the work is genuinely multi-step.
 - Confirm tests, typecheck, and lint pass locally. Note any deliberate skips in the PR body.
 - Remove debug prints, commented-out code, and `TODO` markers that are not tracked.
@@ -90,4 +114,4 @@ Skip the `Risk and rollback` section only for clearly trivial PRs (typos, docs).
 - PR description that says "see commits". Reviewers should not need to read the log.
 - Mixing refactor and behavior change in the same PR with no separation in the body.
 - "Address feedback" commits that bundle unrelated edits. One commit per round of feedback is fine; one commit for everything in flight is not.
-- Force-pushing during active review without telling the reviewer.
+- Force-pushing a branch that is already pushed — during review or at any other point.
