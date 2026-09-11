@@ -10,6 +10,7 @@ import {
   type ModelBoostBossReview,
 } from "@paperclipai/shared";
 import { formatCents } from "../lib/utils";
+import { workingStyleTitle } from "./WorkingStyleSection";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
@@ -332,6 +333,12 @@ export function HireAgentPayload({ payload }: { payload: Record<string, unknown>
           </span>
         </div>
       )}
+      {/* DUR-3971: the working-style choice made when this person was
+          employed, in the same words the operator was offered. */}
+      <div className="flex items-start gap-2">
+        <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs pt-0.5">Works</span>
+        <span className="min-w-0">{workingStyleTitle(payload.laneAEnabled === true)}</span>
+      </div>
       <SkillList values={payload.desiredSkills} />
     </div>
   );

@@ -30,6 +30,8 @@ type DuplicateAgentSource = Pick<
   | "budgetMonthlyCents"
   | "permissions"
   | "metadata"
+  | "laneAEnabled"
+  | "laneAInstructions"
 >;
 
 function cloneRecord(value: Record<string, unknown> | null | undefined): Record<string, unknown> {
@@ -70,6 +72,15 @@ export function buildDuplicateAgentPayload(
   if (agent.reportsTo) payload.reportsTo = agent.reportsTo;
   if (agent.capabilities) payload.capabilities = agent.capabilities;
   if (agent.metadata) payload.metadata = cloneRecord(agent.metadata);
+  // DUR-3971: a copy of someone who answers straight away in chat is also
+  // someone who answers straight away in chat. Until the create path accepted
+  // this choice, duplicating a quick agent quietly produced an ordinary one
+  // and the operator had to notice and fix it by hand. Nothing is written for
+  // an ordinary agent, so an ordinary duplicate is the payload it always was.
+  if (agent.laneAEnabled) {
+    payload.laneAEnabled = true;
+    if (agent.laneAInstructions) payload.laneAInstructions = agent.laneAInstructions;
+  }
 
   if (instructionsBundle && Object.keys(instructionsBundle.files).length > 0) {
     payload.instructionsBundle = instructionsBundle;

@@ -31,6 +31,12 @@ import { ReportsToPicker } from "../components/ReportsToPicker";
 import { JobPicker } from "../components/jobs/JobPicker";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
 import { TrustPresetSection } from "../components/TrustPresetSection";
+import {
+  answersStraightAwayInChat,
+  DEFAULT_WORKING_STYLE,
+  WorkingStyleSection,
+  type WorkingStyle,
+} from "../components/WorkingStyleSection";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
@@ -70,6 +76,7 @@ export function NewAgent() {
   const [personality, setPersonality] = useState("");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
+  const [workingStyle, setWorkingStyle] = useState<WorkingStyle>(DEFAULT_WORKING_STYLE);
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
     buildPermissionsForTrustPreset(null, "standard"),
   );
@@ -202,6 +209,7 @@ export function NewAgent() {
         configValues,
         adapterConfig: buildAdapterConfig(),
         permissions,
+        answersStraightAwayInChat: answersStraightAwayInChat(workingStyle),
       }),
     );
   }
@@ -325,6 +333,14 @@ export function NewAgent() {
             created. Changing the job later won't change this agent.
           </div>
         ) : null}
+
+        <div className="border-t border-border px-4 py-4">
+          <WorkingStyleSection
+            value={workingStyle}
+            onChange={setWorkingStyle}
+            disabled={createAgent.isPending}
+          />
+        </div>
 
         <div className="border-t border-border px-4 py-4">
           <TrustPresetSection
