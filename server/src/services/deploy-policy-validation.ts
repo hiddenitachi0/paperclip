@@ -122,8 +122,15 @@ export function describeDeployPolicyProblems(
   for (const page of policy.appHealthCheckPaths ?? []) {
     const trimmed = page.trim();
     if (!trimmed) continue;
+    // The field this comes from is "Pages that must still work
+    // (comma-separated)" and is split on commas, so telling the operator to
+    // put each page on its own line — as this once did — asks for something
+    // the form cannot do. Say what the field actually accepts.
     if (hasWhitespace(trimmed)) {
-      problems.push(`A page address cannot contain spaces (got "${trimmed}"). Put each page on its own line.`);
+      problems.push(
+        `A page address cannot contain spaces (got "${trimmed}"). Separate several pages with commas, like ` +
+          "/, /dashboard, /reports. If a space is really part of the address, write it as %20.",
+      );
       continue;
     }
     if (!trimmed.startsWith("/") && !isHttpUrl(trimmed)) {

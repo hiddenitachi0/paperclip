@@ -602,18 +602,29 @@ health_check() { # url -> 0 if any of HEALTH_RETRIES probes returns HTTP 200
 # So a deploy is also checked against REAL pages of the app — and it is
 # checked DIFFERENTIALLY: how each page answers is recorded immediately before
 # anything is touched, and compared with how it answers afterwards. Only a
-# page that worked before and is server-erroring after can fail a deploy.
-# That is the whole reason this check cannot cause a false rollback:
+# page that worked before and is broken after — a server error, or no answer
+# at all — can fail a deploy. That is the whole reason this check cannot cause
+# a false rollback:
 #   - a page that is already broken answers the same before and after;
 #   - a login wall (401/403), a redirect (3xx) and a missing page (404) are
-#     all "not a server error" and pass;
+#     all "not broken" and pass;
 #   - a page nothing could reach before (no answer at all) is skipped
 #     entirely, since there is no working state to have regressed from;
-#   - a slow-to-warm app gets PAGE_CHECK_RETRIES attempts before any verdict.
+#   - a slow-to-warm app gets PAGE_CHECK_RETRIES attempts before any verdict,
+#     and those attempts now cover "the port isn't open yet" too.
 # The only thing that fails is the thing the operator would call breakage: a
-# page that used to work and now returns a server error.
+# page that used to work and now returns a server error or nothing at all.
 PAGE_CHECK_RETRIES="${PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_RETRIES:-10}"
 PAGE_CHECK_SLEEP_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_SLEEP:-3}"
+# How long to wait for the ROLLED-BACK version to answer before re-checking the
+# pages and telling the operator whether the site came back. `docker compose up
+# -d --force-recreate` returns when the container has started, not when the
+# server inside it is listening, so a re-check fired the instant the rollback
+# recipe returns is reading a booting app — and it is the one re-check whose
+# answer the operator acts on. Same order of magnitude as the deploy's own
+# health budget (HEALTH_RETRIES * HEALTH_SLEEP_SECONDS = 180s by default), and
+# bounded so a rollback into a dead server cannot hang the runner.
+ROLLBACK_HEALTH_WAIT_SECONDS="${PAPERCLIP_DEPLOY_RUNNER_ROLLBACK_HEALTH_WAIT_SECONDS:-180}"
 
 probe_http_code() { # url -> stdout: the HTTP status, or 000 when nothing answered at all
   local code
@@ -629,6 +640,30 @@ is_server_error() { # http code -> 0 if it is a 5xx
     5[0-9][0-9]) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# DUR-3974 follow-up: "broken" is not only a 5xx. probe_http_code() prints 000
+# when nothing answered at all — connection refused, the port never reopened,
+# the container gone — and that is the single clearest way a deploy can break a
+# page: the app is simply not there any more. An earlier version of this file
+# only ever asked is_server_error(), so a page that answered 200 before and
+# answered NOTHING after was logged as "still works after the deploy (was 200,
+# now 000)" and passed. That inverted the whole feature: a deploy that took the
+# application completely down sailed through the check written to catch exactly
+# that. Both shapes are "down" now.
+#
+# This deliberately stays a comparison, not a verdict: 000 only counts against
+# a deploy when the page answered something before it (see the baseline skips
+# in verify_pages_after_deploy), so a page that was unreachable all along, or a
+# host that is firewalled from the box, still cannot roll anything back.
+is_page_down() { # http code -> 0 if the page is broken (a 5xx, or no answer at all)
+  [ "$1" = "000" ] && return 0
+  is_server_error "$1"
+}
+
+# 000 is a curl detail, not something to show an operator.
+describe_http_code() { # http code -> stdout: the code, or plain words for "no answer"
+  if [ "$1" = "000" ]; then printf 'nothing at all'; else printf '%s' "$1"; fi
 }
 
 # The absolute addresses of the pages to check. Each configured entry is
@@ -693,17 +728,21 @@ verify_pages_after_deploy() { # aid, baseline -> 0 nothing regressed, 1 somethin
       log "runner: $aid skipping $url — it was already answering $before before the deploy, so this deploy did not break it"
       continue
     fi
+    # The retry budget is what keeps a slow-starting app from being read as a
+    # failure, and it now covers "nothing answered yet" as well as a 5xx — an
+    # app still opening its port gets every one of these attempts before any
+    # verdict, where before it got none (000 left the loop on the first pass).
     attempt=1
     while :; do
       now="$(probe_http_code "$url")"
-      is_server_error "$now" || break
+      is_page_down "$now" || break
       [ "$attempt" -ge "$PAGE_CHECK_RETRIES" ] && break
       attempt=$((attempt + 1))
       sleep "$PAGE_CHECK_SLEEP_SECONDS"
     done
-    if is_server_error "$now"; then
-      log "runner: $aid $url answered $before before the deploy and $now after it, on all $attempt attempts"
-      broken="${broken}${broken:+, }$url (answered $before before, $now now)"
+    if is_page_down "$now"; then
+      log "runner: $aid $url answered $before before the deploy and $(describe_http_code "$now") after it, on all $attempt attempts"
+      broken="${broken}${broken:+, }$url (answered $before before, $(describe_http_code "$now") now)"
     else
       log "runner: $aid $url still works after the deploy (was $before, now $now)"
     fi
@@ -720,14 +759,20 @@ verify_pages_after_deploy() { # aid, baseline -> 0 nothing regressed, 1 somethin
 # would both re-log a deploy verdict that was already decided and blow the
 # time budget of a recovery step that must stay short.
 wait_for_health() { # url, budget_seconds -> 0 as soon as a probe returns 200, 1 if the budget runs out
-  local url="$1" budget="${2:-0}" waited=0 code curl_status
+  local url="$1" budget="${2:-0}" waited=0 code curl_status step
   [ -n "$url" ] || return 1
+  # The budget is spent in HEALTH_SLEEP_SECONDS steps — but that is tunable and
+  # can legitimately be 0 (tests, a fast local loop), which would advance the
+  # clock by nothing and spin here forever. Never count a step as less than a
+  # second: this wait is a courtesy on a failure path and must always end.
+  step="$HEALTH_SLEEP_SECONDS"
+  [ "$step" -gt 0 ] 2>/dev/null || step=1
   while [ "$waited" -lt "$budget" ]; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout "$HEALTH_CONNECT_TIMEOUT_SECONDS" --max-time "$HEALTH_MAX_TIME_SECONDS" "$url")"
     curl_status=$?
     [ "$(probe_verdict "$curl_status" "$code")" = ok ] && return 0
     sleep "$HEALTH_SLEEP_SECONDS"
-    waited=$((waited + HEALTH_SLEEP_SECONDS))
+    waited=$((waited + step))
   done
   return 1
 }
@@ -1600,10 +1645,24 @@ print(d.get("decidedAt") or d.get("updatedAt") or d.get("createdAt") or "")' 2>/
     # and it is exactly the case a hopeful sentence would hide.
     local recovery_note="No rollback is set up for this project, so the broken version is still live and someone needs to look at it."
     if [ "$DV_ROLLBACK" = git_previous ]; then
-      if verify_pages_after_deploy "$aid" "$page_baseline" >/dev/null; then
+      # The rollback's recipe has returned, which only means the container has
+      # been started — not that the old version is listening yet. Re-checking
+      # now would read a booting app as "the rollback did not help", and that
+      # verdict is the one the operator is asked to act on, so wait (bounded)
+      # for the old version to answer first.
+      if wait_for_health "$DV_HEALTH_CHECK_URL" "$ROLLBACK_HEALTH_WAIT_SECONDS"; then
+        log "runner: $aid the rolled-back version is answering at $DV_HEALTH_CHECK_URL — re-checking the pages"
+      else
+        log "runner: $aid the rolled-back version still has not answered at $DV_HEALTH_CHECK_URL after ${ROLLBACK_HEALTH_WAIT_SECONDS}s — re-checking the pages anyway"
+      fi
+      local still_broken
+      if still_broken="$(verify_pages_after_deploy "$aid" "$page_baseline")"; then
         recovery_note="Production has been put back to the version that was live before this ($before_commit), and those pages have been checked again and are working."
       else
-        recovery_note="Production has been put back to the version that was live before this ($before_commit), but those pages are STILL returning an error, so putting the old version back was not enough. This one needs a person."
+        # The worst case there is. Loud in the log, and unmistakable on the
+        # card: do not let this read like the reassuring branch above.
+        log "runner: $aid ROLLBACK DID NOT RESTORE THE APP — after rolling $DV_DEPLOY_TARGET_PATH back to $before_commit these pages are still broken: $still_broken"
+        recovery_note="Production has been put back to the version that was live before this ($before_commit), but these pages are STILL not working: $still_broken. Putting the old version back was not enough, so the app is still down and this needs a person now."
       fi
     fi
     maybe_end_quiet_mode_drain "$aid" "$DV_HEALTH_CHECK_URL"

@@ -128,6 +128,24 @@ describe("describeDeployPolicyProblems", () => {
     ]);
   });
 
+  // The field is "Pages that must still work (comma-separated)", split on
+  // commas, with the placeholder "/, /dashboard, /reports". The rejection
+  // message has to tell the operator to do the thing that field can do.
+  it("tells the operator to separate pages the way the form actually splits them", () => {
+    const [problem] = describeDeployPolicyProblems(policy({ appHealthCheckPaths: ["/two pages"] }), context);
+    expect(problem).toMatch(/commas/);
+    expect(problem).not.toMatch(/own line/);
+    // and it shows the shape the placeholder shows, so the two cannot drift apart
+    expect(problem).toContain("/, /dashboard, /reports");
+  });
+
+  it("does not reject a comma-separated list that the form has already split and trimmed", () => {
+    // What splitCommaList("/, /dashboard, /reports") hands the API.
+    expect(
+      describeDeployPolicyProblems(policy({ appHealthCheckPaths: ["/", "/dashboard", "/reports"] }), context),
+    ).toEqual([]);
+  });
+
   it("never blocks a project for listing no pages — every project that exists today lists none", () => {
     expect(describeDeployPolicyProblems(policy({ appHealthCheckPaths: [] }), context)).toEqual([]);
     expect(describeDeployPolicyProblems(policy(), context)).toEqual([]);

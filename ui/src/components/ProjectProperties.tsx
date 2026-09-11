@@ -1662,8 +1662,9 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     Real pages of the app, not a status endpoint. Before each deploy the runner notes how they answer
                     today; after the deploy it opens them again, and only undoes the deploy if a page that worked before
-                    is now broken. A page that was already broken, needs a login, or does not exist cannot fail a deploy.
-                    Leave this empty and the runner can only check the front page.
+                    is now broken — showing an error, or not answering at all. A page that was already broken, needs a
+                    login, or does not exist cannot fail a deploy. Leave this empty and the runner can only check the
+                    front page.
                   </p>
                 </div>
 

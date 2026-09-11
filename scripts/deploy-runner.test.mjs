@@ -3195,7 +3195,7 @@ test("DUR-3974: when the rollback does not fix the broken page either, the card 
     assertSuccess(result, "process_approval");
 
     const body = scenario.commentsFor("aid-1")[0];
-    assert.match(body, /STILL returning an error/, "a rollback that did not help must not be reported as if it had");
+    assert.match(body, /STILL not working/, "a rollback that did not help must not be reported as if it had");
     assert.match(body, /needs a person/);
     assert.doesNotMatch(body, /checked again and are working/);
   } finally {
@@ -3360,6 +3360,218 @@ test("DUR-3974: a page nothing could reach before the deploy is skipped, not tre
     rmSync(webRoot, { recursive: true, force: true });
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- "nothing answered at all" is the loudest failure there is, not a pass ---
+
+test("DUR-3974: a page that worked before the deploy and answers NOTHING after it is a failure, not a pass", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-down-"));
+  try {
+    // verify_pages_after_deploy probed directly, the way a reviewer would:
+    // one page, a real pre-deploy answer, and nothing listening afterwards.
+    // This used to log "still works after the deploy (was 200, now 000)" and
+    // return 0, so a deploy that took the whole application down PASSED the
+    // check that exists to catch precisely that.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      PAGE_CHECK_RETRIES=2
+      PAGE_CHECK_SLEEP_SECONDS=0
+      echo "--worked-before--"
+      if broken="$(verify_pages_after_deploy aid-x "$(printf 'http://127.0.0.1:1/gone\\t200')")"; then
+        echo "verdict=pass"
+      else
+        echo "verdict=fail broken=\${broken}"
+      fi
+      echo "--never-worked--"
+      if verify_pages_after_deploy aid-x "$(printf 'http://127.0.0.1:1/gone\\t000')" >/dev/null; then
+        echo "verdict=pass"
+      else
+        echo "verdict=fail"
+      fi
+      echo "--already-500--"
+      if verify_pages_after_deploy aid-x "$(printf 'http://127.0.0.1:1/gone\\t503')" >/dev/null; then
+        echo "verdict=pass"
+      else
+        echo "verdict=fail"
+      fi
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "runner.log") },
+    });
+    assertSuccess(result, "verify_pages_after_deploy");
+    const [, workedBefore, neverWorked, already500] = result.stdout.split(/--(?:worked-before|never-worked|already-500)--\n/);
+
+    assert.match(
+      workedBefore,
+      /verdict=fail/,
+      "a page that answered 200 before the deploy and answers nothing after it must fail the deploy",
+    );
+    assert.match(workedBefore, /answered 200 before, nothing at all now/, "and say so in words, not as the code 000");
+    // The genuine cases this must NOT start failing — the whole point of the
+    // check being a comparison rather than a verdict on health.
+    assert.match(neverWorked, /verdict=pass/, "a page nothing could reach before the deploy is not a regression this deploy caused");
+    assert.match(already500, /verdict=pass/, "a page that was already server-erroring before the deploy is not a regression either");
+
+    const log = readFileSync(path.join(dir, "runner.log"), "utf8");
+    assert.doesNotMatch(log, /still works after the deploy \(was 200, now 000\)/, "and it must never be logged as working");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a deploy that takes the app off the air entirely is rolled back, and the card says the rollback did not bring it back", async () => {
+  // Two servers, because this is the case a single-address health check is
+  // blind to: the configured health address keeps answering (a status page,
+  // another container, nginx) while the application itself is simply gone.
+  const healthRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  const appRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-app-"));
+  writeFileSync(path.join(healthRoot, "status_health"), "200");
+  writeFileSync(path.join(appRoot, "status_dashboard_now"), "200");
+  const health = await startStatusHttpServer(healthRoot);
+  const app = await startStatusHttpServer(appRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, {
+      port: health.port,
+      appHealthCheckPaths: [`http://127.0.0.1:${app.port}/dashboard/now`],
+    }));
+    writeFileSync(path.join(scenario.dir, "app.pid"), String(app.child.pid));
+    // The deploy kills the application outright; the rollback cannot revive it
+    // (a rolled-back checkout does not undo, say, a half-applied migration
+    // that stops the server booting at all).
+    const recipeKillsTheApp = [
+      'run_recipe() {',
+      '  echo recipe >> "$SCENARIO_DIR/recipe.log"',
+      '  local n; n="$(wc -l < "$SCENARIO_DIR/recipe.log")"',
+      '  if [ "$n" -eq 1 ]; then kill "$(cat "$SCENARIO_DIR/app.pid")" 2>/dev/null; sleep 1; fi',
+      '  return 0',
+      '}',
+    ].join("\n");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${recipeKillsTheApp}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: pageCheckEnv(scenario, healthRoot, { PAPERCLIP_DEPLOY_RUNNER_ROLLBACK_HEALTH_WAIT_SECONDS: "2" }),
+    });
+    assertSuccess(result, "process_approval");
+
+    const body = scenario.commentsFor("aid-1")[0];
+    assert.match(body, /Deploy failed/, "a deploy that took the app down is the clearest possible failed deploy");
+    assert.doesNotMatch(body, /is live and healthy/);
+    assert.match(body, /dashboard\/now/, "the card must name the page that stopped answering");
+    assert.match(body, /answered 200 before, nothing at all now/);
+    assert.match(body, /STILL not working/, "the rollback did not bring it back and the card must not pretend otherwise");
+    assert.match(body, /needs a person/);
+    assert.doesNotMatch(body, /checked again and are working/);
+    assert.match(
+      scenario.readLog(),
+      /ROLLBACK DID NOT RESTORE THE APP/,
+      "the worst case has to be loud in the log too, not just on the card",
+    );
+  } finally {
+    health.child.kill();
+    app.child.kill();
+    scenario.cleanup();
+    rmSync(healthRoot, { recursive: true, force: true });
+    rmSync(appRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: the re-check after a rollback waits for the old version to come back before judging it", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "dashboard_now", { before: 200, after: 500 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["/dashboard/now"] }));
+    // `docker compose up -d --force-recreate` returns when the container has
+    // STARTED. This recipe models that honestly: the rollback run returns
+    // immediately with the app not yet listening (503), and the old version
+    // only finishes booting a couple of seconds later. Judging the rollback at
+    // the instant the recipe returns reads a booting app as "the rollback did
+    // not help" — the single most alarming thing the runner can say, and here
+    // it would be false.
+    const rollbackComesBackSlowly = [
+      'run_recipe() {',
+      '  echo recipe >> "$SCENARIO_DIR/recipe.log"',
+      '  local n; n="$(wc -l < "$SCENARIO_DIR/recipe.log")"',
+      '  if [ "$n" -eq 1 ]; then',
+      '    echo 500 > "$WEB_ROOT/status_dashboard_now"',
+      '  else',
+      '    echo 503 > "$WEB_ROOT/status_health"',
+      '    echo 503 > "$WEB_ROOT/status_dashboard_now"',
+      '    ( sleep 3; echo 200 > "$WEB_ROOT/status_health"; echo 200 > "$WEB_ROOT/status_dashboard_now" ) >/dev/null 2>&1 &',
+      '  fi',
+      '  return 0',
+      '}',
+    ].join("\n");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${rollbackComesBackSlowly}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: pageCheckEnv(scenario, webRoot, {
+        // One page attempt, no page-level sleep: the ONLY thing that can give
+        // the rolled-back app time here is the health wait under test.
+        PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_RETRIES: "1",
+        PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_SLEEP: "0",
+        PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "1",
+        PAPERCLIP_DEPLOY_RUNNER_ROLLBACK_HEALTH_WAIT_SECONDS: "30",
+      }),
+    });
+    assertSuccess(result, "process_approval");
+
+    const body = scenario.commentsFor("aid-1")[0];
+    assert.match(body, /Deploy failed/);
+    assert.match(
+      body,
+      /checked again and are working/,
+      "the rollback did work — it was just still booting when the recipe returned",
+    );
+    assert.doesNotMatch(body, /STILL not working/, "a still-booting app must not be reported as a rollback that failed");
+    assert.match(
+      scenario.readLog(),
+      /the rolled-back version is answering at .* re-checking the pages/,
+      "the wait has to be visible in the log, so a slow recovery is explainable afterwards",
+    );
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: the wait for a rolled-back app to come back is bounded, and ends even when the sleep between probes is zero", () => {
+  // wait_for_health spends its budget in HEALTH_SLEEP_SECONDS steps, and that
+  // is tunable to 0 — which would advance the clock by nothing and spin here
+  // forever on a server that never comes back, hanging the deploy runner on a
+  // failure path. Nothing may take longer than the budget it was given.
+  const started = Date.now();
+  const script = `
+    set -uo pipefail
+    source "${SCRIPT}"
+    HEALTH_SLEEP_SECONDS=0
+    HEALTH_CONNECT_TIMEOUT_SECONDS=1
+    HEALTH_MAX_TIME_SECONDS=1
+    if wait_for_health "http://127.0.0.1:1/health" 3; then echo "verdict=came-back"; else echo "verdict=gave-up"; fi
+  `;
+  const result = run("bash", ["-c", script], { timeout: 30_000 });
+  assertSuccess(result, "wait_for_health");
+  assert.match(result.stdout, /verdict=gave-up/);
+  assert.ok(Date.now() - started < 30_000, "wait_for_health must return, not spin");
 });
 
 test("app_health_check_urls resolves paths against the health check address, keeps full addresses, de-duplicates, and falls back to the front page", () => {
