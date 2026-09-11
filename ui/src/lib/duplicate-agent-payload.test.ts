@@ -83,4 +83,24 @@ describe("duplicate agent payload", () => {
     expect(payload.adapterConfig).not.toHaveProperty("instructionsFilePath");
     expect(payload.adapterConfig).not.toHaveProperty("promptTemplate");
   });
+  // DUR-3971
+  it("keeps a copy of a quick agent a quick agent", () => {
+    const payload = buildDuplicateAgentPayload({
+      ...baseAgent,
+      laneAEnabled: true,
+      laneAInstructions: "You are the front desk.",
+    });
+
+    expect(payload).toMatchObject({
+      laneAEnabled: true,
+      laneAInstructions: "You are the front desk.",
+    });
+  });
+
+  it("writes nothing about the working style when copying an ordinary agent", () => {
+    const payload = buildDuplicateAgentPayload(baseAgent);
+
+    expect(Object.hasOwn(payload, "laneAEnabled")).toBe(false);
+    expect(Object.hasOwn(payload, "laneAInstructions")).toBe(false);
+  });
 });

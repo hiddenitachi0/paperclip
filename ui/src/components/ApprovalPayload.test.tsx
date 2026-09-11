@@ -607,4 +607,45 @@ describe("ApprovalPayloadRenderer", () => {
       root.unmount();
     });
   });
+
+  // DUR-3971: the hire card has to say which kind of person is being employed.
+  it("says the hire answers straight away in chat when that is what was chosen", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="hire_agent"
+          payload={{ name: "Front desk", role: "general", laneAEnabled: true }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Front desk");
+    expect(container.textContent).toContain("Also answers straight away in chat");
+    expect(container.textContent).not.toContain("laneAEnabled");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("says the hire goes away and works on tasks when the card carries no choice", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ApprovalPayloadRenderer
+          type="hire_agent"
+          payload={{ name: "Analyst", role: "general" }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Goes away and works on tasks");
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });

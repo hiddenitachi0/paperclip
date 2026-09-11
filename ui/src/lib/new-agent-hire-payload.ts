@@ -13,6 +13,13 @@ export function buildNewAgentHirePayload(input: {
   configValues: CreateConfigValues;
   adapterConfig: Record<string, unknown>;
   permissions?: Partial<AgentPermissions>;
+  /**
+   * DUR-3971: "answers straight away in chat" (true) vs "goes away and works
+   * on tasks" (false/omitted). Only sent when the operator picks the quick
+   * lane, so a hire made without touching the choice produces exactly the
+   * payload it produced before this field existed.
+   */
+  answersStraightAwayInChat?: boolean;
 }) {
   const {
     name,
@@ -25,6 +32,7 @@ export function buildNewAgentHirePayload(input: {
     configValues,
     adapterConfig,
     permissions,
+    answersStraightAwayInChat = false,
   } = input;
 
   return {
@@ -46,5 +54,6 @@ export function buildNewAgentHirePayload(input: {
     }),
     budgetMonthlyCents: 0,
     ...(permissions ? { permissions } : {}),
+    ...(answersStraightAwayInChat ? { laneAEnabled: true } : {}),
   };
 }

@@ -31,6 +31,7 @@ import {
   extractSorteringsreglerBlock,
   parseSorteringsreglerRuleTargetNames,
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  QUICK_AGENT_FIELDS,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -1584,10 +1585,11 @@ export function agentRoutes(
   }
 
   // Quick-agent fields guarded by the board-only Lane A rule: the on/off switch
-  // and the instruction set the quick agent follows.
-  const LANE_A_BOARD_ONLY_FIELDS = ["laneAEnabled", "laneAInstructions"] as const;
+  // and the instruction set the quick agent follows. The list itself lives in
+  // @paperclipai/shared (QUICK_AGENT_FIELDS) so the create/hire schema, this
+  // guard and the hire approval payload cannot drift apart — DUR-3971.
   function patchTouchesLaneAFields(patchData: Record<string, unknown>) {
-    return LANE_A_BOARD_ONLY_FIELDS.some((key) => hasOwn(patchData, key));
+    return QUICK_AGENT_FIELDS.some((key) => hasOwn(patchData, key));
   }
 
   // Mirrors assertNoAgentInstructionsConfigMutation: an agent PATCHing its own
@@ -2706,6 +2708,11 @@ export function agentRoutes(
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, hireInput.runtimeConfig);
     assertNoAgentVoiceFieldMutation(req, "tone", hireInput.tone);
     assertNoAgentVoiceFieldMutation(req, "personality", hireInput.personality);
+    // DUR-3971: the quick-agent choice is now part of employing someone, so
+    // the same board-only rule that guards PATCH has to guard the hire too —
+    // otherwise an agent-authenticated hire could hand itself the direct
+    // model-call lane that a human is supposed to switch on.
+    assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2804,6 +2811,14 @@ export function agentRoutes(
               : agent.budgetMonthlyCents,
           desiredSkills: desiredSkillAssignment.desiredSkills,
           metadata: requestedMetadata,
+          // DUR-3971: the working-style choice made when employing this
+          // person travels with the card the board approves. On the normal
+          // path the agent row already carries it (agentId below), but the
+          // card is what the operator reads, and approvals.ts still has a
+          // legacy branch that rebuilds the agent from this payload — so the
+          // choice must not live only on the row.
+          laneAEnabled: agent.laneAEnabled === true,
+          laneAInstructions: agent.laneAInstructions ?? null,
           agentId: agent.id,
           requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
           requestedConfigurationSnapshot: {
@@ -2931,6 +2946,10 @@ export function agentRoutes(
     assertNoAgentRuntimeConfigAdapterConfigMutation(req, createInput.runtimeConfig);
     assertNoAgentVoiceFieldMutation(req, "tone", createInput.tone);
     assertNoAgentVoiceFieldMutation(req, "personality", createInput.personality);
+    // Belt and braces (DUR-3971): agent actors are already refused above, but
+    // the quick-agent choice is board-only on every write path and should not
+    // depend on that one earlier check staying where it is.
+    assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
