@@ -59,6 +59,11 @@ jobs:
       - name: Test deploy runner comment guarantee
         run: node --test ./scripts/deploy-runner.test.mjs
 
+      # DUR-3975: the pre-push guard that stops one agent's push discarding
+      # another agent's commits, plus the wiring that installs it.
+      - name: Test push-clobber guards
+        run: node --test ./scripts/__tests__/git-push-clobber-guard.test.mjs
+
       # Checks the migration-rehearsal script itself (safety refusals, failure
       # reporting). The rehearsal proper needs a dump of real data, so it is an
       # operator step (docs/rls-cutover-runbook.md), never a CI step.
