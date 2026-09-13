@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PROJECT_STATUSES, PROJECT_ICON_NAMES } from "../constants.js";
 import { EMBEDDED_GIT_CREDENTIAL_ERROR_MESSAGE, hasEmbeddedGitCredential } from "../git-remote-url.js";
+import type { ProjectDeployPolicy as ProjectDeployPolicyInterface } from "../types/workspace-runtime.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -56,6 +57,25 @@ export const deployPolicySchema = z
     composeFiles: z.array(z.string()).optional(),
     envFile: z.string().optional(),
     healthCheckUrl: z.string(),
+    /**
+     * DUR-3974: real pages on the deployed app that must still work after a
+     * deploy, each either a path ("/dashboard/now") resolved against
+     * `healthCheckUrl`'s own origin, or a full http(s) address.
+     *
+     * `healthCheckUrl` on its own only proves that SOMETHING answered. On
+     * 2026-09-10 the configured probe was a login page that renders without
+     * reading the database at all, so it kept answering 200 while every page
+     * that loads companies returned 500 — the deploy declared itself healthy
+     * and no rollback fired. These paths are the pages the runner opens
+     * instead of trusting that one endpoint.
+     *
+     * The runner compares each page against how it answered immediately
+     * BEFORE the deploy, so a page that was already broken, behind a login,
+     * or simply missing cannot fail a deploy — only a page this deploy broke
+     * can. See capture_page_baseline/verify_pages_after_deploy in
+     * scripts/deploy-runner.sh.
+     */
+    appHealthCheckPaths: z.array(z.string()).optional(),
     rollback: z.enum(["git_previous", "none"]),
     /**
      * The branch a merge must land on to ever reach this deploy (DUR-40).
@@ -85,6 +105,46 @@ export const deployPolicySchema = z
     previewHealthPath: z.string().optional(),
   })
   .strict();
+
+/**
+ * DUR-3974: `deployPolicy` is declared TWICE in this package — once as the zod
+ * schema above (what the API accepts) and once as a hand-written interface in
+ * types/workspace-runtime.ts (what every consumer actually imports as
+ * `ProjectDeployPolicy`, because that is the one re-exported from the package
+ * index). Nothing used to hold the two in step, so a field added to one and
+ * forgotten on the other type-checked cleanly and then silently never reached
+ * the runner. This assertion fails the build the moment they diverge in either
+ * direction.
+ *
+ * Structural assignability alone is NOT enough here: an extra OPTIONAL field on
+ * either side is assignable in both directions, which is exactly the shape a
+ * forgotten field takes. So the keys are compared explicitly, and the failure
+ * is phrased so the compiler names the missing field
+ * ("Type '\"appHealthCheckPaths\"' is not assignable to type 'never'") instead
+ * of leaving whoever hits it to guess.
+ */
+type DeployPolicyFieldsMissingFromInterface = Exclude<
+  keyof z.infer<typeof deployPolicySchema>,
+  keyof ProjectDeployPolicyInterface
+>;
+type DeployPolicyFieldsMissingFromSchema = Exclude<
+  keyof ProjectDeployPolicyInterface,
+  keyof z.infer<typeof deployPolicySchema>
+>;
+/** Add the field to types/workspace-runtime.ts's ProjectDeployPolicy as well. */
+const _addMeToTheProjectDeployPolicyInterface: never =
+  undefined as unknown as DeployPolicyFieldsMissingFromInterface;
+/** Add the field to deployPolicySchema above as well. */
+const _addMeToTheDeployPolicySchema: never = undefined as unknown as DeployPolicyFieldsMissingFromSchema;
+/** Same keys is necessary but not sufficient — the value types must line up too. */
+const _deployPolicyValueTypesAgree: [z.infer<typeof deployPolicySchema>] extends [ProjectDeployPolicyInterface]
+  ? [ProjectDeployPolicyInterface] extends [z.infer<typeof deployPolicySchema>]
+    ? true
+    : never
+  : never = true;
+void _addMeToTheProjectDeployPolicyInterface;
+void _addMeToTheDeployPolicySchema;
+void _deployPolicyValueTypesAgree;
 
 export const projectWorkspaceRuntimeConfigSchema = z.object({
   workspaceRuntime: z.record(z.string(), z.unknown()).optional().nullable(),
