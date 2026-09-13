@@ -650,9 +650,14 @@ const SERVICE_OR_BOARD_SECURITY: Array<Record<string, string[]>> = [
  * list and SERVICE_TOKEN_SCOPES in
  * packages/shared/src/validators/company-service-token.ts are the two
  * written-down answers to "what can the outside system reach"; the enforcement
- * is assertServiceOrBoard in server/src/routes/authz.ts, and
- * server/src/__tests__/company-service-token-route-table.test.ts pins the two
- * together against the real route table.
+ * is assertServiceOrBoard plus the default-deny in assertAuthenticated, both in
+ * server/src/routes/authz.ts.
+ *
+ * server/src/__tests__/company-service-token-every-route.test.ts is what holds
+ * all of that to the truth: it builds the real app, fires a real token at every
+ * route it registers, and fails if anything outside this list answers 2xx. If
+ * you add an operation here, add the route to that test's grant as well — and
+ * if you cannot justify it there, it does not belong here either.
  */
 const SERVICE_TOKEN_OPERATIONS = new Set([
   "POST /api/lane-a/{agentId}/transform",

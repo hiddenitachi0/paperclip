@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { serviceTokensApi, type CreatedServiceToken } from "../api/serviceTokens";
+import {
+  LANE_A_TRANSFORM_SCOPES,
+  serviceTokensApi,
+  type CreatedServiceToken,
+} from "../api/serviceTokens";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { useToastActions } from "../context/ToastContext";
@@ -43,7 +47,14 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
   };
 
   const createMutation = useMutation({
-    mutationFn: () => serviceTokensApi.create(companyId, { name: name.trim() }),
+    mutationFn: () =>
+      // The scope is sent explicitly rather than left to the server default, so
+      // that adding a second scope to the platform later cannot silently widen
+      // the key this button mints.
+      serviceTokensApi.create(companyId, {
+        name: name.trim(),
+        scopes: LANE_A_TRANSFORM_SCOPES,
+      }),
     onSuccess: (created) => {
       setJustCreated(created);
       setName("");

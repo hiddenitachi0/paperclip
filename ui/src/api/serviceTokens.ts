@@ -1,4 +1,14 @@
+import type { ServiceTokenScope } from "@paperclipai/shared";
 import { api } from "./client";
+
+export type ServiceTokenScopeValue = ServiceTokenScope;
+
+/**
+ * What the "Lag nøkkel" button mints. Written out here rather than spread from
+ * the shared allowlist so that adding a scope to the platform cannot widen the
+ * key this screen creates without someone editing this line.
+ */
+export const LANE_A_TRANSFORM_SCOPES: ServiceTokenScopeValue[] = ["lane_a:transform"];
 
 /**
  * DUR-3977: per-company machine credentials for server-to-server calls.
@@ -26,7 +36,14 @@ export type CreatedServiceToken = ServiceTokenSummary & { token: string };
 export const serviceTokensApi = {
   list: (companyId: string) =>
     api.get<ServiceTokenSummary[]>(`/companies/${companyId}/service-tokens`),
-  create: (companyId: string, data: { name: string }) =>
+  /**
+   * `scopes` is required here on purpose. The server has a default, but a
+   * default is the wrong place for the UI to get its answer from: when a
+   * second scope is added, a create call that says nothing would start minting
+   * a wider key than the board user chose. The screen mints exactly what it
+   * describes, and nothing else.
+   */
+  create: (companyId: string, data: { name: string; scopes: ServiceTokenScopeValue[] }) =>
     api.post<CreatedServiceToken>(`/companies/${companyId}/service-tokens`, data),
   revoke: (companyId: string, tokenId: string) =>
     api.post<{ ok: true; serviceTokenId: string }>(

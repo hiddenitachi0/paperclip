@@ -52,15 +52,23 @@ export const createCompanyServiceTokenSchema = z.object({
   /** What the operator calls it, e.g. "Nordstrand dashboard". */
   name: z.string().trim().min(1).max(120),
   /**
-   * What this token may reach. Defaults to the transform lane because that is
-   * the only thing a service token exists for today; it is still written onto
-   * the row explicitly so the grant is a stored fact, not an assumption.
+   * What this token may reach. The UI sends this explicitly; the default is
+   * only for a caller that omits it.
+   *
+   * The default is the LITERAL ["lane_a:transform"], not `SERVICE_TOKEN_SCOPES`.
+   * Spreading the whole allowlist reads as least privilege only for as long as
+   * the allowlist has one entry: the day a second scope is added, every token
+   * minted without an explicit list would silently carry it too — a widening
+   * no board user asked for, applied retroactively to a create call written
+   * before that scope existed. Adding a scope to the allowlist must never
+   * change what an existing caller mints. If a new default is wanted, it has
+   * to be typed in here on purpose.
    */
   scopes: z
     .array(z.enum(SERVICE_TOKEN_SCOPES))
     .min(1)
     .optional()
-    .default([...SERVICE_TOKEN_SCOPES]),
+    .default(["lane_a:transform"]),
   /** Optional expiry. Null/absent means it lasts until revoked. */
   expiresAt: z.coerce.date().nullable().optional(),
 });

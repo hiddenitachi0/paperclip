@@ -26,6 +26,16 @@ import { companyServiceTokenService } from "../services/company-service-tokens.j
  * review asked for before this credential is handed to the Nordstrand
  * dashboard: the transform lane is reachable, and everything named below is
  * not.
+ *
+ * It is NOT the guarantee, though, and it should not be read as one. A list of
+ * ten route names typed by hand is still a list that has to be kept in step
+ * with the server by someone remembering to. It missed the five static
+ * catalogue reads under /api/skills and /api/teams, which answered 200 to a
+ * token that never named them. The guarantee is
+ * company-service-token-every-route.test.ts, which enumerates every route the
+ * real app registers and fires the same token at all of them. This file stays
+ * because a named, readable case tells you WHICH door was tried and why it
+ * matters; that one tells you no door was missed.
  */
 
 vi.hoisted(() => {

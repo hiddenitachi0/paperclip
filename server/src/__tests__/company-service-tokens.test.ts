@@ -225,4 +225,34 @@ describeEmbeddedPostgres("company service tokens", () => {
     expect(created.scopes).toEqual([]);
     expect(await service.findByToken(created.token)).toMatchObject({ scopes: [] });
   });
+
+  // DUR-3977. The create schema used to default `scopes` to a spread of the
+  // whole SERVICE_TOKEN_SCOPES allowlist. With one scope in the list that reads
+  // as least privilege, which is why it shipped — but it means "everything this
+  // platform can grant", and the day a second scope is added, every caller that
+  // omits the field starts minting a wider key than anybody chose, retroactively
+  // and silently. The default has to be a literal, so that widening the platform
+  // never widens an existing caller.
+  it("defaults a create call with no scopes to the transform lane only, not to the whole allowlist", async () => {
+    const { createCompanyServiceTokenSchema, SERVICE_TOKEN_SCOPES } = await import(
+      "@paperclipai/shared"
+    );
+
+    const parsed = createCompanyServiceTokenSchema.parse({ name: "Nordstrand dashboard" });
+    expect(parsed.scopes).toEqual(["lane_a:transform"]);
+
+    // Whatever the allowlist grows to, the default stays this one scope. The
+    // assertion above is written as a literal for that reason: it is a value
+    // someone has to come back and change on purpose, not an expression that
+    // tracks the allowlist and keeps agreeing with itself.
+    expect(SERVICE_TOKEN_SCOPES).toContain("lane_a:transform");
+
+    // An explicit list is still honoured exactly as given — the default is a
+    // fallback, not a floor.
+    const explicit = createCompanyServiceTokenSchema.parse({
+      name: "Nordstrand dashboard",
+      scopes: ["lane_a:transform"],
+    });
+    expect(explicit.scopes).toEqual(["lane_a:transform"]);
+  });
 });

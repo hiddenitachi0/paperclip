@@ -4,10 +4,37 @@ import { forbidden, unauthorized } from "../errors.js";
 import type { accessService } from "../services/access.js";
 import { logger } from "../middleware/logger.js";
 
+// DUR-3977 default-deny, the single gate. A company service token is the
+// first credential Paperclip issues to a system outside itself, so "which
+// routes can it reach" must be a list someone wrote down, not a side effect of
+// which assert helper a route happened to pick years ago.
+//
+// The marker `req.serviceRouteOptIn` is set by `assertServiceOrBoard` and
+// nowhere else, so the reachable set is exactly "the routes that named a
+// service-token scope". Everything else refuses here.
+//
+// This lives on `assertAuthenticated` rather than on `assertCompanyAccess`
+// because a route that takes no company parameter (the static platform
+// catalogues under /api/skills and /api/teams, for instance) only ever calls
+// `assertAuthenticated` — guarding the company helper alone left those
+// answering 200 to a token that never named them.
+function refuseServiceTokenWithoutOptIn(req: Request) {
+  if (req.actor.type !== "service" || req.serviceRouteOptIn === true) return;
+  logger.error({
+    event: "security.service_token_route_denied",
+    actorCompanyId: req.actor.companyId,
+    serviceTokenId: req.actor.serviceTokenId ?? null,
+    method: req.method,
+    path: req.originalUrl ?? req.path,
+  }, "Refused a company service token on a route that does not accept service tokens");
+  throw forbidden("This endpoint does not accept company service tokens");
+}
+
 export function assertAuthenticated(req: Request) {
   if (req.actor.type === "none") {
     throw unauthorized();
   }
+  refuseServiceTokenWithoutOptIn(req);
 }
 
 export function assertBoard(req: Request) {
@@ -102,7 +129,11 @@ export function assertServiceOrBoard(req: Request, requiredScope: ServiceTokenSc
       }, "Refused a service token that does not hold the scope this route requires");
       throw forbidden(`Service token is not scoped for ${requiredScope}`);
     }
+    // The marker goes on BEFORE anything else is asserted, because
+    // `assertAuthenticated` — which every downstream gate calls — refuses a
+    // service actor that has not been opted in by this function.
     req.serviceRouteOptIn = true;
+    assertAuthenticated(req);
     return;
   }
   if (req.actor.type === "board") {
@@ -113,28 +144,12 @@ export function assertServiceOrBoard(req: Request, requiredScope: ServiceTokenSc
 }
 
 export function assertCompanyAccess(req: Request, companyId: string) {
+  // DUR-3977 default-deny runs inside assertAuthenticated, which this calls
+  // first: a service token that has not been opted in by assertServiceOrBoard
+  // is refused before any of the ~300 assertCompanyAccess call sites — the
+  // company dashboard, issue attachments, and POST /api/chat/classify (an
+  // uncapped metered Anthropic call) — gets a look at it.
   assertAuthenticated(req);
-  // DUR-3977 default-deny. A company service token is the first credential
-  // Paperclip has ever issued to a system outside itself, so "which routes can
-  // it reach" must be a list someone wrote down, not a side effect of which
-  // assert helper a route happened to pick years ago. Without this branch a
-  // service token would pass every one of the ~300 assertCompanyAccess call
-  // sites for its own company — the company dashboard, issue attachments, and
-  // POST /api/chat/classify, which is an uncapped metered Anthropic call.
-  //
-  // The marker is set by assertServiceOrBoard and nowhere else, so the
-  // allowed set is exactly "the routes that named a service-token scope".
-  if (req.actor.type === "service" && req.serviceRouteOptIn !== true) {
-    logger.error({
-      event: "security.service_token_route_denied",
-      actorCompanyId: req.actor.companyId,
-      serviceTokenId: req.actor.serviceTokenId ?? null,
-      targetCompanyId: companyId,
-      method: req.method,
-      path: req.originalUrl ?? req.path,
-    }, "Refused a company service token on a route that does not accept service tokens");
-    throw forbidden("This endpoint does not accept company service tokens");
-  }
   // A service token authenticates AS one company. Same rule, and the same
   // loud refusal, as an agent key reaching for another company's data — this
   // is the check that keeps the standing cross-company isolation requirement

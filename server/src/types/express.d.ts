@@ -62,11 +62,13 @@ declare global {
       /**
        * DUR-3977 default-deny marker. Set by `assertServiceOrBoard` (and only
        * there) to record that THIS route explicitly opted into accepting a
-       * company service token. `assertCompanyAccess` refuses a service actor
-       * when it is absent, which makes the comment on assertServiceOrBoard
-       * true by construction: a service token reaches the routes that named
-       * it and nothing else, whatever any of the ~300 other
-       * `assertCompanyAccess` call sites do.
+       * company service token. `assertAuthenticated` — which every other gate
+       * calls, including `assertCompanyAccess` — refuses a service actor when
+       * it is absent, which makes the comment on assertServiceOrBoard true by
+       * construction: a service token reaches the routes that named it and
+       * nothing else, whatever any of the ~300 other `assertCompanyAccess`
+       * call sites, or the company-less catalogue routes that only call
+       * `assertAuthenticated`, happen to do.
        *
        * It lives on the request rather than on the actor because it is a fact
        * about the route, not about the credential.
