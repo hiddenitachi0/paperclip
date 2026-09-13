@@ -46,6 +46,7 @@ function toDeployDraft(deployPolicy: ProjectDeployPolicy | null | undefined) {
     composeFiles: deployPolicy?.composeFiles ?? [],
     envFile: deployPolicy?.envFile ?? "",
     healthCheckUrl: deployPolicy?.healthCheckUrl ?? "",
+    appHealthCheckPaths: deployPolicy?.appHealthCheckPaths ?? [],
     rollback: deployPolicy?.rollback ?? "git_previous",
     deployBranch: deployPolicy?.deployBranch ?? "",
     previewCommand: deployPolicy?.previewCommand ?? "",
@@ -61,6 +62,7 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
   const {
     deployCommand,
     composeFiles,
+    appHealthCheckPaths,
     envFile,
     deployBranch,
     mirrorBranch,
@@ -72,6 +74,7 @@ function toDeployPolicyPayload(draft: DeployDraft): Record<string, unknown> {
     ...rest,
     ...(deployCommand.trim() ? { deployCommand: deployCommand.trim() } : {}),
     ...(composeFiles.length > 0 ? { composeFiles } : {}),
+    ...(appHealthCheckPaths.length > 0 ? { appHealthCheckPaths } : {}),
     ...(envFile.trim() ? { envFile: envFile.trim() } : {}),
     ...(deployBranch.trim() ? { deployBranch: deployBranch.trim() } : {}),
     ...(mirrorBranch ? { mirrorBranch } : {}),
@@ -125,6 +128,7 @@ export type ProjectConfigFieldKey =
   | "deploy_services"
   | "deploy_command"
   | "deploy_health_check_url"
+  | "deploy_app_health_check_paths"
   | "deploy_rollback"
   | "deploy_branch"
   | "deploy_env_file"
@@ -1637,6 +1641,30 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
                   />
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     A web address the runner opens after each deploy. If it does not answer OK, the deploy is treated as failed.
+                  </p>
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>Pages that must still work (comma-separated)</span>
+                      <SaveIndicator state={fieldState("deploy_app_health_check_paths")} />
+                    </label>
+                  </div>
+                  <DraftInput
+                    value={deployDraft.appHealthCheckPaths.join(", ")}
+                    onCommit={(value) =>
+                      commitDeployField("deploy_app_health_check_paths", { appHealthCheckPaths: splitCommaList(value) })
+                    }
+                    className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs font-mono outline-none"
+                    placeholder="/, /dashboard, /reports"
+                  />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Real pages of the app, not a status endpoint. Before each deploy the runner notes how they answer
+                    today; after the deploy it opens them again, and only undoes the deploy if a page that worked before
+                    is now broken — showing an error, or not answering at all. A page that was already broken, needs a
+                    login, or does not exist cannot fail a deploy. Leave this empty and the runner can only check the
+                    front page.
                   </p>
                 </div>
 

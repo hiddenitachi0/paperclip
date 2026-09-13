@@ -174,6 +174,13 @@ export interface ProjectDeployPolicy {
   composeFiles?: string[];
   envFile?: string;
   healthCheckUrl: string;
+  /**
+   * DUR-3974: real pages that must still work after a deploy — see the
+   * matching field on `deployPolicySchema` (validators/project.ts) for the
+   * full rationale. The two declarations are kept in step by a compile-time
+   * assertion at the bottom of that file, not by anyone remembering.
+   */
+  appHealthCheckPaths?: string[];
   rollback: ProjectDeployRollbackStrategy;
   /** Branch a merge must land on before it can be deployed (DUR-40). */
   deployBranch?: string;

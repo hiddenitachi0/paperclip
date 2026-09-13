@@ -56,6 +56,17 @@ const FAKE_DOCKER = [
   '  exit 0',
   'fi',
   '',
+  // DUR-3974: `docker compose ...` — the pre-swap stop, the restart-after-a-
+  // failed-swap, and (via capture_failure_diagnostics) the log capture. Every
+  // invocation is appended to one ordered file so a test can assert not just
+  // THAT the services were stopped but that it happened before the checkout
+  // was swapped.
+  'if [ "${1:-}" = "compose" ]; then',
+  '  printf "%s\\n" "$*" >> "$SCENARIO_DIR/docker-compose-calls.log"',
+  '  if [ -f "$SCENARIO_DIR/compose-fail-$2" ]; then echo "fake: docker compose $2 failed" >&2; exit 1; fi',
+  '  exit 0',
+  'fi',
+  '',
   '[ "${1:-}" = "exec" ] || exit 1',
   'shift',
   '',
@@ -1521,14 +1532,17 @@ function makeCiPollScenario(scenario, { decidedAt } = {}) {
 // that is still running, tick 2 sees the same build green.
 const CI_STATUS_OVERRIDES = [
   'check_ci_status() { cat "$SCENARIO_DIR/ci-status"; }',
-  'git_fetch_reset() { echo "$(date -u +%s) fetch" >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  // DUR-3974: process_approval calls git_fetch_reset twice — once as a dry run
+  // (6th argument set) that only runs the refusal guards, and once for real. Only
+  // the real one is a deploy, so only that one is counted here.
+  'git_fetch_reset() { [ -n "${6:-}" ] || echo "$(date -u +%s) fetch" >> "$SCENARIO_DIR/deploys.log"; return 0; }',
   'run_recipe() { return 0; }',
   'health_check() { return 0; }',
 ].join("\n");
 
 const NO_DEPLOY_OVERRIDES = [
   'check_ci_status() { cat "$SCENARIO_DIR/ci-status"; }',
-  'git_fetch_reset() { echo fetch >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'git_fetch_reset() { [ -n "${6:-}" ] || echo fetch >> "$SCENARIO_DIR/deploys.log"; return 0; }',
   'run_recipe() { echo recipe >> "$SCENARIO_DIR/deploys.log"; return 0; }',
   'health_check() { return 0; }',
 ].join("\n");
@@ -1549,7 +1563,7 @@ function setCiStatus(scenario, value) {
 // any test about what happens when the API answer itself changes shape, which
 // a stub returning canned words can't reach.
 const REAL_CI_OVERRIDES = [
-  'git_fetch_reset() { echo fetch >> "$SCENARIO_DIR/deploys.log"; return 0; }',
+  'git_fetch_reset() { [ -n "${6:-}" ] || echo fetch >> "$SCENARIO_DIR/deploys.log"; return 0; }',
   'run_recipe() { echo recipe >> "$SCENARIO_DIR/deploys.log"; return 0; }',
   'health_check() { return 0; }',
 ].join("\n");
@@ -2947,5 +2961,814 @@ test("DUR-3923: the unsupported-kind window is configurable via PAPERCLIP_DEPLOY
     assert.deepEqual(scenario.processedIds(), ["aid-3d-deploy-pr"]);
   } finally {
     scenario.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DUR-3974: the health check could not see a broken app, and new code could be
+// serving before its own migrations had run.
+//
+// 2026-09-10, approval bbbc40cb (commit 06c32de): the checkout was reset at
+// 22:25:16 and the three migrations that commit carried were not applied until
+// 22:30:55. That repository's code is bind-mounted, so for five and a half
+// minutes production ran new code against the old schema and answered 500 on
+// every page that loads companies — while the deploy's health check, pointed
+// at a login page that renders without touching the database, kept answering
+// 200. The deploy was reported clean.
+//
+// These tests lock in both halves: a health check that opens the app's real
+// pages and compares them against how they answered BEFORE the deploy, and an
+// ordering that does not leave new code serving ahead of its migrations.
+// ---------------------------------------------------------------------------
+
+// A tiny HTTP server whose answer for each path is read from a file on every
+// request, so a test can change what the app "does" mid-deploy (which is
+// exactly what deploying broken code looks like from outside). Same
+// separate-process reasoning as startPythonHttpServer above: curl blocks this
+// process's event loop, so an in-process listener could never answer.
+function startStatusHttpServer(dir) {
+  return new Promise((resolve, reject) => {
+    const script = [
+      "import http.server, os, socketserver, sys",
+      "root = sys.argv[1]",
+      "class H(http.server.BaseHTTPRequestHandler):",
+      "    def do_GET(self):",
+      "        path = self.path.split('?')[0]",
+      "        name = os.path.join(root, 'status' + path.replace('/', '_'))",
+      "        try:",
+      "            code = int(open(name).read().strip())",
+      "        except Exception:",
+      "            code = 404",
+      "        self.send_response(code)",
+      "        self.send_header('Content-Length', '2')",
+      "        self.end_headers()",
+      "        self.wfile.write(b'ok')",
+      "    def log_message(self, *a): pass",
+      "socketserver.TCPServer.allow_reuse_address = True",
+      "with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:",
+      "    print(httpd.server_address[1], flush=True)",
+      "    httpd.serve_forever()",
+    ].join("\n");
+    const child = spawn("python3", ["-c", script, dir], { stdio: ["ignore", "pipe", "pipe"] });
+    let buf = "";
+    let settled = false;
+    child.stdout.on("data", (chunk) => {
+      if (settled) return;
+      buf += chunk.toString();
+      const match = /^(\d+)/.exec(buf);
+      if (match) {
+        settled = true;
+        resolve({ child, port: Number(match[1]) });
+      }
+    });
+    child.on("error", (err) => {
+      if (!settled) { settled = true; reject(err); }
+    });
+    child.on("exit", (code) => {
+      if (!settled) { settled = true; reject(new Error(`python3 status server exited early (code ${code})`)); }
+    });
+  });
+}
+
+/**
+ * A project whose checkout is a real git repo with one commit (so the
+ * backward-deploy guard and `maybe_rollback` both have a real commit to work
+ * with), pointed at a live status server.
+ */
+function setUpPageCheckScenario(scenario, { port, appHealthCheckPaths, deployServices } = {}) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-page-check-"));
+  const targetPath = path.join(dir, "target");
+  mkdirSync(targetPath, { recursive: true });
+  const git = (...args) => spawnSync("git", args, { cwd: targetPath });
+  git("init", "--quiet", "-b", "custom");
+  git("config", "user.email", "test@example.invalid");
+  git("config", "user.name", "test");
+  writeFileSync(path.join(targetPath, "README"), "live\n");
+  git("add", "-A");
+  git("commit", "--quiet", "-m", "live");
+
+  scenario.writeJson("project-proj-1.json", {
+    id: "proj-1",
+    deployPolicy: {
+      enabled: true,
+      workspaceId: "ws-1",
+      deployKind: "compose_recreate",
+      deployTargetPath: targetPath,
+      healthCheckUrl: `http://127.0.0.1:${port}/health`,
+      rollback: "git_previous",
+      ...(appHealthCheckPaths ? { appHealthCheckPaths } : {}),
+      ...(deployServices ? { deployServices } : {}),
+    },
+    workspaces: [{ id: "ws-1", repoUrl: "https://example.invalid/repo.git", repoRef: "custom" }],
+  });
+  scenario.writeJson("approval-aid-1.json", {
+    id: "aid-1",
+    payload: { projectId: "proj-1", workspaceId: "ws-1", commit: "irrelevant", kind: "deploy" },
+  });
+  scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+  return { dir, targetPath };
+}
+
+function pageCheckEnv(scenario, webRoot, extra = {}) {
+  return {
+    ...process.env,
+    PATH: `${scenario.binDir}:${process.env.PATH}`,
+    SCENARIO_DIR: scenario.dir,
+    WEB_ROOT: webRoot,
+    PAPERCLIP_DEPLOY_RUNNER_LOG: scenario.log,
+    PAPERCLIP_DEPLOY_RUNNER_PROCESSED: scenario.processed,
+    PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_MARKER: path.join(scenario.dir, "quiet-mode-pending"),
+    PAPERCLIP_DEPLOY_RUNNER_FAILURE_LOG_DIR: path.join(scenario.dir, "failure-logs"),
+    PAPERCLIP_DEPLOY_RUNNER_HEALTH_RETRIES: "3",
+    PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "0",
+    PAPERCLIP_DEPLOY_RUNNER_PORT_WAIT_SECONDS: "5",
+    PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_RETRIES: "2",
+    PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_SLEEP: "0",
+    PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_DEACTIVATE_BACKOFF_SECONDS: "0",
+    PAPERCLIP_DEPLOY_RUNNER_QUIET_MODE_RECOVERY_HEALTH_SECONDS: "0",
+    ...extra,
+  };
+}
+
+function composeCalls(scenario) {
+  const file = path.join(scenario.dir, "docker-compose-calls.log");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean);
+}
+
+// The recipe stub stands in for "the new code goes live". On the first call
+// (the deploy) it applies whatever $WEB_ROOT/after_<page> says the new version
+// does to each page; on the second call (the rollback re-running the same
+// recipe) it puts the pre-deploy answers back, exactly as restoring the old
+// code would.
+const RECIPE_SWAPS_THE_APP = [
+  'run_recipe() {',
+  '  echo recipe >> "$SCENARIO_DIR/recipe.log"',
+  '  local n; n="$(wc -l < "$SCENARIO_DIR/recipe.log")"',
+  '  local f base',
+  '  for f in "$WEB_ROOT"/after_*; do',
+  '    [ -e "$f" ] || continue',
+  '    base="$(basename "$f")"; base="${base#after_}"',
+  '    if [ "$n" -eq 1 ]; then cp "$f" "$WEB_ROOT/status_$base"; else cp "$WEB_ROOT/before_$base" "$WEB_ROOT/status_$base"; fi',
+  '  done',
+  '  return 0',
+  '}',
+].join("\n");
+
+function writePage(webRoot, page, { before, after }) {
+  writeFileSync(path.join(webRoot, `status_${page}`), String(before));
+  writeFileSync(path.join(webRoot, `before_${page}`), String(before));
+  if (after !== undefined) writeFileSync(path.join(webRoot, `after_${page}`), String(after));
+}
+
+test("DUR-3974: a deploy that leaves a working page returning 500 is rolled back, even though the health check address still answers 200", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  // The 2026-09-10 shape exactly: the configured health check is a page that
+  // renders without touching the database and keeps answering 200 throughout.
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "dashboard_now", { before: 200, after: 500 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["/dashboard/now"] }));
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${RECIPE_SWAPS_THE_APP}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1, `expected one outcome comment, got: ${JSON.stringify(comments)}`);
+    assert.match(comments[0], /Deploy failed/, "a deploy that broke a working page is a failed deploy, not a healthy one");
+    assert.doesNotMatch(comments[0], /is live and healthy/);
+    assert.match(comments[0], /dashboard\/now/, "the comment must name the page that broke");
+    assert.match(comments[0], /answered 200 before, 500 now/, "and say what changed, in codes an operator can hand to someone");
+    assert.match(comments[0], /put back to the version that was live before/, "and say what was done about it");
+    assert.match(
+      comments[0],
+      /checked again and are working/,
+      "the card must not merely hope the rollback worked — the pages are opened again before it says so",
+    );
+
+    const recipeRuns = readFileSync(path.join(scenario.dir, "recipe.log"), "utf8").split("\n").filter(Boolean);
+    assert.equal(recipeRuns.length, 2, "the rollback must actually re-run the recipe, not just report a rollback");
+    assert.equal(readFileSync(path.join(webRoot, "status_dashboard_now"), "utf8").trim(), "200", "the page must be working again afterwards");
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: when the rollback does not fix the broken page either, the card says so instead of claiming the site is back", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "dashboard_now", { before: 200, after: 500 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["/dashboard/now"] }));
+    // A recipe whose rollback run does NOT put the page back — e.g. the
+    // migration the bad version applied is still applied.
+    const stubbornlyBroken = [
+      'run_recipe() {',
+      '  echo recipe >> "$SCENARIO_DIR/recipe.log"',
+      '  echo 500 > "$WEB_ROOT/status_dashboard_now"',
+      '  return 0',
+      '}',
+    ].join("\n");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${stubbornlyBroken}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+
+    const body = scenario.commentsFor("aid-1")[0];
+    assert.match(body, /STILL not working/, "a rollback that did not help must not be reported as if it had");
+    assert.match(body, /needs a person/);
+    assert.doesNotMatch(body, /checked again and are working/);
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a page that was ALREADY broken before the deploy cannot fail that deploy — the check is a comparison, not a verdict on health", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  // Broken before, broken after: this deploy neither caused nor fixed it.
+  writePage(webRoot, "dashboard_now", { before: 500, after: 500 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["/dashboard/now"] }));
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${RECIPE_SWAPS_THE_APP}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+
+    const comments = scenario.commentsFor("aid-1");
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /is live and healthy/, "an already-broken page must never roll back a good deploy");
+    const recipeRuns = readFileSync(path.join(scenario.dir, "recipe.log"), "utf8").split("\n").filter(Boolean);
+    assert.equal(recipeRuns.length, 1, "no rollback may have run");
+    assert.match(scenario.readLog(), /it was already answering 500 before the deploy/);
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: only a server error fails a deploy — a page that starts redirecting, asking for a login or 404ing does not", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "moved", { before: 200, after: 302 });
+  writePage(webRoot, "private", { before: 200, after: 401 });
+  writePage(webRoot, "gone", { before: 200, after: 404 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["/moved", "/private", "/gone"] }));
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${RECIPE_SWAPS_THE_APP}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+
+    assert.match(scenario.commentsFor("aid-1")[0], /is live and healthy/, "a redirect, a login wall and a missing page are not outages");
+    const recipeRuns = readFileSync(path.join(scenario.dir, "recipe.log"), "utf8").split("\n").filter(Boolean);
+    assert.equal(recipeRuns.length, 1, "no rollback may have run");
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: with no pages listed, the successful deploy comment says so instead of implying the app was checked", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "", { before: 200, after: 200 }); // the front page, "/"
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port }));
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${RECIPE_SWAPS_THE_APP}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+
+    const body = scenario.commentsFor("aid-1")[0];
+    assert.match(body, /is live and healthy/);
+    assert.match(body, /Only the health check address and the front page were opened/, "the operator must not be told more was checked than was");
+    assert.match(body, /Pages that must still work/, "and must be told where to change that");
+    // Everything the note points at has to exist for the operator to use.
+    const ui = readFileSync(path.join(repoRoot, "ui", "src", "components", "ProjectProperties.tsx"), "utf8");
+    assert.match(ui, /Pages that must still work/, "the deploy settings must actually offer the field the comment names");
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: the front page is checked even when the project lists no pages, so a deploy that 500s everything is still caught", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "", { before: 200, after: 500 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port }));
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${RECIPE_SWAPS_THE_APP}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+    assert.match(scenario.commentsFor("aid-1")[0], /Deploy failed/);
+    assert.match(scenario.commentsFor("aid-1")[0], /answered 200 before, 500 now/);
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a page nothing could reach before the deploy is skipped, not treated as a regression", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    // A page on a host that does not exist: nothing answers, before or after.
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["http://127.0.0.1:1/never"] }));
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${RECIPE_SWAPS_THE_APP}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: pageCheckEnv(scenario, webRoot) });
+    assertSuccess(result, "process_approval");
+    assert.match(scenario.commentsFor("aid-1")[0], /is live and healthy/);
+    assert.match(scenario.readLog(), /nothing answered there before the deploy either/);
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- "nothing answered at all" is the loudest failure there is, not a pass ---
+
+test("DUR-3974: a page that worked before the deploy and answers NOTHING after it is a failure, not a pass", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-down-"));
+  try {
+    // verify_pages_after_deploy probed directly, the way a reviewer would:
+    // one page, a real pre-deploy answer, and nothing listening afterwards.
+    // This used to log "still works after the deploy (was 200, now 000)" and
+    // return 0, so a deploy that took the whole application down PASSED the
+    // check that exists to catch precisely that.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      PAGE_CHECK_RETRIES=2
+      PAGE_CHECK_SLEEP_SECONDS=0
+      echo "--worked-before--"
+      if broken="$(verify_pages_after_deploy aid-x "$(printf 'http://127.0.0.1:1/gone\\t200')")"; then
+        echo "verdict=pass"
+      else
+        echo "verdict=fail broken=\${broken}"
+      fi
+      echo "--never-worked--"
+      if verify_pages_after_deploy aid-x "$(printf 'http://127.0.0.1:1/gone\\t000')" >/dev/null; then
+        echo "verdict=pass"
+      else
+        echo "verdict=fail"
+      fi
+      echo "--already-500--"
+      if verify_pages_after_deploy aid-x "$(printf 'http://127.0.0.1:1/gone\\t503')" >/dev/null; then
+        echo "verdict=pass"
+      else
+        echo "verdict=fail"
+      fi
+    `;
+    const result = run("bash", ["-c", script], {
+      env: { ...process.env, PAPERCLIP_DEPLOY_RUNNER_LOG: path.join(dir, "runner.log") },
+    });
+    assertSuccess(result, "verify_pages_after_deploy");
+    const [, workedBefore, neverWorked, already500] = result.stdout.split(/--(?:worked-before|never-worked|already-500)--\n/);
+
+    assert.match(
+      workedBefore,
+      /verdict=fail/,
+      "a page that answered 200 before the deploy and answers nothing after it must fail the deploy",
+    );
+    assert.match(workedBefore, /answered 200 before, nothing at all now/, "and say so in words, not as the code 000");
+    // The genuine cases this must NOT start failing — the whole point of the
+    // check being a comparison rather than a verdict on health.
+    assert.match(neverWorked, /verdict=pass/, "a page nothing could reach before the deploy is not a regression this deploy caused");
+    assert.match(already500, /verdict=pass/, "a page that was already server-erroring before the deploy is not a regression either");
+
+    const log = readFileSync(path.join(dir, "runner.log"), "utf8");
+    assert.doesNotMatch(log, /still works after the deploy \(was 200, now 000\)/, "and it must never be logged as working");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a deploy that takes the app off the air entirely is rolled back, and the card says the rollback did not bring it back", async () => {
+  // Two servers, because this is the case a single-address health check is
+  // blind to: the configured health address keeps answering (a status page,
+  // another container, nginx) while the application itself is simply gone.
+  const healthRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  const appRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-app-"));
+  writeFileSync(path.join(healthRoot, "status_health"), "200");
+  writeFileSync(path.join(appRoot, "status_dashboard_now"), "200");
+  const health = await startStatusHttpServer(healthRoot);
+  const app = await startStatusHttpServer(appRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, {
+      port: health.port,
+      appHealthCheckPaths: [`http://127.0.0.1:${app.port}/dashboard/now`],
+    }));
+    writeFileSync(path.join(scenario.dir, "app.pid"), String(app.child.pid));
+    // The deploy kills the application outright; the rollback cannot revive it
+    // (a rolled-back checkout does not undo, say, a half-applied migration
+    // that stops the server booting at all).
+    const recipeKillsTheApp = [
+      'run_recipe() {',
+      '  echo recipe >> "$SCENARIO_DIR/recipe.log"',
+      '  local n; n="$(wc -l < "$SCENARIO_DIR/recipe.log")"',
+      '  if [ "$n" -eq 1 ]; then kill "$(cat "$SCENARIO_DIR/app.pid")" 2>/dev/null; sleep 1; fi',
+      '  return 0',
+      '}',
+    ].join("\n");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${recipeKillsTheApp}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: pageCheckEnv(scenario, healthRoot, { PAPERCLIP_DEPLOY_RUNNER_ROLLBACK_HEALTH_WAIT_SECONDS: "2" }),
+    });
+    assertSuccess(result, "process_approval");
+
+    const body = scenario.commentsFor("aid-1")[0];
+    assert.match(body, /Deploy failed/, "a deploy that took the app down is the clearest possible failed deploy");
+    assert.doesNotMatch(body, /is live and healthy/);
+    assert.match(body, /dashboard\/now/, "the card must name the page that stopped answering");
+    assert.match(body, /answered 200 before, nothing at all now/);
+    assert.match(body, /STILL not working/, "the rollback did not bring it back and the card must not pretend otherwise");
+    assert.match(body, /needs a person/);
+    assert.doesNotMatch(body, /checked again and are working/);
+    assert.match(
+      scenario.readLog(),
+      /ROLLBACK DID NOT RESTORE THE APP/,
+      "the worst case has to be loud in the log too, not just on the card",
+    );
+  } finally {
+    health.child.kill();
+    app.child.kill();
+    scenario.cleanup();
+    rmSync(healthRoot, { recursive: true, force: true });
+    rmSync(appRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: the re-check after a rollback waits for the old version to come back before judging it", async () => {
+  const webRoot = mkdtempSync(path.join(os.tmpdir(), "deploy-runner-web-"));
+  writePage(webRoot, "health", { before: 200, after: 200 });
+  writePage(webRoot, "dashboard_now", { before: 200, after: 500 });
+  const { child, port } = await startStatusHttpServer(webRoot);
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpPageCheckScenario(scenario, { port, appHealthCheckPaths: ["/dashboard/now"] }));
+    // `docker compose up -d --force-recreate` returns when the container has
+    // STARTED. This recipe models that honestly: the rollback run returns
+    // immediately with the app not yet listening (503), and the old version
+    // only finishes booting a couple of seconds later. Judging the rollback at
+    // the instant the recipe returns reads a booting app as "the rollback did
+    // not help" — the single most alarming thing the runner can say, and here
+    // it would be false.
+    const rollbackComesBackSlowly = [
+      'run_recipe() {',
+      '  echo recipe >> "$SCENARIO_DIR/recipe.log"',
+      '  local n; n="$(wc -l < "$SCENARIO_DIR/recipe.log")"',
+      '  if [ "$n" -eq 1 ]; then',
+      '    echo 500 > "$WEB_ROOT/status_dashboard_now"',
+      '  else',
+      '    echo 503 > "$WEB_ROOT/status_health"',
+      '    echo 503 > "$WEB_ROOT/status_dashboard_now"',
+      '    ( sleep 3; echo 200 > "$WEB_ROOT/status_health"; echo 200 > "$WEB_ROOT/status_dashboard_now" ) >/dev/null 2>&1 &',
+      '  fi',
+      '  return 0',
+      '}',
+    ].join("\n");
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      ${rollbackComesBackSlowly}
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], {
+      env: pageCheckEnv(scenario, webRoot, {
+        // One page attempt, no page-level sleep: the ONLY thing that can give
+        // the rolled-back app time here is the health wait under test.
+        PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_RETRIES: "1",
+        PAPERCLIP_DEPLOY_RUNNER_PAGE_CHECK_SLEEP: "0",
+        PAPERCLIP_DEPLOY_RUNNER_HEALTH_SLEEP: "1",
+        PAPERCLIP_DEPLOY_RUNNER_ROLLBACK_HEALTH_WAIT_SECONDS: "30",
+      }),
+    });
+    assertSuccess(result, "process_approval");
+
+    const body = scenario.commentsFor("aid-1")[0];
+    assert.match(body, /Deploy failed/);
+    assert.match(
+      body,
+      /checked again and are working/,
+      "the rollback did work — it was just still booting when the recipe returned",
+    );
+    assert.doesNotMatch(body, /STILL not working/, "a still-booting app must not be reported as a rollback that failed");
+    assert.match(
+      scenario.readLog(),
+      /the rolled-back version is answering at .* re-checking the pages/,
+      "the wait has to be visible in the log, so a slow recovery is explainable afterwards",
+    );
+  } finally {
+    child.kill();
+    scenario.cleanup();
+    rmSync(webRoot, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: the wait for a rolled-back app to come back is bounded, and ends even when the sleep between probes is zero", () => {
+  // wait_for_health spends its budget in HEALTH_SLEEP_SECONDS steps, and that
+  // is tunable to 0 — which would advance the clock by nothing and spin here
+  // forever on a server that never comes back, hanging the deploy runner on a
+  // failure path. Nothing may take longer than the budget it was given.
+  const started = Date.now();
+  const script = `
+    set -uo pipefail
+    source "${SCRIPT}"
+    HEALTH_SLEEP_SECONDS=0
+    HEALTH_CONNECT_TIMEOUT_SECONDS=1
+    HEALTH_MAX_TIME_SECONDS=1
+    if wait_for_health "http://127.0.0.1:1/health" 3; then echo "verdict=came-back"; else echo "verdict=gave-up"; fi
+  `;
+  const result = run("bash", ["-c", script], { timeout: 30_000 });
+  assertSuccess(result, "wait_for_health");
+  assert.match(result.stdout, /verdict=gave-up/);
+  assert.ok(Date.now() - started < 30_000, "wait_for_health must return, not spin");
+});
+
+test("app_health_check_urls resolves paths against the health check address, keeps full addresses, de-duplicates, and falls back to the front page", () => {
+  const script = `
+    set -uo pipefail
+    source "${SCRIPT}"
+    echo "--none--"
+    app_health_check_urls "https://app.example.com/accounts/login/" ""
+    echo "--some--"
+    app_health_check_urls "https://app.example.com/accounts/login/" "/DUR/dashboard/now
+reports
+https://other.example.com/status
+/DUR/dashboard/now"
+  `;
+  const result = run("bash", ["-c", script]);
+  assertSuccess(result, "app_health_check_urls");
+  const [, none, some] = result.stdout.split(/--(?:none|some)--\n/);
+  assert.deepEqual(none.split("\n").filter(Boolean), ["https://app.example.com/"]);
+  assert.deepEqual(some.split("\n").filter(Boolean), [
+    "https://app.example.com/DUR/dashboard/now",
+    "https://app.example.com/reports",
+    "https://other.example.com/status",
+  ]);
+});
+
+// --- ordering: new code must not be serving while its migrations are unapplied ---
+
+test("DUR-3974: the quiet-mode drain and every refusal guard happen BEFORE the checkout is swapped, not between the swap and the recreate", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    // One ordered log for both the quiet-mode calls (written by the fake
+    // docker) and the moment the checkout is actually reset.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() {
+        if [ -n "\${6:-}" ]; then echo dry-run-guards >> "$SCENARIO_DIR/quiet-mode-calls.log"; else echo reset-checkout >> "$SCENARIO_DIR/quiet-mode-calls.log"; fi
+        return 0
+      }
+      run_recipe() { echo run-recipe >> "$SCENARIO_DIR/quiet-mode-calls.log"; return 0; }
+      health_check() { return 0; }
+      verify_pages_after_deploy() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    const calls = quietModeCallsLog(scenario);
+    assert.deepEqual(
+      calls,
+      ["dry-run-guards", "activate", "reset-checkout", "run-recipe", "deactivate"],
+      "on 2026-09-10 the drain sat between the reset and the recreate, so the new code served against the old schema for the whole drain — the reset must come after it",
+    );
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a compose_recreate project that names its services has them stopped before the files are swapped, and started again by the recipe", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    const project = JSON.parse(readFileSync(path.join(scenario.dir, "project-proj-1.json"), "utf8"));
+    project.deployPolicy.deployServices = ["web", "worker"];
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() {
+        [ -n "\${6:-}" ] || printf '%s\\n' "reset-checkout" >> "$SCENARIO_DIR/docker-compose-calls.log"
+        return 0
+      }
+      health_check() { return 0; }
+      verify_pages_after_deploy() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    const calls = composeCalls(scenario);
+    assert.deepEqual(
+      calls,
+      ["compose stop web worker", "reset-checkout", "compose up -d --force-recreate web worker"],
+      "the services that serve the code must be stopped before the files change under them, and the recipe is what starts them again",
+    );
+    assert.match(scenario.commentsFor("aid-1")[0], /is live and healthy/);
+    assert.match(scenario.readLog(), /stopped web worker before swapping the files/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a project that names no services is not stopped at all (that would take the database down too) and the log says why", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { return 0; }
+      health_check() { return 0; }
+      verify_pages_after_deploy() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    assert.deepEqual(
+      composeCalls(scenario).filter((line) => line.startsWith("compose stop")),
+      [],
+      "with no services named, `docker compose stop` would stop everything in the file, database included",
+    );
+    assert.match(scenario.readLog(), /names no services, so the runner will not stop anything before swapping the files/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a git fetch that fails after the services were stopped starts them again — a failed deploy never leaves production stopped", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    const project = JSON.parse(readFileSync(path.join(scenario.dir, "project-proj-1.json"), "utf8"));
+    project.deployPolicy.deployServices = ["web"];
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    // The guards pass on the dry run; the real reset then fails.
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      git_fetch_reset() { [ -n "\${6:-}" ] && return 0; return 1; }
+      run_recipe() { echo run-recipe >> "$SCENARIO_DIR/docker-compose-calls.log"; return 0; }
+      health_check() { return 0; }
+      process_approval "aid-1" "co-1"
+    `;
+    const result = run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+    assertSuccess(result, "process_approval");
+
+    const calls = composeCalls(scenario);
+    assert.equal(calls[0], "compose stop web");
+    assert.ok(
+      calls.some((line) => line === "compose start web" || line === "compose up -d web"),
+      `the stopped service must be started again, got: ${JSON.stringify(calls)}`,
+    );
+    assert.ok(!calls.includes("run-recipe"), "the recipe never ran, so nothing else would have started it");
+    assert.match(scenario.commentsFor("aid-1")[0], /Deploy failed/);
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DUR-3974: a deploy that dies between the stop and the recipe still has its services started again by the exit trap", () => {
+  const scenario = makeScenario();
+  let dir;
+  try {
+    ({ dir } = setUpComposeRecreateScenario(scenario));
+    const project = JSON.parse(readFileSync(path.join(scenario.dir, "project-proj-1.json"), "utf8"));
+    project.deployPolicy.deployServices = ["web"];
+    scenario.writeJson("project-proj-1.json", project);
+    scenario.writeJson("quiet-mode-status.json", { active: false, activeRunCount: 0 });
+
+    const script = `
+      set -uo pipefail
+      source "${SCRIPT}"
+      # An unbound variable under \`set -u\` — i.e. the shape of any future
+      # typo in this script — kills the deploy subshell outright, without
+      # reaching any of the explicit failure paths.
+      git_fetch_reset() { [ -n "\${6:-}" ] && return 0; echo "$A_VARIABLE_NOBODY_SET"; }
+      run_recipe() { return 0; }
+      health_check() { return 0; }
+      run_one_approval "aid-1" "co-1"
+    `;
+    run("bash", ["-c", script], { env: quietModeEnv(scenario) });
+
+    const calls = composeCalls(scenario);
+    assert.ok(
+      calls.some((line) => line === "compose start web" || line === "compose up -d web"),
+      `a killed deploy must not leave the service stopped, got: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    scenario.cleanup();
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
