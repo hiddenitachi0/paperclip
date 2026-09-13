@@ -756,13 +756,19 @@ export function pluginRoutes(
         companyId: scopedCompanyId,
       };
     }
-    return {
-      type: "system",
-      userId: null,
-      agentId: null,
-      runId: req.actor.runId ?? null,
-      companyId: scopedCompanyId,
-    };
+    // DUR-3977: everything else is refused, explicitly.
+    //
+    // This used to fall through to `type: "system"` — the MOST privileged
+    // actor context a plugin worker ever sees, and the one a plugin is
+    // entitled to read as "Paperclip itself asked for this". Any actor type
+    // that is neither an agent nor a board user therefore got an upgrade by
+    // default: a company service token, a board delegate token, or whatever
+    // actor kind is added next. None of them can reach this line today (a
+    // service token is refused by `assertAuthenticated` above, and the
+    // company-scope check refuses it again), but "cannot get here" is a
+    // property of two other functions, and this one should not depend on it.
+    // A new actor type must fail here loudly rather than arrive as "system".
+    throw forbidden("This actor cannot perform plugin actions");
   }
 
   function actionParamsWithAuthorizedCompanyScope(
@@ -1596,6 +1602,10 @@ export function pluginRoutes(
     }
 
     const companyId = assertPluginBridgeScope(req, body.companyId);
+    // Resolved OUTSIDE the try: a refused actor is an authorization failure
+    // (403), not a plugin-worker failure (502), and the catch below turns
+    // everything it sees into a bridge error.
+    const actorContext = performActionActorContext(req, companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1604,7 +1614,7 @@ export function pluginRoutes(
         {
           key: body.key,
           params: actionParamsWithAuthorizedCompanyScope(body.params, companyId),
-          actorContext: performActionActorContext(req, companyId),
+          actorContext,
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -1780,6 +1790,8 @@ export function pluginRoutes(
     } | undefined;
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
+    // Outside the try for the same reason as the body-keyed route above.
+    const actorContext = performActionActorContext(req, companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1788,7 +1800,7 @@ export function pluginRoutes(
         {
           key,
           params: actionParamsWithAuthorizedCompanyScope(body?.params, companyId),
-          actorContext: performActionActorContext(req, companyId),
+          actorContext,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );

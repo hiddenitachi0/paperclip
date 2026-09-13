@@ -815,8 +815,31 @@ export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
-export const BUDGET_METRICS = ["billed_cents", "total_tokens"] as const;
+// `lane_a_transform_cents` (DUR-3977) is billed_cents narrowed to the cost
+// rows a quick agent's stateless transform calls produce, so an operator can
+// put a monthly ceiling on "rewriting product descriptions" without that
+// ceiling also stopping the agent's ordinary work. Every metric here must be
+// handled by computeObservedAmount in server/src/services/budgets.ts;
+// server/src/__tests__/budgets-transform-metric.test.ts reads this array and
+// asserts exactly that, so a new metric cannot be added in one place only.
+export const BUDGET_METRICS = ["billed_cents", "total_tokens", "lane_a_transform_cents"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
+
+/**
+ * Budget metrics whose hard stop must NOT pause the scope it is attached to.
+ * Pausing an agent is the right answer when the agent itself has overspent;
+ * it is the wrong answer for a metric that only covers one narrow kind of
+ * call, because it would also stop the agent's real work. For these metrics
+ * the incident and the budget_override_required approval are still created —
+ * the operator gets the same card — and the transform endpoint refuses with a
+ * 429 until the budget is raised.
+ */
+export const BUDGET_METRICS_WITHOUT_SCOPE_PAUSE = ["lane_a_transform_cents"] as const;
+export type BudgetMetricWithoutScopePause = (typeof BUDGET_METRICS_WITHOUT_SCOPE_PAUSE)[number];
+
+export function budgetMetricPausesScope(metric: string): boolean {
+  return !(BUDGET_METRICS_WITHOUT_SCOPE_PAUSE as readonly string[]).includes(metric);
+}
 
 export const BUDGET_WINDOW_KINDS = ["calendar_day_utc", "calendar_month_utc", "lifetime"] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];

@@ -167,6 +167,10 @@ describe("openapi routes", () => {
       BoardSessionAuth: { type: "apiKey", in: "cookie" },
       BoardApiKeyAuth: { type: "http", scheme: "bearer" },
       AgentBearerAuth: { type: "http", scheme: "bearer" },
+      // DUR-3977: the credential the Lane A transform lane actually takes.
+      // Without a scheme in the document, a generated client has no way to
+      // send it at all.
+      ServiceTokenAuth: { type: "http", scheme: "bearer", bearerFormat: "Company Service Token" },
     });
     expect(res.body.paths["/api/health"].get.security).toEqual([]);
     expect(res.body.paths["/api/companies"].post.responses["201"]).toBeDefined();
@@ -217,5 +221,71 @@ describe("openapi routes", () => {
     expect(spec.paths["/api/invites/{token}/accept"].post.responses["202"]).toBeDefined();
     expect(spec.paths["/api/board-api-keys"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/companies/import"].post.responses["202"]).toBeDefined();
+  });
+
+  /**
+   * DUR-3977: the contract another team implements against. Each assertion
+   * below corresponds to a way a dashboard team could be misled into writing
+   * code that cannot work.
+   */
+  describe("the Lane A transform lane advertises the credential it actually takes", () => {
+    const transformOperations = [
+      ["/api/lane-a/{agentId}/transform", "post"] as const,
+      ["/api/lane-a/agents", "get"] as const,
+    ];
+
+    it("offers the service token first, and never the agent bearer token", () => {
+      const { spec } = loadSpecRoutes();
+      for (const [path, method] of transformOperations) {
+        const operation = spec.paths[path][method];
+        expect(operation.security, `${method} ${path}`).toEqual([
+          { ServiceTokenAuth: [] },
+          { BoardSessionAuth: [] },
+          { BoardApiKeyAuth: [] },
+        ]);
+        // An agent key is refused with 403 by assertServiceOrBoard, so
+        // advertising it would send a client straight into a 403 loop.
+        expect(JSON.stringify(operation.security)).not.toContain("AgentBearerAuth");
+        expect(operation["x-paperclip-authorization"]).toEqual({
+          actor: "service_or_board",
+          serviceTokenScope: "lane_a:transform",
+          agentTokenRefused: true,
+        });
+      }
+    });
+
+    it("gives 429 a schema that carries the reason a caller must branch on", () => {
+      const { spec } = loadSpecRoutes();
+      const schema =
+        spec.paths["/api/lane-a/{agentId}/transform"].post.responses["429"].content["application/json"].schema;
+      // Either the inlined object or a $ref to the registered component.
+      const resolved = schema.$ref
+        ? spec.components.schemas[String(schema.$ref).split("/").pop()!]
+        : schema;
+      expect(resolved.properties.details).toBeDefined();
+      expect(resolved.properties.details.properties.reason.enum).toEqual([
+        "daily_call_cap",
+        "monthly_budget",
+        "concurrency_limit",
+        "upstream_rate_limit",
+      ]);
+    });
+
+    it("documents the statuses an unattended run has to branch on, and not the one that never fires", () => {
+      const { spec } = loadSpecRoutes();
+      const responses = spec.paths["/api/lane-a/{agentId}/transform"].post.responses;
+      // 502 and 503 decide retry-vs-abort for a 1400-item run.
+      expect(responses["502"]).toBeDefined();
+      expect(responses["503"]).toBeDefined();
+      // 401 is unreachable: an unknown, revoked or expired service token
+      // leaves the request unauthenticated and assertServiceOrBoard answers
+      // 403. Documenting 401 would have a dashboard wait forever for a signal
+      // to rotate the token.
+      expect(responses["401"]).toBeUndefined();
+      expect(responses["403"]).toBeDefined();
+      expect(JSON.stringify(responses["403"])).toContain(
+        "A company service token or board access is required",
+      );
+    });
   });
 });

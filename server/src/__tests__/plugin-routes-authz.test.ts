@@ -922,6 +922,60 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(call).not.toHaveBeenCalled();
   });
 
+  // DUR-3977. `performActionActorContext` used to end with an unconditional
+  // fall-through to `{ type: "system" }` — the most privileged actor context a
+  // plugin worker ever sees, and the one a plugin is entitled to read as
+  // "Paperclip itself asked for this". Any actor that was neither an agent nor
+  // a board user therefore got an upgrade by default. A board delegate token
+  // is exactly that shape: it is scoped for a couple of recovery actions, it
+  // passes `assertAuthenticated`, and it passes `assertCompanyAccess` for the
+  // company it belongs to — so it reached the worker as "system".
+  it("refuses a board delegate token on plugin actions instead of calling it the system", async () => {
+    readyPlugin();
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const delegateActor = {
+      type: "board_delegate",
+      userId: "user-1",
+      source: "board_delegate_key",
+      companyIds: [companyA],
+      delegateTokenId: "77777777-7777-4777-8777-777777777777",
+      delegateScopes: ["run:resume"],
+    };
+    const { app } = await createApp(delegateActor, {}, {
+      bridgeDeps: { workerManager: { call } },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/bridge/action`)
+      .send({ key: "sync", companyId: companyA });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("This actor cannot perform plugin actions");
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("refuses a company service token on plugin actions", async () => {
+    readyPlugin();
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const serviceActor = {
+      type: "service",
+      companyId: companyA,
+      source: "company_service_token",
+      serviceTokenId: "88888888-8888-4888-8888-888888888888",
+      serviceScopes: ["lane_a:transform"],
+    };
+    const { app } = await createApp(serviceActor, {}, {
+      bridgeDeps: { workerManager: { call } },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/bridge/action`)
+      .send({ key: "sync", companyId: companyA });
+
+    expect(res.status).toBe(403);
+    expect(call).not.toHaveBeenCalled();
+  });
+
   it("attaches worker bridge errors to the HTTP logger context", async () => {
     readyPlugin();
     const call = vi.fn().mockRejectedValue(new Error("missing source_objects column"));

@@ -19,7 +19,9 @@ type BoardActor = {
   // assertBoardSelfMembershipAccess below requires type === "board" exactly,
   // so board_delegate (never granted this action) is rejected the same way
   // "agent"/"none" already are -- this widening is for type soundness only.
-  type: "board" | "agent" | "board_delegate" | "none";
+  // "service" (DUR-3977) is widened in for the same reason and rejected the
+  // same way: a company service token is never "board".
+  type: "board" | "agent" | "board_delegate" | "service" | "none";
   userId?: string;
   companyIds?: string[];
   memberships?: Array<{

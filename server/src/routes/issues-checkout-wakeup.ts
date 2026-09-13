@@ -1,5 +1,6 @@
 type CheckoutWakeInput = {
-  actorType: "board" | "agent" | "board_delegate" | "none";
+  // "service" (DUR-3977) never reaches checkout; widened for type soundness.
+  actorType: "board" | "agent" | "board_delegate" | "service" | "none";
   actorAgentId: string | null;
   checkoutAgentId: string;
   checkoutRunId: string | null;

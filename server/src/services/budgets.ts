@@ -9,6 +9,7 @@ import {
   costEvents,
   projects,
 } from "@paperclipai/db";
+import { LANE_A_TRANSFORM_BILLING_CODE, budgetMetricPausesScope } from "@paperclipai/shared";
 import type {
   BudgetIncident,
   BudgetIncidentResolutionInput,
@@ -156,11 +157,28 @@ async function computeObservedAmount(
   db: Db,
   policy: Pick<PolicyRow, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">,
 ) {
-  if (policy.metric !== "billed_cents" && policy.metric !== "total_tokens") return 0;
+  // Every value in BUDGET_METRICS must be handled here.
+  // server/src/__tests__/budgets-transform-metric.test.ts reads that array and
+  // asserts this function actually observes each one, so adding a metric in
+  // @paperclipai/shared and not here fails a test instead of silently
+  // returning 0 (i.e. a budget that never triggers).
+  if (
+    policy.metric !== "billed_cents" &&
+    policy.metric !== "total_tokens" &&
+    policy.metric !== "lane_a_transform_cents"
+  ) {
+    return 0;
+  }
 
   const conditions = [eq(costEvents.companyId, policy.companyId)];
   if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, policy.scopeId));
   if (policy.scopeType === "project") conditions.push(eq(costEvents.projectId, policy.scopeId));
+  // DUR-3977: the transform metric is billed_cents narrowed to the cost rows
+  // the stateless Lane A calls write. Narrowed by billing code, never by
+  // guessing from the model name or the amount.
+  if (policy.metric === "lane_a_transform_cents") {
+    conditions.push(eq(costEvents.billingCode, LANE_A_TRANSFORM_BILLING_CODE));
+  }
   const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
   if (policy.windowKind !== "lifetime") {
     conditions.push(gte(costEvents.occurredAt, start));
@@ -265,6 +283,13 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
   }
 
   async function pauseAndCancelScopeForBudget(policy: PolicyRow) {
+    // DUR-3977: a narrow metric must not pause the whole scope. A quick
+    // agent that has spent its monthly "rewriting text" budget still has to
+    // answer chat and do its ordinary work — the transform endpoint refuses
+    // with a 429 instead, and the operator still gets the same
+    // budget_override_required card either way (createIncidentIfNeeded above
+    // runs before this, for every metric).
+    if (!budgetMetricPausesScope(policy.metric)) return;
     await pauseScopeForBudget(policy);
     await hooks.cancelWorkForScope?.({
       companyId: policy.companyId,
@@ -274,6 +299,11 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
   }
 
   async function resumeScopeFromBudget(policy: PolicyRow) {
+    // Mirror of pauseAndCancelScopeForBudget: a metric that never pauses the
+    // scope must never un-pause it either. Without this, raising a quick
+    // agent's transform budget would also resume an agent that its ordinary
+    // billed_cents hard stop had paused for a completely different reason.
+    if (!budgetMetricPausesScope(policy.metric)) return;
     const now = new Date();
     if (policy.scopeType === "agent") {
       await db

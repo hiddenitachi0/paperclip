@@ -116,6 +116,10 @@ export interface Agent {
   laneAEnabled?: boolean;
   /** Quick agent instruction set (persona + rules). Board-only, null = none. */
   laneAInstructions?: string | null;
+  /** DUR-3977 quick-agent settings. Null on all three = platform default. */
+  laneAModel?: string | null;
+  laneAMaxOutputTokens?: number | null;
+  laneATransformDailyCallCap?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -155,6 +155,12 @@ DECLARE
     'company_secret_provider_configs',
     'company_secret_versions',
     'company_secrets',
+    -- DUR-3977. The real DDL, grant and policy for this table live in
+    -- 0165_lane_a_transform.sql; the name is listed here because
+    -- packages/db/src/rls-login-roles.test.ts holds these arrays to the
+    -- Drizzle schema exactly, so a table added later must appear here too or
+    -- the list silently rots.
+    'company_service_tokens',
     'company_skill_comments',
     'company_skill_stars',
     'company_skill_versions',
@@ -288,6 +294,7 @@ DECLARE
     'company_secret_bindings',
     'company_secret_provider_configs',
     'company_secrets',
+    'company_service_tokens',
     'company_skill_comments',
     'company_skill_stars',
     'company_skill_versions',
