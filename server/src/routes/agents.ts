@@ -3695,6 +3695,22 @@ export function agentRoutes(
         return;
       }
       agent = approval.agent;
+      // DUR-3976: with no hire card to approve, nothing above creates the
+      // budget policy, so the limit on the agent row would be shown but not
+      // enforced. The policy is what enforces it, so create it here as the
+      // approval path does.
+      if (agent && agent.budgetMonthlyCents > 0) {
+        await budgets.upsertPolicy(
+          agent.companyId,
+          {
+            scopeType: "agent",
+            scopeId: agent.id,
+            amount: agent.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          req.actor.userId ?? null,
+        );
+      }
     }
 
     if (!agent) {

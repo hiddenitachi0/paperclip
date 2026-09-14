@@ -238,6 +238,7 @@ import {
   buildTurnCapRepeatedOperatorNotice,
   type FrozenRunStopReason,
 } from "./operator-notices.js";
+import { readHeartbeatWakeFlags } from "./assignee-pickup.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -2510,6 +2511,44 @@ export function buildExplicitResumeSessionOverride(input: {
     sessionDisplayId,
     sessionParams,
   };
+}
+
+/**
+ * DUR-3943: the prompt-cache detail of one run, as the adapter reported it for
+ * that run. Copied into heartbeat_runs.usage_json next to the token totals.
+ *
+ * - cacheCreationInputTokens: tokens written to the prompt cache. Billed above
+ *   fresh input (1.25x for 5-minute entries, 2x for 1-hour entries), and NOT
+ *   part of cachedInputTokens, which counts cache reads only.
+ * - cacheCreation1hInputTokens: of those, the tokens written with a 1-hour
+ *   lifetime (the Claude CLI's automatic choice on a subscription).
+ * - firstCallPromptTokens: size of the run's first model call -- everything
+ *   the agent carries before doing any work (CLI system prompt, tools,
+ *   instructions, task prompt, and on a resumed session the prior transcript).
+ *
+ * Deliberately not netted against an earlier run of the same session (unlike
+ * the token totals in resolveNormalizedUsageForSession): these are per-run
+ * observations. Only fields the adapter reported are returned, so adapters
+ * without a prompt cache add nothing to usage_json.
+ */
+export const PROMPT_CACHE_USAGE_KEYS = [
+  "cacheCreationInputTokens",
+  "cacheCreation1hInputTokens",
+  "firstCallPromptTokens",
+] as const satisfies ReadonlyArray<keyof UsageSummary>;
+
+export type PromptCacheUsageFields = Partial<Record<(typeof PROMPT_CACHE_USAGE_KEYS)[number], number>>;
+
+export function pickPromptCacheUsageFields(usage: UsageSummary | null | undefined): PromptCacheUsageFields {
+  const fields: PromptCacheUsageFields = {};
+  if (!usage) return fields;
+  for (const key of PROMPT_CACHE_USAGE_KEYS) {
+    const value = usage[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      fields[key] = Math.max(0, Math.floor(value));
+    }
+  }
+  return fields;
 }
 
 function normalizeUsageTotals(usage: UsageSummary | null | undefined): UsageTotals | null {
@@ -9419,9 +9458,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const heartbeat = parseObject(runtimeConfig.heartbeat);
 
     return {
-      enabled: asBoolean(heartbeat.enabled, false),
-      intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
-      wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
+      // DUR-3973: enabled / intervalSec / wakeOnDemand come from the one
+      // shared parser, so the recovery sweep's "can this agent be woken?"
+      // (services/assignee-pickup.ts) is the same answer this gate gives.
+      ...readHeartbeatWakeFlags(runtimeConfig),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
       // DUR-42: default this on. It shipped upstream (#8347) as an opt-in
       // fast-exit for empty timer wakes, but opt-in meant nobody's timer
@@ -13459,6 +13499,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         normalizedUsage || adapterResult.costUsd != null
           ? ({
               ...(normalizedUsage ?? {}),
+              // DUR-3943: cache writes and first-call size, per run as reported.
+              ...pickPromptCacheUsageFields(adapterResult.usage),
               ...(rawUsage ? {
                 rawInputTokens: rawUsage.inputTokens,
                 rawCachedInputTokens: rawUsage.cachedInputTokens,

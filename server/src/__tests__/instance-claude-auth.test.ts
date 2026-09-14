@@ -54,6 +54,8 @@ class FakeSignIn implements ClaudeSignInSession {
   private status: ClaudeSignInSessionSnapshot["status"] = "starting";
   private loginUrl: string | null = null;
   private message: string | null = "Starting…";
+  private failureReason: ClaudeSignInSessionSnapshot["failureReason"] = null;
+  private cliOutput: string | null = null;
   private resolveDone!: (snapshot: ClaudeSignInSessionSnapshot) => void;
   readonly done = new Promise<ClaudeSignInSessionSnapshot>((resolve) => {
     this.resolveDone = resolve;
@@ -65,6 +67,8 @@ class FakeSignIn implements ClaudeSignInSession {
       status: this.status,
       loginUrl: this.loginUrl,
       message: this.message,
+      failureReason: this.failureReason,
+      cliOutput: this.cliOutput,
       startedAt: "2026-09-07T10:00:00.000Z",
       updatedAt: "2026-09-07T10:00:00.000Z",
     };
@@ -88,6 +92,13 @@ class FakeSignIn implements ClaudeSignInSession {
       this.status = "failed";
       this.message = err instanceof Error ? err.message : String(err);
     }
+    this.resolveDone(this.snapshot());
+  }
+  fail(message: string, reason: NonNullable<ClaudeSignInSessionSnapshot["failureReason"]>, cliOutput: string | null) {
+    this.status = "failed";
+    this.message = message;
+    this.failureReason = reason;
+    this.cliOutput = cliOutput;
     this.resolveDone(this.snapshot());
   }
   cancel(reason?: string) {
@@ -514,6 +525,51 @@ describeEmbeddedPostgres("instance Claude auth service", () => {
     expect(finished.message).toMatch(/rejected/);
     expect(finished.message).not.toContain(BAD_TOKEN);
     expect((await svc.getStatus()).configured).toBe(false);
+  });
+
+  it("DUR-3970: a failed sign-in is logged for support, redacted; its CLI transcript is admin-only; a completed one logs nothing", async () => {
+    const fakes: FakeSignIn[] = [];
+    const warn = vi.fn();
+    const { svc } = makeService({
+      startSignIn: (options) => {
+        const fake = new FakeSignIn(options);
+        fakes.push(fake);
+        return fake;
+      },
+      signInLog: { warn },
+    });
+    const failedAttempt = svc.startInteractiveSignIn({ userId: null });
+    fakes[0]!.showUrl("https://claude.com/cai/oauth/authorize?x=1");
+    svc.submitSignInCode(failedAttempt.id, "code#state");
+    // Defence in depth: even if a transcript reached the service with a token in it, the log must not.
+    fakes[0]!.fail(
+      "Claude did not accept that code.",
+      "code_rejected",
+      `OAuth error: Request failed with status code 400\nPress Enter to retry.\nstray ${GOOD_TOKEN}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [details, line] = warn.mock.calls[0]!;
+    expect(line).toMatch(/Claude sign-in failed/);
+    expect(details).toMatchObject({ signInId: failedAttempt.id, failureReason: "code_rejected" });
+    expect(details.cliOutput).toContain("OAuth error: Request failed with status code 400");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(GOOD_TOKEN.slice("sk-ant-oat01-".length, 40));
+
+    // The admin-only poll carries the transcript; the org-readable status does not.
+    expect(svc.getSignIn(failedAttempt.id).cliOutput).toContain("status code 400");
+    const status = await svc.getStatus();
+    expect(status.activeSignIn?.id).toBe(failedAttempt.id);
+    expect(status.activeSignIn?.failureReason).toBe("code_rejected");
+    expect(status.activeSignIn?.cliOutput).toBeNull();
+
+    const goodAttempt = svc.startInteractiveSignIn({ userId: null });
+    fakes[1]!.showUrl("https://claude.com/cai/oauth/authorize?x=1");
+    svc.submitSignInCode(goodAttempt.id, "code#state");
+    await fakes[1]!.finishWithToken(GOOD_TOKEN);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(svc.getSignIn(goodAttempt.id).status).toBe("completed");
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it("starting a new sign-in replaces an in-flight one, unknown ids 404, and unsupported hosts get a plain reason", async () => {

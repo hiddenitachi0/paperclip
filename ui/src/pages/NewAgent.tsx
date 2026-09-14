@@ -31,6 +31,11 @@ import { ReportsToPicker } from "../components/ReportsToPicker";
 import { JobPicker } from "../components/jobs/JobPicker";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
 import { TrustPresetSection } from "../components/TrustPresetSection";
+import { SpendingLimitSection } from "../components/SpendingLimitSection";
+import {
+  DEFAULT_SPENDING_LIMIT_DOLLARS_TEXT,
+  resolveSpendingLimitChoice,
+} from "../lib/hire-spending-limit";
 import {
   answersStraightAwayInChat,
   DEFAULT_WORKING_STYLE,
@@ -77,6 +82,9 @@ export function NewAgent() {
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
   const [workingStyle, setWorkingStyle] = useState<WorkingStyle>(DEFAULT_WORKING_STYLE);
+  // DUR-3976: pre-filled with the standard $50 a month (operator decision).
+  const [spendingLimitDollars, setSpendingLimitDollars] = useState(DEFAULT_SPENDING_LIMIT_DOLLARS_TEXT);
+  const [noSpendingLimit, setNoSpendingLimit] = useState(false);
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
     buildPermissionsForTrustPreset(null, "standard"),
   );
@@ -197,6 +205,14 @@ export function NewAgent() {
         return;
       }
     }
+    const spendingLimit = resolveSpendingLimitChoice({
+      dollarsText: spendingLimitDollars,
+      noLimit: noSpendingLimit,
+    });
+    if (!spendingLimit.ok) {
+      setFormError(spendingLimit.message);
+      return;
+    }
     createAgent.mutate(
       buildNewAgentHirePayload({
         name,
@@ -210,6 +226,7 @@ export function NewAgent() {
         adapterConfig: buildAdapterConfig(),
         permissions,
         answersStraightAwayInChat: answersStraightAwayInChat(workingStyle),
+        budgetMonthlyCents: spendingLimit.cents,
       }),
     );
   }
@@ -338,6 +355,16 @@ export function NewAgent() {
           <WorkingStyleSection
             value={workingStyle}
             onChange={setWorkingStyle}
+            disabled={createAgent.isPending}
+          />
+        </div>
+
+        <div className="border-t border-border px-4 py-4">
+          <SpendingLimitSection
+            dollarsText={spendingLimitDollars}
+            onDollarsTextChange={setSpendingLimitDollars}
+            noLimit={noSpendingLimit}
+            onNoLimitChange={setNoSpendingLimit}
             disabled={createAgent.isPending}
           />
         </div>

@@ -5,11 +5,17 @@ import {
   describeModelBoostConsequence,
   formatBoostDuration,
   formatBoostMoney,
+  hireMonthlySpendingLimitCentsFromPayload,
   prettyBoostEffort,
   prettyBoostModel,
   type ModelBoostBossReview,
 } from "@paperclipai/shared";
-import { formatCents } from "../lib/utils";
+import { cn, formatCents } from "../lib/utils";
+import {
+  NO_SPENDING_LIMIT_WARNING,
+  SPENDING_LIMIT_EXPLANATION,
+  spendingLimitSummary,
+} from "../lib/hire-spending-limit";
 import { workingStyleTitle } from "./WorkingStyleSection";
 
 export const typeLabel: Record<string, string> = {
@@ -309,6 +315,23 @@ function SkillList({ values }: { values: unknown }) {
   );
 }
 
+function HireSpendingLimitRow({ payload }: { payload: Record<string, unknown> }) {
+  const cents = hireMonthlySpendingLimitCentsFromPayload(payload);
+  return (
+    <div className="flex items-start gap-2" data-testid="hire-spending-limit">
+      <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs pt-0.5">Spending</span>
+      <span className="min-w-0">
+        <span className={cn("block", cents <= 0 && "text-destructive font-medium")}>
+          {spendingLimitSummary(cents)}
+        </span>
+        <span className="block text-xs text-muted-foreground">
+          {cents > 0 ? SPENDING_LIMIT_EXPLANATION : NO_SPENDING_LIMIT_WARNING}
+        </span>
+      </span>
+    </div>
+  );
+}
+
 export function HireAgentPayload({ payload }: { payload: Record<string, unknown> }) {
   return (
     <div className="mt-3 space-y-1.5 text-sm">
@@ -339,6 +362,10 @@ export function HireAgentPayload({ payload }: { payload: Record<string, unknown>
         <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs pt-0.5">Works</span>
         <span className="min-w-0">{workingStyleTitle(payload.laneAEnabled === true)}</span>
       </div>
+      {/* DUR-3976: the monthly spending limit, in the same words the
+          employment form used. Approving this card applies exactly this
+          number: the server reads the payload with the same shared function. */}
+      <HireSpendingLimitRow payload={payload} />
       <SkillList values={payload.desiredSkills} />
     </div>
   );

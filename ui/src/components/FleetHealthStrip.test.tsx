@@ -72,6 +72,7 @@ const healthyFleet: FleetHealthSnapshot = {
     stuck: false,
     activatedForDeploy: false,
   },
+  waitingOnUnavailableAgents: { tasks: 0, agents: 0, sample: [] },
   summary: {
     level: "ok",
     headline: "Runs are flowing: 9 started, 7 finished, 1 failed in the last 15 minutes. 3 of 4 slots in use.",
@@ -179,6 +180,26 @@ describe("fleetHealthFacts", () => {
 
     // No queue at all: the fact is not shown.
     expect(fleetHealthFacts(healthyFleet).some((fact) => fact.key === "queue")).toBe(false);
+  });
+
+  // DUR-3973: tasks sitting with agents that cannot pick them up. On this
+  // instance whole companies' agents are paused on purpose for weeks, so the
+  // chip is a plain fact and never turns amber on its own.
+  it("counts tasks waiting on agents that are off as a fact, never an alert, and hides it at zero", () => {
+    expect(fleetHealthFacts(healthyFleet).some((fact) => fact.key === "waiting-on-unavailable")).toBe(false);
+    const waiting = fleetHealthFacts({
+      ...healthyFleet,
+      waitingOnUnavailableAgents: {
+        tasks: 12,
+        agents: 6,
+        sample: [{ id: "a", name: "CEO", companyId: "c", tasks: 5, reason: "paused" }],
+      },
+    });
+    expect(waiting.find((fact) => fact.key === "waiting-on-unavailable")).toEqual({
+      key: "waiting-on-unavailable",
+      text: "12 tasks waiting on agents that are off",
+      alert: false,
+    });
   });
 
   it("reads calmly when nothing is wrong and loudly when the scheduler is off", () => {

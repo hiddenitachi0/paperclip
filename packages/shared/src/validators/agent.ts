@@ -6,6 +6,7 @@ import {
   INBOX_MINE_ISSUE_STATUS_FILTER,
 } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
+import { DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS } from "../hire-spending-limit.js";
 import {
   LANE_A_MAX_MAX_OUTPUT_TOKENS,
   LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP,
@@ -276,7 +277,19 @@ const createAgentObjectSchema = z.object({
   instructionsBundle: createAgentInstructionsBundleSchema.optional(),
   runtimeConfig: agentRuntimeConfigSchema.optional().default({}),
   defaultEnvironmentId: z.string().uuid().optional().nullable(),
-  budgetMonthlyCents: z.number().int().nonnegative().optional().default(0),
+  // DUR-3976: a hire that does not say starts with the standard monthly limit
+  // ($50), not with none. A CEO-proposed hire that leaves the field out used to
+  // default to 0, meaning nothing enforced any limit. "No limit" is still
+  // possible, but only as an explicit 0. updateAgentSchema is a .partial() of
+  // this object, and zod 3 does not apply this default under .partial(), so
+  // PATCH never touches an existing agent's limit (covered by a test).
+  budgetMonthlyCents: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(2_147_483_647)
+    .optional()
+    .default(DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS),
   permissions: agentPermissionsSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional().nullable(),
   // DUR-3971: whether this hire answers straight away in chat (quick agent)

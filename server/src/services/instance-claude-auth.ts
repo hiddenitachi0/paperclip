@@ -30,15 +30,18 @@ import {
 import {
   automaticClaudeSignInSupport,
   looksLikeClaudeOAuthToken,
+  redactClaudeSignInText,
   readClaudeCliVersion,
   scrubClaudeTokens,
   startClaudeSignInSession,
   verifyClaudeOAuthToken,
   type ClaudeSignInSession,
+  type ClaudeSignInSessionSnapshot,
   type ClaudeTokenVerification,
   type StartClaudeSignInSessionOptions,
 } from "@paperclipai/adapter-claude-local/server";
 import { badRequest, notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import { logActivity } from "./activity-log.js";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -87,6 +90,8 @@ export interface InstanceClaudeAuthServiceDeps {
   now?: () => Date;
   /** Which companies get the operator notice in their Activity feed. Defaults to every company. */
   listCompanyIds?: () => Promise<string[]>;
+  /** Where a failed interactive sign-in is recorded for support. Defaults to the server log. */
+  signInLog?: { warn: (details: Record<string, unknown>, message: string) => void };
 }
 
 /** The columns the health verdict is made from; shared with the weekly check-up. */
@@ -243,6 +248,7 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
   const readCliVersion = deps.readCliVersion ?? (() => readClaudeCliVersion(command));
   const automaticSupport = deps.automaticSupport ?? automaticClaudeSignInSupport;
   const listCompanyIds = deps.listCompanyIds ?? (() => instanceSettingsService(db).listCompanyIds());
+  const signInLog = deps.signInLog ?? logger;
 
   async function getRow() {
     const rows = await db
@@ -271,10 +277,13 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
     const [row, version] = await Promise.all([getRow(), readCliVersion().catch(() => null)]);
     const support = automaticSupport();
     const current = now();
+    const active = activeSignInSnapshot();
     const base = {
       cli: { command, version },
       automaticSignIn: support,
-      activeSignIn: activeSignInSnapshot(),
+      // The status route is readable by every org member; the CLI transcript
+      // of a failed sign-in is only for instance admins (getSignIn).
+      activeSignIn: active ? { ...active, cliOutput: null } : null,
     };
     if (!row) {
       return {
@@ -597,7 +606,31 @@ export function instanceClaudeAuthService(db: Db, deps: InstanceClaudeAuthServic
       },
     });
     activeSignIn = { id, userId: input.userId, session, finishedAt: null };
+    void session.done
+      .then((final) => recordFailedSignIn(id, final))
+      .catch(() => undefined);
     return { id, ...session.snapshot() };
+  }
+
+  /**
+   * DUR-3970: a failed sign-in used to leave nothing behind, so the 11 Sep
+   * "did not finish in time" could not be explained. Record why it failed and
+   * what the CLI printed in the server log for support. Only ever for a
+   * FAILED sign-in (a completed one's output held the token), and redacted
+   * again here even though the adapter already redacts — this is the one
+   * place CLI text is written anywhere durable.
+   */
+  function recordFailedSignIn(id: string, final: ClaudeSignInSessionSnapshot) {
+    if (final.status !== "failed") return;
+    signInLog.warn(
+      {
+        signInId: id,
+        failureReason: final.failureReason,
+        message: final.message ? redactClaudeSignInText(final.message) : null,
+        cliOutput: final.cliOutput ? redactClaudeSignInText(final.cliOutput) : null,
+      },
+      "[instance-claude-auth] Claude sign-in failed",
+    );
   }
 
   function requireSignIn(id: string): ActiveSignIn {

@@ -59,6 +59,10 @@ export {
   type LaneAModel,
 } from "./lane-a-models.js";
 export {
+  DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS,
+  hireMonthlySpendingLimitCentsFromPayload,
+} from "./hire-spending-limit.js";
+export {
   getAgentOrgChainHealth,
   getAgentWorkEligibility,
   isAgentAssignableToWork,
@@ -1179,6 +1183,7 @@ export type {
   ClaudeAuthHealth,
   ClaudeAuthSource,
   InstanceClaudeAuthStatus,
+  InstanceClaudeSignInFailureReason,
   InstanceClaudeSignInSession,
   InstanceClaudeSignInStatus,
 } from "./types/instance-claude-auth.js";
@@ -1243,7 +1248,16 @@ export type {
   FleetRunCounts,
   FleetSchedulerStatus,
   FleetSlotUsage,
+  FleetUnavailableAgentSample,
+  FleetWaitingOnUnavailableAgents,
 } from "./types/fleet-health.js";
+export {
+  ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES,
+  ASSIGNEE_UNAVAILABLE_NOTICE_ACTION,
+  ASSIGNEE_UNAVAILABLE_REASONS,
+  ASSIGNEE_UNAVAILABLE_RECORDED_ACTION,
+  type AssigneeUnavailableReason,
+} from "./assignee-pickup.js";
 
 export {
   getClosedIsolatedExecutionWorkspaceMessage,

@@ -1,9 +1,15 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import {
+  CLAUDE_SIGNIN_CLI_OUTPUT_WITHHELD,
+  buildClaudeSignInCliOutput,
+  claudeSignInOutputHasTokenEvidence,
+  classifyClaudeSignInCliMessage,
+  detectClaudeSignInCliError,
   extractClaudeOAuthTokenFromTerminalOutput,
   extractClaudeSignInUrlFromTerminalOutput,
   looksLikeClaudeOAuthToken,
+  redactClaudeSignInText,
   scrubClaudeTokens,
   startClaudeSignInSession,
   stripAnsi,
@@ -266,5 +272,229 @@ describe("startClaudeSignInSession", () => {
     const final = await session.done;
     expect(final.status).toBe("failed");
     expect(final.message).toMatch(/did not show a sign-in link in time/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DUR-3970: a failed sign-in says which case it was, and is diagnosable
+// ---------------------------------------------------------------------------
+
+// The exact bytes the real `claude setup-token` (2.1.270) drew right after a
+// code was pasted, captured by driving it through `script -q -f -e -c … setup-token`
+// with an isolated CLAUDE_CONFIG_DIR — the same way startClaudeSignInSession
+// runs it. In every case the CLI stayed running, waiting for Enter.
+/** Pasted "nohashcodeatall" (no "#state" half). */
+const REAL_AFTER_INCOMPLETE_CODE = "\u001b(B\u000f\u001b[2K\u001b[1A\u001b[2K\u001b[G\u001b[1A\r\u001b[1C\u001b[4A\u001b[38;2;255;107;128mOAuth error: Invalid code. Please make sure the full code was copied\r\u001b[2B\u001b[39m\u001b[K\r\u001b[1C\u001b[1B\u001b[38;2;177;185;249mPress \u001b[1mEnter\u001b[22m to retry.\r\u001b[1B\u001b[39m\u001b[K\r\u001b[1B\u001b[K\r\u001b[1A";
+/** Pasted a well-formed but unknown code "bogusAuthCode123456#bogusState654321". */
+const REAL_AFTER_UNKNOWN_CODE = "\u001b(B\u000f\r\u001b[31C\u001b[1A******************************654321\r\r\n\u001b[2K\u001b[1A\u001b[2K\u001b[G\u001b[1A\r\u001b[1C\u001b[4A\u001b[38;2;255;107;128mOAuth error: Request failed with status code 400\u001b[39m\u001b[K\r\u001b[2B\u001b[K\r\u001b[1C\u001b[1B\u001b[38;2;177;185;249mPress \u001b[1mEnter\u001b[22m to retry.\r\u001b[1B\u001b[39m\u001b[K\r\u001b[1B\u001b[K\r\u001b[1A";
+/** Same code with HTTPS_PROXY pointed at a closed port. */
+const REAL_AFTER_NETWORK_FAILURE = "\u001b(B\u000f\r\u001b[31C\u001b[1A******************************654321\r\r\n\u001b[2K\u001b[1A\u001b[2K\u001b[G\u001b[1A\r\u001b[1C\u001b[4A\u001b[38;2;255;107;128mOAuth error: connect ECONNREFUSED 127.0.0.1:9\u001b[39m\u001b[K\r\u001b[2B\u001b[K\r\u001b[1C\u001b[1B\u001b[38;2;177;185;249mPress \u001b[1mEnter\u001b[22m to retry.\r\u001b[1B\u001b[39m\u001b[K\r\u001b[1B\u001b[K\r\u001b[1A";
+const BOGUS_CODE = "bogusAuthCode123456#bogusState654321";
+const TOKEN_BODY = FAKE_TOKEN.slice("sk-ant-oat01-".length);
+
+/** Every 12-character slice of the token body, to prove not even a fragment leaked. */
+function expectNoTokenFragment(text: string) {
+  expect(text).not.toContain("sk-ant-oat01-A");
+  for (let index = 0; index + 12 <= TOKEN_BODY.length; index += 4) {
+    expect(text).not.toContain(TOKEN_BODY.slice(index, index + 12));
+  }
+}
+
+async function sessionAtExchange(options: Partial<Parameters<typeof startClaudeSignInSession>[0]> = {}) {
+  const child = new FakeChild();
+  const onToken = vi.fn(async () => {});
+  let spawned = false;
+  const session = startClaudeSignInSession({
+    onToken,
+    spawn: () => {
+      spawned = true;
+      return child;
+    },
+    exchangeTimeoutMs: 60_000,
+    ...options,
+  });
+  // The session attaches its output listeners only after creating its temp
+  // config dir; wait for the spawn instead of guessing a delay.
+  for (let attempt = 0; attempt < 400 && !spawned; attempt += 1) await flush();
+  expect(spawned).toBe(true);
+  child.emitOutput(PTY_OUTPUT_WITH_URL);
+  session.submitCode(BOGUS_CODE);
+  return { child, session, onToken };
+}
+
+describe("reading what the Claude CLI reported after the code", () => {
+  it("recognises the real CLI's error output and which case it is", () => {
+    expect(detectClaudeSignInCliError(REAL_AFTER_INCOMPLETE_CODE)).toEqual({
+      reason: "code_rejected",
+      cliMessage: "Invalid code. Please make sure the full code was copied",
+      complete: true,
+    });
+    expect(detectClaudeSignInCliError(REAL_AFTER_UNKNOWN_CODE)).toEqual({
+      reason: "code_rejected",
+      cliMessage: "Request failed with status code 400",
+      complete: true,
+    });
+    expect(detectClaudeSignInCliError(REAL_AFTER_NETWORK_FAILURE)).toEqual({
+      reason: "network",
+      cliMessage: "connect ECONNREFUSED 127.0.0.1:9",
+      complete: true,
+    });
+  });
+
+  it("does not see an error in the normal prompt or in success output", () => {
+    expect(detectClaudeSignInCliError(PTY_OUTPUT_WITH_URL)).toBeNull();
+    expect(detectClaudeSignInCliError(`Long-lived authentication token created:\r\n${FAKE_TOKEN}\r\n`)).toBeNull();
+    expect(detectClaudeSignInCliError("\x1b[31mOAuth error: Request fai")).toEqual({
+      reason: "unexpected_output",
+      cliMessage: "Request fai",
+      complete: false,
+    });
+  });
+
+  it("classifies CLI messages conservatively: only known shapes get a specific case", () => {
+    expect(classifyClaudeSignInCliMessage("Request failed with status code 401")).toBe("code_rejected");
+    expect(classifyClaudeSignInCliMessage("Authentication failed: Invalid authorization code")).toBe("code_rejected");
+    expect(classifyClaudeSignInCliMessage("Token exchange failed (400): Bad Request")).toBe("code_rejected");
+    expect(classifyClaudeSignInCliMessage("getaddrinfo ENOTFOUND platform.claude.com")).toBe("network");
+    expect(classifyClaudeSignInCliMessage("timeout of 30000ms exceeded")).toBe("network");
+    expect(classifyClaudeSignInCliMessage("Request failed with status code 503")).toBe("network");
+    expect(
+      classifyClaudeSignInCliMessage("SSL certificate error (UNABLE_TO_GET_ISSUER_CERT_LOCALLY). If you are behind a corporate proxy…"),
+    ).toBe("network");
+    expect(classifyClaudeSignInCliMessage("The organization didn't grant inference access to this sign-in")).toBe("unexpected_output");
+    expect(classifyClaudeSignInCliMessage("Request failed with status code 403")).toBe("unexpected_output");
+  });
+
+  it("redacts every token shape, token fragments and the pasted code, but keeps error codes readable", () => {
+    const text = [
+      `token ${FAKE_TOKEN}`,
+      "api key sk-ant-api03-abcDEF123_-xyz",
+      `wrapped tail ${TOKEN_BODY.slice(40)}`,
+      `code ${BOGUS_CODE}`,
+      "SSL certificate error (UNABLE_TO_GET_ISSUER_CERT_LOCALLY) connect ECONNREFUSED",
+    ].join("\n");
+    const redacted = redactClaudeSignInText(text, [BOGUS_CODE, ...BOGUS_CODE.split("#")]);
+    expectNoTokenFragment(redacted);
+    expect(redacted).not.toContain("abcDEF123");
+    expect(redacted).not.toContain("bogusAuthCode123456");
+    expect(redacted).not.toContain("bogusState654321");
+    expect(redacted).toContain("UNABLE_TO_GET_ISSUER_CERT_LOCALLY");
+    expect(redacted).toContain("ECONNREFUSED");
+  });
+
+  it("treats any sign of a token as token evidence, however the terminal split it", () => {
+    expect(claudeSignInOutputHasTokenEvidence(`\x1b[33m${FAKE_TOKEN}\x1b[0m`)).toBe(true);
+    expect(claudeSignInOutputHasTokenEvidence(`sk-an\x1b[1Ct-oat01-${TOKEN_BODY.slice(0, 10)}`)).toBe(true);
+    expect(claudeSignInOutputHasTokenEvidence(`sk-ant-\r\n${TOKEN_BODY}`)).toBe(true);
+    expect(claudeSignInOutputHasTokenEvidence("Your OAuth token (valid for 1 year):")).toBe(true);
+    expect(claudeSignInOutputHasTokenEvidence(REAL_AFTER_UNKNOWN_CODE)).toBe(false);
+    expect(buildClaudeSignInCliOutput(`Your OAuth token (valid for 1 year):\r\n${TOKEN_BODY.slice(0, 30)}`)).toBe(
+      CLAUDE_SIGNIN_CLI_OUTPUT_WITHHELD,
+    );
+  });
+});
+
+describe("startClaudeSignInSession failures (DUR-3970)", () => {
+  it("fails at once when the CLI rejects the code, instead of waiting out the timer and blaming a timeout", async () => {
+    for (const capture of [REAL_AFTER_UNKNOWN_CODE, REAL_AFTER_INCOMPLETE_CODE]) {
+      const { child, session } = await sessionAtExchange();
+      expect(session.snapshot().status).toBe("exchanging");
+      child.emitOutput(capture);
+      const snap = session.snapshot();
+      expect(snap.status).toBe("failed");
+      expect(snap.failureReason).toBe("code_rejected");
+      expect(snap.message).toMatch(/did not accept that code/);
+      expect(snap.message).toMatch(/fresh code/);
+      expect(snap.message).not.toMatch(/in time/);
+      const final = await session.done;
+      expect(final.cliOutput).toContain("OAuth error:");
+      expect(final.cliOutput).toContain("Press Enter to retry.");
+      expect(final.cliOutput).not.toContain("bogusAuthCode123456");
+      expect(final.cliOutput).not.toContain("bogusState654321");
+      expect(child.killed.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("says it could not reach Claude when the CLI reports a network failure", async () => {
+    const { child, session } = await sessionAtExchange();
+    child.emitOutput(REAL_AFTER_NETWORK_FAILURE);
+    const final = await session.done;
+    expect(final.status).toBe("failed");
+    expect(final.failureReason).toBe("network");
+    expect(final.message).toMatch(/could not get through to Claude/);
+    expect(final.cliOutput).toContain("connect ECONNREFUSED 127.0.0.1:9");
+  });
+
+  it("stops with 'paste a token instead' and keeps the CLI's words when the error is one it does not recognise", async () => {
+    const { child, session } = await sessionAtExchange();
+    child.emitOutput("\x1b[31mOAuth error: The organization didn't grant inference access to this sign-in\x1b[39m\r\nPress Enter to retry.\r\n");
+    const final = await session.done;
+    expect(final.failureReason).toBe("unexpected_output");
+    expect(final.message).toMatch(/paste a token instead/i);
+    expect(final.cliOutput).toContain("The organization didn't grant inference access to this sign-in");
+  });
+
+  it("waits for a half-written error line to finish before deciding which case it is", async () => {
+    const { child, session } = await sessionAtExchange({ errorSettleMs: 30 });
+    child.emitOutput("\x1b[38;2;255;107;128mOAuth error: Request fai");
+    expect(session.snapshot().status).toBe("exchanging");
+    child.emitOutput("led with status code 400\x1b[39m");
+    const final = await session.done;
+    expect(final.status).toBe("failed");
+    expect(final.failureReason).toBe("code_rejected");
+  });
+
+  it("reports a genuine timeout as a timeout, with what the CLI printed", async () => {
+    const { child, session } = await sessionAtExchange({ exchangeTimeoutMs: 30 });
+    child.emitOutput("\x1b[2K Processing authentication\u2026\r\n");
+    const final = await session.done;
+    expect(final.status).toBe("failed");
+    expect(final.failureReason).toBe("timed_out");
+    expect(final.message).toMatch(/did not answer within 1 second after the code was entered/);
+    expect(final.cliOutput).toContain("Processing authentication");
+  });
+
+  it("never records CLI output on a successful sign-in", async () => {
+    const { child, session, onToken } = await sessionAtExchange();
+    child.emitOutput(`\r\n\u2713 Long-lived authentication token created successfully!\r\nYour OAuth token (valid for 1 year):\r\n${FAKE_TOKEN}\r\n`);
+    const final = await session.done;
+    expect(onToken).toHaveBeenCalledWith(FAKE_TOKEN);
+    expect(final.status).toBe("completed");
+    expect(final.failureReason).toBeNull();
+    expect(final.cliOutput).toBeNull();
+    expectNoTokenFragment(JSON.stringify(final));
+  });
+
+  it("records no CLI output when a token was minted but could not be saved", async () => {
+    const { child, session } = await sessionAtExchange({
+      onToken: async () => {
+        throw new Error("Claude rejected this token.");
+      },
+    });
+    child.emitOutput(`Your OAuth token (valid for 1 year):\r\n${FAKE_TOKEN}\r\n`);
+    const final = await session.done;
+    expect(final.status).toBe("failed");
+    expect(final.failureReason).toBe("save_failed");
+    expect(final.cliOutput).toBeNull();
+    expectNoTokenFragment(JSON.stringify(final));
+  });
+
+  it("withholds the whole transcript when only part of a token was printed before the timeout", async () => {
+    const { child, session } = await sessionAtExchange({ exchangeTimeoutMs: 30 });
+    child.emitOutput(`Your OAuth token (valid for 1 year):\r\nsk-ant-oat01-${TOKEN_BODY.slice(0, 30)}`);
+    const final = await session.done;
+    expect(final.failureReason).toBe("timed_out");
+    expect(final.cliOutput).toBe(CLAUDE_SIGNIN_CLI_OUTPUT_WITHHELD);
+    expectNoTokenFragment(JSON.stringify(final));
+  });
+
+  it("leaks no fragment of a token the terminal split so it could not be extracted, even when the CLI exits", async () => {
+    const { child, session } = await sessionAtExchange();
+    child.emitOutput(`sk-ant-oat01-${TOKEN_BODY.slice(0, 30)}\u2502\r\n\u2502${TOKEN_BODY.slice(30)}\r\n`);
+    child.exit(1);
+    const final = await session.done;
+    expect(final.status).toBe("failed");
+    expect(final.cliOutput).toBe(CLAUDE_SIGNIN_CLI_OUTPUT_WITHHELD);
+    expectNoTokenFragment(JSON.stringify(final));
   });
 });

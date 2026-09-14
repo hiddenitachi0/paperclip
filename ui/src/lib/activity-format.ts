@@ -1,4 +1,5 @@
 import type { Agent } from "@paperclipai/shared";
+import { ASSIGNEE_UNAVAILABLE_NOTICE_ACTION, ASSIGNEE_UNAVAILABLE_RECORDED_ACTION } from "@paperclipai/shared";
 import type { CompanyUserProfile } from "./company-members";
 
 type ActivityDetails = Record<string, unknown> | null | undefined;
@@ -124,9 +125,16 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "company.archived": "archived",
   "company.reactivated": "reactivated",
   "company.budget_updated": "updated budget for",
+  // DUR-3973: tasks waiting on an agent that cannot pick them up. The notice's
+  // verb depends on how many tasks it covers (see formatActivityVerb); the
+  // per-task record is quiet (not an operator notice) so a backlog is one line.
+  [ASSIGNEE_UNAVAILABLE_NOTICE_ACTION]: "flagged tasks that nobody will start",
+  [ASSIGNEE_UNAVAILABLE_RECORDED_ACTION]: "recorded that the assigned agent cannot pick up",
 };
 
 const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
+  [ASSIGNEE_UNAVAILABLE_NOTICE_ACTION]: "flagged that nobody will start this task",
+  [ASSIGNEE_UNAVAILABLE_RECORDED_ACTION]: "recorded that the assigned agent cannot pick this task up",
   "issue.created": "created the issue",
   "issue.updated": "updated the issue",
   "issue.checked_out": "checked out the issue",
@@ -562,6 +570,11 @@ const OPERATOR_NOTICE_ACTIONS: ReadonlySet<string> = new Set([
   // name and throw that sentence away -- which is how the feature shipped
   // broken with every suite green.
   "instance.quiet_mode_stuck",
+  // DUR-3973: a task (or, in one line, several) is waiting on an agent that
+  // cannot pick it up. server/src/services/recovery/service.ts writes the
+  // sentence into details.message; the action name comes from the shared
+  // package on both sides.
+  ASSIGNEE_UNAVAILABLE_NOTICE_ACTION,
 ]);
 
 export function isOperatorNoticeAction(action: string): boolean {
@@ -593,6 +606,11 @@ export function formatActivityVerb(
   details?: Record<string, unknown> | null,
   options: ActivityFormatOptions = {},
 ): string {
+  if (action === ASSIGNEE_UNAVAILABLE_NOTICE_ACTION && details?.taskCount === 1) {
+    // Written on the task itself, so the row reads "...that nobody will start NOR-12".
+    return "flagged that nobody will start";
+  }
+
   if (action === "issue.updated") {
     const issueUpdatedVerb = formatIssueUpdatedVerb(details);
     if (issueUpdatedVerb) return issueUpdatedVerb;

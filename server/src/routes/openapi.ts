@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { ASSIGNEE_UNAVAILABLE_REASONS } from "@paperclipai/shared";
 import {
   // Agent
   createAgentSchema,
@@ -1052,6 +1053,20 @@ registry.registerPath({
             stuckAfterMinutes: z.number().int().positive(),
             stuck: z.boolean(),
             activatedForDeploy: z.boolean(),
+          }),
+          // DUR-3973: open tasks assigned to agents that cannot pick them up
+          // (paused, switched off, terminated, ...), counted live. Quiet mode
+          // and paused/archived companies are not counted.
+          waitingOnUnavailableAgents: z.object({
+            tasks: z.number().int().nonnegative(),
+            agents: z.number().int().nonnegative(),
+            sample: z.array(z.object({
+              id: z.string(),
+              name: z.string(),
+              companyId: z.string(),
+              tasks: z.number().int().positive(),
+              reason: z.enum(ASSIGNEE_UNAVAILABLE_REASONS),
+            })),
           }),
           summary: z.object({
             level: z.enum(["ok", "warning", "critical"]),

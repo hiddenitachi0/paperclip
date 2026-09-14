@@ -1,6 +1,7 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentInstructionsRevisions, approvalComments, approvals, personaPosts } from "@paperclipai/db";
+import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
+import { hireMonthlySpendingLimitCentsFromPayload } from "@paperclipai/shared";
 import {
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
@@ -400,8 +401,8 @@ export function approvalService(db: Db) {
               typeof payload.adapterConfig === "object" && payload.adapterConfig !== null
                 ? (payload.adapterConfig as Record<string, unknown>)
                 : {},
-            budgetMonthlyCents:
-              typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0,
+            // DUR-3976: the same reading of the card the board saw.
+            budgetMonthlyCents: hireMonthlySpendingLimitCentsFromPayload(payload),
             metadata:
               typeof payload.metadata === "object" && payload.metadata !== null
                 ? (payload.metadata as Record<string, unknown>)
@@ -422,8 +423,26 @@ export function approvalService(db: Db) {
           hireApprovedAgentId = created?.id ?? null;
         }
         if (hireApprovedAgentId) {
-          const budgetMonthlyCents =
-            typeof payload.budgetMonthlyCents === "number" ? payload.budgetMonthlyCents : 0;
+          // DUR-3976: the budget policy is what enforces a monthly limit (a
+          // cost event over it pauses the agent and files a
+          // budget_override_required card). The agent row's
+          // budget_monthly_cents column enforces nothing on its own.
+          // hireMonthlySpendingLimitCentsFromPayload is the same function the
+          // hire card uses to show the limit, so the board approves exactly
+          // the number it read. A card that does not say gets the standard
+          // limit, never "no limit".
+          const budgetMonthlyCents = hireMonthlySpendingLimitCentsFromPayload(payload);
+          if (budgetMonthlyCents <= 0 && payloadAgentId) {
+            // Explicit "no monthly limit" on the card. The pending agent row
+            // could still carry an amount (a resubmitted card can change the
+            // payload after the row was written), and a row showing a limit
+            // with no policy behind it looks enforced when it is not. Make
+            // the row say what the board approved.
+            await db
+              .update(agents)
+              .set({ budgetMonthlyCents: 0, updatedAt: now })
+              .where(and(eq(agents.id, payloadAgentId), ne(agents.budgetMonthlyCents, 0)));
+          }
           if (budgetMonthlyCents > 0) {
             await budgets.upsertPolicy(
               updated.companyId,
