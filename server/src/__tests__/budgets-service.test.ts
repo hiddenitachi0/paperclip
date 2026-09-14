@@ -420,3 +420,98 @@ describe("budgetService", () => {
     );
   });
 });
+
+// Governance, 14 Sep: its $20 stop was approved and raised to $40 on 13 Sep.
+// When it reached $40 the next day it was paused again, but the lookup found
+// the resolved incident from the day before and returned it, so no new card
+// was filed and nothing asked the operator anything.
+describe("budgetService a second budget stop in the same month", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const agentPolicy = {
+    id: "policy-1",
+    companyId: "company-1",
+    scopeType: "agent",
+    scopeId: "agent-1",
+    metric: "billed_cents",
+    windowKind: "calendar_month_utc",
+    amount: 4000,
+    warnPercent: 80,
+    hardStopEnabled: true,
+    notifyEnabled: false,
+    isActive: true,
+  };
+  const agentRow = { companyId: "company-1", name: "Governance", status: "running", pauseReason: null };
+
+  function earlierIncident(overrides: Record<string, unknown>) {
+    return {
+      id: "incident-old",
+      companyId: "company-1",
+      policyId: "policy-1",
+      thresholdType: "hard",
+      amountLimit: 2000,
+      amountObserved: 2010,
+      status: "resolved",
+      approvalId: "approval-old",
+      ...overrides,
+    };
+  }
+
+  async function reachLimit(existingIncidents: unknown[], policy: Record<string, unknown> = agentPolicy, observed = 4000) {
+    const dbStub = createDbStub([[policy], [{ total: observed }], existingIncidents, [agentRow]]);
+    dbStub.queueInsert([{ id: "approval-new", companyId: "company-1", status: "pending" }]);
+    dbStub.queueInsert([{ id: "incident-new", companyId: "company-1", policyId: "policy-1", approvalId: "approval-new" }]);
+    const service = budgetService(dbStub.db as any, { cancelWorkForScope: vi.fn().mockResolvedValue(undefined) });
+    await service.evaluateCostEvent({ companyId: "company-1", agentId: "agent-1", projectId: null } as any);
+    return dbStub;
+  }
+
+  function newCardFiled(dbStub: ReturnType<typeof createDbStub>) {
+    return dbStub.insertValues.mock.calls.some(
+      ([values]) => (values as { type?: string }).type === "budget_override_required",
+    );
+  }
+
+  it("files a new card when the agent reaches its raised limit after the earlier stop was approved", async () => {
+    const dbStub = await reachLimit([earlierIncident({})]);
+
+    expect(newCardFiled(dbStub)).toBe(true);
+    expect(dbStub.updateSet).toHaveBeenCalledWith(expect.objectContaining({ status: "paused", pauseReason: "budget" }));
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "budget.hard_threshold_crossed",
+        entityId: "incident-new",
+        details: expect.objectContaining({ approvalId: "approval-new", amountLimit: 4000 }),
+      }),
+    );
+  });
+
+  it("files a new card even when the limit was later set back to the one the earlier stop was at", async () => {
+    const dbStub = await reachLimit([earlierIncident({ amountLimit: 4000 })]);
+
+    expect(newCardFiled(dbStub)).toBe(true);
+  });
+
+  it("still reuses an incident that is open, so one breach gets one card", async () => {
+    const dbStub = await reachLimit([earlierIncident({ id: "incident-open", status: "open", amountLimit: 4000, approvalId: "approval-open" })]);
+
+    expect(newCardFiled(dbStub)).toBe(false);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "budget.hard_threshold_crossed", entityId: "incident-open" }),
+    );
+  });
+
+  it("does not raise the same warning again after a stop resolved it while the limit is unchanged", async () => {
+    const dbStub = await reachLimit(
+      [earlierIncident({ id: "soft-old", thresholdType: "soft", amountLimit: 4000, approvalId: null })],
+      { ...agentPolicy, notifyEnabled: true },
+      3500,
+    );
+
+    expect(dbStub.insertValues).not.toHaveBeenCalled();
+  });
+});

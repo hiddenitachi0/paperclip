@@ -41,6 +41,9 @@ ARGS = f"--api-base {API_BASE} --data-dir {DATA_DIR} --json"
 
 LOCK = threading.Lock()
 
+# Telegram user ids allowed to use the bots; set in main(). Empty means nobody.
+ALLOWED_USER_IDS = set()
+
 
 def load_bots():
     with open(CONFIG_FILE) as f:
@@ -233,7 +236,7 @@ def notify_approvals(state, bots):
                 {"text": "❌ Reject", "callback_data": f"reject:{aid}"},
             ]]}
             sent = False
-            for chat in bots_state(state, bot["token"])["chats"]:
+            for chat in deliverable_chats(state, bot["token"]):
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
                 if kb:
                     params["reply_markup"] = kb
@@ -297,7 +300,7 @@ def notify_waiting(state, bots):
             text += "\nThis task is waiting and may need your input or go-ahead."
             text += f"\n\n[Open in Paperclip]({bot['uiBase']}/issues/{iid})"
             sent = False
-            for chat in bots_state(state, bot["token"])["chats"]:
+            for chat in deliverable_chats(state, bot["token"]):
                 res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
                          parse_mode="Markdown", disable_web_page_preview=True)
                 if res is None:
@@ -344,7 +347,7 @@ def notify_stalled_agents(state, bots):
             text += "\nNo one has cleared it yet. It needs `clear-error` + `resume`, or someone to look."
             text += f"\n\n[Open in Paperclip]({bot['uiBase']}/agents/{aid})"
             sent = False
-            for chat in bots_state(state, bot["token"])["chats"]:
+            for chat in deliverable_chats(state, bot["token"]):
                 res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
                          parse_mode="Markdown", disable_web_page_preview=True)
                 if res is None:
@@ -426,7 +429,7 @@ def notify_interactions(state, bots):
                 {"text": "❌ Decline", "callback_data": f"ireject:{issue_id}:{iid}"},
             ]]}
             sent = False
-            for chat in bots_state(state, bot["token"])["chats"]:
+            for chat in deliverable_chats(state, bot["token"]):
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
                 if kb:
                     params["reply_markup"] = kb
@@ -448,6 +451,41 @@ def bots_state(state, token):
         return state["bots"].setdefault(token, {"offset": 0, "chats": []})
 
 
+def parse_allowed_user_ids(raw):
+    ids = set()
+    for part in (raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+def resolve_allowed_user_ids(state, env_value):
+    """Who may use the bots: their Telegram user ids, and where that came from.
+
+    Every bot can create tasks and its Approve button runs with the operator's
+    board rights, so this is fail-closed: nobody listed means nobody gets in.
+    TELEGRAM_ALLOWED_USER_IDS (comma-separated) wins when set. Without it, the
+    private chats already connected when this check was introduced are kept,
+    so the operator's existing chat keeps working with no setup. In a private
+    chat the chat id is the user's id. Group chats never count.
+    """
+    configured = parse_allowed_user_ids(env_value)
+    if configured:
+        return configured, "TELEGRAM_ALLOWED_USER_IDS"
+    derived = set()
+    for bs in (state.get("bots") or {}).values():
+        for chat in bs.get("chats") or []:
+            if isinstance(chat, int) and chat > 0:
+                derived.add(chat)
+    return derived, "private chats already connected"
+
+
+def deliverable_chats(state, token):
+    """The chats a bot may send cards to: allowed people's private chats only."""
+    return [chat for chat in bots_state(state, token)["chats"] if chat in ALLOWED_USER_IDS]
+
+
 def register_chat(state, token, chat_id):
     with LOCK:
         bs = state["bots"].setdefault(token, {"offset": 0, "chats": []})
@@ -460,6 +498,10 @@ def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
     tgtoken = cq["_token"]
+    if (cq.get("from") or {}).get("id") not in ALLOWED_USER_IDS:
+        print("telegram-bridge: refused a button tap from a Telegram user who is not allowed", flush=True)
+        tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"), text="Not allowed")
+        return
     if action in ("approve", "reject") and rest:
         ok = cli("approval", "approve" if action == "approve" else "reject", rest) is not None
         label = "Approved ✅" if action == "approve" else "Rejected ❌"
@@ -486,6 +528,11 @@ def handle_message(state, bot, m):
     chat_id = (m.get("chat") or {}).get("id")
     text = (m.get("text") or "").strip()
     if chat_id is None:
+        return
+    # Anyone can find a bot and write to it. A stranger gets no reply, so the
+    # bot does not even confirm it is alive, and is never added to its chats.
+    if (m.get("chat") or {}).get("type") != "private" or (m.get("from") or {}).get("id") not in ALLOWED_USER_IDS:
+        print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
     token, agent_id, agent_name = bot["token"], bot["agentId"], bot["name"]
@@ -551,6 +598,12 @@ def main():
         print("telegram-bridge: no bots configured", flush=True)
         return
     state = load_state()
+    global ALLOWED_USER_IDS
+    ALLOWED_USER_IDS, source = resolve_allowed_user_ids(state, os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
+    if ALLOWED_USER_IDS:
+        print(f"telegram-bridge: {len(ALLOWED_USER_IDS)} Telegram user(s) allowed ({source})", flush=True)
+    else:
+        print("telegram-bridge: nobody is allowed to use the bots; set TELEGRAM_ALLOWED_USER_IDS", flush=True)
     for b in bots:
         threading.Thread(target=bot_thread, args=(state, b), daemon=True).start()
     companies = len({b["companyId"] for b in bots})

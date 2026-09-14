@@ -17,6 +17,8 @@ import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { describeToolCapability, summarizeMcpServer } from "./agent-tool-audit.js";
 
+const POSTGRES_UUID_TEXT_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+
 function isModelBoostApproval(approval: Pick<typeof approvals.$inferSelect, "type" | "payload">) {
   return approval.type === "request_board_approval" && approval.payload?.kind === "model_boost";
 }
@@ -218,12 +220,19 @@ export function approvalService(db: Db) {
       return db.select().from(approvals).where(and(...conditions));
     },
 
-    getById: (id: string) =>
-      db
+    // A shortened id like "4a365896" can never match, and handing it to
+    // Postgres as a uuid is a query error that surfaced as a 500. It is
+    // simply not found. Deliberately looser than isUuidLike, which also
+    // demands a version and variant: any hex id Postgres accepts still gets
+    // looked up.
+    getById: async (id: string) => {
+      if (!POSTGRES_UUID_TEXT_RE.test(id)) return null;
+      return db
         .select()
         .from(approvals)
         .where(eq(approvals.id, id))
-        .then((rows) => rows[0] ?? null),
+        .then((rows) => rows[0] ?? null);
+    },
 
     findOpenHireApprovalForAgent: async (companyId: string, agentId: string) => {
       const rows = await db
