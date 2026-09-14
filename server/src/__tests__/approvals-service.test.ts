@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { agents } from "@paperclipai/db";
 import { approvalService } from "../services/approvals.ts";
 
 const mockAgentService = vi.hoisted(() => ({
@@ -15,6 +16,14 @@ vi.mock("../services/agents.js", () => ({
 
 vi.mock("../services/hire-hook.js", () => ({
   notifyHireApproved: mockNotifyHireApproved,
+}));
+
+const mockBudgetService = vi.hoisted(() => ({
+  upsertPolicy: vi.fn(),
+}));
+
+vi.mock("../services/budgets.js", () => ({
+  budgetService: vi.fn(() => mockBudgetService),
 }));
 
 type ApprovalRecord = {
@@ -133,6 +142,73 @@ describe("approvalService resolution idempotency", () => {
         adapterConfig: approved.payload.adapterConfig,
       }),
     );
+  });
+});
+
+// DUR-3976: approving a hire card must leave the new agent with the monthly
+// limit the card showed, enforced by a budget policy (the row column alone
+// enforces nothing).
+describe("approving a hire card applies its monthly spending limit", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAgentService.activatePendingApproval.mockResolvedValue({ agent: { id: "agent-1" }, activated: true });
+    mockAgentService.create.mockResolvedValue({ id: "agent-new" });
+    mockNotifyHireApproved.mockResolvedValue(undefined);
+    mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
+  });
+
+  function approveCard(payload: Record<string, unknown>) {
+    const pending = { ...createApproval("pending"), payload };
+    const approved = { ...createApproval("approved"), payload };
+    const dbStub = createDbStub([[pending]], [approved]);
+    const svc = approvalService(dbStub.db as any);
+    return { dbStub, result: svc.approve("approval-1", "board-user", "ok") };
+  }
+
+  it("creates the enforcing policy with the amount on the card", async () => {
+    const { result } = approveCard({ agentId: "agent-1", budgetMonthlyCents: 5000 });
+    await result;
+
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
+      "company-1",
+      { scopeType: "agent", scopeId: "agent-1", amount: 5000, windowKind: "calendar_month_utc" },
+      "board-user",
+    );
+  });
+
+  it("gives a card that does not mention a limit the standard $50, never no limit", async () => {
+    const { result } = approveCard({ agentId: "agent-1" });
+    await result;
+
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ scopeId: "agent-1", amount: 5000 }),
+      "board-user",
+    );
+  });
+
+  it("rebuilds an agent from the card with the card's limit, and enforces it", async () => {
+    const { result } = approveCard({ name: "Analyst", budgetMonthlyCents: 30000 });
+    await result;
+
+    expect(mockAgentService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ budgetMonthlyCents: 30000 }),
+    );
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ scopeType: "agent", scopeId: "agent-new", amount: 30000 }),
+      "board-user",
+    );
+  });
+
+  it("creates no policy for an explicit 'no monthly limit' card, and makes the agent say so", async () => {
+    const { dbStub, result } = approveCard({ agentId: "agent-1", budgetMonthlyCents: 0 });
+    await result;
+
+    expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+    expect(dbStub.db.update).toHaveBeenCalledWith(agents);
   });
 });
 

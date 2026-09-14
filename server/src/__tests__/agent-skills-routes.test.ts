@@ -50,7 +50,9 @@ const mockAccessService = vi.hoisted(() => ({
 const mockApprovalService = vi.hoisted(() => ({
   create: vi.fn(),
 }));
-const mockBudgetService = vi.hoisted(() => ({}));
+// DUR-3976: a direct creation that says nothing about a limit now starts at the
+// standard $50 a month, so the route creates the enforcing budget policy.
+const mockBudgetService = vi.hoisted(() => ({ upsertPolicy: vi.fn(async () => undefined) }));
 const mockEnvironmentService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));

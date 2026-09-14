@@ -15,6 +15,7 @@ describe("buildNewAgentHirePayload", () => {
           defaultEnvironmentId: "11111111-1111-4111-8111-111111111111",
         },
         adapterConfig: { foo: "bar" },
+        budgetMonthlyCents: 5000,
       }),
     ).toMatchObject({
       name: "Linux Claude",
@@ -22,7 +23,7 @@ describe("buildNewAgentHirePayload", () => {
       adapterType: "claude_local",
       defaultEnvironmentId: "11111111-1111-4111-8111-111111111111",
       adapterConfig: { foo: "bar" },
-      budgetMonthlyCents: 0,
+      budgetMonthlyCents: 5000,
     });
   });
 
@@ -36,6 +37,7 @@ describe("buildNewAgentHirePayload", () => {
           adapterType: "claude_local",
         },
         adapterConfig: {},
+        budgetMonthlyCents: 5000,
       }),
     ).toMatchObject({
       defaultEnvironmentId: null,
@@ -49,6 +51,7 @@ describe("buildNewAgentHirePayload", () => {
       effectiveRole: "general",
       configValues: { ...defaultCreateValues, adapterType: "claude_local" },
       adapterConfig: {},
+      budgetMonthlyCents: 5000,
     });
 
     // The key must be absent, not false: a hire made without touching the
@@ -62,6 +65,7 @@ describe("buildNewAgentHirePayload", () => {
       effectiveRole: "general",
       configValues: { ...defaultCreateValues, adapterType: "claude_local" },
       adapterConfig: {},
+      budgetMonthlyCents: 5000,
       answersStraightAwayInChat: true,
     });
 
@@ -74,6 +78,7 @@ describe("buildNewAgentHirePayload", () => {
       effectiveRole: "general",
       configValues: { ...defaultCreateValues, adapterType: "claude_local" },
       adapterConfig: {},
+      budgetMonthlyCents: 5000,
       answersStraightAwayInChat: false,
     });
 
@@ -86,6 +91,7 @@ describe("buildNewAgentHirePayload", () => {
       effectiveRole: "general" as const,
       configValues: { ...defaultCreateValues, adapterType: "claude_local" as const },
       adapterConfig: { foo: "bar" },
+      budgetMonthlyCents: 5000,
     };
     const plain = buildNewAgentHirePayload(common);
     const quick = buildNewAgentHirePayload({ ...common, answersStraightAwayInChat: true });
@@ -105,6 +111,7 @@ describe("buildNewAgentHirePayload", () => {
           adapterType: "codex_local",
         },
         adapterConfig: {},
+        budgetMonthlyCents: 5000,
         permissions: {
           canCreateAgents: false,
           trustPreset: "low_trust_review",
@@ -142,5 +149,30 @@ describe("buildNewAgentHirePayload", () => {
         },
       },
     });
+  });
+
+  // DUR-3976: the monthly spending limit chosen on the form.
+  it("sends the monthly spending limit the operator chose, in cents", () => {
+    const payload = buildNewAgentHirePayload({
+      name: "Analyst",
+      effectiveRole: "general",
+      configValues: { ...defaultCreateValues, adapterType: "claude_local" },
+      adapterConfig: {},
+      budgetMonthlyCents: 12_550,
+    });
+
+    expect(payload.budgetMonthlyCents).toBe(12_550);
+  });
+
+  it("sends 0 only when the operator chose no limit", () => {
+    const payload = buildNewAgentHirePayload({
+      name: "Analyst",
+      effectiveRole: "general",
+      configValues: { ...defaultCreateValues, adapterType: "claude_local" },
+      adapterConfig: {},
+      budgetMonthlyCents: 0,
+    });
+
+    expect(payload.budgetMonthlyCents).toBe(0);
   });
 });

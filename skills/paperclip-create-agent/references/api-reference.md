@@ -56,7 +56,7 @@ Request body matches agent create shape:
       "wakeOnDemand": true
     }
   },
-  "budgetMonthlyCents": 0,
+  "budgetMonthlyCents": 5000,
   "sourceIssueId": "uuid-or-null",
   "sourceIssueIds": ["uuid-1", "uuid-2"]
 }
@@ -84,6 +84,8 @@ Response:
 An agent-authenticated hire always comes back `pending_approval` with a `hire_agent` approval, regardless of the company's `requireBoardApprovalForNewAgents` setting — an agent can never make a hire go live on its own. Only a board/user-authenticated call is affected by that company setting; when it's off for a board-initiated hire, `approval` is `null` and the agent is created as `idle` directly.
 
 `desiredSkills` accepts company skill ids, canonical keys, or a unique slug. The server resolves and stores canonical company skill keys.
+
+`budgetMonthlyCents` is the most the hire may spend per calendar month, in cents. Leave it out and the hire gets the standard limit of `5000` ($50). The limit is enforced: when the agent's spending for the month reaches it, the agent is paused and the board gets a budget card to raise the limit or keep the agent paused. `0` means no monthly limit. Send it only when the board asked for that, because the hire card shows it to the board as a warning.
 Leave timer heartbeats disabled by default. Only set `runtimeConfig.heartbeat.enabled=true` and include an `intervalSec` when the role truly needs scheduled recurring work or the user explicitly requested it.
 
 ## Approval Lifecycle

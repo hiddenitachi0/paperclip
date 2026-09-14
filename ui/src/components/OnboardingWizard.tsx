@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AdapterEnvironmentTestResult } from "@paperclipai/shared";
+import { DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS, type AdapterEnvironmentTestResult } from "@paperclipai/shared";
 import { useLocation, useNavigate, useParams } from "@/lib/router";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
@@ -39,6 +39,11 @@ import {
   selectReusableOnboardingProject,
 } from "../lib/onboarding-launch";
 import { buildNewAgentRuntimeConfig } from "../lib/new-agent-runtime-config";
+import {
+  SPENDING_LIMIT_EXPLANATION,
+  SPENDING_LIMIT_HEADING,
+  spendingLimitSummary,
+} from "../lib/hire-spending-limit";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
@@ -627,7 +632,10 @@ export function OnboardingWizard() {
         role: "ceo",
         adapterType,
         adapterConfig: buildAdapterConfig(),
-        runtimeConfig: buildNewAgentRuntimeConfig()
+        runtimeConfig: buildNewAgentRuntimeConfig(),
+        // DUR-3976: sent explicitly (and said on step 3) rather than left to
+        // the server default, so this first hire's limit is never invisible.
+        budgetMonthlyCents: DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS
       });
       if (hire.approval) {
         await approvalsApi.approve(
@@ -1230,6 +1238,10 @@ export function OnboardingWizard() {
                       autoFocus
                     />
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    {SPENDING_LIMIT_HEADING}: {spendingLimitSummary(DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS).toLowerCase()}.{" "}
+                    {SPENDING_LIMIT_EXPLANATION} You can change it later on their own page.
+                  </p>
                 </div>
               )}
 

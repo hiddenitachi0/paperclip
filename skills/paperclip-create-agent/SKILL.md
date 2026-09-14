@@ -87,6 +87,7 @@ curl -sS "$PAPERCLIP_API_URL/llms/agent-icons.txt" \
 - for coding or execution agents, include the Paperclip execution contract: start actionable work in the same heartbeat; do not stop at a plan unless planning was requested; leave durable progress with a clear next action; use child issues for long or parallel delegated work instead of polling; mark blocked work with owner/action; respect budget, pause/cancel, approval gates, and company boundaries
 - instruction text such as `AGENTS.md` built from step 4; for local managed-bundle adapters, send this as top-level `instructionsBundle.files["AGENTS.md"]`. Do not set `adapterConfig.promptTemplate` or `bootstrapPromptTemplate` for new agents.
 - source issue linkage (`sourceIssueId` or `sourceIssueIds`) when this hire came from an issue
+- `budgetMonthlyCents`: the most this hire may spend per calendar month, in cents. If you leave it out, the hire gets the standard limit of 5000 ($50). When the agent reaches it, the agent is paused and the board gets a card to raise it. Only send `0` (no monthly limit) when the board has asked for that, and say why in the hire comment: the approval card shows "No monthly limit" as a warning
 
 ### 7. Review the draft against the quality checklist
 
@@ -111,6 +112,7 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-h
     "adapterConfig": {"cwd": "/abs/path/to/repo", "model": "o4-mini"},
     "instructionsBundle": {"files": {"AGENTS.md": "You are the CTO..."}},
     "runtimeConfig": {"heartbeat": {"enabled": false, "wakeOnDemand": true}},
+    "budgetMonthlyCents": 5000,
     "sourceIssueId": "<issue-id>"
   }'
 ```
