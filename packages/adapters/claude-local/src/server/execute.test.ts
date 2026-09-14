@@ -71,6 +71,77 @@ function successStreamStdout(summary: string, extra: Record<string, unknown> = {
   ].join("\n");
 }
 
+// DUR-3943: a run's prompt-cache writes must reach the adapter result whether
+// Claude's usage arrives in the stream-json result event or only in the plain
+// JSON output (the fallback in resolveClaudeAdapterResult). Both paths share
+// readClaudeUsage; this pins that they give the same answer.
+describe("resolveClaudeAdapterResult — prompt cache writes (DUR-3943)", () => {
+  const claudeUsage = {
+    input_tokens: 3742,
+    cache_creation_input_tokens: 61_868,
+    cache_read_input_tokens: 1_194_217,
+    output_tokens: 20_348,
+    cache_creation: { ephemeral_1h_input_tokens: 61_868, ephemeral_5m_input_tokens: 0 },
+  };
+
+  it("reports cache writes and their 1-hour share from the stream result event", () => {
+    const attempt = attemptFromStdout(successStreamStdout("Done", { usage: claudeUsage }));
+
+    const result = resolveClaudeAdapterResult(attempt, { fallbackSessionId: null }, baseEnv);
+
+    expect(result.usage).toMatchObject({
+      inputTokens: 3742,
+      cachedInputTokens: 1_194_217,
+      outputTokens: 20_348,
+      cacheCreationInputTokens: 61_868,
+      cacheCreation1hInputTokens: 61_868,
+    });
+  });
+
+  it("reports the same usage when only the plain JSON output carries it", () => {
+    const streamAttempt = attemptFromStdout(successStreamStdout("Done", { usage: claudeUsage }));
+    const plainAttempt = {
+      proc: buildProc({ stdout: "" }),
+      parsedStream: parseClaudeStreamJson(""),
+      parsed: { session_id: "sess-1", is_error: false, result: "Done", usage: claudeUsage },
+      usageCapTracker: createClaudeUsageCapTracker(0),
+    };
+
+    const fromStream = resolveClaudeAdapterResult(streamAttempt, { fallbackSessionId: null }, baseEnv).usage;
+    const fromPlain = resolveClaudeAdapterResult(plainAttempt, { fallbackSessionId: null }, baseEnv).usage;
+
+    expect(plainAttempt.parsedStream.usage).toBeNull();
+    // The stream path also knows the first call's prompt size (from the
+    // assistant events); everything else must match exactly.
+    const { firstCallPromptTokens: _ignored, ...streamUsageWithoutFirstCall } = fromStream ?? { inputTokens: 0, outputTokens: 0 };
+    expect(fromPlain).toStrictEqual(streamUsageWithoutFirstCall);
+    expect(fromPlain?.cacheCreationInputTokens).toBe(61_868);
+  });
+
+  it("reports cache writes separately from reads when the per-run token cap stopped the run", () => {
+    const tracker = createClaudeUsageCapTracker(1_000);
+    tracker.onChunk(
+      `${JSON.stringify({ type: "assistant", message: { usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 400, cache_creation_input_tokens: 700 } } })}\n`,
+    );
+    const attempt = {
+      proc: buildProc({ stdout: "", usageCapped: true }),
+      parsedStream: parseClaudeStreamJson(""),
+      parsed: null,
+      usageCapTracker: tracker,
+    };
+
+    const result = resolveClaudeAdapterResult(attempt, { fallbackSessionId: null }, { ...baseEnv, maxTokensPerRun: 1_000 });
+
+    expect(result.errorCode).toBe("token_cap_exceeded");
+    expect(result.usage).toStrictEqual({
+      inputTokens: 10,
+      cachedInputTokens: 400,
+      cacheCreationInputTokens: 700,
+      outputTokens: 5,
+    });
+  });
+});
+
 describe("resolveClaudeAdapterResult — DUR-41 success/failure integrity", () => {
   it("keeps a run succeeded when the process is killed after it already produced a successful result", () => {
     const summary =

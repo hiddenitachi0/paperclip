@@ -110,9 +110,11 @@ describe("claude execution — per-run token cap (DUR-213)", () => {
 
     expect(result.errorCode).toBe("token_cap_exceeded");
     expect(result.timedOut).toBe(false);
+    // DUR-3943: cache writes are reported next to reads (none in this stream).
     expect(result.usage).toEqual({
       inputTokens: 900_000,
       cachedInputTokens: 9_100_000,
+      cacheCreationInputTokens: 0,
       outputTokens: 1_000,
     });
     expect(result.summary).toContain("still working");

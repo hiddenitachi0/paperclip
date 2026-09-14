@@ -35,7 +35,21 @@ export interface AdapterRuntime {
 export interface UsageSummary {
   inputTokens: number;
   outputTokens: number;
+  /** Prompt-cache READS (billed at about a tenth of fresh input). Does not include cache writes. */
   cachedInputTokens?: number;
+  /**
+   * Prompt-cache WRITES: tokens stored in the cache this run. Billed above fresh
+   * input (1.25x for 5-minute entries, 2x for 1-hour entries). Only adapters whose
+   * provider reports it set this.
+   */
+  cacheCreationInputTokens?: number;
+  /** Of cacheCreationInputTokens, the tokens written with a 1-hour cache lifetime. */
+  cacheCreation1hInputTokens?: number;
+  /**
+   * Prompt size of the run's first model call (fresh input + cache reads + cache
+   * writes): the standing context the agent carries before doing any work.
+   */
+  firstCallPromptTokens?: number;
 }
 
 export type AdapterBillingType =
