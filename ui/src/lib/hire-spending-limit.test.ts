@@ -19,7 +19,26 @@ describe("monthly spending limit on the employment form", () => {
   it("accepts dollars and stores cents", () => {
     expect(resolveSpendingLimitChoice({ dollarsText: "300", noLimit: false })).toEqual({ ok: true, cents: 30000 });
     expect(resolveSpendingLimitChoice({ dollarsText: " $125.50 ", noLimit: false })).toEqual({ ok: true, cents: 12550 });
-    expect(resolveSpendingLimitChoice({ dollarsText: "1,000", noLimit: false })).toEqual({ ok: true, cents: 100000 });
+    expect(resolveSpendingLimitChoice({ dollarsText: "1 000", noLimit: false })).toEqual({ ok: true, cents: 100000 });
+  });
+
+  // The operator is Norwegian, where the comma is the decimal mark. Every comma
+  // used to be stripped as a thousands separator, so "50,00" became $5,000 — a
+  // limit 100x too high, failing open on money. These pin the fix.
+  it("reads a Norwegian decimal comma as decimals, never as a 100x limit", () => {
+    expect(resolveSpendingLimitChoice({ dollarsText: "50,00", noLimit: false })).toEqual({ ok: true, cents: 5000 });
+    expect(resolveSpendingLimitChoice({ dollarsText: "50,5", noLimit: false })).toEqual({ ok: true, cents: 5050 });
+    expect(resolveSpendingLimitChoice({ dollarsText: "125,50", noLimit: false })).toEqual({ ok: true, cents: 12550 });
+  });
+
+  // Three digits after a separator could be thousands ("1,000", "1.000") or a
+  // typo, and a spending limit must not guess between $1 and $1,000.
+  it("refuses an amount whose separator is ambiguous instead of guessing", () => {
+    for (const dollarsText of ["1,000", "1.000", "50,000", "1.000,50", "1,000.50", "50,5,5"]) {
+      const choice = resolveSpendingLimitChoice({ dollarsText, noLimit: false });
+      expect(choice.ok, `expected "${dollarsText}" to be refused`).toBe(false);
+      if (!choice.ok) expect(choice.message).toMatch(/without thousands separators/);
+    }
   });
 
   // The choice this ticket asked to be made deliberately: an empty box or a 0

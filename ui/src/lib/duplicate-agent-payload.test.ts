@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { buildDuplicateAgentPayload, duplicateAgentName } from "./duplicate-agent-payload";
-import type { AgentDetail } from "@paperclipai/shared";
+import { DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS, type AgentDetail } from "@paperclipai/shared";
 
 const baseAgent: AgentDetail = {
   id: "agent-1",
@@ -102,5 +102,27 @@ describe("duplicate agent payload", () => {
 
     expect(Object.hasOwn(payload, "laneAEnabled")).toBe(false);
     expect(Object.hasOwn(payload, "laneAInstructions")).toBe(false);
+  });
+});
+
+// DUR-3976: duplicating an agent must not quietly create a hire with no
+// spending limit. Most existing agents predate the $50 default and carry 0, so
+// copying that 0 would give the copy no limit without anyone choosing it.
+describe("duplicate agent payload spending limit", () => {
+  it("gives a copy of an agent with no limit the standard $50 limit", () => {
+    const payload = buildDuplicateAgentPayload({ ...baseAgent, budgetMonthlyCents: 0 }, {
+      entryFile: "AGENTS.md",
+      files: { "AGENTS.md": "You are a copy." },
+    });
+    expect(payload.budgetMonthlyCents).toBe(DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS);
+    expect(payload.budgetMonthlyCents).toBe(5000);
+  });
+
+  it("keeps a real limit when copying an agent that has one", () => {
+    const payload = buildDuplicateAgentPayload({ ...baseAgent, budgetMonthlyCents: 30000 }, {
+      entryFile: "AGENTS.md",
+      files: { "AGENTS.md": "You are a copy." },
+    });
+    expect(payload.budgetMonthlyCents).toBe(30000);
   });
 });

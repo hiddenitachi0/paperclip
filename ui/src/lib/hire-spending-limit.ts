@@ -54,12 +54,29 @@ export function resolveSpendingLimitChoice(input: {
   noLimit: boolean;
 }): SpendingLimitChoice {
   if (input.noLimit) return { ok: true, cents: 0 };
-  const text = input.dollarsText.trim().replace(/^\$/, "").replace(/,/g, "");
+  // Spaces (including the non-breaking kinds) are only ever grouping, as in
+  // "1 000", so they are safe to drop.
+  let text = input.dollarsText.trim().replace(/^\$/, "").replace(/[\s  ]/g, "");
   if (text.length === 0) {
     return {
       ok: false,
       message: "Enter a monthly spending limit, or tick \"No monthly limit\" if you really want none.",
     };
+  }
+  // The operator is Norwegian, where the comma is the DECIMAL mark: "50,00" is
+  // fifty dollars. Treating every comma as a thousands separator turned that
+  // into $5,000 — a limit 100x too high, which is the one mistake a spending
+  // limit must never make, because it fails open on money.
+  //
+  // So a comma or dot followed by one or two digits is a decimal mark. A comma
+  // or dot followed by exactly three digits could be either ("1,000" / "1.000")
+  // and is refused rather than guessed. So is mixing both separators.
+  const ambiguous = "Write the amount without thousands separators, like 1000 or 50.50.";
+  if (text.includes(",") && text.includes(".")) return { ok: false, message: ambiguous };
+  if (/[.,]\d{3}$/.test(text)) return { ok: false, message: ambiguous };
+  if (text.includes(",")) {
+    if (!/^\d+,\d{1,2}$/.test(text)) return { ok: false, message: ambiguous };
+    text = text.replace(",", ".");
   }
   const dollars = Number(text);
   if (!Number.isFinite(dollars) || dollars < 0) {

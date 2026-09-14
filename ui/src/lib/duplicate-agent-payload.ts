@@ -1,4 +1,4 @@
-import type { AgentDetail } from "@paperclipai/shared";
+import { DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS, type AgentDetail } from "@paperclipai/shared";
 
 const INSTRUCTION_CONFIG_KEYS = [
   "instructionsBundleMode",
@@ -60,7 +60,15 @@ export function buildDuplicateAgentPayload(
     adapterConfig,
     runtimeConfig: cloneRecord(agent.runtimeConfig),
     defaultEnvironmentId: agent.defaultEnvironmentId ?? null,
-    budgetMonthlyCents: agent.budgetMonthlyCents ?? 0,
+    // DUR-3976: a hire with no spending limit must be an explicit, visible
+    // choice. Most existing agents predate the default and carry 0, so copying
+    // that 0 would quietly create a new agent nothing can stop spending. A copy
+    // of an unlimited agent therefore gets the standard limit; a copy of an
+    // agent with a real limit keeps it.
+    budgetMonthlyCents:
+      agent.budgetMonthlyCents && agent.budgetMonthlyCents > 0
+        ? agent.budgetMonthlyCents
+        : DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS,
     permissions: {
       canCreateAgents: Boolean(agent.permissions?.canCreateAgents),
       canCreateSkills: agent.permissions?.canCreateSkills !== false,
