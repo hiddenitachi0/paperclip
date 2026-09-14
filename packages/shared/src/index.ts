@@ -1179,6 +1179,7 @@ export type {
   ClaudeAuthHealth,
   ClaudeAuthSource,
   InstanceClaudeAuthStatus,
+  InstanceClaudeSignInFailureReason,
   InstanceClaudeSignInSession,
   InstanceClaudeSignInStatus,
 } from "./types/instance-claude-auth.js";

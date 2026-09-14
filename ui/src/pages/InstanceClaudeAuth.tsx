@@ -366,11 +366,23 @@ export function InstanceClaudeAuth() {
           )}
 
           {finishedSignIn && (
-            <div className="flex items-start justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm">
-              <span>{finishedSignIn.message ?? "The sign-in did not finish."}</span>
-              <Button variant="ghost" size="sm" onClick={() => { setSignInId(null); setCode(""); }}>
-                Dismiss
-              </Button>
+            <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <span>{finishedSignIn.message ?? "The sign-in did not finish."}</span>
+                <Button variant="ghost" size="sm" onClick={() => { setSignInId(null); setCode(""); }}>
+                  Dismiss
+                </Button>
+              </div>
+              {finishedSignIn.cliOutput && (
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-muted-foreground">
+                    Details for support (what the Claude sign-in tool printed)
+                  </summary>
+                  <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 font-mono">
+                    {finishedSignIn.cliOutput}
+                  </pre>
+                </details>
+              )}
             </div>
           )}
 
