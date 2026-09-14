@@ -54,6 +54,8 @@ function session(overrides: Partial<InstanceClaudeSignInSession> = {}): Instance
     status: "starting",
     loginUrl: null,
     message: "Starting…",
+    failureReason: null,
+    cliOutput: null,
     startedAt: "2026-09-07T10:00:00.000Z",
     updatedAt: "2026-09-07T10:00:00.000Z",
     ...overrides,
@@ -145,6 +147,39 @@ describe("InstanceClaudeAuth page", () => {
     await flushReact();
     expect(mockApi.submitSignInCode).toHaveBeenCalledWith("sess-1", "abc#def");
     expect(container.textContent).not.toContain(TOKEN);
+  });
+
+  it("says which case a failed sign-in was and keeps what the Claude tool printed for support", async () => {
+    const failed = session({
+      status: "failed",
+      failureReason: "code_rejected",
+      message: "Claude did not accept that code. Start the sign-in again to get a fresh code, and paste it straight away.",
+      cliOutput: "Paste code here if prompted >\nOAuth error: Request failed with status code 400\nPress Enter to retry.",
+    });
+    mockApi.get.mockResolvedValue(status());
+    mockApi.startSignIn.mockResolvedValue(failed);
+    mockApi.getSignIn.mockResolvedValue(failed);
+    await renderPage();
+
+    click(findButton(container, "Sign in with Claude"));
+    await flushReact();
+    expect(container.textContent).toContain("Claude did not accept that code.");
+    const details = container.querySelector("details");
+    expect(details?.querySelector("summary")?.textContent).toContain("Details for support");
+    expect(details?.querySelector("pre")?.textContent).toContain("OAuth error: Request failed with status code 400");
+  });
+
+  it("shows no support details when the failed sign-in has none", async () => {
+    const failed = session({ status: "failed", failureReason: "save_failed", message: "Claude rejected this token.", cliOutput: null });
+    mockApi.get.mockResolvedValue(status());
+    mockApi.startSignIn.mockResolvedValue(failed);
+    mockApi.getSignIn.mockResolvedValue(failed);
+    await renderPage();
+
+    click(findButton(container, "Sign in with Claude"));
+    await flushReact();
+    expect(container.textContent).toContain("Claude rejected this token.");
+    expect(container.querySelector("details")).toBeNull();
   });
 
   it("shows an expired sign-in plainly and offers to sign in again", async () => {

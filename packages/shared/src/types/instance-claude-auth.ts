@@ -56,11 +56,39 @@ export type InstanceClaudeSignInStatus =
   | "failed"
   | "cancelled";
 
+/**
+ * Why a sign-in failed, so the operator is told which case it was instead of
+ * one generic "did not finish in time". Must stay a superset of the adapter's
+ * ClaudeSignInFailureReason — the server's `{ id, ...snapshot }` return
+ * type-checks that.
+ */
+export type InstanceClaudeSignInFailureReason =
+  /** Claude said the pasted code is wrong, incomplete, expired or already used. */
+  | "code_rejected"
+  /** The server could not get through to Claude's sign-in service. */
+  | "network"
+  /** The Claude CLI reported something Paperclip does not recognise, or stopped without a token. */
+  | "unexpected_output"
+  /** Nothing conclusive happened before the time limit. */
+  | "timed_out"
+  /** A token was created but could not be tested or saved. */
+  | "save_failed"
+  /** The sign-in tool could not be started on this server. */
+  | "cli_unavailable";
+
 export interface InstanceClaudeSignInSession {
   id: string;
   status: InstanceClaudeSignInStatus;
   loginUrl: string | null;
   message: string | null;
+  /** Set only when status is "failed". */
+  failureReason: InstanceClaudeSignInFailureReason | null;
+  /**
+   * What the Claude CLI printed, for support — only on a failed sign-in, with
+   * anything token-shaped redacted, and withheld entirely if the output ever
+   * contained a token. Never set on a completed sign-in.
+   */
+  cliOutput: string | null;
   startedAt: string;
   updatedAt: string;
 }
