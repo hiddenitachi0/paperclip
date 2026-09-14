@@ -424,6 +424,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     amountObserved: number,
   ) {
     const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
+    // An open incident is the same breach still going on, so it is reused.
+    // A resolved HARD incident never is: the operator already answered its
+    // card, so reaching the limit again this month is a new breach that needs
+    // a new card. Reusing the old, already-approved card paused the agent
+    // again with nothing asking the operator anything (Governance, 14 Sep).
+    // A resolved SOFT warning is reused while the limit is unchanged, so a
+    // hard stop resolving it does not re-raise the same warning on every
+    // later cost event.
     const existing = await db
       .select()
       .from(budgetIncidents)
@@ -435,7 +443,12 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           ne(budgetIncidents.status, "dismissed"),
         ),
       )
-      .then((rows) => rows[0] ?? null);
+      .then((rows) =>
+        rows.find(
+          (row) =>
+            row.status === "open" || (thresholdType === "soft" && row.amountLimit === policy.amount),
+        ) ?? null,
+      );
     if (existing) return existing;
 
     const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);

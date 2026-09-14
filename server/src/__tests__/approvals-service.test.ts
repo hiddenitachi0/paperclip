@@ -278,3 +278,28 @@ describe("approvalService.findOpenHireApprovalForAgent", () => {
     expect(result).toBeNull();
   });
 });
+
+// Agents asked for approvals by their shortened id ("4a365896"). Postgres
+// rejects that as a uuid, and the query error surfaced as a 500 on
+// GET /api/approvals/:id, eight times in one afternoon.
+describe("approvalService getById with an id that is not a uuid", () => {
+  it("treats a shortened id as not found without asking the database", async () => {
+    const select = vi.fn(() => {
+      throw new Error('invalid input syntax for type uuid: "4a365896"');
+    });
+    const svc = approvalService({ select } as any);
+
+    await expect(svc.getById("4a365896")).resolves.toBeNull();
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it("still looks up every full hex id, including ones without a version digit", async () => {
+    const found = { ...createApproval("pending"), id: "11111111-1111-1111-1111-111111111111" };
+    const dbStub = createDbStub([[found], [createApproval("pending")]], []);
+    const svc = approvalService(dbStub.db as any);
+
+    await expect(svc.getById("11111111-1111-1111-1111-111111111111")).resolves.toEqual(found);
+    await expect(svc.getById("9abd6c8e-4c1d-40e7-a81e-73d1481c25ef")).resolves.toMatchObject({ id: "approval-1" });
+    expect(dbStub.selectWhere).toHaveBeenCalledTimes(2);
+  });
+});
