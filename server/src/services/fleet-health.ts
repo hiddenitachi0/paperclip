@@ -1,6 +1,9 @@
-import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
-import { agents, companies, getAppPoolMax, heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, asc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { agents, companies, getAppPoolMax, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import {
+  ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES,
+  type AssigneeUnavailableReason,
+  type FleetWaitingOnUnavailableAgents,
   QUIET_MODE_REASON_DEPLOY,
   QUIET_MODE_STALE_AFTER_MS,
   QUIET_MODE_STUCK_AFTER_MS,
@@ -17,7 +20,13 @@ import {
   type QuietModeState,
 } from "@paperclipai/shared";
 import { instanceSettingsService } from "./instance-settings.js";
-import { buildQuietModeNotice, formatOperatorDuration } from "./operator-notices.js";
+import {
+  buildFleetWaitingOnUnavailableAgentsNote,
+  buildQuietModeNotice,
+  formatOperatorDuration,
+} from "./operator-notices.js";
+import { classifyAssigneePickup } from "./assignee-pickup.js";
+import { evaluateAgentInvokability, type AgentOrgRow } from "./agent-invokability.js";
 import { logger } from "../middleware/logger.js";
 
 // DUR-3939/DUR-3940 (with DUR-272 and DUR-98): one computed, on-demand
@@ -199,6 +208,84 @@ export async function loadFleetAgentCounts(db: Db): Promise<FleetAgentCounts> {
   };
 }
 
+export const FLEET_WAITING_AGENTS_SAMPLE_LIMIT = 5;
+
+/**
+ * DUR-3973: open tasks assigned to agents that cannot pick them up, right
+ * now. Uses the same classifier as the recovery sweep
+ * (services/assignee-pickup.ts), so this count and the sweep's "do not
+ * dispatch, tell the operator once" decision can never disagree. Agents
+ * switched off by quiet mode are judged by their own pre-quiet-mode settings,
+ * so the nightly quiet window never inflates this number.
+ */
+export async function loadFleetWaitingOnUnavailableAgents(
+  db: Db,
+  quietMode: Pick<QuietModeState, "active" | "snapshot">,
+): Promise<FleetWaitingOnUnavailableAgents> {
+  const rows = await db
+    .select({
+      id: agents.id,
+      companyId: agents.companyId,
+      name: agents.name,
+      reportsTo: agents.reportsTo,
+      status: agents.status,
+      pauseReason: agents.pauseReason,
+      runtimeConfig: agents.runtimeConfig,
+    })
+    .from(agents)
+    .innerJoin(companies, eq(companies.id, agents.companyId))
+    .where(eq(companies.status, "active"));
+
+  const orgRowsByCompany = new Map<string, AgentOrgRow[]>();
+  for (const row of rows) {
+    const companyRows = orgRowsByCompany.get(row.companyId);
+    if (companyRows) companyRows.push(row);
+    else orgRowsByCompany.set(row.companyId, [row]);
+  }
+
+  const unavailable = new Map<string, { row: (typeof rows)[number]; reason: AssigneeUnavailableReason }>();
+  for (const row of rows) {
+    const pickup = classifyAssigneePickup({
+      agent: row,
+      invokability: evaluateAgentInvokability(row, orgRowsByCompany.get(row.companyId) ?? []),
+      companyActive: true,
+      quietMode: { active: quietMode.active, snapshot: quietMode.snapshot ?? null },
+    });
+    if (pickup.kind === "unavailable") unavailable.set(row.id, { row, reason: pickup.reason });
+  }
+  if (unavailable.size === 0) return { tasks: 0, agents: 0, sample: [] };
+
+  const counts = await db
+    .select({ agentId: issues.assigneeAgentId, count: sql<number>`count(*)`.mapWith(Number) })
+    .from(issues)
+    .where(
+      and(
+        inArray(issues.assigneeAgentId, [...unavailable.keys()]),
+        isNull(issues.assigneeUserId),
+        isNull(issues.hiddenAt),
+        inArray(issues.status, [...ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES]),
+      ),
+    )
+    .groupBy(issues.assigneeAgentId);
+
+  const waiting = counts
+    .map((row) => {
+      const entry = row.agentId ? unavailable.get(row.agentId) : undefined;
+      const tasks = asCount(row.count);
+      return entry && tasks > 0
+        ? { id: entry.row.id, name: entry.row.name, companyId: entry.row.companyId, tasks, reason: entry.reason }
+        : null;
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null)
+    .sort((left, right) => right.tasks - left.tasks || left.name.localeCompare(right.name));
+
+  return {
+    tasks: waiting.reduce((sum, row) => sum + row.tasks, 0),
+    agents: waiting.length,
+    sample: waiting.slice(0, FLEET_WAITING_AGENTS_SAMPLE_LIMIT),
+  };
+}
+
 export async function loadFleetDatabaseLoad(db: Db): Promise<FleetDatabaseLoad> {
   const poolMax = getAppPoolMax();
   try {
@@ -338,6 +425,8 @@ export function summarizeFleetHealth(input: {
   requests: FleetRequestLoad;
   database: FleetDatabaseLoad;
   quietMode: FleetQuietMode;
+  /** DUR-3973; absent = nothing known to be waiting. */
+  waitingOnUnavailableAgents?: FleetWaitingOnUnavailableAgents;
 }): FleetHealthSummary {
   const findings: Array<{ level: FleetHealthLevel; text: string }> = [];
   const { runs, slots, agents: agentCounts, scheduler, requests, database, quietMode } = input;
@@ -459,6 +548,23 @@ export function summarizeFleetHealth(input: {
     });
   }
 
+  // DUR-3973: tasks sitting with agents that cannot pick them up. Always
+  // "ok" -- a statement of fact, never amber on its own. On this instance
+  // whole companies' agents are paused on purpose for weeks; painting the
+  // strip yellow for that would teach the operator to ignore the strip. The
+  // one-time Activity notice per task is what flags a NEW case.
+  const waiting = input.waitingOnUnavailableAgents;
+  if (waiting && waiting.tasks > 0) {
+    findings.push({
+      level: "ok",
+      text: buildFleetWaitingOnUnavailableAgentsNote({
+        tasks: waiting.tasks,
+        agents: waiting.agents,
+        sample: waiting.sample.map((agent) => ({ agentName: agent.name, reason: agent.reason, tasks: agent.tasks })),
+      }),
+    });
+  }
+
   const level = findings.reduce<FleetHealthLevel>(
     (worst, finding) => (LEVEL_RANK[finding.level] > LEVEL_RANK[worst] ? finding.level : worst),
     "ok",
@@ -503,13 +609,14 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
     options.zombieSilenceMs ??
     (general && general.silentRunTimeoutMinutes > 0 ? general.silentRunTimeoutMinutes * 60_000 : FLEET_ZOMBIE_SILENCE_MS);
 
-  const quietMode = computeFleetQuietMode(options.quietMode ?? general!.quietMode, {
+  const quietModeState = options.quietMode ?? general!.quietMode;
+  const quietMode = computeFleetQuietMode(quietModeState, {
     now,
     deployStuckAfterMs: options.quietModeStuckMs ?? resolveQuietModeStuckMs(),
     manualStuckAfterMs: options.quietModeManualStuckMs,
   });
 
-  const [runs, agentCounts, database] = await Promise.all([
+  const [runs, agentCounts, database, waitingOnUnavailableAgents] = await Promise.all([
     loadFleetRunCounts(db, { now, windowMs, zombieSilenceMs }),
     loadFleetAgentCounts(db),
     options.includeDatabaseLoad === false
@@ -522,6 +629,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
           waitingOnLocks: null,
         })
       : loadFleetDatabaseLoad(db),
+    loadFleetWaitingOnUnavailableAgents(db, quietModeState),
   ]);
   const slots = computeFleetSlotUsage(globalMaxConcurrentRuns, runs.running);
   const summary = summarizeFleetHealth({
@@ -532,6 +640,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
     requests: options.requests,
     database,
     quietMode,
+    waitingOnUnavailableAgents,
   });
 
   return {
@@ -544,6 +653,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
     requests: options.requests,
     database,
     quietMode,
+    waitingOnUnavailableAgents,
     summary,
   };
 }

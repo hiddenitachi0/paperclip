@@ -5,6 +5,8 @@
 // operator can tell "scheduler broken" from "every run slot is taken" from
 // "server overloaded" without reading the database.
 
+import type { AssigneeUnavailableReason } from "../assignee-pickup.js";
+
 export type FleetHealthLevel = "ok" | "warning" | "critical";
 
 export interface FleetRunCounts {
@@ -131,6 +133,31 @@ export interface FleetQuietMode {
   activatedForDeploy: boolean;
 }
 
+/** One agent that cannot pick up its assigned work, and how much is waiting on it. */
+export interface FleetUnavailableAgentSample {
+  id: string;
+  name: string;
+  companyId: string;
+  /** Open (todo / in progress) tasks assigned to it. */
+  tasks: number;
+  reason: AssigneeUnavailableReason;
+}
+
+/**
+ * DUR-3973: open tasks assigned to agents that cannot pick them up (paused,
+ * switched off, terminated, ...), counted live. The at-a-glance answer to
+ * "is anything just sitting there?" -- one line instead of one alarm per
+ * task. Quiet mode and paused/archived companies are not counted: they have
+ * their own signals.
+ */
+export interface FleetWaitingOnUnavailableAgents {
+  tasks: number;
+  /** Agents that cannot pick up work AND have at least one open task. */
+  agents: number;
+  /** The agents with the most waiting tasks first, a handful at most. */
+  sample: FleetUnavailableAgentSample[];
+}
+
 export interface FleetHealthSummary {
   level: FleetHealthLevel;
   /** One plain-language sentence for the strip. */
@@ -149,6 +176,7 @@ export interface FleetHealthSnapshot {
   requests: FleetRequestLoad;
   database: FleetDatabaseLoad;
   quietMode: FleetQuietMode;
+  waitingOnUnavailableAgents: FleetWaitingOnUnavailableAgents;
   summary: FleetHealthSummary;
 }
 

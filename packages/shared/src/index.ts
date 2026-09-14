@@ -1243,7 +1243,16 @@ export type {
   FleetRunCounts,
   FleetSchedulerStatus,
   FleetSlotUsage,
+  FleetUnavailableAgentSample,
+  FleetWaitingOnUnavailableAgents,
 } from "./types/fleet-health.js";
+export {
+  ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES,
+  ASSIGNEE_UNAVAILABLE_NOTICE_ACTION,
+  ASSIGNEE_UNAVAILABLE_REASONS,
+  ASSIGNEE_UNAVAILABLE_RECORDED_ACTION,
+  type AssigneeUnavailableReason,
+} from "./assignee-pickup.js";
 
 export {
   getClosedIsolatedExecutionWorkspaceMessage,
