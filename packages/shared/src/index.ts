@@ -59,6 +59,10 @@ export {
   type LaneAModel,
 } from "./lane-a-models.js";
 export {
+  DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS,
+  hireMonthlySpendingLimitCentsFromPayload,
+} from "./hire-spending-limit.js";
+export {
   getAgentOrgChainHealth,
   getAgentWorkEligibility,
   isAgentAssignableToWork,

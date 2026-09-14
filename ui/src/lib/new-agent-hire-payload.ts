@@ -20,6 +20,13 @@ export function buildNewAgentHirePayload(input: {
    * payload it produced before this field existed.
    */
   answersStraightAwayInChat?: boolean;
+  /**
+   * DUR-3976: the monthly spending limit chosen on the form, in cents. It is
+   * required so that no caller can quietly send "no limit": 0 is only sent
+   * when the operator ticked "No monthly limit" (see
+   * resolveSpendingLimitChoice in ./hire-spending-limit).
+   */
+  budgetMonthlyCents: number;
 }) {
   const {
     name,
@@ -33,6 +40,7 @@ export function buildNewAgentHirePayload(input: {
     adapterConfig,
     permissions,
     answersStraightAwayInChat = false,
+    budgetMonthlyCents,
   } = input;
 
   return {
@@ -52,7 +60,7 @@ export function buildNewAgentHirePayload(input: {
       cheapModel: configValues.cheapModel,
       cheapModelEnabled: configValues.cheapModelEnabled,
     }),
-    budgetMonthlyCents: 0,
+    budgetMonthlyCents: Math.max(0, Math.round(budgetMonthlyCents)),
     ...(permissions ? { permissions } : {}),
     ...(answersStraightAwayInChat ? { laneAEnabled: true } : {}),
   };

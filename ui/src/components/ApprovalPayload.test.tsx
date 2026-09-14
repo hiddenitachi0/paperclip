@@ -18,6 +18,12 @@ import {
   credentialRequestFields,
   credentialRequestFriendlyName,
 } from "./ApprovalPayload";
+import { hireMonthlySpendingLimitCentsFromPayload } from "@paperclipai/shared";
+import {
+  NO_SPENDING_LIMIT_WARNING,
+  SPENDING_LIMIT_EXPLANATION,
+  spendingLimitSummary,
+} from "../lib/hire-spending-limit";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -647,5 +653,45 @@ describe("ApprovalPayloadRenderer", () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  // DUR-3976: the board must read the monthly limit in the same words the
+  // employment form offered it, and approving applies exactly that number.
+  function renderHireCard(payload: Record<string, unknown>) {
+    const root = createRoot(container);
+    act(() => {
+      root.render(<ApprovalPayloadRenderer type="hire_agent" payload={payload} />);
+    });
+    const text = container.querySelector("[data-testid='hire-spending-limit']")?.textContent ?? "";
+    act(() => {
+      root.unmount();
+    });
+    return text;
+  }
+
+  it("shows the monthly spending limit on the hire card in the form's words", () => {
+    const text = renderHireCard({ name: "Analyst", budgetMonthlyCents: 5000 });
+
+    expect(text).toContain(spendingLimitSummary(5000));
+    expect(text).toContain("Up to $50.00 a month");
+    expect(text).toContain(SPENDING_LIMIT_EXPLANATION);
+  });
+
+  it("shows a raised limit as the amount chosen", () => {
+    expect(renderHireCard({ name: "Analyst", budgetMonthlyCents: 30000 })).toContain("Up to $300.00 a month");
+  });
+
+  it("warns plainly when the hire has no monthly limit", () => {
+    const text = renderHireCard({ name: "Analyst", budgetMonthlyCents: 0 });
+
+    expect(text).toContain("No monthly limit");
+    expect(text).toContain(NO_SPENDING_LIMIT_WARNING);
+  });
+
+  it("shows the standard limit on a card that does not mention one, matching what approval applies", () => {
+    expect(renderHireCard({ name: "Analyst" })).toContain(
+      spendingLimitSummary(hireMonthlySpendingLimitCentsFromPayload({})),
+    );
+    expect(renderHireCard({ name: "Analyst" })).toContain("Up to $50.00 a month");
   });
 });
