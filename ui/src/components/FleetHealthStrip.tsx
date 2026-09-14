@@ -120,6 +120,18 @@ export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: strin
         : "No agents in error",
     alert: agents.inError > 0,
   });
+  // DUR-3973: tasks sitting with agents that cannot pick them up. A fact,
+  // never highlighted: whole companies' agents are paused on purpose for weeks
+  // on this instance, and an amber chip for that would be crying wolf. The
+  // one-time Activity notice per task is what flags a new case.
+  const waiting = fleet.waitingOnUnavailableAgents;
+  if (waiting && waiting.tasks > 0) {
+    facts.push({
+      key: "waiting-on-unavailable",
+      text: `${waiting.tasks} task${waiting.tasks === 1 ? "" : "s"} waiting on agents that are off`,
+      alert: false,
+    });
+  }
   facts.push({
     key: "scheduler",
     text: !scheduler.enabled

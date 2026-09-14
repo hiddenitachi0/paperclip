@@ -238,6 +238,7 @@ import {
   buildTurnCapRepeatedOperatorNotice,
   type FrozenRunStopReason,
 } from "./operator-notices.js";
+import { readHeartbeatWakeFlags } from "./assignee-pickup.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -9419,9 +9420,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const heartbeat = parseObject(runtimeConfig.heartbeat);
 
     return {
-      enabled: asBoolean(heartbeat.enabled, false),
-      intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
-      wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
+      // DUR-3973: enabled / intervalSec / wakeOnDemand come from the one
+      // shared parser, so the recovery sweep's "can this agent be woken?"
+      // (services/assignee-pickup.ts) is the same answer this gate gives.
+      ...readHeartbeatWakeFlags(runtimeConfig),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
       // DUR-42: default this on. It shipped upstream (#8347) as an opt-in
       // fast-exit for empty timer wakes, but opt-in meant nobody's timer

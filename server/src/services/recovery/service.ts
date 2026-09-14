@@ -2,11 +2,16 @@ import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql } fro
 import type { Db } from "@paperclipai/db";
 import { withCompanyScope } from "@paperclipai/db";
 import {
+  ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES,
+  ASSIGNEE_UNAVAILABLE_NOTICE_ACTION,
+  ASSIGNEE_UNAVAILABLE_RECORDED_ACTION,
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  type AssigneeUnavailableReason,
   type IssueGraphLivenessAutoRecoveryPreview,
   type IssueGraphLivenessAutoRecoveryPreviewItem,
+  type QuietModeAgentSnapshotEntry,
 } from "@paperclipai/shared";
 import {
   agents,
@@ -69,6 +74,11 @@ import {
   withRecoveryModelProfileHint,
 } from "./model-profile-hint.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { classifyAssigneePickup } from "../assignee-pickup.js";
+import {
+  buildAssigneeUnavailableNotice,
+  buildAssigneeUnavailableTaskSentence,
+} from "../operator-notices.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
@@ -869,6 +879,181 @@ export function recoveryService(
       projectId: issue.projectId,
     });
     return Boolean(budgetBlock);
+  }
+
+  // -------------------------------------------------------------------------
+  // DUR-3973: assigned work the assignee cannot pick up.
+  //
+  // The sweep used to queue a wake-up for such a task on every pass (every
+  // ~30s); the heartbeat rejected each one, and the next pass did it again.
+  // Now the sweep asks classifyAssigneePickup first and only queues a wake-up
+  // the heartbeat will accept. When the agent cannot pick the task up until a
+  // person acts, the operator is told ONCE per task and assignee, in plain
+  // words, batched per company per sweep. Nothing is reassigned.
+  //
+  // Nothing needs re-checking on a timer: the classification is read off the
+  // agent row the sweep already loads, so the first pass after someone
+  // switches the agent on (or reassigns the task) dispatches it.
+  // -------------------------------------------------------------------------
+
+  /** (task, assignee) pairs already told about, so the durable record is looked up at most once per process. */
+  const assigneeUnavailableAnnounced = new Set<string>();
+
+  type PendingAssigneeUnavailableNotice = {
+    issue: typeof issues.$inferSelect;
+    agent: typeof agents.$inferSelect;
+    reason: AssigneeUnavailableReason;
+  };
+
+  function assigneeUnavailableKey(issueId: string, agentId: string) {
+    return `${issueId}:${agentId}`;
+  }
+
+  async function loadAssigneePickupContext() {
+    // Fail-OPEN on dispatch: if company status cannot be read, the sweep
+    // treats the company as active and lets the heartbeat's own gate refuse
+    // an inactive one, exactly as before. Never hold work on a failed read.
+    let companyStatusById: Map<string, string> | null = null;
+    try {
+      const rows = await db.select({ id: companies.id, status: companies.status }).from(companies);
+      companyStatusById = new Map(rows.map((row) => [row.id, row.status]));
+    } catch (err) {
+      logger.warn({ err }, "recovery sweep could not read company status; dispatching as before");
+    }
+    // Fail-CLOSED on the notice: if quiet mode cannot be read, a switched-off
+    // agent might be quiet mode's doing, so nothing is said this sweep.
+    let quietMode: { active: boolean; snapshot: QuietModeAgentSnapshotEntry[] | null } | null = null;
+    try {
+      const general = await instanceSettings.getGeneral();
+      quietMode = { active: general.quietMode.active, snapshot: general.quietMode.snapshot ?? null };
+    } catch (err) {
+      logger.warn({ err }, "recovery sweep could not read quiet mode; no waiting-task notices this sweep");
+    }
+    return { companyStatusById, quietMode };
+  }
+
+  async function hasAssigneeUnavailableRecord(issueId: string, agentId: string) {
+    return db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issueId),
+          inArray(activityLog.action, [ASSIGNEE_UNAVAILABLE_NOTICE_ACTION, ASSIGNEE_UNAVAILABLE_RECORDED_ACTION]),
+          eq(activityLog.agentId, agentId),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows.length > 0);
+  }
+
+  async function considerAssigneeUnavailableNotice(
+    pending: PendingAssigneeUnavailableNotice[],
+    issue: typeof issues.$inferSelect,
+    agent: typeof agents.$inferSelect,
+    reason: AssigneeUnavailableReason,
+  ) {
+    if (!(ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES as readonly string[]).includes(issue.status)) return;
+    if (issue.hiddenAt) return;
+    const key = assigneeUnavailableKey(issue.id, agent.id);
+    if (assigneeUnavailableAnnounced.has(key)) return;
+    if (pending.some((entry) => entry.issue.id === issue.id)) return;
+    // Only work that is genuinely waiting on this agent: a task that already
+    // has a live or deferred run, is waiting on a person's answer, or sits
+    // under a paused task tree is waiting on something else.
+    if (await hasActiveExecutionPath(issue.companyId, issue.id, null)) return;
+    if (await hasPendingWakeInteraction(issue.companyId, issue.id)) return;
+    if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) return;
+    if (await hasAssigneeUnavailableRecord(issue.id, agent.id)) {
+      assigneeUnavailableAnnounced.add(key);
+      return;
+    }
+    pending.push({ issue, agent, reason });
+  }
+
+  async function flushAssigneeUnavailableNotices(pending: PendingAssigneeUnavailableNotice[]) {
+    let noticed = 0;
+    const byCompany = new Map<string, PendingAssigneeUnavailableNotice[]>();
+    for (const entry of pending) {
+      const group = byCompany.get(entry.issue.companyId);
+      if (group) group.push(entry);
+      else byCompany.set(entry.issue.companyId, [entry]);
+    }
+
+    for (const [companyId, entries] of byCompany) {
+      const describe = (entry: PendingAssigneeUnavailableNotice) => ({
+        task: { identifier: entry.issue.identifier, title: entry.issue.title },
+        agentId: entry.agent.id,
+        agentName: entry.agent.name,
+        reason: entry.reason,
+      });
+      const single = entries.length === 1 ? entries[0]! : null;
+      try {
+        // The notice first: it is the thing that must happen. A task's own
+        // record (below) only stops the notice from being given twice.
+        await logActivity(db, {
+          companyId,
+          actorType: "system",
+          actorId: "recovery",
+          agentId: single ? single.agent.id : null,
+          runId: null,
+          action: ASSIGNEE_UNAVAILABLE_NOTICE_ACTION,
+          // One task: on the task itself, so the feed links to it and the
+          // notice is also that task's durable record. Several: once for the
+          // company, with one quiet record per task below.
+          entityType: single ? "issue" : "company",
+          entityId: single ? single.issue.id : companyId,
+          details: {
+            message: buildAssigneeUnavailableNotice(entries.map(describe)),
+            taskCount: entries.length,
+            source: "recovery.assignee_unavailable",
+            tasks: entries.slice(0, 50).map((entry) => ({
+              issueId: entry.issue.id,
+              identifier: entry.issue.identifier,
+              assigneeAgentId: entry.agent.id,
+              agentName: entry.agent.name,
+              reason: entry.reason,
+            })),
+          },
+        });
+      } catch (err) {
+        logger.warn({ err, companyId, taskCount: entries.length }, "failed to write the waiting-on-unavailable-agent notice; will try again next sweep");
+        continue;
+      }
+      // Told, in this process, from here on -- even if a per-task record
+      // below fails, so a failing write can never turn into a notice per
+      // sweep. After a restart such a task may be mentioned once more.
+      for (const entry of entries) assigneeUnavailableAnnounced.add(assigneeUnavailableKey(entry.issue.id, entry.agent.id));
+      noticed += entries.length;
+
+      if (single) continue;
+      for (const entry of entries) {
+        try {
+          await logActivity(db, {
+            companyId,
+            actorType: "system",
+            actorId: "recovery",
+            agentId: entry.agent.id,
+            runId: null,
+            action: ASSIGNEE_UNAVAILABLE_RECORDED_ACTION,
+            entityType: "issue",
+            entityId: entry.issue.id,
+            details: {
+              message: buildAssigneeUnavailableTaskSentence(describe(entry)),
+              identifier: entry.issue.identifier,
+              assigneeAgentId: entry.agent.id,
+              agentName: entry.agent.name,
+              reason: entry.reason,
+              source: "recovery.assignee_unavailable",
+            },
+          });
+        } catch (err) {
+          logger.warn({ err, issueId: entry.issue.id }, "failed to record a waiting-on-unavailable-agent task");
+        }
+      }
+    }
+    return noticed;
   }
 
   async function reconcileUnassignedBlockingIssues() {
@@ -2984,8 +3169,15 @@ export function recoveryService(
       waitingOnReviewResolved: 0,
       recentProgressExempted: 0,
       skipped: 0,
+      /** DUR-3973: wake-ups NOT queued because the heartbeat would reject them (also counted in `skipped`). */
+      assigneeCannotWakeHeld: 0,
+      /** DUR-3973: tasks the operator was told about on this sweep (each only ever once). */
+      assigneeUnavailableNoticed: 0,
       issueIds: [] as string[],
     };
+
+    const pickupContext = await loadAssigneePickupContext();
+    const pendingAssigneeNotices: PendingAssigneeUnavailableNotice[] = [];
 
     for (const issue of candidates) {
       const executionState = issue.status === "in_review"
@@ -3005,10 +3197,40 @@ export function recoveryService(
       }
 
       const agent = await getAgent(agentId);
-      const agentInvokable = agent && agent.companyId === issue.companyId
-        ? await isAgentInvokable(agent)
-        : false;
+      const invokability = agent && agent.companyId === issue.companyId
+        ? await evaluateAgentInvokabilityFromDb(db, agent)
+        : null;
+      const agentInvokable = invokability?.invokable ?? false;
+      // DUR-3973: can a wake-up queued now actually reach this agent? Null
+      // (no agent / wrong company) keeps the old behaviour below.
+      const pickup = agent && invokability
+        ? classifyAssigneePickup({
+          agent,
+          invokability,
+          companyActive: pickupContext.companyStatusById
+            ? pickupContext.companyStatusById.get(issue.companyId) === "active"
+            : true,
+          quietMode: pickupContext.quietMode,
+        })
+        : null;
+      // Called right before each place this sweep queues a wake-up: when the
+      // heartbeat would reject it, do not queue it (no rejected row, no retry
+      // storm), and tell the operator once if a person has to act.
+      const holdIfAssigneeCannotWake = async () => {
+        if (!pickup || pickup.kind === "wake_on_demand") return false;
+        if (pickup.kind === "unavailable" && agent) {
+          await considerAssigneeUnavailableNotice(pendingAssigneeNotices, issue, agent, pickup.reason);
+        }
+        result.assigneeCannotWakeHeld += 1;
+        result.skipped += 1;
+        return true;
+      };
       if (issue.status !== "in_review" && !agentInvokable) {
+        // Paused / terminated / awaiting approval: never dispatched (as
+        // before), but no longer silent.
+        if (pickup?.kind === "unavailable" && agent) {
+          await considerAssigneeUnavailableNotice(pendingAssigneeNotices, issue, agent, pickup.reason);
+        }
         result.skipped += 1;
         continue;
       }
@@ -3127,6 +3349,8 @@ export function recoveryService(
           continue;
         }
 
+        if (await holdIfAssigneeCannotWake()) continue;
+
         const queued = await enqueueStrandedIssueRecovery({
           issueId: issue.id,
           agentId: participantAgentId,
@@ -3161,6 +3385,8 @@ export function recoveryService(
             result.skipped += 1;
             continue;
           }
+
+          if (await holdIfAssigneeCannotWake()) continue;
 
           const queued = await enqueueInitialAssignedTodoDispatch(issue, agentId);
           if (queued) {
@@ -3201,6 +3427,8 @@ export function recoveryService(
           result.skipped += 1;
           continue;
         }
+
+        if (await holdIfAssigneeCannotWake()) continue;
 
         const queued = await enqueueStrandedIssueRecovery({
           issueId: issue.id,
@@ -3289,6 +3517,8 @@ export function recoveryService(
           result.skipped += 1;
           continue;
         }
+
+        if (await holdIfAssigneeCannotWake()) continue;
 
         const queued = await enqueueStrandedIssueRecovery({
           issueId: issue.id,
@@ -3385,6 +3615,8 @@ export function recoveryService(
         continue;
       }
 
+      if (await holdIfAssigneeCannotWake()) continue;
+
       const queued = await enqueueStrandedIssueRecovery({
         issueId: issue.id,
         agentId,
@@ -3400,6 +3632,8 @@ export function recoveryService(
         result.skipped += 1;
       }
     }
+
+    result.assigneeUnavailableNoticed = await flushAssigneeUnavailableNotices(pendingAssigneeNotices);
 
     const orphanBlockerRecovery = await reconcileUnassignedBlockingIssues();
     result.orphanBlockersAssigned = orphanBlockerRecovery.assigned;

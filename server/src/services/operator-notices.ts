@@ -9,6 +9,8 @@
 // House rule (see build brief): plain human language, no ids/jargon as the
 // only identifier, say what happened and what happens next.
 
+import type { AssigneeUnavailableReason } from "@paperclipai/shared";
+
 export function formatOperatorDuration(ms: number | null | undefined): string {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "an unknown amount of time";
   const totalMinutes = Math.floor(ms / 60_000);
@@ -277,4 +279,215 @@ export function buildStoppedRunOperatorNotice(input: StoppedRunOperatorNoticeInp
       ? `Paperclip ended it. That was already the retry, so ${who} is now marked as needing attention and will not take new work until someone clears the error.`
       : `Paperclip ended it. ${who} is free to take work again.`;
   return `${who}'s run was stopped: ${why}. ${then}`;
+}
+
+// ---------------------------------------------------------------------------
+// DUR-3973: tasks waiting on an agent that cannot pick them up.
+//
+// Every sentence says which task, which agent, why that agent cannot pick it
+// up, and the one thing the operator can do about it -- and never suggests an
+// action that does not exist (a terminated agent is not "switched back on").
+// Paperclip never reassigns the task itself: that is the operator's call.
+// ---------------------------------------------------------------------------
+
+export interface AssigneeUnavailableTaskRef {
+  identifier: string | null | undefined;
+  title: string | null | undefined;
+}
+
+export interface AssigneeUnavailableEntry {
+  task: AssigneeUnavailableTaskRef;
+  agentId: string;
+  agentName: string | null | undefined;
+  reason: AssigneeUnavailableReason;
+}
+
+function agentLabel(name: string | null | undefined): string {
+  return name?.trim() ? name.trim() : "the assigned agent";
+}
+
+function taskRef(task: AssigneeUnavailableTaskRef): string {
+  const identifier = task.identifier?.trim();
+  const title = task.title?.trim();
+  if (identifier && title) return `${identifier} "${title}"`;
+  if (identifier) return identifier;
+  if (title) return `"${title}"`;
+  return "A task";
+}
+
+function taskShortRef(task: AssigneeUnavailableTaskRef): string {
+  return task.identifier?.trim() || (task.title?.trim() ? `"${task.title.trim()}"` : "an untitled task");
+}
+
+/** "Automations is switched off (...)" -- the full why, for one agent. */
+export function describeAssigneeUnavailableState(agentName: string | null | undefined, reason: AssigneeUnavailableReason): string {
+  const who = agentLabel(agentName);
+  switch (reason) {
+    case "switched_off":
+      return `${who} is switched off ("Heartbeat on interval" and "Wake on demand" are both off in its settings)`;
+    case "paused":
+      return `${who} is paused`;
+    case "paused_for_budget":
+      return `${who} is paused because it reached its budget limit`;
+    case "terminated":
+      return `${who} has been terminated`;
+    case "pending_approval":
+      return `${who} is still waiting for its hiring to be approved`;
+    case "reporting_line_broken":
+      return `${who} cannot work because the agent it reports to is gone`;
+    case "unknown_status":
+    default:
+      return `${who} is in a state where it cannot take work`;
+  }
+}
+
+/** "paused", "switched off", ... -- the short why, for lists. */
+export function describeAssigneeUnavailableShort(reason: AssigneeUnavailableReason): string {
+  switch (reason) {
+    case "switched_off":
+      return "switched off";
+    case "paused":
+      return "paused";
+    case "paused_for_budget":
+      return "paused, budget limit reached";
+    case "terminated":
+      return "terminated";
+    case "pending_approval":
+      return "waiting for hiring approval";
+    case "reporting_line_broken":
+      return "reports to an agent that is gone";
+    case "unknown_status":
+    default:
+      return "cannot take work";
+  }
+}
+
+/** The one thing to do, for one agent. */
+export function describeAssigneeUnavailableFix(
+  agentName: string | null | undefined,
+  reason: AssigneeUnavailableReason,
+  taskCount: number,
+): string {
+  const who = agentLabel(agentName);
+  const task = taskCount === 1 ? "task" : "tasks";
+  switch (reason) {
+    case "switched_off":
+      return `Switch ${who} back on (turn on "Wake on demand" in its settings), or give the ${task} to another agent.`;
+    case "paused":
+      return `Resume ${who}, or give the ${task} to another agent.`;
+    case "paused_for_budget":
+      return `Raise the budget for ${who}, or give the ${task} to another agent.`;
+    case "pending_approval":
+      return `Approve the hiring of ${who}, or give the ${task} to another agent.`;
+    case "reporting_line_broken":
+      return `Change who ${who} reports to, or give the ${task} to another agent.`;
+    case "terminated":
+    case "unknown_status":
+    default:
+      return `Give the ${task} to another agent.`;
+  }
+}
+
+/** One task, one agent: the sentence recorded on the task itself. */
+export function buildAssigneeUnavailableTaskSentence(entry: Omit<AssigneeUnavailableEntry, "agentId">): string {
+  return (
+    `${taskRef(entry.task)} is assigned to ${agentLabel(entry.agentName)}, but ` +
+    `${describeAssigneeUnavailableState(entry.agentName, entry.reason)}, so nobody will start it. ` +
+    describeAssigneeUnavailableFix(entry.agentName, entry.reason, 1)
+  );
+}
+
+const LISTED_TASKS_LIMIT = 3;
+const LISTED_AGENTS_LIMIT = 5;
+/** Reasons where the agent was switched off by a decision, not by an accident. */
+const DELIBERATE_UNAVAILABLE_REASONS: ReadonlySet<AssigneeUnavailableReason> = new Set(["paused", "switched_off"]);
+
+function pluralTasks(count: number): string {
+  return `${count} ${count === 1 ? "task" : "tasks"}`;
+}
+
+export interface UnavailableAgentGroup {
+  agentName: string | null | undefined;
+  reason: AssigneeUnavailableReason;
+  tasks: number;
+}
+
+function formatAgentGroups(groups: UnavailableAgentGroup[], totalAgents = groups.length): string {
+  const sorted = [...groups].sort((left, right) => right.tasks - left.tasks);
+  const shown = sorted
+    .slice(0, LISTED_AGENTS_LIMIT)
+    .map((group) => `${agentLabel(group.agentName)} (${describeAssigneeUnavailableShort(group.reason)}, ${pluralTasks(group.tasks)})`);
+  const more = totalAgents - shown.length;
+  return `${shown.join(", ")}${more > 0 ? ` and ${more} more ${more === 1 ? "agent" : "agents"}` : ""}`;
+}
+
+function multiAgentFix(groups: Array<{ reason: AssigneeUnavailableReason }>): string {
+  const anyTerminated = groups.some((group) => group.reason === "terminated" || group.reason === "unknown_status");
+  return (
+    `Switch those agents back on, or give their tasks to other agents.` +
+    (anyTerminated ? ` A terminated agent cannot be switched back on, so its tasks need another agent.` : "")
+  );
+}
+
+/**
+ * The Activity-feed notice for everything one recovery sweep newly found in
+ * one company. One task reads as one plain sentence; a backlog (the first
+ * sweep after this shipped, or pausing an agent that has work) reads as ONE
+ * line with counts per agent instead of a wall of identical alarms.
+ */
+export function buildAssigneeUnavailableNotice(entries: AssigneeUnavailableEntry[]): string {
+  if (entries.length === 0) return "";
+  if (entries.length === 1) return buildAssigneeUnavailableTaskSentence(entries[0]!);
+
+  const byAgent = new Map<string, { agentName: string | null | undefined; reason: AssigneeUnavailableReason; entries: AssigneeUnavailableEntry[] }>();
+  for (const entry of entries) {
+    const group = byAgent.get(entry.agentId);
+    if (group) group.entries.push(entry);
+    else byAgent.set(entry.agentId, { agentName: entry.agentName, reason: entry.reason, entries: [entry] });
+  }
+  const groups = [...byAgent.values()];
+  const deliberate = groups.every((group) => DELIBERATE_UNAVAILABLE_REASONS.has(group.reason));
+  const calm = deliberate ? " If that is deliberate, nothing needs doing." : "";
+
+  if (groups.length === 1) {
+    const group = groups[0]!;
+    const refs = group.entries.slice(0, LISTED_TASKS_LIMIT).map((entry) => taskShortRef(entry.task));
+    const more = group.entries.length - refs.length;
+    return (
+      `${pluralTasks(group.entries.length)} are assigned to ${agentLabel(group.agentName)}, but ` +
+      `${describeAssigneeUnavailableState(group.agentName, group.reason)}, so nobody will start them: ` +
+      `${refs.join(", ")}${more > 0 ? ` and ${more} more` : ""}. ` +
+      describeAssigneeUnavailableFix(group.agentName, group.reason, group.entries.length) +
+      calm
+    );
+  }
+
+  return (
+    `${pluralTasks(entries.length)} are waiting on agents that cannot pick them up, so nobody will start them: ` +
+    `${formatAgentGroups(groups.map((group) => ({ agentName: group.agentName, reason: group.reason, tasks: group.entries.length })))}. ` +
+    multiAgentFix(groups) +
+    calm
+  );
+}
+
+/**
+ * The at-a-glance line on the fleet-health strip: how many open tasks are
+ * waiting on agents that cannot pick them up, right now. Informational, never
+ * an alarm on its own -- on this instance whole companies' agents are paused
+ * on purpose for weeks at a time.
+ */
+export function buildFleetWaitingOnUnavailableAgentsNote(input: {
+  tasks: number;
+  agents: number;
+  sample: UnavailableAgentGroup[];
+}): string {
+  const them = input.tasks === 1 ? "it" : "them";
+  const opening =
+    input.tasks === 1
+      ? "1 open task is assigned to an agent that cannot pick it up"
+      : `${input.tasks} open tasks are assigned to ${input.agents === 1 ? "an agent" : "agents"} that cannot pick them up`;
+  return (
+    `${opening}, so nobody will start ${them}: ${formatAgentGroups(input.sample, input.agents)}. ` +
+    `They wait until the agent is switched back on or the task is given to another agent.`
+  );
 }

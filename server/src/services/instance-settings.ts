@@ -30,18 +30,15 @@ import {
 } from "@paperclipai/shared";
 import { eq, inArray, count } from "drizzle-orm";
 import { parseObject, asBoolean } from "@paperclipai/adapter-utils/server-utils";
+import { readHeartbeatWakeFlags } from "./assignee-pickup.js";
 
 const ACTIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"] as const;
 
 function heartbeatFlagsFromRuntimeConfig(runtimeConfig: Record<string, unknown>) {
-  const heartbeat = parseObject(runtimeConfig.heartbeat);
-  return {
-    enabled: asBoolean(heartbeat.enabled, false),
-    wakeOnDemand: asBoolean(
-      heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation,
-      true,
-    ),
-  };
+  // DUR-3973: same parser as the heartbeat's wake gate, so the snapshot
+  // quiet mode restores from means exactly what the gate enforced.
+  const { enabled, wakeOnDemand } = readHeartbeatWakeFlags(runtimeConfig);
+  return { enabled, wakeOnDemand };
 }
 
 export interface MaxTurnsPerRunAgentOverride {
