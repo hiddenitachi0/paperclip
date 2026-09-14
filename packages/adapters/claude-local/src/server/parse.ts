@@ -18,10 +18,56 @@ const CLAUDE_TRANSIENT_UPSTREAM_RE =
 const CLAUDE_EXTRA_USAGE_RESET_RE =
   /(?:out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,80}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
 
+function readFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * DUR-3943: the one reading of a Claude `usage` object into Paperclip's
+ * UsageSummary, shared by the stream-json path and the plain-JSON fallback in
+ * execute.ts so the two cannot drift.
+ *
+ * cachedInputTokens stays cache READS only -- its meaning in every run and cost
+ * event stored so far. Cache WRITES are reported separately: they are billed
+ * above fresh input (1.25x for 5-minute entries, 2x for the 1-hour entries the
+ * Claude CLI uses on a subscription), so changes that trade reads for writes
+ * (reusing sessions, compacting history, changing the cache lifetime) can only
+ * be judged when both are recorded. The write fields are omitted, not zeroed,
+ * when Claude did not report them.
+ */
+export function readClaudeUsage(usageValue: unknown): UsageSummary {
+  const usageObj = parseObject(usageValue);
+  const usage: UsageSummary = {
+    inputTokens: asNumber(usageObj.input_tokens, 0),
+    cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
+    outputTokens: asNumber(usageObj.output_tokens, 0),
+  };
+  const cacheWrites = readFiniteNumber(usageObj.cache_creation_input_tokens);
+  if (cacheWrites !== null) {
+    usage.cacheCreationInputTokens = cacheWrites;
+    const cacheWrites1h = readFiniteNumber(parseObject(usageObj.cache_creation).ephemeral_1h_input_tokens);
+    if (cacheWrites1h !== null) usage.cacheCreation1hInputTokens = cacheWrites1h;
+  }
+  return usage;
+}
+
+/** Total prompt size of one model call: fresh input + cache reads + cache writes. Null when the event carries no usage. */
+function readClaudeCallPromptTokens(usageValue: unknown): number | null {
+  const usageObj = parseObject(usageValue);
+  const parts = [
+    readFiniteNumber(usageObj.input_tokens),
+    readFiniteNumber(usageObj.cache_read_input_tokens),
+    readFiniteNumber(usageObj.cache_creation_input_tokens),
+  ];
+  if (parts.every((part) => part === null)) return null;
+  return parts.reduce<number>((sum, part) => sum + (part ?? 0), 0);
+}
+
 export function parseClaudeStreamJson(stdout: string) {
   let sessionId: string | null = null;
   let model = "";
   let finalResult: Record<string, unknown> | null = null;
+  let firstCallPromptTokens: number | null = null;
   const assistantTexts: string[] = [];
 
   for (const rawLine of stdout.split(/\r?\n/)) {
@@ -40,6 +86,9 @@ export function parseClaudeStreamJson(stdout: string) {
     if (type === "assistant") {
       sessionId = asString(event.session_id, sessionId ?? "") || sessionId;
       const message = parseObject(event.message);
+      // The first model call of the run shows the standing context: what the
+      // agent carries before its own work adds anything.
+      if (firstCallPromptTokens === null) firstCallPromptTokens = readClaudeCallPromptTokens(message.usage);
       const content = Array.isArray(message.content) ? message.content : [];
       for (const entry of content) {
         if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
@@ -69,12 +118,8 @@ export function parseClaudeStreamJson(stdout: string) {
     };
   }
 
-  const usageObj = parseObject(finalResult.usage);
-  const usage: UsageSummary = {
-    inputTokens: asNumber(usageObj.input_tokens, 0),
-    cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
-    outputTokens: asNumber(usageObj.output_tokens, 0),
-  };
+  const usage = readClaudeUsage(finalResult.usage);
+  if (firstCallPromptTokens !== null) usage.firstCallPromptTokens = firstCallPromptTokens;
   const costRaw = finalResult.total_cost_usd;
   const costUsd = typeof costRaw === "number" && Number.isFinite(costRaw) ? costRaw : null;
   const summary = asString(finalResult.result, assistantTexts.join("\n\n")).trim();
@@ -139,10 +184,14 @@ export function createClaudeLiveUsageTracker() {
 export function createClaudeUsageCapTracker(maxTotalTokens: number) {
   let inputTokens = 0;
   let cachedInputTokens = 0;
+  let cacheCreationInputTokens = 0;
   let outputTokens = 0;
   let buffer = "";
 
-  const totalTokens = () => inputTokens + cachedInputTokens + outputTokens;
+  // The cap counts cache reads AND writes (both are billed). The usage it
+  // reports for a capped run keeps them apart, like every other run
+  // (readClaudeUsage): cachedInputTokens = reads, cacheCreationInputTokens = writes.
+  const totalTokens = () => inputTokens + cachedInputTokens + cacheCreationInputTokens + outputTokens;
 
   return {
     onChunk(chunk: string): boolean {
@@ -158,13 +207,13 @@ export function createClaudeUsageCapTracker(maxTotalTokens: number) {
         const usageObj = parseObject(message.usage);
         inputTokens += asNumber(usageObj.input_tokens, 0);
         outputTokens += asNumber(usageObj.output_tokens, 0);
-        cachedInputTokens +=
-          asNumber(usageObj.cache_read_input_tokens, 0) + asNumber(usageObj.cache_creation_input_tokens, 0);
+        cachedInputTokens += asNumber(usageObj.cache_read_input_tokens, 0);
+        cacheCreationInputTokens += asNumber(usageObj.cache_creation_input_tokens, 0);
       }
       return maxTotalTokens > 0 && totalTokens() >= maxTotalTokens;
     },
     getUsage(): UsageSummary {
-      return { inputTokens, cachedInputTokens, outputTokens };
+      return { inputTokens, cachedInputTokens, cacheCreationInputTokens, outputTokens };
     },
     getTotalTokens(): number {
       return totalTokens();

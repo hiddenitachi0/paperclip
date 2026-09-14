@@ -2513,6 +2513,44 @@ export function buildExplicitResumeSessionOverride(input: {
   };
 }
 
+/**
+ * DUR-3943: the prompt-cache detail of one run, as the adapter reported it for
+ * that run. Copied into heartbeat_runs.usage_json next to the token totals.
+ *
+ * - cacheCreationInputTokens: tokens written to the prompt cache. Billed above
+ *   fresh input (1.25x for 5-minute entries, 2x for 1-hour entries), and NOT
+ *   part of cachedInputTokens, which counts cache reads only.
+ * - cacheCreation1hInputTokens: of those, the tokens written with a 1-hour
+ *   lifetime (the Claude CLI's automatic choice on a subscription).
+ * - firstCallPromptTokens: size of the run's first model call -- everything
+ *   the agent carries before doing any work (CLI system prompt, tools,
+ *   instructions, task prompt, and on a resumed session the prior transcript).
+ *
+ * Deliberately not netted against an earlier run of the same session (unlike
+ * the token totals in resolveNormalizedUsageForSession): these are per-run
+ * observations. Only fields the adapter reported are returned, so adapters
+ * without a prompt cache add nothing to usage_json.
+ */
+export const PROMPT_CACHE_USAGE_KEYS = [
+  "cacheCreationInputTokens",
+  "cacheCreation1hInputTokens",
+  "firstCallPromptTokens",
+] as const satisfies ReadonlyArray<keyof UsageSummary>;
+
+export type PromptCacheUsageFields = Partial<Record<(typeof PROMPT_CACHE_USAGE_KEYS)[number], number>>;
+
+export function pickPromptCacheUsageFields(usage: UsageSummary | null | undefined): PromptCacheUsageFields {
+  const fields: PromptCacheUsageFields = {};
+  if (!usage) return fields;
+  for (const key of PROMPT_CACHE_USAGE_KEYS) {
+    const value = usage[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      fields[key] = Math.max(0, Math.floor(value));
+    }
+  }
+  return fields;
+}
+
 function normalizeUsageTotals(usage: UsageSummary | null | undefined): UsageTotals | null {
   if (!usage) return null;
   return {
@@ -13461,6 +13499,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         normalizedUsage || adapterResult.costUsd != null
           ? ({
               ...(normalizedUsage ?? {}),
+              // DUR-3943: cache writes and first-call size, per run as reported.
+              ...pickPromptCacheUsageFields(adapterResult.usage),
               ...(rawUsage ? {
                 rawInputTokens: rawUsage.inputTokens,
                 rawCachedInputTokens: rawUsage.cachedInputTokens,

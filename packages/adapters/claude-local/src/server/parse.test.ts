@@ -9,6 +9,8 @@ import {
   isClaudeImageProcessingError,
   createClaudeLiveUsageTracker,
   createClaudeUsageCapTracker,
+  parseClaudeStreamJson,
+  readClaudeUsage,
 } from "./parse.js";
 
 function assistantEvent(usage: Record<string, number>) {
@@ -79,8 +81,21 @@ describe("createClaudeUsageCapTracker", () => {
     const tracker = createClaudeUsageCapTracker(0);
     tracker.onChunk(assistantLine({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }));
     tracker.onChunk(assistantLine({ input_tokens: 20, output_tokens: 7, cache_creation_input_tokens: 200 }));
-    expect(tracker.getUsage()).toEqual({ inputTokens: 30, cachedInputTokens: 300, outputTokens: 12 });
+    // DUR-3943: the cap still counts reads + writes (342), but the reported
+    // usage keeps writes out of cachedInputTokens, matching uncapped runs.
+    expect(tracker.getUsage()).toStrictEqual({
+      inputTokens: 30,
+      cachedInputTokens: 100,
+      cacheCreationInputTokens: 200,
+      outputTokens: 12,
+    });
     expect(tracker.getTotalTokens()).toBe(342);
+  });
+
+  it("still stops the run on cache writes alone (DUR-3943 split must not loosen the cap)", () => {
+    const tracker = createClaudeUsageCapTracker(500);
+    expect(tracker.onChunk(assistantLine({ cache_creation_input_tokens: 499 }))).toBe(false);
+    expect(tracker.onChunk(assistantLine({ cache_creation_input_tokens: 1 }))).toBe(true);
   });
 
   it("reports exceeded once the running total reaches the cap", () => {
@@ -101,6 +116,107 @@ describe("createClaudeUsageCapTracker", () => {
     const tracker = createClaudeUsageCapTracker(10);
     tracker.onChunk(`${JSON.stringify({ type: "result", usage: { input_tokens: 999 } })}\nnot json\n`);
     expect(tracker.getTotalTokens()).toBe(0);
+  });
+});
+
+// DUR-3943: the ticket's cost model read usage_json.cachedInputTokens as
+// "cache reads at a tenth of the price" and had no cache writes at all. The
+// numbers below are a real claude_local result event (Opus 4.8, 32 turns,
+// total_cost_usd 1.7432): at $5/$25 per MTok with reads at 0.1x and 1-hour
+// writes at 2x, input $0.019 + reads $0.597 + writes $0.619 + output $0.509
+// = $1.743 exactly -- writes cost more than all 1.19M reads, and were dropped.
+const REAL_RESULT_USAGE = {
+  input_tokens: 3742,
+  cache_creation_input_tokens: 61_868,
+  cache_read_input_tokens: 1_194_217,
+  output_tokens: 20_348,
+  server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+  service_tier: "standard",
+  cache_creation: { ephemeral_1h_input_tokens: 61_868, ephemeral_5m_input_tokens: 0 },
+};
+
+describe("readClaudeUsage (DUR-3943)", () => {
+  it("keeps cachedInputTokens as reads only and reports cache writes and their 1-hour share separately", () => {
+    expect(readClaudeUsage(REAL_RESULT_USAGE)).toStrictEqual({
+      inputTokens: 3742,
+      cachedInputTokens: 1_194_217,
+      outputTokens: 20_348,
+      cacheCreationInputTokens: 61_868,
+      cacheCreation1hInputTokens: 61_868,
+    });
+  });
+
+  it("omits the write fields when Claude did not report them, instead of claiming zero writes", () => {
+    expect(readClaudeUsage({ input_tokens: 5, cache_read_input_tokens: 2, output_tokens: 8 })).toStrictEqual({
+      inputTokens: 5,
+      cachedInputTokens: 2,
+      outputTokens: 8,
+    });
+    expect(readClaudeUsage(undefined)).toStrictEqual({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+  });
+
+  it("reports total writes even when the lifetime breakdown is missing", () => {
+    expect(readClaudeUsage({ input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 300 })).toStrictEqual({
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 1,
+      cacheCreationInputTokens: 300,
+    });
+  });
+});
+
+describe("parseClaudeStreamJson — prompt cache detail (DUR-3943)", () => {
+  function line(event: Record<string, unknown>) {
+    return JSON.stringify(event);
+  }
+
+  it("records cache writes and the first model call's prompt size for the run", () => {
+    const stdout = [
+      line({ type: "system", subtype: "init", session_id: "s-1", model: "claude-opus-4-8" }),
+      // First model call: 2828 fresh + 15093 read + 4976 written = the standing context.
+      line({
+        type: "assistant",
+        session_id: "s-1",
+        message: {
+          content: [{ type: "text", text: "Starting." }],
+          usage: {
+            input_tokens: 2828,
+            cache_creation_input_tokens: 4976,
+            cache_read_input_tokens: 15_093,
+            output_tokens: 5,
+          },
+        },
+      }),
+      // A later call is bigger (the run's own work) and must not replace it.
+      line({
+        type: "assistant",
+        session_id: "s-1",
+        message: {
+          content: [{ type: "text", text: "Done." }],
+          usage: { input_tokens: 2, cache_creation_input_tokens: 294, cache_read_input_tokens: 63_318, output_tokens: 716 },
+        },
+      }),
+      line({ type: "result", subtype: "success", session_id: "s-1", result: "Done.", total_cost_usd: 1.7432, usage: REAL_RESULT_USAGE }),
+    ].join("\n");
+
+    expect(parseClaudeStreamJson(stdout).usage).toStrictEqual({
+      inputTokens: 3742,
+      cachedInputTokens: 1_194_217,
+      outputTokens: 20_348,
+      cacheCreationInputTokens: 61_868,
+      cacheCreation1hInputTokens: 61_868,
+      firstCallPromptTokens: 22_897,
+    });
+  });
+
+  it("skips assistant events without usage when finding the first model call", () => {
+    const stdout = [
+      line({ type: "assistant", message: { content: [{ type: "text", text: "no usage on this one" }] } }),
+      line({ type: "assistant", message: { content: [], usage: { input_tokens: 100, cache_read_input_tokens: 900 } } }),
+      line({ type: "result", subtype: "success", result: "ok", usage: { input_tokens: 100, output_tokens: 1 } }),
+    ].join("\n");
+
+    expect(parseClaudeStreamJson(stdout).usage?.firstCallPromptTokens).toBe(1000);
   });
 });
 

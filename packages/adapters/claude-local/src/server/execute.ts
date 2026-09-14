@@ -60,6 +60,7 @@ import {
   isClaudeImageProcessingError,
   createClaudeLiveUsageTracker,
   createClaudeUsageCapTracker,
+  readClaudeUsage,
 } from "./parse.js";
 import {
   materializeRemoteClaudeConfig,
@@ -613,16 +614,10 @@ export function resolveClaudeAdapterResult(
     };
   }
 
-  const usage =
-    parsedStream.usage ??
-    (() => {
-      const usageObj = parseObject(parsed.usage);
-      return {
-        inputTokens: asNumber(usageObj.input_tokens, 0),
-        cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
-        outputTokens: asNumber(usageObj.output_tokens, 0),
-      };
-    })();
+  // DUR-3943: same reading as the stream path (readClaudeUsage), so a run
+  // whose usage only arrives in the plain JSON output still records its
+  // prompt-cache writes.
+  const usage = parsedStream.usage ?? readClaudeUsage(parsed.usage);
 
   const rawResolvedSessionId =
     parsedStream.sessionId ??
