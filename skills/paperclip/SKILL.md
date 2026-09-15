@@ -57,6 +57,7 @@ Overrides and special cases:
 - `PAPERCLIP_WAKE_REASON=issue_comment_mentioned` → read the comment thread first even if you're not the assignee. Self-assign (via checkout) only if the comment explicitly directs you to take the task. Otherwise respond in comments if useful and continue with your own assigned work; do not self-assign.
 - Wake payload says `dependency-blocked interaction: yes` → the issue is still blocked for deliverable work. Do not try to unblock it. Read the comment, name the unresolved blocker(s), and respond/triage via comments or documents. Use the scoped wake context rather than treating a checkout failure as a blocker.
 - **Blocked-task dedup:** before touching a `blocked` task, check the thread. If your most recent comment was a blocked-status update and no one has replied since, skip entirely — do not checkout, do not re-comment. Only re-engage on new context (comment, status change, event wake).
+- **Waiting on a board approval:** when a task's only remaining blocker is an approval the operator has not decided yet, post at most one comment saying it waits for that decision, then stop. Do not comment again on later heartbeats, and never state how long it has been waiting from memory — if you mention a duration at all, use the "Waiting for the operator's decision" times in your wake payload, which come from the approval card. The operator sees the card, and Paperclip wakes you when it is decided.
 - Nothing assigned and no valid mention handoff → exit the heartbeat.
 
 **Step 5 — Checkout.** You MUST checkout before doing any work. Include the run ID header:
@@ -213,6 +214,8 @@ POST /api/companies/{companyId}/approvals
 ```
 
 `issueIds` links the approval into the issue thread. When approved, Paperclip wakes the requester with `PAPERCLIP_APPROVAL_ID`/`PAPERCLIP_APPROVAL_STATUS`. Keep the payload concise and decision-ready.
+
+**While the card is waiting, say so once and stop.** Put the task in an explicit waiting posture (`in_review`, or `blocked` when another issue is the blocker), post one plain comment that it waits for the operator's decision, and leave it. Do not repeat that comment on later heartbeats and do not invent durations: your wake payload lists each pending approval with the exact time it was filed and how long it has been waiting. Paperclip also stops its own recovery wake-ups for a task whose only remaining blocker is a pending approval linked with `issueIds` — another reason to link the approval to the task instead of only naming it in text.
 
 **Title convention (required).** The operator runs many companies/projects from one approvals list, so `payload.title` must never lead with a PR number, branch name, commit hash, or other internal field — those look identical across unrelated repos. Write it as plain words: what this does, not how you did it. The server rewrites `request_board_approval` titles server-side to enforce `"<project> — <what this does>"` (resolved from the linked issue's project, or the company name if no project applies), so a bare description like `"put the 2026 look live"` is enough — don't hand-prefix it yourself.
 

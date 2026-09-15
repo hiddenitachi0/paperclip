@@ -17,6 +17,7 @@ import {
 import { asBoolean, asNumber, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import { extractAgentMentionIds } from "@paperclipai/shared";
 import { readHeartbeatWakeFlags } from "./assignee-pickup.js";
+import { isIssueWaitingOnlyOnBoardApproval } from "./board-approval-wait.js";
 import { logger } from "../middleware/logger.js";
 
 // DUR-3943 round 2: skip scheduled heartbeat wake-ups when nothing is new.
@@ -72,6 +73,8 @@ const ACTIVE_OR_PENDING_RUN_STATUSES = ["queued", "running", "scheduled_retry"] 
 const PENDING_WAKEUP_REQUEST_STATUSES = ["queued", "deferred_issue_execution", "claimed"] as const;
 /** More comments than this since the last run: do not parse them, just run. */
 const MENTION_SCAN_LIMIT = 200;
+/** More held (in-progress / checked-out) issues than this: do not check each one, just run. */
+const HELD_ISSUE_SCAN_LIMIT = 20;
 
 export interface TimerIdleGatePolicy {
   enabled: boolean;
@@ -289,16 +292,20 @@ async function evaluate(
   const assignedToAgent = and(eq(issues.companyId, companyId), eq(issues.assigneeAgentId, agentId), isNull(issues.hiddenAt));
   const openAssigned = and(assignedToAgent, notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]));
 
-  if (
-    await exists(
-      db
-        .select({ id: issues.id })
-        .from(issues)
-        .where(and(openAssigned, or(eq(issues.status, "in_progress"), sql`${issues.checkoutRunId} is not null`)))
-        .limit(1),
-    )
-  ) {
-    return run("holds_checked_out_or_in_progress_issue");
+  // DUR-3979: an in-progress or checked-out issue that waits only on the
+  // operator's decision on a linked approval is not work to continue (see
+  // board-approval-wait.ts); only the other held issues keep the timer on.
+  // Fail-open: a failed check answers "not waiting", so the run goes ahead.
+  const heldIssues = await db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(openAssigned, or(eq(issues.status, "in_progress"), sql`${issues.checkoutRunId} is not null`)))
+    .limit(HELD_ISSUE_SCAN_LIMIT + 1);
+  if (heldIssues.length > HELD_ISSUE_SCAN_LIMIT) return run("holds_checked_out_or_in_progress_issue");
+  for (const held of heldIssues) {
+    if (!(await isIssueWaitingOnlyOnBoardApproval(db, { companyId, issueId: held.id }))) {
+      return run("holds_checked_out_or_in_progress_issue");
+    }
   }
 
   // Any non-timer wake-up asked for since the last run started, whatever

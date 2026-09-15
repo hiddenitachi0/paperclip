@@ -2867,6 +2867,12 @@ export function issueRoutes(
       // through as-is; it now has a distinguishable reason for the operator.
       return { intercepted: false, escalation };
     }
+    if ("waitingOnBoardApproval" in escalation) {
+      // DUR-3979: the issue waits only on the operator's decision on a
+      // linked approval, so `blocked` is an honest waiting state, not a wall
+      // this run's size caused. Let it through; nothing was escalated.
+      return { intercepted: false, escalation };
+    }
     delete (req.body as Record<string, unknown>).status;
     return { intercepted: true, escalation };
   }
