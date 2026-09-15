@@ -332,7 +332,13 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
     expect(bindings).toHaveLength(0);
   });
 
-  it("allows an agent actor binding a secret_ref to its own mcpServers", async () => {
+  // DUR-3980: DUR-132 originally ALLOWED an agent to bind a secret_ref to its
+  // OWN mcpServers. That let an agent attach any company saved password to
+  // itself and read its value on the next run. That self-bind is now refused
+  // too -- an agent may keep or remove passwords it already holds, but adding
+  // one it was never given goes through a credential_request instead. See
+  // dur3980-agent-secret-self-binding.test.ts for the full matrix.
+  it("rejects an agent actor binding a NEW secret_ref to its own mcpServers, writing no binding row (DUR-3980)", async () => {
     const companyId = await seedCompany();
     const secrets = secretService(db);
     const secret = await secrets.create(companyId, {
@@ -351,15 +357,17 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
       lastHeartbeatAt: null,
     });
 
-    await agentService(db).update(actingAgent.id, {
-      adapterConfig: {
-        mcpServers: [
-          { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
-        ],
-      },
-    }, {
-      actor: { actorType: "agent", agentId: actingAgent.id },
-    });
+    await expect(
+      agentService(db).update(actingAgent.id, {
+        adapterConfig: {
+          mcpServers: [
+            { name: "fs", command: "npx", env: { TOKEN: { type: "secret_ref", secretId: secret.id, version: "latest" } } },
+          ],
+        },
+      }, {
+        actor: { actorType: "agent", agentId: actingAgent.id },
+      }),
+    ).rejects.toMatchObject({ status: 403 });
 
     const bindings = await db
       .select()
@@ -369,8 +377,7 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
         eq(companySecretBindings.targetType, "agent"),
         eq(companySecretBindings.targetId, actingAgent.id),
       ));
-    expect(bindings).toHaveLength(1);
-    expect(bindings[0]).toMatchObject({ secretId: secret.id, configPath: "mcpServers[fs].env.TOKEN" });
+    expect(bindings).toHaveLength(0);
   });
 
   it("backfills missing secret bindings when a legacy pending agent is approved", async () => {
