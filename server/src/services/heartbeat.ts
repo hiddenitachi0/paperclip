@@ -118,6 +118,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { isHeartbeatRunLockStale, issueService } from "./issues.js";
+import { TIMER_IDLE_SKIP_REASON, evaluateTimerIdleGate, recordTimerIdleSkip } from "./timer-idle-gate.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
@@ -186,6 +187,7 @@ import {
   readContinuationAttempt,
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+import { buildBoardApprovalWaitContext, evaluateBoardApprovalWait } from "./board-approval-wait.js";
 import {
   buildSelfReviewPassInstruction,
   detectRiskySurfaceFromDiff,
@@ -269,6 +271,7 @@ import {
 } from "@paperclipai/adapter-utils";
 import {
   readPaperclipSkillSyncPreference,
+  renderPaperclipBoardApprovalWaitLines,
   writePaperclipSkillSyncPreference,
   resolveCompanyInstructionsPath,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -4256,6 +4259,8 @@ export async function buildPaperclipWakePayload(input: {
       }
     | null;
   exposeLowTrustRaw?: boolean;
+  /** Clock for the approval ages (tests). */
+  now?: Date;
 }) {
   const executionStage = parseObject(input.contextSnapshot.executionStage);
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
@@ -4436,6 +4441,19 @@ export async function buildPaperclipWakePayload(input: {
       interactionId,
     })
     : null;
+  // DUR-3979: pending approvals linked to this issue, with their real age
+  // from approvals.created_at, so an agent never has to guess how long it
+  // has been waiting. Fail-open: a failed check yields no block.
+  const boardApprovalWaitIssueId = issueSummary?.id ?? issueId;
+  const boardApprovalWait = boardApprovalWaitIssueId
+    ? buildBoardApprovalWaitContext(
+      await evaluateBoardApprovalWait(input.db, {
+        companyId: input.companyId,
+        issueId: boardApprovalWaitIssueId,
+      }),
+      input.now ?? new Date(),
+    )
+    : null;
   const payloadTruncated = truncated || planReviewContext?.truncated === true;
 
   return {
@@ -4450,6 +4468,7 @@ export async function buildPaperclipWakePayload(input: {
           workMode: issueSummary.workMode,
         }
       : null,
+    boardApprovalWait,
     childIssueSummaries: Array.isArray(input.contextSnapshot.childIssueSummaries)
       ? input.contextSnapshot.childIssueSummaries
       : [],
@@ -4960,6 +4979,13 @@ export function buildPaperclipTaskMarkdown(input: {
    * the description and ancestor chain are replaced by a one-line notice.
    */
   unchangedTaskContextForResume?: boolean;
+  /** DUR-3979: paperclipWake.boardApprovalWait for this issue (the approvals' real ages). */
+  boardApprovalWait?: unknown;
+  /**
+   * DUR-3979: the same approval lines are already in the wake payload that
+   * this adapter renders next to this block; point at them instead.
+   */
+  boardApprovalWaitInlinedInWakePayload?: boolean;
 }) {
   const quoteTaskScalar = (value: string) => JSON.stringify(value);
   const fenceTaskText = (value: string) => {
@@ -5051,6 +5077,17 @@ export function buildPaperclipTaskMarkdown(input: {
       );
     } else {
       lines.push("", "Latest wake comment:", fenceTaskText(wakeComment.body.trim()));
+    }
+  }
+  const boardApprovalWaitLines = renderPaperclipBoardApprovalWaitLines(input.boardApprovalWait);
+  if (boardApprovalWaitLines.length > 0) {
+    if (input.boardApprovalWaitInlinedInWakePayload) {
+      lines.push(
+        "",
+        "This issue waits for the operator's decision on an approval. The real waiting time is in the wake payload of this prompt; do not post comments that only repeat that you are still waiting.",
+      );
+    } else {
+      lines.push("", ...boardApprovalWaitLines);
     }
   }
   lines.push("", "Use this task context as the current assignment.");
@@ -7169,6 +7206,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       })
       : null;
 
+    // DUR-3979: a "still waiting" run on an issue that waits only on the
+    // operator's decision is not stuck. Fail-open (answers "not waiting").
+    const boardApprovalWait = issue
+      ? await evaluateBoardApprovalWait(db, { companyId: issue.companyId, issueId: issue.id })
+      : null;
+
     const decision = decideRunLivenessContinuation({
       run,
       issue,
@@ -7178,6 +7221,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       nextAction: run.nextAction,
       budgetBlocked: Boolean(budgetBlock),
       idempotentWakeExists: Boolean(existingWake),
+      waitingOnBoardApproval: boardApprovalWait?.waiting === true,
     });
 
     if (decision.kind === "exhausted") {
@@ -11801,6 +11845,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation"
         && Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0,
       wakeCommentInlinedInWakePayload,
+      boardApprovalWait: paperclipWakePayload?.boardApprovalWait ?? null,
+      boardApprovalWaitInlinedInWakePayload: Boolean(
+        paperclipWakePayload?.boardApprovalWait && WAKE_COMMENT_DEDUP_ADAPTER_TYPES.has(agent.adapterType),
+      ),
     };
     const taskMarkdown = buildPaperclipTaskMarkdown(taskMarkdownInput);
     // DUR-3943: short form + fingerprint for adapters that resume a session
@@ -14913,6 +14961,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await markTimerHeartbeatChecked(agentId, source);
       opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.timer.no_actionable_work" });
       return null;
+    }
+
+    // DUR-3943 round 2: the agent has open work, but has anything changed for
+    // it since its last run started? If not, skip before any run, session or
+    // workspace lease exists. Fail-open (see timer-idle-gate.ts). A skip is
+    // counted on the agent's runtime state -- never a wake-up, run or
+    // activity row per skip -- and advances lastHeartbeatAt exactly like the
+    // DUR-42 skip above, so the scheduler does not retry it every tick.
+    if (genericTimerWake) {
+      const idleGate = await evaluateTimerIdleGate(db, agent);
+      if (idleGate.decision === "skip") {
+        await recordTimerIdleSkip(db, agent, idleGate);
+        await markTimerHeartbeatChecked(agentId, source);
+        opts.onNotScheduled?.({ kind: "skipped", reason: TIMER_IDLE_SKIP_REASON });
+        return null;
+      }
     }
 
     if (issueId) {

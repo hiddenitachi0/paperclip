@@ -8,6 +8,7 @@ export type {
   IssueThreadInteraction,
   IssueThreadInteractionActorFields,
   IssueThreadInteractionBase,
+  IssueThreadInteractionNamedApproval,
   IssueThreadInteractionContinuationPolicy,
   IssueThreadInteractionStatus,
   RequestCheckboxConfirmationInteraction,
@@ -219,4 +220,59 @@ export function getQuestionAnswerLabels(args: {
   const otherText = answer?.otherText?.trim();
   if (otherText) labels.push(`Other: ${otherText}`);
   return labels;
+}
+
+/** Reason sent to the agent when the operator closes an out-of-date card. */
+export const NAMED_APPROVAL_OUT_OF_DATE_CLOSE_REASON =
+  "Closed as out of date: the approval this asked about was already decided.";
+
+export interface NamedApprovalState {
+  /** The approval was already decided: nothing on this card matters any more. */
+  outOfDate: boolean;
+  /** Plain words for the operator. Never an id. */
+  message: string;
+}
+
+function decidedWord(status: string) {
+  if (status === "approved") return "approved";
+  if (status === "rejected") return "rejected";
+  return "withdrawn";
+}
+
+/**
+ * What a pending confirmation card should say about the approval it is about
+ * (the server fills `namedApproval` from the card's link or the approval it
+ * names). Used by the issue-thread card and the Needs-you row on Now, so both
+ * say the same thing and both stop offering an answer once it is decided.
+ */
+export function describeNamedApprovalState(
+  interaction: Pick<IssueThreadInteraction, "kind" | "status" | "namedApproval">,
+): NamedApprovalState | null {
+  if (interaction.kind !== "request_confirmation" && interaction.kind !== "request_checkbox_confirmation") return null;
+  if (interaction.status !== "pending") return null;
+  const named = interaction.namedApproval;
+  if (!named) return null;
+
+  if (named.status === "approved" || named.status === "rejected" || named.status === "cancelled") {
+    return {
+      outOfDate: true,
+      message:
+        `Out of date: the approval this asks about was already ${decidedWord(named.status)}. ` +
+        "There is nothing left to answer here.",
+    };
+  }
+  if (named.status === "revision_requested") {
+    return {
+      outOfDate: false,
+      message: named.linked
+        ? "This is also on an approval card, which was sent back for changes. Answering here also answers that card."
+        : "This is about an approval card that was sent back for changes. Answering here does not decide that approval.",
+    };
+  }
+  return {
+    outOfDate: false,
+    message: named.linked
+      ? "This is also on an approval card that is waiting for you. Answering here also answers that card."
+      : "This is about an approval card that is still waiting for you. Answering here does not decide that approval.",
+  };
 }

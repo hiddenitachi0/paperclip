@@ -75,6 +75,7 @@ import {
 } from "./model-profile-hint.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 import { classifyAssigneePickup } from "../assignee-pickup.js";
+import { evaluateBoardApprovalWait } from "../board-approval-wait.js";
 import {
   buildAssigneeUnavailableNotice,
   buildAssigneeUnavailableTaskSentence,
@@ -3173,6 +3174,11 @@ export function recoveryService(
       assigneeCannotWakeHeld: 0,
       /** DUR-3973: tasks the operator was told about on this sweep (each only ever once). */
       assigneeUnavailableNoticed: 0,
+      /**
+       * DUR-3979: tasks left alone because they wait only on the operator's
+       * decision on a linked approval (also counted in `skipped`).
+       */
+      waitingOnBoardApproval: 0,
       issueIds: [] as string[],
     };
 
@@ -3255,6 +3261,30 @@ export function recoveryService(
       }
 
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+
+      // DUR-3979: an issue that has already had a run and now waits only on
+      // the operator's decision on a linked approval has nothing for its
+      // agent to do. Every branch below would re-wake it (continuation,
+      // corrective handoff, recovery-action wake) or post a stranded notice
+      // -- on NOR-1437 that loop produced 15 "still waiting" comments in 3
+      // days. The decision itself wakes the requester, and once the approval
+      // is decided this check stops matching, so the next sweep behaves as
+      // before. Fail-open: a failed check answers "not waiting". in_review
+      // is skipped here because it is only ever acted on below for a pending
+      // execution-review stage, which is never "waiting only on an approval".
+      // A todo issue that never had a run still gets its first dispatch.
+      if (latestRun && issue.status !== "in_review") {
+        const boardApprovalWait = await evaluateBoardApprovalWait(db, {
+          companyId: issue.companyId,
+          issueId: issue.id,
+        });
+        if (boardApprovalWait.waiting) {
+          result.waitingOnBoardApproval += 1;
+          result.skipped += 1;
+          continue;
+        }
+      }
+
       if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
         const updated = await escalateStrandedRecoveryIssueInPlace({
           issue,

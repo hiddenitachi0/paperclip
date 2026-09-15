@@ -8,6 +8,7 @@ import type {
   ThreadUserMessage,
 } from "@assistant-ui/react";
 import type { Agent, IssueComment } from "@paperclipai/shared";
+import { AGENT_BOARD_DECISION_CLAIM_NOTICE, detectBoardDecisionClaim } from "@paperclipai/shared";
 import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 import { formatAssigneeUserLabel } from "./assignees";
 import { isOperatorInterruptedRun } from "./interrupt-handoff";
@@ -431,13 +432,18 @@ function createCommentMessage(args: {
   }
 
   if (authorAgentId) {
+    // Agents cannot decide approvals; mark a comment that reads like they did.
+    // Same detector the server uses to flag it in the activity log.
+    const claimsBoardDecision = !comment.deletedAt && detectBoardDecisionClaim(comment.body) !== null;
     const message: ThreadAssistantMessage = {
       id: comment.id,
       role: "assistant",
       createdAt,
       content: [{ type: "text", text: contentText }],
       status: { type: "complete", reason: "stop" },
-      metadata: createAssistantMetadata(custom),
+      metadata: createAssistantMetadata(
+        claimsBoardDecision ? { ...custom, notices: [AGENT_BOARD_DECISION_CLAIM_NOTICE] } : custom,
+      ),
     };
     return message;
   }

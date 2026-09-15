@@ -1,5 +1,9 @@
 import type { Agent } from "@paperclipai/shared";
-import { ASSIGNEE_UNAVAILABLE_NOTICE_ACTION, ASSIGNEE_UNAVAILABLE_RECORDED_ACTION } from "@paperclipai/shared";
+import {
+  AGENT_BOARD_DECISION_CLAIM_ACTION,
+  ASSIGNEE_UNAVAILABLE_NOTICE_ACTION,
+  ASSIGNEE_UNAVAILABLE_RECORDED_ACTION,
+} from "@paperclipai/shared";
 import type { CompanyUserProfile } from "./company-members";
 
 type ActivityDetails = Record<string, unknown> | null | undefined;
@@ -130,11 +134,14 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   // per-task record is quiet (not an operator notice) so a backlog is one line.
   [ASSIGNEE_UNAVAILABLE_NOTICE_ACTION]: "flagged tasks that nobody will start",
   [ASSIGNEE_UNAVAILABLE_RECORDED_ACTION]: "recorded that the assigned agent cannot pick up",
+  [AGENT_BOARD_DECISION_CLAIM_ACTION]: "flagged an agent message that claims an approval decision on",
 };
 
 const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   [ASSIGNEE_UNAVAILABLE_NOTICE_ACTION]: "flagged that nobody will start this task",
   [ASSIGNEE_UNAVAILABLE_RECORDED_ACTION]: "recorded that the assigned agent cannot pick this task up",
+  [AGENT_BOARD_DECISION_CLAIM_ACTION]:
+    "flagged an agent message that claims an approval decision (only you can decide approvals)",
   "issue.created": "created the issue",
   "issue.updated": "updated the issue",
   "issue.checked_out": "checked out the issue",

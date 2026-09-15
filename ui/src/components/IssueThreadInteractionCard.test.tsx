@@ -378,6 +378,54 @@ describe("IssueThreadInteractionCard", () => {
     );
   });
 
+  it("shows a card about an already-decided approval as out of date, with no confirm or decline", async () => {
+    const onAcceptInteraction = vi.fn(async () => undefined);
+    const onRejectInteraction = vi.fn(async () => undefined);
+    const host = renderCard({
+      interaction: {
+        ...pendingRequestConfirmationInteraction,
+        namedApproval: { approvalId: "fa9e5228-0000-4000-8000-000000000001", status: "rejected", decidedAt: null, linked: false },
+      },
+      onAcceptInteraction,
+      onRejectInteraction,
+    });
+
+    const text = host.textContent ?? "";
+    expect(text).toContain("Out of date");
+    expect(text).toContain("was already rejected");
+    expect(text).not.toContain("fa9e5228");
+    const labels = Array.from(host.querySelectorAll("button")).map((button) => button.textContent ?? "");
+    expect(labels.some((label) => label.includes("Approve plan"))).toBe(false);
+    expect(labels.some((label) => label.includes("Request changes") || label.includes("Decline"))).toBe(false);
+
+    const closeButton = Array.from(host.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Close this card"),
+    );
+    expect(closeButton).toBeTruthy();
+    await act(async () => {
+      closeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onAcceptInteraction).not.toHaveBeenCalled();
+    expect(onRejectInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "request_confirmation" }),
+      expect.stringContaining("out of date"),
+    );
+  });
+
+  it("says a card's approval is still waiting and keeps the answer buttons", () => {
+    const host = renderCard({
+      interaction: {
+        ...pendingRequestConfirmationInteraction,
+        namedApproval: { approvalId: "fa9e5228-0000-4000-8000-000000000001", status: "pending", decidedAt: null, linked: true },
+      },
+    });
+
+    const text = host.textContent ?? "";
+    expect(text).toContain("Answering here also answers that card.");
+    expect(text).not.toContain("Out of date");
+    expect(Array.from(host.querySelectorAll("button")).some((button) => button.textContent?.includes("Approve plan"))).toBe(true);
+  });
+
   it("labels accept-only continuation policies in the card header", () => {
     const host = renderCard({
       interaction: {
