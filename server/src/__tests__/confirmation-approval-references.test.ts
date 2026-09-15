@@ -171,20 +171,37 @@ describeEmbeddedPostgres("confirmation cards that name a board approval", () => 
     }), { agentId, userId: null }));
   });
 
-  it("auto-links an agent card to the one pending non-deploy approval it names, and a replay is not a conflict", async () => {
+  // Not linked automatically: answering a linked card decides the approval
+  // without the approval's own steps (a budget override would not raise the
+  // budget), so a card that only names a waiting approval is refused.
+  it("refuses an agent card that names a waiting non-deploy approval only in its key, instead of linking it", async () => {
     const { companyId, issueId, agentId } = await seedCompany();
     const approval = await insertApproval({
       companyId,
       type: "approve_ceo_strategy",
       payload: { plan: "Q4 strategy" },
     });
-    const input = confirmation({ idempotencyKey: `strategy:approval:${approval.id.slice(0, 8)}` });
 
-    const created = await interactionsSvc.create({ id: issueId, companyId }, input, { agentId, userId: null });
+    const error = await expectConflict(interactionsSvc.create({ id: issueId, companyId }, confirmation({
+      idempotencyKey: `strategy:approval:${approval.id.slice(0, 8)}`,
+    }), { agentId, userId: null }));
+
+    expect(error.details).toMatchObject({ code: "confirmation_duplicates_approval_card", approvalId: approval.id });
+    expect(await pendingCount(issueId)).toBe(0);
+  });
+
+  it("still accepts an explicit linkedApprovalId to a waiting non-deploy approval, as DUR-29 always did", async () => {
+    const { companyId, issueId, agentId } = await seedCompany();
+    const approval = await insertApproval({
+      companyId,
+      type: "approve_ceo_strategy",
+      payload: { plan: "Q4 strategy" },
+    });
+
+    const created = await interactionsSvc.create({ id: issueId, companyId }, confirmation({
+      linkedApprovalId: approval.id,
+    }), { agentId, userId: null });
     expect(created.linkedApprovalId).toBe(approval.id);
-
-    const replay = await interactionsSvc.create({ id: issueId, companyId }, input, { agentId, userId: null });
-    expect(replay.id).toBe(created.id);
 
     // DUR-29 then applies: deciding the approval resolves the card.
     await approvalService(db).approve(approval.id, "board", "go");

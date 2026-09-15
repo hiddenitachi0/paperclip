@@ -791,8 +791,9 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
   // One request per decision, enforced for AGENT-created confirmation cards
   // (board users are never checked). Resolves the approvals the card names via
   // the shared helper, refuses a card about an approval that is already
-  // decided or that must be decided on its own card (deploy/merge), and returns
-  // the id to auto-link when the card names exactly one other open approval.
+  // decided, that must be decided on its own card (deploy/merge), or that is
+  // still waiting and named only through its id. Nothing is linked for the
+  // agent; an explicit linkedApprovalId is left to DUR-29.
   // Fail-open on "can't tell": no reference, an ambiguous short id or another
   // company's id all mean no action. Fail-closed only on a positive, unique,
   // same-company match.
@@ -800,15 +801,15 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
     issue: { id: string; companyId: string },
     data: CreateIssueThreadInteraction,
     actor: InteractionActor,
-  ): Promise<string | null> {
-    if (!isRequestConfirmationLikeKind(data.kind)) return null;
-    if (!actor.agentId || actor.userId) return null;
+  ): Promise<void> {
+    if (!isRequestConfirmationLikeKind(data.kind)) return;
+    if (!actor.agentId || actor.userId) return;
     const card = {
       linkedApprovalId: "linkedApprovalId" in data ? data.linkedApprovalId ?? null : null,
       idempotencyKey: data.idempotencyKey ?? null,
       payload: data.payload,
     };
-    if (!hasAnyApprovalReference(extractApprovalReferences(card))) return null;
+    if (!hasAnyApprovalReference(extractApprovalReferences(card))) return;
     const [named = []] = await resolveNamedApprovals(db, issue.companyId, [card]);
     const decision = decideConfirmationCreate(named, card.linkedApprovalId);
     if (decision.action === "refuse_already_decided" || decision.action === "refuse_decide_on_approval_card") {
@@ -820,28 +821,6 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         approvalStatus: decision.approval.status,
       });
     }
-    return decision.action === "link" ? decision.approval.id : null;
-  }
-
-  // An agent's replay of a card that was auto-linked on its first create sends
-  // no linkedApprovalId, while the stored row has one. That is the same request,
-  // not a different one, as long as the card still names that approval.
-  async function isAutoLinkedReplay(
-    issue: { id: string; companyId: string },
-    existing: IssueThreadInteractionRow,
-    data: CreateIssueThreadInteraction,
-    actor: InteractionActor,
-  ): Promise<boolean> {
-    if (data.kind !== "request_confirmation" && data.kind !== "request_checkbox_confirmation") return false;
-    if (data.linkedApprovalId || !existing.linkedApprovalId) return false;
-    if (!isEquivalentCreateRequest(existing, { ...data, linkedApprovalId: existing.linkedApprovalId }, actor)) {
-      return false;
-    }
-    const [named = []] = await resolveNamedApprovals(db, issue.companyId, [{
-      idempotencyKey: data.idempotencyKey ?? null,
-      payload: data.payload,
-    }]);
-    return named.some((approval) => approval.id === existing.linkedApprovalId);
   }
 
   // Live status of the approval a pending confirmation card is about, for the
@@ -1162,9 +1141,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         });
         if (existing) {
           if (
-            !isEquivalentCreateRequest(existing, data, actor)
-            && !(await isAutoLinkedReplay(issue, existing, data, actor))
-          ) {
+            !isEquivalentCreateRequest(existing, data, actor)          ) {
             throw conflict("Interaction idempotency key already exists for a different request", {
               idempotencyKey: data.idempotencyKey,
             });
@@ -1219,9 +1196,8 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         }
       }
 
-      const autoLinkedApprovalId = await enforceAgentConfirmationReferences(issue, data, actor);
-      const linkedApprovalId = autoLinkedApprovalId
-        ?? ("linkedApprovalId" in data ? data.linkedApprovalId ?? null : null);
+      await enforceAgentConfirmationReferences(issue, data, actor);
+      const linkedApprovalId = "linkedApprovalId" in data ? data.linkedApprovalId ?? null : null;
 
       let created: IssueThreadInteractionRow;
       try {
@@ -1255,9 +1231,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         });
         if (!existing) throw error;
         if (
-          !isEquivalentCreateRequest(existing, data, actor)
-          && !(await isAutoLinkedReplay(issue, existing, data, actor))
-        ) {
+          !isEquivalentCreateRequest(existing, data, actor)        ) {
           throw conflict("Interaction idempotency key already exists for a different request", {
             idempotencyKey: data.idempotencyKey,
           });

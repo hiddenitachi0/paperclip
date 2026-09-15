@@ -217,16 +217,13 @@ export function describeApprovalDecision(status: string): string {
 
 export type ConfirmationCreateDecision =
   | { action: "none" }
-  | { action: "link"; approval: NamedApproval }
   | { action: "refuse_already_decided"; approval: NamedApproval }
   | { action: "refuse_decide_on_approval_card"; approval: NamedApproval };
 
 /**
  * What an AGENT's new confirmation card should do, given the approvals it
- * names. Refusals win over linking; a decided approval wins over an open one.
- * Several open approvals that are fine to link are left unlinked (the column
- * holds one id and picking one would be a guess) — the decide-time cleanup
- * still closes the card through its references.
+ * names. A decided approval wins over an open one. Nothing is ever linked
+ * automatically; an explicit linkedApprovalId is left to DUR-29 as before.
  */
 export function decideConfirmationCreate(
   named: readonly NamedApproval[],
@@ -239,8 +236,14 @@ export function decideConfirmationCreate(
   const onCard = open.find(mustBeDecidedOnApprovalCard);
   if (onCard) return { action: "refuse_decide_on_approval_card", approval: onCard };
 
+  // An explicit linkedApprovalId is DUR-29's own path and behaves as before.
   if (explicitLinkedApprovalId) return { action: "none" };
-  if (open.length === 1) return { action: "link", approval: open[0]! };
+  // A card that only names a waiting approval (in its key or text) asks again
+  // for a decision the approval card already asks for. It is refused rather
+  // than auto-linked: answering a linked card decides the approval through
+  // approvalService().approve() alone, without the approval's own steps, so a
+  // budget override "approved" that way would never raise the budget.
+  if (open.length > 0) return { action: "refuse_decide_on_approval_card", approval: open[0]! };
   return { action: "none" };
 }
 
@@ -248,7 +251,7 @@ function formatDecidedAt(date: Date | null): string {
   return date ? ` on ${date.toISOString().slice(0, 10)}` : "";
 }
 
-export function refusalMessageForAgent(decision: Exclude<ConfirmationCreateDecision, { action: "none" | "link" }>): string {
+export function refusalMessageForAgent(decision: Exclude<ConfirmationCreateDecision, { action: "none" }>): string {
   const { approval } = decision;
   const what = describeApprovalForAgent(approval);
   const notAboutIt =
