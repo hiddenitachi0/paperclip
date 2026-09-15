@@ -9,6 +9,9 @@ import {
   buildSuggestedTaskTree,
   collectSuggestedTaskClientKeys,
   countSuggestedTaskNodes,
+  describeNamedApprovalState,
+  NAMED_APPROVAL_OUT_OF_DATE_CLOSE_REASON,
+  type NamedApprovalState,
   getCheckboxConfirmationSelectedLabels,
   getQuestionAnswerLabels,
   type AskUserQuestionsAnswer,
@@ -1497,6 +1500,71 @@ function RequestConfirmationResolution({
   return null;
 }
 
+/**
+ * What the approval this card is about looks like right now. When it is
+ * already decided the card is out of date: say so, and offer only to close it.
+ */
+function NamedApprovalStateNotice({
+  state,
+  onClose,
+}: {
+  state: NamedApprovalState;
+  /** Closes the card (a decline carrying the out-of-date reason). */
+  onClose?: (reason: string) => Promise<void> | void;
+}) {
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+
+  async function handleClose() {
+    if (!onClose) return;
+    setClosing(true);
+    setCloseError(null);
+    try {
+      await onClose(NAMED_APPROVAL_OUT_OF_DATE_CLOSE_REASON);
+    } catch {
+      setCloseError("Try again");
+    } finally {
+      setClosing(false);
+    }
+  }
+
+  if (!state.outOfDate) {
+    return (
+      <p data-testid="named-approval-state" className="text-xs leading-5 text-muted-foreground">
+        {state.message}
+      </p>
+    );
+  }
+
+  return (
+    <div
+      data-testid="named-approval-state"
+      className="space-y-3 rounded-sm border border-amber-500/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100"
+    >
+      <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        Already decided
+      </div>
+      <p className="leading-6">{state.message}</p>
+      {onClose ? (
+        <div className="flex justify-end">
+          <Button size="sm" variant="outline" disabled={closing} onClick={() => void handleClose()}>
+            {closing ? (
+              <>
+                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                Closing...
+              </>
+            ) : (
+              "Close this card"
+            )}
+          </Button>
+        </div>
+      ) : null}
+      {closeError ? <p className="text-xs text-destructive">{closeError}</p> : null}
+    </div>
+  );
+}
+
 function RequestConfirmationCard({
   interaction,
   isPlan = false,
@@ -1606,6 +1674,8 @@ function RequestConfirmationCard({
     }
   }
 
+  const approvalState = describeNamedApprovalState(interaction);
+
   return (
     <div className="space-y-4">
       {interaction.status === "pending" ? (
@@ -1625,7 +1695,14 @@ function RequestConfirmationCard({
         </div>
       ) : null}
 
-      {interaction.status === "pending" ? (
+      {approvalState ? (
+        <NamedApprovalStateNotice
+          state={approvalState}
+          onClose={onRejectInteraction ? (reason) => onRejectInteraction(interaction, reason) : undefined}
+        />
+      ) : null}
+
+      {interaction.status === "pending" && !approvalState?.outOfDate ? (
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
@@ -2040,6 +2117,24 @@ function RequestCheckboxConfirmationCard({
     );
   }
 
+  const approvalState = describeNamedApprovalState(interaction);
+  const approvalNotice = approvalState ? (
+    <NamedApprovalStateNotice
+      state={approvalState}
+      onClose={onRejectInteraction ? (reason) => onRejectInteraction(interaction, reason) : undefined}
+    />
+  ) : null;
+  if (approvalState?.outOfDate) {
+    return (
+      <div className="space-y-4">
+        <div className="space-y-3 rounded-sm border border-border/70 bg-background/75 p-4">
+          <div className="text-sm leading-6 text-foreground">{interaction.payload.prompt}</div>
+        </div>
+        {approvalNotice}
+      </div>
+    );
+  }
+
   const selectionSummary = totalOptions > 0 && selectedCount === totalOptions
     ? `All ${totalOptions} options selected`
     : `${selectedCount} of ${totalOptions} ${totalOptions === 1 ? "option" : "options"} selected`;
@@ -2063,6 +2158,8 @@ function RequestCheckboxConfirmationCard({
           target={interaction.payload.target}
         />
       </div>
+
+      {approvalNotice}
 
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2225,6 +2322,8 @@ export function IssueThreadInteractionCard({
   const factCheckStyles = isFactCheck ? factCheckStatusClasses(interaction.status) : null;
   const StatusIcon = planStyles?.Icon ?? factCheckStyles?.Icon ?? statusIcon(interaction.status);
   const styles = planStyles ?? factCheckStyles ?? statusClasses(interaction.status);
+  // A pending card about an approval that was already decided no longer waits on anyone.
+  const outOfDate = describeNamedApprovalState(interaction)?.outOfDate === true;
   const createdByLabel = resolveActorLabel({
     agentId: interaction.createdByAgentId,
     userId: interaction.createdByUserId,
@@ -2252,7 +2351,7 @@ export function IssueThreadInteractionCard({
               <StatusIcon className="h-3.5 w-3.5" />
               {isPlan ? "Plan" : isFactCheck ? "Fact check" : interactionKindLabel(interaction.kind)}
               <span className="text-current/60">/</span>
-              {planStyles?.label ?? factCheckStyles?.label ?? statusLabel(interaction.status)}
+              {outOfDate ? "Out of date" : planStyles?.label ?? factCheckStyles?.label ?? statusLabel(interaction.status)}
             </span>
             {interaction.continuationPolicy === "wake_assignee"
               || interaction.continuationPolicy === "wake_assignee_on_accept" ? (

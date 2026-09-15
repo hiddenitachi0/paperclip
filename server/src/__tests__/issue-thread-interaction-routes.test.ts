@@ -15,6 +15,7 @@ const mockInteractionService = vi.hoisted(() => ({
   listForIssue: vi.fn(),
   listPendingForCompany: vi.fn(),
   create: vi.fn(),
+  assertAgentConfirmationAllowed: vi.fn(async () => undefined),
   acceptInteraction: vi.fn(),
   acceptSuggestedTasks: vi.fn(),
   rejectInteraction: vi.fn(),
