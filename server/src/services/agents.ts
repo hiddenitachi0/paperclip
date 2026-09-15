@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -9,6 +9,8 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   activityLog,
+  companySecretBindings,
+  companySecrets,
   costEvents,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -27,7 +29,13 @@ import {
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { syncAgentAdapterEnvBindings, type AgentSecretBindingActor } from "./agent-secret-bindings.js";
+import {
+  agentSecretRefKey,
+  agentSecretRefRefusal,
+  collectAgentRecordSecretRefs,
+  syncAgentAdapterEnvBindings,
+  type AgentSecretBindingActor,
+} from "./agent-secret-bindings.js";
 import { collectMcpToolLibrarySecretRefs } from "./mcp-tool-library.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
@@ -60,7 +68,13 @@ interface UpdateAgentOptions {
   // DUR-132: identity of the caller saving this agent, forwarded to the
   // secret-binding sync gate so an agent actor can only ever bind a saved
   // password (secret_ref) to its own agent record.
+  // DUR-3980: also drives assertAgentActorAddsNoSecretRefs -- an agent actor
+  // may never ADD a saved password to any agent record through this save.
   actor?: AgentSecretBindingActor;
+  // DUR-3980: extra (configPath, secretId) pairs (agentSecretRefKey) an agent
+  // actor may restore on top of what the record holds now. Only
+  // rollbackConfigRevision sets this, from listRestorableSecretRefKeys.
+  restorableSecretRefKeys?: ReadonlySet<string>;
 }
 
 interface AgentShortnameRow {
@@ -443,6 +457,121 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     });
   }
 
+  // DUR-3980: an agent-authenticated save may never ADD a saved password
+  // (secret_ref) to any agent record -- not by PATCH, rollback, hire, skill
+  // sync, or any other path that reaches agentService.update/create with an
+  // agent actor. Keeping an attachment it already holds (same configPath and
+  // secretId) or removing one stays allowed, so an agent editing unrelated
+  // settings is never refused because a board member gave it credentials.
+  //
+  // "Held" = the record's current adapterConfig/model-profile refs, plus its
+  // current binding rows (whichever says more, so legacy rows missing one
+  // side never cause a false refusal), plus `restorableSecretRefKeys`
+  // (rollback only). One exception: a secret this same agent created by
+  // pasting its own literal value into an adapter secret field (normalization
+  // turns that into a managed secret with createdByAgentId = the agent). The
+  // agent already had that value; attaching it grants nothing new.
+  //
+  // Fail-closed for agent actors: anything not provably held is refused.
+  // Board and server-side flows (no agent actor) are not gated here.
+  async function assertAgentActorAddsNoSecretRefs(input: {
+    actor: AgentSecretBindingActor | undefined;
+    companyId: string;
+    existing: { id: string; adapterConfig: unknown; runtimeConfig: unknown } | null;
+    nextAdapterConfig: unknown;
+    nextRuntimeConfig: unknown;
+    restorableSecretRefKeys?: ReadonlySet<string>;
+  }) {
+    if (input.actor?.actorType !== "agent") return;
+    const nextRefs = collectAgentRecordSecretRefs({
+      adapterConfig: input.nextAdapterConfig,
+      runtimeConfig: input.nextRuntimeConfig,
+    });
+    if (nextRefs.length === 0) return;
+
+    const held = new Set<string>(input.restorableSecretRefKeys ?? []);
+    if (input.existing) {
+      for (const ref of collectAgentRecordSecretRefs(input.existing, { lenient: true })) {
+        held.add(agentSecretRefKey(ref));
+      }
+      const boundRows = await db
+        .select({ secretId: companySecretBindings.secretId, configPath: companySecretBindings.configPath })
+        .from(companySecretBindings)
+        .where(and(
+          eq(companySecretBindings.companyId, input.companyId),
+          eq(companySecretBindings.targetType, "agent"),
+          eq(companySecretBindings.targetId, input.existing.id),
+        ));
+      for (const row of boundRows) held.add(agentSecretRefKey(row));
+    }
+
+    let notHeld = nextRefs.filter((ref) => !held.has(agentSecretRefKey(ref)));
+    if (notHeld.length === 0) return;
+
+    if (input.actor.agentId) {
+      const candidateSecretIds = [...new Set(notHeld.map((ref) => ref.secretId))];
+      const selfCreated = await db
+        .select({ id: companySecrets.id })
+        .from(companySecrets)
+        .where(and(
+          eq(companySecrets.companyId, input.companyId),
+          inArray(companySecrets.id, candidateSecretIds),
+          eq(companySecrets.createdByAgentId, input.actor.agentId),
+        ));
+      const selfCreatedIds = new Set(selfCreated.map((row) => row.id));
+      notHeld = notHeld.filter((ref) => !selfCreatedIds.has(ref.secretId));
+    }
+    if (notHeld.length === 0) return;
+    throw agentSecretRefRefusal(input.companyId, notHeld);
+  }
+
+  // DUR-3980: the saved passwords an agent may get back by rolling back its
+  // configuration -- ones it once legitimately held. Walks the revision log
+  // oldest-first. A ref counts as legitimately given when it
+  //  - appears in a revision's `before` without being in the previous
+  //    revision's `after` (it arrived outside the revision log: at creation,
+  //    by import, or by a server flow that saves without a revision -- agent
+  //    self-saves always record one), or
+  //  - is introduced by a revision NOT authored by an agent (board, approval).
+  // A ref introduced only by an agent-authored revision (e.g. the pre-fix
+  // DUR-3980 hole) is never restorable.
+  async function listRestorableSecretRefKeys(agentId: string): Promise<Set<string>> {
+    const revisions = await db
+      .select({
+        createdByAgentId: agentConfigRevisions.createdByAgentId,
+        beforeConfig: agentConfigRevisions.beforeConfig,
+        afterConfig: agentConfigRevisions.afterConfig,
+      })
+      .from(agentConfigRevisions)
+      .where(eq(agentConfigRevisions.agentId, agentId))
+      .orderBy(asc(agentConfigRevisions.createdAt), asc(agentConfigRevisions.id));
+    const snapshotKeys = (snapshot: unknown) => {
+      const record = isPlainRecord(snapshot) ? snapshot : {};
+      return new Set(
+        collectAgentRecordSecretRefs(
+          { adapterConfig: record.adapterConfig, runtimeConfig: record.runtimeConfig },
+          { lenient: true },
+        ).map(agentSecretRefKey),
+      );
+    };
+    const given = new Set<string>();
+    let previousAfter: Set<string> | null = null;
+    for (const revision of revisions) {
+      const before = snapshotKeys(revision.beforeConfig);
+      const after = snapshotKeys(revision.afterConfig);
+      for (const key of before) {
+        if (!previousAfter?.has(key)) given.add(key);
+      }
+      if (!revision.createdByAgentId) {
+        for (const key of after) {
+          if (!before.has(key)) given.add(key);
+        }
+      }
+      previousAfter = after;
+    }
+    return given;
+  }
+
   async function updateAgent(
     id: string,
     data: Partial<typeof agents.$inferInsert>,
@@ -501,6 +630,25 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
         adapterConfigWithoutPersona,
         { adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string },
       );
+    }
+
+    // DUR-3980: before anything is written.
+    if (
+      Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig") ||
+      Object.prototype.hasOwnProperty.call(normalizedPatch, "runtimeConfig")
+    ) {
+      await assertAgentActorAddsNoSecretRefs({
+        actor: options?.actor,
+        companyId: existing.companyId,
+        existing,
+        nextAdapterConfig: Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig")
+          ? normalizedPatch.adapterConfig
+          : existing.adapterConfig,
+        nextRuntimeConfig: Object.prototype.hasOwnProperty.call(normalizedPatch, "runtimeConfig")
+          ? normalizedPatch.runtimeConfig
+          : existing.runtimeConfig,
+        restorableSecretRefKeys: options?.restorableSecretRefKeys,
+      });
     }
 
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
@@ -595,6 +743,17 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
             { adapterType },
           )
         : {};
+      // DUR-3980: a brand-new record holds nothing yet, so an agent actor
+      // (hire) may not put any saved password on it. The DUR-132 sync gate
+      // refuses adapterConfig refs here too; this also covers model profiles
+      // and refuses before the row is written.
+      await assertAgentActorAddsNoSecretRefs({
+        actor: options?.actor,
+        companyId,
+        existing: null,
+        nextAdapterConfig: adapterConfig,
+        nextRuntimeConfig: runtimeConfig,
+      });
       return withCompanyScope(rawDb, companyId, async (tx) => {
         const txDb = tx as unknown as Db;
         const created = await tx
@@ -870,7 +1029,7 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     rollbackConfigRevision: async (
       id: string,
       revisionId: string,
-      actor: { agentId?: string | null; userId?: string | null },
+      actor: { agentId?: string | null; userId?: string | null; actorType?: "agent" | "user" },
     ) => {
       const revision = await db
         .select()
@@ -883,6 +1042,12 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
       }
 
       const patch = configPatchFromSnapshot(revision.afterConfig);
+      // DUR-3980: a rollback performed by an agent goes through the same
+      // "never add a saved password" gate as a PATCH, except that it may
+      // restore ones this record was once legitimately given.
+      const bindingActor: AgentSecretBindingActor | undefined = actor.actorType
+        ? { actorType: actor.actorType, agentId: actor.agentId ?? null }
+        : undefined;
       return updateAgent(id, patch, {
         recordRevision: {
           createdByAgentId: actor.agentId ?? null,
@@ -890,6 +1055,9 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
           source: "rollback",
           rolledBackFromRevisionId: revision.id,
         },
+        actor: bindingActor,
+        restorableSecretRefKeys:
+          bindingActor?.actorType === "agent" ? await listRestorableSecretRefKeys(id) : undefined,
       });
     },
 

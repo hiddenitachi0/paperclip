@@ -133,12 +133,91 @@ function collectMcpServerSecretRefs(rawMcpServers: unknown): Array<{
   return refs;
 }
 
+export type AgentSecretRef = {
+  secretId: string;
+  configPath: string;
+  versionSelector?: SecretVersionSelector;
+};
+
+// DUR-3980: every secret_ref an agent record's adapterConfig carries, keyed
+// by the same configPath its company_secret_bindings row uses.
+export function collectAgentAdapterConfigSecretRefs(adapterConfig: unknown): AgentSecretRef[] {
+  return collectSecretRefs(adapterConfig);
+}
+
+// DUR-3980: secret_refs inside runtimeConfig.modelProfiles[*].adapterConfig.
+// At run time a model profile's adapterConfig is merged over the agent's own
+// (heartbeat resolveModelProfileApplication) and resolved against the AGENT's
+// bindings, so these use the same inner configPath (`env.KEY`) as the agent's
+// own adapterConfig refs.
+export function collectRuntimeConfigModelProfileSecretRefs(runtimeConfig: unknown): AgentSecretRef[] {
+  const modelProfiles = asRecord(asRecord(runtimeConfig)?.modelProfiles);
+  if (!modelProfiles) return [];
+  const refs: AgentSecretRef[] = [];
+  for (const rawProfile of Object.values(modelProfiles)) {
+    refs.push(...collectSecretRefs(asRecord(rawProfile)?.adapterConfig));
+  }
+  return refs;
+}
+
+// All secret_refs an agent record carries (adapterConfig + model profiles).
+// `lenient` swallows malformed legacy data (e.g. an old invalid MCP server
+// name) instead of throwing -- used only when reading what an agent ALREADY
+// holds or once held, never when validating what is being saved.
+export function collectAgentRecordSecretRefs(
+  record: { adapterConfig: unknown; runtimeConfig: unknown },
+  options?: { lenient?: boolean },
+): AgentSecretRef[] {
+  if (!options?.lenient) {
+    return [
+      ...collectAgentAdapterConfigSecretRefs(record.adapterConfig),
+      ...collectRuntimeConfigModelProfileSecretRefs(record.runtimeConfig),
+    ];
+  }
+  const refs: AgentSecretRef[] = [];
+  try {
+    refs.push(...collectAgentAdapterConfigSecretRefs(record.adapterConfig));
+  } catch {
+    // malformed legacy adapterConfig: contributes nothing
+  }
+  try {
+    refs.push(...collectRuntimeConfigModelProfileSecretRefs(record.runtimeConfig));
+  } catch {
+    // malformed legacy runtimeConfig: contributes nothing
+  }
+  return refs;
+}
+
+// A saved password is "held" at a specific place: the same secret moved to a
+// different configPath is a new attachment, not the one the agent was given.
+export function agentSecretRefKey(ref: { secretId: string; configPath: string }): string {
+  return `${ref.configPath} ${ref.secretId}`;
+}
+
+// DUR-3980: agent-facing refusal. Names the real way to get a credential:
+// a credential_request approval (FORK.md Feature 5), which a board member
+// fulfils by providing the value and attaching it to the agent.
+export function agentSecretRefRefusal(companyId: string, refs: Array<{ configPath: string }>) {
+  const paths = [...new Set(refs.map((ref) => ref.configPath))].sort();
+  return forbidden(
+    `Agents cannot attach a saved password they were not given (${paths.join(", ")}). ` +
+      `Only a board member can attach one. To ask for a credential you need, file a credential request: ` +
+      `POST /api/companies/${companyId}/approvals with type "credential_request" and ` +
+      `payload { "name", "envKey", "description" } saying what it is for. ` +
+      `A board member provides the value and attaches it to you. ` +
+      `You can still keep or remove saved passwords you already have.`,
+    { code: "agent_secret_ref_not_held", configPaths: paths },
+  );
+}
+
 // DUR-132: identity of whoever is saving the agent record. When the actor is
-// itself an agent (not a board user), it may only ever add a secret_ref
-// while saving *its own* agent record -- never while creating or patching a
-// different agent (including one it is in the process of creating, whose id
-// necessarily differs from the actor's own agentId). Board actors are
-// unaffected.
+// itself an agent (not a board user), a save of a DIFFERENT agent's record
+// (including one it is in the process of creating, whose id necessarily
+// differs from the actor's own agentId) may carry no secret_ref at all.
+// DUR-3980: saving its OWN record, an agent may keep or remove saved
+// passwords it already holds but never add one -- that gate runs before the
+// write, in agentService (assertAgentActorAddsNoSecretRefs), because it needs
+// the record's previous state. Board actors are unaffected by both.
 export type AgentSecretBindingActor = {
   actorType: "agent" | "user";
   agentId?: string | null;
