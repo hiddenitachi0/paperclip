@@ -828,6 +828,7 @@ export type {
   AcceptedPlanDecompositionChildIssue,
   AcceptedPlanDecompositionSummary,
   IssueThreadInteractionBase,
+  IssueThreadInteractionNamedApproval,
   SuggestTasksInteraction,
   AskUserQuestionsInteraction,
   RequestConfirmationInteraction,
@@ -1258,6 +1259,13 @@ export {
   ASSIGNEE_UNAVAILABLE_RECORDED_ACTION,
   type AssigneeUnavailableReason,
 } from "./assignee-pickup.js";
+export {
+  AGENT_BOARD_DECISION_CLAIM_ACTION,
+  AGENT_BOARD_DECISION_CLAIM_NOTICE,
+  detectBoardDecisionClaim,
+  type BoardDecisionClaim,
+  type BoardDecisionClaimOutcome,
+} from "./board-decision-claim.js";
 
 export {
   getClosedIsolatedExecutionWorkspaceMessage,

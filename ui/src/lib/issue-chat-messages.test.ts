@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "@paperclipai/shared";
+import { AGENT_BOARD_DECISION_CLAIM_NOTICE } from "@paperclipai/shared";
 import {
   buildAssistantPartsFromTranscript,
   buildIssueChatMessages,
@@ -401,6 +402,40 @@ describe("buildIssueChatMessages", () => {
       deletedByUserId: "user-1",
     });
     expect(JSON.stringify(messages[0])).not.toContain("Sensitive deleted body");
+  });
+
+  it("marks an agent comment that claims a board decision, and only that one", () => {
+    const messages = buildIssueChatMessages({
+      comments: [
+        createComment({
+          id: "comment-claim",
+          authorAgentId: "agent-1",
+          authorUserId: null,
+          body: "## Board Decision: APPROVED\n\nDeploying now.",
+        }),
+        createComment({
+          id: "comment-waiting",
+          authorAgentId: "agent-1",
+          authorUserId: null,
+          body: "Waiting for the board decision before deploying.",
+        }),
+        createComment({
+          id: "comment-operator",
+          authorAgentId: null,
+          authorUserId: "user-1",
+          body: "## Board Decision: APPROVED",
+        }),
+      ],
+      timelineEvents: [],
+      linkedRuns: [],
+      liveRuns: [],
+      agentMap: new Map([["agent-1", createAgent("agent-1", "CEO")]]),
+    });
+
+    const byId = new Map(messages.map((message) => [message.id, message]));
+    expect(byId.get("comment-claim")?.metadata.custom.notices).toEqual([AGENT_BOARD_DECISION_CLAIM_NOTICE]);
+    expect(byId.get("comment-waiting")?.metadata.custom.notices).toBeUndefined();
+    expect(byId.get("comment-operator")?.metadata.custom.notices).toBeUndefined();
   });
 
   it("preserves low-trust source metadata on comment messages", () => {

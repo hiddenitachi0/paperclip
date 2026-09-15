@@ -111,6 +111,7 @@ import {
 } from "../services/task-watchdog-scope.js";
 import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/task-watchdogs.js";
 import { logger } from "../middleware/logger.js";
+import { flagAgentBoardDecisionClaim } from "../services/board-decision-claims.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertBoardOrDelegate, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
@@ -7273,6 +7274,16 @@ export function issueRoutes(
         ),
       };
 
+      await flagAgentBoardDecisionClaim(db, {
+        companyId: issue.companyId,
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        commentId: comment.id,
+        body: comment.body,
+        actorType: actor.actorType,
+        agentId: actor.agentId,
+        runId: actor.runId,
+      }, { logActivity });
       await logActivity(db, {
         companyId: issue.companyId,
         actorType: actor.actorType,
@@ -8017,7 +8028,13 @@ export function issueRoutes(
     if (req.body.dryRun) {
       // DUR-162: every access/permission check above has already run — this
       // confirms the request would succeed without creating a live,
-      // operator-visible card in the decision queue.
+      // operator-visible card in the decision queue. The one-request-per-
+      // decision guard runs too, so a dry run never says "would succeed" for a
+      // card the real create refuses.
+      await issueThreadInteractionService(db).assertAgentConfirmationAllowed(issue, req.body, {
+        agentId: actor.agentId,
+        userId: actor.actorType === "user" ? actor.actorId : null,
+      });
       res.status(200).json({ dryRun: true, wouldSucceed: true });
       return;
     }
@@ -8959,6 +8976,16 @@ export function issueRoutes(
         }),
       },
     });
+    await flagAgentBoardDecisionClaim(db, {
+      companyId: currentIssue.companyId,
+      issueId: currentIssue.id,
+      issueIdentifier: currentIssue.identifier,
+      commentId: comment.id,
+      body: comment.body,
+      actorType: actor.actorType,
+      agentId: actor.agentId,
+      runId: actor.runId,
+    }, { logActivity });
 
     const expiredInteractions = await issueThreadInteractionService(db).expireRequestConfirmationsSupersededByComment(
       currentIssue,

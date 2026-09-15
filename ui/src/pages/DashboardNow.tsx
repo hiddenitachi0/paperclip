@@ -15,6 +15,10 @@ import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
 import { issuesApi } from "../api/issues";
 import { interactionsApi, type PendingCompanyInteraction } from "../api/interactions";
+import {
+  describeNamedApprovalState,
+  NAMED_APPROVAL_OUT_OF_DATE_CLOSE_REASON,
+} from "../lib/issue-thread-interactions";
 import { agentsApi } from "../api/agents";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, relativeTime } from "../lib/utils";
@@ -926,8 +930,14 @@ function InteractionRow({
   // question forms, and task drafts need the full form in the issue thread.
   // A confirmation that requires a decline reason also needs the full form —
   // an inline Decline tap with no reason would just fail silently.
+  // A card about an approval that was already decided is out of date: say so
+  // and offer only to close it, never Approve/Decline as if it still mattered.
+  const approvalState = describeNamedApprovalState(interaction);
+  const outOfDate = approvalState?.outOfDate === true;
   const supportsInlineDecision =
-    interaction.kind === "request_confirmation" && interaction.payload.rejectRequiresReason !== true;
+    !outOfDate
+    && interaction.kind === "request_confirmation"
+    && interaction.payload.rejectRequiresReason !== true;
 
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: queryKeys.interactions.pendingForCompany(companyId) });
@@ -940,7 +950,12 @@ function InteractionRow({
     mutationFn: () => issuesApi.rejectInteraction(interaction.issueId, interaction.id),
     onSuccess: invalidate,
   });
-  const busy = acceptMutation.isPending || rejectMutation.isPending;
+  const closeMutation = useMutation({
+    mutationFn: () =>
+      issuesApi.rejectInteraction(interaction.issueId, interaction.id, NAMED_APPROVAL_OUT_OF_DATE_CLOSE_REASON),
+    onSuccess: invalidate,
+  });
+  const busy = acceptMutation.isPending || rejectMutation.isPending || closeMutation.isPending;
   const acceptLabel =
     interaction.kind === "request_confirmation" ? interaction.payload.acceptLabel ?? "Approve" : "Approve";
   const rejectLabel =
@@ -963,7 +978,28 @@ function InteractionRow({
           </p>
         </div>
       </Link>
-      {supportsInlineDecision ? (
+      {approvalState ? (
+        <p
+          className={
+            outOfDate
+              ? "text-[11px] leading-4 text-amber-800 dark:text-amber-200"
+              : "text-[10px] leading-4 text-muted-foreground"
+          }
+        >
+          {approvalState.message}
+        </p>
+      ) : null}
+      {outOfDate ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-[11px]"
+          disabled={busy}
+          onClick={() => closeMutation.mutate()}
+        >
+          {closeMutation.isPending ? "…" : "Close this card"}
+        </Button>
+      ) : supportsInlineDecision ? (
         <div className="flex items-center gap-1.5">
           <Button
             size="sm"

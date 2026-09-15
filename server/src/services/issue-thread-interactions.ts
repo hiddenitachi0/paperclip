@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, inArray, isNotNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -46,6 +46,14 @@ import { conflict, notFound, unprocessable } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { approvalService } from "./approvals.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
+import {
+  decideConfirmationCreate,
+  extractApprovalReferences,
+  hasAnyApprovalReference,
+  pickNamedApprovalForDisplay,
+  refusalMessageForAgent,
+  resolveNamedApprovals,
+} from "./confirmation-approval-references.js";
 
 type InteractionActor = {
   agentId?: string | null;
@@ -780,6 +788,95 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
       .then((rows) => rows[0] ?? null);
   }
 
+  // One request per decision, enforced for AGENT-created confirmation cards
+  // (board users are never checked). Resolves the approvals the card names via
+  // the shared helper, refuses a card about an approval that is already
+  // decided or that must be decided on its own card (deploy/merge), and returns
+  // the id to auto-link when the card names exactly one other open approval.
+  // Fail-open on "can't tell": no reference, an ambiguous short id or another
+  // company's id all mean no action. Fail-closed only on a positive, unique,
+  // same-company match.
+  async function enforceAgentConfirmationReferences(
+    issue: { id: string; companyId: string },
+    data: CreateIssueThreadInteraction,
+    actor: InteractionActor,
+  ): Promise<string | null> {
+    if (!isRequestConfirmationLikeKind(data.kind)) return null;
+    if (!actor.agentId || actor.userId) return null;
+    const card = {
+      linkedApprovalId: "linkedApprovalId" in data ? data.linkedApprovalId ?? null : null,
+      idempotencyKey: data.idempotencyKey ?? null,
+      payload: data.payload,
+    };
+    if (!hasAnyApprovalReference(extractApprovalReferences(card))) return null;
+    const [named = []] = await resolveNamedApprovals(db, issue.companyId, [card]);
+    const decision = decideConfirmationCreate(named, card.linkedApprovalId);
+    if (decision.action === "refuse_already_decided" || decision.action === "refuse_decide_on_approval_card") {
+      throw conflict(refusalMessageForAgent(decision), {
+        code: decision.action === "refuse_already_decided"
+          ? "confirmation_names_decided_approval"
+          : "confirmation_duplicates_approval_card",
+        approvalId: decision.approval.id,
+        approvalStatus: decision.approval.status,
+      });
+    }
+    return decision.action === "link" ? decision.approval.id : null;
+  }
+
+  // An agent's replay of a card that was auto-linked on its first create sends
+  // no linkedApprovalId, while the stored row has one. That is the same request,
+  // not a different one, as long as the card still names that approval.
+  async function isAutoLinkedReplay(
+    issue: { id: string; companyId: string },
+    existing: IssueThreadInteractionRow,
+    data: CreateIssueThreadInteraction,
+    actor: InteractionActor,
+  ): Promise<boolean> {
+    if (data.kind !== "request_confirmation" && data.kind !== "request_checkbox_confirmation") return false;
+    if (data.linkedApprovalId || !existing.linkedApprovalId) return false;
+    if (!isEquivalentCreateRequest(existing, { ...data, linkedApprovalId: existing.linkedApprovalId }, actor)) {
+      return false;
+    }
+    const [named = []] = await resolveNamedApprovals(db, issue.companyId, [{
+      idempotencyKey: data.idempotencyKey ?? null,
+      payload: data.payload,
+    }]);
+    return named.some((approval) => approval.id === existing.linkedApprovalId);
+  }
+
+  // Live status of the approval a pending confirmation card is about, for the
+  // operator UI. Same helper as the create guard and the decide-time cleanup.
+  async function withNamedApprovals<T extends IssueThreadInteraction>(interactions: T[]): Promise<T[]> {
+    const targets = interactions
+      .map((interaction, index) => ({ interaction, index }))
+      .filter(({ interaction }) => interaction.status === "pending" && isRequestConfirmationLikeKind(interaction.kind));
+    if (targets.length === 0) return interactions;
+
+    const out = [...interactions];
+    const byCompany = new Map<string, typeof targets>();
+    for (const target of targets) {
+      byCompany.set(target.interaction.companyId, [...(byCompany.get(target.interaction.companyId) ?? []), target]);
+    }
+    for (const [companyId, group] of byCompany) {
+      const lists = await resolveNamedApprovals(db, companyId, group.map(({ interaction }) => interaction));
+      group.forEach(({ interaction, index }, position) => {
+        const picked = pickNamedApprovalForDisplay(lists[position] ?? [], interaction.linkedApprovalId);
+        out[index] = {
+          ...interaction,
+          namedApproval: picked
+            ? {
+                approvalId: picked.id,
+                status: picked.status,
+                decidedAt: picked.decidedAt,
+                linked: picked.via === "linked",
+              }
+            : null,
+        };
+      });
+    }
+    return out;
+  }
+
   async function assertIssueWorkspaceFinalizedForAccept(args: {
     db: Pick<Db, "select">;
     issue: { id: string; companyId: string };
@@ -1005,7 +1102,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         .where(eq(issueThreadInteractions.issueId, issueId))
         .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id));
 
-      return rows.map((row) => hydrateInteraction(row));
+      return withNamedApprovals(rows.map((row) => hydrateInteraction(row)));
     },
 
     // Every interaction kind can only be accepted/rejected by a board actor
@@ -1031,13 +1128,13 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         ))
         .orderBy(desc(issueThreadInteractions.createdAt));
 
-      return rows.map((row) => ({
+      return withNamedApprovals(rows.map((row) => ({
         ...hydrateInteraction(row.interaction),
         issueIdentifier: row.issueIdentifier,
         issueTitle: row.issueTitle,
         issueStatus: row.issueStatus,
         createdByAgentName: row.createdByAgentName,
-      }));
+      })));
     },
 
     getById: async (interactionId: string) => {
@@ -1064,7 +1161,10 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
           idempotencyKey: data.idempotencyKey,
         });
         if (existing) {
-          if (!isEquivalentCreateRequest(existing, data, actor)) {
+          if (
+            !isEquivalentCreateRequest(existing, data, actor)
+            && !(await isAutoLinkedReplay(issue, existing, data, actor))
+          ) {
             throw conflict("Interaction idempotency key already exists for a different request", {
               idempotencyKey: data.idempotencyKey,
             });
@@ -1119,6 +1219,10 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         }
       }
 
+      const autoLinkedApprovalId = await enforceAgentConfirmationReferences(issue, data, actor);
+      const linkedApprovalId = autoLinkedApprovalId
+        ?? ("linkedApprovalId" in data ? data.linkedApprovalId ?? null : null);
+
       let created: IssueThreadInteractionRow;
       try {
         [created] = await db
@@ -1132,7 +1236,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
             idempotencyKey: data.idempotencyKey ?? null,
             sourceCommentId: data.sourceCommentId ?? null,
             sourceRunId: data.sourceRunId ?? null,
-            linkedApprovalId: "linkedApprovalId" in data ? data.linkedApprovalId ?? null : null,
+            linkedApprovalId,
             title: data.title ?? null,
             summary: data.summary ?? null,
             createdByAgentId: actor.agentId ?? null,
@@ -1150,7 +1254,10 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
           idempotencyKey: data.idempotencyKey,
         });
         if (!existing) throw error;
-        if (!isEquivalentCreateRequest(existing, data, actor)) {
+        if (
+          !isEquivalentCreateRequest(existing, data, actor)
+          && !(await isAutoLinkedReplay(issue, existing, data, actor))
+        ) {
           throw conflict("Interaction idempotency key already exists for a different request", {
             idempotencyKey: data.idempotencyKey,
           });
@@ -1160,6 +1267,17 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
 
       await touchIssue(db, issue.id);
       return hydrateInteraction(created);
+    },
+
+    // DUR-162 dryRun: run the same one-request-per-decision guard create() runs,
+    // without creating anything. Throws the same 409 create() would.
+    assertAgentConfirmationAllowed: async (
+      issue: { id: string; companyId: string },
+      input: CreateIssueThreadInteraction,
+      actor: InteractionActor,
+    ): Promise<void> => {
+      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      await enforceAgentConfirmationReferences(issue, data, actor);
     },
 
     acceptInteraction: async (
@@ -1812,7 +1930,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         return [];
       }
 
-      const rows = await db
+      const linkedRows = await db
         .select()
         .from(issueThreadInteractions)
         .where(and(
@@ -1820,6 +1938,36 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
           eq(issueThreadInteractions.linkedApprovalId, approval.id),
           eq(issueThreadInteractions.status, "pending"),
         ));
+
+      // Pending confirmation cards that were never linked but name this
+      // approval (its id, or approval:<first 8 chars> in their key). Searched
+      // company-wide, not just on the approval's linked issues: the name is
+      // already an exact id or a company-unique prefix — the same rule the
+      // create guard uses — and agents do file the card on a different task
+      // than the approval (e.g. a parent task). The SQL filter only narrows the
+      // candidates; resolveNamedApprovals decides.
+      const prefix = approval.id.slice(0, 8).toLowerCase();
+      const candidateRows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, approval.companyId),
+          eq(issueThreadInteractions.status, "pending"),
+          inArray(issueThreadInteractions.kind, [...REQUEST_CONFIRMATION_INTERACTION_KINDS]),
+          isNull(issueThreadInteractions.linkedApprovalId),
+          or(
+            sql`${issueThreadInteractions.idempotencyKey} ilike ${`%${prefix}%`}`,
+            sql`${issueThreadInteractions.payload}::text ilike ${`%${prefix}%`}`,
+          ),
+        ));
+      let namingRows: IssueThreadInteractionRow[] = [];
+      if (candidateRows.length > 0) {
+        const namedLists = await resolveNamedApprovals(db, approval.companyId, candidateRows);
+        namingRows = candidateRows.filter((_, index) =>
+          (namedLists[index] ?? []).some((named) => named.id === approval.id));
+      }
+
+      const rows = [...linkedRows, ...namingRows];
       if (rows.length === 0) return [];
 
       // DUR-141: a withdrawn approval closes its linked interaction the same
