@@ -3507,6 +3507,44 @@ registerCurrentRoute({
   },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/issue-answers",
+  tags: ["issues"],
+  summary:
+    "DUR-3978: status and the agent's latest answer (secrets redacted) for up to 50 of one company's tasks; ids from another company are left out",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    query: z.object({ ids: z.string().describe("Comma-separated task UUIDs, at most 50") }),
+  },
+  responses: {
+    200: r.ok(
+      z.object({
+        issues: z.array(
+          z.object({
+            id: z.string(),
+            companyId: z.string(),
+            identifier: z.string().nullable(),
+            title: z.string(),
+            status: z.string(),
+            answer: z
+              .object({
+                commentId: z.string(),
+                authorAgentId: z.string().nullable(),
+                body: z.string(),
+                createdAt: z.string(),
+              })
+              .nullable(),
+          }),
+        ),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+  },
+});
+
 // ─── Access / invites / members ───────────────────────────────────────────────
 
 registry.registerPath({

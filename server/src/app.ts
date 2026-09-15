@@ -35,6 +35,7 @@ import { goalRoutes } from "./routes/goals.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { laneARoutes } from "./routes/lane-a.js";
 import { chatRouterRoutes } from "./routes/chat-router.js";
+import { issueAnswerRoutes } from "./routes/issue-answers.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { deployRunnerRoutes } from "./routes/deploy-runner.js";
 import { secretRoutes } from "./routes/secrets.js";
@@ -294,6 +295,7 @@ export async function createApp(
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(laneARoutes(db));
   api.use(chatRouterRoutes(db));
+  api.use(issueAnswerRoutes(db));
   api.use(approvalRoutes(db, {
     pluginWorkerManager: workerManager,
     previewEnvironments,

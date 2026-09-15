@@ -12,8 +12,13 @@ approvals/tasks still live in Paperclip and the web UI.
   nearest boss's bot up `reportsTo`, within the same company), with Approve/Reject
   buttons. Credential requests link to the dashboard form instead (a button can't
   carry a secret value).
-- Inbound (per bot): Approve/Reject taps resolve the approval; a text message
-  creates a task for that bot's agent in that bot's company.
+- Inbound (per bot): Approve/Reject taps resolve the approval. A text message
+  goes through the same chat router the web chat uses (DUR-3978): a quick
+  question is answered in the same chat when that bot's agent has quick answers
+  switched on, and the chat keeps one conversation so follow-ups have context
+  (`/new` starts over). Anything else becomes a task for that bot's agent in
+  that bot's company, and the agent's answer is posted back into the chat the
+  task came from once it is done or waiting.
 
 Config: /root/paperclip/.telegram-agents.json =
   [{"agentId","name","token","companyId"?,"uiBase"?}, ...]  (root-only)
@@ -22,6 +27,7 @@ Config: /root/paperclip/.telegram-agents.json =
 """
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -38,6 +44,26 @@ CONFIG_FILE = os.environ.get("TELEGRAM_AGENTS_FILE", "/root/paperclip/.telegram-
 STATE_FILE = os.environ.get("TELEGRAM_STATE_FILE", "/root/paperclip/.telegram-state.json")
 CLI = "cd /app && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts"
 ARGS = f"--api-base {API_BASE} --data-dir {DATA_DIR} --json"
+
+# DUR-3978: two-way chat.
+TG_TEXT_LIMIT = 4096  # Telegram's limit per message, counted in UTF-16 units
+QUICK_ANSWER_MAX_PARTS = 4
+CUT_SHORT_NOTE = "\n(The answer was too long for Telegram and was cut short.)"
+# Refusal codes from server/src/services/lane-a.ts meaning the stored
+# conversation cannot be continued; the same message is sent again as the start
+# of a fresh conversation. A test pins that these codes still exist there.
+CONVERSATION_ENDED_CODES = ("LANE_A_CONVERSATION_EXPIRED", "LANE_A_TURN_CAP_REACHED")
+# Refusals meaning "no quick answer right now": the daily limit, the model busy
+# or down, or quick answers not set up on the server. The message is handed over
+# as a task instead, which is what every message did before, so this is never
+# worse than before (fail-open to the old behaviour, not to silence).
+QUICK_UNAVAILABLE_STATUSES = (429, 502, 503, 504)
+ANSWER_FINISHED_STATUSES = ("done", "cancelled")
+ANSWER_WAITING_STATUSES = ("in_review", "blocked")
+# A task that has not finished after this long stops being watched.
+TASK_ANSWER_MAX_AGE_SECONDS = 30 * 24 * 3600
+TASK_ANSWERS_PER_CALL = 50  # the server's limit per call
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 LOCK = threading.Lock()
 
@@ -494,6 +520,255 @@ def register_chat(state, token, chat_id):
             save_state(state)
 
 
+# ─── DUR-3978: two-way chat ────────────────────────────────────────────────────
+
+def _bot_entry(state, token):
+    """This bot's state. The caller must hold LOCK."""
+    return state["bots"].setdefault(token, {"offset": 0, "chats": []})
+
+
+def get_conversation(state, token, chat_id):
+    """The quick-answer conversation this chat is in with this bot, if any."""
+    with LOCK:
+        entry = (_bot_entry(state, token).get("conversations") or {}).get(str(chat_id)) or {}
+    conversation_id = entry.get("id")
+    return conversation_id if isinstance(conversation_id, str) and UUID_RE.match(conversation_id) else None
+
+
+def set_conversation(state, token, chat_id, conversation_id):
+    """Remember (or, with None, forget) the conversation for one (bot, chat)."""
+    with LOCK:
+        conversations = _bot_entry(state, token).setdefault("conversations", {})
+        if conversation_id:
+            conversations[str(chat_id)] = {"id": conversation_id, "at": time.time()}
+        else:
+            conversations.pop(str(chat_id), None)
+        save_state(state)
+
+
+def remember_task(state, token, chat_id, task_ref, text):
+    """Record that a task came from this chat, so its answer goes back there."""
+    with LOCK:
+        tasks = _bot_entry(state, token).setdefault("tasks", {})
+        tasks[task_ref["issueId"]] = {
+            "chat": chat_id,
+            "identifier": task_ref.get("identifier") or "",
+            "title": first_line(text)[:200],
+            "at": time.time(),
+        }
+        save_state(state)
+
+
+def first_line(text):
+    return next((line.strip() for line in (text or "").splitlines() if line.strip()), "")
+
+
+def tg_len(text):
+    """Length the way Telegram counts it (UTF-16 code units)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def tg_truncate(text, limit):
+    """Shorten to at most `limit` Telegram units, ending in an ellipsis if cut."""
+    if tg_len(text) <= limit:
+        return text
+    out, used = [], 0
+    for ch in text:
+        width = 2 if ord(ch) > 0xFFFF else 1
+        if used + width > limit - 1:
+            break
+        out.append(ch)
+        used += width
+    return "".join(out) + "…"
+
+
+def split_for_telegram(text, limit=TG_TEXT_LIMIT, max_parts=QUICK_ANSWER_MAX_PARTS):
+    """Split into messages Telegram accepts, preferring line breaks. Past
+    `max_parts` the last part is cut short and says so."""
+    parts, rest = [], text
+    while rest:
+        if tg_len(rest) <= limit:
+            parts.append(rest)
+            break
+        if len(parts) == max_parts - 1:
+            parts.append(tg_truncate(rest, limit - tg_len(CUT_SHORT_NOTE)) + CUT_SHORT_NOTE)
+            break
+        head = tg_truncate(rest, limit)[:-1]
+        cut = head.rfind("\n")
+        if cut <= len(head) // 2:
+            cut = len(head)
+        parts.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    return parts
+
+
+def send_plain(token, chat_id, text):
+    """Send text written by an agent or a person. No parse mode, so nothing in
+    it can format the message, hide a link behind other words, or make
+    Telegram reject the message."""
+    for part in split_for_telegram(text):
+        tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True)
+
+
+def chat_send(bot, text, conversation_id=None, lane=None):
+    """One message through the chat router. The agent and the company are always
+    the bot's own from its config; the message only ever travels as data in an
+    environment variable, never as part of the command."""
+    parts = ["chat", "send", bot["agentId"], "-C", bot["companyId"], "--message", '"$TT"']
+    if conversation_id and UUID_RE.match(conversation_id):
+        parts += ["--conversation-id", conversation_id]
+    if lane in ("a", "b"):
+        parts += ["--lane", lane]
+    return cli_env({"TT": text}, *parts)
+
+
+def _refused(res):
+    return isinstance(res, dict) and res.get("ok") is False
+
+
+def ask_agent(state, bot, chat_id, text, force_task=False):
+    """Send a chat message to the bot's agent and reply in the same chat."""
+    token, agent_name = bot["token"], bot["name"]
+    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
+    conversation_id = None if force_task else get_conversation(state, token, chat_id)
+    notes = []
+    res = chat_send(bot, text, conversation_id, "b" if force_task else None)
+    if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
+        set_conversation(state, token, chat_id, None)
+        notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
+        res = chat_send(bot, text)
+    if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
+        notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
+        res = chat_send(bot, text, lane="b")
+
+    if res is None:
+        # The command may have timed out after the server acted, so do not
+        # claim that nothing happened.
+        send_plain(token, chat_id, (
+            f"I didn't hear back from Paperclip, so I can't tell whether {agent_name} got that. "
+            "Check Paperclip before sending it again."))
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, f"Couldn't send that to {agent_name}." + (f" Paperclip said: {reason}" if reason else ""))
+        return
+
+    lane = res.get("lane") if isinstance(res, dict) else None
+    if lane == "a":
+        result = res.get("result") or {}
+        conversation = result.get("conversationId")
+        if isinstance(conversation, str) and UUID_RE.match(conversation):
+            set_conversation(state, token, chat_id, conversation)
+        answer = str(result.get("response") or "").strip() or f"{agent_name} had nothing to add."
+        send_plain(token, chat_id, "\n\n".join(notes + [answer]))
+        return
+    task_ref = res.get("taskRef") if isinstance(res, dict) else None
+    if lane == "b" and isinstance(task_ref, dict) and isinstance(task_ref.get("issueId"), str) \
+            and UUID_RE.match(task_ref["issueId"]):
+        # Durable first: the chat is recorded before the reply goes out.
+        remember_task(state, token, chat_id, task_ref, text)
+        ident = task_ref.get("identifier") or "a task"
+        confirmation = (
+            f"✅ Sent to {agent_name} as {ident} — {tg_truncate(first_line(text), 200)}\n"
+            "I'll post the answer here when it's done.")
+        send_plain(token, chat_id, "\n\n".join(notes + [confirmation]))
+        return
+    send_plain(token, chat_id, (
+        f"Something went wrong sending that to {agent_name}. "
+        "Check Paperclip before sending it again."))
+
+
+def format_task_answer(bot, item, entry, answer):
+    """The message that carries a task's answer back into its chat."""
+    ident = item.get("identifier") or entry.get("identifier") or "The task"
+    title = (item.get("title") or entry.get("title") or "").strip()[:200]
+    status = item.get("status")
+    link = f"{bot['uiBase']}/issues/{item.get('identifier') or item.get('id')}"
+    if status == "done":
+        head = f"✅ {bot['name']} finished {ident}"
+    elif status == "cancelled":
+        head = f"✖️ {ident} was cancelled"
+    else:
+        head = f"⏸ {ident} is waiting and may need you"
+    if title:
+        head += f" — {title}"
+    footer = f"\n\nOpen the task: {link}"
+    if not answer:
+        return f"{head}\nNo written answer.{footer}"
+    body = str(answer.get("body") or "").strip()
+    room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
+    if tg_len(body) > room:
+        footer = f"\n\nThis answer is too long for Telegram. Read all of it here: {link}"
+        room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
+        body = tg_truncate(body, room)
+    return f"{head}\n\n{body}{footer}"
+
+
+def notify_task_answers(state, bots):
+    """Post each chat task's answer into the chat the task came from, once.
+
+    Only tasks this bot recorded from one of its chats are ever looked at, only
+    in this bot's company, and only ever posted to the chat that created them
+    (never to the bot's other chats). An answer is marked as posted in the state
+    file after Telegram accepted it, so a restart does not post it again and a
+    failed send is retried on the next pass.
+    """
+    for bot in bots:
+        token = bot["token"]
+        with LOCK:
+            tasks = {iid: dict(e) for iid, e in (_bot_entry(state, token).get("tasks") or {}).items()}
+        if not tasks:
+            continue
+        now = time.time()
+        finished = {iid for iid, e in tasks.items()
+                    if not UUID_RE.match(iid) or now - float(e.get("at") or 0) > TASK_ANSWER_MAX_AGE_SECONDS}
+        posted = {}
+        ids = sorted((iid for iid in tasks if iid not in finished),
+                     key=lambda iid: float(tasks[iid].get("at") or 0), reverse=True)[:TASK_ANSWERS_PER_CALL]
+        data = cli("chat", "answers", "-C", bot["companyId"], *ids) if ids else None
+        items = data.get("issues") if isinstance(data, dict) else None
+        for it in items if isinstance(items, list) else []:
+            iid = it.get("id")
+            entry = tasks.get(iid)
+            if not entry or iid in finished or it.get("companyId") != bot["companyId"]:
+                continue
+            status = it.get("status")
+            is_finished = status in ANSWER_FINISHED_STATUSES
+            if not is_finished and status not in ANSWER_WAITING_STATUSES:
+                continue
+            chat = entry.get("chat")
+            if chat not in ALLOWED_USER_IDS:
+                # That person is no longer allowed: post nothing, stop watching.
+                if is_finished:
+                    finished.add(iid)
+                continue
+            answer = it.get("answer") if isinstance(it.get("answer"), dict) else None
+            comment_id = (answer or {}).get("commentId")
+            is_new = bool(comment_id) and comment_id != entry.get("postedCommentId")
+            text = None
+            if is_new:
+                text = format_task_answer(bot, it, entry, answer)
+            elif is_finished and not entry.get("postedCommentId"):
+                text = format_task_answer(bot, it, entry, None)
+            if text is not None:
+                if tg(token, "sendMessage", chat_id=chat, text=text, disable_web_page_preview=True) is None:
+                    continue  # not delivered; try again next pass
+                if is_new:
+                    posted[iid] = comment_id
+            if is_finished:
+                finished.add(iid)
+        if not finished and not posted:
+            continue
+        with LOCK:
+            live = _bot_entry(state, token).setdefault("tasks", {})
+            for iid, comment_id in posted.items():
+                if iid in live:
+                    live[iid]["postedCommentId"] = comment_id
+            for iid in finished:
+                live.pop(iid, None)
+            save_state(state)
+
+
 def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
@@ -542,9 +817,17 @@ def handle_message(state, bot, m):
         tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown", text=(
             f"*Connected — you're talking to {agent_name}.*\n"
             "I'll send approvals here; tap ✅/❌ to act.\n\n"
-            f"• Any message → a task for {agent_name}\n"
+            f"• Any message → {agent_name} answers here. A quick question gets a quick answer "
+            f"when quick answers are switched on for {agent_name}; anything bigger becomes a task, "
+            "and its answer comes back here when it's done\n"
+            "• `/task <text>` → always make it a task\n"
+            "• `/new` → start a fresh conversation\n"
             "• `/project <name>` → a project\n"
             "• `/status` → what's happening now"))
+        return
+    if low == "/new":
+        set_conversation(state, token, chat_id, None)
+        send_plain(token, chat_id, f"🆕 Fresh start. {agent_name} won't remember the earlier conversation.")
         return
     if low == "/status":
         runs = cli("run", "live", "-C", company_id) or []
@@ -561,15 +844,14 @@ def handle_message(state, bot, m):
         tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown",
            text=(f"📁 Created project *{name}*" if res else "Couldn't create the project."))
         return
-    title = text[len("/task "):].strip() if low.startswith("/task ") else text
-    if not title:
+    force_task = low.startswith("/task ")
+    body = text[len("/task "):].strip() if force_task else text
+    if not body:
         return
-    # A message to an agent's bot becomes a task assigned to that agent.
-    res = cli_env({"TT": title}, "issue", "create", "-C", company_id,
-                  "--title", '"$TT"', "--assignee-agent-id", agent_id)
-    ident = (res or {}).get("identifier", "")
-    tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown",
-       text=(f"✅ Sent to {agent_name} as *{ident}* — {title}" if res else "Couldn't create the task."))
+    # The chat router decides between a quick answer and a task, exactly as
+    # for the web chat. Nothing in the text can approve or reject anything:
+    # it is only ever sent to the agent as a message.
+    ask_agent(state, bot, chat_id, body, force_task=force_task)
 
 
 def bot_thread(state, bot):
@@ -609,6 +891,10 @@ def main():
     companies = len({b["companyId"] for b in bots})
     print(f"telegram-bridge: {len(bots)} bot(s) across {companies} companies up", flush=True)
     while True:
+        try:
+            notify_task_answers(state, bots)
+        except Exception as e:
+            print(f"task-answer-notify error: {e}", flush=True)
         try:
             notify_approvals(state, bots)
         except Exception as e:

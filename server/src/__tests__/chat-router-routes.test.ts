@@ -236,6 +236,61 @@ describe("chat router routes", () => {
     expect(res.status).toBe(400);
   });
 
+  // DUR-3978: the Telegram bridge sends no hint and trusts the router. A short
+  // question to an agent without quick answers used to be guessed into Lane A
+  // and refused with 403; it must become a task that agent can actually take.
+  it("does not guess Lane A for an agent without quick answers", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent({ laneAEnabled: false }));
+    mockIssueService.create.mockResolvedValue({
+      id: "issue-9",
+      identifier: "PAP-49",
+      status: "todo",
+      assigneeAgentId: targetAgentId,
+    });
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: "how many agents are on the team right now?" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.lane).toBe("b");
+    expect(mockLaneAService.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("still honours an explicit quick-answer hint for an agent without quick answers", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent({ laneAEnabled: false }));
+    mockLaneAService.sendMessage.mockRejectedValue(new HttpError(403, "Lane A is not enabled for this agent"));
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: "how many agents are on the team right now?", laneHint: "a" });
+
+    expect(res.status).toBe(403);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("redacts secrets in a quick answer before returning it", async () => {
+    const token = `ghp_${"B".repeat(36)}`;
+    mockAgentService.getById.mockResolvedValue(makeAgent());
+    mockLaneAService.sendMessage.mockResolvedValue({
+      conversationId: "conv-3",
+      response: `The deploy key is ${token}`,
+      turnCount: 1,
+      stopReason: "end_turn",
+    });
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .post(`/api/chat/${targetAgentId}/messages`)
+      .send({ companyId, message: "what is the key?" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.conversationId).toBe("conv-3");
+    expect(res.body.result.response).not.toContain(token);
+  });
+
   it("rejects a Lane B dispatch the actor is not authorized to assign", async () => {
     mockAgentService.getById.mockResolvedValue(makeAgent());
     mockAccessService.decide.mockResolvedValue({ allowed: false, action: "tasks:assign", explanation: "nope" });

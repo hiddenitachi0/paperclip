@@ -40,6 +40,7 @@ const apiPrefixes: Record<string, string> = {
   "instance-claude-auth.ts": "/api",
   "instance-security.ts": "/api",
   "issues.ts": "/api",
+  "issue-answers.ts": "/api",
   "issue-tree-control.ts": "/api",
   "lane-a.ts": "/api",
   "llms.ts": "/api",

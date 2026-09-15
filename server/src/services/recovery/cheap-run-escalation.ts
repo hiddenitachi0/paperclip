@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, issueComments } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
+import { evaluateBoardApprovalWait } from "../board-approval-wait.js";
 import { withRecoveryModelProfileHint } from "./model-profile-hint.js";
 import { RECOVERY_REASON_KINDS } from "./origins.js";
 
@@ -137,7 +138,11 @@ export function decideCheapRunEscalation(input: {
 export type CheapRunEscalationOutcome =
   | { escalated: true; alreadyPending: boolean; capped: false; failed: false; escalationRunId: string | null; count: number }
   | { escalated: false; alreadyPending: false; capped: true; failed: false; count: number; maxCount: number }
-  | { escalated: false; alreadyPending: false; capped: false; failed: true };
+  | { escalated: false; alreadyPending: false; capped: false; failed: true }
+  // DUR-3979: the issue waits only on the operator's decision on a linked
+  // approval. Nothing is escalated and no comment is written; the decision
+  // wakes the agent. Callers test for it with `"waitingOnBoardApproval" in outcome`.
+  | { escalated: false; alreadyPending: false; capped: false; failed: false; waitingOnBoardApproval: true };
 
 /**
  * Orchestrates the decision above against real state: looks up any in-flight
@@ -162,8 +167,29 @@ export async function recordCheapRunEscalation(
     sourceRunId: string;
     blockedAction: string;
   },
+  options: {
+    /** Test seam; defaults to the real check (which never throws). */
+    evaluateBoardApprovalWait?: typeof evaluateBoardApprovalWait;
+  } = {},
 ): Promise<CheapRunEscalationOutcome> {
   try {
+    // DUR-3979: a cheap run on an issue that waits only on the operator's
+    // decision is almost always re-filing or re-blocking over the same
+    // approval. A normal-sized run (~50c) and an "Escalating..." comment buy
+    // nothing: the decision wakes the agent. Fail-open: the check answers
+    // "not waiting" on any error, which escalates exactly as before.
+    const boardApprovalWait = await (options.evaluateBoardApprovalWait ?? evaluateBoardApprovalWait)(db, {
+      companyId: input.companyId,
+      issueId: input.issueId,
+    });
+    if (boardApprovalWait.waiting) {
+      logger.info(
+        { companyId: input.companyId, issueId: input.issueId, sourceRunId: input.sourceRunId },
+        "cheap-run escalation skipped: the issue is waiting only on the operator's decision on a linked approval",
+      );
+      return { escalated: false, alreadyPending: false, capped: false, failed: false, waitingOnBoardApproval: true };
+    }
+
     const idempotencyKey = buildCheapRunEscalationIdempotencyKey({
       issueId: input.issueId,
       sourceRunId: input.sourceRunId,

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { validate } from "../middleware/validate.js";
 import { forbidden } from "../errors.js";
+import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
 import {
   accessService,
   agentService,
@@ -55,9 +56,23 @@ const chatRouteClassifySchema = z.object({
 // in one of these statuses shouldn't be offered as a routing target.
 const SECRETARY_UNAVAILABLE_AGENT_STATUSES = new Set(["terminated", "paused", "error"]);
 
-function classifyLane(input: { message: string; laneHint?: "a" | "b" }): "a" | "b" {
+export function classifyLane(input: {
+  message: string;
+  laneHint?: "a" | "b";
+  /** Whether the addressed agent has quick answers switched on. */
+  laneAEnabled?: boolean;
+}): "a" | "b" {
   if (input.laneHint === "a" && input.message.length <= LANE_A_MESSAGE_MAX_LENGTH) return "a";
   if (input.laneHint === "b") return "b";
+  // DUR-3978: without an explicit hint the router is guessing, and it must not
+  // guess a lane the addressed agent cannot serve. Before this, a short
+  // question to an agent without quick answers was sent to Lane A and refused
+  // with 403 ("Lane A is not enabled") — so a caller that trusts the router
+  // (the Telegram bridge; simple mode's fallback path) got an error for a
+  // message the agent could have taken as a task. An explicit "a" hint is left
+  // alone: that caller asked for a quick answer and should be told it can't
+  // have one, not be silently billed for a full task run.
+  if (input.laneAEnabled === false) return "b";
   if (input.message.length > CHEAP_QUESTION_LENGTH_THRESHOLD) return "b";
   if (WORK_KEYWORDS.test(input.message)) return "b";
   return "a";
@@ -123,7 +138,7 @@ export function chatRouterRoutes(db: Db) {
     }
 
     const actor = getActorInfo(req);
-    const lane = classifyLane({ message, laneHint });
+    const lane = classifyLane({ message, laneHint, laneAEnabled: targetAgent.laneAEnabled });
 
     if (lane === "a") {
       const requester = actor.actorType === "agent"
@@ -154,7 +169,14 @@ export function chatRouterRoutes(db: Db) {
         conversationId,
       });
 
-      res.json({ lane: "a", result, taskRef: null });
+      // DUR-3978: a quick answer can now leave Paperclip (the Telegram bridge
+      // relays it into a chat app), and a quick agent's tools can hand it text
+      // it should not repeat. Same redaction the server applies to run output.
+      const safeResult =
+        result && typeof result.response === "string"
+          ? { ...result, response: redactKnownLeakedSecretPatterns(redactSensitiveText(result.response)) }
+          : result;
+      res.json({ lane: "a", result: safeResult, taskRef: null });
       return;
     }
 

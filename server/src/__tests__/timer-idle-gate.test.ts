@@ -230,6 +230,69 @@ describeEmbeddedPostgres("evaluateTimerIdleGate (embedded postgres)", () => {
       expect(await evaluate(f)).toMatchObject({ decision: "run", signal: "holds_checked_out_or_in_progress_issue" });
     });
 
+    // DUR-3979: an in-progress task whose only remaining blocker is a
+    // pending board approval is not work to continue -- it must not keep the
+    // agent's timer awake on every tick.
+    async function linkApproval(f: Fixture, status: string) {
+      const approvalId = randomUUID();
+      await db.insert(approvals).values({
+        id: approvalId,
+        companyId: f.companyId,
+        type: "request_board_approval",
+        requestedByAgentId: f.agentId,
+        status,
+        payload: { title: "Put the new dashboard live" },
+        createdAt: ago(f.now, 300),
+        updatedAt: ago(f.now, 300),
+      });
+      await db.insert(issueApprovals).values({
+        companyId: f.companyId,
+        issueId: f.standingIssueId,
+        approvalId,
+        createdAt: ago(f.now, 300),
+      });
+      return approvalId;
+    }
+
+    it("does not count an in-progress issue that waits only on the operator's decision (DUR-3979)", async () => {
+      const f = await seed();
+      await linkApproval(f, "pending");
+      await db
+        .update(issues)
+        .set({ status: "in_progress", updatedAt: ago(f.now, 2 * 24 * 60) })
+        .where(eq(issues.id, f.standingIssueId));
+      expect(await evaluate(f)).toMatchObject({ decision: "skip", baselineRunId: f.lastRunId });
+    });
+
+    it("still runs when the operator sent that approval back for changes", async () => {
+      const f = await seed();
+      await linkApproval(f, "revision_requested");
+      await db
+        .update(issues)
+        .set({ status: "in_progress", updatedAt: ago(f.now, 2 * 24 * 60) })
+        .where(eq(issues.id, f.standingIssueId));
+      expect(await evaluate(f)).toMatchObject({ decision: "run", signal: "holds_checked_out_or_in_progress_issue" });
+    });
+
+    it("still runs when another held issue is real work", async () => {
+      const f = await seed();
+      await linkApproval(f, "pending");
+      await db
+        .update(issues)
+        .set({ status: "in_progress", updatedAt: ago(f.now, 2 * 24 * 60) })
+        .where(eq(issues.id, f.standingIssueId));
+      await db.insert(issues).values({
+        companyId: f.companyId,
+        title: "Second task in progress",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: f.agentId,
+        createdAt: ago(f.now, 2 * 24 * 60),
+        updatedAt: ago(f.now, 2 * 24 * 60),
+      });
+      expect(await evaluate(f)).toMatchObject({ decision: "run", signal: "holds_checked_out_or_in_progress_issue" });
+    });
+
     it("runs when a run is queued or scheduled for the agent", async () => {
       const f = await seed();
       await db.insert(heartbeatRuns).values({

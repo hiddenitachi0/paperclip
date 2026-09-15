@@ -1412,6 +1412,54 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("PAP-101 Implement helper (done)");
     expect(prompt).toContain("Added the helper route and tests.");
   });
+
+  // DUR-3979: an agent waiting on a board decision must read the approval's
+  // real age off the card instead of inventing "18+ hours" (NOR-1437).
+  it("renders each pending board approval with the time it was filed and how long it has waited", () => {
+    const payload = {
+      reason: "heartbeat_timer",
+      issue: { id: "issue-1", identifier: "NOR-1437", title: "Put the new dashboard live", status: "in_progress" },
+      boardApprovalWait: {
+        waitingOnlyOnBoardApproval: true,
+        approvals: [
+          {
+            id: "approval-1",
+            title: "Put the new dashboard live",
+            createdAt: "2026-09-15T16:40:00.000Z",
+            waitingSince: "15 Sep 16:40 UTC",
+            age: "5 h 32 min",
+          },
+        ],
+      },
+      commentWindow: { requestedCount: 0, includedCount: 0, missingCount: 0 },
+      comments: [],
+    };
+
+    expect(JSON.parse(stringifyPaperclipWakePayload(payload) ?? "{}")).toMatchObject({
+      boardApprovalWait: {
+        waitingOnlyOnBoardApproval: true,
+        approvals: [{ id: "approval-1", waitingSince: "15 Sep 16:40 UTC", age: "5 h 32 min" }],
+      },
+    });
+
+    const prompt = renderPaperclipWakePrompt(payload);
+    expect(prompt).toContain("Waiting for the operator's decision:");
+    expect(prompt).toContain(
+      '- "Put the new dashboard live": waiting for the operator\'s decision since 15 Sep 16:40 UTC (5 h 32 min).',
+    );
+    expect(prompt).toContain("The operator sees the approval card. You are woken automatically when it is decided.");
+    expect(prompt).toContain("Do not post comments that only repeat that you are still waiting");
+    expect(prompt).toContain("Nothing else on this issue needs you until the decision");
+
+    // Not waiting only on the decision: the age still shows, the "stop here"
+    // line does not.
+    const alsoBusy = renderPaperclipWakePrompt({
+      ...payload,
+      boardApprovalWait: { ...payload.boardApprovalWait, waitingOnlyOnBoardApproval: false },
+    });
+    expect(alsoBusy).toContain("15 Sep 16:40 UTC (5 h 32 min)");
+    expect(alsoBusy).not.toContain("Nothing else on this issue needs you until the decision");
+  });
 });
 
 describe("WATCHDOG_DEFAULT_MANDATE", () => {

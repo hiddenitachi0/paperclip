@@ -92,6 +92,12 @@ export function decideRunLivenessContinuation(input: {
   budgetBlocked: boolean;
   idempotentWakeExists: boolean;
   maxAttempts?: number;
+  /**
+   * DUR-3979: the issue waits only on the operator's decision on a linked
+   * approval (board-approval-wait.ts). A run that only said "still waiting"
+   * is not stuck: neither continue it nor post the exhausted notice.
+   */
+  waitingOnBoardApproval?: boolean;
 }): RunContinuationDecision {
   const {
     run,
@@ -127,6 +133,9 @@ export function decideRunLivenessContinuation(input: {
   }
   if (budgetBlocked) {
     return { kind: "skip", reason: "budget hard stop blocks continuation" };
+  }
+  if (input.waitingOnBoardApproval === true) {
+    return { kind: "skip", reason: "issue is waiting only on the operator's decision on a linked approval" };
   }
   const currentAttempt = readContinuationAttempt(run.continuationAttempt);
   if (currentAttempt >= maxAttempts) {

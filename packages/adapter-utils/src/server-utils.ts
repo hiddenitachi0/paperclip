@@ -749,9 +749,28 @@ type PaperclipWakeCheckboxSelection = {
   }>;
 };
 
+type PaperclipWakeBoardApprovalWaitApproval = {
+  id: string | null;
+  title: string | null;
+  createdAt: string | null;
+  waitingSince: string | null;
+  age: string | null;
+};
+
+/**
+ * DUR-3979: pending approvals linked to the wake's issue, with their real age
+ * computed by the server from approvals.created_at when the run started
+ * (server/src/services/board-approval-wait.ts buildBoardApprovalWaitContext).
+ */
+type PaperclipWakeBoardApprovalWait = {
+  waitingOnlyOnBoardApproval: boolean;
+  approvals: PaperclipWakeBoardApprovalWaitApproval[];
+};
+
 type PaperclipWakePayload = {
   reason: string | null;
   issue: PaperclipWakeIssue | null;
+  boardApprovalWait: PaperclipWakeBoardApprovalWait | null;
   checkedOutByHarness: boolean;
   dependencyBlockedInteraction: boolean;
   treeHoldInteraction: boolean;
@@ -1065,6 +1084,57 @@ function normalizePaperclipWakeLivenessContinuation(value: unknown): PaperclipWa
   };
 }
 
+function normalizePaperclipWakeBoardApprovalWait(value: unknown): PaperclipWakeBoardApprovalWait | null {
+  const wait = parseObject(value);
+  const approvals = Array.isArray(wait.approvals)
+    ? wait.approvals
+        .map((entry) => {
+          const approval = parseObject(entry);
+          const normalized = {
+            id: asString(approval.id, "").trim() || null,
+            title: asString(approval.title, "").trim() || null,
+            createdAt: asString(approval.createdAt, "").trim() || null,
+            waitingSince: asString(approval.waitingSince, "").trim() || null,
+            age: asString(approval.age, "").trim() || null,
+          };
+          return normalized.id || normalized.title ? normalized : null;
+        })
+        .filter((entry): entry is PaperclipWakeBoardApprovalWaitApproval => Boolean(entry))
+    : [];
+  if (approvals.length === 0) return null;
+  return {
+    waitingOnlyOnBoardApproval: asBoolean(wait.waitingOnlyOnBoardApproval, false),
+    approvals,
+  };
+}
+
+/**
+ * DUR-3979: the lines an agent reads about pending approvals on its issue.
+ * The one renderer for this text -- the wake prompt below and the server's
+ * task block (heartbeat.ts buildPaperclipTaskMarkdown) both call it.
+ */
+export function renderPaperclipBoardApprovalWaitLines(value: unknown): string[] {
+  const wait = normalizePaperclipWakeBoardApprovalWait(value);
+  if (!wait) return [];
+  const lines = ["Waiting for the operator's decision:"];
+  for (const approval of wait.approvals) {
+    const label = approval.title ? JSON.stringify(approval.title) : `approval ${approval.id}`;
+    const since = approval.waitingSince ?? approval.createdAt ?? "an unknown time";
+    lines.push(`- ${label}: waiting for the operator's decision since ${since}${approval.age ? ` (${approval.age})` : ""}.`);
+  }
+  lines.push(
+    "- These times come from the approval card itself. If you mention how long it has been waiting, use them; never estimate.",
+    "- The operator sees the approval card. You are woken automatically when it is decided.",
+    "- Do not post comments that only repeat that you are still waiting. One note that the task waits for the decision is enough.",
+  );
+  if (wait.waitingOnlyOnBoardApproval) {
+    lines.push(
+      "- Nothing else on this issue needs you until the decision: end this run without a new status comment.",
+    );
+  }
+  return lines;
+}
+
 function normalizePaperclipWakeChildIssueSummary(value: unknown): PaperclipWakeChildIssueSummary | null {
   const child = parseObject(value);
   const id = asString(child.id, "").trim() || null;
@@ -1319,13 +1389,15 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
 
   const activeTreeHold = normalizePaperclipWakeTreeHoldSummary(payload.activeTreeHold);
   const checkboxSelection = normalizePaperclipWakeCheckboxSelection(payload.checkboxSelection);
-  if (comments.length === 0 && commentIds.length === 0 && annotationDeltas.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !planReviewContext && !livenessContinuation && !taskWatchdog && !checkboxSelection && !normalizePaperclipWakeIssue(payload.issue)) {
+  const boardApprovalWait = normalizePaperclipWakeBoardApprovalWait(payload.boardApprovalWait);
+  if (comments.length === 0 && commentIds.length === 0 && annotationDeltas.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !planReviewContext && !livenessContinuation && !taskWatchdog && !checkboxSelection && !boardApprovalWait && !normalizePaperclipWakeIssue(payload.issue)) {
     return null;
   }
 
   return {
     reason: asString(payload.reason, "").trim() || null,
     issue: normalizePaperclipWakeIssue(payload.issue),
+    boardApprovalWait,
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
     dependencyBlockedInteraction: asBoolean(payload.dependencyBlockedInteraction, false),
     treeHoldInteraction: asBoolean(payload.treeHoldInteraction, false),
@@ -1456,6 +1528,10 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.issue?.priority) {
     lines.push(`- issue priority: ${normalized.issue.priority}`);
+  }
+  const boardApprovalWaitLines = renderPaperclipBoardApprovalWaitLines(normalized.boardApprovalWait);
+  if (boardApprovalWaitLines.length > 0) {
+    lines.push("", ...boardApprovalWaitLines, "");
   }
   if (normalized.checkboxSelection) {
     if (normalized.checkboxSelection.prompt) {

@@ -66,6 +66,7 @@ import {
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { agentSecretRefRefusal, collectAgentRecordSecretRefs } from "../services/agent-secret-bindings.js";
 import {
   assertBoard,
   assertBoardOrDelegate,
@@ -1309,6 +1310,12 @@ export function agentRoutes(
     adapterType: string | null | undefined;
     adapterConfig: Record<string, unknown>;
     constraintAdapterConfig?: Record<string, unknown>;
+    // DUR-3980: when an agent pastes a literal value into an adapter secret
+    // field, normalization stores it as a new managed secret. Recording the
+    // agent as its creator is what lets the self-save gate
+    // (assertAgentActorAddsNoSecretRefs) tell "its own value" from "a saved
+    // password it was never given".
+    secretCreator?: { agentId: string };
   }): Promise<Record<string, unknown>> {
     const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
       input.companyId,
@@ -1316,6 +1323,7 @@ export function agentRoutes(
       {
         strictMode: strictSecretsMode,
         adapterType: input.adapterType ?? null,
+        ...(input.secretCreator ? { actor: { agentId: input.secretCreator.agentId } } : {}),
       },
     );
     await assertAdapterConfigConstraints(
@@ -1332,6 +1340,7 @@ export function agentRoutes(
     adapterType: string,
     runtimeConfig: Record<string, unknown>,
     baseAdapterConfig: Record<string, unknown>,
+    secretCreator?: { agentId: string },
   ): Promise<Record<string, unknown>> {
     const entries = listRuntimeModelProfileAdapterConfigs(runtimeConfig);
     if (entries.length === 0) return runtimeConfig;
@@ -1353,6 +1362,7 @@ export function agentRoutes(
           ...baseAdapterConfig,
           ...adapterDefaultConfig,
         },
+        secretCreator,
       });
       normalizedModelProfiles[entry.profileKey] = {
         ...entry.profile,
@@ -2048,6 +2058,20 @@ export function agentRoutes(
 
       const inputAdapterConfig =
         (req.body?.adapterConfig ?? {}) as Record<string, unknown>;
+      // DUR-3980: this probe resolves secret_refs WITHOUT a binding check
+      // (there is no agent record yet) and runs the adapter's command with the
+      // values in its environment. An agent must not be able to point it at a
+      // saved password it was never given. Agents cannot hire with saved
+      // passwords either, so they never need to test a config that has one.
+      if (req.actor.type === "agent") {
+        const probeSecretRefs = collectAgentRecordSecretRefs({
+          adapterConfig: inputAdapterConfig,
+          runtimeConfig: null,
+        });
+        if (probeSecretRefs.length > 0) {
+          throw agentSecretRefRefusal(companyId, probeSecretRefs);
+        }
+      }
       const requestedEnvironmentId =
         typeof req.body?.environmentId === "string" && req.body.environmentId.trim().length > 0
           ? (req.body.environmentId as string)
@@ -2604,6 +2628,9 @@ export function agentRoutes(
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
       agentId: actor.agentId,
       userId: actor.actorType === "user" ? actor.actorId : null,
+      // DUR-3980: the service needs to know an agent is doing this, so a
+      // rollback can only restore saved passwords the agent was once given.
+      actorType: actor.actorType,
     });
     if (!updated) {
       res.status(404).json({ error: "Revision not found" });
@@ -3423,6 +3450,15 @@ export function agentRoutes(
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
     assertAgentSelfUpdateAllowed(req, patchData);
+    // DUR-3980: when an agent pastes a literal value into an adapter secret
+    // field on its own record, the managed secret minted from it is recorded
+    // as created by this agent, so the self-save gate treats it as a value
+    // the agent already had rather than a saved password it was never given.
+    const patchActorInfo = getActorInfo(req);
+    const patchSecretCreator =
+      patchActorInfo.actorType === "agent" && patchActorInfo.agentId
+        ? { agentId: patchActorInfo.agentId }
+        : undefined;
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {
@@ -3502,6 +3538,7 @@ export function agentRoutes(
         companyId: existing.companyId,
         adapterType: requestedAdapterType,
         adapterConfig: effectiveAdapterConfig,
+        secretCreator: patchSecretCreator,
       });
       patchData.adapterConfig = syncInstructionsBundleConfigFromFilePath(existing, normalizedEffectiveAdapterConfig);
     }
@@ -3512,6 +3549,7 @@ export function agentRoutes(
         requestedAdapterType,
         requestedRuntimeConfig,
         baseAdapterConfig,
+        patchSecretCreator,
       );
     }
     if (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId")) {
