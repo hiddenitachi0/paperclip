@@ -897,6 +897,19 @@ export interface RequestCheckboxConfirmationResult extends RequestConfirmationRe
   selectedOptionIds?: string[];
 }
 
+/**
+ * Server-derived, on pending confirmation cards in list responses only: the
+ * board approval this card is about (its explicit link, or an approval it
+ * names in its key/payload) and that approval's live status.
+ */
+export interface IssueThreadInteractionNamedApproval {
+  approvalId: string;
+  status: string;
+  decidedAt: Date | string | null;
+  /** True when the card is linked, so answering it also answers the approval. */
+  linked: boolean;
+}
+
 export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {
   id: string;
   companyId: string;
@@ -906,6 +919,7 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   sourceCommentId?: string | null;
   sourceRunId?: string | null;
   linkedApprovalId?: string | null;
+  namedApproval?: IssueThreadInteractionNamedApproval | null;
   title?: string | null;
   summary?: string | null;
   status: IssueThreadInteractionStatus;

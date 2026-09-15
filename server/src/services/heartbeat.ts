@@ -118,6 +118,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { isHeartbeatRunLockStale, issueService } from "./issues.js";
+import { TIMER_IDLE_SKIP_REASON, evaluateTimerIdleGate, recordTimerIdleSkip } from "./timer-idle-gate.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
@@ -14913,6 +14914,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await markTimerHeartbeatChecked(agentId, source);
       opts.onNotScheduled?.({ kind: "skipped", reason: "heartbeat.timer.no_actionable_work" });
       return null;
+    }
+
+    // DUR-3943 round 2: the agent has open work, but has anything changed for
+    // it since its last run started? If not, skip before any run, session or
+    // workspace lease exists. Fail-open (see timer-idle-gate.ts). A skip is
+    // counted on the agent's runtime state -- never a wake-up, run or
+    // activity row per skip -- and advances lastHeartbeatAt exactly like the
+    // DUR-42 skip above, so the scheduler does not retry it every tick.
+    if (genericTimerWake) {
+      const idleGate = await evaluateTimerIdleGate(db, agent);
+      if (idleGate.decision === "skip") {
+        await recordTimerIdleSkip(db, agent, idleGate);
+        await markTimerHeartbeatChecked(agentId, source);
+        opts.onNotScheduled?.({ kind: "skipped", reason: TIMER_IDLE_SKIP_REASON });
+        return null;
+      }
     }
 
     if (issueId) {
