@@ -111,6 +111,11 @@ export interface Config {
   heartbeatRunRetentionEnabled: boolean;
   heartbeatRunRetentionDays: number;
   heartbeatRunRetentionIntervalMinutes: number;
+  // DUR-386: retention for the cross-company access audit table. On by
+  // default -- nothing pruned it before, so it grew forever.
+  crossCompanyAccessLogRetentionEnabled: boolean;
+  crossCompanyAccessLogRetentionDays: number;
+  crossCompanyAccessLogRetentionIntervalMinutes: number;
   shutdownDrainTimeoutMs: number;
   companyDeletionEnabled: boolean;
   mergePrAutomationEnabled: boolean;
@@ -164,6 +169,25 @@ export function resolveHeartbeatRunRetentionEnabled(
   env: { PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED?: string } = process.env,
 ): boolean {
   return env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_ENABLED === "true";
+}
+
+/**
+ * DUR-386: unlike the heartbeat_runs sweep (off by default, DUR-366), the
+ * cross_company_access_log sweep is ON by default. Nothing in the codebase
+ * ever deleted from that table, so it grew without bound on every instance;
+ * the default 90-day window is far longer than any investigation horizon,
+ * and leaving it unbounded is the actual bug.
+ *
+ * Disabling is the data-preserving direction, so the disable spellings are
+ * forgiving: anything that plainly reads as "off" turns the sweep off, and
+ * everything else (including an unset or empty value) leaves it on.
+ */
+export function resolveCrossCompanyAccessLogRetentionEnabled(
+  env: { PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_ENABLED?: string } = process.env,
+): boolean {
+  const value = env.PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_ENABLED?.trim().toLowerCase();
+  if (value === undefined || value === "") return true;
+  return !["false", "0", "off", "no"].includes(value);
 }
 
 /**
@@ -462,6 +486,17 @@ export function loadConfig(): Config {
     heartbeatRunRetentionIntervalMinutes: Math.max(
       1,
       Number(process.env.PAPERCLIP_HEARTBEAT_RUN_RETENTION_INTERVAL_MINUTES) || 60,
+    ),
+    // DUR-386: bound the cross-company access audit table. See
+    // services/cross-company-access-log-retention.ts for why 90 days.
+    crossCompanyAccessLogRetentionEnabled: resolveCrossCompanyAccessLogRetentionEnabled(),
+    crossCompanyAccessLogRetentionDays: Math.max(
+      1,
+      Number(process.env.PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_DAYS) || 90,
+    ),
+    crossCompanyAccessLogRetentionIntervalMinutes: Math.max(
+      1,
+      Number(process.env.PAPERCLIP_CROSS_COMPANY_ACCESS_LOG_RETENTION_INTERVAL_MINUTES) || 60,
     ),
     // DUR-257: on SIGTERM/SIGINT, shutdown() waits this long for in-flight heartbeat
     // runs to finish naturally before it calls process.exit(0), instead of letting
