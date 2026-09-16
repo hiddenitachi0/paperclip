@@ -68,11 +68,21 @@ const CLAIM_RESET_RE = /^\s*reset\s+app\.current_company_id\b/i;
 const BEGIN_RE = /^\s*begin\b/i;
 const ROLLBACK_TO_RE = /^\s*rollback\s+to\b/i;
 const TX_END_RE = /^\s*(commit|rollback)\b/i;
-// withCompanyScopeBypass/runInCompanyScopeBypass both insert one row here,
-// on the same connection, before running any of the caller's own queries
-// (see company-scope.ts) -- an already-audited legitimate cross-company use,
-// not a gap this log needs to also flag.
-const BYPASS_AUDIT_INSERT_RE = /insert\s+into\s+"?cross_company_access_log"?/i;
+// withCompanyScopeBypass/runInCompanyScopeBypass both run the
+// paperclip_app_bypass role-membership check on the connection before any of
+// the caller's own queries, and then (for everything except the routine
+// scheduler chains DUR-386 silences) insert one audit row on it (see
+// company-scope.ts) -- either way an acknowledged, legitimate cross-company
+// use, not a gap this log needs to also flag.
+//
+// The role check, not the insert, is the authoritative marker: it happens on
+// every bypass path unconditionally, so a silenced scheduler tick that writes
+// no cross_company_access_log row is still recognised here instead of being
+// misreported as an accidental unscoped access (DUR-386). The insert pattern
+// is kept as well so an audited bypass issued by any other code path still
+// acknowledges the connection.
+const BYPASS_ACK_RE =
+  /pg_has_role\(\s*current_user\s*,\s*'paperclip_app_bypass'|insert\s+into\s+"?cross_company_access_log"?/i;
 
 interface ConnectionClaimState {
   claim: string | null;
@@ -137,7 +147,7 @@ export function createUnscopedTenantAccessDebugHook(applicationName: string): Un
       }
       return;
     }
-    if (BYPASS_AUDIT_INSERT_RE.test(query)) {
+    if (BYPASS_ACK_RE.test(query)) {
       state.bypassAcknowledged = true;
       return;
     }

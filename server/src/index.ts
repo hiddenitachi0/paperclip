@@ -86,6 +86,7 @@ import {
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
+import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -1603,6 +1604,25 @@ export async function startServer(): Promise<StartedServer> {
       db,
       config.heartbeatRunRetentionIntervalMinutes * 60 * 1000,
       config.heartbeatRunRetentionDays,
+    );
+  }
+
+  // DUR-386: bound cross_company_access_log the same way. Bypass-scoped
+  // forever for the same reason as the sweep above -- one batched DELETE
+  // across every company's audit rows, with no company_id predicate (the
+  // table has no company_id column at all).
+  if (config.crossCompanyAccessLogRetentionEnabled) {
+    logger.info(
+      {
+        retentionDays: config.crossCompanyAccessLogRetentionDays,
+        intervalMinutes: config.crossCompanyAccessLogRetentionIntervalMinutes,
+      },
+      "Cross-company access log retention sweep enabled",
+    );
+    startCrossCompanyAccessLogRetention(
+      db,
+      config.crossCompanyAccessLogRetentionIntervalMinutes * 60 * 1000,
+      config.crossCompanyAccessLogRetentionDays,
     );
   }
 

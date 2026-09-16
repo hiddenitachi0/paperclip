@@ -99,6 +99,17 @@ describe("createUnscopedTenantAccessDebugHook", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it("does not log after the bypass role-membership check, even with no audit insert (DUR-386)", () => {
+    // The routine scheduler chains DUR-386 silences run the role check and
+    // then write no cross_company_access_log row at all. The check itself is
+    // what acknowledges the connection -- without this the silenced ticks
+    // would be misreported here as accidental unscoped access.
+    const hook = hookWithTables("paperclip-app", ["issues"]);
+    hook.debug(1, "\n      select pg_has_role(current_user, 'paperclip_app_bypass', 'member') as has_bypass\n    ", []);
+    hook.debug(1, 'select * from "issues"', []);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it("re-arms bypass acknowledgment on the next transaction (BEGIN)", () => {
     const hook = hookWithTables("paperclip-app", ["issues"]);
     hook.debug(1, 'insert into "cross_company_access_log" ("reason") values ($1)', ["board review"]);
