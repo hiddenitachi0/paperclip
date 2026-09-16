@@ -4,6 +4,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import type { ReservedSql } from "postgres";
 import type { Db } from "./client.js";
 import { crossCompanyAccessLog } from "./schema/cross_company_access_log.js";
+import { isRoutineSchedulerBypass, recordRoutineSchedulerBypass } from "./cross-company-audit.js";
 import * as schema from "./schema/index.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -325,13 +326,22 @@ export async function withCompanyScopeBypass<T>(
       );
     }
 
-    await tx.insert(crossCompanyAccessLog).values({
-      reason: opts.reason,
-      actorType: opts.actorType ?? null,
-      actorId: opts.actorId ?? null,
-      route: opts.route ?? null,
-      companyIdsTouched: opts.companyIdsTouched ?? null,
-    });
+    // DUR-386: the enumerated, timer-driven scheduler chains are routine
+    // mechanics -- counted in process rather than written here, so the table
+    // keeps surfacing the rare genuine cross-company use it exists for. Every
+    // other bypass, including any scheduler route not on that list, still
+    // writes its row (fail-open). See cross-company-audit.ts.
+    if (isRoutineSchedulerBypass(opts)) {
+      recordRoutineSchedulerBypass(opts.route as string);
+    } else {
+      await tx.insert(crossCompanyAccessLog).values({
+        reason: opts.reason,
+        actorType: opts.actorType ?? null,
+        actorId: opts.actorId ?? null,
+        route: opts.route ?? null,
+        companyIdsTouched: opts.companyIdsTouched ?? null,
+      });
+    }
     return fn(tx);
   });
 }
@@ -842,13 +852,20 @@ export async function runInCompanyScopeBypass<T>(
     }
 
     const scopedDb = drizzlePg(fence.client, { schema });
-    await scopedDb.insert(crossCompanyAccessLog).values({
-      reason: opts.reason,
-      actorType: opts.actorType ?? null,
-      actorId: opts.actorId ?? null,
-      route: opts.route ?? null,
-      companyIdsTouched: opts.companyIdsTouched ?? null,
-    });
+    // DUR-386: see the matching comment in withCompanyScopeBypass above --
+    // this is the call site the ~14 heartbeat scheduler tick chains reach
+    // every `config.heartbeatSchedulerIntervalMs` (default 30s), forever.
+    if (isRoutineSchedulerBypass(opts)) {
+      recordRoutineSchedulerBypass(opts.route as string);
+    } else {
+      await scopedDb.insert(crossCompanyAccessLog).values({
+        reason: opts.reason,
+        actorType: opts.actorType ?? null,
+        actorId: opts.actorId ?? null,
+        route: opts.route ?? null,
+        companyIdsTouched: opts.companyIdsTouched ?? null,
+      });
+    }
 
     return await requestCompanyScopeStorage.run({ kind: "bypass", scopedDb, liveness }, fn);
   } finally {

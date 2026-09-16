@@ -54,6 +54,17 @@ export {
   type RequestCompanyScopeBypass,
   type RequestPooledScope,
 } from "./company-scope.js";
+export {
+  ROUTINE_SCHEDULER_BYPASS_ACTOR_TYPE,
+  ROUTINE_SCHEDULER_BYPASS_ROUTES,
+  ROUTINE_SCHEDULER_BYPASS_SUMMARY_INTERVAL_MS,
+  isRoutineSchedulerBypass,
+  recordRoutineSchedulerBypass,
+  snapshotRoutineSchedulerBypassCounts,
+  resetRoutineSchedulerBypassCounts,
+  type RoutineSchedulerBypassRoute,
+  type RoutineSchedulerBypassSubject,
+} from "./cross-company-audit.js";
 export { issueRelations } from "./schema/issue_relations.js";
 export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";
 export * from "./schema/index.js";
