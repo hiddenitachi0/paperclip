@@ -5,6 +5,7 @@ export const queryKeys = {
     stats: ["companies", "stats"] as const,
     instructions: (id: string) => ["companies", id, "instructions"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
+    telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
   },
   companySkills: {
     list: (companyId: string) => ["company-skills", companyId] as const,

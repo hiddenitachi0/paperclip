@@ -1195,6 +1195,23 @@ export {
   type SaveInstanceClaudeAuthTokenInput,
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./validators/instance-claude-auth.js";
+export type {
+  TelegramBotCheckResult,
+  TelegramBotSummary,
+  TelegramBridgeBot,
+  TelegramBridgeConfig,
+} from "./types/telegram-bot.js";
+export {
+  MAX_TELEGRAM_BOT_ALLOWED_USERS,
+  TELEGRAM_BOT_TOKEN_PATTERN,
+  TELEGRAM_USER_ID_PATTERN,
+  createTelegramBotSchema,
+  rotateTelegramBotTokenSchema,
+  updateTelegramBotAllowedUsersSchema,
+  type CreateTelegramBotInput,
+  type RotateTelegramBotTokenInput,
+  type UpdateTelegramBotAllowedUsersInput,
+} from "./validators/telegram-bot.js";
 export {
   ADMIN_AUTH_CHECK_STATUSES,
   ADMIN_AUTH_CHECK_TRIGGERS,
