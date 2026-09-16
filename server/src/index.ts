@@ -66,6 +66,10 @@ import {
 } from "./services/index.js";
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import {
+  SCHEDULER_TICK_CHAIN,
+  schedulerTickSingleFlight,
+} from "./services/scheduler-tick-single-flight.js";
+import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
 } from "./services/adapter-registry-bootstrap.js";
@@ -1082,80 +1086,88 @@ export async function startServer(): Promise<StartedServer> {
       // DUR-3939/DUR-3940: record every tick so /api/health can say whether
       // the scheduler itself is alive, separately from whether runs start.
       schedulerLiveness.tickStarted();
-      void runInCompanyScopeBypass(
-        bypassDb,
-        { reason: "heartbeat scheduler tick: tickTimers", actorType: "scheduler", route: "heartbeat-scheduler:tickTimers" },
-        () => heartbeat.tickTimers(new Date()),
-      )
-        .then((result) => {
-          schedulerLiveness.tickFinished(result);
-          if (result.enqueued > 0) {
-            logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          schedulerLiveness.tickFailed(err);
-          logger.error({ err }, "heartbeat timer tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tickTimers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          { reason: "heartbeat scheduler tick: tickTimers", actorType: "scheduler", route: "heartbeat-scheduler:tickTimers" },
+          () => heartbeat.tickTimers(new Date()),
+        )
+          .then((result) => {
+            schedulerLiveness.tickFinished(result);
+            if (result.enqueued > 0) {
+              logger.info({ ...result }, "heartbeat timer tick enqueued runs");
+            }
+          })
+          .catch((err) => {
+            schedulerLiveness.tickFailed(err);
+            logger.error({ err }, "heartbeat timer tick failed");
+          }),
+      );
 
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: tickScheduledTriggers",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:tickScheduledTriggers",
-        },
-        () => routines.tickScheduledTriggers(new Date()),
-      )
-        .then((result) => {
-          if (result.triggered > 0) {
-            logger.info({ ...result }, "routine scheduler tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "routine scheduler tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.tickScheduledTriggers, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: tickScheduledTriggers",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:tickScheduledTriggers",
+          },
+          () => routines.tickScheduledTriggers(new Date()),
+        )
+          .then((result) => {
+            if (result.triggered > 0) {
+              logger.info({ ...result }, "routine scheduler tick enqueued runs");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "routine scheduler tick failed");
+          }),
+      );
 
       // DUR-40: flag any merge_pr approval that landed on a project's deploy
       // branch without a follow-up deploy approval (see merge-deploy-visibility.ts).
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: mergeDeployVisibility",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:mergeDeployVisibility",
-        },
-        () => mergeDeployVisibility.tick(new Date()),
-      )
-        .then((result) => {
-          if (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0) {
-            logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "merge-deploy visibility tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mergeDeployVisibility, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: mergeDeployVisibility",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:mergeDeployVisibility",
+          },
+          () => mergeDeployVisibility.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.flagged > 0 || result.backfilled > 0 || result.gaveUp > 0) {
+              logger.info({ ...result }, "merge-deploy visibility tick flagged unfollowed merges");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "merge-deploy visibility tick failed");
+          }),
+      );
 
       // DUR-3923: an approved deploy card the runner never picks up (wrong kind, wrong
       // workspace, runner stopped) must get a plain-language note instead of silence
       // (see deploy-approval-feedback.ts). Bypass scope for the same reason as above.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: deployApprovalFeedback",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:deployApprovalFeedback",
-        },
-        () => deployApprovalFeedback.tick(new Date()),
-      )
-        .then((result) => {
-          if (result.flagged > 0) {
-            logger.info({ ...result }, "deploy-approval feedback tick flagged approved deploys nothing acted on");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "deploy-approval feedback tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.deployApprovalFeedback, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: deployApprovalFeedback",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:deployApprovalFeedback",
+          },
+          () => deployApprovalFeedback.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.flagged > 0) {
+              logger.info({ ...result }, "deploy-approval feedback tick flagged approved deploys nothing acted on");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "deploy-approval feedback tick failed");
+          }),
+      );
 
       // DUR-238: once a deploy approval completes, proactively close every OTHER in_review
       // issue in the same project whose merge commit shipped as part of it (exact match or a
@@ -1163,23 +1175,25 @@ export async function startServer(): Promise<StartedServer> {
       // done PATCH (see deploy-carried-issues.ts). Wrapped in runInCompanyScopeBypass (DUR-352)
       // for the same reason as mergeDeployVisibility above: its tick() scans approvals across
       // every company in one sweep, so bypass (not per-company scope) is the right primitive.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: deployCarriedIssues",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:deployCarriedIssues",
-        },
-        () => deployCarriedIssues.tick(),
-      )
-        .then((result) => {
-          if (result.closed > 0) {
-            logger.info({ ...result }, "deploy-carried-issues tick auto-closed issues carried by a completed deploy");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "deploy-carried-issues tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.deployCarriedIssues, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: deployCarriedIssues",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:deployCarriedIssues",
+          },
+          () => deployCarriedIssues.tick(),
+        )
+          .then((result) => {
+            if (result.closed > 0) {
+              logger.info({ ...result }, "deploy-carried-issues tick auto-closed issues carried by a completed deploy");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "deploy-carried-issues tick failed");
+          }),
+      );
 
       // DUR-299 point 6 / DUR-314: delegate the "61 percent" of merge_pr
       // approvals (CI green + no fundamental-surface path touched +
@@ -1188,246 +1202,264 @@ export async function startServer(): Promise<StartedServer> {
       // inside tick()) in addition to the startup flag above -- see
       // merge-pr-automation.ts for the full set of hard rules.
       if (mergePrAutomation) {
-        void runInCompanyScopeBypass(
-          bypassDb,
-          {
-            reason: "heartbeat scheduler tick: mergePrAutomation",
-            actorType: "scheduler",
-            route: "heartbeat-scheduler:mergePrAutomation",
-          },
-          () => mergePrAutomation.tick(new Date()),
-        )
-          .then((result) => {
-            if (result.approved > 0) {
-              logger.info({ ...result }, "merge-pr automation tick approved delegated merge_pr approvals");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "merge-pr automation tick failed");
-          });
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.mergePrAutomation, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: mergePrAutomation",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:mergePrAutomation",
+            },
+            () => mergePrAutomation.tick(new Date()),
+          )
+            .then((result) => {
+              if (result.approved > 0) {
+                logger.info({ ...result }, "merge-pr automation tick approved delegated merge_pr approvals");
+              }
+            })
+            .catch((err) => {
+              logger.error({ err }, "merge-pr automation tick failed");
+            }),
+        );
       }
 
       // DUR-128: an agent left sitting in "error" is invisible until someone
       // happens to look. Raise it as soon as it crosses the stall threshold
       // (see agent-error-alerts.ts) instead of waiting to be discovered.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: agentErrorAlerts",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:agentErrorAlerts",
-        },
-        () => agentErrorAlerts.tick(new Date()),
-      )
-        .then((result) => {
-          if (result.alerted > 0) {
-            logger.warn({ ...result }, "agent-error alert tick raised stalled-agent alerts");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "agent-error alert tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.agentErrorAlerts, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: agentErrorAlerts",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:agentErrorAlerts",
+          },
+          () => agentErrorAlerts.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.alerted > 0) {
+              logger.warn({ ...result }, "agent-error alert tick raised stalled-agent alerts");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "agent-error alert tick failed");
+          }),
+      );
 
       // DUR-3965: quiet mode freezes every agent in every company. A deploy
       // that failed while it was on left the instance completely silent for 27
       // minutes on 2026-09-10 with nothing anywhere saying why. Once it has
       // been on longer than the configured window, say so in each company's
       // Activity feed. Never clears it: someone may have set it deliberately.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: quietModeAlerts",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:quietModeAlerts",
-        },
-        () => quietModeAlerts.tick(new Date()),
-      )
-        .then((result) => {
-          if (result.alerted > 0) {
-            logger.warn({ ...result }, "quiet mode has been active too long — operator notice written to every company");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "quiet-mode alert tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.quietModeAlerts, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: quietModeAlerts",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:quietModeAlerts",
+          },
+          () => quietModeAlerts.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.alerted > 0) {
+              logger.warn({ ...result }, "quiet mode has been active too long — operator notice written to every company");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "quiet-mode alert tick failed");
+          }),
+      );
 
       // DUR-130: the fn_flag_untracked_write trigger (migration 0139) records
       // any write to a DUR-128-relevant table not made through the service
       // layer, migration runner, or restore path. Surface each new row as an
       // operator-visible alert instead of leaving it a quiet DB-only row.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: untrackedWriteAlerts",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:untrackedWriteAlerts",
-        },
-        () => untrackedWriteAlerts.tick(new Date()),
-      )
-        .then((result) => {
-          if (result.alerted > 0) {
-            logger.warn({ ...result }, "untracked-write alert tick raised out-of-band write alerts");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "untracked-write alert tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.untrackedWriteAlerts, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: untrackedWriteAlerts",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:untrackedWriteAlerts",
+          },
+          () => untrackedWriteAlerts.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.alerted > 0) {
+              logger.warn({ ...result }, "untracked-write alert tick raised out-of-band write alerts");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "untracked-write alert tick failed");
+          }),
+      );
 
       // DUR-134 review follow-up: move queued/approved persona posts through
       // the publisher's safety gates (kill switches, warm-up, autonomy gate,
       // daily cap, one-shot claim). Without this pass nothing ever published
       // on its own -- an approved post sat waiting for a manual trigger.
       if (personaPublisherSweep) {
-        void runInCompanyScopeBypass(
-          bypassDb,
-          {
-            reason: "heartbeat scheduler tick: personaPublisherSweep",
-            actorType: "scheduler",
-            route: "heartbeat-scheduler:personaPublisherSweep",
-          },
-          () => personaPublisherSweep.tick(),
-        )
-          .then((result) => {
-            if (result.published > 0 || result.failed > 0 || result.pendingApproval > 0 || result.errors > 0) {
-              logger.info({ ...result }, "persona publisher sweep moved posts");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "persona publisher sweep tick failed");
-          });
+        void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.personaPublisherSweep, () =>
+          runInCompanyScopeBypass(
+            bypassDb,
+            {
+              reason: "heartbeat scheduler tick: personaPublisherSweep",
+              actorType: "scheduler",
+              route: "heartbeat-scheduler:personaPublisherSweep",
+            },
+            () => personaPublisherSweep.tick(),
+          )
+            .then((result) => {
+              if (result.published > 0 || result.failed > 0 || result.pendingApproval > 0 || result.errors > 0) {
+                logger.info({ ...result }, "persona publisher sweep moved posts");
+              }
+            })
+            .catch((err) => {
+              logger.error({ err }, "persona publisher sweep tick failed");
+            }),
+        );
       }
 
       // DUR-162: close pending operator-queue cards nobody has answered within
       // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them
       // to pile up in the live decision queue forever.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: issueThreadInteractions abandonment",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:issueThreadInteractionsAbandonment",
-        },
-        () => issueThreadInteractions.expireAbandonedPending(new Date()),
-      )
-        .then((expired) => {
-          if (expired.length > 0) {
-            logger.info(
-              { expired: expired.length },
-              "issue-thread-interaction abandonment tick closed unanswered operator cards",
-            );
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "issue-thread-interaction abandonment tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueThreadInteractionsAbandonment, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: issueThreadInteractions abandonment",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:issueThreadInteractionsAbandonment",
+          },
+          () => issueThreadInteractions.expireAbandonedPending(new Date()),
+        )
+          .then((expired) => {
+            if (expired.length > 0) {
+              logger.info(
+                { expired: expired.length },
+                "issue-thread-interaction abandonment tick closed unanswered operator cards",
+              );
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "issue-thread-interaction abandonment tick failed");
+          }),
+      );
 
       // Boost asks waiting on a boss (agent -> boss -> operator) move on to the
       // operator by themselves once the boss's time is up, so a silent boss
       // can never leave a report stuck on its normal setting forever.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: model boost boss-review timeouts",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:modelBoostBossReviewTimeouts",
-        },
-        () => escalationGrants.sweepBossReviewTimeouts(new Date()),
-      )
-        .then((movedOn) => {
-          if (movedOn.length > 0) {
-            logger.info({ movedOn: movedOn.length }, "boost requests moved on to the operator after the boss did not answer");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "model boost boss-review timeout tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.modelBoostBossReviewTimeouts, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: model boost boss-review timeouts",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:modelBoostBossReviewTimeouts",
+          },
+          () => escalationGrants.sweepBossReviewTimeouts(new Date()),
+        )
+          .then((movedOn) => {
+            if (movedOn.length > 0) {
+              logger.info({ movedOn: movedOn.length }, "boost requests moved on to the operator after the boss did not answer");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "model boost boss-review timeout tick failed");
+          }),
+      );
 
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: environmentCustomImages cleanup",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:environmentCustomImagesCleanup",
-        },
-        () => environmentCustomImages.cleanupExpiredSetupSessions(),
-      )
-        .then((result) => {
-          if (result.timedOut > 0 || result.failed > 0) {
-            logger.warn({ ...result }, "environment customImage setup cleanup changed sessions");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "environment customImage setup cleanup failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.environmentCustomImagesCleanup, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: environmentCustomImages cleanup",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:environmentCustomImagesCleanup",
+          },
+          () => environmentCustomImages.cleanupExpiredSetupSessions(),
+        )
+          .then((result) => {
+            if (result.timedOut > 0 || result.failed > 0) {
+              logger.warn({ ...result }, "environment customImage setup cleanup changed sessions");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "environment customImage setup cleanup failed");
+          }),
+      );
 
       // Periodically reap orphaned runs (5-min staleness threshold) and make sure
       // persisted queued work is still being driven forward. One shared bypass
       // scope for the whole chained pipeline below (not one per step) --
       // each step depends on the previous one's result, so this is one unit
       // of work, not independent iterations.
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: periodic recovery pipeline",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:periodicRecoveryPipeline",
-        },
-        () =>
-          heartbeat
-            .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-            .then(() => heartbeat.promoteDueScheduledRetries())
-            .then(async (promotion) => {
-          await heartbeat.resumeQueuedRuns();
-          const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-          if (
-            promotion.promoted > 0 ||
-            reconciled.assignmentDispatched > 0 ||
-            reconciled.dispatchRequeued > 0 ||
-            reconciled.continuationRequeued > 0 ||
-            reconciled.successfulRunHandoffEscalated > 0 ||
-            reconciled.escalated > 0 ||
-            reconciled.assigneeUnavailableNoticed > 0
-          ) {
-            logger.warn(
-              { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-              "periodic heartbeat recovery changed assigned issue state",
-            );
-          }
-        })
-        .then(async () => {
-          const reconciled = await heartbeat.reconcileIssueGraphLiveness();
-          if (reconciled.escalationsCreated > 0 || reconciled.dependencyWakesHealed > 0) {
-            logger.warn({ ...reconciled }, "periodic issue-graph liveness reconciliation changed issue graph state");
-          }
-        })
-        .then(async () => {
-          const reconciled = await heartbeat.reconcileTaskWatchdogs();
-          if (reconciled.triggered > 0) {
-            logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
-          }
-        })
-        .then(async () => {
-          const scanned = await heartbeat.scanSilentActiveRuns();
-          if (scanned.created > 0 || scanned.escalated > 0) {
-            logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
-          }
-        })
-        .then(async () => {
-          const swept = await heartbeat.sweepStaleIssueLocks();
-          if (swept.cleared > 0) {
-            logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
-          }
-        })
-            .then(async () => {
-              const reviewed = await heartbeat.reconcileProductivityReviews();
-              if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
-                logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
-              }
-            }),
-      )
-        .catch((err) => {
-          logger.error({ err }, "periodic heartbeat recovery failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.periodicRecoveryPipeline, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: periodic recovery pipeline",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:periodicRecoveryPipeline",
+          },
+          () =>
+            heartbeat
+              .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
+              .then(() => heartbeat.promoteDueScheduledRetries())
+              .then(async (promotion) => {
+            await heartbeat.resumeQueuedRuns();
+            const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
+            if (
+              promotion.promoted > 0 ||
+              reconciled.assignmentDispatched > 0 ||
+              reconciled.dispatchRequeued > 0 ||
+              reconciled.continuationRequeued > 0 ||
+              reconciled.successfulRunHandoffEscalated > 0 ||
+              reconciled.escalated > 0 ||
+              reconciled.assigneeUnavailableNoticed > 0
+            ) {
+              logger.warn(
+                { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+                "periodic heartbeat recovery changed assigned issue state",
+              );
+            }
+          })
+          .then(async () => {
+            const reconciled = await heartbeat.reconcileIssueGraphLiveness();
+            if (reconciled.escalationsCreated > 0 || reconciled.dependencyWakesHealed > 0) {
+              logger.warn({ ...reconciled }, "periodic issue-graph liveness reconciliation changed issue graph state");
+            }
+          })
+          .then(async () => {
+            const reconciled = await heartbeat.reconcileTaskWatchdogs();
+            if (reconciled.triggered > 0) {
+              logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
+            }
+          })
+          .then(async () => {
+            const scanned = await heartbeat.scanSilentActiveRuns();
+            if (scanned.created > 0 || scanned.escalated > 0) {
+              logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
+            }
+          })
+          .then(async () => {
+            const swept = await heartbeat.sweepStaleIssueLocks();
+            if (swept.cleared > 0) {
+              logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+            }
+          })
+              .then(async () => {
+                const reviewed = await heartbeat.reconcileProductivityReviews();
+                if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
+                  logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
+                }
+              }),
+        )
+          .catch((err) => {
+            logger.error({ err }, "periodic heartbeat recovery failed");
+          }),
+      );
     }, config.heartbeatSchedulerIntervalMs);
 
     // DUR-62: the weekly check-up. Its own, much slower interval: the tick
@@ -1455,37 +1487,39 @@ export async function startServer(): Promise<StartedServer> {
     let weeklyCheckupWasOn = config.weeklyCheckupEnabled;
     const tickWeeklyCheckup = () => {
       if (heartbeatDrainState?.isDraining) return;
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: weekly organization check-up",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:organizationCheckups",
-        },
-        async () => {
-          const enabled =
-            config.weeklyCheckupEnabled || (await weeklyCheckupSettings.getExperimental()).enableWeeklyCheckup;
-          if (enabled !== weeklyCheckupWasOn) {
-            logger.info({ enabled }, enabled ? "Weekly check-up switched on in instance settings" : "Weekly check-up switched off");
-            weeklyCheckupWasOn = enabled;
-          }
-          if (!enabled) return null;
-          return organizationCheckups.reconcileOrganizationCheckups({
-            now: new Date(),
-            intervalDays: config.weeklyCheckupIntervalDays,
-            dryRun: config.weeklyCheckupDryRun,
-            companyIds: config.weeklyCheckupCompanyIds,
-          });
-        },
-      )
-        .then((result) => {
-          if (result && (result.created > 0 || result.failed > 0 || result.dryRun > 0)) {
-            logger.warn({ ...result }, "weekly check-up tick wrote or previewed reports");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "weekly check-up tick failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.organizationCheckups, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: weekly organization check-up",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:organizationCheckups",
+          },
+          async () => {
+            const enabled =
+              config.weeklyCheckupEnabled || (await weeklyCheckupSettings.getExperimental()).enableWeeklyCheckup;
+            if (enabled !== weeklyCheckupWasOn) {
+              logger.info({ enabled }, enabled ? "Weekly check-up switched on in instance settings" : "Weekly check-up switched off");
+              weeklyCheckupWasOn = enabled;
+            }
+            if (!enabled) return null;
+            return organizationCheckups.reconcileOrganizationCheckups({
+              now: new Date(),
+              intervalDays: config.weeklyCheckupIntervalDays,
+              dryRun: config.weeklyCheckupDryRun,
+              companyIds: config.weeklyCheckupCompanyIds,
+            });
+          },
+        )
+          .then((result) => {
+            if (result && (result.created > 0 || result.failed > 0 || result.dryRun > 0)) {
+              logger.warn({ ...result }, "weekly check-up tick wrote or previewed reports");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "weekly check-up tick failed");
+          }),
+      );
     };
     // First tick a couple of minutes after boot so startup recovery has
     // settled and the first report does not describe a restart in progress.
@@ -1501,23 +1535,25 @@ export async function startServer(): Promise<StartedServer> {
     const adminAuthSecret = resolveAdminAuthSigningSecret();
     const tickAdminAuthCheck = (trigger: "startup" | "scheduled") => {
       if (heartbeatDrainState?.isDraining) return;
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: admin auth record check",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:adminAuthCheck",
-        },
-        () => reconcileAdminAuthSnapshot(schedulerDb as any, { secret: adminAuthSecret, trigger }),
-      )
-        .then((result) => {
-          if (result.status !== "unchanged") {
-            logger.warn({ ...result }, "admin auth record check found something to report");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "admin auth record check failed");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.adminAuthCheck, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: admin auth record check",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:adminAuthCheck",
+          },
+          () => reconcileAdminAuthSnapshot(schedulerDb as any, { secret: adminAuthSecret, trigger }),
+        )
+          .then((result) => {
+            if (result.status !== "unchanged") {
+              logger.warn({ ...result }, "admin auth record check found something to report");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "admin auth record check failed");
+          }),
+      );
     };
     setTimeout(() => tickAdminAuthCheck("startup"), 90 * 1000).unref?.();
     if (config.adminAuthCheckIntervalMinutes > 0) {
@@ -1534,29 +1570,31 @@ export async function startServer(): Promise<StartedServer> {
     const claudeAuthChecks = instanceClaudeAuthService(schedulerDb as any);
     const tickClaudeAuthCheck = () => {
       if (heartbeatDrainState?.isDraining) return;
-      void runInCompanyScopeBypass(
-        bypassDb,
-        {
-          reason: "heartbeat scheduler tick: daily Claude sign-in check",
-          actorType: "scheduler",
-          route: "heartbeat-scheduler:claudeAuthCheck",
-        },
-        () => claudeAuthChecks.runScheduledCheck(),
-      )
-        .then((result) => {
-          if (result.outcome !== "checked") return;
-          if (result.notice) {
-            logger.warn(
-              { health: result.status.health, expiresInDays: result.status.expiresInDays, companies: result.noticedCompanyIds.length },
-              `daily Claude sign-in check: ${result.notice.message}`,
-            );
-          } else {
-            logger.info({ health: result.status.health, expiresInDays: result.status.expiresInDays }, "daily Claude sign-in check passed");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "daily Claude sign-in check failed to run");
-        });
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.claudeAuthCheck, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: daily Claude sign-in check",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:claudeAuthCheck",
+          },
+          () => claudeAuthChecks.runScheduledCheck(),
+        )
+          .then((result) => {
+            if (result.outcome !== "checked") return;
+            if (result.notice) {
+              logger.warn(
+                { health: result.status.health, expiresInDays: result.status.expiresInDays, companies: result.noticedCompanyIds.length },
+                `daily Claude sign-in check: ${result.notice.message}`,
+              );
+            } else {
+              logger.info({ health: result.status.health, expiresInDays: result.status.expiresInDays }, "daily Claude sign-in check passed");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "daily Claude sign-in check failed to run");
+          }),
+      );
     };
     setTimeout(tickClaudeAuthCheck, 5 * 60 * 1000).unref?.();
     setInterval(tickClaudeAuthCheck, 60 * 60 * 1000);
