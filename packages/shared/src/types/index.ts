@@ -673,3 +673,9 @@ export type {
   CrossCompanyInstructionSenderView,
   CrossCompanyInstructionView,
 } from "./cross-company-instruction.js";
+export type {
+  TelegramBotCheckResult,
+  TelegramBotSummary,
+  TelegramBridgeBot,
+  TelegramBridgeConfig,
+} from "./telegram-bot.js";

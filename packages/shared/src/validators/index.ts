@@ -753,6 +753,17 @@ export {
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./instance-claude-auth.js";
 export {
+  MAX_TELEGRAM_BOT_ALLOWED_USERS,
+  TELEGRAM_BOT_TOKEN_PATTERN,
+  TELEGRAM_USER_ID_PATTERN,
+  createTelegramBotSchema,
+  rotateTelegramBotTokenSchema,
+  updateTelegramBotAllowedUsersSchema,
+  type CreateTelegramBotInput,
+  type RotateTelegramBotTokenInput,
+  type UpdateTelegramBotAllowedUsersInput,
+} from "./telegram-bot.js";
+export {
   sendCrossCompanyInstructionSchema,
   crossCompanyInstructionRequestPayloadSchema,
   CROSS_COMPANY_INSTRUCTION_STATUSES,

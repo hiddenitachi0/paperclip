@@ -50,6 +50,10 @@ import {
   // Goal
   createGoalSchema,
   updateGoalSchema,
+  // Telegram bots (DUR-3978)
+  createTelegramBotSchema,
+  rotateTelegramBotTokenSchema,
+  updateTelegramBotAllowedUsersSchema,
   // Secret
   createSecretSchema,
   updateSecretSchema,
@@ -745,6 +749,15 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/issues/{id}/interactions/{interactionId}/respond",
   "POST /api/companies/{companyId}/agents/{agentId}/avatar",
   "DELETE /api/companies/{companyId}/agents/{agentId}/avatar",
+  // DUR-3978: connecting a Telegram bot is operator work. An agent must never
+  // reach these — one of them stores a credential, and all of them decide who
+  // may talk to an agent from outside Paperclip.
+  "GET /api/companies/{companyId}/telegram-bots",
+  "POST /api/companies/{companyId}/telegram-bots",
+  "POST /api/companies/{companyId}/telegram-bots/{botId}/token",
+  "POST /api/companies/{companyId}/telegram-bots/{botId}/test",
+  "PUT /api/companies/{companyId}/telegram-bots/{botId}/allowed-users",
+  "DELETE /api/companies/{companyId}/telegram-bots/{botId}",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -766,6 +779,11 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   "POST /api/instance/security/check",
   "POST /api/instance/security/sign-out-everywhere",
   "DELETE /api/instance/security/sessions/{sessionId}",
+  // DUR-3978: what the host-side Telegram bridge reads. The roster carries no
+  // token; the second one carries exactly one, for one bot, and is recorded in
+  // secret_access_events like every other credential read.
+  "GET /api/instance/telegram-bridge-config",
+  "GET /api/companies/{companyId}/telegram-bots/{botId}/bridge-token",
 ]);
 
 const CREATED_OPERATIONS = new Set([
@@ -816,6 +834,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/plugins/install",
   "POST /api/instance/database-backups",
   "POST /api/instance/claude-auth/sign-in",
+  "POST /api/companies/{companyId}/telegram-bots",
 ]);
 
 const ACCEPTED_OPERATIONS = new Set([
@@ -3121,6 +3140,29 @@ for (const route of [
     method: route[0],
     path: route[1],
     tags: ["instance"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Telegram bots (DUR-3978) ───────────────────────────────────────────────
+// The bot token appears in exactly ONE of these operations — the
+// instance-admin-only bridge-token read. Every other response here carries a
+// masked hint (`8123456789:••••bQ4t`) and nothing more.
+for (const route of [
+  ["get", "/api/companies/{companyId}/telegram-bots", "List the Telegram bots connected in this company (never the token)", undefined],
+  ["post", "/api/companies/{companyId}/telegram-bots", "Connect a Telegram bot to one of this company's agents", createTelegramBotSchema],
+  ["post", "/api/companies/{companyId}/telegram-bots/{botId}/token", "Replace a connected bot's token with a new one from BotFather", rotateTelegramBotTokenSchema],
+  ["post", "/api/companies/{companyId}/telegram-bots/{botId}/test", "Ask Telegram whether this bot is reachable, and report its username", undefined],
+  ["put", "/api/companies/{companyId}/telegram-bots/{botId}/allowed-users", "Set which Telegram users may use this bot", updateTelegramBotAllowedUsersSchema],
+  ["delete", "/api/companies/{companyId}/telegram-bots/{botId}", "Disconnect a Telegram bot and delete its saved token", undefined],
+  ["get", "/api/instance/telegram-bridge-config", "Every enabled Telegram bot on this instance, without tokens, for the host-side bridge", undefined],
+  ["get", "/api/companies/{companyId}/telegram-bots/{botId}/bridge-token", "Resolve one bot's token for the host-side bridge (instance admin only)", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["telegram"],
     summary: route[2],
     ...(route[3] ? { body: route[3] } : {}),
   });

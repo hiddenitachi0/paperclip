@@ -42,6 +42,7 @@ diagnostics/
 
 # Editor / tool temp files
 *.tmp
+__pycache__/
 .vscode/
 .claude/settings.local.json
 .paperclip-local/
