@@ -5,7 +5,10 @@ import {
   patchInstanceExperimentalSettingsSchema,
   patchInstanceGeneralSettingsSchema,
 } from "./instance.js";
-import { DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS } from "../types/instance.js";
+import {
+  DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
+  DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+} from "../types/instance.js";
 
 describe("instance experimental settings validators", () => {
   it("defaults the server info debug view off", () => {
@@ -46,5 +49,28 @@ describe("instructionsStalenessThresholdDays", () => {
 
   it("rejects a non-integer threshold", () => {
     expect(() => instanceGeneralSettingsSchema.parse({ instructionsStalenessThresholdDays: 60.5 })).toThrow();
+  });
+});
+
+// The time-based half of the Now page's "nobody is moving this" source.
+describe("needsYouStalledAfterHours", () => {
+  it("defaults to 12 hours", () => {
+    const settings = instanceGeneralSettingsSchema.parse({});
+    expect(settings.needsYouStalledAfterHours).toBe(12);
+    expect(DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS).toBe(12);
+  });
+
+  it("accepts a patch overriding the threshold", () => {
+    expect(
+      patchInstanceGeneralSettingsSchema.parse({ needsYouStalledAfterHours: 48 }),
+    ).toEqual({ needsYouStalledAfterHours: 48 });
+  });
+
+  it("rejects a non-positive threshold", () => {
+    expect(() => instanceGeneralSettingsSchema.parse({ needsYouStalledAfterHours: 0 })).toThrow();
+  });
+
+  it("rejects a non-integer threshold", () => {
+    expect(() => instanceGeneralSettingsSchema.parse({ needsYouStalledAfterHours: 12.5 })).toThrow();
   });
 });

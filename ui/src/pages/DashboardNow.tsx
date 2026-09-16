@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Approval, Agent, Issue } from "@paperclipai/shared";
+import type { Approval, Agent, Issue, StalledTask } from "@paperclipai/shared";
 import {
   AlertCircle,
   ArrowRight,
@@ -15,6 +15,7 @@ import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
 import { approvalsApi } from "../api/approvals";
 import { issuesApi } from "../api/issues";
 import { interactionsApi, type PendingCompanyInteraction } from "../api/interactions";
+import { stalledTasksApi } from "../api/stalledTasks";
 import {
   describeNamedApprovalState,
   NAMED_APPROVAL_OUT_OF_DATE_CLOSE_REASON,
@@ -186,6 +187,22 @@ export function DashboardNow() {
     enabled: !!selectedCompanyId,
     refetchInterval: NOW_POLL_INTERVAL_MS,
   });
+
+  // Open work nobody is moving: the fifth source (see
+  // server/src/services/stalled-tasks.ts). An agent that ends its run and
+  // writes "awaiting operator verification" as an ordinary comment matches
+  // none of the four above, so the task just stops. The server does the whole
+  // judgement -- including dropping anything already shown through an
+  // approval, a card or a live run -- and returns rows ready to render, so
+  // this 5s poll stays one bounded query.
+  const { data: stalled } = useQuery({
+    queryKey: queryKeys.stalledTasks.forCompany(selectedCompanyId!),
+    queryFn: () => stalledTasksApi.listForCompany(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    refetchInterval: NOW_POLL_INTERVAL_MS,
+  });
+  const stalledTasks = stalled?.tasks ?? [];
+  const stalledTotalCount = stalled?.totalCount ?? 0;
 
   // Total open issues across every status that isn't done/cancelled, purely
   // to tell the operator how much this page is *not* showing (DUR-249): the
@@ -359,13 +376,18 @@ export function DashboardNow() {
     runsByLane.needs_you.length
     + actionableApprovals.length
     + needsYouTasks.length
-    + (pendingInteractions ?? []).length;
+    + (pendingInteractions ?? []).length
+    + stalledTotalCount;
 
   // Rows the lane's own LANE_ROW_LIMIT silently drops (DUR-249 item 3) —
-  // approvals and interactions above are never sliced, only these two are.
+  // approvals and interactions above are never sliced, only these are. For
+  // stalled work also count what the server itself capped, so the "+N more"
+  // stays true end to end rather than only describing the client's slice.
   const needsYouOverflow =
     Math.max(0, runsByLane.needs_you.length - LANE_ROW_LIMIT)
-    + Math.max(0, needsYouTasks.length - LANE_ROW_LIMIT);
+    + Math.max(0, needsYouTasks.length - LANE_ROW_LIMIT)
+    + Math.max(0, stalledTasks.length - LANE_ROW_LIMIT)
+    + Math.max(0, stalledTotalCount - stalledTasks.length);
 
   return (
     <div className="space-y-5">
@@ -439,6 +461,9 @@ export function DashboardNow() {
                   ))}
                   {needsYouTasks.slice(0, LANE_ROW_LIMIT).map(({ issue, waiting }) => (
                     <BlockedTaskRow key={`task-${issue.id}`} issue={issue} label={waiting.label} />
+                  ))}
+                  {stalledTasks.slice(0, LANE_ROW_LIMIT).map((task) => (
+                    <StalledTaskRow key={`stalled-${task.issueId}`} task={task} />
                   ))}
                   {needsYouCount === 0 ? <LaneEmpty label="Nothing needs you right now." /> : null}
                   {needsYouOverflow > 0 ? (
@@ -694,6 +719,32 @@ function BlockedTaskRow({
           </span>
           {label && label !== "Parked" ? ` · ${label}` : ""}
         </p>
+      </div>
+    </Link>
+  );
+}
+
+/**
+ * Open work nobody is moving. The whole sentence ("Nobody is working on this —
+ * Backend Engineer is paused because it reached its budget limit. Waiting
+ * since 13 September.") is written by the server so the Now page and the
+ * Activity feed can never describe the same situation differently.
+ */
+function StalledTaskRow({ task }: { task: StalledTask }) {
+  return (
+    <Link
+      to={`/issues/${task.identifier ?? task.issueId}`}
+      className="group flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/[0.04] px-2.5 py-2"
+      title="Open the task"
+      data-testid="now-stalled-task"
+    >
+      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
+          {task.identifier ? `${task.identifier} · ` : ""}
+          {task.title}
+        </p>
+        <p className="line-clamp-2 text-[10px] text-muted-foreground">{task.reasonText}</p>
       </div>
     </Link>
   );

@@ -20,6 +20,9 @@ import {
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   MIN_SILENT_RUN_TIMEOUT_MINUTES,
   MAX_SILENT_RUN_TIMEOUT_MINUTES,
+  DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+  MIN_NEEDS_YOU_STALLED_AFTER_HOURS,
+  MAX_NEEDS_YOU_STALLED_AFTER_HOURS,
   DEFAULT_MAX_TURNS_PER_RUN,
   MIN_MAX_TURNS_PER_RUN,
   MAX_MAX_TURNS_PER_RUN,
@@ -162,6 +165,15 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_SILENT_RUN_TIMEOUT_MINUTES)
     .max(MAX_SILENT_RUN_TIMEOUT_MINUTES)
     .default(DEFAULT_SILENT_RUN_TIMEOUT_MINUTES),
+  // Hours of no run, no comment and no status change before the Now page's
+  // "Needs you" lane reports an open task as one nobody is moving. A task
+  // whose assignee cannot run at all does not wait for this.
+  needsYouStalledAfterHours: z
+    .number()
+    .int()
+    .min(MIN_NEEDS_YOU_STALLED_AFTER_HOURS)
+    .max(MAX_NEEDS_YOU_STALLED_AFTER_HOURS)
+    .default(DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS),
   // DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
   // An agent's own adapterConfig.maxTurnsPerRun (> 0) takes precedence.
   maxTurnsPerRun: z

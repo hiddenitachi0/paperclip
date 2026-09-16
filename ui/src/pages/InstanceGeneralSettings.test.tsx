@@ -55,6 +55,7 @@ function defaultGeneralSettings(): InstanceGeneralSettingsPayload {
     globalMaxConcurrentRuns: 4,
     maxRunDurationMinutes: 60,
     silentRunTimeoutMinutes: 20,
+    needsYouStalledAfterHours: 12,
     maxTurnsPerRun: 100,
     sessionResetAfterRuns: 20,
     sessionResetAfterHours: 12,
