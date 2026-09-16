@@ -82,9 +82,11 @@ describe("DUR-386: the silenced scheduler set matches the real bypass call sites
     // The silencing decision keys on `route`; a call site that passes none
     // could never be silenced (safe), but it would also escape the
     // enumeration check above, so require them all to declare one.
-    // `await`/`void` prefixed only, so the identifier appearing in prose
-    // inside a comment is not counted as a call site.
-    const callSites = serverIndexSource.match(/(?:await|void)\s+runInCompanyScopeBypass\(/g) ?? [];
+    // `await`/`void`/`=>` prefixed only, so the identifier appearing in prose
+    // inside a comment is not counted as a call site. DUR-385 wrapped each
+    // fire-and-forget chain in a single-flight guard, so its call sites now
+    // read `() => runInCompanyScopeBypass(` instead of `void ...`.
+    const callSites = serverIndexSource.match(/(?:await|void|=>)\s+runInCompanyScopeBypass\(/g) ?? [];
     expect(callSites.length).toBe(schedulerRoutesDeclaredInServerIndex().length);
   });
 });
