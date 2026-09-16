@@ -714,6 +714,10 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // scoped GET .../persona-accounts/:accountId/publish-token route, modelled
   // on the deploy-github-token pattern.
   "persona_account",
+  // DUR-3978: the bot token for a telegram_bots row. Never resolved by the
+  // bot's own agent -- only by the instance-admin-only bridge-config route,
+  // modelled on the persona_account/deploy-github-token pattern above.
+  "telegram_bot",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
