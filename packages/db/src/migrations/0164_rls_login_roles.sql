@@ -258,6 +258,10 @@ DECLARE
     'routines',
     'secret_access_events',
     'session',
+    -- DUR-3978 slice 2. The real DDL, grant and policy for this table live in
+    -- 0166_telegram_bots.sql; the name is listed here for the same reason
+    -- company_service_tokens is, above.
+    'telegram_bots',
     'untracked_write_incidents',
     'user',
     'user_sidebar_preferences',
@@ -375,6 +379,9 @@ DECLARE
     'routine_triggers',
     'routines',
     'secret_access_events',
+    -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
+    -- it belongs in this list too.
+    'telegram_bots',
     'untracked_write_incidents',
     'workspace_operations',
     'workspace_runtime_services'
