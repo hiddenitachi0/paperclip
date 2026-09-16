@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Settings, CloudUpload, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
+import { TelegramBotsSection } from "../components/TelegramBotsSection";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
   Field,
@@ -421,6 +422,8 @@ export function CompanySettings() {
             Other systems
           </div>
           <ServiceTokensSection companyId={selectedCompanyId} />
+          {/* Telegram bots (DUR-3978) */}
+          <TelegramBotsSection companyId={selectedCompanyId} />
         </div>
       ) : null}
 

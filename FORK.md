@@ -419,8 +419,9 @@ nearest boss's) with Approve/Reject buttons; credential requests link to the das
 instead. Inbound: Approve/Reject taps resolve the approval, a text message creates a task for
 that bot's agent. Purely additive — approvals/tasks still live in Paperclip and the web UI.
 
-**Zero core edits** (host-side script driving the CLI, config at
-`/root/paperclip/.telegram-agents.json`, root-only). Iterated since first ship: multi-bot +
+**Zero core edits** for its first two years (host-side script driving the CLI, config at
+`/root/paperclip/.telegram-agents.json`, root-only — see the DUR-3978 update below, which moved
+that config into the app). Iterated since first ship: multi-bot +
 org-aware routing/escalation, multi-company support, only-mark-notified-after-successful-send,
 and surfacing parked/blocked/stopped tasks (not just `in_review`) so stalls don't go silent.
 
@@ -436,6 +437,31 @@ additionally gets inline Approve/Decline buttons (`iaccept:`/`ireject:` callback
 through `handle_callback` to `issue interaction:accept`/`interaction:reject`) — checkbox
 selections, question forms, and suggested-task drafts need the full form in the thread, so
 those get the deep link only, no buttons.
+
+**Update (DUR-3978, slice 2):** connecting a bot used to mean someone editing
+`/root/paperclip/.telegram-agents.json` as root — with the bot token in plain text — and
+restarting the systemd unit. Filip could not do any of that, so every new bot needed an engineer.
+The bots now live in Paperclip: **Company settings → Telegram-boter** connects a bot to one of that
+company's agents, stores the token in the ordinary company secret store (encrypted, rotatable,
+never shown again — the screen shows `8123456789:••••bQ4t`), tests it against Telegram's `getMe`
+and reports the bot's username in plain Norwegian, and lists who may use each bot. New table
+`telegram_bots` (migration 0166): the token is NOT in it, only `token_secret_id` pointing at
+`company_secrets`, which is what makes "an ordinary read route cannot return the token" a property
+of the schema rather than a habit.
+
+The bridge reads its configuration from Paperclip instead of the file, through the same
+`docker exec` CLI path it already uses (`paperclipai telegram bridge-config`) — so no new port, no
+new credential, no new env var. Two routes back it: `GET /api/instance/telegram-bridge-config`
+(the roster, **no tokens at all**) and `GET /api/companies/:id/telegram-bots/:botId/bridge-token`
+(one token, one bot). Both are **instance-admin only**, and the token read is recorded in
+`secret_access_events` like every other credential read. The old file still works as a fallback:
+if Paperclip does not answer, the file's bots keep running, and a bot that exists only in the file
+keeps running alongside the ones in the app (Paperclip wins where both describe the same agent).
+The bridge re-reads the config every loop, so a newly connected bot starts answering — and a
+removed one stops — without a restart. The lock-down from slice 1 is unchanged: private chats
+only, groups refused, strangers ignored, and nothing in a chat message can approve anything. A
+bot's own allowlist now comes from the app; a bot with nobody added falls back to the
+instance-wide `TELEGRAM_ALLOWED_USER_IDS` list, and with neither set, nobody gets in.
 
 _Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
 external dependency (a productizable deliverable from another company's project) and was

@@ -20,8 +20,17 @@ approvals/tasks still live in Paperclip and the web UI.
   that bot's company, and the agent's answer is posted back into the chat the
   task came from once it is done or waiting.
 
-Config: /root/paperclip/.telegram-agents.json =
+Config (DUR-3978 slice 2): the bots come from Paperclip itself — the operator
+connects them in company settings, and this service reads them through the
+same `docker exec` CLI path it already uses for everything else
+(`telegram bridge-config`). Bots appear and disappear without a restart.
+
+The old file, /root/paperclip/.telegram-agents.json =
   [{"agentId","name","token","companyId"?,"uiBase"?}, ...]  (root-only)
+still works, as a fallback: when Paperclip does not answer, the file's bots
+keep running, and a bot that only exists in the file (nobody has moved it into
+the app yet) keeps running alongside the ones that do. Paperclip wins where
+both describe the same agent.
 `companyId` scopes the bot to a company (defaults to PAPERCLIP_COMPANY_ID).
 `uiBase` is the deep-link base for that company (defaults to PAPERCLIP_UI_HOST).
 """
@@ -70,15 +79,121 @@ LOCK = threading.Lock()
 # Telegram user ids allowed to use the bots; set in main(). Empty means nobody.
 ALLOWED_USER_IDS = set()
 
+# The bots that should be running right now, keyed by token. Replaced wholesale
+# on every refresh, so a bot removed in Paperclip disappears from here and its
+# thread stops on its next pass (DUR-3978 slice 2).
+CURRENT_BOTS = {}
+BOT_THREADS = {}
+
+
+def _normalized_user_ids(raw):
+    """Telegram user ids as ints. Anything that is not a plain id is dropped —
+    a damaged entry must never become a wildcard."""
+    ids = set()
+    for value in raw or []:
+        text = str(value).strip()
+        if text.isdigit():
+            ids.add(int(text))
+    return ids
+
+
+def fetch_bots_from_api():
+    """The bots the operator has connected in Paperclip, or None.
+
+    None means "Paperclip did not answer" — NOT "there are no bots". The
+    difference matters: on None the caller keeps serving whatever it already
+    had, so an API that is down, restarting, or refusing this operator can
+    never take a running bot off the air. An empty list, by contrast, is a real
+    answer and is treated as one.
+    """
+    data = cli("telegram", "bridge-config")
+    if not isinstance(data, dict) or not isinstance(data.get("bots"), list):
+        return None
+    bots = []
+    for b in data["bots"]:
+        if not isinstance(b, dict):
+            continue
+        token = str(b.get("token") or "").strip()
+        agent_id = b.get("agentId")
+        if not token or not agent_id:
+            continue
+        bots.append({
+            "agentId": agent_id,
+            "name": b.get("name") or "Paperclip",
+            "token": token,
+            "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
+            "uiBase": b.get("uiBase") or UI_HOST,
+            "allowedUserIds": _normalized_user_ids(b.get("allowedUserIds")),
+            "source": "paperclip",
+        })
+    return bots
+
+
+def load_file_bots():
+    """The bots in the old root-only file. Missing or damaged file = no bots."""
+    try:
+        with open(CONFIG_FILE) as f:
+            text = f.read().strip()
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"telegram-bridge: could not read the bot file ({type(e).__name__})", flush=True)
+        return []
+    # An empty file is the ordinary state once every bot has been moved into
+    # Paperclip, so it is not worth a line of log every twelve seconds.
+    if not text:
+        return []
+    try:
+        raw = json.loads(text)
+    except Exception as e:
+        print(f"telegram-bridge: could not read the bot file ({type(e).__name__})", flush=True)
+        return []
+    bots = []
+    for b in raw if isinstance(raw, list) else []:
+        token = str(b.get("token") or "").strip()
+        if not token or not b.get("agentId"):
+            continue
+        bots.append({
+            "agentId": b["agentId"],
+            "name": b.get("name") or "Paperclip",
+            "token": token,
+            "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
+            "uiBase": b.get("uiBase") or UI_HOST,
+            # The file has never carried a per-bot allowlist; those bots keep
+            # using the instance-wide list, exactly as before.
+            "allowedUserIds": set(),
+            "source": "file",
+        })
+    return bots
+
+
+def merge_bots(api_bots, file_bots):
+    """Paperclip wins; the file covers agents Paperclip has no bot for.
+
+    So: removing a bot in the app stops it (it was never in the file), and an
+    old file-only bot keeps working until somebody moves it into the app.
+    """
+    if api_bots is None:
+        return file_bots
+    known = {(b["companyId"], b["agentId"]) for b in api_bots}
+    return api_bots + [b for b in file_bots if (b["companyId"], b["agentId"]) not in known]
+
 
 def load_bots():
-    with open(CONFIG_FILE) as f:
-        bots = json.load(f)
-    for b in bots:
-        b["token"] = b["token"].strip()
-        b.setdefault("companyId", DEFAULT_COMPANY_ID)
-        b.setdefault("uiBase", UI_HOST)
-    return bots
+    """Every bot that should be running right now."""
+    return merge_bots(fetch_bots_from_api(), load_file_bots())
+
+
+def allowed_users_for(bot):
+    """Who may use THIS bot.
+
+    A bot configured in the app carries its own list, and that list is the
+    whole answer for that bot. A bot with an empty list — a newly connected one
+    the operator has not filled in yet, or an old file bot — falls back to the
+    instance-wide list that was the only rule before this existed. Never wider
+    than one of those two, and never "everybody": with neither set, nobody.
+    """
+    return set(bot.get("allowedUserIds") or ()) or ALLOWED_USER_IDS
 
 
 def load_state():
@@ -262,7 +377,7 @@ def notify_approvals(state, bots):
                 {"text": "❌ Reject", "callback_data": f"reject:{aid}"},
             ]]}
             sent = False
-            for chat in deliverable_chats(state, bot["token"]):
+            for chat in deliverable_chats(state, bot["token"], allowed_users_for(bot)):
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
                 if kb:
                     params["reply_markup"] = kb
@@ -326,7 +441,7 @@ def notify_waiting(state, bots):
             text += "\nThis task is waiting and may need your input or go-ahead."
             text += f"\n\n[Open in Paperclip]({bot['uiBase']}/issues/{iid})"
             sent = False
-            for chat in deliverable_chats(state, bot["token"]):
+            for chat in deliverable_chats(state, bot["token"], allowed_users_for(bot)):
                 res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
                          parse_mode="Markdown", disable_web_page_preview=True)
                 if res is None:
@@ -373,7 +488,7 @@ def notify_stalled_agents(state, bots):
             text += "\nNo one has cleared it yet. It needs `clear-error` + `resume`, or someone to look."
             text += f"\n\n[Open in Paperclip]({bot['uiBase']}/agents/{aid})"
             sent = False
-            for chat in deliverable_chats(state, bot["token"]):
+            for chat in deliverable_chats(state, bot["token"], allowed_users_for(bot)):
                 res = tg(bot["token"], "sendMessage", chat_id=chat, text=text,
                          parse_mode="Markdown", disable_web_page_preview=True)
                 if res is None:
@@ -455,7 +570,7 @@ def notify_interactions(state, bots):
                 {"text": "❌ Decline", "callback_data": f"ireject:{issue_id}:{iid}"},
             ]]}
             sent = False
-            for chat in deliverable_chats(state, bot["token"]):
+            for chat in deliverable_chats(state, bot["token"], allowed_users_for(bot)):
                 params = dict(chat_id=chat, text=text, parse_mode="Markdown", disable_web_page_preview=True)
                 if kb:
                     params["reply_markup"] = kb
@@ -507,9 +622,15 @@ def resolve_allowed_user_ids(state, env_value):
     return derived, "private chats already connected"
 
 
-def deliverable_chats(state, token):
-    """The chats a bot may send cards to: allowed people's private chats only."""
-    return [chat for chat in bots_state(state, token)["chats"] if chat in ALLOWED_USER_IDS]
+def deliverable_chats(state, token, allowed=None):
+    """The chats a bot may send cards to: allowed people's private chats only.
+
+    `allowed` is this bot's own list when it has one (see allowed_users_for).
+    With nothing given it falls back to the instance-wide list, which is what
+    every caller did before per-bot lists existed.
+    """
+    permitted = ALLOWED_USER_IDS if allowed is None else allowed
+    return [chat for chat in bots_state(state, token)["chats"] if chat in permitted]
 
 
 def register_chat(state, token, chat_id):
@@ -737,7 +858,7 @@ def notify_task_answers(state, bots):
             if not is_finished and status not in ANSWER_WAITING_STATUSES:
                 continue
             chat = entry.get("chat")
-            if chat not in ALLOWED_USER_IDS:
+            if chat not in allowed_users_for(bot):
                 # That person is no longer allowed: post nothing, stop watching.
                 if is_finished:
                     finished.add(iid)
@@ -773,7 +894,9 @@ def handle_callback(cq):
     data = cq.get("data", "")
     action, _, rest = data.partition(":")
     tgtoken = cq["_token"]
-    if (cq.get("from") or {}).get("id") not in ALLOWED_USER_IDS:
+    # This bot's own list when the caller supplied one, otherwise the
+    # instance-wide list — same rule as before for a bot that has no list.
+    if (cq.get("from") or {}).get("id") not in (cq.get("_allowed") or ALLOWED_USER_IDS):
         print("telegram-bridge: refused a button tap from a Telegram user who is not allowed", flush=True)
         tg(tgtoken, "answerCallbackQuery", callback_query_id=cq.get("id"), text="Not allowed")
         return
@@ -806,7 +929,7 @@ def handle_message(state, bot, m):
         return
     # Anyone can find a bot and write to it. A stranger gets no reply, so the
     # bot does not even confirm it is alive, and is never added to its chats.
-    if (m.get("chat") or {}).get("type") != "private" or (m.get("from") or {}).get("id") not in ALLOWED_USER_IDS:
+    if (m.get("chat") or {}).get("type") != "private" or (m.get("from") or {}).get("id") not in allowed_users_for(bot):
         print(f"telegram-bridge: ignored a message to {bot['name']} from a Telegram user or chat that is not allowed", flush=True)
         return
     register_chat(state, bot["token"], chat_id)
@@ -854,19 +977,36 @@ def handle_message(state, bot, m):
     ask_agent(state, bot, chat_id, body, force_task=force_task)
 
 
-def bot_thread(state, bot):
-    print(f"telegram-bridge: bot for {bot['name']} ({bot['companyId'][:8]}) started", flush=True)
+def current_bot(token):
+    """This bot as it is configured right now, or None once it is gone."""
+    with LOCK:
+        return CURRENT_BOTS.get(token)
+
+
+def bot_thread(state, token):
+    started = current_bot(token)
+    if started:
+        print(f"telegram-bridge: bot for {started['name']} ({started['companyId'][:8]}) started", flush=True)
     while True:
-        bs = bots_state(state, bot["token"])
-        updates = tg(bot["token"], "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25) or []
+        # Re-read the bot every pass instead of closing over the dict this
+        # thread started with: that is what lets a changed allowlist, a
+        # renamed bot or a removal take effect without a restart.
+        bot = current_bot(token)
+        if bot is None:
+            print("telegram-bridge: a bot is no longer configured and has stopped answering", flush=True)
+            return
+        bs = bots_state(state, token)
+        updates = tg(token, "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25) or []
         for u in updates:
             with LOCK:
-                bs2 = state["bots"].setdefault(bot["token"], {"offset": 0, "chats": []})
+                bs2 = state["bots"].setdefault(token, {"offset": 0, "chats": []})
                 bs2["offset"] = max(bs2["offset"], u.get("update_id", 0))
                 save_state(state)
             try:
                 if "callback_query" in u:
-                    cq = u["callback_query"]; cq["_token"] = bot["token"]
+                    cq = u["callback_query"]
+                    cq["_token"] = token
+                    cq["_allowed"] = allowed_users_for(bot)
                     handle_callback(cq)
                 elif "message" in u:
                     handle_message(state, bot, u["message"])
@@ -874,23 +1014,53 @@ def bot_thread(state, bot):
                 print(f"update error ({bot['name']}): {e}", flush=True)
 
 
-def main():
+def refresh_bots(state):
+    """Re-read the configuration and make the running threads match it.
+
+    Returns the bots that should be served right now. A newly connected bot
+    gets a thread here, without a restart; a removed one is dropped from
+    CURRENT_BOTS, which is what makes its thread stop on its next pass.
+    """
     bots = load_bots()
-    if not bots:
-        print("telegram-bridge: no bots configured", flush=True)
-        return
+    tokens = {b["token"] for b in bots}
+    with LOCK:
+        CURRENT_BOTS.clear()
+        for b in bots:
+            CURRENT_BOTS[b["token"]] = b
+    for token in list(BOT_THREADS):
+        if token not in tokens:
+            BOT_THREADS.pop(token, None)
+    for b in bots:
+        thread = BOT_THREADS.get(b["token"])
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(target=bot_thread, args=(state, b["token"]), daemon=True)
+            BOT_THREADS[b["token"]] = thread
+            thread.start()
+    return bots
+
+
+def main():
     state = load_state()
     global ALLOWED_USER_IDS
     ALLOWED_USER_IDS, source = resolve_allowed_user_ids(state, os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
     if ALLOWED_USER_IDS:
-        print(f"telegram-bridge: {len(ALLOWED_USER_IDS)} Telegram user(s) allowed ({source})", flush=True)
+        print(f"telegram-bridge: {len(ALLOWED_USER_IDS)} Telegram user(s) allowed by default ({source})", flush=True)
     else:
-        print("telegram-bridge: nobody is allowed to use the bots; set TELEGRAM_ALLOWED_USER_IDS", flush=True)
-    for b in bots:
-        threading.Thread(target=bot_thread, args=(state, b), daemon=True).start()
-    companies = len({b["companyId"] for b in bots})
-    print(f"telegram-bridge: {len(bots)} bot(s) across {companies} companies up", flush=True)
+        print("telegram-bridge: nobody is allowed to use the bots by default; set TELEGRAM_ALLOWED_USER_IDS "
+              "or add people to each bot in Paperclip", flush=True)
+    bots = refresh_bots(state)
+    if bots:
+        companies = len({b["companyId"] for b in bots})
+        print(f"telegram-bridge: {len(bots)} bot(s) across {companies} companies up", flush=True)
+    else:
+        # Not fatal any more: a bot connected in Paperclip a minute from now is
+        # picked up by the refresh below, with no restart and nobody on the box.
+        print("telegram-bridge: no bots configured yet; waiting for one", flush=True)
     while True:
+        try:
+            bots = refresh_bots(state)
+        except Exception as e:
+            print(f"config-refresh error: {e}", flush=True)
         try:
             notify_task_answers(state, bots)
         except Exception as e:
