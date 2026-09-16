@@ -126,8 +126,20 @@ export const TIMER_IDLE_GATE_RUN_SIGNALS = [
 ] as const;
 export type TimerIdleGateRunSignal = (typeof TIMER_IDLE_GATE_RUN_SIGNALS)[number];
 
+/** A "something new" query that could not be run, and why. */
+export interface TimerIdleGateSignalFailure {
+  signal: TimerIdleGateRunSignal;
+  message: string;
+}
+
 export type TimerIdleGateDecision =
-  | { decision: "run"; signal: TimerIdleGateRunSignal; error?: unknown }
+  | {
+    decision: "run";
+    signal: TimerIdleGateRunSignal;
+    error?: unknown;
+    /** Signals whose query failed during this check (DUR-3981). */
+    failedSignals?: TimerIdleGateSignalFailure[];
+  }
   | { decision: "skip"; baselineRunId: string; baselineAt: Date };
 
 /**
@@ -234,7 +246,12 @@ async function evaluate(
   agent: { id: string; companyId: string; runtimeConfig: unknown },
   now: Date,
 ): Promise<TimerIdleGateDecision> {
-  const run = (signal: TimerIdleGateRunSignal): TimerIdleGateDecision => ({ decision: "run", signal });
+  const failures: TimerIdleGateSignalFailure[] = [];
+  const run = (signal: TimerIdleGateRunSignal): TimerIdleGateDecision => ({
+    decision: "run",
+    signal,
+    ...(failures.length > 0 ? { failedSignals: [...failures] } : {}),
+  });
   const policy = readTimerIdleGatePolicy(agent.runtimeConfig);
   if (!policy.enabled) return run("gate_disabled");
   // An agent that is not woken on demand hears about assignments, comments
@@ -245,10 +262,29 @@ async function evaluate(
   const companyId = agent.companyId;
   const agentId = agent.id;
 
+  // DUR-3981: each "something new" query answers for itself. A query that
+  // fails is recorded and answers "I cannot tell" -- never "nothing new" --
+  // and any such failure forces the run at the end of the check. Keeping the
+  // signals independent means one broken query cannot hide the others, and a
+  // test can prove a case passed because the rule said so, not because
+  // something threw.
+  const check = async (signal: TimerIdleGateRunSignal, query: () => Promise<boolean>): Promise<boolean> => {
+    try {
+      return await query();
+    } catch (error) {
+      failures.push({ signal, message: error instanceof Error ? error.message : String(error) });
+      logger.warn(
+        { err: error, agentId, signal },
+        "timer idle gate: a signal could not be checked; the scheduled run goes ahead",
+      );
+      return false;
+    }
+  };
+
   // Anything queued, running or scheduled for this agent: let the wake-up
   // through (enqueueWakeup coalesces it onto that run).
   if (
-    await exists(
+    await check("run_active_or_pending", () => exists(
       db
         .select({ id: heartbeatRuns.id })
         .from(heartbeatRuns)
@@ -260,7 +296,7 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("run_active_or_pending");
   }
@@ -311,7 +347,7 @@ async function evaluate(
   // Any non-timer wake-up asked for since the last run started, whatever
   // became of it (coalesced, deferred, skipped, failed), or one still pending.
   if (
-    await exists(
+    await check("wakeup_request", () => exists(
       db
         .select({ id: agentWakeupRequests.id })
         .from(agentWakeupRequests)
@@ -327,13 +363,13 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("wakeup_request");
   }
 
   if (
-    await exists(
+    await check("assigned_issue_created", () => exists(
       db
         .select({ id: issues.id })
         .from(issues)
@@ -341,19 +377,19 @@ async function evaluate(
           and(openAssigned, gt(issues.createdAt, since), sql`${issues.createdByAgentId} is distinct from ${agentId}::uuid`),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("assigned_issue_created");
   }
 
   if (
-    await exists(
+    await check("assigned_issue_updated", () => exists(
       db
         .select({ id: issues.id })
         .from(issues)
         .where(and(openAssigned, gt(issues.updatedAt, unattributedSince)))
         .limit(1),
-    )
+    ))
   ) {
     return run("assigned_issue_updated");
   }
@@ -361,7 +397,7 @@ async function evaluate(
   // Activity on the agent's open issues by anyone but the agent itself or
   // one of its own runs.
   if (
-    await exists(
+    await check("issue_activity_by_others", () => exists(
       db
         .select({ id: activityLog.id })
         .from(activityLog)
@@ -376,7 +412,7 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("issue_activity_by_others");
   }
@@ -384,7 +420,7 @@ async function evaluate(
   // Comments by anyone else on any issue assigned to the agent (a comment on
   // a closed issue can reopen it).
   if (
-    await exists(
+    await check("comment_on_assigned_issue", () => exists(
       db
         .select({ id: issueComments.id })
         .from(issueComments)
@@ -399,14 +435,15 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("comment_on_assigned_issue");
   }
 
   // Mentions anywhere in the company. The id prefilter is a superset; the
   // real parser the comment route uses decides.
-  const mentionCandidates = await db
+  const mentioned = await check("mentioned_in_comment", async () => {
+    const mentionCandidates = await db
     .select({ body: issueComments.body })
     .from(issueComments)
     .where(
@@ -419,14 +456,14 @@ async function evaluate(
       ),
     )
     .limit(MENTION_SCAN_LIMIT + 1);
-  if (mentionCandidates.length > MENTION_SCAN_LIMIT) return run("mentioned_in_comment");
-  if (mentionCandidates.some((comment) => extractAgentMentionIds(comment.body).includes(agentId))) {
-    return run("mentioned_in_comment");
-  }
+    if (mentionCandidates.length > MENTION_SCAN_LIMIT) return true;
+    return mentionCandidates.some((comment) => extractAgentMentionIds(comment.body).includes(agentId));
+  });
+  if (mentioned) return run("mentioned_in_comment");
 
   // Approvals the agent asked for, or that sit on its issues, decided since.
   if (
-    await exists(
+    await check("approval_decided", () => exists(
       db
         .select({ id: approvals.id })
         .from(approvals)
@@ -442,13 +479,13 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("approval_decided");
   }
 
   if (
-    await exists(
+    await check("approval_comment_by_others", () => exists(
       db
         .select({ id: approvalComments.id })
         .from(approvalComments)
@@ -462,7 +499,7 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("approval_comment_by_others");
   }
@@ -470,7 +507,7 @@ async function evaluate(
   // An approval waiting on THIS agent's answer (a boss review of a
   // teammate's boost ask) that arrived or changed since.
   if (
-    await exists(
+    await check("approval_waiting_for_agent", () => exists(
       db
         .select({ id: approvals.id })
         .from(approvals)
@@ -483,7 +520,7 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("approval_waiting_for_agent");
   }
@@ -491,7 +528,7 @@ async function evaluate(
   // Interactions (questions, confirmations, suggested tasks) the agent opened
   // or that live on its issues: a new one from someone else, or one answered.
   if (
-    await exists(
+    await check("interaction_changed", () => exists(
       db
         .select({ id: issueThreadInteractions.id })
         .from(issueThreadInteractions)
@@ -514,7 +551,7 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("interaction_changed");
   }
@@ -522,7 +559,7 @@ async function evaluate(
   // A blocker of one of its open issues finished (issue_relations: issue_id
   // blocks related_issue_id).
   if (
-    await exists(
+    await check("blocker_resolved", () => exists(
       db
         .select({ id: issueRelations.id })
         .from(issueRelations)
@@ -536,13 +573,13 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("blocker_resolved");
   }
 
   if (
-    await exists(
+    await check("child_issue_closed", () => exists(
       db
         .select({ id: issues.id })
         .from(issues)
@@ -554,25 +591,25 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("child_issue_closed");
   }
 
   if (
-    await exists(
+    await check("issue_monitor_due", () => exists(
       db
         .select({ id: issues.id })
         .from(issues)
         .where(and(openAssigned, sql`${issues.monitorNextCheckAt} <= ${now.toISOString()}::timestamptz`))
         .limit(1),
-    )
+    ))
   ) {
     return run("issue_monitor_due");
   }
 
   if (
-    await exists(
+    await check("recovery_action_changed", () => exists(
       db
         .select({ id: issueRecoveryActions.id })
         .from(issueRecoveryActions)
@@ -584,7 +621,7 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("recovery_action_changed");
   }
@@ -592,7 +629,7 @@ async function evaluate(
   // Review / approval stages: the agent is the current reviewer or approver,
   // or changes were requested back to it, on an issue that moved since.
   if (
-    await exists(
+    await check("execution_stage_changed", () => exists(
       db
         .select({ id: issues.id })
         .from(issues)
@@ -609,10 +646,16 @@ async function evaluate(
           ),
         )
         .limit(1),
-    )
+    ))
   ) {
     return run("execution_stage_changed");
   }
+
+  // Nothing said "new". If any signal could not answer, that unanswered
+  // signal is exactly the one that might have been holding work, so the run
+  // goes ahead (fail-open) rather than the tick being skipped on partial
+  // information.
+  if (failures.length > 0) return run("check_failed");
 
   return { decision: "skip", baselineRunId: lastRun.id, baselineAt: since };
 }
@@ -625,6 +668,8 @@ export interface TimerIdleSkipState {
   previousDayCount: number;
   lastSkippedAt: string;
   lastBaselineRunId: string;
+  /** DUR-3981: set when a signal query failed and forced a run. */
+  lastCheckError?: { at: string; signals: string; message: string };
 }
 
 /**
@@ -678,5 +723,48 @@ export async function recordTimerIdleSkip(
       });
   } catch (error) {
     logger.warn({ err: error, agentId: agent.id }, "timer idle gate: could not record skipped wake-up");
+  }
+}
+
+/**
+ * DUR-3981: records that the check could not be completed, on the same
+ * runtime-state key as the skip counters (no row per tick). Without this a
+ * permanently broken signal query is invisible: every tick quietly falls open
+ * and runs, which looks exactly like a busy agent while costing full price.
+ * Best-effort, like the skip counter.
+ */
+export async function recordTimerIdleCheckFailure(
+  db: Db,
+  agent: { id: string; companyId: string; adapterType: string },
+  decision: Extract<TimerIdleGateDecision, { decision: "run" }>,
+  now: Date = new Date(),
+): Promise<void> {
+  const failures = decision.failedSignals ?? [];
+  if (failures.length === 0) return;
+  const key = TIMER_IDLE_SKIP_STATE_KEY;
+  const nowIso = now.toISOString();
+  const lastCheckError = {
+    at: nowIso,
+    signals: failures.map((failure) => failure.signal).join(", "),
+    message: failures[0]!.message,
+  };
+  try {
+    await db
+      .insert(agentRuntimeState)
+      .values({
+        agentId: agent.id,
+        companyId: agent.companyId,
+        adapterType: agent.adapterType,
+        stateJson: { [key]: { lastCheckError } },
+      })
+      .onConflictDoUpdate({
+        target: agentRuntimeState.agentId,
+        set: {
+          stateJson: sql`coalesce(${agentRuntimeState.stateJson}, '{}'::jsonb) || jsonb_build_object(${key}::text,
+            coalesce(${agentRuntimeState.stateJson} -> ${key}, '{}'::jsonb) || jsonb_build_object('lastCheckError', ${JSON.stringify(lastCheckError)}::jsonb))`,
+        },
+      });
+  } catch (error) {
+    logger.warn({ err: error, agentId: agent.id }, "timer idle gate: could not record a failed check");
   }
 }
