@@ -226,6 +226,9 @@ export const queryKeys = {
   interactions: {
     pendingForCompany: (companyId: string) => ["interactions", "pending", companyId] as const,
   },
+  stalledTasks: {
+    forCompany: (companyId: string) => ["stalled-tasks", companyId] as const,
+  },
   access: {
     invites: (companyId: string, state: string = "all", limit: number = 20) =>
       ["access", "invites", "paginated-v1", companyId, state, limit] as const,

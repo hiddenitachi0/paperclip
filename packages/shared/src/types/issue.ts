@@ -305,6 +305,45 @@ export interface IssueBlockedInboxAttention {
   };
 }
 
+/**
+ * Why the Now page's "Needs you" lane reports that nobody is moving an open
+ * task. `assignee_unavailable` and `assignee_error` fire immediately; the two
+ * `idle_*` reasons only after the instance's stalled threshold has passed.
+ */
+export type StalledTaskReason =
+  | "assignee_unavailable"
+  | "assignee_error"
+  | "unassigned"
+  | "idle_in_review"
+  | "idle";
+
+/** One open task nobody is moving, ready to render. */
+export interface StalledTask {
+  issueId: string;
+  identifier: string | null;
+  title: string;
+  status: IssueStatus;
+  reason: StalledTaskReason;
+  /**
+   * The whole operator-facing sentence: why this is here and since when, in
+   * plain words. Never an internal identifier, never an action the operator
+   * cannot perform.
+   */
+  reasonText: string;
+  /** When it last moved: newest of its last run, comment or status change. */
+  sinceAt: string;
+  /** The assigned agent's name, when it has one. */
+  agentName: string | null;
+}
+
+export interface StalledTasksResult {
+  tasks: StalledTask[];
+  /** How many qualify in total, before the response cap. */
+  totalCount: number;
+  /** The instance threshold in force, so the page can explain itself. */
+  stalledAfterHours: number;
+}
+
 export type IssueProductivityReviewTrigger =
   | "no_comment_streak"
   | "long_active_duration"

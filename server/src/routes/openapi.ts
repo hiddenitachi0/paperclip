@@ -4037,6 +4037,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/stalled-tasks",
+  tags: ["issues"],
+  summary: "List open tasks nobody is moving, for the Now page's Needs-you lane",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/issues/{id}/interactions",
   tags: ["issues"],

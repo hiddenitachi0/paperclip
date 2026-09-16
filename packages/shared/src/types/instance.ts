@@ -50,6 +50,21 @@ export const DEFAULT_SILENT_RUN_TIMEOUT_MINUTES = 45;
 export const MIN_SILENT_RUN_TIMEOUT_MINUTES = 5;
 export const MAX_SILENT_RUN_TIMEOUT_MINUTES = 12 * 60;
 
+// How long an open task may sit with nothing happening on it -- no run, no
+// comment, no status change -- before the Now page's "Needs you" lane says
+// nobody is moving it. Only the time-based half of that lane's fifth source:
+// a task whose assignee cannot run at all (paused, terminated, switched off)
+// is surfaced immediately and never waits for this threshold.
+//
+// 12 hours by default: long enough that an agent finishing at 23:00 and the
+// operator reading the board at 08:00 is normal working rhythm rather than a
+// notification, short enough that "finished yesterday, still waiting" is
+// caught the same day. Raise it if the lane feels noisy; lower it to be told
+// sooner.
+export const DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS = 12;
+export const MIN_NEEDS_YOU_STALLED_AFTER_HOURS = 1;
+export const MAX_NEEDS_YOU_STALLED_AFTER_HOURS = 24 * 30;
+
 // DUR-3943 item 4: every turn of a run re-sends the whole standing context,
 // so the turn ceiling is the single biggest multiplier on what a run can
 // cost. Instance-wide default for Claude-style local agents; an agent's own
@@ -282,6 +297,12 @@ export interface InstanceGeneralSettings {
    * adapterConfig.silentRunTimeoutMinutes.
    */
   silentRunTimeoutMinutes: number;
+  /**
+   * Hours with nothing happening on an open task before the Now page's
+   * "Needs you" lane reports that nobody is moving it. Does not apply to a
+   * task whose assignee cannot run at all -- that is reported immediately.
+   */
+  needsYouStalledAfterHours: number;
   /**
    * DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
    * Per-agent override: adapterConfig.maxTurnsPerRun (> 0 wins).

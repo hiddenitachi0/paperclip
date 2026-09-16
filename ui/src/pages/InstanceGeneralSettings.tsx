@@ -19,6 +19,9 @@ import {
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   MIN_SILENT_RUN_TIMEOUT_MINUTES,
   MAX_SILENT_RUN_TIMEOUT_MINUTES,
+  DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+  MIN_NEEDS_YOU_STALLED_AFTER_HOURS,
+  MAX_NEEDS_YOU_STALLED_AFTER_HOURS,
   DEFAULT_MAX_TURNS_PER_RUN,
   MIN_MAX_TURNS_PER_RUN,
   MAX_MAX_TURNS_PER_RUN,
@@ -267,6 +270,8 @@ export function InstanceGeneralSettings() {
   const globalMaxConcurrentRuns = generalQuery.data?.globalMaxConcurrentRuns ?? DEFAULT_GLOBAL_MAX_CONCURRENT_RUNS;
   const maxRunDurationMinutes = generalQuery.data?.maxRunDurationMinutes ?? DEFAULT_MAX_RUN_DURATION_MINUTES;
   const silentRunTimeoutMinutes = generalQuery.data?.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES;
+  const needsYouStalledAfterHours =
+    generalQuery.data?.needsYouStalledAfterHours ?? DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS;
   const maxTurnsPerRun = generalQuery.data?.maxTurnsPerRun ?? DEFAULT_MAX_TURNS_PER_RUN;
   const sessionResetAfterRuns = generalQuery.data?.sessionResetAfterRuns ?? DEFAULT_SESSION_RESET_AFTER_RUNS;
   const sessionResetAfterHours = generalQuery.data?.sessionResetAfterHours ?? DEFAULT_SESSION_RESET_AFTER_HOURS;
@@ -460,6 +465,33 @@ export function InstanceGeneralSettings() {
             max={MAX_SILENT_RUN_TIMEOUT_MINUTES}
             pending={updateGeneralMutation.isPending}
             onSave={(minutes) => updateGeneralMutation.mutate({ silentRunTimeoutMinutes: minutes })}
+          />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Work nobody is moving</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              The Now page&apos;s &quot;Needs you&quot; list also shows open tasks that have simply stopped, so
+              work an agent finished and left for you to check cannot sit unnoticed. A task where nothing
+              has happened — no agent run, no comment, no change of status — for longer than this is listed,
+              with a plain line saying why and since when. A task whose agent cannot run at all (paused, out
+              of budget, switched off, terminated) is listed straight away and does not wait for this time.
+              Anything already shown to you as an approval, a question card or a running agent is never
+              listed twice. Default {DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS} hours; raise it if the list feels
+              noisy, lower it to be told sooner.
+            </p>
+          </div>
+          <MinutesLimitField
+            label="Say nobody is moving a task after"
+            unit="hours"
+            saved={needsYouStalledAfterHours}
+            min={MIN_NEEDS_YOU_STALLED_AFTER_HOURS}
+            max={MAX_NEEDS_YOU_STALLED_AFTER_HOURS}
+            pending={updateGeneralMutation.isPending}
+            onSave={(hours) => updateGeneralMutation.mutate({ needsYouStalledAfterHours: hours })}
           />
         </div>
       </section>
