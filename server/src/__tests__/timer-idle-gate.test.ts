@@ -746,19 +746,79 @@ describeEmbeddedPostgres("evaluateTimerIdleGate (embedded postgres)", () => {
           return Reflect.get(target, prop, receiver);
         },
       });
-      expect(await evaluateTimerIdleGate(brokenDb, f.agent, { now: f.now })).toMatchObject({
-        decision: "run",
-        signal: "check_failed",
-      });
-      expect(selects).toBe(5);
+      const decision = await evaluateTimerIdleGate(brokenDb, f.agent, { now: f.now });
+      expect(decision).toMatchObject({ decision: "run", signal: "check_failed" });
+      // DUR-3981: the check does not stop at the broken query. The remaining
+      // signals still get to answer, and the failure is reported rather than
+      // ending the whole check on the first error.
+      expect(selects).toBeGreaterThan(5);
+      expect(decision.decision === "run" && decision.failedSignals?.length).toBeTruthy();
     });
 
     it("runs when the agent's runtime config is unreadable junk", async () => {
       const f = await seed();
+      // No heartbeat object -> wakeOnDemand and the gate both default to on,
+      // so this is an ordinary evaluation of an idle agent: it skips, and
+      // above all it does not throw.
       const decision = await evaluateTimerIdleGate(db, { ...f.agent, runtimeConfig: "not-an-object" }, { now: f.now });
-      // No heartbeat object -> wakeOnDemand defaults to on and the gate to on,
-      // so this is an ordinary evaluation; the point is it does not throw.
-      expect(decision.decision === "run" || decision.decision === "skip").toBe(true);
+      expect(decision).toMatchObject({ decision: "skip" });
+    });
+  });
+
+  describe("one signal that cannot answer (DUR-3981)", () => {
+    // Each test file owns its embedded Postgres cluster, so renaming a table
+    // breaks exactly one signal's query here and nothing anywhere else.
+    async function withBrokenApprovalComments<T>(fn: () => Promise<T>): Promise<T> {
+      await db.execute(sql.raw(`ALTER TABLE "approval_comments" RENAME TO "approval_comments_hidden_for_test"`));
+      try {
+        return await fn();
+      } finally {
+        await db.execute(sql.raw(`ALTER TABLE "approval_comments_hidden_for_test" RENAME TO "approval_comments"`));
+      }
+    }
+
+    it("forces the run rather than skipping on partial information, and names the signal", async () => {
+      const f = await seed();
+      // Same fixture skips when every query works, so the broken query below
+      // is definitely reached.
+      expect(await evaluate(f)).toMatchObject({ decision: "skip" });
+
+      const decision = await withBrokenApprovalComments(() => evaluate(f));
+      expect(decision).toMatchObject({ decision: "run", signal: "check_failed" });
+      expect(decision.decision === "run" && decision.failedSignals).toMatchObject([
+        { signal: "approval_comment_by_others" },
+      ]);
+    });
+
+    it("lets the signals after the broken one still do their job", async () => {
+      const f = await seed();
+      // issue_monitor_due is checked after approval_comment_by_others.
+      await db
+        .update(issues)
+        .set({ monitorNextCheckAt: ago(f.now, 1), updatedAt: ago(f.now, 3000) })
+        .where(eq(issues.id, f.standingIssueId));
+
+      const decision = await withBrokenApprovalComments(() => evaluate(f));
+      // It still ran, for the real reason, and the broken query is reported
+      // rather than lost behind the later answer.
+      expect(decision).toMatchObject({ decision: "run", signal: "issue_monitor_due" });
+      expect(decision.decision === "run" && decision.failedSignals).toMatchObject([
+        { signal: "approval_comment_by_others" },
+      ]);
+    });
+
+    it("a signal that answers 'new' before the broken one still short-circuits", async () => {
+      const f = await seed();
+      await db.insert(issueComments).values({
+        companyId: f.companyId,
+        issueId: f.standingIssueId,
+        authorUserId: "board-user",
+        authorType: "user",
+        body: "Any news?",
+        createdAt: ago(f.now, 27),
+      });
+      const decision = await withBrokenApprovalComments(() => evaluate(f));
+      expect(decision).toMatchObject({ decision: "run", signal: "comment_on_assigned_issue" });
     });
   });
 

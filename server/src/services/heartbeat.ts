@@ -118,7 +118,12 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { isHeartbeatRunLockStale, issueService } from "./issues.js";
-import { TIMER_IDLE_SKIP_REASON, evaluateTimerIdleGate, recordTimerIdleSkip } from "./timer-idle-gate.js";
+import {
+  TIMER_IDLE_SKIP_REASON,
+  evaluateTimerIdleGate,
+  recordTimerIdleCheckFailure,
+  recordTimerIdleSkip,
+} from "./timer-idle-gate.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
@@ -14976,6 +14981,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await markTimerHeartbeatChecked(agentId, source);
         opts.onNotScheduled?.({ kind: "skipped", reason: TIMER_IDLE_SKIP_REASON });
         return null;
+      }
+      // DUR-3981: the run goes ahead, but note which check could not be made.
+      // A signal whose query is permanently broken would otherwise make every
+      // tick fall open silently -- full price, and nothing on screen saying so.
+      if (idleGate.failedSignals?.length) {
+        await recordTimerIdleCheckFailure(db, agent, idleGate);
       }
     }
 
