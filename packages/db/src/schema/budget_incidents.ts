@@ -33,10 +33,16 @@ export const budgetIncidents = pgTable(
       table.scopeId,
       table.status,
     ),
-    policyWindowIdx: uniqueIndex("budget_incidents_policy_window_threshold_idx").on(
+    // At most one OPEN incident per policy, window and threshold: one breach
+    // still going on gets one card. Resolved and dismissed incidents are
+    // history and may repeat, so a second stop in the same month after the
+    // operator approved the first can file a new one (migration 0167).
+    // createIncidentIfNeeded in server/src/services/budgets.ts relies on this
+    // index as the arbiter when two cost events race to file the same one.
+    policyWindowOpenIdx: uniqueIndex("budget_incidents_policy_window_threshold_open_idx").on(
       table.policyId,
       table.windowStart,
       table.thresholdType,
-    ).where(sql`${table.status} <> 'dismissed'`),
+    ).where(sql`${table.status} = 'open'`),
   }),
 );

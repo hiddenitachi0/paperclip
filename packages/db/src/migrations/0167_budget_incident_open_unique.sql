@@ -1,0 +1,25 @@
+-- A second budget stop in the same month must be able to file a new incident.
+--
+-- Until now at most one NON-DISMISSED incident could exist per
+-- (policy_id, window_start, threshold_type). A RESOLVED incident still took
+-- that one slot, so once the operator had approved "raise the budget and
+-- resume", the next time the agent reached its new limit in the same month
+-- the new incident was refused with a duplicate-key error (138 times in three
+-- hours on 16 Sep, on both the 80% warning and the hard stop). The rule the
+-- code actually needs is narrower: at most one OPEN incident per slot, i.e.
+-- one breach still going on gets one card. Resolved and dismissed incidents
+-- are history and may repeat.
+--
+-- Safe on existing data without touching any row: every row that is 'open' is
+-- also "<> 'dismissed'", so the rows the new index covers are a subset of the
+-- rows the old unique index already kept unique. No existing data can violate
+-- it, so the CREATE cannot fail on production rows.
+--
+-- The new index is created BEFORE the old one is dropped (and the migration
+-- runs in one transaction), so there is no moment without a uniqueness guard.
+-- Every statement is guarded, so a re-run is a no-op. The only table named is
+-- budget_incidents, declared in packages/db/src/schema/budget_incidents.ts; no
+-- table is discovered by column shape (see the note at the top of
+-- 0164_rls_login_roles.sql for why that is a rule).
+CREATE UNIQUE INDEX IF NOT EXISTS "budget_incidents_policy_window_threshold_open_idx" ON "budget_incidents" USING btree ("policy_id","window_start","threshold_type") WHERE "budget_incidents"."status" = 'open';--> statement-breakpoint
+DROP INDEX IF EXISTS "budget_incidents_policy_window_threshold_idx";

@@ -28,6 +28,7 @@ function createDbStub(selectResults: SelectResult[]) {
   const insert = vi.fn(() => ({
     values: insertValues.mockImplementation(() => ({
       returning: insertReturning,
+      onConflictDoNothing: () => ({ returning: insertReturning }),
     })),
   }));
 
@@ -42,12 +43,20 @@ function createDbStub(selectResults: SelectResult[]) {
   const pendingInserts: unknown[][] = [];
   const pendingUpdates: unknown[][] = [];
 
+  // The card and its incident are written in one transaction (withCompanyScope
+  // sets the company claim, then runs the callback). The stub runs the
+  // callback on itself; real transaction behaviour is covered against a real
+  // database in budgets-incident-uniqueness.test.ts.
+  const db: Record<string, unknown> = {
+    select,
+    insert,
+    update,
+    execute: vi.fn(async () => []),
+  };
+  db.transaction = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db));
+
   return {
-    db: {
-      select,
-      insert,
-      update,
-    },
+    db,
     queueInsert: (rows: unknown[]) => {
       pendingInserts.push(rows);
     },
@@ -68,7 +77,7 @@ describe("budgetService", () => {
   it("creates a hard-stop incident and pauses an agent when spend exceeds a budget", async () => {
     const policy = {
       id: "policy-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       scopeType: "agent",
       scopeId: "agent-1",
       metric: "billed_cents",
@@ -85,7 +94,7 @@ describe("budgetService", () => {
       [{ total: 150 }],
       [],
       [{
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         name: "Budget Agent",
         status: "running",
         pauseReason: null,
@@ -94,12 +103,12 @@ describe("budgetService", () => {
 
     dbStub.queueInsert([{
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       status: "pending",
     }]);
     dbStub.queueInsert([{
       id: "incident-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       policyId: "policy-1",
       approvalId: "approval-1",
     }]);
@@ -108,21 +117,21 @@ describe("budgetService", () => {
 
     const service = budgetService(dbStub.db as any, { cancelWorkForScope });
     await service.evaluateCostEvent({
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       agentId: "agent-1",
       projectId: null,
     } as any);
 
     expect(dbStub.insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         type: "budget_override_required",
         status: "pending",
       }),
     );
     expect(dbStub.insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         policyId: "policy-1",
         thresholdType: "hard",
         amountLimit: 100,
@@ -145,7 +154,7 @@ describe("budgetService", () => {
       }),
     );
     expect(cancelWorkForScope).toHaveBeenCalledWith({
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       scopeType: "agent",
       scopeId: "agent-1",
     });
@@ -154,7 +163,7 @@ describe("budgetService", () => {
   it("blocks new work when an agent hard-stop remains exceeded even if the agent is not paused yet", async () => {
     const agentPolicy = {
       id: "policy-agent-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       scopeType: "agent",
       scopeId: "agent-1",
       metric: "billed_cents",
@@ -170,7 +179,7 @@ describe("budgetService", () => {
       [{
         status: "running",
         pauseReason: null,
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         name: "Budget Agent",
       }],
       [{
@@ -183,7 +192,7 @@ describe("budgetService", () => {
     ]);
 
     const service = budgetService(dbStub.db as any);
-    const block = await service.getInvocationBlock("company-1", "agent-1");
+    const block = await service.getInvocationBlock("11111111-1111-4111-8111-111111111111", "agent-1");
 
     expect(block).toEqual({
       scopeType: "agent",
@@ -198,7 +207,7 @@ describe("budgetService", () => {
       [{
         status: "idle",
         pauseReason: null,
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         name: "Budget Agent",
       }],
       [{
@@ -209,11 +218,11 @@ describe("budgetService", () => {
     ]);
 
     const service = budgetService(dbStub.db as any);
-    const block = await service.getInvocationBlock("company-1", "agent-1");
+    const block = await service.getInvocationBlock("11111111-1111-4111-8111-111111111111", "agent-1");
 
     expect(block).toEqual({
       scopeType: "company",
-      scopeId: "company-1",
+      scopeId: "11111111-1111-4111-8111-111111111111",
       scopeName: "Paperclip",
       reason: "Company is paused because its budget hard-stop was reached.",
     });
@@ -222,7 +231,7 @@ describe("budgetService", () => {
   it("pauses an agent when a calendar-day token budget is exceeded, independent of billed_cents", async () => {
     const tokenPolicy = {
       id: "policy-tokens-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       scopeType: "agent",
       scopeId: "agent-1",
       metric: "total_tokens",
@@ -239,7 +248,7 @@ describe("budgetService", () => {
       [{ total: 1_500_000 }],
       [],
       [{
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         name: "Budget Agent",
         status: "running",
         pauseReason: null,
@@ -248,12 +257,12 @@ describe("budgetService", () => {
 
     dbStub.queueInsert([{
       id: "approval-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       status: "pending",
     }]);
     dbStub.queueInsert([{
       id: "incident-1",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       policyId: "policy-tokens-1",
       approvalId: "approval-1",
     }]);
@@ -262,14 +271,14 @@ describe("budgetService", () => {
 
     const service = budgetService(dbStub.db as any, { cancelWorkForScope });
     await service.evaluateCostEvent({
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       agentId: "agent-1",
       projectId: null,
     } as any);
 
     expect(dbStub.insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         policyId: "policy-tokens-1",
         metric: "total_tokens",
         windowKind: "calendar_day_utc",
@@ -285,7 +294,7 @@ describe("budgetService", () => {
       }),
     );
     expect(cancelWorkForScope).toHaveBeenCalledWith({
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       scopeType: "agent",
       scopeId: "agent-1",
     });
@@ -296,7 +305,7 @@ describe("budgetService", () => {
       [{
         status: "idle",
         pauseReason: null,
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         name: "Budget Agent",
       }],
       [{
@@ -306,7 +315,7 @@ describe("budgetService", () => {
       [],
       [{
         id: "policy-tokens-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         scopeType: "agent",
         scopeId: "agent-1",
         metric: "total_tokens",
@@ -320,7 +329,7 @@ describe("budgetService", () => {
     ]);
 
     const service = budgetService(dbStub.db as any);
-    const block = await service.getInvocationBlock("company-1", "agent-1");
+    const block = await service.getInvocationBlock("11111111-1111-4111-8111-111111111111", "agent-1");
 
     expect(block).toEqual({
       scopeType: "agent",
@@ -334,16 +343,16 @@ describe("budgetService", () => {
     const dbStub = createDbStub([
       [{
         id: "incident-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         policyId: "policy-1",
         amountObserved: 120,
         approvalId: "approval-1",
       }],
       [{
         id: "policy-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         scopeType: "company",
-        scopeId: "company-1",
+        scopeId: "11111111-1111-4111-8111-111111111111",
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
       }],
@@ -354,7 +363,7 @@ describe("budgetService", () => {
 
     await expect(
       service.resolveIncident(
-        "company-1",
+        "11111111-1111-4111-8111-111111111111",
         "incident-1",
         { action: "raise_budget_and_resume", amount: 140 },
         "board-user",
@@ -367,10 +376,10 @@ describe("budgetService", () => {
     const dbStub = createDbStub([
       [{
         id: "incident-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         policyId: "policy-1",
         scopeType: "company",
-        scopeId: "company-1",
+        scopeId: "11111111-1111-4111-8111-111111111111",
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
         windowStart: now,
@@ -386,9 +395,9 @@ describe("budgetService", () => {
       }],
       [{
         id: "policy-1",
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         scopeType: "company",
-        scopeId: "company-1",
+        scopeId: "11111111-1111-4111-8111-111111111111",
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
         amount: 100,
@@ -396,7 +405,7 @@ describe("budgetService", () => {
       [{ total: 120 }],
       [{ id: "approval-1", status: "approved" }],
       [{
-        companyId: "company-1",
+        companyId: "11111111-1111-4111-8111-111111111111",
         name: "Paperclip",
         status: "paused",
         pauseReason: "budget",
@@ -406,7 +415,7 @@ describe("budgetService", () => {
 
     const service = budgetService(dbStub.db as any);
     await service.resolveIncident(
-      "company-1",
+      "11111111-1111-4111-8111-111111111111",
       "incident-1",
       { action: "raise_budget_and_resume", amount: 175 },
       "board-user",
@@ -432,7 +441,7 @@ describe("budgetService a second budget stop in the same month", () => {
 
   const agentPolicy = {
     id: "policy-1",
-    companyId: "company-1",
+    companyId: "11111111-1111-4111-8111-111111111111",
     scopeType: "agent",
     scopeId: "agent-1",
     metric: "billed_cents",
@@ -443,12 +452,12 @@ describe("budgetService a second budget stop in the same month", () => {
     notifyEnabled: false,
     isActive: true,
   };
-  const agentRow = { companyId: "company-1", name: "Governance", status: "running", pauseReason: null };
+  const agentRow = { companyId: "11111111-1111-4111-8111-111111111111", name: "Governance", status: "running", pauseReason: null };
 
   function earlierIncident(overrides: Record<string, unknown>) {
     return {
       id: "incident-old",
-      companyId: "company-1",
+      companyId: "11111111-1111-4111-8111-111111111111",
       policyId: "policy-1",
       thresholdType: "hard",
       amountLimit: 2000,
@@ -461,10 +470,10 @@ describe("budgetService a second budget stop in the same month", () => {
 
   async function reachLimit(existingIncidents: unknown[], policy: Record<string, unknown> = agentPolicy, observed = 4000) {
     const dbStub = createDbStub([[policy], [{ total: observed }], existingIncidents, [agentRow]]);
-    dbStub.queueInsert([{ id: "approval-new", companyId: "company-1", status: "pending" }]);
-    dbStub.queueInsert([{ id: "incident-new", companyId: "company-1", policyId: "policy-1", approvalId: "approval-new" }]);
+    dbStub.queueInsert([{ id: "approval-new", companyId: "11111111-1111-4111-8111-111111111111", status: "pending" }]);
+    dbStub.queueInsert([{ id: "incident-new", companyId: "11111111-1111-4111-8111-111111111111", policyId: "policy-1", approvalId: "approval-new" }]);
     const service = budgetService(dbStub.db as any, { cancelWorkForScope: vi.fn().mockResolvedValue(undefined) });
-    await service.evaluateCostEvent({ companyId: "company-1", agentId: "agent-1", projectId: null } as any);
+    await service.evaluateCostEvent({ companyId: "11111111-1111-4111-8111-111111111111", agentId: "agent-1", projectId: null } as any);
     return dbStub;
   }
 

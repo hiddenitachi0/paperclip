@@ -8,6 +8,7 @@ import {
   companies,
   costEvents,
   projects,
+  withCompanyScope,
 } from "@paperclipai/db";
 import { LANE_A_TRANSFORM_BILLING_CODE, budgetMetricPausesScope } from "@paperclipai/shared";
 import type {
@@ -24,6 +25,7 @@ import type {
   BudgetWindowKind,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 
 type ScopeRecord = {
@@ -45,6 +47,54 @@ export type BudgetEnforcementScope = {
 export type BudgetServiceHooks = {
   cancelWorkForScope?: (scope: BudgetEnforcementScope) => Promise<void>;
 };
+
+// Thrown inside the incident transaction when another cost event already
+// holds the one open slot for this policy, window and threshold. It rolls the
+// transaction back (so the card this attempt inserted goes with it) and is
+// never seen outside createIncidentIfNeeded.
+class IncidentSlotTaken extends Error {
+  constructor() {
+    super("budget incident slot already taken by a concurrent writer");
+  }
+}
+
+// Budget paperwork (the incident row, its card, the activity entry) failing
+// must never let an over-limit scope keep running, and must never surface as
+// a failed heartbeat. It is logged instead, once per policy, window,
+// threshold and message per hour, so an agent sitting at its limit does not
+// write the same line on every cost event.
+const PAPERWORK_FAILURE_LOG_INTERVAL_MS = 60 * 60 * 1000;
+const lastPaperworkFailureLogAt = new Map<string, number>();
+
+function reportBudgetPaperworkFailure(
+  policy: Pick<PolicyRow, "id" | "companyId" | "scopeType" | "scopeId" | "windowKind">,
+  step: string,
+  err: unknown,
+) {
+  // Keyed on the database's own message (the cause), not the query wrapper's,
+  // which embeds the parameters and so differs on every cost event.
+  const root = err instanceof Error && err.cause instanceof Error ? err.cause : err;
+  const message = root instanceof Error ? root.message : String(root);
+  const { start } = resolveWindow(policy.windowKind as BudgetWindowKind);
+  const key = `${policy.id}|${start.toISOString()}|${step}|${message}`;
+  const now = Date.now();
+  const last = lastPaperworkFailureLogAt.get(key);
+  if (last !== undefined && now - last < PAPERWORK_FAILURE_LOG_INTERVAL_MS) return;
+  if (lastPaperworkFailureLogAt.size > 1000) lastPaperworkFailureLogAt.clear();
+  lastPaperworkFailureLogAt.set(key, now);
+  logger.error(
+    {
+      err,
+      policyId: policy.id,
+      companyId: policy.companyId,
+      scopeType: policy.scopeType,
+      scopeId: policy.scopeId,
+      step,
+    },
+    "Budget limit reached, but the budget record could not be saved. " +
+      "Spending is still enforced (a hard stop still pauses); this line repeats at most once an hour.",
+  );
+}
 
 function currentUtcMonthWindow(now = new Date()) {
   const year = now.getUTCFullYear();
@@ -418,12 +468,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     };
   }
 
-  async function createIncidentIfNeeded(
-    policy: PolicyRow,
-    thresholdType: BudgetThresholdType,
-    amountObserved: number,
-  ) {
-    const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
+  async function findReusableIncident(policy: PolicyRow, thresholdType: BudgetThresholdType, windowStart: Date) {
     // An open incident is the same breach still going on, so it is reused.
     // A resolved HARD incident never is: the operator already answered its
     // card, so reaching the limit again this month is a new breach that needs
@@ -432,69 +477,186 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     // A resolved SOFT warning is reused while the limit is unchanged, so a
     // hard stop resolving it does not re-raise the same warning on every
     // later cost event.
-    const existing = await db
+    const rows = await db
       .select()
       .from(budgetIncidents)
       .where(
         and(
           eq(budgetIncidents.policyId, policy.id),
-          eq(budgetIncidents.windowStart, start),
+          eq(budgetIncidents.windowStart, windowStart),
           eq(budgetIncidents.thresholdType, thresholdType),
           ne(budgetIncidents.status, "dismissed"),
         ),
-      )
-      .then((rows) =>
-        rows.find(
-          (row) =>
-            row.status === "open" || (thresholdType === "soft" && row.amountLimit === policy.amount),
-        ) ?? null,
       );
-    if (existing) return existing;
+    return (
+      rows.find((row) => row.status === "open") ??
+      rows.find((row) => thresholdType === "soft" && row.amountLimit === policy.amount) ??
+      null
+    );
+  }
 
-    const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
-    const payload = buildApprovalPayload({
-      policy,
-      scopeName: normalizeScopeName(policy.scopeType as BudgetScopeType, scope.name),
-      thresholdType,
-      amountObserved,
-      windowStart: start,
-      windowEnd: end,
-    });
+  async function createIncidentIfNeeded(
+    policy: PolicyRow,
+    thresholdType: BudgetThresholdType,
+    amountObserved: number,
+  ) {
+    const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
+    let payload: ReturnType<typeof buildApprovalPayload> | null = null;
 
-    const approval = thresholdType === "hard"
-      ? await db
-        .insert(approvals)
-        .values({
+    // The unique index budget_incidents_policy_window_threshold_open_idx
+    // (at most one OPEN incident per policy, window and threshold) is the
+    // arbiter. Two cost events that both find nothing to reuse both try to
+    // insert; the loser's insert does nothing, its transaction is rolled
+    // back together with the card it had just inserted, and it goes round
+    // again and reuses the winner's incident. Three rounds is plenty: a
+    // round only repeats when a concurrent writer committed in between.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const existing = await findReusableIncident(policy, thresholdType, start);
+      if (existing) return existing;
+
+      if (!payload) {
+        const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
+        payload = buildApprovalPayload({
+          policy,
+          scopeName: normalizeScopeName(policy.scopeType as BudgetScopeType, scope.name),
+          thresholdType,
+          amountObserved,
+          windowStart: start,
+          windowEnd: end,
+        });
+      }
+      const approvalPayload = payload;
+
+      // The card and the incident are written in one transaction, so an
+      // incident that cannot be written never leaves a card behind with
+      // nothing pointing at it.
+      const created = await withCompanyScope(db, policy.companyId, async (tx) => {
+        const approval = thresholdType === "hard"
+          ? await tx
+            .insert(approvals)
+            .values({
+              companyId: policy.companyId,
+              type: "budget_override_required",
+              requestedByUserId: null,
+              requestedByAgentId: null,
+              status: "pending",
+              payload: approvalPayload,
+            })
+            .returning()
+            .then((rows) => rows[0] ?? null)
+          : null;
+
+        const incident = await tx
+          .insert(budgetIncidents)
+          .values({
+            companyId: policy.companyId,
+            policyId: policy.id,
+            scopeType: policy.scopeType,
+            scopeId: policy.scopeId,
+            metric: policy.metric,
+            windowKind: policy.windowKind,
+            windowStart: start,
+            windowEnd: end,
+            thresholdType,
+            amountLimit: policy.amount,
+            amountObserved,
+            status: "open",
+            approvalId: approval?.id ?? null,
+          })
+          .onConflictDoNothing()
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!incident) throw new IncidentSlotTaken();
+        return incident;
+      }).catch((err: unknown) => {
+        if (err instanceof IncidentSlotTaken) return null;
+        throw err;
+      });
+      if (created) return created;
+    }
+
+    throw new Error(
+      `Budget incident for policy ${policy.id} (${thresholdType}) kept conflicting with another incident ` +
+        "that could not be found afterwards; is migration 0167_budget_incident_open_unique applied?",
+    );
+  }
+
+  // Warning paperwork. A failure is logged, never thrown: nothing is enforced
+  // at the warning threshold, and the hard-stop check that follows must still
+  // run.
+  async function fileSoftIncident(
+    policy: PolicyRow,
+    observedAmount: number,
+    options: { recordActivity: boolean },
+  ) {
+    try {
+      const softIncident = await createIncidentIfNeeded(policy, "soft", observedAmount);
+      if (softIncident && options.recordActivity) {
+        await logActivity(db, {
           companyId: policy.companyId,
-          type: "budget_override_required",
-          requestedByUserId: null,
-          requestedByAgentId: null,
-          status: "pending",
-          payload,
-        })
-        .returning()
-        .then((rows) => rows[0] ?? null)
-      : null;
+          actorType: "system",
+          actorId: "budget_service",
+          action: "budget.soft_threshold_crossed",
+          entityType: "budget_incident",
+          entityId: softIncident.id,
+          details: {
+            scopeType: policy.scopeType,
+            scopeId: policy.scopeId,
+            amountObserved: observedAmount,
+            amountLimit: policy.amount,
+          },
+        });
+      }
+    } catch (err) {
+      reportBudgetPaperworkFailure(policy, "soft_incident", err);
+    }
+  }
 
-    return db
-      .insert(budgetIncidents)
-      .values({
+  // Fail-closed on spend: the scope is paused whether or not the incident and
+  // its card could be written. A failure to file paperwork must never let an
+  // over-limit agent keep running, and must never escape into the caller (a
+  // heartbeat recording its cost) as if the run itself had failed. Even with
+  // no card, getInvocationBlock still refuses new runs while the limit stays
+  // exceeded, and the next cost event tries to file the card again.
+  async function fileHardIncidentAndPause(
+    policy: PolicyRow,
+    observedAmount: number,
+    options: { recordActivity: boolean },
+  ) {
+    let hardIncident: IncidentRow | null = null;
+    try {
+      await resolveOpenSoftIncidents(policy.id);
+    } catch (err) {
+      reportBudgetPaperworkFailure(policy, "resolve_soft_incidents", err);
+    }
+    try {
+      hardIncident = await createIncidentIfNeeded(policy, "hard", observedAmount);
+    } catch (err) {
+      reportBudgetPaperworkFailure(policy, "hard_incident", err);
+    }
+
+    await pauseAndCancelScopeForBudget(policy);
+
+    if (!hardIncident || !options.recordActivity) return;
+    try {
+      await logActivity(db, {
         companyId: policy.companyId,
-        policyId: policy.id,
-        scopeType: policy.scopeType,
-        scopeId: policy.scopeId,
-        metric: policy.metric,
-        windowKind: policy.windowKind,
-        windowStart: start,
-        windowEnd: end,
-        thresholdType,
-        amountLimit: policy.amount,
-        amountObserved,
-        status: "open",
-        approvalId: approval?.id ?? null,
-      })
-      .returning()
-      .then((rows) => rows[0] ?? null);
+        actorType: "system",
+        actorId: "budget_service",
+        action: "budget.hard_threshold_crossed",
+        entityType: "budget_incident",
+        entityId: hardIncident.id,
+        details: {
+          scopeType: policy.scopeType,
+          scopeId: policy.scopeId,
+          amountObserved: observedAmount,
+          amountLimit: policy.amount,
+          approvalId: hardIncident.approvalId ?? null,
+        },
+      });
+    } catch (err) {
+      reportBudgetPaperworkFailure(policy, "hard_activity_log", err);
+    }
   }
 
   async function resolveOpenSoftIncidents(policyId: string) {
@@ -679,12 +841,10 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         } else {
           const softThreshold = Math.ceil((row.amount * row.warnPercent) / 100);
           if (row.notifyEnabled && observedAmount >= softThreshold) {
-            await createIncidentIfNeeded(row, "soft", observedAmount);
+            await fileSoftIncident(row, observedAmount, { recordActivity: false });
           }
           if (row.hardStopEnabled && observedAmount >= row.amount) {
-            await resolveOpenSoftIncidents(row.id);
-            await createIncidentIfNeeded(row, "hard", observedAmount);
-            await pauseAndCancelScopeForBudget(row);
+            await fileHardIncidentAndPause(row, observedAmount, { recordActivity: false });
           }
         }
       } else {
@@ -754,46 +914,11 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         const softThreshold = Math.ceil((policy.amount * policy.warnPercent) / 100);
 
         if (policy.notifyEnabled && observedAmount >= softThreshold) {
-          const softIncident = await createIncidentIfNeeded(policy, "soft", observedAmount);
-          if (softIncident) {
-            await logActivity(db, {
-              companyId: policy.companyId,
-              actorType: "system",
-              actorId: "budget_service",
-              action: "budget.soft_threshold_crossed",
-              entityType: "budget_incident",
-              entityId: softIncident.id,
-              details: {
-                scopeType: policy.scopeType,
-                scopeId: policy.scopeId,
-                amountObserved: observedAmount,
-                amountLimit: policy.amount,
-              },
-            });
-          }
+          await fileSoftIncident(policy, observedAmount, { recordActivity: true });
         }
 
         if (policy.hardStopEnabled && observedAmount >= policy.amount) {
-          await resolveOpenSoftIncidents(policy.id);
-          const hardIncident = await createIncidentIfNeeded(policy, "hard", observedAmount);
-          await pauseAndCancelScopeForBudget(policy);
-          if (hardIncident) {
-            await logActivity(db, {
-              companyId: policy.companyId,
-              actorType: "system",
-              actorId: "budget_service",
-              action: "budget.hard_threshold_crossed",
-              entityType: "budget_incident",
-              entityId: hardIncident.id,
-              details: {
-                scopeType: policy.scopeType,
-                scopeId: policy.scopeId,
-                amountObserved: observedAmount,
-                amountLimit: policy.amount,
-                approvalId: hardIncident.approvalId ?? null,
-              },
-            });
-          }
+          await fileHardIncidentAndPause(policy, observedAmount, { recordActivity: true });
         }
       }
     },
