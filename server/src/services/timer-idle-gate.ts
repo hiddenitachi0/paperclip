@@ -57,6 +57,33 @@ export const MIN_NOTHING_NEW_SAFETY_WINDOW_SEC = 60;
 export const MAX_NOTHING_NEW_SAFETY_WINDOW_SEC = 86_400;
 /** Key under agent_runtime_state.state_json where skips are counted. */
 export const TIMER_IDLE_SKIP_STATE_KEY = "timerIdleSkips";
+/**
+ * Key under agent_runtime_state.state_json where the reasons a scheduled
+ * wake-up was let through are counted (today and the previous day), with the
+ * last reason. Visible at GET /api/agents/:id/runtime-state.
+ */
+export const TIMER_IDLE_RUN_STATE_KEY = "timerIdleRunReasons";
+/** At most one summary log line per agent per this long. */
+export const TIMER_IDLE_SUMMARY_LOG_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Wake-up requests that were turned down ("skipped") on purpose, for a reason
+ * that has its own wake-up when it clears, so the record is not news for a
+ * scheduled tick.
+ *
+ * issue_dependencies_blocked: the heartbeat parks a wake-up for a task whose
+ * blockers are still open ("blocked descendants should stay idle until the
+ * final blocker resolves"). Finishing the last blocker sends its own
+ * issue_blockers_resolved wake-up, and the gate's blocker_resolved signal
+ * covers that one being lost. The stranded-task sweep re-asks for such a task
+ * every ~30 seconds when it never had a run, and each ask left a fresh
+ * "skipped" row -- so counting these rows made every tick of that agent look
+ * busy and the gate never skipped it (DUR-3943 round 3).
+ *
+ * Only "skipped" rows are ignored: a wake-up still queued or deferred counts
+ * whatever its reason.
+ */
+export const TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS = ["issue_dependencies_blocked"] as const;
 
 /**
  * Issue rows carry no "who changed this" column, and a run's own finalisation
@@ -106,8 +133,15 @@ export const TIMER_IDLE_GATE_RUN_SIGNALS = [
   "previous_run_not_succeeded",
   "safety_window_elapsed",
   "run_active_or_pending",
+  /** More in-progress / checked-out issues than can be checked one by one. */
   "holds_checked_out_or_in_progress_issue",
   // Something new
+  /** An in-progress or checked-out issue changed since the last run (beyond its own clean-up). */
+  "held_issue_changed",
+  /** An issue's checkout belongs to a run that is no longer active. */
+  "held_issue_stale_checkout",
+  /** A held issue has a linked approval the operator sent back for changes. */
+  "held_issue_approval_sent_back",
   "wakeup_request",
   "assigned_issue_created",
   "assigned_issue_updated",
@@ -136,6 +170,11 @@ export type TimerIdleGateDecision =
   | {
     decision: "run";
     signal: TimerIdleGateRunSignal;
+    /**
+     * What exactly matched, in a few words (an issue identifier, a wake-up
+     * reason). For diagnosis only; never shown to the operator.
+     */
+    detail?: string;
     error?: unknown;
     /** Signals whose query failed during this check (DUR-3981). */
     failedSignals?: TimerIdleGateSignalFailure[];
@@ -147,8 +186,10 @@ export type TimerIdleGateDecision =
  * code can pass to a wake-up, mapped to the signal(s) above that would still
  * make a scheduled tick run if that wake-up were lost. Every wake-up that
  * reaches enqueueWakeup leaves an agent_wakeup_requests row ("wakeup_request"),
- * so that signal backs every entry; the data signals cover a wake-up that
- * never got that far (most are fire-and-forget).
+ * so that signal backs every entry -- except a wake-up turned down for a
+ * reason in TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS, which has its own
+ * wake-up when it clears; the data signals cover a wake-up that never got
+ * that far (most are fire-and-forget).
  *
  * timer-idle-gate-wake-reasons.test.ts enumerates the real reasons from the
  * server source and fails if one is missing here, or if an entry here no
@@ -157,7 +198,7 @@ export type TimerIdleGateDecision =
 export const TIMER_IDLE_GATE_WAKE_REASON_COVERAGE: Readonly<Record<string, readonly TimerIdleGateRunSignal[]>> = {
   // Assignment and issue changes
   issue_assigned: ["assigned_issue_created", "assigned_issue_updated", "issue_activity_by_others", "wakeup_request"],
-  issue_checked_out: ["holds_checked_out_or_in_progress_issue", "wakeup_request"],
+  issue_checked_out: ["held_issue_changed", "assigned_issue_updated", "issue_activity_by_others", "wakeup_request"],
   issue_status_changed: ["assigned_issue_updated", "issue_activity_by_others", "wakeup_request"],
   issue_tree_restored: ["assigned_issue_updated", "issue_activity_by_others", "wakeup_request"],
   task_watchdog_stopped_subtree: ["issue_activity_by_others", "wakeup_request"],
@@ -224,6 +265,16 @@ async function exists(query: Promise<Array<unknown>>): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** The first matching row described in a few words, or null when there is none. */
+async function firstDetail<T>(query: Promise<T[]>, describe: (row: T) => string): Promise<string | null> {
+  const [row] = await query;
+  return row === undefined ? null : describe(row);
+}
+
+function issueLabel(row: { identifier: string | null; id: string }): string {
+  return row.identifier ?? row.id;
+}
+
 /**
  * Decides whether a plain scheduled wake-up may be skipped. Never throws: an
  * error anywhere returns { decision: "run", signal: "check_failed" }.
@@ -247,9 +298,10 @@ async function evaluate(
   now: Date,
 ): Promise<TimerIdleGateDecision> {
   const failures: TimerIdleGateSignalFailure[] = [];
-  const run = (signal: TimerIdleGateRunSignal): TimerIdleGateDecision => ({
+  const run = (signal: TimerIdleGateRunSignal, detail?: string | null): TimerIdleGateDecision => ({
     decision: "run",
     signal,
+    ...(detail ? { detail } : {}),
     ...(failures.length > 0 ? { failedSignals: [...failures] } : {}),
   });
   const policy = readTimerIdleGatePolicy(agent.runtimeConfig);
@@ -268,38 +320,53 @@ async function evaluate(
   // signals independent means one broken query cannot hide the others, and a
   // test can prove a case passed because the rule said so, not because
   // something threw.
-  const check = async (signal: TimerIdleGateRunSignal, query: () => Promise<boolean>): Promise<boolean> => {
+  //
+  // A query answers true / a short description of what it found ("new"), or
+  // false / null ("nothing new"). check() hands back the description (or ""
+  // for a plain true) so the decision can say what matched.
+  const check = async (
+    signal: TimerIdleGateRunSignal,
+    query: () => Promise<boolean | string | null>,
+  ): Promise<string | null> => {
     try {
-      return await query();
+      const answer = await query();
+      if (typeof answer === "string") return answer;
+      return answer ? "" : null;
     } catch (error) {
       failures.push({ signal, message: error instanceof Error ? error.message : String(error) });
       logger.warn(
         { err: error, agentId, signal },
         "timer idle gate: a signal could not be checked; the scheduled run goes ahead",
       );
-      return false;
+      return null;
     }
+  };
+  /** Runs the check; returns the decision when the signal fired, null otherwise. */
+  const fired = async (
+    signal: TimerIdleGateRunSignal,
+    query: () => Promise<boolean | string | null>,
+  ): Promise<TimerIdleGateDecision | null> => {
+    const found = await check(signal, query);
+    return found === null ? null : run(signal, found);
   };
 
   // Anything queued, running or scheduled for this agent: let the wake-up
   // through (enqueueWakeup coalesces it onto that run).
-  if (
-    await check("run_active_or_pending", () => exists(
-      db
-        .select({ id: heartbeatRuns.id })
-        .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.companyId, companyId),
-            eq(heartbeatRuns.agentId, agentId),
-            inArray(heartbeatRuns.status, [...ACTIVE_OR_PENDING_RUN_STATUSES]),
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("run_active_or_pending");
-  }
+  const activeRun = await fired("run_active_or_pending", () => firstDetail(
+    db
+      .select({ status: heartbeatRuns.status, source: heartbeatRuns.invocationSource })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, agentId),
+          inArray(heartbeatRuns.status, [...ACTIVE_OR_PENDING_RUN_STATUSES]),
+        ),
+      )
+      .limit(1),
+    (row) => `${row.source} run ${row.status}`,
+  ));
+  if (activeRun) return activeRun;
 
   const [lastRun] = await db
     .select({
@@ -314,7 +381,7 @@ async function evaluate(
     .orderBy(desc(heartbeatRuns.createdAt))
     .limit(1);
   if (!lastRun) return run("no_previous_run");
-  if (lastRun.status !== "succeeded") return run("previous_run_not_succeeded");
+  if (lastRun.status !== "succeeded") return run("previous_run_not_succeeded", lastRun.status);
 
   // A run that never recorded a start is judged from when it was created,
   // which is earlier: more things count as new, never fewer.
@@ -328,334 +395,377 @@ async function evaluate(
   const assignedToAgent = and(eq(issues.companyId, companyId), eq(issues.assigneeAgentId, agentId), isNull(issues.hiddenAt));
   const openAssigned = and(assignedToAgent, notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]));
 
-  // DUR-3979: an in-progress or checked-out issue that waits only on the
-  // operator's decision on a linked approval is not work to continue (see
-  // board-approval-wait.ts); only the other held issues keep the timer on.
-  // Fail-open: a failed check answers "not waiting", so the run goes ahead.
-  const heldIssues = await db
-    .select({ id: issues.id })
-    .from(issues)
-    .where(and(openAssigned, or(eq(issues.status, "in_progress"), sql`${issues.checkoutRunId} is not null`)))
-    .limit(HELD_ISSUE_SCAN_LIMIT + 1);
-  if (heldIssues.length > HELD_ISSUE_SCAN_LIMIT) return run("holds_checked_out_or_in_progress_issue");
+  // In-progress and checked-out issues (DUR-3943 round 3).
+  //
+  // Holding one used to force every scheduled tick to run. On production that
+  // kept Dashboard Boss running every 15 minutes for one in-progress task
+  // that nothing had touched, while the work itself was being moved on by the
+  // wake-ups that are never gated (execution promotion, continuation and
+  // assignment recovery, blockers resolved, children completed). So holding
+  // work is no longer news by itself. A held issue counts only when:
+  //   - it changed since the last run started, beyond that run's own
+  //     clean-up (the same grace as assigned_issue_updated), or
+  //   - its checkout belongs to a run that is no longer active: nobody is
+  //     working it, and a run of this agent can take the checkout over.
+  // An issue waiting only on the operator's decision on a linked approval
+  // (DUR-3979, board-approval-wait.ts) never counts for the checkout rule,
+  // exactly as before; a change to it is still news through
+  // assigned_issue_updated. Fail-open: a failed approval check answers "not
+  // waiting", so the run goes ahead. One narrower rule stays unconditional
+  // (a linked approval sent back for changes, below). Held work that nothing
+  // else wakes gets a run at the latest when the safety window elapses.
+  const heldIssues: Array<{
+    id: string;
+    identifier: string | null;
+    updatedAt: Date;
+    checkoutRunId: string | null;
+    checkoutRunStatus: string | null;
+  }> = [];
+  // A failed lookup is recorded against held_issue_changed and forces the run
+  // at the end of the check, like any other signal that cannot answer.
+  await check("held_issue_changed", async () => {
+    const rows = await db
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        updatedAt: issues.updatedAt,
+        checkoutRunId: issues.checkoutRunId,
+        checkoutRunStatus: heartbeatRuns.status,
+      })
+      .from(issues)
+      .leftJoin(heartbeatRuns, eq(heartbeatRuns.id, issues.checkoutRunId))
+      .where(and(openAssigned, or(eq(issues.status, "in_progress"), sql`${issues.checkoutRunId} is not null`)))
+      .limit(HELD_ISSUE_SCAN_LIMIT + 1);
+    heldIssues.push(...rows);
+    return false;
+  });
+  if (heldIssues.length > HELD_ISSUE_SCAN_LIMIT) return run("holds_checked_out_or_in_progress_issue", `more than ${HELD_ISSUE_SCAN_LIMIT}`);
   for (const held of heldIssues) {
-    if (!(await isIssueWaitingOnlyOnBoardApproval(db, { companyId, issueId: held.id }))) {
-      return run("holds_checked_out_or_in_progress_issue");
+    const changed = (ms(held.updatedAt) ?? Number.POSITIVE_INFINITY) > unattributedSince.getTime();
+    const staleCheckout =
+      held.checkoutRunId !== null &&
+      !(ACTIVE_OR_PENDING_RUN_STATUSES as readonly string[]).includes(held.checkoutRunStatus ?? "");
+    if (changed) return run("held_issue_changed", issueLabel(held));
+    if (staleCheckout && !(await isIssueWaitingOnlyOnBoardApproval(db, { companyId, issueId: held.id }))) {
+      return run("held_issue_stale_checkout", `${issueLabel(held)} (checkout run ${held.checkoutRunStatus ?? "gone"})`);
     }
+  }
+  // The one held case kept on every tick: the operator sent a linked approval
+  // back for changes. Nothing wakes the agent for that (the request-revision
+  // route sends no wake-up; see board-approval-wait.ts), so the timer is its
+  // only way back to the work, and dropping it could leave the send-back
+  // unanswered for a whole safety window at a time. It stops counting the
+  // moment the agent resubmits or the approval is otherwise settled.
+  if (heldIssues.length > 0) {
+    const sentBack = await fired("held_issue_approval_sent_back", () => firstDetail(
+      db
+        .select({ id: issues.id, identifier: issues.identifier })
+        .from(issueApprovals)
+        .innerJoin(approvals, eq(approvals.id, issueApprovals.approvalId))
+        .innerJoin(issues, eq(issues.id, issueApprovals.issueId))
+        .where(
+          and(
+            eq(issueApprovals.companyId, companyId),
+            eq(approvals.companyId, companyId),
+            inArray(issueApprovals.issueId, heldIssues.map((held) => held.id)),
+            eq(approvals.status, "revision_requested"),
+          ),
+        )
+        .limit(1),
+      issueLabel,
+    ));
+    if (sentBack) return sentBack;
   }
 
   // Any non-timer wake-up asked for since the last run started, whatever
-  // became of it (coalesced, deferred, skipped, failed), or one still pending.
-  if (
-    await check("wakeup_request", () => exists(
-      db
-        .select({ id: agentWakeupRequests.id })
-        .from(agentWakeupRequests)
-        .where(
-          and(
-            eq(agentWakeupRequests.companyId, companyId),
-            eq(agentWakeupRequests.agentId, agentId),
-            sql`${agentWakeupRequests.source} <> 'timer'`,
-            or(
-              gt(agentWakeupRequests.requestedAt, since),
-              inArray(agentWakeupRequests.status, [...PENDING_WAKEUP_REQUEST_STATUSES]),
-            ),
+  // became of it (coalesced, deferred, skipped, failed), or one still pending
+  // -- except one turned down on purpose for a reason that has its own
+  // wake-up when it clears (TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS).
+  const wakeupRequest = await fired("wakeup_request", () => firstDetail(
+    db
+      .select({ reason: agentWakeupRequests.reason, status: agentWakeupRequests.status, source: agentWakeupRequests.source })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, agentId),
+          sql`${agentWakeupRequests.source} <> 'timer'`,
+          or(
+            gt(agentWakeupRequests.requestedAt, since),
+            inArray(agentWakeupRequests.status, [...PENDING_WAKEUP_REQUEST_STATUSES]),
           ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("wakeup_request");
-  }
+          sql`not (${agentWakeupRequests.status} = 'skipped' and ${agentWakeupRequests.reason} in (${sql.join(
+            TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS.map((reason) => sql`${reason}`),
+            sql`, `,
+          )}))`,
+        ),
+      )
+      .orderBy(desc(agentWakeupRequests.requestedAt))
+      .limit(1),
+    (row) => `${row.reason ?? "no reason"} (${row.source}, ${row.status})`,
+  ));
+  if (wakeupRequest) return wakeupRequest;
 
-  if (
-    await check("assigned_issue_created", () => exists(
-      db
-        .select({ id: issues.id })
-        .from(issues)
-        .where(
-          and(openAssigned, gt(issues.createdAt, since), sql`${issues.createdByAgentId} is distinct from ${agentId}::uuid`),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("assigned_issue_created");
-  }
+  const assignedCreated = await fired("assigned_issue_created", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(
+        and(openAssigned, gt(issues.createdAt, since), sql`${issues.createdByAgentId} is distinct from ${agentId}::uuid`),
+      )
+      .limit(1),
+    issueLabel,
+  ));
+  if (assignedCreated) return assignedCreated;
 
-  if (
-    await check("assigned_issue_updated", () => exists(
-      db
-        .select({ id: issues.id })
-        .from(issues)
-        .where(and(openAssigned, gt(issues.updatedAt, unattributedSince)))
-        .limit(1),
-    ))
-  ) {
-    return run("assigned_issue_updated");
-  }
+  const assignedUpdated = await fired("assigned_issue_updated", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(and(openAssigned, gt(issues.updatedAt, unattributedSince)))
+      .limit(1),
+    issueLabel,
+  ));
+  if (assignedUpdated) return assignedUpdated;
 
   // Activity on the agent's open issues by anyone but the agent itself or
   // one of its own runs.
-  if (
-    await check("issue_activity_by_others", () => exists(
-      db
-        .select({ id: activityLog.id })
-        .from(activityLog)
-        .where(
-          and(
-            eq(activityLog.companyId, companyId),
-            eq(activityLog.entityType, "issue"),
-            gt(activityLog.createdAt, since),
-            sql`${activityLog.entityId} in (select ${issues.id}::text from ${issues} where ${openAssigned})`,
-            sql`not (${activityLog.actorType} = 'agent' and ${activityLog.actorId} = ${agentId})`,
-            sql`(${activityLog.runId} is null or not exists (select 1 from ${heartbeatRuns} own_run where own_run.id = ${activityLog.runId} and own_run.agent_id = ${agentId}::uuid))`,
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("issue_activity_by_others");
-  }
+  const activityByOthers = await fired("issue_activity_by_others", () => firstDetail(
+    db
+      .select({ action: activityLog.action, actorType: activityLog.actorType, actorId: activityLog.actorId })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.entityType, "issue"),
+          gt(activityLog.createdAt, since),
+          sql`${activityLog.entityId} in (select ${issues.id}::text from ${issues} where ${openAssigned})`,
+          sql`not (${activityLog.actorType} = 'agent' and ${activityLog.actorId} = ${agentId})`,
+          sql`(${activityLog.runId} is null or not exists (select 1 from ${heartbeatRuns} own_run where own_run.id = ${activityLog.runId} and own_run.agent_id = ${agentId}::uuid))`,
+        ),
+      )
+      .limit(1),
+    (row) => `${row.action} by ${row.actorType === "system" ? `system ${row.actorId}` : row.actorType}`,
+  ));
+  if (activityByOthers) return activityByOthers;
 
   // Comments by anyone else on any issue assigned to the agent (a comment on
   // a closed issue can reopen it).
-  if (
-    await check("comment_on_assigned_issue", () => exists(
-      db
-        .select({ id: issueComments.id })
-        .from(issueComments)
-        .innerJoin(issues, eq(issues.id, issueComments.issueId))
-        .where(
-          and(
-            assignedToAgent,
-            eq(issueComments.companyId, companyId),
-            gt(issueComments.createdAt, since),
-            isNull(issueComments.deletedAt),
-            sql`${issueComments.authorAgentId} is distinct from ${agentId}::uuid`,
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("comment_on_assigned_issue");
-  }
+  const commentByOthers = await fired("comment_on_assigned_issue", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issueComments)
+      .innerJoin(issues, eq(issues.id, issueComments.issueId))
+      .where(
+        and(
+          assignedToAgent,
+          eq(issueComments.companyId, companyId),
+          gt(issueComments.createdAt, since),
+          isNull(issueComments.deletedAt),
+          sql`${issueComments.authorAgentId} is distinct from ${agentId}::uuid`,
+        ),
+      )
+      .limit(1),
+    issueLabel,
+  ));
+  if (commentByOthers) return commentByOthers;
 
   // Mentions anywhere in the company. The id prefilter is a superset; the
   // real parser the comment route uses decides.
-  const mentioned = await check("mentioned_in_comment", async () => {
+  const mentioned = await fired("mentioned_in_comment", async () => {
     const mentionCandidates = await db
-    .select({ body: issueComments.body })
-    .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.companyId, companyId),
-        gt(issueComments.createdAt, since),
-        isNull(issueComments.deletedAt),
-        sql`${issueComments.authorAgentId} is distinct from ${agentId}::uuid`,
-        sql`strpos(${issueComments.body}, ${agentId}) > 0`,
-      ),
-    )
-    .limit(MENTION_SCAN_LIMIT + 1);
-    if (mentionCandidates.length > MENTION_SCAN_LIMIT) return true;
+      .select({ body: issueComments.body })
+      .from(issueComments)
+      .where(
+        and(
+          eq(issueComments.companyId, companyId),
+          gt(issueComments.createdAt, since),
+          isNull(issueComments.deletedAt),
+          sql`${issueComments.authorAgentId} is distinct from ${agentId}::uuid`,
+          sql`strpos(${issueComments.body}, ${agentId}) > 0`,
+        ),
+      )
+      .limit(MENTION_SCAN_LIMIT + 1);
+    if (mentionCandidates.length > MENTION_SCAN_LIMIT) return `more than ${MENTION_SCAN_LIMIT} candidate comments`;
     return mentionCandidates.some((comment) => extractAgentMentionIds(comment.body).includes(agentId));
   });
-  if (mentioned) return run("mentioned_in_comment");
+  if (mentioned) return mentioned;
 
   // Approvals the agent asked for, or that sit on its issues, decided since.
-  if (
-    await check("approval_decided", () => exists(
-      db
-        .select({ id: approvals.id })
-        .from(approvals)
-        .where(
-          and(
-            eq(approvals.companyId, companyId),
-            sql`${approvals.status} <> 'pending'`,
-            or(gt(approvals.decidedAt, since), gt(approvals.updatedAt, since)),
-            or(
-              eq(approvals.requestedByAgentId, agentId),
-              sql`exists (select 1 from ${issueApprovals} ia join ${issues} linked on linked.id = ia.issue_id where ia.approval_id = ${approvals.id} and linked.assignee_agent_id = ${agentId}::uuid)`,
-            ),
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("approval_decided");
-  }
-
-  if (
-    await check("approval_comment_by_others", () => exists(
-      db
-        .select({ id: approvalComments.id })
-        .from(approvalComments)
-        .innerJoin(approvals, eq(approvals.id, approvalComments.approvalId))
-        .where(
-          and(
-            eq(approvalComments.companyId, companyId),
+  const approvalDecided = await fired("approval_decided", () => firstDetail(
+    db
+      .select({ type: approvals.type, status: approvals.status })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.companyId, companyId),
+          sql`${approvals.status} <> 'pending'`,
+          or(gt(approvals.decidedAt, since), gt(approvals.updatedAt, since)),
+          or(
             eq(approvals.requestedByAgentId, agentId),
-            gt(approvalComments.createdAt, since),
-            sql`${approvalComments.authorAgentId} is distinct from ${agentId}::uuid`,
+            sql`exists (select 1 from ${issueApprovals} ia join ${issues} linked on linked.id = ia.issue_id where ia.approval_id = ${approvals.id} and linked.assignee_agent_id = ${agentId}::uuid)`,
           ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("approval_comment_by_others");
-  }
+        ),
+      )
+      .limit(1),
+    (row) => `${row.type} ${row.status}`,
+  ));
+  if (approvalDecided) return approvalDecided;
+
+  const approvalComment = await fired("approval_comment_by_others", () => exists(
+    db
+      .select({ id: approvalComments.id })
+      .from(approvalComments)
+      .innerJoin(approvals, eq(approvals.id, approvalComments.approvalId))
+      .where(
+        and(
+          eq(approvalComments.companyId, companyId),
+          eq(approvals.requestedByAgentId, agentId),
+          gt(approvalComments.createdAt, since),
+          sql`${approvalComments.authorAgentId} is distinct from ${agentId}::uuid`,
+        ),
+      )
+      .limit(1),
+  ));
+  if (approvalComment) return approvalComment;
 
   // An approval waiting on THIS agent's answer (a boss review of a
   // teammate's boost ask) that arrived or changed since.
-  if (
-    await check("approval_waiting_for_agent", () => exists(
-      db
-        .select({ id: approvals.id })
-        .from(approvals)
-        .where(
-          and(
-            eq(approvals.companyId, companyId),
-            eq(approvals.status, "pending"),
-            sql`${approvals.payload} -> 'bossReview' ->> 'bossAgentId' = ${agentId}`,
-            or(gt(approvals.createdAt, since), gt(approvals.updatedAt, since)),
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("approval_waiting_for_agent");
-  }
+  const approvalWaiting = await fired("approval_waiting_for_agent", () => exists(
+    db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.companyId, companyId),
+          eq(approvals.status, "pending"),
+          sql`${approvals.payload} -> 'bossReview' ->> 'bossAgentId' = ${agentId}`,
+          or(gt(approvals.createdAt, since), gt(approvals.updatedAt, since)),
+        ),
+      )
+      .limit(1),
+  ));
+  if (approvalWaiting) return approvalWaiting;
 
   // Interactions (questions, confirmations, suggested tasks) the agent opened
   // or that live on its issues: a new one from someone else, or one answered.
-  if (
-    await check("interaction_changed", () => exists(
-      db
-        .select({ id: issueThreadInteractions.id })
-        .from(issueThreadInteractions)
-        .leftJoin(issues, eq(issues.id, issueThreadInteractions.issueId))
-        .where(
-          and(
-            eq(issueThreadInteractions.companyId, companyId),
-            or(eq(issueThreadInteractions.createdByAgentId, agentId), eq(issues.assigneeAgentId, agentId)),
-            or(
-              and(
-                gt(issueThreadInteractions.createdAt, since),
-                sql`${issueThreadInteractions.createdByAgentId} is distinct from ${agentId}::uuid`,
-              ),
-              and(
-                or(gt(issueThreadInteractions.resolvedAt, since), gt(issueThreadInteractions.updatedAt, since)),
-                sql`${issueThreadInteractions.status} <> 'pending'`,
-                sql`${issueThreadInteractions.resolvedByAgentId} is distinct from ${agentId}::uuid`,
-              ),
+  const interaction = await fired("interaction_changed", () => firstDetail(
+    db
+      .select({ kind: issueThreadInteractions.kind, status: issueThreadInteractions.status })
+      .from(issueThreadInteractions)
+      .leftJoin(issues, eq(issues.id, issueThreadInteractions.issueId))
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, companyId),
+          or(eq(issueThreadInteractions.createdByAgentId, agentId), eq(issues.assigneeAgentId, agentId)),
+          or(
+            and(
+              gt(issueThreadInteractions.createdAt, since),
+              sql`${issueThreadInteractions.createdByAgentId} is distinct from ${agentId}::uuid`,
+            ),
+            and(
+              or(gt(issueThreadInteractions.resolvedAt, since), gt(issueThreadInteractions.updatedAt, since)),
+              sql`${issueThreadInteractions.status} <> 'pending'`,
+              sql`${issueThreadInteractions.resolvedByAgentId} is distinct from ${agentId}::uuid`,
             ),
           ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("interaction_changed");
-  }
+        ),
+      )
+      .limit(1),
+    (row) => `${row.kind} ${row.status}`,
+  ));
+  if (interaction) return interaction;
 
   // A blocker of one of its open issues finished (issue_relations: issue_id
   // blocks related_issue_id).
-  if (
-    await check("blocker_resolved", () => exists(
-      db
-        .select({ id: issueRelations.id })
-        .from(issueRelations)
-        .innerJoin(issues, eq(issues.id, issueRelations.relatedIssueId))
-        .where(
-          and(
-            eq(issueRelations.companyId, companyId),
-            eq(issueRelations.type, "blocks"),
-            openAssigned,
-            sql`exists (select 1 from ${issues} blocker where blocker.id = ${issueRelations.issueId} and (blocker.completed_at > ${since.toISOString()}::timestamptz or blocker.cancelled_at > ${since.toISOString()}::timestamptz or (blocker.status in ('done', 'cancelled') and blocker.updated_at > ${since.toISOString()}::timestamptz)))`,
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("blocker_resolved");
-  }
+  const blockerResolved = await fired("blocker_resolved", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issueRelations)
+      .innerJoin(issues, eq(issues.id, issueRelations.relatedIssueId))
+      .where(
+        and(
+          eq(issueRelations.companyId, companyId),
+          eq(issueRelations.type, "blocks"),
+          openAssigned,
+          sql`exists (select 1 from ${issues} blocker where blocker.id = ${issueRelations.issueId} and (blocker.completed_at > ${since.toISOString()}::timestamptz or blocker.cancelled_at > ${since.toISOString()}::timestamptz or (blocker.status in ('done', 'cancelled') and blocker.updated_at > ${since.toISOString()}::timestamptz)))`,
+        ),
+      )
+      .limit(1),
+    issueLabel,
+  ));
+  if (blockerResolved) return blockerResolved;
 
-  if (
-    await check("child_issue_closed", () => exists(
-      db
-        .select({ id: issues.id })
-        .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, companyId),
-            or(gt(issues.completedAt, since), gt(issues.cancelledAt, since)),
-            sql`${issues.parentId} in (select parent.id from ${issues} parent where parent.company_id = ${companyId}::uuid and parent.assignee_agent_id = ${agentId}::uuid and parent.hidden_at is null and parent.status not in ('done', 'cancelled'))`,
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("child_issue_closed");
-  }
+  const childClosed = await fired("child_issue_closed", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          or(gt(issues.completedAt, since), gt(issues.cancelledAt, since)),
+          sql`${issues.parentId} in (select parent.id from ${issues} parent where parent.company_id = ${companyId}::uuid and parent.assignee_agent_id = ${agentId}::uuid and parent.hidden_at is null and parent.status not in ('done', 'cancelled'))`,
+        ),
+      )
+      .limit(1),
+    issueLabel,
+  ));
+  if (childClosed) return childClosed;
 
-  if (
-    await check("issue_monitor_due", () => exists(
-      db
-        .select({ id: issues.id })
-        .from(issues)
-        .where(and(openAssigned, sql`${issues.monitorNextCheckAt} <= ${now.toISOString()}::timestamptz`))
-        .limit(1),
-    ))
-  ) {
-    return run("issue_monitor_due");
-  }
+  const monitorDue = await fired("issue_monitor_due", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(and(openAssigned, sql`${issues.monitorNextCheckAt} <= ${now.toISOString()}::timestamptz`))
+      .limit(1),
+    issueLabel,
+  ));
+  if (monitorDue) return monitorDue;
 
-  if (
-    await check("recovery_action_changed", () => exists(
-      db
-        .select({ id: issueRecoveryActions.id })
-        .from(issueRecoveryActions)
-        .where(
-          and(
-            eq(issueRecoveryActions.companyId, companyId),
-            or(eq(issueRecoveryActions.ownerAgentId, agentId), eq(issueRecoveryActions.returnOwnerAgentId, agentId)),
-            gt(issueRecoveryActions.updatedAt, since),
-          ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("recovery_action_changed");
-  }
+  const recoveryChanged = await fired("recovery_action_changed", () => firstDetail(
+    db
+      .select({ kind: issueRecoveryActions.kind, status: issueRecoveryActions.status })
+      .from(issueRecoveryActions)
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, companyId),
+          or(eq(issueRecoveryActions.ownerAgentId, agentId), eq(issueRecoveryActions.returnOwnerAgentId, agentId)),
+          gt(issueRecoveryActions.updatedAt, since),
+        ),
+      )
+      .limit(1),
+    (row) => `${row.kind} ${row.status}`,
+  ));
+  if (recoveryChanged) return recoveryChanged;
 
   // Review / approval stages: the agent is the current reviewer or approver,
   // or changes were requested back to it, on an issue that moved since.
-  if (
-    await check("execution_stage_changed", () => exists(
-      db
-        .select({ id: issues.id })
-        .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, companyId),
-            isNull(issues.hiddenAt),
-            notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]),
-            gt(issues.updatedAt, since),
-            or(
-              sql`${issues.executionState} -> 'currentParticipant' ->> 'agentId' = ${agentId}`,
-              sql`${issues.executionState} -> 'returnAssignee' ->> 'agentId' = ${agentId}`,
-            ),
+  const stageChanged = await fired("execution_stage_changed", () => firstDetail(
+    db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          isNull(issues.hiddenAt),
+          notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]),
+          gt(issues.updatedAt, since),
+          or(
+            sql`${issues.executionState} -> 'currentParticipant' ->> 'agentId' = ${agentId}`,
+            sql`${issues.executionState} -> 'returnAssignee' ->> 'agentId' = ${agentId}`,
           ),
-        )
-        .limit(1),
-    ))
-  ) {
-    return run("execution_stage_changed");
-  }
+        ),
+      )
+      .limit(1),
+    issueLabel,
+  ));
+  if (stageChanged) return stageChanged;
 
   // Nothing said "new". If any signal could not answer, that unanswered
   // signal is exactly the one that might have been holding work, so the run
   // goes ahead (fail-open) rather than the tick being skipped on partial
   // information.
-  if (failures.length > 0) return run("check_failed");
+  if (failures.length > 0) return run("check_failed", failures.map((failure) => failure.signal).join(", "));
 
   return { decision: "skip", baselineRunId: lastRun.id, baselineAt: since };
 }
@@ -767,4 +877,128 @@ export async function recordTimerIdleCheckFailure(
   } catch (error) {
     logger.warn({ err: error, agentId: agent.id }, "timer idle gate: could not record a failed check");
   }
+}
+
+export interface TimerIdleRunReasonState {
+  /** UTC day the byReason counts are for. */
+  day: string;
+  /** How often each reason let a scheduled wake-up through on that day. */
+  byReason: Partial<Record<TimerIdleGateRunSignal, number>>;
+  previousDay: string | null;
+  previousByReason: Partial<Record<TimerIdleGateRunSignal, number>> | null;
+  lastReason: TimerIdleGateRunSignal;
+  /** What exactly matched last time (an issue identifier, a wake-up reason), when known. */
+  lastDetail: string | null;
+  lastRanAt: string;
+}
+
+const MAX_DETAIL_CHARS = 200;
+
+/**
+ * DUR-3943 round 3: records WHY a scheduled wake-up was let through, on the
+ * same runtime-state row as the skip counters (merged into state_json under
+ * "timerIdleRunReasons"): a counter per reason for today and the previous day
+ * (UTC), and the last reason with what matched and when. No row per decision
+ * and no log line per tick. Visible at GET /api/agents/:id/runtime-state.
+ * Best-effort: a failure is logged and the run still goes ahead.
+ */
+export async function recordTimerIdleGateRun(
+  db: Db,
+  agent: { id: string; companyId: string; adapterType: string },
+  decision: Extract<TimerIdleGateDecision, { decision: "run" }>,
+  now: Date = new Date(),
+): Promise<void> {
+  const day = now.toISOString().slice(0, 10);
+  const nowIso = now.toISOString();
+  const key = TIMER_IDLE_RUN_STATE_KEY;
+  const reason = decision.signal;
+  const detail = decision.detail ? decision.detail.slice(0, MAX_DETAIL_CHARS) : null;
+  try {
+    const fresh: TimerIdleRunReasonState = {
+      day,
+      byReason: { [reason]: 1 },
+      previousDay: null,
+      previousByReason: null,
+      lastReason: reason,
+      lastDetail: detail,
+      lastRanAt: nowIso,
+    };
+    const current = sql`coalesce(${agentRuntimeState.stateJson} -> ${key}::text, '{}'::jsonb)`;
+    const sameDay = sql`(${current} ->> 'day') = ${day}::text`;
+    await db
+      .insert(agentRuntimeState)
+      .values({
+        agentId: agent.id,
+        companyId: agent.companyId,
+        adapterType: agent.adapterType,
+        stateJson: { [key]: fresh },
+      })
+      .onConflictDoUpdate({
+        target: agentRuntimeState.agentId,
+        set: {
+          stateJson: sql`coalesce(${agentRuntimeState.stateJson}, '{}'::jsonb) || jsonb_build_object(${key}::text, jsonb_build_object(
+            'day', ${day}::text,
+            'byReason', case when ${sameDay}
+              then coalesce(${current} -> 'byReason', '{}'::jsonb) || jsonb_build_object(${reason}::text, coalesce((${current} -> 'byReason' ->> ${reason}::text)::bigint, 0) + 1)
+              else jsonb_build_object(${reason}::text, 1) end,
+            'previousDay', case when ${sameDay} then ${current} -> 'previousDay' else ${current} -> 'day' end,
+            'previousByReason', case when ${sameDay} then ${current} -> 'previousByReason' else ${current} -> 'byReason' end,
+            'lastReason', ${reason}::text,
+            'lastDetail', ${detail}::text,
+            'lastRanAt', ${nowIso}::text
+          ))`,
+        },
+      });
+  } catch (error) {
+    logger.warn({ err: error, agentId: agent.id }, "timer idle gate: could not record why a scheduled wake-up ran");
+  }
+}
+
+interface TimerIdleSummaryWindow {
+  startedAt: number;
+  skipped: number;
+  ran: Record<string, number>;
+}
+
+const summaryWindows = new Map<string, TimerIdleSummaryWindow>();
+
+/**
+ * One info log line per agent per hour at most, summarising the gate's
+ * decisions since the previous line: how many scheduled wake-ups were skipped
+ * and, per reason, how many ran. Counted in memory (lost on restart, which
+ * only shortens one window); nothing is written per tick. Returns true when
+ * it logged.
+ */
+export function noteTimerIdleGateDecision(
+  agent: { id: string; companyId: string; name?: string | null },
+  decision: TimerIdleGateDecision,
+  now: Date = new Date(),
+): boolean {
+  const nowMs = now.getTime();
+  let window = summaryWindows.get(agent.id);
+  if (!window) {
+    window = { startedAt: nowMs, skipped: 0, ran: {} };
+    summaryWindows.set(agent.id, window);
+  }
+  if (decision.decision === "skip") window.skipped += 1;
+  else window.ran[decision.signal] = (window.ran[decision.signal] ?? 0) + 1;
+  if (nowMs - window.startedAt < TIMER_IDLE_SUMMARY_LOG_INTERVAL_MS) return false;
+  logger.info(
+    {
+      agentId: agent.id,
+      companyId: agent.companyId,
+      agentName: agent.name ?? undefined,
+      since: new Date(window.startedAt).toISOString(),
+      skipped: window.skipped,
+      ran: window.ran,
+    },
+    "timer idle gate: hourly summary of scheduled wake-ups",
+  );
+  summaryWindows.set(agent.id, { startedAt: nowMs, skipped: 0, ran: {} });
+  return true;
+}
+
+/** Test hook: forget every in-memory summary window. */
+export function resetTimerIdleGateSummariesForTest(): void {
+  summaryWindows.clear();
 }

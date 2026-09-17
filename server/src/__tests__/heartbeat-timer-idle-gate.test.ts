@@ -6,10 +6,13 @@ import {
   agentRuntimeState,
   agents,
   agentWakeupRequests,
+  approvals,
   companies,
   createDb,
   heartbeatRuns,
+  issueApprovals,
   issueComments,
+  issueRelations,
   issues,
 } from "@paperclipai/db";
 import {
@@ -283,9 +286,189 @@ describeEmbeddedPostgres("heartbeat timer idle gate (DUR-3943)", () => {
     });
   }
 
-  it("runs when the agent holds an in-progress issue", async () => {
+  // ---- DUR-3943 round 3 ------------------------------------------------
+
+  /** The reasons a scheduled wake-up was let through, as GET /api/agents/:id/runtime-state returns them. */
+  async function readRunReasons(agentId: string) {
+    const state = await heartbeat.getRuntimeState(agentId);
+    return (state?.stateJson as Record<string, Record<string, unknown>> | undefined)?.timerIdleRunReasons;
+  }
+
+  it("records why each scheduled wake-up ran, per reason, on the runtime state the API returns", async () => {
+    // no_previous_run
+    const fresh = await seed({ lastRun: null });
+    await expectRanAndExecuted(await timerWake(fresh.agentId), fresh.agentId);
+    expect(await readRunReasons(fresh.agentId)).toMatchObject({
+      byReason: { no_previous_run: 1 },
+      lastReason: "no_previous_run",
+      day: new Date().toISOString().slice(0, 10),
+    });
+
+    // previous_run_not_succeeded
+    const failed = await seed({ lastRun: { status: "failed" } });
+    await expectRanAndExecuted(await timerWake(failed.agentId), failed.agentId);
+    expect(await readRunReasons(failed.agentId)).toMatchObject({
+      byReason: { previous_run_not_succeeded: 1 },
+      lastReason: "previous_run_not_succeeded",
+      lastDetail: "failed",
+    });
+
+    // wake_on_demand_off
+    const noDemand = await seed({ heartbeat: { wakeOnDemand: false } });
+    await expectRanAndExecuted(await timerWake(noDemand.agentId), noDemand.agentId);
+    expect(await readRunReasons(noDemand.agentId)).toMatchObject({ lastReason: "wake_on_demand_off" });
+
+    // Something new: which signal, and what matched.
+    const commented = await seed();
+    await db.update(issues).set({ identifier: "NOR-77" }).where(eq(issues.id, commented.standingIssueId));
+    await db.update(issues).set({ updatedAt: ago(2 * 24 * 60) }).where(eq(issues.id, commented.standingIssueId));
+    await db.insert(issueComments).values({
+      companyId: commented.companyId,
+      issueId: commented.standingIssueId,
+      authorUserId: "board-user",
+      authorType: "user",
+      body: "Any news on this?",
+      createdAt: ago(10),
+    });
+    await expectRanAndExecuted(await timerWake(commented.agentId), commented.agentId);
+    expect(await readRunReasons(commented.agentId)).toMatchObject({
+      byReason: { comment_on_assigned_issue: 1 },
+      lastReason: "comment_on_assigned_issue",
+      lastDetail: "NOR-77",
+    });
+
+    // A skip adds no run reason.
+    const idle = await seed();
+    expect(await timerWake(idle.agentId)).toBeNull();
+    expect(await readRunReasons(idle.agentId)).toBeUndefined();
+  });
+
+  it("skips an agent whose only in-progress issue has had nothing new since a succeeded run (Dashboard Boss)", async () => {
     const s = await seed({ standingIssueStatus: "in_progress" });
+    expect(await timerWake(s.agentId)).toBeNull();
+    expect(await runsFor(s.agentId)).toHaveLength(1);
+    await expectNoCheckError(s.agentId);
+    expect(await readIdleSkipState(s.agentId)).toMatchObject({ total: 1 });
+  });
+
+  it("runs for an in-progress issue that changed since the last run", async () => {
+    const s = await seed({ standingIssueStatus: "in_progress" });
+    await db.update(issues).set({ updatedAt: ago(5) }).where(eq(issues.id, s.standingIssueId));
     await expectRanAndExecuted(await timerWake(s.agentId), s.agentId);
+    expect(await readRunReasons(s.agentId)).toMatchObject({ lastReason: "held_issue_changed" });
+  });
+
+  it("runs for an in-progress issue whose checkout belongs to a run that is no longer active", async () => {
+    const s = await seed({ standingIssueStatus: "in_progress" });
+    await db.update(issues).set({ checkoutRunId: s.lastRunId }).where(eq(issues.id, s.standingIssueId));
+    await db.update(issues).set({ updatedAt: ago(2 * 24 * 60) }).where(eq(issues.id, s.standingIssueId));
+    await expectRanAndExecuted(await timerWake(s.agentId), s.agentId);
+    expect(await readRunReasons(s.agentId)).toMatchObject({ lastReason: "held_issue_stale_checkout" });
+  });
+
+  it("the safety window still forces a run for an untouched in-progress issue", async () => {
+    const s = await seed({ standingIssueStatus: "in_progress", lastRun: { startedMinutesAgo: 130 } });
+    await expectRanAndExecuted(await timerWake(s.agentId), s.agentId);
+    expect(await readRunReasons(s.agentId)).toMatchObject({ lastReason: "safety_window_elapsed" });
+  });
+
+  describe("board-approval wait (DUR-3979) unchanged", () => {
+    async function linkApproval(s: Seeded, status: string) {
+      const approvalId = randomUUID();
+      await db.insert(approvals).values({
+        id: approvalId,
+        companyId: s.companyId,
+        type: "request_board_approval",
+        requestedByAgentId: s.agentId,
+        status,
+        payload: { title: "Put the new dashboard live" },
+        createdAt: ago(300),
+        updatedAt: ago(300),
+      });
+      await db.insert(issueApprovals).values({ companyId: s.companyId, issueId: s.standingIssueId, approvalId, createdAt: ago(300) });
+    }
+
+    it("an in-progress, checked-out-by-a-finished-run issue waiting only on the operator's decision does not keep the timer awake", async () => {
+      const s = await seed({ standingIssueStatus: "in_progress" });
+      await linkApproval(s, "pending");
+      await db.update(issues).set({ checkoutRunId: s.lastRunId }).where(eq(issues.id, s.standingIssueId));
+      await db.update(issues).set({ updatedAt: ago(2 * 24 * 60) }).where(eq(issues.id, s.standingIssueId));
+      expect(await timerWake(s.agentId)).toBeNull();
+      await expectNoCheckError(s.agentId);
+    });
+
+    it("an approval the operator sent back for changes still runs every tick (nothing else wakes the agent for it)", async () => {
+      const s = await seed({ standingIssueStatus: "in_progress" });
+      await linkApproval(s, "revision_requested");
+      await expectRanAndExecuted(await timerWake(s.agentId), s.agentId);
+      expect(await readRunReasons(s.agentId)).toMatchObject({ lastReason: "held_issue_approval_sent_back" });
+    });
+  });
+
+  it("reproduction (Tech Boss / CEO): the stranded-task sweep's rejected asks for a blocked task no longer make every tick run", async () => {
+    // Tech Boss: no in-progress or checked-out work, wake on demand, a
+    // succeeded previous run. It owns a todo task that has never had a run
+    // and is blocked by a task still open.
+    const s = await seed({ standingIssueStatus: "blocked" });
+    const blockerId = randomUUID();
+    const blockedTodoId = randomUUID();
+    await db.insert(issues).values([
+      {
+        id: blockerId,
+        companyId: s.companyId,
+        title: "Prerequisite still open",
+        status: "todo",
+        priority: "medium",
+        assigneeUserId: "board-user",
+        createdAt: ago(2 * 24 * 60),
+        updatedAt: ago(2 * 24 * 60),
+      },
+      {
+        id: blockedTodoId,
+        companyId: s.companyId,
+        title: "Plan the next release",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: s.agentId,
+        createdByUserId: "board-user",
+        createdAt: ago(2 * 24 * 60),
+        updatedAt: ago(2 * 24 * 60),
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId: s.companyId,
+      issueId: blockerId,
+      relatedIssueId: blockedTodoId,
+      type: "blocks",
+      createdAt: ago(2 * 24 * 60),
+      updatedAt: ago(2 * 24 * 60),
+    });
+
+    // The periodic recovery pipeline (every 30 s on production) asks to wake
+    // the agent for that task on every pass; the heartbeat turns each ask
+    // down. This is the row the gate used to count as news.
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.reconcileStrandedAssignedIssues();
+    const rejected = await db
+      .select({ reason: agentWakeupRequests.reason, status: agentWakeupRequests.status, source: agentWakeupRequests.source })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, s.agentId));
+    expect(rejected.length).toBeGreaterThanOrEqual(2);
+    expect(rejected.every((row) => row.reason === "issue_dependencies_blocked" && row.status === "skipped")).toBe(true);
+
+    // The scheduled tick: nothing new for this agent, so it is skipped.
+    expect(await timerWake(s.agentId)).toBeNull();
+    expect(await runsFor(s.agentId)).toHaveLength(1);
+    await expectNoCheckError(s.agentId);
+    expect(await readIdleSkipState(s.agentId)).toMatchObject({ total: 1 });
+
+    // And finishing the blocker is still news.
+    await db
+      .update(issues)
+      .set({ status: "done", completedAt: ago(1), updatedAt: ago(1) })
+      .where(eq(issues.id, blockerId));
+    await expectRanAndExecuted(await timerWake(s.agentId), s.agentId);
+    expect(await readRunReasons(s.agentId)).toMatchObject({ lastReason: "blocker_resolved" });
   });
 
   for (const source of ["on_demand", "assignment", "automation"] as const) {
