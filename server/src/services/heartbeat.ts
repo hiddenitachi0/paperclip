@@ -121,7 +121,9 @@ import { isHeartbeatRunLockStale, issueService } from "./issues.js";
 import {
   TIMER_IDLE_SKIP_REASON,
   evaluateTimerIdleGate,
+  noteTimerIdleGateDecision,
   recordTimerIdleCheckFailure,
+  recordTimerIdleGateRun,
   recordTimerIdleSkip,
 } from "./timer-idle-gate.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
@@ -14976,12 +14978,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // DUR-42 skip above, so the scheduler does not retry it every tick.
     if (genericTimerWake) {
       const idleGate = await evaluateTimerIdleGate(db, agent);
+      // DUR-3943 round 3: at most one summary log line per agent per hour.
+      noteTimerIdleGateDecision(agent, idleGate);
       if (idleGate.decision === "skip") {
         await recordTimerIdleSkip(db, agent, idleGate);
         await markTimerHeartbeatChecked(agentId, source);
         opts.onNotScheduled?.({ kind: "skipped", reason: TIMER_IDLE_SKIP_REASON });
         return null;
       }
+      // DUR-3943 round 3: the run goes ahead; count why, on the runtime state
+      // (per reason, today and the previous day, and the last one), so a tick
+      // that should have been skipped can be explained.
+      await recordTimerIdleGateRun(db, agent, idleGate);
       // DUR-3981: the run goes ahead, but note which check could not be made.
       // A signal whose query is permanently broken would otherwise make every
       // tick fall open silently -- full price, and nothing on screen saying so.
