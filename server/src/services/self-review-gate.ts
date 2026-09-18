@@ -205,6 +205,24 @@ async function resolveIssueGitWorkspace(
   db: Db,
   input: { companyId: string; issueId: string | null | undefined },
 ): Promise<{ workspacePath: string; baseRef: string } | null> {
+  const checkout = await resolveIssueWorkspaceCheckout(db, input);
+  if (!checkout?.baseRef) return null;
+  return { workspacePath: checkout.workspacePath, baseRef: checkout.baseRef };
+}
+
+/**
+ * The same resolution as resolveIssueGitWorkspace, minus the base-ref requirement: the
+ * on-disk checkout an issue's work happened in, or null when there isn't one to read.
+ *
+ * Split out for origin-commit-gate.ts (DUR-3987), which asks whether a named commit reached
+ * the shared repository. That question needs the checkout but no base ref, and a workspace
+ * realized without one would otherwise be silently skipped -- reading as "checked, the
+ * commit is fine" when nothing was checked at all.
+ */
+export async function resolveIssueWorkspaceCheckout(
+  db: Db,
+  input: { companyId: string; issueId: string | null | undefined },
+): Promise<{ workspacePath: string; baseRef: string | null } | null> {
   if (!input.issueId) return null;
   const workspace = await db
     .select({
@@ -222,7 +240,7 @@ async function resolveIssueGitWorkspace(
   if (workspace.providerType !== "local_fs" && workspace.providerType !== "git_worktree") return null;
 
   const workspacePath = workspace.providerRef ?? workspace.cwd;
-  if (!workspacePath || !workspace.baseRef) return null;
+  if (!workspacePath) return null;
 
   try {
     await fs.access(workspacePath);
@@ -230,7 +248,7 @@ async function resolveIssueGitWorkspace(
     return null;
   }
 
-  return { workspacePath, baseRef: workspace.baseRef };
+  return { workspacePath, baseRef: workspace.baseRef ?? null };
 }
 
 /**
