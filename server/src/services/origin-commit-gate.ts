@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueComments } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
 import { resolveIssueWorkspaceCheckout } from "./self-review-gate.js";
 
 const execFileAsync = promisify(execFile);
@@ -168,14 +169,34 @@ export async function evaluateOriginCommitDoneGate(input: {
 }): Promise<OriginCommitGateResult | null> {
   if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
   if (input.requestedStatus !== "done" || input.currentStatus === "done") return null;
+  try {
+    return await checkNamedCommits(input);
+  } catch (err) {
+    // Fails OPEN, always. This gate runs inside the PATCH that closes a task, and the worst
+    // thing it could do is make finishing work impossible because a git call, a lookup or a
+    // workspace path misbehaved. Every deliberate "couldn't check" path above already
+    // returns null; this catches the ones nobody thought of.
+    logger.warn(
+      { err, issueId: input.issue.id, companyId: input.issue.companyId },
+      "origin-commit gate could not run; letting the transition through (DUR-3987)",
+    );
+    return null;
+  }
+}
 
+async function checkNamedCommits(input: {
+  db: Db;
+  issue: { id: string; identifier: string | null; companyId: string };
+  actor: { actorType: string; agentId: string | null; runId: string | null };
+  patchComment: string | null;
+}): Promise<OriginCommitGateResult | null> {
   const doneNote =
     input.patchComment?.trim()
       ? input.patchComment
       : await findLatestAgentComment(input.db, {
           companyId: input.issue.companyId,
           issueId: input.issue.id,
-          agentId: input.actor.agentId,
+          agentId: input.actor.agentId!,
         });
 
   const namedCommits = extractNamedCommits(doneNote);

@@ -384,6 +384,33 @@ describeEmbeddedPostgres("origin-commit-gate against a real checkout", () => {
     expect(result).toBeNull();
   });
 
+  it("lets done through when the lookup itself blows up — a gate must never make finishing work impossible", async () => {
+    const { clonePath } = await createCloneWithOrigin();
+    const unpushed = await commitInClone(clonePath, "unpushed work");
+    const seeded = await seedIssue({ workspacePath: clonePath });
+    const brokenDb = {
+      select() {
+        throw new Error("db.select is not a function");
+      },
+    } as unknown as typeof db;
+
+    const result = await evaluateOriginCommitDoneGate({
+      ...agentDone(seeded, null),
+      db: brokenDb,
+    });
+    expect(result).toBeNull();
+    // ...and the same call with a working db still refuses, so the test above is not
+    // passing for some unrelated reason.
+    await db.insert(issueComments).values({
+      companyId: seeded.companyId,
+      issueId: seeded.issueId,
+      authorAgentId: seeded.agentId,
+      authorType: "agent",
+      body: `Deployed in commit ${unpushed}.`,
+    });
+    expect((await evaluateOriginCommitDoneGate(agentDone(seeded, null)))?.reason).toBe("local_only");
+  });
+
   it("refuses the exact 15 Sep shape: agent commits, another run resets the shared checkout, agent closes as deployed", async () => {
     const { clonePath } = await createCloneWithOrigin();
     const committed = await commitInClone(clonePath, "NOR-1429 work");
