@@ -54,6 +54,7 @@ import {
   refusalMessageForAgent,
   resolveNamedApprovals,
 } from "./confirmation-approval-references.js";
+import { deployDecisionRefusalMessage, detectDeployDecisionAsk } from "./confirmation-deploy-decision.js";
 
 type InteractionActor = {
   agentId?: string | null;
@@ -809,8 +810,25 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
       idempotencyKey: data.idempotencyKey ?? null,
       payload: data.payload,
     };
-    if (!hasAnyApprovalReference(extractApprovalReferences(card))) return;
-    const [named = []] = await resolveNamedApprovals(db, issue.companyId, [card]);
+    const named = hasAnyApprovalReference(extractApprovalReferences(card))
+      ? (await resolveNamedApprovals(db, issue.companyId, [card]))[0] ?? []
+      : [];
+    if (named.length === 0) {
+      // DUR-3990: no approval covers this card. DUR-3979's guard has nothing to compare
+      // against, but a card ASKING for a deploy decision is still an ask the operator
+      // cannot act on -- a confirmation card deploys nothing. Refuse it here, pointing at
+      // the mechanism that does work. Keyed off what actually RESOLVED, not off whether the
+      // card mentions an id: an unresolvable id (another company's, an ambiguous prefix)
+      // would otherwise be a way to carry a deploy question past this check.
+      const deployAsk = detectDeployDecisionAsk(card.payload);
+      if (deployAsk) {
+        throw conflict(deployDecisionRefusalMessage(deployAsk), {
+          code: "confirmation_asks_for_deploy_decision",
+          signal: deployAsk,
+        });
+      }
+      return;
+    }
     const decision = decideConfirmationCreate(named, card.linkedApprovalId);
     if (decision.action === "refuse_already_decided" || decision.action === "refuse_decide_on_approval_card") {
       throw conflict(refusalMessageForAgent(decision), {
