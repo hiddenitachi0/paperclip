@@ -161,6 +161,7 @@ import { evaluateSelfReviewDoneGate } from "../services/self-review-gate.js";
 import { evaluateGoalConditionDoneGate } from "../services/goal-condition-judge.js";
 import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-gate.js";
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
+import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
@@ -6521,6 +6522,25 @@ export function issueRoutes(
     const deployCompletionWarning = deployCompletionGateResult?.warningOnly
       ? deployCompletionGateResult.message
       : null;
+    // DUR-3987: the gate above asks whether a merge actually went live. This asks the step
+    // before it -- whether the commit the agent NAMES in its done note ever left this
+    // machine at all. A commit that exists only in one checkout is one `git reset` away
+    // from gone, which is how a Nordstrand issue came to be closed as "deployed and
+    // verified" on work that no longer existed. Refuses only the proven case (named,
+    // present here, on no remote ref); an unrecognized sha is warned about, not blocked.
+    const originCommitGateResult = await evaluateOriginCommitDoneGate({
+      db,
+      issue: { id: existing.id, identifier: existing.identifier, companyId: existing.companyId },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      patchComment: typeof commentBody === "string" ? commentBody : null,
+    });
+    if (originCommitGateResult && !originCommitGateResult.warningOnly) {
+      res.status(409).json({ error: originCommitGateResult.message });
+      return;
+    }
+    const originCommitWarning = originCommitGateResult?.warningOnly ? originCommitGateResult.message : null;
     // DUR-313: composes with the gates above -- this asks a narrower question again,
     // "did the operator explicitly sign off on THIS being a finished, user-facing
     // launch", independent of whether the work itself is done or already deployed.
@@ -6921,6 +6941,18 @@ export function issueRoutes(
         await svc.addComment(issue.id, deployCompletionWarning, {}, { authorType: "system" });
       } catch (err) {
         logger.warn({ err, issueId: issue.id }, "failed to post deploy-completion warning comment (DUR-291)");
+      }
+    }
+
+    if (originCommitWarning) {
+      logger.warn(
+        { issueId: issue.id, companyId: issue.companyId, commits: originCommitGateResult?.commits },
+        "issue marked done naming commits this project's checkout has never seen; warning posted on the issue (DUR-3987)",
+      );
+      try {
+        await svc.addComment(issue.id, originCommitWarning, {}, { authorType: "system" });
+      } catch (err) {
+        logger.warn({ err, issueId: issue.id }, "failed to post origin-commit warning comment (DUR-3987)");
       }
     }
 
