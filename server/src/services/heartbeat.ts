@@ -127,6 +127,13 @@ import {
   recordTimerIdleSkip,
 } from "./timer-idle-gate.js";
 import { tickCustomerInboxHandoff } from "./customer-inbox-handoff.js";
+import {
+  recordTickPhase,
+  timeTickPhase,
+  withTickPhaseTimeout,
+  withTickPhases,
+  type TickPhaseReport,
+} from "./scheduler-tick-phases.js";
 import { escalationGrantService } from "./escalation-grants.js";
 import { approvalService } from "./approvals.js";
 import { issueApprovalService } from "./issue-approvals.js";
@@ -5386,6 +5393,56 @@ export interface HeartbeatServiceOptions {
    * capped at a few minutes; `{ ratio: 0 }` disables it.
    */
   timerJitter?: HeartbeatTimerJitterOptions;
+  /**
+   * DUR-3991: how long the per-agent part of one timer tick may take before it
+   * stops and leaves the rest for the next tick. Override in tests.
+   */
+  timerTickBudgetMs?: number;
+  /** DUR-3991: deadline for waking ONE agent. Override in tests. */
+  timerWakeTimeoutMs?: number;
+}
+
+/**
+ * DUR-3991: how long the per-agent loop of a timer tick may run.
+ *
+ * Two minutes, against a 30-second interval. Deliberately several ticks long
+ * rather than one: a tick that stops at its own interval would drop most of the
+ * fleet on the first tick after a restart (everyone is due at once, caches are
+ * cold) and never catch up. Two minutes is comfortably inside the five minutes
+ * the single-flight watchdog allows before it abandons the chain, so an
+ * over-budget tick ends itself rather than being abandoned, and short enough
+ * that the agents it did not reach wait two minutes, not forever.
+ */
+export const DEFAULT_TIMER_TICK_BUDGET_MS = 2 * 60_000;
+
+/**
+ * DUR-3991: deadline for waking one agent.
+ *
+ * enqueueWakeup does roughly twenty sequential round trips per agent (the
+ * DUR-42 actionable-work check plus the DUR-3943 idle gate's per-signal
+ * queries), on the one connection the chain reserved. Twenty seconds is far
+ * more than that has ever honestly needed and far less than a tick interval,
+ * so it fires only for something genuinely stuck. It does not cancel the
+ * query -- see withTickPhaseTimeout -- it only lets the tick move on.
+ */
+export const DEFAULT_TIMER_WAKE_TIMEOUT_MS = 20_000;
+
+/** DUR-3991: deadline for each of the two sweeps that close out a timer tick. */
+export const DEFAULT_TIMER_SUBTICK_TIMEOUT_MS = 60_000;
+
+/** What one timer tick reports back -- counts plus DUR-3991's timing evidence. */
+export interface HeartbeatTimerTickResult {
+  checked: number;
+  enqueued: number;
+  skipped: number;
+  /** Agents whose interval had elapsed when the tick started. */
+  agentsDue: number;
+  /** Due agents the tick ran out of time for; they go first next tick. */
+  agentsNotReached: number;
+  /** Agents whose wake-up hit its own deadline and was left behind. */
+  agentsTimedOut: number;
+  /** Where the time went. */
+  phases: TickPhaseReport;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -14961,7 +15018,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       !wakeCommentId &&
       !readNonEmptyString(enrichedContextSnapshot.taskId) &&
       !readNonEmptyString(enrichedContextSnapshot.taskKey);
-    if (policy.skipTimerWhenNoActionableWork && genericTimerWake && !(await hasActionableTimerWork(agent))) {
+    // DUR-3991: this gate and the idle gate below are the two multi-query
+    // checks every scheduled wake-up pays for, and they were the prime
+    // suspects for the tick that did not return. Timed so the tick's own
+    // result can say so instead of leaving it to guesswork. recordTickPhase
+    // is a no-op outside a scheduler tick, so on-demand wake-ups pay nothing.
+    const actionableWorkGateStartedAt = Date.now();
+    const actionableWorkGateBlocked =
+      policy.skipTimerWhenNoActionableWork && genericTimerWake && !(await hasActionableTimerWork(agent));
+    if (policy.skipTimerWhenNoActionableWork && genericTimerWake) {
+      recordTickPhase("actionableWorkGate", Date.now() - actionableWorkGateStartedAt);
+    }
+    if (actionableWorkGateBlocked) {
       await writeSkippedHeartbeatRequest("heartbeat.timer.no_actionable_work", {
         reason: "No assigned todo or in_progress issue requires this agent before timer adapter invocation.",
       });
@@ -14977,7 +15045,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // activity row per skip -- and advances lastHeartbeatAt exactly like the
     // DUR-42 skip above, so the scheduler does not retry it every tick.
     if (genericTimerWake) {
+      const idleGateStartedAt = Date.now();
       const idleGate = await evaluateTimerIdleGate(db, agent);
+      recordTickPhase("idleGate", Date.now() - idleGateStartedAt);
       // DUR-3943 round 3: at most one summary log line per agent per hour.
       noteTimerIdleGateDecision(agent, idleGate);
       if (idleGate.decision === "skip") {
@@ -16376,84 +16446,195 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     buildRunOutputSilence,
 
-    tickTimers: async (now = new Date()) => {
-      const allAgents = await db
-        .select({ ...getTableColumns(agents) })
-        .from(agents)
-        .innerJoin(companies, eq(companies.id, agents.companyId))
-        .where(eq(companies.status, "active"));
-      const agentsByCompany = groupAgentOrgRowsByCompany(allAgents.map(toAgentOrgRow));
-      let checked = 0;
-      let enqueued = 0;
-      let skipped = 0;
+    // DUR-3991: this chain did not return on 2026-09-17 and the fleet went to
+    // sleep behind it. Three changes, all here:
+    //   * every phase is timed (scheduler-tick-phases.ts), so the tick's own
+    //     result says where the time went instead of leaving it to guesswork;
+    //   * the per-agent work has a budget and each wake-up has a deadline, so
+    //     the chain always ends even when one await never settles;
+    //   * the agents that have waited longest go first, so a tick cut short by
+    //     the budget always drops the LEAST overdue agents -- and they are the
+    //     most overdue on the next tick. No agent can be starved by the
+    //     unordered agent query.
+    tickTimers: async (now = new Date()): Promise<HeartbeatTimerTickResult> =>
+      withTickPhases(async (report) => {
+        const allAgents = await timeTickPhase("loadAgents", async () =>
+          db
+            .select({ ...getTableColumns(agents) })
+            .from(agents)
+            .innerJoin(companies, eq(companies.id, agents.companyId))
+            .where(eq(companies.status, "active")),
+        );
+        const agentsByCompany = groupAgentOrgRowsByCompany(allAgents.map(toAgentOrgRow));
+        let checked = 0;
+        let enqueued = 0;
+        let skipped = 0;
+        let timedOut = 0;
 
-      for (const agent of allAgents) {
-        const invokability = evaluateAgentInvokability(toAgentOrgRow(agent), agentsByCompany.get(agent.companyId) ?? []);
-        if (!invokability.invokable) continue;
-        const policy = parseHeartbeatPolicy(agent);
-        if (!policy.enabled || policy.intervalSec <= 0) continue;
+        // Pass one is pure in-memory arithmetic: no awaits, so it cannot hang
+        // and it costs nothing to measure.
+        const due: Array<{ agent: (typeof allAgents)[number]; baselineMs: number }> = [];
+        for (const agent of allAgents) {
+          const invokability = evaluateAgentInvokability(toAgentOrgRow(agent), agentsByCompany.get(agent.companyId) ?? []);
+          if (!invokability.invokable) continue;
+          const policy = parseHeartbeatPolicy(agent);
+          if (!policy.enabled || policy.intervalSec <= 0) continue;
 
-        checked += 1;
-        const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
-        const elapsedMs = now.getTime() - baseline;
-        // DUR-273: each agent waits its own small, stable extra offset past
-        // the interval so a fleet whose lastHeartbeatAt values line up (after
-        // a restart, a reap, or a shared creation time) does not wake as one.
-        const jitterMs = computeHeartbeatTimerJitterMs(agent.id, policy.intervalSec, options.timerJitter);
-        if (elapsedMs < policy.intervalSec * 1000 + jitterMs) continue;
-
-        // DUR-3932: enqueueWakeup can throw (budget block, invokability race,
-        // inactive company, etc. -- see its `throw conflict(...)` paths) and this
-        // loop previously had no per-agent isolation. One agent stuck in a
-        // permanently-throwing state (e.g. a budget cap) would reject this
-        // iteration and silently abort the *rest* of the fleet's tick for every
-        // agent still to come in `allAgents` -- with no ORDER BY on that query,
-        // Postgres is free to reorder rows across plans/restarts, so which
-        // agents got starved (and how many) varied run to run. A restart could
-        // look like it "re-armed the fleet" purely by reshuffling row order away
-        // from the poison-pill agent, while that agent itself stayed stuck
-        // forever. Catch and log per agent so one broken agent can never take
-        // the rest of the fleet down with it, and so the failure is visible
-        // instead of a single easy-to-miss top-level "tick failed" log line.
-        try {
-          const run = await enqueueWakeup(agent.id, {
-            source: "timer",
-            triggerDetail: "system",
-            reason: "heartbeat_timer",
-            requestedByActorType: "system",
-            requestedByActorId: "heartbeat_scheduler",
-            contextSnapshot: {
-              source: "scheduler",
-              reason: "interval_elapsed",
-              now: now.toISOString(),
-            },
-          });
-          if (run) enqueued += 1;
-          else skipped += 1;
-        } catch (err) {
-          skipped += 1;
-          logger.error(
-            { err, agentId: agent.id, companyId: agent.companyId },
-            "heartbeat scheduler tick: enqueueWakeup failed for agent, continuing to next agent",
-          );
+          checked += 1;
+          const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
+          const elapsedMs = now.getTime() - baseline;
+          // DUR-273: each agent waits its own small, stable extra offset past
+          // the interval so a fleet whose lastHeartbeatAt values line up (after
+          // a restart, a reap, or a shared creation time) does not wake as one.
+          const jitterMs = computeHeartbeatTimerJitterMs(agent.id, policy.intervalSec, options.timerJitter);
+          if (elapsedMs < policy.intervalSec * 1000 + jitterMs) continue;
+          due.push({ agent, baselineMs: baseline });
         }
-      }
+        // Longest-waiting first. The agent query has no ORDER BY, so without
+        // this the budget below would cut a different arbitrary slice of the
+        // fleet every tick; with it, whoever is dropped is by definition the
+        // least overdue, and is first in line next time.
+        due.sort((a, b) => a.baselineMs - b.baselineMs);
 
-      const issueMonitors = await tickDueIssueMonitors(now).catch((err) => {
-        logger.error({ err }, "heartbeat scheduler tick: tickDueIssueMonitors failed");
-        return { checked: 0, triggered: 0, skipped: 0 };
-      });
-      const customerInboxHandoffs = await tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now).catch((err) => {
-        logger.error({ err }, "heartbeat scheduler tick: tickCustomerInboxHandoff failed");
-        return { checked: 0, reassigned: 0, skipped: 0 };
-      });
+        const budgetMs = options.timerTickBudgetMs ?? DEFAULT_TIMER_TICK_BUDGET_MS;
+        const wakeTimeoutMs = options.timerWakeTimeoutMs ?? DEFAULT_TIMER_WAKE_TIMEOUT_MS;
+        const deadline = Date.now() + budgetMs;
+        let notReached = 0;
+        /** Set once a deadline fired: something is still running on this chain's connection. */
+        let abandonedWork = false;
 
-      return {
-        checked: checked + issueMonitors.checked + customerInboxHandoffs.checked,
-        enqueued: enqueued + issueMonitors.triggered + customerInboxHandoffs.reassigned,
-        skipped: skipped + issueMonitors.skipped + customerInboxHandoffs.skipped,
-      };
-    },
+        await timeTickPhase("wakeAgents", async () => {
+          for (let index = 0; index < due.length; index += 1) {
+            // Checked between agents, which is why the per-agent deadline
+            // below matters: without it a single await that never settles
+            // would mean this check never runs again.
+            if (Date.now() >= deadline) {
+              notReached = due.length - index;
+              logger.warn(
+                { budgetMs, woken: index, notReached, dueTotal: due.length },
+                "heartbeat scheduler tick: out of time for this tick, the agents not reached go first next tick",
+              );
+              break;
+            }
+
+            const { agent } = due[index]!;
+            // DUR-3932: enqueueWakeup can throw (budget block, invokability race,
+            // inactive company, etc. -- see its `throw conflict(...)` paths) and this
+            // loop previously had no per-agent isolation. One agent stuck in a
+            // permanently-throwing state (e.g. a budget cap) would reject this
+            // iteration and silently abort the *rest* of the fleet's tick for every
+            // agent still to come. Catch and log per agent so one broken agent can
+            // never take the rest of the fleet down with it, and so the failure is
+            // visible instead of a single easy-to-miss top-level "tick failed" line.
+            //
+            // DUR-3991 adds the deadline: enqueueWakeup awaits ~20 sequential
+            // queries per agent through the timer idle gate, all on the one
+            // connection this chain reserved, and nothing under it had a
+            // timeout. A wake-up that never settles used to end the tick
+            // forever; now it ends this agent and the tick carries on.
+            try {
+              const run = await timeTickPhase("wakeAgent", () =>
+                withTickPhaseTimeout(
+                  "wakeAgent",
+                  wakeTimeoutMs,
+                  enqueueWakeup(agent.id, {
+                    source: "timer",
+                    triggerDetail: "system",
+                    reason: "heartbeat_timer",
+                    requestedByActorType: "system",
+                    requestedByActorId: "heartbeat_scheduler",
+                    contextSnapshot: {
+                      source: "scheduler",
+                      reason: "interval_elapsed",
+                      now: now.toISOString(),
+                    },
+                  }),
+                ),
+              );
+              if (run) enqueued += 1;
+              else skipped += 1;
+            } catch (err) {
+              skipped += 1;
+              const isTimeout = err instanceof Error && err.name === "TickPhaseTimeoutError";
+              logger.error(
+                { err, agentId: agent.id, companyId: agent.companyId, timedOut: isTimeout, wakeTimeoutMs },
+                isTimeout
+                  ? "heartbeat scheduler tick: waking this agent did not finish in time; ending this tick early so " +
+                    "nothing else shares a connection with work that has been given up on"
+                  : "heartbeat scheduler tick: enqueueWakeup failed for agent, continuing to next agent",
+              );
+              if (isTimeout) {
+                // A deadline does not cancel the work behind it (see
+                // withTickPhaseTimeout). The abandoned wake-up keeps running,
+                // and it is still inside this tick's company-scope bypass --
+                // which means it still holds this chain's ONE reserved
+                // connection and may still have a transaction open on it.
+                // Carrying on down the loop would nest the next agent's writes
+                // inside that doomed transaction, on the same connection, with
+                // two callers finalizing out of order. So: stop here. The
+                // agents not reached are the least overdue ones and go first
+                // on the next tick; the chain itself ends, which is the whole
+                // point. Anything the abandoned call still has in flight is
+                // drained (bounded) and fenced off by runInCompanyScopeBypass.
+                timedOut += 1;
+                abandonedWork = true;
+                notReached = due.length - index - 1;
+                break;
+              }
+            }
+          }
+        });
+
+        // Same reasoning as the break above: once something on this
+        // connection has been given up on, nothing else may use it this tick.
+        if (abandonedWork) {
+          logger.warn(
+            { agentsDue: due.length, agentsTimedOut: timedOut, agentsNotReached: notReached },
+            "heartbeat scheduler tick: ending early after a wake-up was given up on; the remaining sweeps run next tick",
+          );
+          return {
+            checked,
+            enqueued,
+            skipped,
+            agentsDue: due.length,
+            agentsNotReached: notReached,
+            agentsTimedOut: timedOut,
+            phases: report(),
+          };
+        }
+
+        const issueMonitors = await timeTickPhase("issueMonitors", () =>
+          withTickPhaseTimeout("issueMonitors", DEFAULT_TIMER_SUBTICK_TIMEOUT_MS, tickDueIssueMonitors(now)).catch((err) => {
+            if (err instanceof Error && err.name === "TickPhaseTimeoutError") abandonedWork = true;
+            logger.error({ err }, "heartbeat scheduler tick: tickDueIssueMonitors failed");
+            return { checked: 0, triggered: 0, skipped: 0 };
+          }),
+        );
+        // Skipped rather than run on a connection whose previous occupant was
+        // given up on but is still using it.
+        const customerInboxHandoffs = abandonedWork
+          ? { checked: 0, reassigned: 0, skipped: 0 }
+          : await timeTickPhase("customerInboxHandoff", () =>
+          withTickPhaseTimeout(
+            "customerInboxHandoff",
+            DEFAULT_TIMER_SUBTICK_TIMEOUT_MS,
+            tickCustomerInboxHandoff(db, { wakeup: enqueueWakeup }, now),
+          ).catch((err) => {
+            logger.error({ err }, "heartbeat scheduler tick: tickCustomerInboxHandoff failed");
+            return { checked: 0, reassigned: 0, skipped: 0 };
+          }),
+        );
+
+        return {
+          checked: checked + issueMonitors.checked + customerInboxHandoffs.checked,
+          enqueued: enqueued + issueMonitors.triggered + customerInboxHandoffs.reassigned,
+          skipped: skipped + issueMonitors.skipped + customerInboxHandoffs.skipped,
+          agentsDue: due.length,
+          agentsNotReached: notReached,
+          agentsTimedOut: timedOut,
+          phases: report(),
+        };
+      }),
 
     cancelRun: (runId: string, reason?: string, options?: CancelRunOptions) => cancelRunInternal(runId, reason, options),
 

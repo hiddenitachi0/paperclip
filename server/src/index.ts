@@ -65,6 +65,7 @@ import {
   startSecretSurfaceScanner,
 } from "./services/index.js";
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
+import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
   schedulerTickSingleFlight,
@@ -1094,8 +1095,35 @@ export async function startServer(): Promise<StartedServer> {
         )
           .then((result) => {
             schedulerLiveness.tickFinished(result);
+            // DUR-3991: a tick slower than its own interval is the shape of the
+            // 2026-09-17 wedge. Say so, and say which phase ate the time, so
+            // the next one does not have to be diagnosed by guesswork.
+            if (result.phases.totalMs >= config.heartbeatSchedulerIntervalMs) {
+              logger.warn(
+                {
+                  totalMs: result.phases.totalMs,
+                  intervalMs: config.heartbeatSchedulerIntervalMs,
+                  slowestPhase: result.phases.slowest?.phase ?? null,
+                  slowestPhaseMs: result.phases.slowest?.totalMs ?? null,
+                  breakdown: describeTickPhases(result.phases),
+                  agentsDue: result.agentsDue,
+                  agentsNotReached: result.agentsNotReached,
+                  agentsTimedOut: result.agentsTimedOut,
+                },
+                `heartbeat timer tick took ${result.phases.totalMs}ms, longer than its own ` +
+                  `${config.heartbeatSchedulerIntervalMs}ms interval — slowest part: ${result.phases.slowest?.phase ?? "unknown"}`,
+              );
+            }
             if (result.enqueued > 0) {
-              logger.info({ ...result }, "heartbeat timer tick enqueued runs");
+              logger.info(
+                {
+                  checked: result.checked,
+                  enqueued: result.enqueued,
+                  skipped: result.skipped,
+                  totalMs: result.phases.totalMs,
+                },
+                "heartbeat timer tick enqueued runs",
+              );
             }
           })
           .catch((err) => {

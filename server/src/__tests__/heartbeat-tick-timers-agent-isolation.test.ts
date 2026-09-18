@@ -142,6 +142,25 @@ describeEmbeddedPostgres("heartbeat tickTimers per-agent isolation", () => {
     // were *reached* -- that's the point being tested.
     expect(result).toMatchObject({ checked: 2, enqueued: 0, skipped: 2 });
 
+    // DUR-3991: the tick now reports where its time went. On 2026-09-17 this
+    // chain ran past 150 seconds and never returned, and there was nothing to
+    // look at afterwards -- no long query, no lock waits, just an unexplained
+    // hang inside the process. These phases are that evidence, and this is the
+    // assertion that keeps them wired up.
+    const phaseNames = result.phases.phases.map((phase) => phase.phase);
+    expect(phaseNames).toContain("loadAgents");
+    expect(phaseNames).toContain("wakeAgents");
+    expect(phaseNames).toContain("wakeAgent");
+    expect(phaseNames).toContain("issueMonitors");
+    expect(phaseNames).toContain("customerInboxHandoff");
+    // One timed occurrence per due agent, so a slow tick can be divided by
+    // "how many agents" rather than guessed at.
+    expect(result.phases.phases.find((phase) => phase.phase === "wakeAgent")?.count).toBe(2);
+    expect(result.phases.slowest).not.toBeNull();
+    expect(result.agentsDue).toBe(2);
+    expect(result.agentsNotReached).toBe(0);
+    expect(result.agentsTimedOut).toBe(0);
+
     // Before the fix, the over-budget agent's thrown conflict aborted the
     // whole `for` loop and the healthy agent -- queried right after it, with
     // no ORDER BY to save it -- would never get an agentWakeupRequests row at

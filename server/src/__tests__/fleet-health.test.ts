@@ -157,6 +157,65 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     );
   });
 
+  // DUR-3991: the 2026-09-17 wedge. The banner above was true but not
+  // actionable -- it never said which part of the scheduler was stuck, so the
+  // only move it left was a restart.
+  it("DUR-3991 names the step that is stuck, how long, and that waiting will fix it", () => {
+    const summary = summarize({
+      runs: runs({ startedInWindow: 0, succeededInWindow: 0, failedInWindow: 0, running: 0, queued: 6 }),
+      scheduler: {
+        ...healthyScheduler,
+        sinceLastTickMs: 3 * 60_000,
+        stale: true,
+        stuckChain: {
+          label: "waking agents on their timers",
+          runningMs: 3 * 60_000,
+          freshAttemptAlreadyTried: false,
+          freshAttemptAfterMs: 5 * 60_000,
+        },
+      },
+    });
+    expect(summary.level).toBe("critical");
+    expect(summary.headline).toBe(
+      "The scheduler has not completed a tick for 3 minutes. The step that is stuck is waking agents on their " +
+        "timers, and it has been going for 3 minutes. No agent is woken while this lasts. The server gives up on " +
+        "it and starts it again by itself after 5 minutes; restart the server if it is still stuck after that.",
+    );
+    // Never an internal identifier on an operator's screen (house rule 7).
+    expect(summary.headline).not.toContain("tickTimers");
+    expect(summary.headline).not.toContain("chain");
+  });
+
+  it("DUR-3991 says a restart is the only thing left once the fresh attempt is stuck too", () => {
+    const summary = summarize({
+      scheduler: {
+        ...healthyScheduler,
+        sinceLastTickMs: 12 * 60_000,
+        stale: true,
+        stuckChain: {
+          label: "recovering stuck work",
+          runningMs: 6 * 60_000,
+          freshAttemptAlreadyTried: true,
+          freshAttemptAfterMs: 5 * 60_000,
+        },
+      },
+    });
+    expect(summary.headline).toBe(
+      "The scheduler has not completed a tick for 12 minutes. The step that is stuck is recovering stuck work, and " +
+        "it has been going for 6 minutes. The server already gave up on it once and started it again, and that is " +
+        "stuck too, so restarting the server is the only thing left.",
+    );
+  });
+
+  it("DUR-3991 falls back to the old wording when no step can be named", () => {
+    const summary = summarize({
+      scheduler: { ...healthyScheduler, sinceLastTickMs: 5 * 60_000, stale: true, stuckChain: null },
+    });
+    expect(summary.headline).toBe(
+      "The scheduler has not completed a tick for 5 minutes. Agents will not be woken until this is fixed (a server restart usually clears it).",
+    );
+  });
+
   it("a scheduler that never ticked since boot is reported as such", () => {
     const summary = summarize({ scheduler: { ...healthyScheduler, lastTickFinishedAt: null, sinceLastTickMs: null, stale: true } });
     expect(summary.level).toBe("critical");

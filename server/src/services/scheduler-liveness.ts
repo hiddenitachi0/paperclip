@@ -5,10 +5,21 @@
 // here (same process as the API, by design: run dispatch is single-process,
 // see agent-start-lock.ts) and /api/health reads it back.
 
+import type { TickPhaseReport } from "./scheduler-tick-phases.js";
+
 export interface SchedulerTickResult {
   checked: number;
   enqueued: number;
   skipped: number;
+  /**
+   * DUR-3991: where the tick's time went, when the chain reports it. Optional
+   * because the counts are the contract and the timing is evidence: a caller
+   * that has no breakdown still records a completed tick.
+   */
+  phases?: TickPhaseReport;
+  agentsDue?: number;
+  agentsNotReached?: number;
+  agentsTimedOut?: number;
 }
 
 export interface SchedulerLivenessSnapshot {

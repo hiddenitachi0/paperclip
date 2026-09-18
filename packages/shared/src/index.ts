@@ -1271,6 +1271,7 @@ export type {
   FleetRequestLoad,
   FleetRunCounts,
   FleetSchedulerStatus,
+  FleetSchedulerStuckChain,
   FleetSlotUsage,
   FleetUnavailableAgentSample,
   FleetWaitingOnUnavailableAgents,

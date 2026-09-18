@@ -11,6 +11,10 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { computeFleetHealth } from "../services/fleet-health.js";
 import { getRequestLoadSnapshot } from "../services/request-load.js";
 import { schedulerLiveness } from "../services/scheduler-liveness.js";
+import {
+  describeStuckSchedulerChain,
+  schedulerTickSingleFlight,
+} from "../services/scheduler-tick-single-flight.js";
 import type { FleetHealth } from "@paperclipai/shared";
 import { serverVersion } from "../version.js";
 
@@ -204,7 +208,14 @@ export function healthRoutes(
     if (actorType === "board" && typeof (db as { select?: unknown }).select === "function") {
       try {
         fleet = await computeFleetHealth(db, {
-          scheduler: schedulerLiveness.snapshot(),
+          scheduler: {
+            ...schedulerLiveness.snapshot(),
+            // DUR-3991: when the scheduler has stopped completing ticks, the
+            // reason is almost always one chain that has not returned. The
+            // single-flight guard is the only thing that knows which, so the
+            // Now page can name it instead of saying "something is stuck".
+            stuckChain: describeStuckSchedulerChain(schedulerTickSingleFlight.snapshot()),
+          },
           requests: getRequestLoadSnapshot(),
         });
       } catch (error) {

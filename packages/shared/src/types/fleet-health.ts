@@ -63,6 +63,26 @@ export interface FleetAgentCounts {
   inErrorSample: FleetAgentInErrorSample[];
 }
 
+/**
+ * DUR-3991: which step of the scheduler is currently stuck, in words the
+ * operator can act on. Deliberately carries no internal chain name -- the
+ * server resolves the label before this ever leaves it.
+ */
+export interface FleetSchedulerStuckChain {
+  /** Plain language, e.g. "waking agents on their timers". */
+  label: string;
+  /** How long that step has been running without returning. */
+  runningMs: number;
+  /**
+   * true once the server has already given up on one copy of this step and
+   * started a fresh one, and that one is stuck too -- at which point only a
+   * restart will clear it.
+   */
+  freshAttemptAlreadyTried: boolean;
+  /** How long the server waits before starting a fresh attempt by itself. */
+  freshAttemptAfterMs: number;
+}
+
 export interface FleetSchedulerStatus {
   enabled: boolean;
   intervalMs: number | null;
@@ -72,6 +92,8 @@ export interface FleetSchedulerStatus {
   lastTickError: string | null;
   sinceLastTickMs: number | null;
   stale: boolean;
+  /** DUR-3991: the step that is holding the scheduler up, when one is. */
+  stuckChain?: FleetSchedulerStuckChain | null;
 }
 
 export interface FleetRequestLoad {
