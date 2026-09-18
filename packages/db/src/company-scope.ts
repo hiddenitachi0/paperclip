@@ -5,6 +5,7 @@ import type { ReservedSql } from "postgres";
 import type { Db } from "./client.js";
 import { crossCompanyAccessLog } from "./schema/cross_company_access_log.js";
 import { isRoutineSchedulerBypass, recordRoutineSchedulerBypass } from "./cross-company-audit.js";
+import { createReservedScopeTurns, type ReservedScopeTurns } from "./reserved-scope-turns.js";
 import * as schema from "./schema/index.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -61,47 +62,21 @@ type ScopedDb = Parameters<Parameters<Db["transaction"]>[0]>[0];
 // once it is the innermost (topmost) still-open call, so completion order
 // is always forced back into the same LIFO order depth was assigned in --
 // see waitForTurn/releaseTurn.
-interface ReservedScopeStack {
-  /** Count of withCompanyScope() calls currently open (BEGIN/SAVEPOINT issued, not yet finalized) on this connection. */
-  depth: number;
-  /** Resolvers for calls waiting to become the topmost open call before they may finalize -- keyed by their own depth. */
-  waiters: Map<number, () => void>;
-}
+//
+// DUR-3991: that gap-closing had a gap of its own, and it is why the production
+// fleet had no scheduled wake-up for over twelve hours on 2026-09-17 -- a
+// `tickTimers` chain that started and never finished, with the database idle
+// and one bypass connection reserved and never released. The full account, and
+// the bookkeeping that replaces it, are in reserved-scope-turns.ts.
+const reservedScopeTurns = new WeakMap<Db, ReservedScopeTurns>();
 
-const reservedScopeStacks = new WeakMap<Db, ReservedScopeStack>();
-
-function getReservedScopeStack(scopedDb: Db): ReservedScopeStack {
-  let stack = reservedScopeStacks.get(scopedDb);
-  if (!stack) {
-    stack = { depth: 0, waiters: new Map() };
-    reservedScopeStacks.set(scopedDb, stack);
+function getReservedScopeTurns(scopedDb: Db): ReservedScopeTurns {
+  let turns = reservedScopeTurns.get(scopedDb);
+  if (!turns) {
+    turns = createReservedScopeTurns();
+    reservedScopeTurns.set(scopedDb, turns);
   }
-  return stack;
-}
-
-// Resolves once `depth` is the innermost (topmost) still-open call on this
-// connection -- i.e. every deeper call has already finalized. For strictly
-// sequential (awaited) nesting this is already true by construction and
-// resolves immediately with no extra wait; it only actually blocks a call
-// whose sibling(s) opened after it are still mid-flight. This mirrors the
-// dependency real nesting already has (an outer await already can't resume
-// until an inner awaited call finishes) -- it does not introduce a new kind
-// of wait, only extends the same guarantee to calls that weren't awaited
-// relative to each other.
-async function waitForTurn(stack: ReservedScopeStack, depth: number): Promise<void> {
-  if (stack.depth === depth + 1) return;
-  await new Promise<void>((resolve) => {
-    stack.waiters.set(depth, resolve);
-  });
-}
-
-function releaseTurn(stack: ReservedScopeStack, depth: number): void {
-  stack.depth = depth;
-  const nextWaiter = stack.waiters.get(depth - 1);
-  if (nextWaiter) {
-    stack.waiters.delete(depth - 1);
-    nextWaiter();
-  }
+  return turns;
 }
 
 // DUR-916 review mod #2: drizzle's real `db.transaction(cb)` gives `cb` a
@@ -195,26 +170,27 @@ async function runOnReservedScope<T>(
   // other half: runInCompanyScope/runInCompanyScopeBypass wait for this
   // counter to drain back to zero before releasing.
   liveness.inFlight += 1;
-  const stack = getReservedScopeStack(scopedDb);
-  const depth = stack.depth;
+  // DUR-3991: acquired synchronously, with no intervening await, so a sibling
+  // opening while this call is finalizing can never erase its turn.
+  const turns = getReservedScopeTurns(scopedDb);
+  const depth = turns.acquire();
   const savepoint = `with_company_scope_${depth}`;
-  stack.depth = depth + 1;
   try {
     await scopedDb.execute(depth === 0 ? sql`BEGIN` : sql.raw(`SAVEPOINT ${savepoint}`));
     try {
       const result = await fn(withRollbackGuard(scopedDb, liveness));
-      await waitForTurn(stack, depth);
+      await turns.waitForTurn(depth);
       await scopedDb.execute(depth === 0 ? sql`COMMIT` : sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
       return result;
     } catch (err) {
-      await waitForTurn(stack, depth);
+      await turns.waitForTurn(depth);
       await scopedDb
         .execute(depth === 0 ? sql`ROLLBACK` : sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`))
         .catch(() => {});
       throw err;
     }
   } finally {
-    releaseTurn(stack, depth);
+    turns.releaseTurn(depth);
     // DUR-920: see the comment above this call's increment -- this call is
     // no longer committed to the connection, so it no longer counts toward
     // what runInCompanyScope's finally block is waiting to drain.

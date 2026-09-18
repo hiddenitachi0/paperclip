@@ -16,6 +16,7 @@ import {
   type FleetRequestLoad,
   type FleetRunCounts,
   type FleetSchedulerStatus,
+  type FleetSchedulerStuckChain,
   type FleetSlotUsage,
   type QuietModeState,
 } from "@paperclipai/shared";
@@ -417,6 +418,28 @@ function plural(count: number, singular: string, pluralWord = `${singular}s`): s
  * a severity, and the findings behind it, in plain language. Pure so the
  * rules are unit-testable against the incidents they came from.
  */
+/**
+ * DUR-3991: the Now page sentence for a scheduler that has stopped completing
+ * ticks. Three shapes, because the operator's next move differs:
+ *   * nothing identified  -> the original wording, unchanged.
+ *   * a step is stuck     -> name it, say how long, say the server will start a
+ *                            fresh attempt by itself and when.
+ *   * already retried once -> name it, and say plainly that only a restart is
+ *                            left, because the watchdog has spent its one
+ *                            override (see MAX_ABANDONED_RUNS_PER_CHAIN).
+ */
+export function buildStuckSchedulerNotice(since: string, stuck: FleetSchedulerStuckChain | null): string {
+  const opening = `The scheduler has not completed a tick ${since}.`;
+  if (!stuck) {
+    return `${opening} Agents will not be woken until this is fixed (a server restart usually clears it).`;
+  }
+  const step = `The step that is stuck is ${stuck.label}, and it has been going for ${formatOperatorDuration(stuck.runningMs)}.`;
+  if (stuck.freshAttemptAlreadyTried) {
+    return `${opening} ${step} The server already gave up on it once and started it again, and that is stuck too, so restarting the server is the only thing left.`;
+  }
+  return `${opening} ${step} No agent is woken while this lasts. The server gives up on it and starts it again by itself after ${formatOperatorDuration(stuck.freshAttemptAfterMs)}; restart the server if it is still stuck after that.`;
+}
+
 export function summarizeFleetHealth(input: {
   runs: FleetRunCounts;
   slots: FleetSlotUsage;
@@ -470,7 +493,13 @@ export function summarizeFleetHealth(input: {
     const since = scheduler.sinceLastTickMs === null ? "since the server started" : `for ${formatOperatorDuration(scheduler.sinceLastTickMs)}`;
     findings.push({
       level: "critical",
-      text: `The scheduler has not completed a tick ${since}. Agents will not be woken until this is fixed (a server restart usually clears it).`,
+      // DUR-3991: "something is stuck, restart the server" was true but not
+      // actionable -- it never said WHAT was stuck, so the only move was a
+      // restart. When the server knows which step is holding things up, say so
+      // in words, say how long, and say whether waiting will fix it (the
+      // watchdog in scheduler-tick-single-flight.ts starts a fresh attempt on
+      // its own) or whether a restart is genuinely the only thing left.
+      text: buildStuckSchedulerNotice(since, scheduler.stuckChain ?? null),
     });
   } else if (scheduler.lastTickError) {
     findings.push({

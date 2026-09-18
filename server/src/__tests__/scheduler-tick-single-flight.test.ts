@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   createSchedulerTickSingleFlight,
+  describeStuckSchedulerChain,
+  MAX_ABANDONED_RUNS_PER_CHAIN,
+  SCHEDULER_TICK_CHAIN_LABELS,
+  SCHEDULER_TICK_CHAINS,
   SKIP_LOG_INTERVAL_MS,
-  STUCK_AFTER_MS,
+  WEDGED_AFTER_MS,
   type TickSingleFlightLogger,
 } from "../services/scheduler-tick-single-flight.js";
 
@@ -221,16 +225,281 @@ describe("DUR-385 scheduler tick single-flight guard", () => {
     expect(lines.filter((l) => l.level === "error")).toHaveLength(0);
     expect(lines.filter((l) => l.level === "warn")).toHaveLength(1);
 
-    clock += STUCK_AFTER_MS;
-    await guard.run("deployCarriedIssues", () => wedged.promise);
+    // DUR-3991: the first time it passes the limit the watchdog overrides
+    // instead of skipping, so the loud "restart this" line only arrives once
+    // that override has been spent and the replacement is wedged too.
+    clock += WEDGED_AFTER_MS;
+    const replacement = deferred();
+    void guard.run("deployCarriedIssues", () => replacement.promise);
+    await flush();
+    clock += WEDGED_AFTER_MS;
+    await guard.run("deployCarriedIssues", () => replacement.promise);
+
+    const errors = lines.filter((l) => l.level === "error");
+    expect(errors).toHaveLength(2);
+    expect(errors[1]!.msg).toBe(
+      'scheduler chain "deployCarriedIssues" has been running for 5 minutes, a fresh copy was already started once ' +
+        "and is stuck too — this server needs restarting",
+    );
+
+    wedged.resolve();
+    replacement.resolve();
+    await flush();
+  });
+});
+
+// DUR-3991: on 2026-09-17 tickTimers stopped returning and the guard above did
+// the only thing it knew how to do -- skip, for as long as the operator left
+// it. The Now page said the scheduler had never completed a tick and no agent
+// was woken by anything until the server was restarted by hand.
+describe("DUR-3991 scheduler tick wedge watchdog", () => {
+  it("starts a fresh copy once a chain has been wedged past the limit, and says so once, loudly", async () => {
+    let clock = 0;
+    const { lines, log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+
+    const wedged = deferred();
+    let starts = 0;
+    void guard.run("tickTimers", () => {
+      starts += 1;
+      return wedged.promise;
+    });
+    await flush();
+
+    // Every tick right up to the limit is skipped, exactly as before.
+    for (let elapsed = 30_000; elapsed < WEDGED_AFTER_MS; elapsed += 30_000) {
+      clock = elapsed;
+      await guard.run("tickTimers", () => {
+        starts += 1;
+        return wedged.promise;
+      });
+    }
+    expect(starts).toBe(1);
+    expect(lines.filter((l) => l.level === "error")).toHaveLength(0);
+
+    // The tick that crosses the limit starts a fresh copy instead of skipping.
+    clock = WEDGED_AFTER_MS;
+    const replacement = deferred();
+    void guard.run("tickTimers", () => {
+      starts += 1;
+      return replacement.promise;
+    });
+    await flush();
+    expect(starts).toBe(2);
+
     const errors = lines.filter((l) => l.level === "error");
     expect(errors).toHaveLength(1);
     expect(errors[0]!.msg).toBe(
-      'scheduler chain "deployCarriedIssues" has been running for 11 minutes and is blocking its own ticks — this one needs looking at',
+      'scheduler chain "tickTimers" has been wedged for 5 minutes and is not coming back — abandoning it and ' +
+        "starting a fresh copy so the fleet keeps moving (one copy only; if this one wedges too the server needs " +
+        "restarting)",
     );
-    expect(errors[0]!.fields).toMatchObject({ runningMinutes: 11, skippedTicks: 1 });
+    expect(errors[0]!.fields).toMatchObject({
+      chain: "tickTimers",
+      runningMs: WEDGED_AFTER_MS,
+      overridesTotal: 1,
+      abandonedInFlight: 1,
+    });
+
+    // Said once per wedge, not once per tick: the replacement owns the flag now.
+    clock += 30_000;
+    await guard.run("tickTimers", () => {
+      starts += 1;
+      return replacement.promise;
+    });
+    expect(starts).toBe(2);
+    expect(lines.filter((l) => l.level === "error")).toHaveLength(1);
+
+    const snapshot = guard.snapshot().find((s) => s.chain === "tickTimers")!;
+    expect(snapshot).toMatchObject({ inFlight: true, runningMs: 30_000, overridesTotal: 1, abandonedInFlight: 1 });
 
     wedged.resolve();
+    replacement.resolve();
     await flush();
+  });
+
+  it("never overrides a chain that finishes normally, however many ticks it spans", async () => {
+    let clock = 0;
+    const { lines, log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+
+    // Twenty ticks, each a chain that finishes well inside its interval.
+    for (let tick = 0; tick < 20; tick += 1) {
+      clock += 30_000;
+      await guard.run("tickTimers", async () => {
+        clock += 1_000;
+      });
+    }
+
+    expect(lines.filter((l) => l.level === "error")).toHaveLength(0);
+    expect(guard.snapshot().find((s) => s.chain === "tickTimers")).toMatchObject({
+      inFlight: false,
+      overridesTotal: 0,
+      abandonedInFlight: 0,
+      skipsTotal: 0,
+    });
+  });
+
+  it("leaves a slow-but-finishing chain alone: it still just skips ticks, as before", async () => {
+    let clock = 0;
+    const { lines, log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+
+    const slow = deferred();
+    let starts = 0;
+    const chain = () => {
+      starts += 1;
+      return slow.promise;
+    };
+    void guard.run("periodicRecoveryPipeline", chain);
+    await flush();
+
+    // Four minutes of skipping -- under the limit, so nothing is overridden.
+    for (let elapsed = 30_000; elapsed <= 4 * 60_000; elapsed += 30_000) {
+      clock = elapsed;
+      await guard.run("periodicRecoveryPipeline", chain);
+    }
+    expect(starts).toBe(1);
+    expect(lines.filter((l) => l.level === "error")).toHaveLength(0);
+
+    // ...and then it finishes, before the watchdog ever had to act.
+    slow.resolve();
+    await flush();
+    const snapshot = guard.snapshot().find((s) => s.chain === "periodicRecoveryPipeline")!;
+    expect(snapshot).toMatchObject({ inFlight: false, overridesTotal: 0, abandonedInFlight: 0, lastRunMs: 4 * 60_000 });
+  });
+
+  it("overrides at most once per wedge: a replacement that wedges too is not overridden again", async () => {
+    let clock = 0;
+    const { lines, log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+
+    const first = deferred();
+    const second = deferred();
+    let starts = 0;
+    const chainFor = (promise: Promise<void>) => () => {
+      starts += 1;
+      return promise;
+    };
+
+    void guard.run("tickTimers", chainFor(first.promise));
+    await flush();
+
+    // Crossing the limit the first time: one override.
+    clock += WEDGED_AFTER_MS;
+    void guard.run("tickTimers", chainFor(second.promise));
+    await flush();
+    expect(starts).toBe(2);
+
+    // The replacement wedges too. Twenty more minutes of ticks and the guard
+    // never starts a third copy -- the abandoned budget is spent.
+    for (let tick = 0; tick < 40; tick += 1) {
+      clock += 30_000;
+      await guard.run("tickTimers", chainFor(second.promise));
+    }
+    expect(starts).toBe(2);
+    expect(MAX_ABANDONED_RUNS_PER_CHAIN).toBe(1);
+    expect(guard.snapshot().find((s) => s.chain === "tickTimers")).toMatchObject({
+      overridesTotal: 1,
+      abandonedInFlight: 1,
+    });
+
+    // It says what is left to do instead of silently skipping.
+    const loud = lines.filter((l) => l.level === "error").map((l) => l.msg);
+    expect(loud.some((msg) => msg.includes("this server needs restarting"))).toBe(true);
+
+    first.resolve();
+    second.resolve();
+    await flush();
+  });
+
+  it("an abandoned run that finally returns hands its budget back and does not clear the replacement", async () => {
+    let clock = 0;
+    const { lines, log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+
+    const abandoned = deferred();
+    const replacement = deferred();
+    void guard.run("tickTimers", () => abandoned.promise);
+    await flush();
+
+    clock += WEDGED_AFTER_MS;
+    void guard.run("tickTimers", () => replacement.promise);
+    await flush();
+    expect(guard.snapshot().find((s) => s.chain === "tickTimers")?.abandonedInFlight).toBe(1);
+
+    // The abandoned run comes back long after it was given up on.
+    clock += 60_000;
+    abandoned.resolve();
+    await flush();
+
+    // The replacement still holds the flag -- the late finish must not clear it.
+    expect(guard.snapshot().find((s) => s.chain === "tickTimers")).toMatchObject({
+      inFlight: true,
+      runningMs: 60_000,
+      abandonedInFlight: 0,
+    });
+    expect(lines.some((l) => l.msg.includes("finally returned"))).toBe(true);
+
+    // With the budget back, a fresh wedge may be overridden again.
+    clock += WEDGED_AFTER_MS;
+    let restarted = false;
+    void guard.run("tickTimers", async () => {
+      restarted = true;
+    });
+    await flush();
+    expect(restarted).toBe(true);
+
+    replacement.resolve();
+    await flush();
+  });
+});
+
+describe("DUR-3991 operator-facing chain names", () => {
+  // Rule 3 ("two lists that must agree, with nothing enforcing it, is the
+  // recurring bug"): the label map is typed as a Record over the chain union
+  // so TypeScript catches a missing entry, and this reads the real list so a
+  // placeholder or a leftover internal name cannot slip through either.
+  it("gives every scheduler chain a plain-language name that is not its internal one", () => {
+    for (const chain of SCHEDULER_TICK_CHAINS) {
+      const label = SCHEDULER_TICK_CHAIN_LABELS[chain];
+      expect(label, `chain ${chain} has no operator label`).toBeTruthy();
+      expect(label).not.toBe(chain);
+      // No camelCase identifiers smuggled into operator text.
+      expect(label).not.toMatch(/[a-z][A-Z]/);
+      expect(label.length).toBeGreaterThan(5);
+    }
+    expect(Object.keys(SCHEDULER_TICK_CHAIN_LABELS).sort()).toEqual([...SCHEDULER_TICK_CHAINS].sort());
+  });
+
+  it("describes the longest-running stuck chain in operator words, or nothing at all", () => {
+    let clock = 0;
+    const { log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+
+    expect(describeStuckSchedulerChain(guard.snapshot())).toBeNull();
+
+    const timers = deferred();
+    const recovery = deferred();
+    void guard.run("tickTimers", () => timers.promise);
+    clock += 30_000;
+    void guard.run("periodicRecoveryPipeline", () => recovery.promise);
+
+    // Nothing has been going long enough to be worth naming yet.
+    clock += 20_000;
+    expect(describeStuckSchedulerChain(guard.snapshot())).toBeNull();
+
+    clock += 3 * 60_000;
+    const stuck = describeStuckSchedulerChain(guard.snapshot());
+    expect(stuck).toEqual({
+      label: "waking agents on their timers",
+      runningMs: 3 * 60_000 + 50_000,
+      freshAttemptAlreadyTried: false,
+      freshAttemptAfterMs: WEDGED_AFTER_MS,
+    });
+    expect(stuck!.label).not.toContain("tickTimers");
+
+    timers.resolve();
+    recovery.resolve();
   });
 });
