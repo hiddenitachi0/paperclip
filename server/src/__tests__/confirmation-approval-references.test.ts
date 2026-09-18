@@ -247,11 +247,94 @@ describeEmbeddedPostgres("confirmation cards that name a board approval", () => 
     await insertApproval({ companyId, id: "fa9e5228-0000-4000-8000-000000000001" });
     await insertApproval({ companyId, id: "fa9e5228-0000-4000-8000-000000000002" });
 
+    // Asks about copy, not a deploy: an ambiguous prefix is what this test is about, and a
+    // deploy question would now be refused by DUR-3990's guard for an unrelated reason.
     const created = await interactionsSvc.create({ id: issueId, companyId }, confirmation({
       idempotencyKey: "confirmation:de50a800:approval:fa9e5228",
+      payload: { version: 1, prompt: "Godkjenner du den nye produktteksten?" },
     }), { agentId, userId: null });
     expect(created.status).toBe("pending");
     expect(created.linkedApprovalId ?? null).toBeNull();
+  });
+
+  // DUR-3990: an agent asked the operator "Approve deployment of NOR-1485 fix (commit
+  // 0ce2e87) to production?" in a plain confirmation card. Nothing deploys from a card, so
+  // "yes" would have done nothing -- and DUR-3979's guard did not apply, because the card
+  // named no approval to compare against.
+  describe("confirmation cards that ask for a deploy decision with no approval behind them", () => {
+    it("refuses the NOR-1485 card and creates nothing", async () => {
+      const { companyId, issueId, agentId } = await seedCompany();
+
+      const error = await expectConflict(interactionsSvc.create({ id: issueId, companyId }, confirmation({
+        idempotencyKey: "confirmation:nor-1485-deploy",
+        payload: { version: 1, prompt: "Approve deployment of NOR-1485 fix (commit 0ce2e87) to production?" },
+      }), { agentId, userId: null }));
+
+      expect(error.message).toContain("cannot deploy or merge anything");
+      expect(error.message).toContain("deploy approval");
+      expect(error.details).toMatchObject({ code: "confirmation_asks_for_deploy_decision", signal: "deploy_wording" });
+      expect(await pendingCount(issueId)).toBe(0);
+    });
+
+    it("refuses the same question written in Norwegian", async () => {
+      const { companyId, issueId, agentId } = await seedCompany();
+
+      await expectConflict(interactionsSvc.create({ id: issueId, companyId }, confirmation({
+        idempotencyKey: "confirmation:norsk-deploy",
+        payload: { version: 1, prompt: "Vil du godkjenne denne deployen til produksjon?" },
+      }), { agentId, userId: null }));
+      expect(await pendingCount(issueId)).toBe(0);
+    });
+
+    it("refuses a deploy question that hides behind an unresolvable approval id", async () => {
+      const { companyId, issueId, agentId } = await seedCompany();
+      const other = await seedCompany("Other Co");
+      const foreign = await insertApproval({ companyId: other.companyId });
+
+      // The id names nothing in this company, so DUR-3979 resolves no approval -- which
+      // must not become a way to carry a deploy question through.
+      await expectConflict(interactionsSvc.create({ id: issueId, companyId }, confirmation({
+        idempotencyKey: `confirmation:approval:${foreign.id}`,
+        payload: { version: 1, prompt: "Can I deploy this to production now?" },
+      }), { agentId, userId: null }));
+      expect(await pendingCount(issueId)).toBe(0);
+    });
+
+    it("lets a card through that mentions a deploy already done while asking about something else", async () => {
+      const { companyId, issueId, agentId } = await seedCompany();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, confirmation({
+        idempotencyKey: "confirmation:post-deploy-copy",
+        payload: {
+          version: 1,
+          prompt: "I deployed the fix this morning — do the numbers look right to you?",
+          detailsMarkdown: "Ready to deploy the follow-up once you confirm.",
+        },
+      }), { agentId, userId: null });
+      expect(created.status).toBe("pending");
+    });
+
+    it("leaves a board user's own deploy question alone", async () => {
+      const { companyId, issueId } = await seedCompany();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, confirmation({
+        idempotencyKey: "confirmation:board-deploy-question",
+        payload: { version: 1, prompt: "Approve deployment of the fix to production?" },
+      }), { userId: "local-board" });
+      expect(created.status).toBe("pending");
+    });
+
+    it("keeps DUR-3979's behaviour for a deploy question that DOES name a real approval", async () => {
+      const { companyId, issueId, agentId } = await seedCompany();
+      const approval = await insertApproval({ companyId });
+
+      const error = await expectConflict(interactionsSvc.create({ id: issueId, companyId }, confirmation({
+        idempotencyKey: `confirmation:approval:${approval.id}`,
+        payload: { version: 1, prompt: "Approve deployment of the fix to production?" },
+      }), { agentId, userId: null }));
+
+      expect(error.details).toMatchObject({ code: "confirmation_duplicates_approval_card", approvalId: approval.id });
+    });
   });
 
   it("takes no action when the prefix or full id only matches another company's approval", async () => {
