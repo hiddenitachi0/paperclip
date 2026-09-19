@@ -484,6 +484,141 @@ describeEmbeddedPostgres("evaluateTimerIdleGate (embedded postgres)", () => {
       expect(await evaluate(f)).toMatchObject({ decision: "run", signal: "wakeup_request" });
     });
 
+    /**
+     * DUR-3943: one wake-up stuck in a pending status used to hold this gate
+     * open for that agent forever, because the "still pending" arm had no
+     * bound at all. Production had 71 such rows across 9 agents, the oldest 25
+     * days; the three agents holding the most were exactly the three whose
+     * scheduled runs cost money while changing nothing on the board.
+     */
+    describe("a pending wake-up that has gone stale no longer forces a run", () => {
+      async function claimedBy(f: Fixture, runStatus: string, minutesAgo = 10) {
+        const runId = randomUUID();
+        await db.insert(heartbeatRuns).values({
+          id: runId,
+          companyId: f.companyId,
+          agentId: f.agentId,
+          invocationSource: "automation",
+          triggerDetail: "system",
+          status: runStatus,
+          createdAt: ago(f.now, minutesAgo + 1),
+          startedAt: ago(f.now, minutesAgo),
+          ...(runStatus === "succeeded" ? { finishedAt: ago(f.now, minutesAgo - 1) } : {}),
+        });
+        await db.insert(agentWakeupRequests).values({
+          companyId: f.companyId,
+          agentId: f.agentId,
+          source: "automation",
+          reason: "process_lost_retry",
+          status: "claimed",
+          runId,
+          requestedAt: ago(f.now, minutesAgo),
+        });
+      }
+
+      it("ignores a claimed wake-up whose run has already finished — nothing will ever complete it", async () => {
+        const f = await seed();
+        await claimedBy(f, "succeeded");
+        expect(await evaluate(f)).toMatchObject({ decision: "skip" });
+      });
+
+      it("still counts a claimed wake-up whose run is genuinely alive", async () => {
+        const f = await seed();
+        await claimedBy(f, "running");
+        // The active-run check fires first, which is the correct answer either
+        // way: this agent is busy, so the gate is not what decides it.
+        expect(await evaluate(f)).toMatchObject({ decision: "run" });
+      });
+
+      /**
+       * A claimed row that names no run is treated as still live, on purpose.
+       * It is the shape a claim race would produce -- claimed written, run id
+       * a moment later -- and skipping on it would drop a real wake-up. It is
+       * not left unbounded either: the age bound below still catches it. Zero
+       * of the 56 stuck rows on production had a null run id, so nothing is
+       * given up by being careful here.
+       */
+      it("still counts a claimed wake-up that names no run, so a claim race cannot lose one", async () => {
+        const f = await seed();
+        await db.insert(agentWakeupRequests).values({
+          companyId: f.companyId,
+          agentId: f.agentId,
+          source: "automation",
+          reason: "process_lost_retry",
+          status: "claimed",
+          runId: null,
+          requestedAt: ago(f.now, 10),
+        });
+        expect(await evaluate(f)).toMatchObject({ decision: "run", signal: "wakeup_request" });
+      });
+
+      it("but bounds even that by age, so it cannot hold the gate open forever", async () => {
+        const f = await seed();
+        await db.insert(agentWakeupRequests).values({
+          companyId: f.companyId,
+          agentId: f.agentId,
+          source: "automation",
+          reason: "process_lost_retry",
+          status: "claimed",
+          runId: null,
+          requestedAt: ago(f.now, 60 * 24 * 2),
+        });
+        expect(await evaluate(f)).toMatchObject({ decision: "skip" });
+      });
+
+      it("ignores a queued wake-up older than a day", async () => {
+        const f = await seed();
+        await db.insert(agentWakeupRequests).values({
+          companyId: f.companyId,
+          agentId: f.agentId,
+          source: "assignment",
+          reason: "issue_assignment_recovery",
+          status: "queued",
+          requestedAt: ago(f.now, 60 * 24 + 60),
+        });
+        expect(await evaluate(f)).toMatchObject({ decision: "skip" });
+      });
+
+      it("ignores a deferred wake-up older than a day", async () => {
+        const f = await seed();
+        await db.insert(agentWakeupRequests).values({
+          companyId: f.companyId,
+          agentId: f.agentId,
+          source: "assignment",
+          reason: "issue_execution_deferred",
+          status: "deferred_issue_execution",
+          requestedAt: ago(f.now, 60 * 24 * 13),
+        });
+        expect(await evaluate(f)).toMatchObject({ decision: "skip" });
+      });
+
+      /**
+       * The bound must not be this agent's own safety window. That window
+       * forces a run, but that run need not have handled THIS wake-up -- which
+       * is precisely why the row is still queued. An earlier attempt at this
+       * fix used the safety window (2h by default) and would have turned these
+       * hours-old, genuinely-outstanding wake-ups into skips.
+       */
+      it("still counts a pending wake-up that is merely older than the safety window", async () => {
+        const f = await seed();
+        await db.insert(agentWakeupRequests).values({
+          companyId: f.companyId,
+          agentId: f.agentId,
+          source: "assignment",
+          reason: "issue_assigned",
+          status: "queued",
+          requestedAt: ago(f.now, 300),
+        });
+        expect(await evaluate(f)).toMatchObject({ decision: "run", signal: "wakeup_request" });
+      });
+
+      it("still counts a recent claimed wake-up whose run is still queued to start", async () => {
+        const f = await seed();
+        await claimedBy(f, "scheduled_retry");
+        expect(await evaluate(f)).toMatchObject({ decision: "run" });
+      });
+    });
+
     it("but not an earlier timer wake-up record", async () => {
       const f = await seed();
       await db.insert(agentWakeupRequests).values({

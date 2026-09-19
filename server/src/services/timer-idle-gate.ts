@@ -477,10 +477,54 @@ async function evaluate(
     if (sentBack) return sentBack;
   }
 
+  // DUR-3943: a wake-up still sitting in a pending status counts as outstanding
+  // work -- but only for as long as it could still BE outstanding. Without a
+  // bound, ONE stuck row disables this gate for that agent permanently, because
+  // the gate then sees a pending wake-up on every single tick and must let the
+  // run through. Measured on production: 71 rows stuck in `claimed`, the oldest
+  // 25 days, and the three agents holding the most were exactly the three whose
+  // scheduled runs cost money while changing nothing on the board.
+  //
+  // Two bounds, each answering a different way a row goes stale:
+  //  * Liveness. `claimed` means some run picked the wake-up up. If that run is
+  //    no longer active, nothing will ever finish it, so it is not pending in
+  //    any useful sense. This is the `process_lost_retry` shape seen live -- a
+  //    run died holding the wake-up it had claimed. All 56 stuck `claimed` rows
+  //    on production are of exactly this shape.
+  //  * Age. A `queued` or deferred wake-up that no run has acted on within a
+  //    whole day is not news any more; whatever it was about is picked up by
+  //    the ordinary checks below or by the safety window. Deliberately NOT
+  //    bound to this agent's own safety window: the window forces a run, but
+  //    that run need not have handled THIS wake-up, which is the very reason
+  //    the row is still queued -- so "a window has passed" does not mean "it
+  //    had its chance". MAX_NOTHING_NEW_SAFETY_WINDOW_SEC is used instead as
+  //    the longest patience anyone can configure anywhere. The stale rows on
+  //    production are 2.5 to 25 days old, far past any honest reading of
+  //    "still outstanding".
+  //
+  // Both fail SAFE. Tripping either bound only stops a stale row from forcing a
+  // run; a genuinely new wake-up still arrives through the `requestedAt > since`
+  // arm, which is untouched.
+  const pendingWakeupCutoff = new Date(now.getTime() - MAX_NOTHING_NEW_SAFETY_WINDOW_SEC * 1000);
+  const pendingWakeupStillLive = sql`(
+    ${agentWakeupRequests.status} <> 'claimed'
+    or ${agentWakeupRequests.runId} is null
+    or exists (
+      select 1
+      from ${heartbeatRuns}
+      where ${heartbeatRuns.id} = ${agentWakeupRequests.runId}
+        and ${heartbeatRuns.status} in (${sql.join(
+          ACTIVE_OR_PENDING_RUN_STATUSES.map((status) => sql`${status}`),
+          sql`, `,
+        )})
+    )
+  )`;
+
   // Any non-timer wake-up asked for since the last run started, whatever
   // became of it (coalesced, deferred, skipped, failed), or one still pending
-  // -- except one turned down on purpose for a reason that has its own
-  // wake-up when it clears (TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS).
+  // and not yet stale (see above) -- except one turned down on purpose for a
+  // reason that has its own wake-up when it clears
+  // (TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS).
   const wakeupRequest = await fired("wakeup_request", () => firstDetail(
     db
       .select({ reason: agentWakeupRequests.reason, status: agentWakeupRequests.status, source: agentWakeupRequests.source })
@@ -492,7 +536,11 @@ async function evaluate(
           sql`${agentWakeupRequests.source} <> 'timer'`,
           or(
             gt(agentWakeupRequests.requestedAt, since),
-            inArray(agentWakeupRequests.status, [...PENDING_WAKEUP_REQUEST_STATUSES]),
+            and(
+              inArray(agentWakeupRequests.status, [...PENDING_WAKEUP_REQUEST_STATUSES]),
+              gt(agentWakeupRequests.requestedAt, pendingWakeupCutoff),
+              pendingWakeupStillLive,
+            ),
           ),
           sql`not (${agentWakeupRequests.status} = 'skipped' and ${agentWakeupRequests.reason} in (${sql.join(
             TIMER_IDLE_GATE_IGNORED_SKIPPED_WAKE_REASONS.map((reason) => sql`${reason}`),
