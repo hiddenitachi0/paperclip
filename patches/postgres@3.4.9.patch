@@ -1,0 +1,68 @@
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+index f09c61c7e998f411560b95c9a8e1ed6a97972c11..644c6c0e8fc9614d0844dba120d3fd03d182ed77 100644
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -205,7 +205,7 @@ function Postgres(a, b) {
+     const c = open.length
+       ? open.shift()
+       : await new Promise((resolve, reject) => {
+-        const query = { reserve: resolve, reject }
++        const query = { reserve: resolve, reject: (e) => (queries.remove(query), reject(e)) }
+         queries.push(query)
+         closed.length && connect(closed.shift(), query)
+       })
+@@ -423,7 +423,7 @@ function Postgres(a, b) {
+     c.reserved = null
+     c.onclose && (c.onclose(e), c.onclose = null)
+     options.onclose && options.onclose(c.id)
+-    queries.length && connect(c, queries.shift())
++    queries.length && connect(c, queries.peek().reserve ? queries.peek() : queries.shift())
+   }
+ }
+ 
+diff --git a/cjs/src/queue.js b/cjs/src/queue.js
+index 8438f5da92cf7637d98a33491d75c75b1c817c25..619cfab310a3185789d4ce29a25796ab8122c772 100644
+--- a/cjs/src/queue.js
++++ b/cjs/src/queue.js
+@@ -14,6 +14,7 @@ function Queue(initial = []) {
+         ? null
+         : (xs.splice(index, 1), x)
+     },
++    peek: () => xs[index],
+     push: (x) => (xs.push(x), x),
+     shift: () => {
+       const out = xs[index++]
+diff --git a/src/index.js b/src/index.js
+index c7fba3dace20173f4cb13f3f138bb6d213b43683..84497ea38582d9df4241305fb6784f35ce5673d4 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -205,7 +205,7 @@ function Postgres(a, b) {
+     const c = open.length
+       ? open.shift()
+       : await new Promise((resolve, reject) => {
+-        const query = { reserve: resolve, reject }
++        const query = { reserve: resolve, reject: (e) => (queries.remove(query), reject(e)) }
+         queries.push(query)
+         closed.length && connect(closed.shift(), query)
+       })
+@@ -423,7 +423,7 @@ function Postgres(a, b) {
+     c.reserved = null
+     c.onclose && (c.onclose(e), c.onclose = null)
+     options.onclose && options.onclose(c.id)
+-    queries.length && connect(c, queries.shift())
++    queries.length && connect(c, queries.peek().reserve ? queries.peek() : queries.shift())
+   }
+ }
+ 
+diff --git a/src/queue.js b/src/queue.js
+index c4ef97164f057db99dce1b9af3401dbb1af37e31..195a9c56b327cc204acdf0573eddfa5413a3aba5 100644
+--- a/src/queue.js
++++ b/src/queue.js
+@@ -14,6 +14,7 @@ function Queue(initial = []) {
+         ? null
+         : (xs.splice(index, 1), x)
+     },
++    peek: () => xs[index],
+     push: (x) => (xs.push(x), x),
+     shift: () => {
+       const out = xs[index++]
