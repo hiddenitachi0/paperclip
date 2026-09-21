@@ -8,6 +8,12 @@ import { issueService } from "./issues.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 import { queueIssueAssignmentWakeup } from "./issue-assignment-wakeup.js";
+import {
+  BUSINESS_DATA_LOOKUP_TIMEOUT_MS,
+  businessDataService,
+  type BusinessDataAnswer,
+  type BusinessDataServiceDeps,
+} from "./business-data.js";
 
 /**
  * Quick agents (Lane A, round 2): the small set of things a quick agent is
@@ -22,7 +28,7 @@ import { queueIssueAssignmentWakeup } from "./issue-assignment-wakeup.js";
  * up to LANE_A_MAX_TOOL_CALLS times per message.
  */
 
-export const LANE_A_BUILTIN_TOOL_NAMES = ["route_to_agent", "get_weather", "lookup_issue"] as const;
+export const LANE_A_BUILTIN_TOOL_NAMES = ["route_to_agent", "get_weather", "lookup_issue", "read_business_data"] as const;
 export type LaneABuiltinToolName = (typeof LANE_A_BUILTIN_TOOL_NAMES)[number];
 
 const BUILTIN_TOOL_NAME_SET: ReadonlySet<string> = new Set(LANE_A_BUILTIN_TOOL_NAMES);
@@ -33,6 +39,12 @@ export function isLaneABuiltinTool(name: string): name is LaneABuiltinToolName {
 
 /** Outbound HTTP calls (weather) must never hang a synchronous chat turn. */
 export const LANE_A_TOOL_HTTP_TIMEOUT_MS = 6_000;
+/**
+ * DUR-3972: a business-data lookup may scan a month of orders, so it gets
+ * its own, longer limit (enforced inside the lookup itself). Weather keeps 6 s.
+ */
+export const LANE_A_BUSINESS_DATA_TIMEOUT_MS = BUSINESS_DATA_LOOKUP_TIMEOUT_MS;
+export const READ_BUSINESS_DATA_TOOL = "read_business_data";
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ROUTE_REQUEST_MAX_CHARS = 20_000;
@@ -48,6 +60,11 @@ export interface LaneAToolResult {
   content: string;
   /** Plain-language one-liner for the operator (activity log + chat panel). */
   summary: string;
+  /**
+   * DUR-3972: set by read_business_data only. The number check compares the
+   * reply against `content`, and the platform appends `footer` itself.
+   */
+  businessData?: { footer: string | null; lookupId: string | null };
 }
 
 export interface LaneAToolColleague {
@@ -82,6 +99,11 @@ export interface LaneAToolContext {
    */
   actor: AuthorizationActor;
   conversationId: string;
+  /**
+   * DUR-3972: the run the requester acts in, from a SIGNED agent token only
+   * (signedRunIdFromActor). Null for people, API keys and anything else.
+   */
+  runId?: string | null;
 }
 
 /**
@@ -109,6 +131,11 @@ export interface LaneAToolDeps {
   }): Promise<{ id: string; identifier: string | null; status: string }>;
   lookupIssue(reference: string): Promise<LaneAToolIssueSummary | null>;
   fetch: typeof fetch;
+  /**
+   * DUR-3972: one business-data lookup for the caller's own company. Absent
+   * means the tool is not wired here, which answers with a plain refusal.
+   */
+  readBusinessData?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<BusinessDataAnswer>;
 }
 
 export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
@@ -156,6 +183,55 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           reference: { type: "string", description: "Task reference such as 'DUR-12', or the task id." },
         },
         required: ["reference"],
+      },
+    },
+    {
+      name: READ_BUSINESS_DATA_TOOL,
+      description:
+        "Read this company's own sales figures (units sold, returns and net, from its connected shop) or its list of " +
+        "product types. Answers only in units (stk), never kroner. The server calculates everything and returns a " +
+        "finished answer card with the exact dates, the source and a lookup id. Call it again for every new question. " +
+        "If it says a product word matches several product types, ask the person which ones to count, then call again " +
+        "with product_types. Relay refusals word for word.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          action: {
+            type: "string",
+            enum: ["sales", "catalog"],
+            description: "'sales' for units sold/returned/net; 'catalog' for the list of product types.",
+          },
+          periods: {
+            type: "array",
+            minItems: 1,
+            maxItems: 2,
+            items: { type: "string" },
+            description:
+              "One or two months: 'last_month', 'month_before_last', 'this_month_to_date', or 'YYYY-MM'. " +
+              "Never free dates. Required for 'sales'.",
+          },
+          measure: {
+            type: "array",
+            items: { type: "string" },
+            description: "Always [\"units\"]. Kroner amounts are not available yet.",
+          },
+          product_type_query: {
+            type: "string",
+            description: "The person's own word for a product group, e.g. 'sofa'. The server matches it to product types.",
+          },
+          product_types: {
+            type: "array",
+            items: { type: "string" },
+            description: "Exact product type names to add up, e.g. after the person chose from a list.",
+          },
+          group_by: {
+            type: "string",
+            enum: ["none", "product_type"],
+            description: "'product_type' to list each product type separately.",
+          },
+        },
+        required: ["action"],
       },
     },
   ];
@@ -400,6 +476,27 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     return { ok: true, content: clip(lines.join("\n")), summary: `Looked up task ${ref}.` };
   }
 
+  async function readBusinessData(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    if (!deps.readBusinessData) {
+      return {
+        ok: false,
+        content: "Salgsdata kan ikke leses herfra. Si det rett ut, og ikke gi noen tall.",
+        summary: "Business data is not available on this path.",
+        businessData: { footer: null, lookupId: null },
+      };
+    }
+    const answer = await deps.readBusinessData(input, ctx);
+    const summary = answer.ok
+      ? `Read sales data (lookup ${answer.lookupId}).`
+      : `Sales data lookup ${answer.outcome}${answer.refusalCode ? ` (${answer.refusalCode})` : ""}.`;
+    return {
+      ok: answer.ok,
+      content: answer.text,
+      summary,
+      businessData: { footer: answer.footer, lookupId: answer.lookupId },
+    };
+  }
+
   return async function execute(
     name: string,
     input: Record<string, unknown>,
@@ -412,6 +509,8 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         return getWeather(input);
       case "lookup_issue":
         return lookupIssue(input, ctx);
+      case "read_business_data":
+        return readBusinessData(input, ctx);
       default:
         return {
           ok: false,
@@ -423,7 +522,11 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
 }
 
 /** The real dependencies: company agents, issue create/lookup through the same services chat-router uses. */
-export function createDbLaneAToolDeps(db: Db): LaneAToolDeps {
+export function createDbLaneAToolDeps(
+  db: Db,
+  options: { businessData?: BusinessDataServiceDeps } = {},
+): LaneAToolDeps {
+  const businessData = businessDataService(db, options.businessData);
   return {
     async listAgents(companyId) {
       const rows = await agentService(db).list(companyId);
@@ -510,5 +613,20 @@ export function createDbLaneAToolDeps(db: Db): LaneAToolDeps {
       };
     },
     fetch: (input, init) => fetch(input, init),
+    async readBusinessData(input, ctx) {
+      // The company is the quick agent's own, from the server; the tool input
+      // has no field that could name another one.
+      return businessData.read(
+        {
+          companyId: ctx.companyId,
+          channel: "quick_chat",
+          agentId: ctx.agent.id,
+          userId: ctx.requester.userId,
+          runId: ctx.runId ?? null,
+          laneAConversationId: ctx.conversationId,
+        },
+        input,
+      );
+    },
   };
 }

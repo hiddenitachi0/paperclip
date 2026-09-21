@@ -32,6 +32,7 @@ import type {
 } from "@paperclipai/shared";
 import {
   createSecretProviderConfigSchema,
+  DEDICATED_SECRET_BINDING_TARGET_TYPES,
   deriveProjectUrlKey,
   envBindingSchema,
   GITHUB_TOKEN_SECRET_NAMES,
@@ -77,6 +78,68 @@ const FALLBACK_ADAPTER_SCHEMA_SECRET_FIELDS: Readonly<Record<string, readonly st
 };
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type SecretBindingDb = Pick<Db | DbTransaction, "select" | "delete" | "insert">;
+
+const DEDICATED_TARGET_LABELS: Record<(typeof DEDICATED_SECRET_BINDING_TARGET_TYPES)[number], string> = {
+  data_connection: "en datakobling (Datakilder)",
+  telegram_bot: "en Telegram-bot",
+  persona_account: "en persona-konto",
+};
+
+/**
+ * DUR-3972: the dedicated-credential rule.
+ *
+ * A saved password that is already bound to a data connection, a Telegram bot
+ * or a persona account belongs to that one thing. Binding it to anything else
+ * -- an agent's env, an MCP server, a plugin, another connection -- is
+ * refused, whoever asks, board users included. (DUR-3980 already stops an
+ * agent attaching a saved password to itself; this closes the remaining gap: a
+ * board user doing it by mistake, which would copy a shop key into a file an
+ * agent can read.)
+ *
+ * Worked out from the existing binding rows, so no data backfill is needed.
+ * Grandfathered: a secret this same target is already bound to stays
+ * allowed, so re-saving something that already holds it never breaks.
+ *
+ * Runs before any binding row is written, inside the caller's transaction
+ * when there is one, so a refusal leaves nothing behind.
+ */
+export async function assertSecretsNotDedicatedElsewhere(
+  source: Pick<Db | DbTransaction, "select">,
+  target: { targetType: SecretBindingTargetType; targetId: string },
+  secretIds: string[],
+): Promise<void> {
+  const unique = [...new Set(secretIds)];
+  if (unique.length === 0) return;
+  const rows = await source
+    .select({
+      secretId: companySecretBindings.secretId,
+      targetType: companySecretBindings.targetType,
+      targetId: companySecretBindings.targetId,
+    })
+    .from(companySecretBindings)
+    .where(inArray(companySecretBindings.secretId, unique));
+  const heldByThisTarget = new Set(
+    rows
+      .filter((row) => row.targetType === target.targetType && row.targetId === target.targetId)
+      .map((row) => row.secretId),
+  );
+  const dedicated = new Set<string>(DEDICATED_SECRET_BINDING_TARGET_TYPES);
+  const conflictRow = rows.find(
+    (row) =>
+      dedicated.has(row.targetType) &&
+      !(row.targetType === target.targetType && row.targetId === target.targetId) &&
+      !heldByThisTarget.has(row.secretId),
+  );
+  if (!conflictRow) return;
+  const owner =
+    DEDICATED_TARGET_LABELS[conflictRow.targetType as keyof typeof DEDICATED_TARGET_LABELS] ?? conflictRow.targetType;
+  throw unprocessable(
+    `Dette lagrede passordet hører til ${owner} og kan bare brukes der. ` +
+      `Det kan ikke kobles til noe annet, heller ikke av en styrebruker. ` +
+      `Trenger du den samme tilgangen et annet sted, lag et eget passord for det.`,
+    { code: "secret_dedicated_to_other_target", dedicatedTo: conflictRow.targetType },
+  );
+}
 
 function remoteProviderHttpError(error: unknown, context: {
   companyId: string;
@@ -2479,6 +2542,11 @@ export function secretService(db: Db, rawDb: Db = db) {
       label?: string | null;
     }) => {
       await assertSecretInCompany(input.companyId, input.secretId);
+      await assertSecretsNotDedicatedElsewhere(
+        db,
+        { targetType: input.targetType, targetId: input.targetId },
+        [input.secretId],
+      );
       const existing = await db
         .select()
         .from(companySecretBindings)
@@ -2541,6 +2609,11 @@ export function secretService(db: Db, rawDb: Db = db) {
       const pathPrefixes = [...new Set(normalizedRefs.map((ref) => ref.configPath.split(".")[0]))];
 
       await withCompanyScope(rawDb, companyId, async (tx) => {
+        await assertSecretsNotDedicatedElsewhere(
+          tx,
+          target,
+          normalizedRefs.map((ref) => ref.secretId),
+        );
         if (options?.replaceAll) {
           await tx
             .delete(companySecretBindings)
@@ -2637,6 +2710,11 @@ export function secretService(db: Db, rawDb: Db = db) {
       }
 
       const writeBindings = async (targetDb: SecretBindingDb) => {
+        await assertSecretsNotDedicatedElsewhere(
+          targetDb,
+          { targetType: target.targetType, targetId: target.targetId },
+          refs.map((ref) => ref.secretId),
+        );
         await targetDb
           .delete(companySecretBindings)
           .where(

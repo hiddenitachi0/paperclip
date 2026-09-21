@@ -39,7 +39,14 @@ describe("instance settings service", () => {
       issueGraphLivenessAutoRecoveryLookbackHours: 48,
       enableWeeklyCheckup: false,
       enableCrossCompanyInstructions: false,
+      enableBusinessData: false,
     });
+  });
+
+  it("defaults business-data sources (DUR-3972) to off and keeps an explicit on", () => {
+    expect(normalizeExperimentalSettings({}).enableBusinessData).toBe(false);
+    expect(normalizeExperimentalSettings(undefined).enableBusinessData).toBe(false);
+    expect(normalizeExperimentalSettings({ enableBusinessData: true }).enableBusinessData).toBe(true);
   });
 
   it("defaults the cross-company instruction channel to off and keeps an explicit on", () => {

@@ -729,6 +729,87 @@ async function resetClaimAndRelease(reserved: ReservedSql): Promise<void> {
 }
 
 /**
+ * DUR-3991: how long runInCompanyScope / runInCompanyScopeBypass wait for a
+ * free pool connection before giving up.
+ *
+ * postgres.js's `reserve()` has no timeout of its own, and in 3.4.9 it can
+ * lose a queued request outright when a pool connection closes while
+ * requests are waiting (patched in patches/postgres@3.4.9.patch). A lost
+ * request is a promise that never settles, which is how the first scheduler
+ * tick after every restart sat in "beforeTick" until the 5-minute watchdog
+ * gave up on it. This bound is the second line of defence: whatever the
+ * cause (a future library bug, a leaked slot, a genuinely saturated pool),
+ * waiting for a connection now ends in a clear error instead of forever.
+ *
+ * Why 30 seconds:
+ * - It matches the scheduler interval (heartbeatSchedulerIntervalMs, 30s by
+ *   default), so a stuck scheduler chain fails and is retried by the next
+ *   tick or the one after it, instead of occupying its slot for 5 minutes.
+ * - It matches the pool's statement_timeout (DEFAULT_APP_POOL_STATEMENT_TIMEOUT_MS),
+ *   the longest a single healthy query holding a connection may run.
+ * - An HTTP request that has waited 30s for a connection alone is already
+ *   past what any browser or proxy will wait for; failing it frees the
+ *   caller instead of letting requests pile up behind a wedged pool.
+ * It is deliberately far above a normal wait, which is milliseconds: this is
+ * a "something is broken" detector, not a load-shedding limit.
+ */
+export const RESERVE_CONNECTION_TIMEOUT_MS = 30_000;
+
+/** DUR-3991: thrown when no pool connection could be reserved in time. */
+export class ConnectionReserveTimeoutError extends Error {
+  constructor(
+    readonly purpose: string,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `company-scope: gave up waiting for a free database connection after ${timeoutMs}ms (${purpose}). ` +
+        "Either every connection in the pool is busy or the request for one was lost; this attempt was " +
+        "abandoned and nothing was run. Scheduler work is retried on its next tick.",
+    );
+    this.name = "ConnectionReserveTimeoutError";
+  }
+}
+
+/**
+ * Reserve a pool connection, but give up after `timeoutMs` with a
+ * ConnectionReserveTimeoutError. If the connection does arrive after we gave
+ * up, it is released straight back to the pool (it never had a session claim
+ * set, so a plain release is safe), so timing out can never leak a slot.
+ */
+export async function reserveConnectionWithTimeout(
+  client: Pick<Db["$client"], "reserve">,
+  purpose: string,
+  timeoutMs: number = RESERVE_CONNECTION_TIMEOUT_MS,
+): Promise<ReservedSql> {
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = client.reserve();
+  // Registered before the race so a late arrival is always handed back, and
+  // a late rejection is always handled (never an unhandled rejection).
+  pending.then(
+    (reserved) => {
+      if (timedOut) reserved.release();
+    },
+    () => {},
+  );
+  try {
+    return await Promise.race([
+      pending,
+      // Intentionally not unref()'d: while this is pending the caller is
+      // blocked on it, and the whole point is that it always fires.
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new ConnectionReserveTimeoutError(purpose, timeoutMs));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Reserve one physical connection, set the `app.current_company_id` session
  * claim, and run `fn` with an AsyncLocalStorage scope so every db call made
  * through createRequestScopedDb(rawDb) during `fn` -- however deep in the
@@ -740,7 +821,10 @@ export async function runInCompanyScope<T>(rawDb: Db, companyId: string, fn: () 
     throw new Error(`runInCompanyScope: companyId is not a UUID: ${companyId}`);
   }
 
-  const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  const reserved = withDrizzleCompatibleClient(
+    await reserveConnectionWithTimeout(rawDb.$client, "runInCompanyScope"),
+    rawDb,
+  );
   const fence = fenceReservedConnection(reserved);
   const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
   let unsafeToRelease = false;
@@ -811,7 +895,10 @@ export async function runInCompanyScopeBypass<T>(
   opts: CompanyScopeBypassOptions,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const reserved = withDrizzleCompatibleClient(await rawDb.$client.reserve(), rawDb);
+  const reserved = withDrizzleCompatibleClient(
+    await reserveConnectionWithTimeout(rawDb.$client, `runInCompanyScopeBypass: ${opts.reason}`),
+    rawDb,
+  );
   const fence = fenceReservedConnection(reserved);
   const liveness: ReservedScopeLiveness = { released: false, inFlight: 0, onDrained: null };
   try {

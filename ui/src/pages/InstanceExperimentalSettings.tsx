@@ -250,6 +250,7 @@ export function InstanceExperimentalSettings() {
     experimentalQuery.data?.enableIssueGraphLivenessAutoRecovery === true;
   const enableWeeklyCheckup = experimentalQuery.data?.enableWeeklyCheckup === true;
   const enableCrossCompanyInstructions = experimentalQuery.data?.enableCrossCompanyInstructions === true;
+  const enableBusinessData = experimentalQuery.data?.enableBusinessData === true;
   const lookbackHours =
     experimentalQuery.data?.issueGraphLivenessAutoRecoveryLookbackHours ?? 24;
   const parsedLookbackHours = Number.parseInt(lookbackHoursDraft, 10);
@@ -529,6 +530,30 @@ export function InstanceExperimentalSettings() {
             }
             disabled={toggleMutation.isPending}
             aria-label="Toggle instructions between companies experimental setting"
+          />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Business data sources</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Lets a board member connect a company to its own shop data (Shopify first) under the company&apos;s
+              settings, with a read-only key. Paperclip keeps the key and makes every lookup itself; agents never see
+              it and can never change anything in the shop. Nothing is read until a company is connected and a board
+              member picks what it may read. Off means no connection can be made or used.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={enableBusinessData}
+            onCheckedChange={(checked) =>
+              toggleMutation.mutate({
+                enableBusinessData: checked,
+              })
+            }
+            disabled={toggleMutation.isPending}
+            aria-label="Toggle business data sources experimental setting"
           />
         </div>
       </section>
