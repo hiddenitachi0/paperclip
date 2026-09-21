@@ -874,6 +874,31 @@ export function recoveryService(
     });
   }
 
+  // DUR-3988: would the heartbeat refuse to start this task because it still
+  // waits on other tasks? The sweep used to queue a wake-up for such a task on
+  // every pass (~30s); the heartbeat refused each one with a fresh "skipped /
+  // issue_dependencies_blocked" row (about 34,700 rows in production). Uses
+  // the same readiness check the heartbeat itself uses
+  // (issuesSvc.listDependencyReadiness), so the two can never disagree. No
+  // re-check timer is needed: once the last blocker resolves, the readiness
+  // check flips and the next pass dispatches the task. Fail-open: if the check
+  // itself errors, answer "not blocked" and dispatch as before -- the
+  // heartbeat still refuses a truly blocked task on its own.
+  async function hasUnresolvedDependencyBlockers(issue: typeof issues.$inferSelect) {
+    try {
+      const readiness = await issuesSvc
+        .listDependencyReadiness(issue.companyId, [issue.id])
+        .then((rows) => rows.get(issue.id) ?? null);
+      return Boolean(readiness && !readiness.isDependencyReady);
+    } catch (err) {
+      logger.warn(
+        { err, issueId: issue.id },
+        "recovery sweep could not read task dependencies; dispatching as before",
+      );
+      return false;
+    }
+  }
+
   async function isInvocationBudgetBlocked(issue: typeof issues.$inferSelect, agentId: string) {
     const budgetBlock = await budgets.getInvocationBlock(issue.companyId, agentId, {
       issueId: issue.id,
@@ -3179,6 +3204,12 @@ export function recoveryService(
        * decision on a linked approval (also counted in `skipped`).
        */
       waitingOnBoardApproval: 0,
+      /**
+       * DUR-3988: todo tasks left alone because they still wait on unresolved
+       * blocker tasks, so the heartbeat would refuse the wake-up (also counted
+       * in `skipped`).
+       */
+      dependencyBlockedHeld: 0,
       issueIds: [] as string[],
     };
 
@@ -3228,6 +3259,16 @@ export function recoveryService(
           await considerAssigneeUnavailableNotice(pendingAssigneeNotices, issue, agent, pickup.reason);
         }
         result.assigneeCannotWakeHeld += 1;
+        result.skipped += 1;
+        return true;
+      };
+      // DUR-3988: a todo task still waiting on unresolved blockers is refused
+      // by the heartbeat, so do not queue a wake-up the heartbeat would only
+      // turn into another skipped row. Picked up on the first pass after the
+      // blockers resolve.
+      const holdIfTodoDependencyBlocked = async () => {
+        if (!(await hasUnresolvedDependencyBlockers(issue))) return false;
+        result.dependencyBlockedHeld += 1;
         result.skipped += 1;
         return true;
       };
@@ -3416,6 +3457,8 @@ export function recoveryService(
             continue;
           }
 
+          if (await holdIfTodoDependencyBlocked()) continue;
+
           if (await holdIfAssigneeCannotWake()) continue;
 
           const queued = await enqueueInitialAssignedTodoDispatch(issue, agentId);
@@ -3457,6 +3500,8 @@ export function recoveryService(
           result.skipped += 1;
           continue;
         }
+
+        if (await holdIfTodoDependencyBlocked()) continue;
 
         if (await holdIfAssigneeCannotWake()) continue;
 
