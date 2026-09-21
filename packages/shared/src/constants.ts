@@ -718,8 +718,22 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // bot's own agent -- only by the instance-admin-only bridge-config route,
   // modelled on the persona_account/deploy-github-token pattern above.
   "telegram_bot",
+  // DUR-3972: the credential for a data_connections row (a read-only Shopify
+  // key). Never resolved by any agent -- only by the server-side
+  // data-connections service, which makes every outbound call itself.
+  "data_connection",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
+
+// DUR-3972: binding targets whose credential belongs to that one target alone.
+// A saved password that is bound to one of these may not be bound to anything
+// else (an agent's env, an MCP server, another connection), whoever asks --
+// see the dedicated-credential rule in server/src/services/secrets.ts.
+export const DEDICATED_SECRET_BINDING_TARGET_TYPES = [
+  "data_connection",
+  "telegram_bot",
+  "persona_account",
+] as const satisfies readonly SecretBindingTargetType[];
 
 // DUR-134: platforms a persona_accounts row can target. Fanvue only for now
 // (23 August operator decision) -- Instagram/Meta and Twitter/X are

@@ -171,6 +171,12 @@ DECLARE
     'cross_company_instructions',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
+    -- DUR-3972 slice S1. The real DDL, grant and policy for these tables live
+    -- in 0168_data_connections.sql; the names are listed here for the same
+    -- reason company_service_tokens is, above.
+    'data_connections',
+    'data_dataset_sources',
+    'data_read_events',
     'document_annotation_anchor_snapshots',
     'document_annotation_comments',
     'document_annotation_threads',
@@ -311,6 +317,11 @@ DECLARE
     'cost_events',
     'customer_inbox_conversations',
     'customer_inbox_deliveries',
+    -- DUR-3972 slice S1, created in 0168_data_connections.sql; company-scoped,
+    -- so they belong in this list too.
+    'data_connections',
+    'data_dataset_sources',
+    'data_read_events',
     'document_annotation_anchor_snapshots',
     'document_annotation_comments',
     'document_annotation_threads',

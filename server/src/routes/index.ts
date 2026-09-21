@@ -27,5 +27,6 @@ export { instanceSettingsRoutes } from "./instance-settings.js";
 export { instanceClaudeAuthRoutes } from "./instance-claude-auth.js";
 export { instanceSecurityRoutes } from "./instance-security.js";
 export { telegramBotRoutes } from "./telegram-bots.js";
+export { dataConnectionRoutes } from "./data-connections.js";
 export { instanceDatabaseBackupRoutes } from "./instance-database-backups.js";
 export { cloudUpstreamRoutes } from "./cloud-upstreams.js";
