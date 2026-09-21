@@ -37,11 +37,23 @@ import {
   createLaneABuiltinToolExecutor,
   isAgentAvailableForRouting,
   isLaneABuiltinTool,
+  READ_BUSINESS_DATA_TOOL,
   type LaneAToolColleague,
   type LaneAToolContext,
   type LaneAToolDeps,
 } from "./lane-a-tools.js";
 import { readAnthropicApiKey } from "../env-values.js";
+import {
+  businessDataService,
+  notConnectedMessage,
+  signedRunIdFromActor,
+  type BusinessDataServiceDeps,
+} from "./business-data.js";
+import {
+  applyBusinessDataNumberCheck,
+  applyNoLookupGuard,
+  type BusinessDataTurnOutput,
+} from "./business-data-number-check.js";
 
 /** Per-conversation hard turn cap — a runaway loop must start a fresh conversation. */
 export const LANE_A_MAX_TURNS_PER_CONVERSATION = 40;
@@ -128,6 +140,35 @@ export interface LaneASystemPromptInput {
   hasBuiltinTools: boolean;
   /** Colleagues the quick agent may hand work to (name + role), already filtered to available ones. */
   colleagues?: Array<{ name: string; role: string }>;
+  /**
+   * DUR-3972: whether this company's sales data can be read this turn. Absent
+   * leaves the prompt exactly as before; present-but-unavailable tells the
+   * model to say so instead of guessing a number.
+   */
+  businessData?: { available: boolean; companyName: string };
+}
+
+/** DUR-3972: the rules a quick agent answers business-data questions under. */
+export function buildBusinessDataPromptParagraph(input: { available: boolean; companyName: string }): string {
+  if (!input.available) {
+    return (
+      `You cannot read ${input.companyName}'s sales or other business data. If someone asks for sales figures, ` +
+      `say exactly: "${notConnectedMessage(input.companyName)}" Never give, estimate or remember a figure.`
+    );
+  }
+  return [
+    `Sales data (read_business_data):`,
+    `- Use only numbers the tool returned in this turn. Never calculate, round, estimate or reuse a number from earlier in the conversation; call the tool again for every new question, including follow-ups like "og måneden før det?".`,
+    `- Always state the period with its exact dates, the source, and that the figures are units (stk), not kroner.`,
+    `- Give the three lines for each month (solgt, returer i måneden with how many are from earlier months, netto), never one net figure alone.`,
+    `- "Ingen data" is not 0: if the tool says there is no data, say that, never zero.`,
+    `- "Salg" is not "inntekt" or revenue, and the numbers are not accounting figures.`,
+    `- Kroner amounts are not available yet; if asked, relay the tool's refusal.`,
+    `- If the tool says a product word matches several product types, ask the person which ones to count. Do not pick for them.`,
+    `- If the tool refuses, pass the refusal on word for word.`,
+    `- The shop source does not split figures by entity (Gruppen, Møbler, Interiørdesign); if asked, say the figures cover the whole shop.`,
+    `- Relaying the tool's answer card as it is, is always fine.`,
+  ].join("\n");
 }
 
 export function buildSystemPrompt(input: LaneASystemPromptInput): string {
@@ -144,6 +185,9 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
       `You can do a few things through tools: hand work to a colleague (route_to_agent), look up the weather (get_weather), ` +
         `and read a task summary (lookup_issue).`,
     );
+    if (input.businessData?.available) {
+      capabilities.push(`You can also read this company's sales figures (read_business_data).`);
+    }
   }
   if (input.hasMcpTools) {
     capabilities.push(`You also have the tools granted to you in the Tools library.`);
@@ -156,6 +200,10 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
     parts.push(capabilities.join(" "));
   } else {
     parts.push(`You have no tools.`);
+  }
+
+  if (input.businessData) {
+    parts.push(buildBusinessDataPromptParagraph(input.businessData));
   }
 
   if (input.colleagues && input.colleagues.length > 0) {
@@ -531,13 +579,27 @@ export function describeLaneASpendingLimitRefusal(
   );
 }
 
+/** The one part of the Anthropic client a chat turn uses. */
+export type LaneAModelClient = Pick<Anthropic, "messages">;
+
 export interface LaneAServiceOptions {
   /** Test seam: override any of the built-in tools' dependencies (agents, issues, fetch). */
   toolDeps?: Partial<LaneAToolDeps>;
+  /** DUR-3972 test seam: the business-data service's outbound fetch and clock. */
+  businessData?: BusinessDataServiceDeps;
+  /**
+   * Test seam: the model client. When set, no ANTHROPIC_API_KEY is read or
+   * needed. Production leaves it unset.
+   */
+  createModelClient?: () => LaneAModelClient;
 }
 
 export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
-  const toolDeps: LaneAToolDeps = { ...createDbLaneAToolDeps(db), ...options.toolDeps };
+  const toolDeps: LaneAToolDeps = {
+    ...createDbLaneAToolDeps(db, { businessData: options.businessData }),
+    ...options.toolDeps,
+  };
+  const businessData = businessDataService(db, options.businessData);
   const executeBuiltinTool = createLaneABuiltinToolExecutor(toolDeps);
   const builtinToolDefinitions = buildLaneABuiltinToolDefinitions();
   const budgets = budgetService(db);
@@ -703,17 +765,29 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return existing;
   }
 
-  async function loadReplayHistory(conversationId: string): Promise<Anthropic.MessageParam[]> {
+  async function loadReplayHistory(
+    conversationId: string,
+  ): Promise<{ history: Anthropic.MessageParam[]; businessDataInHistory: boolean }> {
     // Newest rows first, bounded by the turn cap; selectReplayTurns applies
     // the token budget and restores chronological order.
     const rows = await db
-      .select({ role: laneAMessages.role, content: laneAMessages.content })
+      .select({ role: laneAMessages.role, content: laneAMessages.content, toolCalls: laneAMessages.toolCalls })
       .from(laneAMessages)
       .where(eq(laneAMessages.conversationId, conversationId))
       .orderBy(desc(laneAMessages.createdAt))
       .limit(LANE_A_MEMORY_MAX_TURNS);
     const chronological = rows.slice().reverse();
-    return selectReplayTurns(chronological).map((turn) => ({ role: turn.role, content: turn.content }));
+    // DUR-3972: an earlier turn that read business data leaves its figures in
+    // the replayed history, where the model can repeat or add them up.
+    const businessDataInHistory = rows.some(
+      (row) => Array.isArray(row.toolCalls) && row.toolCalls.some((call) => call?.tool === READ_BUSINESS_DATA_TOOL),
+    );
+    return {
+      history: selectReplayTurns(chronological.map((row) => ({ role: row.role, content: row.content }))).map(
+        (turn) => ({ role: turn.role, content: turn.content }),
+      ),
+      businessDataInHistory,
+    };
   }
 
   async function recordToolCall(ctx: LaneAToolContext, toolName: string, input: unknown, result: { ok: boolean; summary: string }) {
@@ -755,20 +829,32 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     /** DUR-3977: per-agent model/output ceiling, defaults already applied by the caller. */
     model?: string;
     maxOutputTokens?: number;
+    /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
+    offerBusinessData?: boolean;
   }): Promise<{
     text: string;
     inputTokens: number;
     outputTokens: number;
     stopReason: string | null;
     actions: LaneAAction[];
+    businessDataOutputs: BusinessDataTurnOutput[];
   }> {
     const { systemPrompt, history, message, toolset, ctx } = params;
-    const apiKey = readAnthropicApiKey();
-    if (!apiKey) {
-      throw new HttpError(503, "Lane A is not configured on this instance (ANTHROPIC_API_KEY unset)");
+    let client: LaneAModelClient;
+    if (options.createModelClient) {
+      client = options.createModelClient();
+    } else {
+      const apiKey = readAnthropicApiKey();
+      if (!apiKey) {
+        throw new HttpError(503, "Lane A is not configured on this instance (ANTHROPIC_API_KEY unset)");
+      }
+      client = new Anthropic({ apiKey });
     }
-    const client = new Anthropic({ apiKey });
-    const tools: Anthropic.Tool[] = [...builtinToolDefinitions, ...toolset.anthropicTools];
+    const builtins = params.offerBusinessData
+      ? builtinToolDefinitions
+      : builtinToolDefinitions.filter((tool) => tool.name !== READ_BUSINESS_DATA_TOOL);
+    const tools: Anthropic.Tool[] = [...builtins, ...toolset.anthropicTools];
+    const businessDataOutputs: BusinessDataTurnOutput[] = [];
     const messages: Anthropic.MessageParam[] = [...history, { role: "user", content: message }];
     const actions: LaneAAction[] = [];
     let inputTokens = 0;
@@ -797,6 +883,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const block of toolUseBlocks) {
           if (toolCallsUsed >= LANE_A_MAX_TOOL_CALLS) {
+            if (block.name === READ_BUSINESS_DATA_TOOL) {
+              // Asked for data and got none: the reply is still checked, so it
+              // cannot carry a number no lookup in this turn returned.
+              businessDataOutputs.push({ content: "", footer: null, lookupId: null });
+            }
             toolResults.push({
               type: "tool_result",
               tool_use_id: block.id,
@@ -809,15 +900,30 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           const input = (block.input as Record<string, unknown>) ?? {};
 
           if (isLaneABuiltinTool(block.name)) {
-            let result: { ok: boolean; content: string; summary: string };
+            let result: {
+              ok: boolean;
+              content: string;
+              summary: string;
+              businessData?: { footer: string | null; lookupId: string | null };
+            };
             try {
               result = await executeBuiltinTool(block.name, input, ctx);
             } catch (err) {
               result = {
                 ok: false,
-                content: `That did not work: ${err instanceof Error ? err.message : String(err)}`,
+                content:
+                  block.name === READ_BUSINESS_DATA_TOOL
+                    ? "Jeg fikk ikke hentet tallene på grunn av en feil, så jeg gir ingen tall."
+                    : `That did not work: ${err instanceof Error ? err.message : String(err)}`,
                 summary: `${block.name} failed.`,
               };
+            }
+            if (block.name === READ_BUSINESS_DATA_TOOL) {
+              businessDataOutputs.push({
+                content: result.content,
+                footer: result.businessData?.footer ?? null,
+                lookupId: result.businessData?.lookupId ?? null,
+              });
             }
             actions.push({ tool: block.name, summary: result.summary, ok: result.ok });
             await recordToolCall(ctx, block.name, input, result);
@@ -897,7 +1003,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       .filter((block): block is Anthropic.TextBlock => block.type === "text")
       .map((block) => block.text)
       .join("");
-    return { text, inputTokens, outputTokens, stopReason: finalResponse.stop_reason, actions };
+    return { text, inputTokens, outputTokens, stopReason: finalResponse.stop_reason, actions, businessDataOutputs };
   }
 
   async function listColleagues(companyId: string, selfAgentId: string): Promise<LaneAToolColleague[]> {
@@ -938,7 +1044,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       requester: params.requester,
     });
 
-    const [toolset, history, colleagues] = await Promise.all([
+    const [toolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
       loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? []),
       loadReplayHistory(conversation.id),
       listColleagues(params.companyId, params.targetAgent.id),
@@ -949,7 +1055,23 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       requester: params.requester,
       actor: params.actor ?? { type: "none" },
       conversationId: conversation.id,
+      runId: signedRunIdFromActor(params.actor),
     };
+
+    // DUR-3972: offer the sales tool only when this company has an active
+    // sales source. While the instance switch is off, the prompt stays exactly
+    // as it was. Fails open to "not offered": a broken check must not turn a
+    // normal chat message into an error.
+    let businessDataPrompt: { available: boolean; companyName: string } | undefined;
+    try {
+      if (await businessData.featureOn()) {
+        const available = await businessData.isAvailable(params.companyId);
+        businessDataPrompt = { available, companyName: await businessData.companyName(params.companyId) };
+      }
+    } catch (err) {
+      logger.warn({ err, companyId: params.companyId }, "lane A: business-data availability check failed");
+      businessDataPrompt = undefined;
+    }
 
     // DUR-3977: chat uses the same per-agent model/output ceiling the
     // transform path does, so an operator who moves a quick agent to a
@@ -962,6 +1084,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let outputTokens: number;
     let stopReason: string | null;
     let actions: LaneAAction[];
+    let businessDataOutputs: BusinessDataTurnOutput[] = [];
     try {
       const systemPrompt = buildSystemPrompt({
         agentName: params.targetAgent.name,
@@ -971,6 +1094,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         hasMcpTools: toolset.anthropicTools.length > 0,
         hasBuiltinTools: builtinToolDefinitions.length > 0,
         colleagues: colleagues.map((c) => ({ name: c.name, role: c.role })),
+        businessData: businessDataPrompt,
       });
       const result = await callModel({
         systemPrompt,
@@ -980,14 +1104,67 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         ctx,
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
+        offerBusinessData: businessDataPrompt?.available === true,
       });
       text = result.text;
+      businessDataOutputs = result.businessDataOutputs;
       inputTokens = result.inputTokens;
       outputTokens = result.outputTokens;
       stopReason = result.stopReason;
       actions = result.actions;
     } finally {
       await closeLaneATools(toolset);
+    }
+
+    // DUR-3972: the number check when business data was read this turn; the
+    // no-lookup guard when it was not, but the tool was offered or earlier
+    // turns carry figures the model could repeat or add up from memory. A
+    // turn that used a Tools-library tool is left to that tool's own output.
+    let guard: { ungrounded: string[]; summary: string } | null = null;
+    if (businessDataOutputs.length > 0) {
+      const checked = applyBusinessDataNumberCheck(text, businessDataOutputs);
+      text = checked.text;
+      if (checked.replaced) {
+        guard = {
+          ungrounded: checked.ungrounded,
+          summary:
+            "The quick agent's reply had numbers the data source did not return; the answer card was sent instead.",
+        };
+      }
+    } else if (
+      (businessDataPrompt?.available === true || businessDataInHistory) &&
+      !actions.some((action) => action.ok && !isLaneABuiltinTool(action.tool))
+    ) {
+      const checked = applyNoLookupGuard(text);
+      text = checked.text;
+      if (checked.replaced) {
+        guard = {
+          ungrounded: checked.claims,
+          summary:
+            "The quick agent gave sales figures without looking them up in this message; it was asked to look them up again instead.",
+        };
+      }
+    }
+    if (guard) {
+      try {
+        await logActivity(db, {
+          companyId: params.companyId,
+          actorType: params.requester.userId ? "user" : "agent",
+          actorId: params.requester.userId ?? params.requester.agentId ?? "system",
+          agentId: params.targetAgent.id,
+          action: "lane_a.provenance_guard",
+          entityType: "agent",
+          entityId: params.targetAgent.id,
+          details: {
+            conversationId: conversation.id,
+            ungroundedNumbers: guard.ungrounded.slice(0, 20),
+            lookupIds: businessDataOutputs.map((output) => output.lookupId).filter(Boolean),
+            summary: guard.summary,
+          },
+        });
+      } catch {
+        // The activity row must never break the turn; the reply is already safe.
+      }
     }
 
     await costService(db).createEvent(params.companyId, {

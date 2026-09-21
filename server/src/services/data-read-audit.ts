@@ -1,4 +1,4 @@
-import { and, eq, gte, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, notInArray, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { dataReadEvents } from "@paperclipai/db";
 import type { DataReadChannel, DataReadOutcome } from "@paperclipai/shared";
@@ -18,6 +18,16 @@ import { logger } from "../middleware/logger.js";
 export const DATA_READ_FACTS_MAX_BYTES = 8192;
 
 export interface RecordDataReadEventInput {
+  /**
+   * Optional pre-chosen row id, so an answer can print "oppslag <id>" before
+   * the row is written with exactly that answer as its facts.
+   */
+  id?: string;
+  /**
+   * When the lookup happened, on the caller's clock (the one its limits are
+   * counted with). Defaults to the database's now().
+   */
+  createdAt?: Date;
   companyId: string;
   connectionId?: string | null;
   dataset: string;
@@ -68,6 +78,8 @@ export async function recordDataReadEvent(db: Db, input: RecordDataReadEventInpu
   const [row] = await db
     .insert(dataReadEvents)
     .values({
+      ...(input.id ? { id: input.id } : {}),
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
       companyId: input.companyId,
       connectionId: input.connectionId ?? null,
       dataset: input.dataset,
@@ -111,7 +123,17 @@ export async function tryRecordDataReadEvent(db: Db, input: RecordDataReadEventI
  */
 export async function countDataReadEvents(
   db: Db,
-  filter: { companyId: string; since: Date; agentId?: string; runId?: string; channel?: DataReadChannel },
+  filter: {
+    companyId: string;
+    since: Date;
+    agentId?: string;
+    runId?: string;
+    channel?: DataReadChannel;
+    /** Only rows for this dataset (the settings Test writes "connection_check" rows). */
+    dataset?: string;
+    /** Rows with these outcomes are not counted (e.g. a refusal for being over a limit). */
+    excludeOutcomes?: DataReadOutcome[];
+  },
 ): Promise<number> {
   const conditions: SQL[] = [
     eq(dataReadEvents.companyId, filter.companyId),
@@ -120,6 +142,10 @@ export async function countDataReadEvents(
   if (filter.agentId) conditions.push(eq(dataReadEvents.agentId, filter.agentId));
   if (filter.runId) conditions.push(eq(dataReadEvents.runId, filter.runId));
   if (filter.channel) conditions.push(eq(dataReadEvents.channel, filter.channel));
+  if (filter.dataset) conditions.push(eq(dataReadEvents.dataset, filter.dataset));
+  if (filter.excludeOutcomes && filter.excludeOutcomes.length > 0) {
+    conditions.push(notInArray(dataReadEvents.outcome, filter.excludeOutcomes));
+  }
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(dataReadEvents)

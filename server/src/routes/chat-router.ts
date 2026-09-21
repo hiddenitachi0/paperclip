@@ -15,6 +15,7 @@ import {
   secretaryClassifierService,
 } from "../services/index.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import type { LaneAServiceOptions } from "../services/lane-a.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /**
@@ -90,10 +91,10 @@ function buildLaneBTitle(text: string): string {
   return `${source.slice(0, LANE_B_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
-export function chatRouterRoutes(db: Db) {
+export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {}) {
   const router = Router();
   const agents = agentService(db);
-  const laneA = laneAService(db);
+  const laneA = laneAService(db, options.laneA);
   const issues = issueService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db);

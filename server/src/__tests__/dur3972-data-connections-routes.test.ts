@@ -158,7 +158,9 @@ d("DUR-3972 data connections", () => {
     userId,
     isInstanceAdmin: false,
     companyIds,
-    memberships: companyIds.map((companyId) => ({ companyId, status: "active", membershipRole: "admin" })),
+    // DUR-3972 S2: Datakilder is owner-or-instance-admin only; the refusal of
+    // other roles is covered in dur3972-datakilder-screen-routes.test.ts.
+    memberships: companyIds.map((companyId) => ({ companyId, status: "active", membershipRole: "owner" })),
   });
 
   const agentActor = (companyId: string, agentId: string) => ({

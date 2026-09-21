@@ -167,7 +167,7 @@ describe("answer card", () => {
     expect(checkSalesInvariants(result)).toEqual([]);
     const card = renderSalesAnswerCard(result, { lookupId: "x" });
     const october = card.split("Oktober 2026")[1]!.split("\n\n")[0]!;
-    expect(october).toContain("Ingen data: Perioden har ikke startet ennå. (ikke det samme som 0)");
+    expect(october).toContain("Ingen data: Perioden har ikke startet ennå. (ikke det samme som null salg)");
     expect(october).not.toMatch(/Solgt/);
   });
 

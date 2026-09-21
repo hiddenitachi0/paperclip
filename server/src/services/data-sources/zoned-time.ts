@@ -65,7 +65,12 @@ function offsetMs(instant: Date, timeZone: string): number {
 
 /** The UTC instant of local wall-clock midnight on `year-month-01` in `timeZone`. */
 export function zonedMonthStart(year: number, month: number, timeZone: string): Date {
-  const normalized = new Date(Date.UTC(year, month - 1, 1));
+  return zonedDayStart(year, month, 1, timeZone);
+}
+
+/** The UTC instant of local wall-clock midnight on `year-month-day` in `timeZone`. */
+export function zonedDayStart(year: number, month: number, day: number, timeZone: string): Date {
+  const normalized = new Date(Date.UTC(year, month - 1, day));
   const guess = normalized.getTime();
   let candidate = guess - offsetMs(new Date(guess), timeZone);
   // One correction step handles a DST change between the guess and the answer.

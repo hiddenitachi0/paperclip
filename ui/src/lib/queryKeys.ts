@@ -6,6 +6,9 @@ export const queryKeys = {
     instructions: (id: string) => ["companies", id, "instructions"] as const,
     serviceTokens: (id: string) => ["companies", id, "service-tokens"] as const,
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
+    dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
+    datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
+    dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {
     list: (companyId: string) => ["company-skills", companyId] as const,

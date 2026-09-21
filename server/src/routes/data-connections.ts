@@ -4,6 +4,7 @@ import { createRequestScopedDb } from "@paperclipai/db";
 import {
   DATA_DATASETS,
   createDataConnectionSchema,
+  dataTrialCalculationSchema,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
   type DataDataset,
@@ -11,19 +12,21 @@ import {
 import { HttpError, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { assertCompanyOwnerOrInstanceAdmin } from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { dataConnectionService, type DataConnectionServiceDeps } from "../services/data-connections.js";
+import { runTrialCalculation } from "../services/data-trial.js";
 
 /**
  * DUR-3972 slice S1: "Datakilder" -- connecting a company to its own business
  * data (Shopify first), from company settings.
  *
- * Board-only, exactly like the Telegram-bot routes next door: assertBoard
- * refuses every agent, service token and delegate token; assertCompanyAccess
- * refuses a board user of another company; every query is filtered on the
- * company in the URL, so another company's connection is "not found".
+ * Owner-or-instance-admin only (slice S2 tightened this from "any board
+ * member"): agents, service tokens and delegate tokens are refused, a board
+ * user of another company is refused, and so is a member of this company who
+ * is not its owner. Every query is filtered on the company in the URL, so
+ * another company's connection is "not found".
  *
  * Switched off by default. Until an instance admin turns on
  * `enableBusinessData` in the experimental settings, every route here answers
@@ -41,9 +44,10 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   const instanceSettings = instanceSettingsService(rawDb);
 
   function boardScope() {
+    // DUR-3972 S2: owner of the company or instance admin only. A plain board
+    // member (admin, operator, viewer) is refused, as are agents and tokens.
     return companyScopeFromParam(rawDb, (req, companyId) => {
-      assertBoard(req);
-      assertCompanyAccess(req, companyId);
+      assertCompanyOwnerOrInstanceAdmin(req, companyId, "datakilder");
     });
   }
 
@@ -174,6 +178,45 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
     });
     res.json(result);
   });
+
+  /**
+   * DUR-3972 S2: "Prøveberegning". Counts units sold in one or two months
+   * through this connection, exactly as an agent answer would, so the numbers
+   * can be compared with Shopify Analytics before "Salg" is ticked. A refusal
+   * is a 200 with ok:false and a plain sentence, like Test.
+   */
+  router.post(
+    "/companies/:companyId/data-connections/:connectionId/trial",
+    boardScope(),
+    requireFeatureOn,
+    validate(dataTrialCalculationSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const connectionId = req.params.connectionId as string;
+      const result = await runTrialCalculation(
+        db,
+        svc,
+        {
+          companyId,
+          connectionId,
+          userId: actorUserId(req),
+          periods: req.body.periods,
+          groupBy: req.body.groupBy,
+        },
+        { now: deps.now, sleep: deps.sleep },
+      );
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "data_connection.trial_calculated",
+        entityType: "data_connection",
+        entityId: connectionId,
+        details: { ok: result.ok, periods: req.body.periods, lookupId: result.lookupId },
+      });
+      res.json(result);
+    },
+  );
 
   router.get("/companies/:companyId/dataset-sources", boardScope(), requireFeatureOn, async (req, res) => {
     res.json(await svc.listDatasetSources(req.params.companyId as string));

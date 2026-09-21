@@ -15,6 +15,7 @@ import { Settings, CloudUpload, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { ServiceTokensSection } from "../components/ServiceTokensSection";
 import { TelegramBotsSection } from "../components/TelegramBotsSection";
+import { DataSourcesSection } from "../components/DataSourcesSection";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
   Field,
@@ -63,6 +64,7 @@ export function CompanySettings() {
     && attachmentMaxBytes >= BYTES_PER_MIB
     && attachmentMaxBytes <= MAX_COMPANY_ATTACHMENT_MAX_BYTES;
   const cloudSyncEnabled = experimentalSettings?.enableCloudSync === true;
+  const businessDataEnabled = experimentalSettings?.enableBusinessData === true;
 
   const generalDirty =
     !!selectedCompany &&
@@ -424,6 +426,8 @@ export function CompanySettings() {
           <ServiceTokensSection companyId={selectedCompanyId} />
           {/* Telegram bots (DUR-3978) */}
           <TelegramBotsSection companyId={selectedCompanyId} />
+          {/* Datakilder: the company's own sales data (DUR-3972), behind the instance switch */}
+          {businessDataEnabled ? <DataSourcesSection companyId={selectedCompanyId} /> : null}
         </div>
       ) : null}
 
