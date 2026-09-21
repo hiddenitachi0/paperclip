@@ -157,6 +157,15 @@ export const SCHEDULER_TICK_CHAIN = Object.fromEntries(
 ) as { readonly [K in SchedulerTickChain]: K };
 
 /**
+ * DUR-3991: the chains whose work runs inside withTickPhases(), so the watchdog
+ * can tell "stuck before its first timed step" (almost always the connection
+ * wait in runInCompanyScopeBypass, which runs BEFORE the recorder opens) from
+ * "this chain times nothing". scheduler-tick-single-flight.test.ts checks this
+ * set against the real withTickPhases() call sites.
+ */
+export const TICK_PHASE_TIMED_CHAINS: ReadonlySet<SchedulerTickChain> = new Set<SchedulerTickChain>(["tickTimers"]);
+
+/**
  * Plain-language name for each chain, for anything an operator reads.
  *
  * Filip is not a developer: "tickTimers" tells him nothing, and rule 7 of the
@@ -547,7 +556,7 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
     }
 
     const runId = nextRunId++;
-    const probe = createTickPhaseProbe();
+    const probe = createTickPhaseProbe({ expectsTick: TICK_PHASE_TIMED_CHAINS.has(chain), now: nowFn });
     state.startedAt = now;
     state.runId = runId;
     state.probe = probe;

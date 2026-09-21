@@ -486,7 +486,9 @@ export function buildSchedulerRescueNotice(rescue: FleetSchedulerRescue, now: Da
   if (rescue.stuckPhase !== null) {
     where = `while ${rescue.stuckPhaseLabel} (part of ${rescue.label})`;
   } else if (rescue.phasesMeasured) {
-    where = `while ${rescue.label}, before its first measured step (most likely waiting for a database connection)`;
+    // The wait before the first step (the database connection) is reported as
+    // its own phase, so a measured run with no phase in progress is between steps.
+    where = `while ${rescue.label}, between two of its measured steps`;
   } else {
     where = `while ${rescue.label}`;
   }

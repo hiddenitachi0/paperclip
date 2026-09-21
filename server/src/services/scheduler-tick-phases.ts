@@ -101,6 +101,16 @@ export interface InFlightTickPhases {
 export const AFTER_TICK_PHASE = "afterTick";
 
 /**
+ * The pseudo-phase reported when a chain that DOES time its steps has not yet
+ * reached its first one: it is still in the wrapper around the tick, which
+ * awaits a reserved database connection (runInCompanyScopeBypass's reserve()
+ * and its role check) before the tick's own recorder ever opens. Without this
+ * that wait -- the likeliest shape of a hang right after a restart -- read as
+ * "this chain is not timed", which was false and pointed away from it.
+ */
+export const BEFORE_TICK_PHASE = "beforeTick";
+
+/**
  * DUR-3991: a slot the scheduler watchdog hands to a tick chain before it
  * starts, so it can look inside the chain later if the chain never returns.
  * The chain's withTickPhases() attaches its recorder to the slot; a chain that
@@ -113,6 +123,17 @@ export interface TickPhaseProbe {
 
 interface ProbeSlot extends TickPhaseProbe {
   recorder: PhaseRecorder | null;
+}
+
+export interface TickPhaseProbeOptions {
+  /**
+   * true for a chain known to open withTickPhases() (see
+   * TICK_PHASE_TIMED_CHAINS in scheduler-tick-single-flight.ts). Until its
+   * recorder attaches, read() then reports BEFORE_TICK_PHASE rather than null,
+   * so a hang in the connection wait is named instead of called "not timed".
+   */
+  expectsTick?: boolean;
+  now?: () => number;
 }
 
 const probeStorage = new AsyncLocalStorage<ProbeSlot>();
@@ -142,12 +163,23 @@ function readInFlight(recorder: PhaseRecorder): InFlightTickPhases {
 }
 
 /** A fresh, empty probe for one chain run. */
-export function createTickPhaseProbe(): TickPhaseProbe {
+export function createTickPhaseProbe(options: TickPhaseProbeOptions = {}): TickPhaseProbe {
+  const now = options.now ?? (() => Date.now());
+  const createdAt = now();
   const slot: ProbeSlot = {
     recorder: null,
     read() {
       try {
-        return slot.recorder ? readInFlight(slot.recorder) : null;
+        if (slot.recorder) return readInFlight(slot.recorder);
+        if (!options.expectsTick) return null;
+        const waitingMs = Math.max(0, now() - createdAt);
+        return {
+          elapsedMs: waitingMs,
+          currentPhase: BEFORE_TICK_PHASE,
+          currentPhaseMs: waitingMs,
+          openPhases: [{ phase: BEFORE_TICK_PHASE, runningMs: waitingMs }],
+          completedPhases: [],
+        };
       } catch {
         // Diagnostics only: a failure to read must never reach the watchdog.
         return null;
@@ -307,10 +339,13 @@ export const TICK_PHASE_LABELS: Record<string, string> = {
   idleGate: "checking whether an agent is free to wake",
   issueMonitors: "checking task monitors",
   customerInboxHandoff: "passing customer inbox messages to agents",
+  [BEFORE_TICK_PHASE]: "waiting for a database connection before starting its work",
   [AFTER_TICK_PHASE]: "handing its database connection back after finishing its work",
 };
 
 export function describeTickPhase(phase: string | null): string {
-  if (phase === null) return "before any of its measured steps had started";
+  // null with a recorder attached: the tick is between two timed steps (the
+  // time before the first one is BEFORE_TICK_PHASE, after the last AFTER_TICK_PHASE).
+  if (phase === null) return "between two of its measured steps";
   return TICK_PHASE_LABELS[phase] ?? "a step without a plain-language name";
 }

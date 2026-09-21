@@ -296,7 +296,10 @@ describe("DUR-3991 scheduler tick wedge watchdog", () => {
     const errors = lines.filter((l) => l.level === "error");
     expect(errors).toHaveLength(1);
     expect(errors[0]!.msg).toBe(
-      'scheduler chain "tickTimers" has been wedged for 5 minutes (its steps are not timed) — abandoning it and ' +
+      // tickTimers is a timed chain whose tick never opened here: that is the
+      // wait for its database connection, named as such, not "not timed".
+      'scheduler chain "tickTimers" has been wedged for 5 minutes (stuck in phase "beforeTick" for 300000ms; ' +
+        "finished: no phases recorded) — abandoning it and " +
         "starting a fresh copy so the fleet keeps moving (rescue 1 of 3 this hour for this chain; 1 of 3 abandoned " +
         "runs still unsettled)",
     );

@@ -179,7 +179,7 @@ describe("DUR-3991 looking inside a tick that has not finished", () => {
       await timeTickPhase("loadAgents", async () => "untimed outside a recorder");
     });
     expect(probe.read()).toBeNull();
-    expect(describeTickPhase(null)).toBe("before any of its measured steps had started");
+    expect(describeTickPhase(null)).toBe("between two of its measured steps");
     // No internal identifier ever reaches operator text, even for an unknown phase.
     expect(describeTickPhase("someNewPhase")).not.toContain("someNewPhase");
   });
