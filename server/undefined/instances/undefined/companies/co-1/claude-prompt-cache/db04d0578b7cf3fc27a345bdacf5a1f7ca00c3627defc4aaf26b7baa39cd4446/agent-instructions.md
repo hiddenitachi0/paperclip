@@ -1,0 +1,2 @@
+# Agent instructions
+The above agent instructions were loaded from /tmp/paperclip-claude-exec-notes-resume-JS518r/instructions.md. Resolve any relative file references from /tmp/paperclip-claude-exec-notes-resume-JS518r/. This base directory is authoritative for sibling instruction files such as ./HEARTBEAT.md, ./SOUL.md, and ./TOOLS.md; do not resolve those from the parent agent directory.

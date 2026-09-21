@@ -144,6 +144,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
         DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
       enableWeeklyCheckup: parsed.data.enableWeeklyCheckup ?? false,
       enableCrossCompanyInstructions: parsed.data.enableCrossCompanyInstructions ?? false,
+      enableBusinessData: parsed.data.enableBusinessData ?? false,
     };
   }
   return {
@@ -164,6 +165,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
     enableWeeklyCheckup: false,
     enableCrossCompanyInstructions: false,
+    enableBusinessData: false,
   };
 }
 

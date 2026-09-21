@@ -67,6 +67,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     issueGraphLivenessAutoRecoveryLookbackHours: 24,
     enableWeeklyCheckup: false,
     enableCrossCompanyInstructions: false,
+    enableBusinessData: false,
   };
 }
 

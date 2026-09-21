@@ -50,6 +50,10 @@ import {
   // Goal
   createGoalSchema,
   updateGoalSchema,
+  // Business-data connections (DUR-3972)
+  createDataConnectionSchema,
+  setDatasetSourceSchema,
+  updateDataConnectionSchema,
   // Telegram bots (DUR-3978)
   createTelegramBotSchema,
   rotateTelegramBotTokenSchema,
@@ -758,6 +762,18 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/telegram-bots/{botId}/test",
   "PUT /api/companies/{companyId}/telegram-bots/{botId}/allowed-users",
   "DELETE /api/companies/{companyId}/telegram-bots/{botId}",
+  // DUR-3972: business-data connections. Operator work only -- one of them
+  // stores a shop key, and all of them decide what company data agents may
+  // read. An agent is refused on every one.
+  "GET /api/companies/{companyId}/data-connections",
+  "POST /api/companies/{companyId}/data-connections",
+  "GET /api/companies/{companyId}/data-connections/{connectionId}",
+  "PATCH /api/companies/{companyId}/data-connections/{connectionId}",
+  "DELETE /api/companies/{companyId}/data-connections/{connectionId}",
+  "POST /api/companies/{companyId}/data-connections/{connectionId}/test",
+  "GET /api/companies/{companyId}/dataset-sources",
+  "PUT /api/companies/{companyId}/dataset-sources/{dataset}",
+  "GET /api/companies/{companyId}/data-reads",
 ]);
 
 const INSTANCE_ADMIN_OPERATIONS = new Set([
@@ -836,6 +852,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/instance/database-backups",
   "POST /api/instance/claude-auth/sign-in",
   "POST /api/companies/{companyId}/telegram-bots",
+  "POST /api/companies/{companyId}/data-connections",
 ]);
 
 const ACCEPTED_OPERATIONS = new Set([
@@ -3141,6 +3158,30 @@ for (const route of [
     method: route[0],
     path: route[1],
     tags: ["instance"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Business-data connections (DUR-3972) ───────────────────────────────────
+// Switched off unless the instance flag enableBusinessData is on (404 with
+// code business_data_disabled). No operation here ever returns the shop key;
+// responses carry the last four characters as `credentialHint` at most.
+for (const route of [
+  ["get", "/api/companies/{companyId}/data-connections", "List this company's business-data connections (never the key)", undefined],
+  ["post", "/api/companies/{companyId}/data-connections", "Connect a read-only Shopify source to this company", createDataConnectionSchema],
+  ["get", "/api/companies/{companyId}/data-connections/{connectionId}", "Get one business-data connection (never the key)", undefined],
+  ["patch", "/api/companies/{companyId}/data-connections/{connectionId}", "Rename, change the daily cap, switch on/off, or replace the key", updateDataConnectionSchema],
+  ["delete", "/api/companies/{companyId}/data-connections/{connectionId}", "Disconnect a source and delete its saved key", undefined],
+  ["post", "/api/companies/{companyId}/data-connections/{connectionId}/test", "Ask the source who it is and what the key may do; switch it on only if read-only", undefined],
+  ["get", "/api/companies/{companyId}/dataset-sources", "Which connection answers each dataset for this company", undefined],
+  ["put", "/api/companies/{companyId}/dataset-sources/{dataset}", "Point a dataset (sales) at one of this company's connections, or at nothing", setDatasetSourceSchema],
+  ["get", "/api/companies/{companyId}/data-reads", "The latest business-data lookups for this company (audit)", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["data-connections"],
     summary: route[2],
     ...(route[3] ? { body: route[3] } : {}),
   });

@@ -482,6 +482,7 @@ export {
   PERSONA_POST_STATUSES,
   type PersonaPostStatus,
   PERSONA_POST_AI_DISCLOSURE_TEXT,
+  DEDICATED_SECRET_BINDING_TARGET_TYPES,
 } from "./constants.js";
 export {
   KNOWN_INTEGRATION_ENV_KEYS,
@@ -1218,6 +1219,41 @@ export {
   type RotateTelegramBotTokenInput,
   type UpdateTelegramBotAllowedUsersInput,
 } from "./validators/telegram-bot.js";
+export type {
+  DataConnectionCheckResult,
+  DataConnectionObservedSummary,
+  DataConnectionSummary,
+  DataReadEventSummary,
+  DataDatasetSourceSummary,
+} from "./types/data-connection.js";
+export {
+  DATA_CONNECTION_ACCESS_LEVELS,
+  DATA_CONNECTION_CREDENTIAL_KINDS,
+  DATA_CONNECTION_KINDS,
+  DATA_CONNECTION_STATUSES,
+  DATA_DATASETS,
+  DATA_READ_CHANNELS,
+  DATA_READ_OUTCOMES,
+  DEFAULT_DATA_CONNECTION_DAILY_LOOKUP_CAP,
+  SHOPIFY_API_VERSION,
+  SHOPIFY_SHOP_DOMAIN_PATTERN,
+  createDataConnectionSchema,
+  dataConnectionCredentialSchema,
+  normalizeShopDomainInput,
+  setDatasetSourceSchema,
+  updateDataConnectionSchema,
+  type CreateDataConnectionInput,
+  type DataConnectionAccessLevel,
+  type DataConnectionCredentialInput,
+  type DataConnectionCredentialKind,
+  type DataConnectionKind,
+  type DataConnectionStatus,
+  type DataDataset,
+  type DataReadChannel,
+  type DataReadOutcome,
+  type SetDatasetSourceInput,
+  type UpdateDataConnectionInput,
+} from "./validators/data-connection.js";
 export {
   ADMIN_AUTH_CHECK_STATUSES,
   ADMIN_AUTH_CHECK_TRIGGERS,
