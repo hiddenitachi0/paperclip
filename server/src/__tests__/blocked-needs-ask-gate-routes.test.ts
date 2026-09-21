@@ -56,6 +56,26 @@ describeEmbeddedPostgres("DUR-3993 blocked needs an operator ask (PATCH /issues/
   }, 20_000);
 
   afterAll(async () => {
+    // A status change fans out fire-and-forget work after the response is
+    // sent (dependent wake-ups, the task watchdog -- see
+    // helpers/late-write-teardown.ts). Nothing in this file awaits it, so
+    // stopping Postgres straight away kills those queries mid-flight and
+    // vitest reports the ECONNRESET as an unhandled rejection. Wait until the
+    // database has been quiet for a sustained stretch -- one idle reading is
+    // not enough, because background work can sit between two queries at the
+    // moment we look -- bounded so a stuck query cannot hang the suite.
+    if (db) {
+      let quietReadings = 0;
+      for (let attempt = 0; attempt < 80 && quietReadings < 6; attempt += 1) {
+        const rows = await db.execute(
+          sql`select count(*)::int as n from pg_stat_activity
+              where datname = current_database() and pid <> pg_backend_pid() and state = 'active'`,
+        );
+        const active = Number((rows as unknown as Array<{ n: number }>)[0]?.n ?? 0);
+        quietReadings = active === 0 ? quietReadings + 1 : 0;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     await tempDb?.cleanup();
   });
 
