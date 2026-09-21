@@ -672,6 +672,11 @@ export type {
   SignOutEverywhereScope,
 } from "./instance-security.js";
 export type {
+  CrossCompanyAccessLogCompany,
+  CrossCompanyAccessLogEntry,
+  CrossCompanyAccessLogPage,
+} from "./cross-company-access-log.js";
+export type {
   CrossCompanyInstruction,
   CrossCompanyInstructionSenderView,
   CrossCompanyInstructionView,

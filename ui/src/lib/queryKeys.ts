@@ -262,6 +262,8 @@ export const queryKeys = {
     quietMode: ["instance", "quiet-mode"] as const,
     claudeAuth: ["instance", "claude-auth"] as const,
     security: ["instance", "security"] as const,
+    crossCompanyAccess: (filters: { from: string | null; to: string | null; cursor: string | null; showRoutine: boolean }) =>
+      ["instance", "cross-company-access", filters] as const,
     claudeSignIn: (sessionId: string) => ["instance", "claude-auth", "sign-in", sessionId] as const,
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,

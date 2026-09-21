@@ -1236,6 +1236,11 @@ export type {
   SignOutEverywhereResult,
   SignOutEverywhereScope,
 } from "./types/instance-security.js";
+export type {
+  CrossCompanyAccessLogCompany,
+  CrossCompanyAccessLogEntry,
+  CrossCompanyAccessLogPage,
+} from "./types/cross-company-access-log.js";
 export {
   signOutEverywhereSchema,
   type SignOutEverywhereInput,

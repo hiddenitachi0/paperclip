@@ -4,6 +4,7 @@ import {
   Clock3,
   CloudUpload,
   Cpu,
+  Eye,
   FlaskConical,
   KeyRound,
   MailPlus,
@@ -166,6 +167,12 @@ export function CompanySettingsSidebar() {
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/access`}
             label="Access"
             icon={Shield}
+            end
+          />
+          <SidebarNavItem
+            to={`${INSTANCE_SETTINGS_PATH_PREFIX}/cross-company-access`}
+            label="Cross-company access"
+            icon={Eye}
             end
           />
           <SidebarNavItem
