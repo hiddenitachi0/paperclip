@@ -156,6 +156,34 @@ describe("sanitizeSshRemoteEnv", () => {
   });
 });
 
+describe("DUR-3994: sanitizeRemoteExecutionEnv drops the server's own keys", () => {
+  it("removes server-only names and the server's database address, keeps a per-agent one", () => {
+    const serverEnv = {
+      BETTER_AUTH_SECRET: "canary-auth",
+      DATABASE_URL: "postgres://owner:pw@db:5432/paperclip",
+      DATABASE_MIGRATION_URL: "postgres://owner:pw@db:5432/paperclip",
+    };
+    expect(
+      sanitizeSshRemoteEnv(
+        {
+          BETTER_AUTH_SECRET: "canary-auth",
+          PAPERCLIP_AGENT_JWT_SECRET: "canary-jwt",
+          PAPERCLIP_SERVER_ANTHROPIC_API_KEY: "canary-anthropic",
+          DATABASE_URL: "postgres://owner:pw@db:5432/paperclip",
+          DATABASE_BYPASS_URL: "postgres://agent_scoped@db:5432/agent",
+          PAPERCLIP_API_URL: "http://127.0.0.1:3100",
+          SAFE_VALUE: "visible",
+        },
+        serverEnv,
+      ),
+    ).toEqual({
+      DATABASE_BYPASS_URL: "postgres://agent_scoped@db:5432/agent",
+      PAPERCLIP_API_URL: "http://127.0.0.1:3100",
+      SAFE_VALUE: "visible",
+    });
+  });
+});
+
 describe("materializePaperclipSkillCopy", () => {
   it("refuses to materialize into an ancestor of the source", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-copy-"));

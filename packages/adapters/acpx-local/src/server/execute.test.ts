@@ -265,6 +265,73 @@ describe("acpx_local runtime skill isolation", () => {
     expect(env).not.toContain("old-key");
   });
 
+  it.skipIf(process.platform === "win32")(
+    "DUR-3994: the wrapper acpx launches drops the server's keys it inherits",
+    async () => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const dumpPath = path.join(root, "agent-env.txt");
+      const serverDb = "postgres://owner:pw@db:5432/paperclip";
+
+      await runExecutor({
+        agent: "custom-env",
+        agentCommand: `env > ${dumpPath}; true`,
+        stateDir,
+        env: {
+          DATABASE_BYPASS_URL: "postgres://agent_scoped@db:5432/agent",
+          // An agent config that repeats a server key must not smuggle it back.
+          BETTER_AUTH_SECRET: "canary-auth",
+        },
+      });
+
+      const wrappers = await fs.readdir(path.join(stateDir, "wrappers"));
+      const wrapperPath = path.join(stateDir, "wrappers", wrappers.find((name) => name.endsWith(".sh"))!);
+      const envFile = await fs.readFile(
+        path.join(stateDir, "wrappers", wrappers.find((name) => name.endsWith(".env"))!),
+        "utf8",
+      );
+      expect(envFile).not.toContain("canary-auth");
+      expect(envFile).toContain("DATABASE_BYPASS_URL='postgres://agent_scoped@db:5432/agent'");
+
+      // acpx starts the wrapper with `{ ...process.env }` of the server.
+      const { spawnSync } = await import("node:child_process");
+      const run = spawnSync(wrapperPath, [], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          BETTER_AUTH_SECRET: "canary-auth",
+          PAPERCLIP_AGENT_JWT_SECRET: "canary-jwt",
+          PAPERCLIP_SECRETS_MASTER_KEY: "canary-master",
+          PAPERCLIP_SERVER_ANTHROPIC_API_KEY: "canary-anthropic",
+          DATABASE_URL: serverDb,
+          DATABASE_MIGRATION_URL: serverDb,
+          DATABASE_BYPASS_URL: serverDb,
+          SAFE_VALUE: "visible",
+        },
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(0);
+      const dumped = await fs.readFile(dumpPath, "utf8");
+      expect(dumped).toContain("SAFE_VALUE=visible");
+      expect(dumped).not.toContain("canary-");
+      expect(dumped).not.toContain(serverDb);
+      expect(dumped).not.toMatch(/^DATABASE_URL=/m);
+      expect(dumped).toContain("DATABASE_BYPASS_URL=postgres://agent_scoped@db:5432/agent");
+    },
+  );
+
+  it("DUR-3994: an agent without a configured command is still launched through the wrapper", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const { runtimeOptions } = await runExecutor({ agent: "gemini", stateDir });
+
+    const registry = runtimeOptions[0]?.agentRegistry as { resolve(name: string): string };
+    const resolved = registry.resolve("gemini");
+    expect(resolved.startsWith(path.join(stateDir, "wrappers"))).toBe(true);
+    expect(resolved.endsWith(".sh")).toBe(true);
+    const wrapper = await fs.readFile(resolved, "utf8");
+    expect(wrapper).toContain("unset BETTER_AUTH_SECRET");
+  });
+
   it("shapes ACPX wrapper workspace env for remote execution identities", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

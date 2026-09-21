@@ -1,3 +1,5 @@
+import { stripServerSecrets } from "./server-env-secrets.js";
+
 const REMOTE_EXECUTION_ENV_IDENTITY_KEYS = new Set([
   "PATH",
   "HOME",
@@ -45,5 +47,10 @@ export function sanitizeRemoteExecutionEnv(
     }
     sanitized[key] = value;
   }
-  return sanitized;
+  // DUR-3994: every sandbox / ssh branch ships this env off the box (or into a
+  // sandbox provider), bypassing runChildProcess. Several adapters build it as
+  // `{ ...process.env, ...env }`, so the server's own keys must be dropped here
+  // too. `inheritedEnv` is the server's env, so the database equality rule
+  // (a deliberately different per-agent DATABASE_URL survives) still applies.
+  return stripServerSecrets(sanitized, inheritedEnv);
 }
