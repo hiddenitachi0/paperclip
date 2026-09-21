@@ -97,7 +97,7 @@ export function renderSalesAnswerCard(result: SalesResult, options: SalesAnswerC
     lines.push("");
     lines.push(periodRange(period, tz));
     if (period.dataState === "no_data") {
-      lines.push(`Ingen data: ${period.noDataReason ?? "ingen tall for perioden"} (ikke det samme som 0)`);
+      lines.push(`Ingen data: ${period.noDataReason ?? "ingen tall for perioden"} (ikke det samme som null salg)`);
       continue;
     }
     const headline = filtered ? period.selection! : period.total!;

@@ -49,7 +49,11 @@ import {
   signedRunIdFromActor,
   type BusinessDataServiceDeps,
 } from "./business-data.js";
-import { applyBusinessDataNumberCheck, type BusinessDataTurnOutput } from "./business-data-number-check.js";
+import {
+  applyBusinessDataNumberCheck,
+  applyNoLookupGuard,
+  type BusinessDataTurnOutput,
+} from "./business-data-number-check.js";
 
 /** Per-conversation hard turn cap — a runaway loop must start a fresh conversation. */
 export const LANE_A_MAX_TURNS_PER_CONVERSATION = 40;
@@ -761,17 +765,29 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return existing;
   }
 
-  async function loadReplayHistory(conversationId: string): Promise<Anthropic.MessageParam[]> {
+  async function loadReplayHistory(
+    conversationId: string,
+  ): Promise<{ history: Anthropic.MessageParam[]; businessDataInHistory: boolean }> {
     // Newest rows first, bounded by the turn cap; selectReplayTurns applies
     // the token budget and restores chronological order.
     const rows = await db
-      .select({ role: laneAMessages.role, content: laneAMessages.content })
+      .select({ role: laneAMessages.role, content: laneAMessages.content, toolCalls: laneAMessages.toolCalls })
       .from(laneAMessages)
       .where(eq(laneAMessages.conversationId, conversationId))
       .orderBy(desc(laneAMessages.createdAt))
       .limit(LANE_A_MEMORY_MAX_TURNS);
     const chronological = rows.slice().reverse();
-    return selectReplayTurns(chronological).map((turn) => ({ role: turn.role, content: turn.content }));
+    // DUR-3972: an earlier turn that read business data leaves its figures in
+    // the replayed history, where the model can repeat or add them up.
+    const businessDataInHistory = rows.some(
+      (row) => Array.isArray(row.toolCalls) && row.toolCalls.some((call) => call?.tool === READ_BUSINESS_DATA_TOOL),
+    );
+    return {
+      history: selectReplayTurns(chronological.map((row) => ({ role: row.role, content: row.content }))).map(
+        (turn) => ({ role: turn.role, content: turn.content }),
+      ),
+      businessDataInHistory,
+    };
   }
 
   async function recordToolCall(ctx: LaneAToolContext, toolName: string, input: unknown, result: { ok: boolean; summary: string }) {
@@ -1028,7 +1044,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       requester: params.requester,
     });
 
-    const [toolset, history, colleagues] = await Promise.all([
+    const [toolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
       loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? []),
       loadReplayHistory(conversation.id),
       listColleagues(params.companyId, params.targetAgent.id),
@@ -1100,30 +1116,54 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       await closeLaneATools(toolset);
     }
 
-    // DUR-3972: the number check. Only when business data was read this turn.
+    // DUR-3972: the number check when business data was read this turn; the
+    // no-lookup guard when it was not, but the tool was offered or earlier
+    // turns carry figures the model could repeat or add up from memory. A
+    // turn that used a Tools-library tool is left to that tool's own output.
+    let guard: { ungrounded: string[]; summary: string } | null = null;
     if (businessDataOutputs.length > 0) {
       const checked = applyBusinessDataNumberCheck(text, businessDataOutputs);
       text = checked.text;
       if (checked.replaced) {
-        try {
-          await logActivity(db, {
-            companyId: params.companyId,
-            actorType: params.requester.userId ? "user" : "agent",
-            actorId: params.requester.userId ?? params.requester.agentId ?? "system",
-            agentId: params.targetAgent.id,
-            action: "lane_a.provenance_guard",
-            entityType: "agent",
-            entityId: params.targetAgent.id,
-            details: {
-              conversationId: conversation.id,
-              ungroundedNumbers: checked.ungrounded.slice(0, 20),
-              lookupIds: businessDataOutputs.map((output) => output.lookupId).filter(Boolean),
-              summary: "The quick agent's reply had numbers the data source did not return; the answer card was sent instead.",
-            },
-          });
-        } catch {
-          // The activity row must never break the turn; the reply is already safe.
-        }
+        guard = {
+          ungrounded: checked.ungrounded,
+          summary:
+            "The quick agent's reply had numbers the data source did not return; the answer card was sent instead.",
+        };
+      }
+    } else if (
+      (businessDataPrompt?.available === true || businessDataInHistory) &&
+      !actions.some((action) => action.ok && !isLaneABuiltinTool(action.tool))
+    ) {
+      const checked = applyNoLookupGuard(text);
+      text = checked.text;
+      if (checked.replaced) {
+        guard = {
+          ungrounded: checked.claims,
+          summary:
+            "The quick agent gave sales figures without looking them up in this message; it was asked to look them up again instead.",
+        };
+      }
+    }
+    if (guard) {
+      try {
+        await logActivity(db, {
+          companyId: params.companyId,
+          actorType: params.requester.userId ? "user" : "agent",
+          actorId: params.requester.userId ?? params.requester.agentId ?? "system",
+          agentId: params.targetAgent.id,
+          action: "lane_a.provenance_guard",
+          entityType: "agent",
+          entityId: params.targetAgent.id,
+          details: {
+            conversationId: conversation.id,
+            ungroundedNumbers: guard.ungrounded.slice(0, 20),
+            lookupIds: businessDataOutputs.map((output) => output.lookupId).filter(Boolean),
+            summary: guard.summary,
+          },
+        });
+      } catch {
+        // The activity row must never break the turn; the reply is already safe.
       }
     }
 

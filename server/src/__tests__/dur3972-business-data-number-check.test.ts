@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   applyBusinessDataNumberCheck,
+  applyNoLookupGuard,
   extractQuantities,
+  findSalesQuantityClaims,
   findUngroundedNumbers,
+  NO_LOOKUP_SENTENCE,
   NO_NUMBERS_SENTENCE,
   NUMBER_CHECK_REPLACEMENT_NOTE,
 } from "../services/business-data-number-check.js";
@@ -109,6 +112,71 @@ describe("the number check", () => {
     const refusal = "Kronebeløp er ikke slått på ennå. Foreløpig kan jeg bare svare i antall enheter (stk), ikke i kroner.";
     expect(applyBusinessDataNumberCheck("Omtrent 40 000 kroner.", [{ content: refusal, footer: null, lookupId: "r" }]).replaced).toBe(true);
     expect(applyBusinessDataNumberCheck(refusal, [{ content: refusal, footer: null, lookupId: "r" }]).replaced).toBe(false);
+  });
+});
+
+describe("review fixes: dates, 'ingen data' and answers from memory", () => {
+  const TWO_MONTHS = [
+    "Salg i antall enheter for produkttype: Sofa",
+    "",
+    "Juli 2026 (1.–31. juli 2026, avsluttet)",
+    "Solgt: 12 stk",
+    "Returer i måneden: 1 stk (herav 0 fra tidligere måneder)",
+    "Netto: 11 stk",
+    "",
+    "August 2026 (1.–31. august 2026, avsluttet)",
+    "Solgt: 14 stk",
+    "Returer i måneden: 2 stk (herav 1 fra tidligere måneder)",
+    "Netto: 12 stk",
+  ].join("\n");
+
+  it("does not hide a wrong number that ends a sentence before a capitalised month ('netto 13. Juli: ...')", () => {
+    const reply = "August: 14 solgt, 2 returer, netto 13. Juli: 12 solgt, 1 retur, netto 11.";
+    expect(findUngroundedNumbers(reply, [TWO_MONTHS])).toEqual(["13"]);
+    const result = applyBusinessDataNumberCheck(reply, [{ content: TWO_MONTHS, footer: "F", lookupId: "id" }]);
+    expect(result.replaced).toBe(true);
+  });
+
+  it("does not hide it behind a lowercase month either, unless the card names that day", () => {
+    expect(findUngroundedNumbers("August netto 13. juli netto 11.", [TWO_MONTHS])).toEqual(["13"]);
+    // A day the card does name is still a date, not a number.
+    expect(findUngroundedNumbers("Fra 1. juli til 31. juli: netto 11. Hele 1.–31. august: netto 12.", [TWO_MONTHS])).toEqual([]);
+  });
+
+  it("does not let the 'Ingen data' line make a zero look grounded", () => {
+    const noData = [
+      "Salg i antall enheter for produkttype: Sofa",
+      "",
+      "Oktober 2026 (ikke startet)",
+      "Ingen data: Perioden har ikke startet ennå. (ikke det samme som null salg)",
+    ].join("\n");
+    for (const reply of ["Dere solgte 0 sofaer i oktober.", "Dere solgte null sofaer i oktober.", "Ingen salg i oktober."]) {
+      const result = applyBusinessDataNumberCheck(reply, [{ content: noData, footer: null, lookupId: "id" }]);
+      expect(result.replaced, reply).toBe(true);
+      expect(result.text).toContain("Ingen data");
+    }
+    // Saying there is no data is fine.
+    expect(
+      applyBusinessDataNumberCheck("Det finnes ingen data for oktober ennå.", [{ content: noData, footer: null, lookupId: "id" }]).replaced,
+    ).toBe(false);
+  });
+
+  it("the no-lookup guard replaces a figure given from memory, and leaves plain text alone", () => {
+    expect(findSalesQuantityClaims("Totalt solgte vi 27 stk de to månedene.")).toEqual(["27"]);
+    expect(findSalesQuantityClaims("Netto: 13. Totalt: 27")).toEqual(["13", "27"]);
+    expect(findSalesQuantityClaims("Det var fem returer.")).toEqual(["5"]);
+    expect(findSalesQuantityClaims("Salget økte med 12,5 %.")).toEqual(["12.5"]);
+    const guarded = applyNoLookupGuard("Til sammen 27 sofaer solgt i juli og august.");
+    expect(guarded).toMatchObject({ replaced: true, text: NO_LOOKUP_SENTENCE, claims: ["27"] });
+
+    for (const text of [
+      "Hei! Hva vil du vite om salget?",
+      "Jeg kan slå opp salg for de to siste månedene.",
+      "Møtet er 14. oktober kl. 10:00.",
+      "Butikken er nordstrand-2.myshopify.com.",
+    ]) {
+      expect(applyNoLookupGuard(text).replaced, text).toBe(false);
+    }
   });
 });
 

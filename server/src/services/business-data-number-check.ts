@@ -11,6 +11,12 @@
  *   - a sign does not matter ("-3" and "ned 3" are the same claim about 3)
  *   - lookup ids (UUIDs), shop addresses, dates, times and years next to a
  *     month name are not numbers about sales and are removed first
+ *   - a day-and-month date ("31. juli") only counts as a date when the month
+ *     is written in lowercase, as Norwegian dates are; in the REPLY it is only
+ *     set aside when the tool output names that same day, so "netto 13. Juli:"
+ *     or "netto 13. juli" cannot hide a wrong 13 behind a month name
+ *   - the card's "Ingen data" lines give no allowed numbers: "no data" must
+ *     never make a "0" in the reply look grounded
  *   - number words ("fem returer") are checked when they sit next to a count
  *     word, so a model cannot slip an invented figure past the check by
  *     spelling it out
@@ -21,7 +27,32 @@ const MONTHS =
   "jan|feb|mar|apr|jun|jul|aug|sep|sept|okt|nov|des|" +
   "january|february|march|may|june|july|october|december|oct|dec";
 
+/** Norwegian day-and-month dates: lowercase month only (no "i" flag). */
+const LOWER_MONTHS = `(?:${MONTHS})`;
+const DAY_MONTH_RANGE_RE = new RegExp(
+  `\\b(\\d{1,2})\\.?\\s*[–-]\\s*(\\d{1,2})\\.\\s*(${LOWER_MONTHS})\\b\\.?(?:\\s+\\d{4})?`,
+  "g",
+);
+const DAY_MONTH_RE = new RegExp(`\\b(\\d{1,2})\\.\\s*(${LOWER_MONTHS})\\b\\.?(?:\\s+\\d{4})?`, "g");
+
+function dayKey(day: string, month: string): string {
+  return `${Number(day)}.${month.slice(0, 3)}`;
+}
+
+/** Every "day. month" the text names, ranges expanded to both end days. */
+export function knownDayMonthDates(text: string): Set<string> {
+  const known = new Set<string>();
+  const normalised = text.replace(/[\u00a0\u202f\u2009]/g, " ");
+  for (const match of normalised.matchAll(DAY_MONTH_RANGE_RE)) {
+    known.add(dayKey(match[1]!, match[3]!));
+    known.add(dayKey(match[2]!, match[3]!));
+  }
+  for (const match of normalised.matchAll(DAY_MONTH_RE)) known.add(dayKey(match[1]!, match[2]!));
+  return known;
+}
+
 const NUMBER_WORDS: Record<string, number> = {
+  null: 0, ingen: 0, zero: 0, no: 0,
   to: 2, tre: 3, fire: 4, fem: 5, seks: 6, sju: 7, syv: 7, "åtte": 8, ni: 9, ti: 10, elleve: 11, tolv: 12,
   tretten: 13, fjorten: 14, femten: 15, seksten: 16, sytten: 17, atten: 18, nitten: 19, tjue: 20,
   two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
@@ -32,8 +63,13 @@ const COUNT_WORDS =
   "stk|stykker|enhet|enheter|retur|returer|returnert|returnerte|solgt|solgte|salg|ordre|ordrer|" +
   "produkt|produkter|varer|sofa|sofaer|units|items|returns|sold|orders|prosent|percent";
 
-/** Removes everything that carries digits but is not a claim about quantities. */
-function stripNonQuantities(text: string): string {
+/**
+ * Removes everything that carries digits but is not a claim about quantities.
+ * With `knownDates`, a day-and-month date is only removed when every day in it
+ * is one of those dates; otherwise its day number stays and is checked.
+ */
+function stripNonQuantities(text: string, knownDates?: Set<string>): string {
+  const isKnown = (...keys: string[]) => !knownDates || keys.every((key) => knownDates.has(key));
   return (
     text
       .replace(/[   ]/g, " ")
@@ -50,8 +86,10 @@ function stripNonQuantities(text: string): string {
       // times 10:14
       .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ")
       // "1.–31. juli 2026", "31. juli", "1.-31. aug."
-      .replace(new RegExp(`\\b\\d{1,2}\\.?\\s*[–-]\\s*\\d{1,2}\\.\\s*(?:${MONTHS})\\b\\.?(?:\\s+\\d{4})?`, "gi"), " ")
-      .replace(new RegExp(`\\b\\d{1,2}\\.\\s*(?:${MONTHS})\\b\\.?(?:\\s+\\d{4})?`, "gi"), " ")
+      .replace(DAY_MONTH_RANGE_RE, (whole, from: string, to: string, month: string) =>
+        isKnown(dayKey(from, month), dayKey(to, month)) ? " " : whole,
+      )
+      .replace(DAY_MONTH_RE, (whole, day: string, month: string) => (isKnown(dayKey(day, month)) ? " " : whole))
       // "juli 2026", "aug. 2025"
       .replace(new RegExp(`\\b(?:${MONTHS})\\.?\\s+\\d{4}\\b`, "gi"), " ")
   );
@@ -73,9 +111,12 @@ function parseNumberToken(token: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-/** Every quantity in `text`, as canonical strings ("1234", "12.5", "5"). */
-export function extractQuantities(text: string): string[] {
-  const cleaned = stripNonQuantities(text);
+/**
+ * Every quantity in `text`, as canonical strings ("1234", "12.5", "5").
+ * `knownDates`: see stripNonQuantities.
+ */
+export function extractQuantities(text: string, knownDates?: Set<string>): string[] {
+  const cleaned = stripNonQuantities(text, knownDates);
   const found: string[] = [];
   for (const match of cleaned.matchAll(NUMBER_RE)) {
     const value = parseNumberToken(match[0]);
@@ -94,9 +135,18 @@ export function extractQuantities(text: string): string[] {
 
 /** The quantities in `reply` that no business-data output of this turn contains. */
 export function findUngroundedNumbers(reply: string, toolOutputs: string[]): string[] {
-  const allowed = new Set(toolOutputs.flatMap((output) => extractQuantities(output)));
+  // "Ingen data" lines state that a period has NO numbers; nothing on them
+  // may ground a number in the reply.
+  const grounding = toolOutputs.map((output) =>
+    output
+      .split("\n")
+      .filter((line) => !/^\s*ingen data\b/i.test(line))
+      .join("\n"),
+  );
+  const allowed = new Set(grounding.flatMap((output) => extractQuantities(output)));
+  const knownDates = new Set(toolOutputs.flatMap((output) => [...knownDayMonthDates(output)]));
   const missing: string[] = [];
-  for (const value of extractQuantities(reply)) {
+  for (const value of extractQuantities(reply, knownDates)) {
     if (!allowed.has(value) && !missing.includes(value)) missing.push(value);
   }
   return missing;
@@ -155,4 +205,58 @@ export function applyBusinessDataNumberCheck(reply: string, outputs: BusinessDat
     footerAdded = true;
   }
   return { text, replaced: false, ungrounded: [], footerAdded };
+}
+
+/** Sent instead of a reply that states sales figures without a lookup in this turn. */
+export const NO_LOOKUP_SENTENCE =
+  "Jeg har ikke hentet tallene på nytt for dette svaret, så jeg gir ingen tall her. " +
+  "Spør meg om tallene igjen, så slår jeg dem opp i datakilden.";
+
+// Words that make a nearby number a claim about sales, for the no-lookup guard.
+const SALES_WORDS = `${COUNT_WORDS}|netto|net|totalt|total|sum|returnerte|endring`;
+
+/**
+ * The quantities in `reply` that sit next to a sales word ("27 stk",
+ * "netto 13", "totalt: 27", "fem returer"). Dates, ids and addresses are
+ * set aside first, exactly as in the main check.
+ */
+export function findSalesQuantityClaims(reply: string): string[] {
+  const cleaned = stripNonQuantities(reply);
+  const digits = `(?:\\d{1,3}(?:[ .]\\d{3})+(?:,\\d+)?(?!\\d)|\\d+(?:[.,]\\d+)?)`;
+  const number = `(?:${digits}|${Object.keys(NUMBER_WORDS).join("|")})`;
+  // Spelled-out numbers only count BEFORE a sales word ("fem returer"):
+  // after one, "to" is as often the English preposition as the number two.
+  const after = new RegExp(`(?<![\\p{L}\\d])[+-]?(${number})(?![\\p{L}\\d])(?=\\s*%|(?:\\s+[\\p{L}-]+)?\\s+(?:${SALES_WORDS})(?![\\p{L}]))`, "giu");
+  const before = new RegExp(`(?<![\\p{L}])(?:${SALES_WORDS})(?![\\p{L}])\\s*:?\\s*(?:på\\s+|of\\s+|var\\s+|was\\s+)?[+-]?(${digits})(?![\\p{L}\\d])`, "giu");
+  const found: string[] = [];
+  for (const re of [after, before]) {
+    for (const match of cleaned.matchAll(re)) {
+      const token = match[1]!;
+      const word = NUMBER_WORDS[token.toLowerCase()];
+      const value = word !== undefined ? word : parseNumberToken(token);
+      if (value === null) continue;
+      const key = canonical(value);
+      if (!found.includes(key)) found.push(key);
+    }
+  }
+  return found;
+}
+
+export interface NoLookupGuardResult {
+  text: string;
+  replaced: boolean;
+  claims: string[];
+}
+
+/**
+ * The guard for a turn where the sales tool was offered, or earlier turns in
+ * the conversation read business data, but NO lookup ran this turn. Such a
+ * reply may only repeat what the model remembers, or its own arithmetic on
+ * it, and nothing can check that. Any sales figure in it is replaced by a
+ * plain sentence asking the person to have the figures looked up again.
+ */
+export function applyNoLookupGuard(reply: string): NoLookupGuardResult {
+  const claims = findSalesQuantityClaims(reply);
+  if (claims.length === 0) return { text: reply, replaced: false, claims };
+  return { text: NO_LOOKUP_SENTENCE, replaced: true, claims };
 }

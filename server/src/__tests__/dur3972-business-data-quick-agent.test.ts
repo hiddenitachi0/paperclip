@@ -44,7 +44,7 @@ import {
   businessDataService,
   type BusinessDataCaller,
 } from "../services/business-data.js";
-import { NUMBER_CHECK_REPLACEMENT_NOTE } from "../services/business-data-number-check.js";
+import { NO_LOOKUP_SENTENCE, NUMBER_CHECK_REPLACEMENT_NOTE } from "../services/business-data-number-check.js";
 import { KRONER_NOT_ENABLED_MESSAGE } from "../services/data-sources/contract.js";
 import { resetShopifyTokenCache } from "../services/data-sources/shopify-client.js";
 import type { LaneAModelClient } from "../services/lane-a.js";
@@ -405,6 +405,58 @@ d("DUR-3972 S4: business data for quick agents", () => {
     expect(stored.find((row) => row.companyId === companyA)!.content).toBe(res.body.result.response);
   });
 
+  it("checks a follow-up answered from memory without a new lookup, and logs the guard", async () => {
+    const companyA = await seedCompany("Nordstrand Konsernet");
+    const analyst = await seedQuickAgent(companyA);
+    await connectShop(companyA, SHOP_A, KEY_A);
+    const model = scriptedModel([
+      callTool(SALES_JULY_AUGUST),
+      reply((card) => card),
+      // No tool call: a sum made up from the history.
+      reply("Totalt solgte vi 27 stk de to månedene."),
+      // A plain follow-up with no figures passes untouched.
+      reply("Vil du at jeg slår opp september også?"),
+    ]);
+    const app = chatApp(boardActor([companyA]), model);
+    const first = await request(app)
+      .post(`/api/chat/${analyst.id}/messages`)
+      .send({ companyId: companyA, message: "Sofaer i juli og august?", laneHint: "a" });
+    expect(first.status).toBe(200);
+    const conversationId = first.body.result.conversationId;
+    const second = await request(app)
+      .post(`/api/chat/${analyst.id}/messages`)
+      .send({ companyId: companyA, message: "hvor mange solgte vi totalt de to månedene?", laneHint: "a", conversationId });
+    expect(second.status).toBe(200);
+    expect(second.body.result.response).toBe(NO_LOOKUP_SENTENCE);
+    expect(second.body.result.response).not.toContain("27");
+    const third = await request(app)
+      .post(`/api/chat/${analyst.id}/messages`)
+      .send({ companyId: companyA, message: "takk", laneHint: "a", conversationId });
+    expect(third.body.result.response).toBe("Vil du at jeg slår opp september også?");
+
+    const guard = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyA), eq(activityLog.action, "lane_a.provenance_guard")));
+    expect(guard).toHaveLength(1);
+    expect((guard[0]!.details as { ungroundedNumbers: string[] }).ungroundedNumbers).toEqual(["27"]);
+    // Only the first turn looked anything up.
+    expect(await auditRows(companyA)).toHaveLength(1);
+  });
+
+  it("checks a first answer given without calling the offered tool", async () => {
+    const companyA = await seedCompany("Nordstrand Konsernet");
+    const analyst = await seedQuickAgent(companyA);
+    await connectShop(companyA, SHOP_A, KEY_A);
+    const model = scriptedModel([reply("Dere solgte 40 sofaer forrige måned.")]);
+    const res = await request(chatApp(boardActor([companyA]), model))
+      .post(`/api/chat/${analyst.id}/messages`)
+      .send({ companyId: companyA, message: "Sofaer forrige måned?", laneHint: "a" });
+    expect(res.status).toBe(200);
+    expect(model.calls[0]!.tools).toContain("read_business_data");
+    expect(res.body.result.response).toBe(NO_LOOKUP_SENTENCE);
+  });
+
   it("replaces a reply with a wrong single digit ('5 returer')", async () => {
     const companyA = await seedCompany("Nordstrand Konsernet");
     const analyst = await seedQuickAgent(companyA);
@@ -694,7 +746,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     await connectShop(companyA, SHOP_A, KEY_A);
     const answer = await businessDataService(db, deps()).read(caller(companyA, agentA.id), { action: "sales", periods: ["2026-12"] });
     expect(answer).toMatchObject({ ok: true, outcome: "no_data" });
-    expect(answer.text).toContain("Ingen data: Perioden har ikke startet ennå. (ikke det samme som 0)");
+    expect(answer.text).toContain("Ingen data: Perioden har ikke startet ennå. (ikke det samme som null salg)");
     expect(answer.text).not.toContain("Solgt:");
     const [row] = await auditRows(companyA);
     expect(row!.outcome).toBe("no_data");
