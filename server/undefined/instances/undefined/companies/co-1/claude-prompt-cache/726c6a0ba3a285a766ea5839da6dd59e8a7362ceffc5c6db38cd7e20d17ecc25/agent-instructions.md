@@ -1,2 +1,0 @@
-# Agent instructions
-The above agent instructions were loaded from /tmp/paperclip-claude-exec-notes-fresh-SsyArB/instructions.md. Resolve any relative file references from /tmp/paperclip-claude-exec-notes-fresh-SsyArB/. This base directory is authoritative for sibling instruction files such as ./HEARTBEAT.md, ./SOUL.md, and ./TOOLS.md; do not resolve those from the parent agent directory.
