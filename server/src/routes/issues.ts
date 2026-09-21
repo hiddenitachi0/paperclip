@@ -163,6 +163,7 @@ import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
+import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -6463,6 +6464,29 @@ export function issueRoutes(
     } = req.body;
     if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
     if (!assertFeatureLaunchFieldAllowed(req, res, updateFields, existing)) return;
+    // DUR-3993: an agent may not park a task as blocked on the operator without giving
+    // the operator a way to answer (a question card, a linked approval) or linking the
+    // unfinished task it waits on. Runs after the DUR-45 cheap-run interception above,
+    // which may already have removed status:"blocked" from this request. Never gates a
+    // board user; fails open on any unexpected error.
+    const blockedNeedsAskGateResult = await evaluateBlockedNeedsAskGate({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        description: existing.description ?? null,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      requestedBlockedByIssueIds: req.body.blockedByIssueIds,
+      requestedDescription: updateFields.description,
+    });
+    if (blockedNeedsAskGateResult) {
+      res.status(409).json({ error: blockedNeedsAskGateResult.message, code: "blocked_needs_operator_ask" });
+      return;
+    }
     const selfReviewGateResult = await evaluateSelfReviewDoneGate({
       db,
       wakeup: heartbeat.wakeup,

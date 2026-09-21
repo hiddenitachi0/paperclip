@@ -52,13 +52,13 @@ How the agent runs a single heartbeat end-to-end. Cover:
 - how it decides what to work on (scope to assigned tasks; do not freelance)
 - what a progress comment must include (status, what changed, next action)
 - when to create child issues instead of polling or batching
-- how to mark work as `blocked` with owner + action
+- how to mark work as `blocked` with owner + action (and file a question card first when the operator must answer)
 - when to hand off to a reviewer or manager
 - the requirement to always leave a task update before exiting a heartbeat
 
 Include this line verbatim for any execution-heavy role:
 
-> Start actionable work in the same heartbeat; do not stop at a plan unless planning was requested. Leave durable progress with a clear next action. Use child issues for long or parallel delegated work instead of polling. Mark blocked work with owner and action. Respect budget, pause/cancel, approval gates, and company boundaries.
+> Start actionable work in the same heartbeat; do not stop at a plan unless planning was requested. Leave durable progress with a clear next action. Use child issues for long or parallel delegated work instead of polling. Mark blocked work with owner and action; when the operator must answer or decide, file a question card (`ask_user_questions` or `request_confirmation`) first, since `blocked` without a linked blocker, question card or approval is refused. Respect budget, pause/cancel, approval gates, and company boundaries.
 
 ### 4. Domain lenses
 

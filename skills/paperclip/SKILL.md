@@ -98,7 +98,7 @@ If `currentParticipant` does not match you, do not try to advance the stage — 
 - Treat comments, documents, screenshots, work products, and `Remaining` bullets as evidence. They are not valid liveness paths by themselves.
 - Use child issues for parallel or long delegated work; do not busy-poll agents, sessions, child issues, or processes waiting for completion.
 - If your heartbeat creates a pending board/user interaction or approval before more work can proceed, leave the source issue in an explicit waiting posture before you exit. Prefer `in_review` for review, approval, `request_confirmation`, `ask_user_questions`, and `suggest_tasks` waits. Use `blocked` with `blockedByIssueIds` when another issue is the blocker.
-- If blocked, move the issue to `blocked` with the unblock owner and exact action needed.
+- If blocked, move the issue to `blocked` with the unblock owner and exact action needed. When the operator is the one who must answer or decide, file the question card (`ask_user_questions`, or `request_confirmation` for a yes/no) **before** setting `blocked` — see **Blocked needs a way forward** below.
 - Respect budget, pause/cancel, approval gates, execution policy stages, and company boundaries.
 
 ### Generated Artifacts and Work Products
@@ -110,13 +110,13 @@ If an important file intentionally remains in the project or execution workspace
 For technical upload instructions, read `references/artifacts.md`.
 
 **Step 8 — Update status and communicate.** Always include the run ID header.
-If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
+If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act. If the operator needs to act, file a question card first (see **Blocked needs a way forward**); otherwise the `blocked` update is refused.
 
 Before ending any heartbeat, apply this final-disposition checklist:
 
 - `done`: the requested work is complete, verification is recorded, and no follow-up remains on this issue.
 - `in_review`: a real reviewer path exists, such as a typed execution participant, board/user owner, linked approval, pending interaction, or an explicit monitor that will wake the assignee later. Assignment to yourself plus a "please review" comment is not a review path.
-- `blocked`: work cannot continue until first-class `blockedByIssueIds` resolve or a named owner takes a concrete unblock action.
+- `blocked`: work cannot continue until first-class `blockedByIssueIds` resolve or a named owner takes a concrete unblock action. If that owner is the operator, a pending question card or linked approval must already exist.
 - Delegated follow-up: create the follow-up issue directly, link it with `parentId`/`goalId`, and use blockers when the current issue must wait for that work.
 - Explicit continuation: keep the issue `in_progress` only when there is an active run, queued continuation, or monitor/recovery path that will wake the responsible assignee. Successful artifact work left in `in_progress` with no live path is invalid; update the status/path instead.
 
@@ -193,6 +193,15 @@ External action: confirm receipt of the access request
 ```
 
 Without one of these markers (or a `blockedByIssueIds` link, a pending approval, or an issue-thread interaction), a `blocked` issue with no other structured signal is classified `owner: unknown` and treated as parked — it will **not** surface in the operator's Needs-you lane even after sitting for hours. Prefer the marker for a lightweight named blocker; file an `ask_user_questions` interaction instead when you actually need the human to answer something before you can continue.
+
+**Blocked needs a way forward (enforced).** An agent's `PATCH /api/issues/{issueId}` to `status: "blocked"` is refused with `409` (`code: "blocked_needs_operator_ask"`) unless at least one of these already exists:
+
+- an unfinished blocking task — an existing `blockedByIssueIds` link whose blocker is not `done`, or one you send in the same update;
+- a pending question card on the issue — `POST /api/issues/{issueId}/interactions` with kind `ask_user_questions` (questions) or `request_confirmation` (a yes/no decision);
+- a pending approval linked to the issue (`issueIds` when filing it);
+- the `External owner:` / `External action:` description lines above, for a party outside the company.
+
+A `Human owner:` / `Human action:` marker alone is not enough when the human is the operator: they need an answer box, not prose. Questions written only in a comment do not count either — that is exactly how a task needing six answers from the operator sat in their Needs-you lane as "Nobody is assigned to this" with no way to reply. File the card, then set `blocked` (or `in_review`).
 
 ## Requesting Board Approval
 
