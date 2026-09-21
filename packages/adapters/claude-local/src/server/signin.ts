@@ -20,7 +20,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
-import { ensurePathInEnv, parseJson } from "@paperclipai/adapter-utils/server-utils";
+import { ensurePathInEnv, parseJson, stripServerSecrets } from "@paperclipai/adapter-utils/server-utils";
 import { detectClaudeLoginRequired } from "./parse.js";
 
 /** Shape of the long-lived token `claude setup-token` hands out. */
@@ -272,6 +272,9 @@ function buildIsolatedClaudeEnv(configDir: string, extra: Record<string, string>
   }
   env.CLAUDE_CONFIG_DIR = configDir;
   Object.assign(env, extra);
+  // DUR-3994: the sign-in / token probe runs the Claude CLI; it never needs
+  // the server's own login key or database address.
+  stripServerSecrets(env);
   const withPath = ensurePathInEnv(env);
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(withPath)) {
@@ -412,7 +415,7 @@ export async function readClaudeCliVersion(command = DEFAULT_CLAUDE_COMMAND): Pr
     const result = spawnSync(command, ["--version"], {
       encoding: "utf8",
       timeout: 10_000,
-      env: ensurePathInEnv({ ...process.env }) as NodeJS.ProcessEnv,
+      env: ensurePathInEnv(stripServerSecrets({ ...process.env })) as NodeJS.ProcessEnv,
     });
     const line = `${result.stdout ?? ""}`.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? null;
     value = result.status === 0 && line ? line : null;

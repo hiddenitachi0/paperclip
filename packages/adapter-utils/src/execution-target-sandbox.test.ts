@@ -314,6 +314,61 @@ describe("sandbox adapter execution targets", () => {
     }));
   });
 
+  it("DUR-3994: never ships the server's own keys to a sandbox (process and shell branches)", async () => {
+    vi.stubEnv("BETTER_AUTH_SECRET", "canary-auth");
+    vi.stubEnv("DATABASE_URL", "postgres://owner:pw@db:5432/paperclip");
+    vi.stubEnv("PAPERCLIP_SERVER_ANTHROPIC_API_KEY", "canary-anthropic");
+
+    const runner = {
+      execute: vi.fn(async () => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "ok\n",
+        stderr: "",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      })),
+    };
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      remoteCwd: "/workspace",
+      runner,
+    };
+    // hermes / codex-install style: the adapter copies all of process.env.
+    const fullCopy = {
+      ...(process.env as Record<string, string>),
+      SAFE_VALUE: "visible",
+    };
+
+    await runAdapterExecutionTargetProcess("run-3994a", target, "agent-cli", [], {
+      cwd: "/local/workspace",
+      env: fullCopy,
+      timeoutSec: 5,
+      graceSec: 1,
+      onLog: async () => {},
+    });
+    await runAdapterExecutionTargetShellCommand("run-3994b", target, "true", {
+      cwd: "/local/workspace",
+      env: { ...fullCopy, DATABASE_URL: "postgres://agent_scoped@db:5432/agent" },
+      timeoutSec: 5,
+    });
+
+    expect(runner.execute).toHaveBeenCalledTimes(2);
+    const [processCall, shellCall] = runner.execute.mock.calls.map(
+      (call) => (call as unknown as [{ env: Record<string, string> }])[0].env,
+    );
+    for (const env of [processCall, shellCall]) {
+      expect(env.SAFE_VALUE).toBe("visible");
+      expect(env).not.toHaveProperty("BETTER_AUTH_SECRET");
+      expect(env).not.toHaveProperty("PAPERCLIP_SERVER_ANTHROPIC_API_KEY");
+    }
+    expect(processCall).not.toHaveProperty("DATABASE_URL");
+    // A deliberately different per-agent database address still gets through.
+    expect(shellCall.DATABASE_URL).toBe("postgres://agent_scoped@db:5432/agent");
+  });
+
   it("preserves explicit remote identity env overrides for sandbox execution", async () => {
     vi.stubEnv("PATH", "/host/bin:/usr/bin");
     vi.stubEnv("HOME", "/Users/local");

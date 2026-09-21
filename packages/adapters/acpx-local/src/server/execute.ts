@@ -26,6 +26,10 @@ import {
   rewriteWorkspaceCwdEnvVarsForExecution,
   shapePaperclipWorkspaceEnvForExecution,
   stringifyPaperclipWakePayload,
+  stripServerSecrets,
+  SERVER_DATABASE_ENV_NAMES,
+  SERVER_ONLY_ENV_NAMES,
+  SERVER_ONLY_ENV_PREFIXES,
   type PaperclipSkillEntry,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
@@ -659,6 +663,25 @@ async function writePaperclipClaudeSettings(input: {
   };
 }
 
+function buildServerSecretUnsetLines(): string[] {
+  const names = [...SERVER_ONLY_ENV_NAMES, ...SERVER_DATABASE_ENV_NAMES].filter((name) =>
+    /^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
+  );
+  const prefixCases = SERVER_ONLY_ENV_PREFIXES.filter((prefix) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(prefix))
+    .map((prefix) => `${prefix}*`)
+    .join("|");
+  const lines = [`unset ${names.join(" ")}`];
+  if (prefixCases) {
+    lines.push(
+      "while IFS= read -r __paperclip_env_name; do",
+      `  case "$__paperclip_env_name" in ${prefixCases}) unset "$__paperclip_env_name" ;; esac`,
+      "done < <(compgen -e)",
+      "unset __paperclip_env_name",
+    );
+  }
+  return lines;
+}
+
 async function writeAgentWrapper(input: {
   stateDir: string;
   acpxAgent: string;
@@ -668,7 +691,10 @@ async function writeAgentWrapper(input: {
 }): Promise<{ wrapperPath: string; envFilePath: string }> {
   const wrappersDir = path.join(input.stateDir, "wrappers");
   await fs.mkdir(wrappersDir, { recursive: true });
-  const envLines = Object.entries(input.env)
+  // DUR-3994: the agent's own env must not carry the server's keys either
+  // (e.g. a configured env that happens to repeat the server's DATABASE_URL).
+  const agentEnv = stripServerSecrets({ ...input.env });
+  const envLines = Object.entries(agentEnv)
     .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
@@ -683,6 +709,14 @@ async function writeAgentWrapper(input: {
   const script = [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    // DUR-3994: acpx starts this wrapper with a copy of the server's whole
+    // process.env (acpx buildAgentEnvironment does `{ ...process.env }`), so
+    // it never goes through runChildProcess. Drop the server's own keys here,
+    // before anything else runs. The database names are dropped outright: the
+    // only way they reach this point is inherited from the server (so they
+    // hold the server's value); a per-agent address is re-applied from the
+    // env file below, which was already stripped by the equality rule.
+    ...buildServerSecretUnsetLines(),
     `env_file=${shellQuote(envFilePath)}`,
     "if [[ -f \"$env_file\" ]]; then",
     "  set -a",
@@ -881,12 +915,17 @@ async function buildRuntime(input: {
   const agentCommand = configuredCommand || builtInCommand || null;
   const agentCommandShell = configuredCommand || (builtInCommand ? shellQuote(builtInCommand) : "");
   const childStderrDir = path.join(stateDir, "run-stderr");
-  const childStderrLogPath = agentCommand ? path.join(childStderrDir, `${runId}.log`) : null;
-  const wrapper = agentCommand
+  // DUR-3994: ALWAYS launch through the wrapper, because the wrapper is what
+  // removes the server's keys from the environment acpx hands the agent. For an
+  // agent with no configured or bundled command, wrap acpx's own registry
+  // command for it (the same string acpx would otherwise spawn directly).
+  const wrappedCommandShell = agentCommandShell || createAgentRegistry().resolve(acpxAgent).trim();
+  const childStderrLogPath = wrappedCommandShell ? path.join(childStderrDir, `${runId}.log`) : null;
+  const wrapper = wrappedCommandShell
     ? await writeAgentWrapper({
         stateDir,
         acpxAgent,
-        agentCommandShell,
+        agentCommandShell: wrappedCommandShell,
         env,
         childStderrDir,
       })

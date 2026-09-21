@@ -1,0 +1,34 @@
+# CI-only override used exclusively by scripts/agent-isolation-acceptance.sh
+# (DUR-3994). Never combine this with a real deploy.
+#
+# Layered on docker-compose.yml + docker-compose.prod.yml, the same way
+# production is started, with these changes:
+#
+#  - Every server key is a random decoy value ("canary") containing the marker
+#    DUR3994CANARY, generated fresh by the acceptance script into docker/.env
+#    (the same file production keeps its keys in). The probe an agent runs
+#    recognises a leaked key by that marker without ever being told a value.
+#  - The database owner password is a canary too (production's is the public
+#    default), so a leaked DATABASE_URL is recognisable. All three database
+#    addresses point at the same working login, as before the DUR-3945 cutover.
+#  - PAPERCLIP_DEPLOYMENT_MODE=local_trusted + HOST=127.0.0.1 give requests with
+#    no Authorization header a zero-setup board actor inside the container, so
+#    the script can create companies and agents without a sign-in dance (the
+#    same pattern docker-compose.ci-recreate-test.yml uses). Ports are
+#    unpublished; every call goes through `docker exec`.
+services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: "${ISOLATION_CANARY_DB_PASSWORD:?run scripts/agent-isolation-acceptance.sh}"
+    ports: !override []
+  server:
+    environment:
+      PAPERCLIP_DEPLOYMENT_MODE: "local_trusted"
+      HOST: "127.0.0.1"
+      DATABASE_URL: "postgres://paperclip:${ISOLATION_CANARY_DB_PASSWORD}@db:5432/paperclip"
+      DATABASE_BYPASS_URL: "postgres://paperclip:${ISOLATION_CANARY_DB_PASSWORD}@db:5432/paperclip"
+      DATABASE_MIGRATION_URL: "postgres://paperclip:${ISOLATION_CANARY_DB_PASSWORD}@db:5432/paperclip"
+      PAPERCLIP_AGENT_JWT_SECRET: "${PAPERCLIP_AGENT_JWT_SECRET:?run scripts/agent-isolation-acceptance.sh}"
+      PAPERCLIP_SECRETS_MASTER_KEY: "${PAPERCLIP_SECRETS_MASTER_KEY:?run scripts/agent-isolation-acceptance.sh}"
+      PAPERCLIP_SERVER_ANTHROPIC_API_KEY: "${PAPERCLIP_SERVER_ANTHROPIC_API_KEY:?run scripts/agent-isolation-acceptance.sh}"
+    ports: !override []

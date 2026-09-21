@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { serverChildProcessEnv } from "./runtime-env.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -73,7 +74,7 @@ async function pathExists(value: string | null | undefined) {
 }
 
 async function runGit(args: string[], cwd: string) {
-  return await execFileAsync("git", ["-C", cwd, ...args], { cwd });
+  return await execFileAsync("git", ["-C", cwd, ...args], { cwd, env: serverChildProcessEnv() });
 }
 
 async function inspectGitCloseReadiness(workspace: ExecutionWorkspace): Promise<{

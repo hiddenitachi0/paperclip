@@ -117,6 +117,7 @@ import {
   type RealizedExecutionWorkspace,
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
+import { serverChildProcessEnv } from "./runtime-env.js";
 import { isHeartbeatRunLockStale, issueService } from "./issues.js";
 import {
   TIMER_IDLE_SKIP_REASON,
@@ -1503,7 +1504,7 @@ function sameResolvedPath(left: string | null | undefined, right: string | null 
 async function hasGitPushRemote(cwd: string | null | undefined) {
   const normalized = readNonEmptyString(cwd);
   if (!normalized) return false;
-  const remoteNames = await execFile("git", ["remote"], { cwd: normalized })
+  const remoteNames = await execFile("git", ["remote"], { cwd: normalized, env: serverChildProcessEnv() })
     .then((result) =>
       result.stdout
         .split(/\r?\n/)
@@ -1513,7 +1514,7 @@ async function hasGitPushRemote(cwd: string | null | undefined) {
     .catch(() => []);
 
   for (const remoteName of remoteNames) {
-    const pushUrl = await execFile("git", ["remote", "get-url", "--push", remoteName], { cwd: normalized })
+    const pushUrl = await execFile("git", ["remote", "get-url", "--push", remoteName], { cwd: normalized, env: serverChildProcessEnv() })
       .then((result) => readNonEmptyString(result.stdout))
       .catch(() => null);
     if (pushUrl) return true;

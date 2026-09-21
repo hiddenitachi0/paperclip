@@ -4,6 +4,7 @@ import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
+import { stripServerSecrets } from "./server-env-secrets.js";
 import { buildSshSpawnTarget, type SshRemoteExecutionSpec } from "./ssh.js";
 import { redactCommandText } from "./command-redaction.js";
 import type {
@@ -2128,6 +2129,14 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
+export {
+  SERVER_DATABASE_ENV_NAMES,
+  SERVER_ONLY_ENV_NAMES,
+  SERVER_ONLY_ENV_PREFIXES,
+  isServerOnlyEnvName,
+  stripServerSecrets,
+} from "./server-env-secrets.js";
+
 export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of Object.keys(env)) {
@@ -3111,10 +3120,20 @@ export async function runChildProcess(
       delete rawMerged[key];
     }
 
+    // DUR-3994: strip the server's own keys from the FINAL merged env, after
+    // opts.env is merged in. The inherited-base cleanup above never saw what an
+    // adapter put in opts.env, and hermes copies all of process.env there --
+    // BETTER_AUTH_SECRET and DATABASE_URL included. A per-agent DATABASE_URL
+    // that differs from the server's own survives (equality rule).
+    stripServerSecrets(rawMerged);
+
     const mergedEnv = ensurePathInEnv(rawMerged);
+    const remoteEnv = opts.remoteExecution
+      ? (stripServerSecrets({ ...opts.env }) as Record<string, string>)
+      : null;
     void resolveSpawnTarget(command, args, opts.cwd, mergedEnv, {
       remoteExecution: opts.remoteExecution ?? null,
-      remoteEnv: opts.remoteExecution ? opts.env : null,
+      remoteEnv,
     })
       .then((target) => {
         const child = spawn(target.command, target.args, {
