@@ -130,3 +130,20 @@ export const setDatasetSourceSchema = z.object({
   connectionId: z.string().uuid().nullable(),
 }).strict();
 export type SetDatasetSourceInput = z.infer<typeof setDatasetSourceSchema>;
+
+/**
+ * DUR-3972 slice S2: "Prøveberegning" in Datakilder. The operator picks one or
+ * two calendar months (never free dates) and Paperclip counts units sold in
+ * them through the connection, exactly as an agent answer would, so the
+ * numbers can be compared with Shopify Analytics before "Salg" is ticked.
+ */
+export const DATA_TRIAL_MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+export const dataTrialCalculationSchema = z.object({
+  periods: z
+    .array(z.string().regex(DATA_TRIAL_MONTH_PATTERN, "Velg en måned, for eksempel 2026-07."))
+    .min(1, "Velg minst én måned.")
+    .max(2, "Velg høyst to måneder."),
+  groupBy: z.enum(["none", "product_type"]).default("product_type"),
+}).strict();
+export type DataTrialCalculationInput = z.input<typeof dataTrialCalculationSchema>;

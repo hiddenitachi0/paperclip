@@ -52,6 +52,7 @@ import {
   updateGoalSchema,
   // Business-data connections (DUR-3972)
   createDataConnectionSchema,
+  dataTrialCalculationSchema,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
   // Telegram bots (DUR-3978)
@@ -3175,7 +3176,7 @@ for (const route of [
   ["patch", "/api/companies/{companyId}/data-connections/{connectionId}", "Rename, change the daily cap, switch on/off, or replace the key", updateDataConnectionSchema],
   ["delete", "/api/companies/{companyId}/data-connections/{connectionId}", "Disconnect a source and delete its saved key", undefined],
   ["post", "/api/companies/{companyId}/data-connections/{connectionId}/test", "Ask the source who it is and what the key may do; switch it on only if read-only", undefined],
-  ["post", "/api/companies/{companyId}/data-connections/{connectionId}/trial", "Trial calculation: units sold, returned and net for the two last closed months, by product type", undefined],
+  ["post", "/api/companies/{companyId}/data-connections/{connectionId}/trial", "Trial calculation: units sold in one or two months through this connection, for checking against Shopify Analytics", dataTrialCalculationSchema],
   ["get", "/api/companies/{companyId}/dataset-sources", "Which connection answers each dataset for this company", undefined],
   ["put", "/api/companies/{companyId}/dataset-sources/{dataset}", "Point a dataset (sales) at one of this company's connections, or at nothing", setDatasetSourceSchema],
   ["get", "/api/companies/{companyId}/data-reads", "The latest business-data lookups for this company (audit)", undefined],

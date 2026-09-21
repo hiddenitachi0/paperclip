@@ -1225,6 +1225,7 @@ export type {
   DataConnectionSummary,
   DataReadEventSummary,
   DataDatasetSourceSummary,
+  DataTrialCalculationResult,
 } from "./types/data-connection.js";
 export {
   DATA_CONNECTION_ACCESS_LEVELS,
@@ -1242,6 +1243,9 @@ export {
   normalizeShopDomainInput,
   setDatasetSourceSchema,
   updateDataConnectionSchema,
+  dataTrialCalculationSchema,
+  DATA_TRIAL_MONTH_PATTERN,
+  type DataTrialCalculationInput,
   type CreateDataConnectionInput,
   type DataConnectionAccessLevel,
   type DataConnectionCredentialInput,

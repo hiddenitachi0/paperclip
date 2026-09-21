@@ -90,3 +90,23 @@ export type DataReadEventSummary = {
   durationMs: number | null;
   createdAt: string;
 };
+
+/**
+ * DUR-3972 slice S2: the answer to "Prøveberegning". `card` is the same fixed
+ * Norwegian answer card an agent would relay; `reconciliationNotes` are plain
+ * sentences about differences Paperclip itself noticed (for example between
+ * Shopify's sales record and its refunds), to explain before going live.
+ */
+export type DataTrialCalculationResult =
+  | {
+      ok: true;
+      lookupId: string;
+      card: string;
+      reconciliationNotes: string[];
+    }
+  | {
+      ok: false;
+      lookupId: string | null;
+      code: string;
+      message: string;
+    };

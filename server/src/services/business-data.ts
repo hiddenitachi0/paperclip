@@ -664,16 +664,11 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
     };
   }
 
-  /** The board's "Prøveberegning": the two last closed months, by product type. */
-  async function trial(companyId: string, connectionId: string, userId: string | null): Promise<BusinessDataAnswer> {
-    return read(
-      { companyId, channel: "settings_test", agentId: null, userId, runId: null, laneAConversationId: null },
-      { action: "sales", periods: ["month_before_last", "last_month"], group_by: "product_type" },
-      { connectionId, allowLargeAnswer: true },
-    );
-  }
-
-  return { featureOn, isAvailable, read, trial, companyName };
+  // The board's "Prøveberegning" is served by services/data-trial.ts (slice S2),
+  // which runs the same S3 sales engine as read() above with the operator's own
+  // choice of months. Moving it onto read() itself, so trial and agent answers
+  // share one path end to end, is a tracked follow-up.
+  return { featureOn, isAvailable, read, companyName };
 }
 
 async function readProductTypes(client: { query<T>(document: string, variables?: Record<string, unknown>): Promise<T> }) {

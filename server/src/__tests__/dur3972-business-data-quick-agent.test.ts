@@ -807,25 +807,30 @@ d("DUR-3972 S4: business data for quick agents", () => {
       return instance;
     };
 
-    const res = await request(app(boardActor([companyA]))).post(`/api/companies/${companyA}/data-connections/${connectionId}/trial`).send({});
+    // The trial is served by slice S2's route (services/data-trial.ts): the
+    // operator chooses the months. It runs the same S3 sales engine as the
+    // agent's read_business_data, so the numbers here are the numbers an agent
+    // would give for the same months.
+    const trialBody = { periods: ["2026-07", "2026-08"], groupBy: "product_type" };
+    const res = await request(app(boardActor([companyA])))
+      .post(`/api/companies/${companyA}/data-connections/${connectionId}/trial`)
+      .send(trialBody);
     expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.text).toContain("Juli 2026 (1.–31. juli 2026, avsluttet)");
-    expect(res.body.text).toContain("August 2026 (1.–31. august 2026, avsluttet)");
-    expect(res.body.text).toContain("  Sofa: solgt 3, returer 1, netto 2");
+    expect(res.body.ok, JSON.stringify(res.body)).toBe(true);
+    expect(res.body.card).toContain("Sofa: solgt 3, returer 1, netto 2");
     expect(JSON.stringify(res.body)).not.toContain(KEY_A);
     const [row] = await auditRows(companyA);
     expect(row).toMatchObject({ channel: "settings_test", outcome: "ok", userId: "filip", agentId: null, id: res.body.lookupId });
 
     const agentRes = await request(app({ type: "agent", agentId: agentA.id, companyId: companyA, source: "agent_jwt", runId: randomUUID() }))
       .post(`/api/companies/${companyA}/data-connections/${connectionId}/trial`)
-      .send({});
+      .send(trialBody);
     expect(agentRes.status).toBe(403);
 
     const otherCompany = await seedCompany("Durkan Agency");
     const crossRes = await request(app(boardActor([otherCompany])))
       .post(`/api/companies/${companyA}/data-connections/${connectionId}/trial`)
-      .send({});
+      .send(trialBody);
     expect(crossRes.status).toBe(403);
     expect(await auditRows(companyA)).toHaveLength(1);
   });
