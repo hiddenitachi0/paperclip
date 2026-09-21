@@ -25,9 +25,54 @@ export function readNonBlankEnv(
   return readNonBlankEnvValue(env[name]);
 }
 
-/** The Anthropic API key, or undefined when it is unset, empty or blank. */
+/**
+ * DUR-3945: the server-only name for the Anthropic key.
+ *
+ * A key set as plain ANTHROPIC_API_KEY on the server process is inherited by
+ * every agent the server starts (claude_local builds its run environment from
+ * `{ ...process.env, ...env }`). The Claude CLI prefers that key over an
+ * agent's own subscription token, so the whole fleet would silently move to
+ * paid API billing, agents without a credential would start running on it,
+ * and any agent in any company could read it with `printenv`.
+ *
+ * Production therefore hands the key in under this name instead, and
+ * `captureServerOnlyAnthropicApiKey()` moves it out of process.env at start-up,
+ * before anything is spawned. Only the server's own callers (quick agents,
+ * the secretary, the done-gate critic) can then reach it, via
+ * `readAnthropicApiKey()`. Nothing that copies process.env ever sees it.
+ */
+export const SERVER_ANTHROPIC_API_KEY_ENV = "PAPERCLIP_SERVER_ANTHROPIC_API_KEY";
+
+let capturedServerAnthropicApiKey: string | undefined;
+
+/**
+ * Remove the server-only Anthropic key from `env` (process.env by default) and
+ * keep it in memory for `readAnthropicApiKey()`. Safe to call more than once;
+ * a later call with no key set keeps the earlier captured value.
+ */
+export function captureServerOnlyAnthropicApiKey(env: NodeJS.ProcessEnv = process.env): void {
+  const value = readNonBlankEnv(SERVER_ANTHROPIC_API_KEY_ENV, env);
+  if (value !== undefined) capturedServerAnthropicApiKey = value;
+  delete env[SERVER_ANTHROPIC_API_KEY_ENV];
+}
+
+/** Test hook: forget any captured server-only key. */
+export function resetCapturedServerAnthropicApiKeyForTests(): void {
+  capturedServerAnthropicApiKey = undefined;
+}
+
+/**
+ * The Anthropic API key the server itself uses, or undefined when none is set
+ * (unset, empty and whitespace-only all count as none). Order: the captured
+ * server-only key, the server-only variable if not captured yet, then plain
+ * ANTHROPIC_API_KEY (installs that deliberately share one key with agents).
+ */
 export function readAnthropicApiKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return readNonBlankEnv("ANTHROPIC_API_KEY", env);
+  return (
+    (env === process.env ? capturedServerAnthropicApiKey : undefined) ??
+    readNonBlankEnv(SERVER_ANTHROPIC_API_KEY_ENV, env) ??
+    readNonBlankEnv("ANTHROPIC_API_KEY", env)
+  );
 }
 
 /**

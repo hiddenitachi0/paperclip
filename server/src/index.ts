@@ -34,7 +34,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { resolveMigrationConnectionString } from "./env-values.js";
+import { captureServerOnlyAnthropicApiKey, resolveMigrationConnectionString } from "./env-values.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
@@ -141,6 +141,9 @@ export async function startServer(): Promise<StartedServer> {
   // connection or the HTTP server exists — see instrumentation.ts.
   await instrumentationReady;
   let config = loadConfig();
+  // DUR-3945: take the server-only Anthropic key out of process.env before any
+  // agent can be spawned, so agents never inherit it (see env-values.ts).
+  captureServerOnlyAnthropicApiKey();
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;

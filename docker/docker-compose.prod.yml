@@ -29,7 +29,10 @@
 #   DATABASE_URL=...            (default: the base compose's paperclip login)
 #   DATABASE_BYPASS_URL=...     (default: unset -> same as DATABASE_URL)
 #   DATABASE_MIGRATION_URL=...  (default: unset -> migrations use DATABASE_URL)
-#   ANTHROPIC_API_KEY=...       (default: unset -> quick agents stay off)
+#   PAPERCLIP_SERVER_ANTHROPIC_API_KEY=...  (default: unset -> quick agents stay off)
+#     Use this name, NOT plain ANTHROPIC_API_KEY: the server keeps this one to
+#     itself. A plain ANTHROPIC_API_KEY would be inherited by every agent and
+#     move them all onto paid API billing.
 services:
   server:
     restart: unless-stopped
@@ -43,11 +46,13 @@ services:
       # docker/.env / the shell when set there, and leaves them out of the
       # container entirely when not -- so an install without them runs with
       # exactly the same environment as before. See docs/rls-cutover-runbook.md,
-      # "This installation".
+      # "This installation". The Anthropic key uses a server-only name that the
+      # server removes from its environment at start-up, so agents never
+      # inherit it.
       DATABASE_URL: "${DATABASE_URL:-postgres://paperclip:paperclip@db:5432/paperclip}"
       DATABASE_BYPASS_URL:
       DATABASE_MIGRATION_URL:
-      ANTHROPIC_API_KEY:
+      PAPERCLIP_SERVER_ANTHROPIC_API_KEY:
     ports: !override
       - "127.0.0.1:3100:3100"
   db:

@@ -7,8 +7,13 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { claudeEnvHasOwnCredential } from "../services/claude-credential-source.js";
 import {
+  SERVER_ANTHROPIC_API_KEY_ENV,
+  captureServerOnlyAnthropicApiKey,
   readAnthropicApiKey,
+  resetCapturedServerAnthropicApiKeyForTests,
   readNonBlankEnv,
   readNonBlankEnvValue,
   resolveMigrationConnectionString,
@@ -29,6 +34,7 @@ const TOUCHED_KEYS = [
   "DATABASE_BYPASS_URL",
   "DATABASE_MIGRATION_URL",
   "ANTHROPIC_API_KEY",
+  "PAPERCLIP_SERVER_ANTHROPIC_API_KEY",
 ] as const;
 const savedEnv = new Map<string, string | undefined>(TOUCHED_KEYS.map((key) => [key, process.env[key]]));
 function restoreEnv() {
@@ -60,6 +66,57 @@ describe("readAnthropicApiKey", () => {
     expect(readAnthropicApiKey({ ANTHROPIC_API_KEY: "" })).toBeUndefined();
     expect(readAnthropicApiKey({ ANTHROPIC_API_KEY: "   " })).toBeUndefined();
     expect(readAnthropicApiKey({ ANTHROPIC_API_KEY: " sk-test " })).toBe("sk-test");
+  });
+});
+
+describe("server-only Anthropic key (agents must never inherit it)", () => {
+  const KEY = "sk-ant-server-only-test-key";
+
+  afterEach(() => {
+    resetCapturedServerAnthropicApiKeyForTests();
+    restoreEnv();
+  });
+
+  it("reads the server-only name first, then plain ANTHROPIC_API_KEY", () => {
+    expect(readAnthropicApiKey({ [SERVER_ANTHROPIC_API_KEY_ENV]: ` ${KEY} ` })).toBe(KEY);
+    expect(readAnthropicApiKey({ [SERVER_ANTHROPIC_API_KEY_ENV]: KEY, ANTHROPIC_API_KEY: "sk-other" })).toBe(KEY);
+    expect(readAnthropicApiKey({ [SERVER_ANTHROPIC_API_KEY_ENV]: "  ", ANTHROPIC_API_KEY: "sk-other" })).toBe("sk-other");
+  });
+
+  it("capture takes the key out of process.env but the server can still read it", () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env[SERVER_ANTHROPIC_API_KEY_ENV] = KEY;
+    captureServerOnlyAnthropicApiKey();
+    expect(process.env[SERVER_ANTHROPIC_API_KEY_ENV]).toBeUndefined();
+    expect(readAnthropicApiKey()).toBe(KEY);
+    // A second call with nothing set keeps the captured key.
+    captureServerOnlyAnthropicApiKey();
+    expect(readAnthropicApiKey()).toBe(KEY);
+  });
+
+  it("after capture, an agent built from { ...process.env } has no key and no API-key credential", async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env[SERVER_ANTHROPIC_API_KEY_ENV] = KEY;
+    captureServerOnlyAnthropicApiKey();
+
+    // claude_local builds its run env as { ...process.env, ...env }: the
+    // worst case, since it bypasses runChildProcess's own inherited-env strip.
+    const agentEnv = Object.fromEntries(
+      Object.entries({ ...process.env }).filter((e): e is [string, string] => typeof e[1] === "string"),
+    );
+    expect(claudeEnvHasOwnCredential(agentEnv)).toBe(false);
+
+    const result = await runChildProcess(
+      "dur3945-anthropic-key-leak-test",
+      process.execPath,
+      ["-e", "process.stdout.write(JSON.stringify(process.env))"],
+      { cwd: process.cwd(), env: agentEnv, timeoutSec: 20, graceSec: 2, onLog: async () => {} },
+    );
+    expect(result.exitCode).toBe(0);
+    const childEnv = JSON.parse(result.stdout) as Record<string, string>;
+    expect(childEnv[SERVER_ANTHROPIC_API_KEY_ENV]).toBeUndefined();
+    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(result.stdout).not.toContain(KEY);
   });
 });
 

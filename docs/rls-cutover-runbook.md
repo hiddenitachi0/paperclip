@@ -114,7 +114,7 @@ The four settings this runbook uses —
 | `DATABASE_URL` | the login ordinary app traffic uses | the original `paperclip` owner login, exactly as today |
 | `DATABASE_BYPASS_URL` | the login for the code that works across companies | same as `DATABASE_URL` |
 | `DATABASE_MIGRATION_URL` | the login that changes the database structure at start-up | same as `DATABASE_URL` |
-| `ANTHROPIC_API_KEY` | the key the quick agents and the task reviewer use | quick agents stay switched off |
+| `PAPERCLIP_SERVER_ANTHROPIC_API_KEY` | the Anthropic key the server itself uses for the quick agents, the request router and the task reviewer | quick agents stay switched off |
 
 — go in **one place only: `/root/paperclip/docker/.env`**. One line each, like
 `DATABASE_BYPASS_URL=postgres://paperclip_app_bypass_login:<password>@db:5432/paperclip`.
@@ -132,12 +132,22 @@ The four settings this runbook uses —
   `openssl rand -hex 32`). Characters like `$`, `@`, `:` or `/` either get
   read as something else by Docker or break the address.
 - A line with nothing after the `=` counts as "not set", same as no line.
+- **Use the long name `PAPERCLIP_SERVER_ANTHROPIC_API_KEY`, never plain
+  `ANTHROPIC_API_KEY`.** The server takes the long-named key out of its own
+  settings as soon as it starts, so the agents it runs never get a copy. A
+  plain `ANTHROPIC_API_KEY` would be handed to every agent: they would all
+  switch from the Claude subscription to paid per-use billing, agents with no
+  Claude login of their own would quietly start running on it, and any agent
+  could read the key. (For this reason a plain `ANTHROPIC_API_KEY` line in this
+  file is simply not passed to the server.) The key is protected the same way
+  as the database logins: agents do not inherit it, but it is still part of the
+  server container's start-up settings.
 - After changing the file, apply it with
   `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d server`
   from `/root/paperclip`. A plain `docker compose restart` does **not** pick up
   changes to this file.
 - To check what the server actually got, without printing passwords:
-  `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml exec server sh -c 'env | grep -E "^(DATABASE_|ANTHROPIC_)" | cut -d= -f1'`
+  `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml exec server sh -c 'env | grep -E "^(DATABASE_|PAPERCLIP_SERVER_ANTHROPIC_|ANTHROPIC_)" | cut -d= -f1'`
   lists which of the settings are set.
 
 ### The one ordering rule: migration login before step 4
