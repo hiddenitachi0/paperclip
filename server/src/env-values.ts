@@ -9,9 +9,15 @@
  * Everything that reads these variables now goes through here: empty or
  * whitespace-only means unset, and a real value is returned trimmed.
  *
- * Deliberately dependency-free (no config.ts import, which loads .env files
- * as a side effect) so services can use it cheaply.
+ * Deliberately free of config.ts (which loads .env files as a side effect)
+ * so services can use it cheaply.
  */
+import {
+  holdServerSecret,
+  readHeldServerSecret,
+  resetServerSecretsForTests,
+} from "./server-secrets.js";
+
 export function readNonBlankEnvValue(raw: string | null | undefined): string | undefined {
   if (typeof raw !== "string") return undefined;
   const trimmed = raw.trim();
@@ -43,22 +49,22 @@ export function readNonBlankEnv(
  */
 export const SERVER_ANTHROPIC_API_KEY_ENV = "PAPERCLIP_SERVER_ANTHROPIC_API_KEY";
 
-let capturedServerAnthropicApiKey: string | undefined;
-
 /**
  * Remove the server-only Anthropic key from `env` (process.env by default) and
  * keep it in memory for `readAnthropicApiKey()`. Safe to call more than once;
  * a later call with no key set keeps the earlier captured value.
  */
 export function captureServerOnlyAnthropicApiKey(env: NodeJS.ProcessEnv = process.env): void {
+  // DUR-3994 Stage 1: the key is now held with the server's other keys
+  // (server-secrets.ts), which normally captured it already at boot.
   const value = readNonBlankEnv(SERVER_ANTHROPIC_API_KEY_ENV, env);
-  if (value !== undefined) capturedServerAnthropicApiKey = value;
+  if (value !== undefined) holdServerSecret(SERVER_ANTHROPIC_API_KEY_ENV, value);
   delete env[SERVER_ANTHROPIC_API_KEY_ENV];
 }
 
 /** Test hook: forget any captured server-only key. */
 export function resetCapturedServerAnthropicApiKeyForTests(): void {
-  capturedServerAnthropicApiKey = undefined;
+  resetServerSecretsForTests([SERVER_ANTHROPIC_API_KEY_ENV]);
 }
 
 /**
@@ -69,7 +75,7 @@ export function resetCapturedServerAnthropicApiKeyForTests(): void {
  */
 export function readAnthropicApiKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
   return (
-    (env === process.env ? capturedServerAnthropicApiKey : undefined) ??
+    (env === process.env ? readNonBlankEnvValue(readHeldServerSecret(SERVER_ANTHROPIC_API_KEY_ENV)) : undefined) ??
     readNonBlankEnv(SERVER_ANTHROPIC_API_KEY_ENV, env) ??
     readNonBlankEnv("ANTHROPIC_API_KEY", env)
   );

@@ -45,6 +45,7 @@ import {
 } from "@paperclipai/shared";
 import { logActivity } from "./activity-log.js";
 import { logger } from "../middleware/logger.js";
+import { serverSecretEnv } from "../server-secrets.js";
 
 export const ADMIN_AUTH_SNAPSHOT_KEY = "admin_auth_snapshot";
 export const ADMIN_AUTH_SNAPSHOT_VERSION = 1;
@@ -111,7 +112,9 @@ const SYSTEM_ACTOR: AdminAuthActorInfo = { actorType: "system", actorId: "securi
 
 // ─── Pure helpers (unit-testable without a database) ─────────────────────────
 
-export function resolveAdminAuthSigningSecret(env: NodeJS.ProcessEnv = process.env): string | null {
+export function resolveAdminAuthSigningSecret(
+  env: NodeJS.ProcessEnv = serverSecretEnv(["BETTER_AUTH_SECRET", "PAPERCLIP_AGENT_JWT_SECRET"]),
+): string | null {
   const secret = env.BETTER_AUTH_SECRET ?? env.PAPERCLIP_AGENT_JWT_SECRET;
   return secret && secret.trim() ? secret : null;
 }

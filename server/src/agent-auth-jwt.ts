@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { readServerSecret } from "./server-secrets.js";
 
 interface JwtHeader {
   alg: string;
@@ -32,7 +33,7 @@ function parseBooleanEnv(value: string | undefined): boolean {
 }
 
 function jwtConfig() {
-  const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim() || process.env.BETTER_AUTH_SECRET?.trim();
+  const secret = readServerSecret("PAPERCLIP_AGENT_JWT_SECRET")?.trim() || readServerSecret("BETTER_AUTH_SECRET")?.trim();
   if (!secret) return null;
 
   return {

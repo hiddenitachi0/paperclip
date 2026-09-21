@@ -327,24 +327,80 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, label: string):
   }
 }
 
+/**
+ * DUR-3994 Stage 1: take the password out of a `postgres://` address so it
+ * never has to go on pg_dump's command line. A process's command line
+ * (/proc/<pid>/cmdline) is readable by every process in the container, and
+ * agents run in the same container, so `--dbname=postgres://user:PASSWORD@...`
+ * handed the database owner password to any agent that looked while the
+ * hourly backup ran.
+ *
+ * Returns the address without the password (both the `user:password@` part
+ * and a `?password=` parameter) and the password on its own. Anything that
+ * is not a URL-style address, or has no password, comes back unchanged with
+ * `password: null`, so pg_dump runs exactly as before.
+ */
+export function splitPostgresPassword(connectionString: string): {
+  connectionString: string;
+  password: string | null;
+} {
+  const trimmed = connectionString.trim();
+  if (!/^postgres(ql)?:\/\//i.test(trimmed)) {
+    return { connectionString, password: null };
+  }
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return { connectionString, password: null };
+  }
+  let password: string | null = null;
+  if (url.password) {
+    try {
+      password = decodeURIComponent(url.password);
+    } catch {
+      return { connectionString, password: null };
+    }
+    url.password = "";
+  }
+  const queryPassword = url.searchParams.get("password");
+  if (queryPassword !== null) {
+    if (password === null) password = queryPassword;
+    url.searchParams.delete("password");
+  }
+  if (password === null || password.length === 0) {
+    return { connectionString, password: null };
+  }
+  return { connectionString: url.toString(), password };
+}
+
 async function runPgDumpBackup(opts: {
   connectionString: string;
   backupFile: string;
   connectTimeout: number;
 }): Promise<void> {
   const pgDumpBin = process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump";
+  // DUR-3994 Stage 1: the password goes to pg_dump through its password
+  // prompt on stdin (`--password`), never on its command line or in its
+  // environment -- both of which every process in the container can read.
+  // `detached` starts pg_dump in its own session with no terminal, so the
+  // prompt reads stdin instead of a terminal (and can never pop up in a
+  // developer's terminal). Same arguments, same output, same file as before.
+  const { connectionString, password } = splitPostgresPassword(opts.connectionString);
   const child = spawn(
     pgDumpBin,
     [
-      `--dbname=${opts.connectionString}`,
+      `--dbname=${connectionString}`,
       "--format=plain",
       "--clean",
       "--if-exists",
       "--no-owner",
       "--no-privileges",
+      ...(password !== null ? ["--password"] : []),
     ],
     {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [password !== null ? "pipe" : "ignore", "pipe", "pipe"],
+      detached: password !== null,
       env: {
         ...process.env,
         PGCONNECT_TIMEOUT: String(opts.connectTimeout),
@@ -354,6 +410,16 @@ async function runPgDumpBackup(opts: {
 
   if (!child.stdout) {
     throw new Error("pg_dump did not expose stdout");
+  }
+  if (password !== null) {
+    if (!child.stdin) {
+      child.kill("SIGKILL");
+      throw new Error("pg_dump did not expose stdin");
+    }
+    // pg_dump may exit before reading (e.g. it cannot start); that surfaces
+    // through its exit status below, not as an unhandled pipe error.
+    child.stdin.on("error", () => {});
+    child.stdin.end(`${password}\n`);
   }
 
   await Promise.all([

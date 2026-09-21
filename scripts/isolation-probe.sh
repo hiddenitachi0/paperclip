@@ -121,6 +121,65 @@ for dir in /proc/[0-9]*; do
 done
 [ "$proc_clean" = 1 ] && pass 1 proc-other "no-canary-in-other-processes"
 
+# The root-only secrets file (docker-compose.secrets.yml) must stay root-only.
+if [ -e /run/secrets/paperclip_server ]; then
+  if [ -r /run/secrets/paperclip_server ]; then
+    found 1 secrets-file /run/secrets/paperclip_server
+  else
+    pass 1 secrets-file /run/secrets/paperclip_server
+  fi
+fi
+
+# The server's open descriptors must be closed to agents. If an agent can
+# list /proc/1/fd it can reopen them: read the key hand-over pipe if it were
+# still open, or read from the server's internal pipes -- which STEALS their
+# contents; draining libuv's signal-lock pipe that way froze the whole server
+# (DUR-3994 acceptance run). The server therefore runs non-dumpable (see
+# Dockerfile), which makes /proc/1/fd root-only.
+#
+# This probe NEVER reads from a pipe: reading one is destructive. Only plain
+# files the server holds open are checked for the marker, and only when the
+# descriptor list is visible at all.
+if ls /proc/1/fd >/dev/null 2>&1; then
+  found 1 server-fd /proc/1/fd
+  for fdpath in /proc/1/fd/*; do
+    [ -e "$fdpath" ] || continue
+    target="$(readlink "$fdpath" 2>/dev/null || true)"
+    case "$target" in /*) ;; *) continue ;; esac
+    case "$target" in /dev/*|/proc/*) continue ;; esac
+    if [ -f "$target" ] && [ -r "$fdpath" ] && file_has_marker "$fdpath"; then
+      found 1 server-fd-file "$fdpath"
+    fi
+  done
+else
+  pass 1 server-fd "server-descriptors-closed-to-agents"
+fi
+
+# The server's memory must not be readable (ptrace protection).
+if ( exec 9</proc/1/mem ) 2>/dev/null; then
+  found 1 server-mem /proc/1/mem
+else
+  pass 1 server-mem /proc/1/mem
+fi
+scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo missing)"
+case "$scope" in
+  1|2|3) pass 1 ptrace-scope "yama-$scope" ;;
+  *) found 1 ptrace-scope "yama-$scope" ;;
+esac
+
+# `kill -USR1` must not open Node's debugger on the server. (With
+# --disable-sigusr1 Node keeps SIGUSR1 blocked, so it is never delivered; the
+# acceptance script checks separately that the server still answers.)
+if [ "${PROBE_SKIP_SIGUSR1:-0}" != 1 ]; then
+  kill -USR1 1 2>/dev/null || true
+  sleep 2
+  if curl -s --max-time 2 -o /dev/null http://127.0.0.1:9229/json/version 2>/dev/null; then
+    found 1 debug-port 127.0.0.1:9229
+  else
+    pass 1 debug-port 127.0.0.1:9229
+  fi
+fi
+
 # --- Stage 2: the server's own program files --------------------------------
 if [ -e /app/server/dist/index.js ]; then
   # Only asks the kernel whether a write WOULD be allowed; never writes.

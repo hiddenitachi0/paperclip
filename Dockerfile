@@ -56,6 +56,12 @@ RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+# DUR-3994 Stage 1: the list of the server's key names (names only, never a
+# value) for the root-run key hand-over in docker-entrypoint.sh. Generated here,
+# at build time, so the entrypoint never has to run Node code from /app -- which
+# every agent can write -- as root.
+RUN node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/server-secret-names.js >/tmp/paperclip-server-secret-names \
+  && grep -q '^name BETTER_AUTH_SECRET$' /tmp/paperclip-server-secret-names
 
 FROM base AS production
 ARG USER_UID=1000
@@ -80,8 +86,22 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
+# DUR-3994 Stage 1: everything the entrypoint runs as root is root-owned and
+# lives outside /app (which the `node` user, i.e. every agent, can write).
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY scripts/server-secrets-handoff.sh /usr/local/lib/paperclip/server-secrets-handoff.sh
+RUN chown root:root /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip/server-secrets-handoff.sh \
+  && chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip /usr/local/lib/paperclip/server-secrets-handoff.sh
+
+# DUR-3994 Stage 1: the server runs from its own copy of Node that the `node`
+# user (i.e. every agent) may start but not read. Linux marks a process
+# started from a program it cannot read as "not dumpable", which makes its
+# /proc/<pid>/{environ,fd,mem,...} root-only. Without this any agent could
+# open the server's descriptors through /proc/1/fd and read from its internal
+# pipes -- one of which is libuv's signal lock, so a single
+# `cat /proc/1/fd/<n>` froze the whole server (found by the isolation
+# acceptance run). Agents keep using the ordinary, readable /usr/local/bin/node.
+RUN install -o root -g root -m 0711 /usr/local/bin/node /usr/local/lib/paperclip/node
 
 # Global git credential helper: lets any agent (and managed clones) authenticate
 # github.com clone/fetch/push from a GITHUB_TOKEN/GH_TOKEN in the environment,
@@ -114,6 +134,12 @@ RUN chmod +x /usr/local/share/paperclip/githooks/pre-push \
 # reproducible builds become a requirement.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
+# DUR-3994 Stage 1: the server's key-name list for the root-run hand-over,
+# root-owned and outside /app (changes only when the list does).
+COPY --from=build /tmp/paperclip-server-secret-names /usr/local/share/paperclip/server-secret-names
+RUN chown root:root /usr/local/share/paperclip /usr/local/share/paperclip/server-secret-names \
+  && chmod 0755 /usr/local/share/paperclip && chmod 0644 /usr/local/share/paperclip/server-secret-names
+
 # Deliberately last: this is the only layer that changes on every commit, so
 # putting it after the network-fetching steps above keeps their cache valid
 # across ordinary deploys.
@@ -137,4 +163,10 @@ ENV NODE_ENV=production \
 EXPOSE 3100
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
+# DUR-3994 Stage 1: --disable-sigusr1 stops `kill -USR1 <server>` (which any
+# agent could send, being the same user) from opening Node's debugger on
+# 127.0.0.1:9229, through which it could read everything the server holds.
+# With it, Node keeps SIGUSR1 blocked in every thread, so the signal is simply
+# never delivered (the server neither stops nor hangs). The server runs from
+# the unreadable copy of Node installed above (see there).
+CMD ["/usr/local/lib/paperclip/node", "--disable-sigusr1", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]

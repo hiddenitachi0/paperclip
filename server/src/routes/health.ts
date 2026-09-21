@@ -20,6 +20,7 @@ import {
 } from "../services/scheduler-tick-single-flight.js";
 import type { FleetHealth, FleetSchedulerRescues } from "@paperclipai/shared";
 import { serverVersion } from "../version.js";
+import { readServerSecret } from "../server-secrets.js";
 
 function shouldExposeFullHealthDetails(
   // "service" is deliberately absent from the full-details branch below: a
@@ -33,7 +34,7 @@ function shouldExposeFullHealthDetails(
 }
 
 function hasDevServerStatusToken(providedToken: string | undefined) {
-  const expectedToken = process.env.PAPERCLIP_DEV_SERVER_STATUS_TOKEN?.trim();
+  const expectedToken = readServerSecret("PAPERCLIP_DEV_SERVER_STATUS_TOKEN")?.trim();
   const token = providedToken?.trim();
   if (!expectedToken || !token) return false;
 

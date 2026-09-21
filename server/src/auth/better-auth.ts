@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
+import { readServerSecret } from "../server-secrets.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -244,7 +245,7 @@ export function createBetterAuthInstance(
 ): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
-  const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  const secret = readServerSecret("BETTER_AUTH_SECRET") ?? readServerSecret("PAPERCLIP_AGENT_JWT_SECRET");
   if (!secret) {
     throw new Error(
       "BETTER_AUTH_SECRET (or PAPERCLIP_AGENT_JWT_SECRET) must be set. " +
