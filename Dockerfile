@@ -99,6 +99,16 @@ COPY scripts/server-secrets-handoff.sh /usr/local/lib/paperclip/server-secrets-h
 RUN chown root:root /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip/server-secrets-handoff.sh \
   && chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip /usr/local/lib/paperclip/server-secrets-handoff.sh
 
+# DUR-3994 Stage 1: the server runs from its own copy of Node that the `node`
+# user (i.e. every agent) may start but not read. Linux marks a process
+# started from a program it cannot read as "not dumpable", which makes its
+# /proc/<pid>/{environ,fd,mem,...} root-only. Without this any agent could
+# open the server's descriptors through /proc/1/fd and read from its internal
+# pipes -- one of which is libuv's signal lock, so a single
+# `cat /proc/1/fd/<n>` froze the whole server (found by the isolation
+# acceptance run). Agents keep using the ordinary, readable /usr/local/bin/node.
+RUN install -o root -g root -m 0711 /usr/local/bin/node /usr/local/lib/paperclip/node
+
 # Global git credential helper: lets any agent (and managed clones) authenticate
 # github.com clone/fetch/push from a GITHUB_TOKEN/GH_TOKEN in the environment,
 # with zero per-agent or per-company git wiring. Scoped to github.com so the
@@ -192,6 +202,9 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 # DUR-3994 Stage 1: --disable-sigusr1 stops `kill -USR1 <server>` (which any
 # agent could send, being the same user) from opening Node's debugger on
 # 127.0.0.1:9229, through which it could read everything the server holds.
+# With it, Node keeps SIGUSR1 blocked in every thread, so the signal is simply
+# never delivered (the server neither stops nor hangs). The server runs from
+# the unreadable copy of Node installed above (see there).
 # DUR-3994 Stage 2: --require node-module-guard.cjs, first, stops Node
 # loading modules from folders agents can write (see that file).
-CMD ["node", "--disable-sigusr1", "--require", "/usr/local/lib/paperclip/node-module-guard.cjs", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
+CMD ["/usr/local/lib/paperclip/node", "--disable-sigusr1", "--require", "/usr/local/lib/paperclip/node-module-guard.cjs", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
