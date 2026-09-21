@@ -335,19 +335,33 @@ check_root_run_files() {
 stage1_server_checks() {
   local container="$1" spy_report backup_json engine backup_file exe
   # The server must run from the unreadable copy of Node, so it is not
-  # dumpable and agents cannot open its /proc/1/fd (see Dockerfile).
-  exe="$(tdocker 15 exec -u 0 "$container" readlink /proc/1/exe 2>/dev/null)"
+  # dumpable and agents cannot open its /proc/1/fd (see Dockerfile). Docker
+  # gives the container's root no CAP_SYS_PTRACE, so even root cannot follow
+  # /proc/1/exe of a non-dumpable process: read argv[0] from /proc/1/cmdline
+  # (world-readable) and the owner of /proc/1/environ instead -- the kernel
+  # shows root as the owner of a non-dumpable process's private /proc files.
+  exe="$(tdocker 15 exec "$container" sh -c 'tr "\0" "\n" </proc/1/cmdline | head -1' 2>/dev/null)"
   if [ "$exe" = /usr/local/lib/paperclip/node ]; then
     log "PASS 1 server-binary: the server runs from /usr/local/lib/paperclip/node"
   else
     fail "the server runs from ${exe:-an unknown program}, not /usr/local/lib/paperclip/node"
+  fi
+  local proc_owner server_uid
+  proc_owner="$(tdocker 15 exec "$container" stat -c %u /proc/1/environ 2>/dev/null)"
+  server_uid="$(tdocker 15 exec "$container" sh -c 'sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" /proc/1/status' 2>/dev/null)"
+  if [ "$proc_owner" = 0 ] && [ -n "$server_uid" ] && [ "$server_uid" != 0 ]; then
+    log "PASS 1 server-nondumpable: the server runs as uid $server_uid but its private /proc files are root-only"
+  else
+    fail "the server is dumpable (/proc/1/environ owner ${proc_owner:-?}, server uid ${server_uid:-?})"
   fi
 
   # kill -USR1 from an agent (the node user) must neither open the debugger
   # nor stop or freeze the server. The probe already sent one; send another
   # directly and check the server still answers.
   log "stage 1: kill -USR1 1 as the node user, then the server must still answer"
-  tdocker 15 exec -u node "$container" kill -USR1 1 >/dev/null 2>&1 || log "  (kill -USR1 returned non-zero)"
+  if ! tdocker 15 exec -u node "$container" sh -c 'kill -USR1 1' >/dev/null 2>&1; then
+    fail "could not send kill -USR1 to the server as the node user (the check below would prove nothing)"
+  fi
   sleep 2
   if tdocker 15 exec "$container" curl -s --max-time 2 -o /dev/null http://127.0.0.1:9229/json/version >/dev/null 2>&1; then
     fail "LEAK 1 debug-port: kill -USR1 opened Node's debugger on 127.0.0.1:9229"
