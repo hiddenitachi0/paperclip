@@ -9,6 +9,7 @@ import type {
   ModelProfileKey,
   GoalConditionVerdict,
 } from "@paperclipai/shared";
+import { MISSING_RUN_ID_GATE_MESSAGE } from "./self-review-gate.js";
 
 /**
  * DUR-32: "keep going until done" — a plain-English finish line on a task, re-checked
@@ -343,10 +344,19 @@ export async function evaluateGoalConditionDoneGate(input: {
 }): Promise<{ message: string } | null> {
   if (input.requestedStatus !== "in_review" && input.requestedStatus !== "done") return null;
   if (input.currentStatus === input.requestedStatus) return null;
-  if (input.actor.actorType !== "agent" || !input.actor.agentId || !input.actor.runId) return null;
+  if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
 
   const monitorPolicy = readGoalConditionMonitorPolicy(input.issue.executionPolicy as IssueExecutionPolicy | null);
   if (!monitorPolicy) return null;
+
+  // DUR-3992: an agent with no trusted run id must not skip the judge. Refuse (fail closed)
+  // unless this round's goal condition is already confirmed met.
+  if (!input.actor.runId) {
+    const noRunMonitorState = (input.issue.executionState as { monitor?: IssueExecutionMonitorState | null } | null)
+      ?.monitor ?? null;
+    if (goalConditionAlreadyMetForRound(noRunMonitorState, nextGoalConditionRound(noRunMonitorState))) return null;
+    return { message: MISSING_RUN_ID_GATE_MESSAGE };
+  }
 
   // The judge's own run must be allowed through — it never itself transitions the issue.
   if (await isGoalConditionJudgeRunId(input.db, input.actor.runId)) return null;

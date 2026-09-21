@@ -41,6 +41,7 @@ import {
   type LaneAToolContext,
   type LaneAToolDeps,
 } from "./lane-a-tools.js";
+import { readAnthropicApiKey } from "../env-values.js";
 
 /** Per-conversation hard turn cap — a runaway loop must start a fresh conversation. */
 export const LANE_A_MAX_TURNS_PER_CONVERSATION = 40;
@@ -762,7 +763,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     actions: LaneAAction[];
   }> {
     const { systemPrompt, history, message, toolset, ctx } = params;
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = readAnthropicApiKey();
     if (!apiKey) {
       throw new HttpError(503, "Lane A is not configured on this instance (ANTHROPIC_API_KEY unset)");
     }
@@ -1305,7 +1306,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     model: string;
     maxOutputTokens: number;
   }) {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = readAnthropicApiKey();
     if (!apiKey) {
       throw new HttpError(503, "Lane A is not configured on this instance (ANTHROPIC_API_KEY unset)");
     }

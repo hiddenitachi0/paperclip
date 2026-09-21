@@ -34,6 +34,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { captureServerOnlyAnthropicApiKey, resolveMigrationConnectionString } from "./env-values.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
@@ -140,6 +141,9 @@ export async function startServer(): Promise<StartedServer> {
   // connection or the HTTP server exists — see instrumentation.ts.
   await instrumentationReady;
   let config = loadConfig();
+  // DUR-3945: take the server-only Anthropic key out of process.env before any
+  // agent can be spawned, so agents never inherit it (see env-values.ts).
+  captureServerOnlyAnthropicApiKey();
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -349,11 +353,13 @@ export async function startServer(): Promise<StartedServer> {
     | { mode: "embedded-postgres"; dataDir: string; port: number };
   assertCloudDatabaseContract();
   if (config.databaseUrl) {
-    const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
+    // DUR-3945: blank DATABASE_MIGRATION_URL means "use DATABASE_URL" here and
+    // for the plugin-migration handle below -- one rule, not two.
+    const migrationUrl = resolveMigrationConnectionString(config.databaseMigrationUrl, config.databaseUrl);
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
   
     db = createDb(config.databaseUrl);
-    pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
+    pluginMigrationDb = migrationUrl !== config.databaseUrl ? createDb(migrationUrl) : db;
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
     activeDatabaseConnectionString = config.databaseUrl;
     startupDbInfo = { mode: "external-postgres", connectionString: config.databaseUrl };

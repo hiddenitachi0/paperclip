@@ -14632,7 +14632,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               currentStageId: executionState?.currentStageId ?? null,
               currentStageType: executionState?.currentStageType ?? null,
               reviewRecoveryInstruction:
-                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
+                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action (if the operator must answer, file an ask_user_questions or request_confirmation question card first; blocked without one is refused).",
             }, "normal_model"),
             sessionIdBefore: recoverySessionBefore,
             retryOfRunId: run.id,
