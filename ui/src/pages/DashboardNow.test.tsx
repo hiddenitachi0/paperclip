@@ -184,6 +184,62 @@ describe("DashboardNow — work nobody is moving", () => {
     act(() => root.unmount());
   });
 
+  it("leads each row with the plain reason, with the title and ticket id as secondary text", async () => {
+    apiMocks.stalledTasks.mockResolvedValue(
+      stalledResult([
+        stalledTask({
+          identifier: "DUR-3945",
+          title: "DUR-244 item 3: execute RLS cutover -- provision login roles",
+          status: "todo",
+          reason: "waiting_on_person",
+          reasonText:
+            "Waiting on Filip — this is with a person, not an agent. Nothing has happened since 13 September.",
+        }),
+      ]),
+    );
+
+    const root = await renderNow(container);
+
+    const row = container.querySelector('[data-testid="now-stalled-task"]');
+    expect(row).not.toBeNull();
+    // The whole row is still the link to the task.
+    expect(row?.tagName).toBe("A");
+    expect(row?.getAttribute("to")).toBe("/issues/DUR-3945");
+
+    const reason = row?.querySelector('[data-testid="now-stalled-task-reason"]');
+    const title = row?.querySelector('[data-testid="now-stalled-task-title"]');
+    const tag = row?.querySelector('[data-testid="now-stalled-task-id"]');
+    // The headline is the plain sentence -- no jargon title, no ticket id.
+    expect(reason?.textContent).toBe(
+      "Waiting on Filip — this is with a person, not an agent. Nothing has happened since 13 September.",
+    );
+    expect(reason?.textContent).not.toContain("DUR-");
+    // The first thing the operator reads is the reason, not the title.
+    expect(row?.textContent?.startsWith("Waiting on Filip")).toBe(true);
+    expect(title?.textContent).toBe("DUR-244 item 3: execute RLS cutover -- provision login roles");
+    expect(tag?.textContent).toBe("DUR-3945");
+    // Reason comes before the title in reading order.
+    expect(
+      reason && title ? reason.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING : 0,
+    ).toBeTruthy();
+
+    act(() => root.unmount());
+  });
+
+  it("omits the id tag for a task without an identifier", async () => {
+    apiMocks.stalledTasks.mockResolvedValue(stalledResult([stalledTask({ identifier: null })]));
+
+    const root = await renderNow(container);
+
+    const row = container.querySelector('[data-testid="now-stalled-task"]');
+    expect(row?.querySelector('[data-testid="now-stalled-task-id"]')).toBeNull();
+    expect(row?.querySelector('[data-testid="now-stalled-task-reason"]')?.textContent).toBe(
+      "Finished and waiting for you since 13 September.",
+    );
+
+    act(() => root.unmount());
+  });
+
   it("counts stalled work in the Needs-you total and in the honesty line", async () => {
     apiMocks.stalledTasks.mockResolvedValue(stalledResult([stalledTask(), stalledTask({ issueId: "issue-2" })]));
     // Three open tasks on the board overall.
