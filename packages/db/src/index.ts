@@ -48,6 +48,8 @@ export {
   createRequestScopedDb,
   ConnectionReleaseUnsafeError,
   ConnectionFencedError,
+  ConnectionReserveTimeoutError,
+  RESERVE_CONNECTION_TIMEOUT_MS,
   type CompanyScopeBypassOptions,
   type RequestScope,
   type RequestCompanyScope,
