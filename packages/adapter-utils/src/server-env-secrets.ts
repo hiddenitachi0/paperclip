@@ -48,8 +48,10 @@ export function isServerOnlyEnvName(name: string): boolean {
  * values of these names in memory only (server/src/server-secrets.ts), and
  * the container entrypoint hands them over through a one-shot pipe instead of
  * the environment, so they never appear in /proc/<server>/environ. This is the
- * one list both of those read (the entrypoint asks it through
- * server/src/server-secrets-handoff.ts); do not copy it anywhere else.
+ * one list both of those read (the entrypoint reads a copy written from it
+ * at image build time by server/src/server-secret-names.ts, because it runs
+ * as root and must not run code agents can edit); do not copy it anywhere
+ * else by hand.
  */
 export function isServerSecretEnvName(name: string): boolean {
   return isServerOnlyEnvName(name) || SERVER_DATABASE_ENV_NAMES.includes(name);

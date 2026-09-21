@@ -26,7 +26,7 @@ import {
   resetServerSecretsForTests,
   serverSecretsHandoffUsed,
 } from "../server-secrets.js";
-import { buildServerSecretsHandoff, formatServerSecretsHandoff } from "../server-secrets-handoff.js";
+import { formatServerSecretNameList } from "../server-secret-names.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const canary = () => `DUR3994CANARY${randomBytes(12).toString("hex")}`;
@@ -214,29 +214,137 @@ describe("instance .env files cannot plant or leak a key", () => {
   });
 });
 
-describe("entrypoint helper", () => {
-  it("prefers the secrets file, hands over only non-blank values, and unsets every key name", () => {
-    const fromFile = canary();
-    const fromEnv = canary();
-    const handoff = buildServerSecretsHandoff({
-      env: { BETTER_AUTH_SECRET: "", DATABASE_URL: fromEnv, DATABASE_MIGRATION_URL: "  ", HOME: "/paperclip" },
-      fileText: `BETTER_AUTH_SECRET=${fromFile}\nNOT_A_KEY=x\n`,
-    });
-    expect(handoff.unsetNames).toEqual(["BETTER_AUTH_SECRET", "DATABASE_MIGRATION_URL", "DATABASE_URL"]);
-    expect(handoff.values.get("BETTER_AUTH_SECRET") === fromFile).toBe(true);
-    expect(handoff.values.get("DATABASE_URL") === fromEnv).toBe(true);
-    expect(handoff.values.has("DATABASE_MIGRATION_URL")).toBe(false);
-    expect(handoff.ignoredFileNames).toEqual(["NOT_A_KEY"]);
+// ---------------------------------------------------------------------------
+// The root-run hand-over helper (scripts/server-secrets-handoff.sh), run with
+// dash as in the image. It must not depend on anything under /app.
+// ---------------------------------------------------------------------------
+const HANDOFF_SCRIPT = path.join(REPO_ROOT, "scripts/server-secrets-handoff.sh");
+const ENTRYPOINT = path.join(REPO_ROOT, "scripts/docker-entrypoint.sh");
+const SHELL = fs.existsSync("/usr/bin/dash") ? "/usr/bin/dash" : "/bin/sh";
 
-    const text = formatServerSecretsHandoff(handoff);
-    expect(text.split("\n")[0]).toBe("UNSET BETTER_AUTH_SECRET DATABASE_MIGRATION_URL DATABASE_URL");
-    expect(text.includes(fromFile) || text.includes(fromEnv)).toBe(false); // base64 only
-    const parsed = parseServerSecretsHandoff(text.split("\n").slice(1).join("\n"));
+function writeNamesFile(dir: string): string {
+  const file = path.join(dir, "server-secret-names");
+  fs.writeFileSync(file, formatServerSecretNameList());
+  return file;
+}
+
+function runHandoff(env: Record<string, string>, secretsFile: string, namesFile: string) {
+  return spawnSync(SHELL, [HANDOFF_SCRIPT, secretsFile, namesFile], {
+    encoding: "utf8",
+    env: { PATH: "/usr/bin:/bin", ...env },
+  });
+}
+
+describe("server key name list (built into the image)", () => {
+  it("lists every server key name and prefix from the single list, names only", () => {
+    const text = formatServerSecretNameList();
+    const lines = text.trim().split("\n");
+    expect(lines).toContain("name BETTER_AUTH_SECRET");
+    expect(lines).toContain("name DATABASE_URL");
+    expect(lines).toContain("name DATABASE_BYPASS_URL");
+    expect(lines).toContain("name DATABASE_MIGRATION_URL");
+    expect(lines).toContain("name PAPERCLIP_AGENT_JWT_SECRET");
+    expect(lines).toContain("name PAPERCLIP_SECRETS_MASTER_KEY");
+    expect(lines).toContain("prefix PAPERCLIP_SERVER_");
+    for (const line of lines) expect(line).toMatch(/^(name|prefix) [A-Za-z_][A-Za-z0-9_]*$/);
+  });
+});
+
+describe("root-run hand-over helper (shell, no Node)", () => {
+  it("prefers the secrets file, hands over only non-blank values, and unsets every key name", () => {
+    const dir = tempDir("dur3994-handoff-");
+    const fromFile = canary();
+    const fromEnv = `postgres://p:${canary()}$x\`y'z"@db/p`;
+    const prefixed = canary();
+    const secretsFile = path.join(dir, "server.env");
+    fs.writeFileSync(
+      secretsFile,
+      `# comment\nBETTER_AUTH_SECRET="${fromFile}"\r\nexport PAPERCLIP_SERVER_DUR3994_X = '${prefixed}'\nNOT_A_KEY=x\nDATABASE_URL=   \n`,
+    );
+    const res = runHandoff(
+      { BETTER_AUTH_SECRET: "", DATABASE_URL: fromEnv, DATABASE_MIGRATION_URL: "  ", HOME: "/paperclip" },
+      secretsFile,
+      writeNamesFile(dir),
+    );
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stderr).toContain("ignored NOT_A_KEY");
+    const lines = res.stdout.trimEnd().split("\n");
+    expect(lines[0]).toBe("UNSET BETTER_AUTH_SECRET DATABASE_MIGRATION_URL DATABASE_URL");
+    expect(res.stdout.includes(fromFile) || res.stdout.includes(prefixed) || res.stdout.includes("DUR3994CANARY")).toBe(false);
+    const parsed = parseServerSecretsHandoff(lines.slice(1).join("\n"));
+    expect(parsed.problems).toEqual([]);
+    expect([...parsed.values.keys()].sort()).toEqual(["BETTER_AUTH_SECRET", "DATABASE_URL", "PAPERCLIP_SERVER_DUR3994_X"]);
     expect(parsed.values.get("BETTER_AUTH_SECRET") === fromFile).toBe(true);
+    expect(parsed.values.get("DATABASE_URL") === fromEnv).toBe(true);
+    expect(parsed.values.get("PAPERCLIP_SERVER_DUR3994_X") === prefixed).toBe(true);
+    expect(res.stderr.includes("DUR3994CANARY")).toBe(false);
   });
 
   it("prints nothing when there is nothing to hand over", () => {
-    expect(formatServerSecretsHandoff(buildServerSecretsHandoff({ env: { HOME: "/x", BETTER_AUTH_SECRET: "" } }))).toBe("");
+    const dir = tempDir("dur3994-handoff-");
+    const res = runHandoff({ HOME: "/x", BETTER_AUTH_SECRET: "" }, path.join(dir, "missing"), writeNamesFile(dir));
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toBe("");
+  });
+
+  it("fails (so the entrypoint starts the old way) when the name list is missing or malformed", () => {
+    const dir = tempDir("dur3994-handoff-");
+    const missing = runHandoff({ BETTER_AUTH_SECRET: canary() }, path.join(dir, "none"), path.join(dir, "no-names"));
+    expect(missing.status).not.toBe(0);
+    expect(missing.stdout).toBe("");
+    const bad = path.join(dir, "bad-names");
+    fs.writeFileSync(bad, "name $(touch pwned)\n");
+    const malformed = runHandoff({ BETTER_AUTH_SECRET: canary() }, path.join(dir, "none"), bad);
+    expect(malformed.status).not.toBe(0);
+    expect(malformed.stdout).toBe("");
+    expect(fs.existsSync(path.join(process.cwd(), "pwned"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Nothing the entrypoint runs as root may be writable by `node` (every agent
+// runs as node and /app is node's). Static checks on the entrypoint and the
+// Dockerfile; the acceptance harness checks the same in the built image.
+// ---------------------------------------------------------------------------
+describe("root-run code stays out of the agents' reach", () => {
+  it("the entrypoint runs no Node code and nothing from /app before dropping to node", () => {
+    const text = fs.readFileSync(ENTRYPOINT, "utf8");
+    const beforeDrop = text
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .filter((line) => !/^\s*exec (env \$unset_args PAPERCLIP_SECRETS_FD=3 )?gosu node "\$@"\s*$/.test(line))
+      .filter((line) => !/^\s*\*" server\/dist\/index\.js "\*\|\*" \/app\/server\/dist\/index\.js "\*\)\s*$/.test(line))
+      .join("\n");
+    expect(beforeDrop).not.toMatch(/\/app\//);
+    expect(beforeDrop).not.toMatch(/\bnode\s+--/);
+    expect(beforeDrop).not.toMatch(/tsx|node_modules/);
+    expect(text).toContain("SECRETS_HANDOFF_SCRIPT=/usr/local/lib/paperclip/server-secrets-handoff.sh");
+    expect(text).toContain("SECRETS_NAMES_FILE=/usr/local/share/paperclip/server-secret-names");
+  });
+
+  it("the helper runs only system tools", () => {
+    const text = fs.readFileSync(HANDOFF_SCRIPT, "utf8")
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    expect(text).not.toMatch(/\/app\/|\bnode\b|tsx|node_modules/);
+  });
+
+  it("the Dockerfile installs the root-run files root-owned, outside /app", () => {
+    const dockerfile = fs.readFileSync(path.join(REPO_ROOT, "Dockerfile"), "utf8");
+    const production = dockerfile.slice(dockerfile.indexOf("FROM base AS production"));
+    for (const target of [
+      "/usr/local/bin/docker-entrypoint.sh",
+      "/usr/local/lib/paperclip/server-secrets-handoff.sh",
+      "/usr/local/share/paperclip/server-secret-names",
+    ]) {
+      const dir = path.posix.dirname(target);
+      const copy = production.split("\n").find((line) => line.startsWith("COPY ") && (line.includes(target) || line.trimEnd().endsWith(` ${dir}/`)));
+      expect(copy, target).toBeDefined();
+      expect(copy).not.toContain("--chown");
+      expect(production).toMatch(new RegExp(`chown root:root[^\\n]*${target.replace(/[.]/g, "\\.")}`));
+    }
+    expect(dockerfile).toContain("server/dist/server-secret-names.js >/tmp/paperclip-server-secret-names");
   });
 });
 
@@ -257,21 +365,23 @@ describe.skipIf(!canUseUserNamespace())("docker-entrypoint.sh hand-over (real da
     fs.mkdirSync(bin);
     const realNode = process.execPath;
     const loader = path.join(REPO_ROOT, "server/node_modules/tsx/dist/loader.mjs");
-    const helper = path.join(REPO_ROOT, "server/src/server-secrets-handoff.ts");
-    // node stub: the entrypoint calls the helper by its /app path; run the
-    // repository's source instead (and the test's secrets file path).
-    fs.writeFileSync(
-      path.join(bin, "node"),
-      [
-        "#!/bin/sh",
-        'if [ "$1" = "--import" ] && [ "$3" = "/app/server/dist/server-secrets-handoff.js" ]; then',
-        `  exec '${realNode}' --import '${loader}' '${helper}' "\${TEST_SECRETS_FILE:-$4}"`,
-        "fi",
-        `exec '${realNode}' "$@"`,
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
+    // The real entrypoint, with only its three root-owned image paths pointed
+    // at this test's copies (the repository's helper, a freshly built name
+    // list, and the test's secrets file).
+    const secretsFile = path.join(dir, "server.env");
+    const entrypoint = path.join(dir, "docker-entrypoint.sh");
+    const original = fs.readFileSync(ENTRYPOINT, "utf8");
+    const patched = original
+      .replace("SECRETS_HANDOFF_SCRIPT=/usr/local/lib/paperclip/server-secrets-handoff.sh", `SECRETS_HANDOFF_SCRIPT='${HANDOFF_SCRIPT}'`)
+      .replace("SECRETS_NAMES_FILE=/usr/local/share/paperclip/server-secret-names", `SECRETS_NAMES_FILE='${writeNamesFile(dir)}'`)
+      .replace("SECRETS_FILE=/run/secrets/paperclip_server", `SECRETS_FILE='${secretsFile}'`);
+    expect(patched.split("\n").filter((l, i) => l !== original.split("\n")[i]).length).toBe(3);
+    fs.writeFileSync(entrypoint, patched);
+    // Any `node` looked up on PATH can only come from the root-run part of
+    // the entrypoint (the server command below uses an absolute path): it
+    // must never happen.
+    const nodeCalledMarker = path.join(dir, "node-was-called-as-root");
+    fs.writeFileSync(path.join(bin, "node"), `#!/bin/sh\ntouch '${nodeCalledMarker}'\nexit 97\n`, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, "gosu"), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
     fs.writeFileSync(
       path.join(bin, "id"),
@@ -310,7 +420,7 @@ process.stdout.write(JSON.stringify({
 }));
 `,
     );
-    return { dir, bin, probe, realNode, loader };
+    return { dir, bin, probe, realNode, loader, entrypoint, secretsFile, nodeCalledMarker };
   }
 
   function runEntrypoint(
@@ -330,7 +440,7 @@ process.stdout.write(JSON.stringify({
       env = { ...env, TEST_CANARIES_FILE: canariesFile };
       delete env.TEST_CANARIES;
     }
-    const res = spawnSync("unshare", ["-r", "sh", path.join(REPO_ROOT, "scripts/docker-entrypoint.sh"), ...args], {
+    const res = spawnSync("unshare", ["-r", "sh", ctx.entrypoint, ...args], {
       encoding: "utf8",
       env: {
         PATH: `${ctx.bin}:/usr/bin:/bin`,
@@ -367,6 +477,7 @@ process.stdout.write(JSON.stringify({
       harmless: "kept",
       bigLength: null,
     });
+    expect(fs.existsSync(ctx.nodeCalledMarker)).toBe(false);
   }, 60_000);
 
   it("a hand-over bigger than one pipe buffer still arrives whole", () => {
@@ -387,12 +498,10 @@ process.stdout.write(JSON.stringify({
     const ctx = setup();
     const auth = canary();
     const jwt = canary();
-    const secretsFile = path.join(ctx.dir, "server.env");
-    fs.writeFileSync(secretsFile, `BETTER_AUTH_SECRET=${auth}\nPAPERCLIP_AGENT_JWT_SECRET=${jwt}\n`, { mode: 0o400 });
+    fs.writeFileSync(ctx.secretsFile, `BETTER_AUTH_SECRET=${auth}\nPAPERCLIP_AGENT_JWT_SECRET=${jwt}\n`, { mode: 0o400 });
     const out = runEntrypoint(ctx, {
       BETTER_AUTH_SECRET: "",
       PAPERCLIP_AGENT_JWT_SECRET: "",
-      TEST_SECRETS_FILE: secretsFile,
       TEST_CANARIES: JSON.stringify([auth, jwt]),
     });
     expect(out.fdIsPipe).toBe(true);

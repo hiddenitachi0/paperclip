@@ -56,6 +56,12 @@ RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+# DUR-3994 Stage 1: the list of the server's key names (names only, never a
+# value) for the root-run key hand-over in docker-entrypoint.sh. Generated here,
+# at build time, so the entrypoint never has to run Node code from /app -- which
+# every agent can write -- as root.
+RUN node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/server-secret-names.js >/tmp/paperclip-server-secret-names \
+  && grep -q '^name BETTER_AUTH_SECRET$' /tmp/paperclip-server-secret-names
 
 FROM base AS production
 ARG USER_UID=1000
@@ -80,8 +86,12 @@ RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/cod
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
+# DUR-3994 Stage 1: everything the entrypoint runs as root is root-owned and
+# lives outside /app (which the `node` user, i.e. every agent, can write).
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY scripts/server-secrets-handoff.sh /usr/local/lib/paperclip/server-secrets-handoff.sh
+RUN chown root:root /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip/server-secrets-handoff.sh \
+  && chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip /usr/local/lib/paperclip/server-secrets-handoff.sh
 
 # Global git credential helper: lets any agent (and managed clones) authenticate
 # github.com clone/fetch/push from a GITHUB_TOKEN/GH_TOKEN in the environment,
@@ -113,6 +123,12 @@ RUN chmod +x /usr/local/share/paperclip/githooks/pre-push \
 # from the official static uv image (no pip needed). Pin a version tag here if
 # reproducible builds become a requirement.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# DUR-3994 Stage 1: the server's key-name list for the root-run hand-over,
+# root-owned and outside /app (changes only when the list does).
+COPY --from=build /tmp/paperclip-server-secret-names /usr/local/share/paperclip/server-secret-names
+RUN chown root:root /usr/local/share/paperclip /usr/local/share/paperclip/server-secret-names \
+  && chmod 0755 /usr/local/share/paperclip && chmod 0644 /usr/local/share/paperclip/server-secret-names
 
 # Deliberately last: this is the only layer that changes on every commit, so
 # putting it after the network-fetching steps above keeps their cache valid

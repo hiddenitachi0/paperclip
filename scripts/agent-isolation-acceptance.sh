@@ -29,6 +29,9 @@
 #     records whether its command line or environment carries a canary; the
 #     backup must still be a pg_dump backup with today's file name, in
 #     today's folder, and restore with psql into a fresh database;
+#   - every file the entrypoint runs as root (and each folder above it) is
+#     root-owned and not writable by `node`, so an agent cannot plant code
+#     that root runs at the next container start;
 #   - ISOLATION_SECRETS_MODE=env (keys in the container settings, as
 #     production today) or file (keys only in a root-only secrets file,
 #     docker/docker-compose.secrets.yml, as after Stage 3).
@@ -202,6 +205,39 @@ check_dockerignore() {
 stage_enforced() { # stage -> 0 if enforced
   case " $(printf '%s' "$ENFORCED_STAGES" | tr ',' ' ') " in *" $1 "*) return 0 ;; esac
   return 1
+}
+
+# Stage 1: nothing the entrypoint runs as ROOT may be writable by `node`
+# (every agent runs as node). Otherwise an agent could plant code there, make
+# the container restart (`kill -TERM 1`), and have it run as root. Checked as
+# the node user, in the built image: each file and every folder above it must
+# be owned by root and not writable.
+check_root_run_files() {
+  local container="$1" out
+  out="$(docker exec -u node "$container" sh -c '
+    bad=0
+    for f in /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip/server-secrets-handoff.sh \
+             /usr/local/share/paperclip/server-secret-names /bin/sh /usr/sbin/gosu; do
+      real="$(readlink -f "$f" 2>/dev/null || echo "$f")"
+      if [ ! -e "$real" ]; then echo "MISSING $f"; bad=1; continue; fi
+      p="$real"
+      while :; do
+        if [ -w "$p" ] || [ "$(stat -c %u "$p")" != 0 ]; then echo "WRITABLE $p"; bad=1; fi
+        [ "$p" = / ] && break
+        p="$(dirname "$p")"
+      done
+    done
+    if grep -v "^[[:space:]]*#" /usr/local/bin/docker-entrypoint.sh | grep -q "/app/server/dist/server-secrets\|node --import"; then
+      echo "ENTRYPOINT-RUNS-APP-CODE"; bad=1
+    fi
+    [ "$bad" = 0 ] && echo OK
+  ' 2>&1)"
+  printf '%s\n' "$out" >"$LOG_DIR/root-run-files.txt"
+  if [ "$out" = OK ]; then
+    log "PASS 1 root-run-files: everything the entrypoint runs as root is root-owned and not writable by agents"
+  else
+    fail "LEAK 1 root-run-files: $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
 }
 
 # Stage 1: a real backup through the server, with a spy in front of pg_dump
@@ -392,6 +428,7 @@ main() {
   fi
 
   if stage_enforced 1; then
+    check_root_run_files "$container"
     stage1_server_checks "$container"
   fi
 
