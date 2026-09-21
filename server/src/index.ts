@@ -34,6 +34,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { resolveMigrationConnectionString } from "./env-values.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
@@ -349,11 +350,13 @@ export async function startServer(): Promise<StartedServer> {
     | { mode: "embedded-postgres"; dataDir: string; port: number };
   assertCloudDatabaseContract();
   if (config.databaseUrl) {
-    const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
+    // DUR-3945: blank DATABASE_MIGRATION_URL means "use DATABASE_URL" here and
+    // for the plugin-migration handle below -- one rule, not two.
+    const migrationUrl = resolveMigrationConnectionString(config.databaseMigrationUrl, config.databaseUrl);
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
   
     db = createDb(config.databaseUrl);
-    pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
+    pluginMigrationDb = migrationUrl !== config.databaseUrl ? createDb(migrationUrl) : db;
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
     activeDatabaseConnectionString = config.databaseUrl;
     startupDbInfo = { mode: "external-postgres", connectionString: config.databaseUrl };

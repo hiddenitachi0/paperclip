@@ -19,6 +19,7 @@ import {
   getChangedFilePathsForIssueWorkspace,
 } from "./self-review-gate.js";
 import { approvalPayloadKind, approvalPayloadOriginalIssueIds } from "./deploy-completion-gate.js";
+import { readAnthropicApiKey } from "../env-values.js";
 
 /**
  * Done-gate quality check ("critic"): the first OFFENSIVE quality loop.
@@ -228,7 +229,7 @@ export function parseDoneGateCriticReply(text: string): { verdict: DoneGateVerdi
 
 /** The default critic: one cheap Anthropic call, same shape as secretary-classifier.ts. */
 export const anthropicDoneGateCritic: DoneGateCritic = async (input) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = readAnthropicApiKey();
   if (!apiKey) {
     throw new Error("done-gate critic is not configured on this instance (ANTHROPIC_API_KEY unset)");
   }
@@ -296,7 +297,7 @@ export function estimateDoneGateCriticMaxCostCents(): number {
  * could not run, so the two failure cases never look like a passing check.
  */
 export function describeDoneGateReadiness(): { ready: boolean; notReadyReason: string | null; model: string } {
-  const hasKey = Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+  const hasKey = readAnthropicApiKey() !== undefined;
   return {
     ready: hasKey,
     notReadyReason: hasKey

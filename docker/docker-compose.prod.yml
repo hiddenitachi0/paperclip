@@ -24,12 +24,30 @@
 #   BETTER_AUTH_SECRET=<openssl rand -hex 32>
 #   PAPERCLIP_PUBLIC_URL=https://<host>.<tailnet>.ts.net
 #   PAPERCLIP_ALLOWED_HOSTNAMES=<host>.<tailnet>.ts.net,localhost,127.0.0.1
+#
+# Optional in .env (never committed; see docs/rls-cutover-runbook.md):
+#   DATABASE_URL=...            (default: the base compose's paperclip login)
+#   DATABASE_BYPASS_URL=...     (default: unset -> same as DATABASE_URL)
+#   DATABASE_MIGRATION_URL=...  (default: unset -> migrations use DATABASE_URL)
+#   ANTHROPIC_API_KEY=...       (default: unset -> quick agents stay off)
 services:
   server:
     restart: unless-stopped
     stop_grace_period: 260s
     environment:
       PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
+      # DUR-3945: database logins and the Anthropic key come from the gitignored
+      # docker/.env so they survive the deploy runner's `git reset --hard`.
+      # DATABASE_URL keeps the base compose's exact value when .env has none.
+      # The other three are bare keys (no value): Compose copies them in from
+      # docker/.env / the shell when set there, and leaves them out of the
+      # container entirely when not -- so an install without them runs with
+      # exactly the same environment as before. See docs/rls-cutover-runbook.md,
+      # "This installation".
+      DATABASE_URL: "${DATABASE_URL:-postgres://paperclip:paperclip@db:5432/paperclip}"
+      DATABASE_BYPASS_URL:
+      DATABASE_MIGRATION_URL:
+      ANTHROPIC_API_KEY:
     ports: !override
       - "127.0.0.1:3100:3100"
   db:
