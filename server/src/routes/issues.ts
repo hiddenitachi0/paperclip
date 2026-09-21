@@ -6432,7 +6432,7 @@ export function issueRoutes(
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
     // DUR-45: never persist status:"blocked" for a cheap/status-only run's own
     // size limits -- escalate to a normal-model run on this issue instead.
-    await interceptCheapRunBlockedStatusTransition(req, existing);
+    const cheapRunBlockedInterception = await interceptCheapRunBlockedStatusTransition(req, existing);
 
     const actor = getActorInfo(req);
     const isClosed = isClosedIssueStatus(existing.status);
@@ -6483,7 +6483,19 @@ export function issueRoutes(
       requestedBlockedByIssueIds: req.body.blockedByIssueIds,
       requestedDescription: updateFields.description,
     });
-    if (blockedNeedsAskGateResult) {
+    // Two callers are let through even when the gate would refuse:
+    //  - DUR-45's capped cheap-run exit: escalation is used up and that path has
+    //    already posted a system comment saying the issue needs an operator, so
+    //    `blocked` is the intended landing state (refusing it would leave the
+    //    issue in progress and post a fresh comment on every retry);
+    //  - low-trust review agents: every path the gate names (question card,
+    //    blockedByIssueIds, a blocker task) is a control-plane surface they are
+    //    denied, so the gate would leave them no way to park the issue at all.
+    if (
+      blockedNeedsAskGateResult &&
+      !cheapRunBlockedInterception.escalation?.capped &&
+      !(await actorIsLowTrustReview(req, existing.companyId, existing))
+    ) {
       res.status(409).json({ error: blockedNeedsAskGateResult.message, code: "blocked_needs_operator_ask" });
       return;
     }

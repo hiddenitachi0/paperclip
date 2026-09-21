@@ -4,22 +4,31 @@ import request from "supertest";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  agentWakeupRequests,
   agents,
   approvals,
   companies,
   createDb,
   heartbeatRuns,
   issueApprovals,
+  issueComments,
   issueRelations,
   issues,
   issueThreadInteractions,
+  projects,
 } from "@paperclipai/db";
+import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+import {
+  CHEAP_RUN_ESCALATION_REASON,
+  DEFAULT_MAX_CHEAP_RUN_ESCALATIONS_PER_ISSUE,
+} from "../services/recovery/cheap-run-escalation.js";
+import { withRecoveryModelProfileHint } from "../services/recovery/model-profile-hint.js";
 
 // DUR-3993: an agent may not set a task to "blocked" on the operator unless the
 // operator has a way to answer (a pending question card or linked approval), or
@@ -290,6 +299,74 @@ describeEmbeddedPostgres("DUR-3993 blocked needs an operator ask (PATCH /issues/
     } finally {
       await db.execute(sql`ALTER TABLE issue_thread_interactions_gone RENAME TO issue_thread_interactions`);
     }
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await statusOf(issueId)).toBe("blocked");
+  });
+
+  it("lets a cheap status-only run whose escalation cap is used up land in blocked (DUR-45 capped exit)", async () => {
+    const { companyId, agentId, runId, issueId, agentActor } = await seed();
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: withRecoveryModelProfileHint({ issueId }, "status_only") })
+      .where(eq(heartbeatRuns.id, runId));
+    for (let i = 0; i < DEFAULT_MAX_CHEAP_RUN_ESCALATIONS_PER_ISSUE; i += 1) {
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        reason: CHEAP_RUN_ESCALATION_REASON,
+        status: "completed",
+        payload: { issueId, sourceRunId: randomUUID() },
+      });
+    }
+
+    const res = await request(createApp(agentActor)).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await statusOf(issueId)).toBe("blocked");
+    const systemComments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+    expect(systemComments.length).toBe(1);
+  });
+
+  it("does not gate a low-trust review agent, which is denied every path the gate would name", async () => {
+    const { companyId, agentId, runId, issueId, agentActor } = await seed();
+    const [project] = await db
+      .insert(projects)
+      .values({ companyId, name: "Review scope", status: "in_progress" })
+      .returning();
+    const trustBoundary = {
+      mode: LOW_TRUST_REVIEW_PRESET,
+      companyId,
+      projectIds: [project!.id],
+      rootIssueId: issueId,
+      issueIds: [issueId],
+      allowedAgentIds: [],
+    };
+    const executionPolicy = { authorizationPolicy: { trustBoundary } };
+    await db
+      .update(agents)
+      .set({ permissions: { trustPreset: LOW_TRUST_REVIEW_PRESET, authorizationPolicy: { trustBoundary } } })
+      .where(eq(agents.id, agentId));
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: { issueId, executionPolicy } })
+      .where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ projectId: project!.id, executionPolicy }).where(eq(issues.id, issueId));
+
+    // Sanity: this actor really is denied the question-card route the gate names.
+    const cardRes = await request(createApp(agentActor))
+      .post(`/api/issues/${issueId}/interactions`)
+      .send({
+        kind: "request_confirmation",
+        payload: { version: 1, prompt: "Go ahead?" },
+      });
+    expect(cardRes.status, JSON.stringify(cardRes.body)).toBe(403);
+
+    const res = await request(createApp(agentActor)).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(await statusOf(issueId)).toBe("blocked");

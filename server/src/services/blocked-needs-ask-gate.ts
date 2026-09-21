@@ -33,6 +33,10 @@ import { logger } from "../middleware/logger.js";
  *      markers (skills/paperclip/SKILL.md) -- a party outside the company
  *      cannot answer a question card, and the operator cannot answer for them.
  *
+ * The route additionally lets through a cheap run whose DUR-45 escalation cap
+ * is used up (that path already told the operator the issue needs them) and a
+ * low-trust review agent (denied every surface this gate would point it to).
+ *
  * Never gates a board user, a delegate or any non-agent actor, never gates an
  * issue that is already `blocked`, and FAILS OPEN: any unexpected error is
  * logged and the transition goes through, exactly as before this gate existed.

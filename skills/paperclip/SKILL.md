@@ -178,21 +178,16 @@ The array **replaces** the current set on each update — send `[]` to clear. Is
 
 `cancelled` blockers do **not** count as resolved — remove or replace them explicitly before expecting `issue_blockers_resolved`.
 
-**Blocked on a human or external party, with no other issue/agent to link:** when you set `status: "blocked"` and the blocker isn't another issue, name the owner and action as the first lines of the `description` so Paperclip can attribute it structurally (not just in prose an operator has to go find):
+**Blocked on the operator, with no other issue/agent to link:** file a question card first — `POST /api/issues/{issueId}/interactions` with kind `ask_user_questions` (questions) or `request_confirmation` (a yes/no decision) — then set `status: "blocked"`. The card gives the operator an answer box in their Needs-you lane.
 
-```
-Human owner: GitHub org admin
-Human action: open the ruleset settings page and remove pytest from the required checks
-```
-
-or, for a party outside the org:
+**Blocked on a party outside the company:** they cannot answer a question card, so name them as the first lines of the `description`:
 
 ```
 External owner: Acme Vendor Security Team
 External action: confirm receipt of the access request
 ```
 
-Without one of these markers (or a `blockedByIssueIds` link, a pending approval, or an issue-thread interaction), a `blocked` issue with no other structured signal is classified `owner: unknown` and treated as parked — it will **not** surface in the operator's Needs-you lane even after sitting for hours. Prefer the marker for a lightweight named blocker; file an `ask_user_questions` interaction instead when you actually need the human to answer something before you can continue.
+Without one of these (or a `blockedByIssueIds` link or a pending approval), a `blocked` issue is classified `owner: unknown` and treated as parked, and an agent's attempt to set it is refused — see below.
 
 **Blocked needs a way forward (enforced).** An agent's `PATCH /api/issues/{issueId}` to `status: "blocked"` is refused with `409` (`code: "blocked_needs_operator_ask"`) unless at least one of these already exists:
 
