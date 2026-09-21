@@ -589,6 +589,13 @@ export type SelfReviewGateWakeup = (
 ) => Promise<unknown>;
 
 /**
+ * DUR-3992: returned by the done gates when an agent asks to finish a task without a run
+ * the server can trust, so the required check cannot be scheduled against it.
+ */
+export const MISSING_RUN_ID_GATE_MESSAGE =
+  "This task needs a check before it can move to review or done, and that check can only be arranged from inside one of your own active runs. Try again from a run (send your current run id), or ask the operator to move it.";
+
+/**
  * Evaluates whether an agent-initiated transition to in_review/done should be deferred
  * for a self-review pass, and if so, schedules the corrective wake. Returns null when the
  * transition should proceed as requested.
@@ -609,8 +616,21 @@ export async function evaluateSelfReviewDoneGate(input: {
 }): Promise<{ message: string } | null> {
   if (input.requestedStatus !== "in_review" && input.requestedStatus !== "done") return null;
   if (input.currentStatus === input.requestedStatus) return null;
-  if (input.actor.actorType !== "agent" || !input.actor.agentId || !input.actor.runId) return null;
+  if (input.actor.actorType !== "agent" || !input.actor.agentId) return null;
   if (issueExecutionPolicyOptsOutOfSelfReview(input.issue.executionPolicy as IssueExecutionPolicy | null)) return null;
+
+  // DUR-3992: an agent with no trusted run id (no header, or an API-key header the auth
+  // middleware refused to believe) must not slip past the gate. Only refuse when the gate
+  // would actually apply, so agents on projects without a git workspace are unaffected.
+  if (!input.actor.runId) {
+    const hasGitWorkspaceNoRun = await issueProjectHasGitWorkspace(
+      input.db,
+      input.issue.companyId,
+      input.issue.projectId,
+    );
+    if (!hasGitWorkspaceNoRun) return null;
+    return { message: MISSING_RUN_ID_GATE_MESSAGE };
+  }
 
   // The self-review pass run itself must be allowed through — otherwise its own handoff
   // attempt would re-trigger this gate and schedule another pass, looping indefinitely.

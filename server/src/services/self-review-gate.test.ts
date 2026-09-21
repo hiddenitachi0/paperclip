@@ -35,6 +35,7 @@ import {
   detectRiskySurfaceFromDiff,
   detectRiskySurfaceFromDiffContent,
   evaluateSelfReviewDoneGate,
+  MISSING_RUN_ID_GATE_MESSAGE,
   findCompletedSelfReviewPassForIssue,
   findExistingSelfReviewPassNoticeCommentForRun,
   getChangedDiffContentForIssueWorkspace,
@@ -852,6 +853,73 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
     expect(
       await findCompletedSelfReviewPassForIssue(db, { companyId, issueId, matchingDiffFingerprint: null }),
     ).toBeNull();
+  });
+
+  describe("DUR-3992: agent with no trusted run id", () => {
+    it("refuses done (fails closed, schedules nothing) instead of skipping the self-review pass", async () => {
+      const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: `T-1`, companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: null },
+        requestedStatus: "done",
+        currentStatus: "todo",
+      });
+
+      expect(result).toEqual({ message: MISSING_RUN_ID_GATE_MESSAGE });
+      expect(calls).toHaveLength(0);
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      expect(comments).toHaveLength(0);
+    });
+
+    it("still lets it through when the gate would not apply anyway (no git workspace, or self-review opted out)", async () => {
+      const { companyId, agentId, projectId, issueId } = await seedCodeIssueFixture();
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const noWorkspace = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: `T-1`, companyId, projectId: null, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: null },
+        requestedStatus: "done",
+        currentStatus: "todo",
+      });
+      const optedOut = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: {
+          id: issueId,
+          identifier: `T-1`,
+          companyId,
+          projectId,
+          executionPolicy: { mode: "normal", commentRequired: true, stages: [], selfReview: false },
+        },
+        actor: { actorType: "agent", agentId, runId: null },
+        requestedStatus: "done",
+        currentStatus: "todo",
+      });
+
+      expect(noWorkspace).toBeNull();
+      expect(optedOut).toBeNull();
+      expect(calls).toHaveLength(0);
+    });
+
+    it("leaves board/user actors without a run id unaffected", async () => {
+      const { companyId, projectId, issueId } = await seedCodeIssueFixture();
+      const { wakeup } = makeRecordingWakeup(db, companyId);
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: issueId, identifier: `T-1`, companyId, projectId, executionPolicy: null },
+        actor: { actorType: "user", agentId: null, runId: null },
+        requestedStatus: "done",
+        currentStatus: "todo",
+      });
+      expect(result).toBeNull();
+    });
   });
 
   it("skips the gate (and posts no comment) when the issue's project has no git workspace", async () => {
