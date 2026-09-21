@@ -34,6 +34,8 @@ const mocks = vi.hoisted(() => {
     reloadExternalAdapter: vi.fn(),
     // DUR-3994 Stage 2: install/reinstall record the adapter's files as trusted.
     recordExternalAdapterCode: vi.fn(async () => undefined),
+    prepareManagedAdapterFolder: vi.fn(async () => ({ movedAsideTo: null })),
+    isSafeNpmPackageName: vi.fn(() => true),
     getUiParserSource: vi.fn(),
     getOrExtractUiParserSource: vi.fn(),
   };
@@ -60,6 +62,8 @@ vi.mock("../adapters/plugin-loader.js", () => ({
   getOrExtractUiParserSource: mocks.getOrExtractUiParserSource,
   reloadExternalAdapter: mocks.reloadExternalAdapter,
   recordExternalAdapterCode: mocks.recordExternalAdapterCode,
+  prepareManagedAdapterFolder: mocks.prepareManagedAdapterFolder,
+  isSafeNpmPackageName: mocks.isSafeNpmPackageName,
 }));
 
 function registerRouteMocks() {
@@ -84,6 +88,8 @@ function registerRouteMocks() {
     getOrExtractUiParserSource: mocks.getOrExtractUiParserSource,
     reloadExternalAdapter: mocks.reloadExternalAdapter,
     recordExternalAdapterCode: mocks.recordExternalAdapterCode,
+  prepareManagedAdapterFolder: mocks.prepareManagedAdapterFolder,
+  isSafeNpmPackageName: mocks.isSafeNpmPackageName,
   }));
 }
 

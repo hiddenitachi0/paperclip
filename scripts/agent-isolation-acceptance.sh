@@ -49,6 +49,11 @@
 #     the plain "changed after it was installed" message), the edited code
 #     must never have run, and the refusal must be in the Activity feed.
 #
+#   - review fixes: a planted $HOME/.node_modules/bufferutil is not loaded by
+#     the restarted server; the server neither writes nor reads tsx's /tmp
+#     cache; the deploy runner's root exec does not run /paperclip/.profile
+#     (negative controls e and f prove each plant works when unguarded).
+#
 # Negative controls (the harness must be able to see a leak, or a green run
 # means nothing):
 #   a. The same probe run with the container's full environment (`docker exec
@@ -230,7 +235,8 @@ check_root_run_files() {
   out="$(docker exec -u node "$container" sh -c '
     bad=0
     for f in /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip/server-secrets-handoff.sh \
-             /usr/local/share/paperclip/server-secret-names /bin/sh /usr/sbin/gosu; do
+             /usr/local/share/paperclip/server-secret-names /usr/local/lib/paperclip/node-module-guard.cjs \
+             /bin/sh /usr/sbin/gosu; do
       real="$(readlink -f "$f" 2>/dev/null || echo "$f")"
       if [ ! -e "$real" ]; then echo "MISSING $f"; bad=1; continue; fi
       p="$real"
@@ -479,6 +485,89 @@ stage2_plugin_tamper_checks() {
   fi
 }
 
+# Stage 2 (review fixes): three more ways an agent could get code run by the
+# server or by root, each planted exactly as an agent would (`-u node`), with
+# a negative control proving the plant itself works.
+#   - Node's global module folders: $HOME/.node_modules/bufferutil, which the
+#     `ws` package the server loads tries to require at start-up.
+#   - tsx's compile cache in /tmp/tsx-<uid>: the server must neither write
+#     nor read it (TSX_DISABLE_CACHE), so nothing new appears there across a
+#     restart; and its start-up line must report the module guard active.
+#   - $HOME/.profile (HOME=/paperclip in the image): the deploy runner's
+#     root `docker exec` must not run it.
+STAGE2_PLANT_MARKER=/tmp/dur3994-planted-module-ran
+stage2_code_planting_checks() {
+  local container control
+  container="$(server_container)"
+  docker exec -u 0 "$container" rm -f "$STAGE2_PLANT_MARKER" /tmp/dur3994-profile-ran >/dev/null 2>&1 || true
+
+  log "stage 2: plant \$HOME/.node_modules/bufferutil as the node user (the server's and /paperclip's HOME)"
+  docker exec -u node -e "MARKER=$STAGE2_PLANT_MARKER" "$container" sh -c '
+    for h in /paperclip "$(getent passwd node | cut -d: -f6)"; do
+      [ -n "$h" ] && [ -w "$h" ] || continue
+      mkdir -p "$h/.node_modules/bufferutil"
+      printf "require(\"node:fs\").writeFileSync(%s, \"ran\"); module.exports = {};\n" "\"$MARKER\"" \
+        >"$h/.node_modules/bufferutil/index.js"
+    done
+  '
+  # Negative control: an unguarded node, with the same HOME, does load it.
+  docker exec -u node -w /app/server "$container" sh -c 'HOME=/paperclip node -e "try { require(\"bufferutil\") } catch {}"' >/dev/null 2>&1 || true
+  if docker exec "$container" test -e "$STAGE2_PLANT_MARKER"; then
+    log "PASS negative control (e): an unguarded node loads the planted ~/.node_modules/bufferutil"
+  else
+    fail "negative control (e): the planted ~/.node_modules/bufferutil was not loadable at all, so the check below proves nothing"
+  fi
+  docker exec -u 0 "$container" rm -f "$STAGE2_PLANT_MARKER"
+
+  docker exec -u node "$container" sh -c 'mkdir -p "/tmp/tsx-$(id -u)" && touch /tmp/dur3994-before-restart' >/dev/null 2>&1 || true
+  sleep 1
+  if ! restart_server; then
+    fail "the server did not come back after a restart with planted modules"
+    return
+  fi
+  container="$(server_container)"
+  sleep 5
+  if docker exec "$container" test -e "$STAGE2_PLANT_MARKER"; then
+    fail "LEAK 2 home-node-modules: the server loaded a planted \$HOME/.node_modules module"
+  else
+    log "PASS 2 home-node-modules: the restarted server did not load the planted module"
+  fi
+  local new_cache_entries
+  new_cache_entries="$(docker exec -u node "$container" sh -c 'find /tmp/tsx-* -type f -newer /tmp/dur3994-before-restart 2>/dev/null | wc -l' | tr -d '[:space:]')"
+  if [ "${new_cache_entries:-1}" = 0 ]; then
+    log "PASS 2 tsx-cache: the server wrote nothing to tsx's /tmp cache (it does not use it)"
+  else
+    fail "LEAK 2 tsx-cache: the server wrote $new_cache_entries entries to tsx's /tmp cache, which agents can edit"
+  fi
+  if docker logs "$container" 2>&1 | grep "add-on code fingerprint check set up" | tail -1 \
+      | grep -q '"resolveCheck":true' \
+    && docker logs "$container" 2>&1 | grep "add-on code fingerprint check set up" | tail -1 \
+      | grep -q '"tsxCacheDisabled":true'; then
+    log "PASS 2 module-guard: the server reports the module guard and tsx cache-off active"
+  else
+    fail "the server did not report the module guard (resolve check) and TSX_DISABLE_CACHE active"
+  fi
+
+  log "stage 2: plant /paperclip/.profile as the node user; the deploy runner's root exec must not run it"
+  docker exec -u node "$container" sh -c 'printf "touch /tmp/dur3994-profile-ran\n" >/paperclip/.profile'
+  control="$(docker exec "$container" sh -lc 'test -e /tmp/dur3994-profile-ran && echo ran' 2>/dev/null || true)"
+  docker exec -u 0 "$container" rm -f /tmp/dur3994-profile-ran
+  if [ "$control" = ran ]; then
+    log "PASS negative control (f): a root login shell with the image's HOME runs the planted .profile"
+  else
+    fail "negative control (f): the planted .profile was not run even by a login shell, so the check below proves nothing"
+  fi
+  local CLI_EXEC_ENV=()
+  eval "$(grep '^CLI_EXEC_ENV=' "$REPO_ROOT/scripts/deploy-runner.sh")"
+  docker exec "${CLI_EXEC_ENV[@]}" "$container" sh -c 'true' >/dev/null 2>&1 || true
+  if docker exec "$container" test -e /tmp/dur3994-profile-ran; then
+    fail "LEAK 2 runner-profile: the deploy runner's root exec ran an agent's /paperclip/.profile"
+  else
+    log "PASS 2 runner-profile: the deploy runner's root exec did not run the planted .profile"
+  fi
+  docker exec -u node "$container" rm -f /paperclip/.profile >/dev/null 2>&1 || true
+}
+
 count_lines() { # prefix, text -> count
   printf '%s\n' "$2" | grep -c "^$1 " || true
 }
@@ -658,6 +747,7 @@ main() {
 
   if stage_enforced 2; then
     stage2_plugin_tamper_checks
+    stage2_code_planting_checks
   fi
 
   if [ "$FAIL" -eq 0 ]; then

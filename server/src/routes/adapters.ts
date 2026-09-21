@@ -53,10 +53,13 @@ import {
   loadExternalAdapterPackage,
   getUiParserSource,
   getOrExtractUiParserSource,
+  isSafeNpmPackageName,
+  prepareManagedAdapterFolder,
   recordExternalAdapterCode,
   reloadExternalAdapter,
 } from "../adapters/plugin-loader.js";
 import { logger } from "../middleware/logger.js";
+import { runIsolatedNpm } from "../services/trusted-npm.js";
 import { assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { BUILTIN_ADAPTER_TYPES } from "../adapters/builtin-adapter-types.js";
 
@@ -270,13 +273,17 @@ export function adapterRoutes() {
       let moduleLocalPath: string | undefined;
 
       if (!isLocalPath) {
-        // npm install into the managed directory
+        // npm install into the managed directory. DUR-3994 Stage 2: the
+        // whole folder is trusted afterwards, so it must still be what was
+        // recorded (or it is set aside first), and npm runs without settings
+        // agents can write.
+        await prepareManagedAdapterFolder();
         const pluginsDir = getAdapterPluginsDir();
         const spec = explicitVersion ? `${canonicalName}@${explicitVersion}` : canonicalName;
 
         logger.info({ spec, pluginsDir }, "Installing adapter package via npm");
 
-        await execFileAsync("npm", ["install", "--no-save", spec], {
+        await runIsolatedNpm(execFileAsync, ["install", "--no-save", spec], {
           cwd: pluginsDir,
           timeout: 120_000,
         });
@@ -494,25 +501,32 @@ export function adapterRoutes() {
     // If installed via npm (has packageName but no localPath), run npm uninstall
     if (externalRecord.packageName && !externalRecord.localPath) {
       try {
-        const pluginsDir = getAdapterPluginsDir();
-        await execFileAsync("npm", ["uninstall", externalRecord.packageName], {
-          cwd: pluginsDir,
-          timeout: 60_000,
-        });
-        logger.info(
-          { type: adapterType, packageName: externalRecord.packageName },
-          "npm uninstall completed for external adapter",
-        );
-        // DUR-3994 Stage 2: the shared npm folder changed; keep the other
-        // npm-installed adapters in it trusted. Best effort.
-        await recordExternalAdapterCode({ localPath: undefined, type: "managed adapter folder" }, "uninstall").catch(
-          (recordErr) => {
-            logger.warn(
-              { err: recordErr, type: adapterType },
-              "could not re-record the managed adapter folder after an uninstall; npm-installed adapters in it will be refused until one is installed again",
-            );
-          },
-        );
+        // DUR-3994 Stage 2: what is left in the shared folder is recorded as
+        // trusted afterwards, so it must still be what was recorded before.
+        // If it was changed, it is set aside, and there is nothing left to
+        // uninstall or re-record.
+        const prepared = await prepareManagedAdapterFolder();
+        if (prepared.movedAsideTo === null) {
+          const pluginsDir = getAdapterPluginsDir();
+          await runIsolatedNpm(execFileAsync, ["uninstall", externalRecord.packageName], {
+            cwd: pluginsDir,
+            timeout: 60_000,
+          });
+          logger.info(
+            { type: adapterType, packageName: externalRecord.packageName },
+            "npm uninstall completed for external adapter",
+          );
+          // DUR-3994 Stage 2: the shared npm folder changed; keep the other
+          // npm-installed adapters in it trusted. Best effort.
+          await recordExternalAdapterCode({ localPath: undefined, type: "managed adapter folder" }, "uninstall").catch(
+            (recordErr) => {
+              logger.warn(
+                { err: recordErr, type: adapterType },
+                "could not re-record the managed adapter folder after an uninstall; npm-installed adapters in it will be refused until one is installed again",
+              );
+            },
+          );
+        }
       } catch (err) {
         logger.warn(
           { err, type: adapterType, packageName: externalRecord.packageName },
@@ -614,11 +628,17 @@ export function adapterRoutes() {
     }
 
     try {
+      if (!isSafeNpmPackageName(record.packageName)) {
+        res.status(400).json({ error: `"${record.packageName}" is not a valid npm package name.` });
+        return;
+      }
+      // DUR-3994 Stage 2: see the install route.
+      await prepareManagedAdapterFolder();
       const pluginsDir = getAdapterPluginsDir();
 
       logger.info({ type, packageName: record.packageName }, "Reinstalling adapter package via npm");
 
-      await execFileAsync("npm", ["install", "--no-save", record.packageName], {
+      await runIsolatedNpm(execFileAsync, ["install", "--no-save", record.packageName], {
         cwd: pluginsDir,
         timeout: 120_000,
       });

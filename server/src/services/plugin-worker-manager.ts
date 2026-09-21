@@ -797,6 +797,11 @@ export function createPluginWorkerHandle(
       NODE_ENV: process.env.NODE_ENV ?? "production",
       TZ: process.env.TZ ?? "UTC",
     };
+    // DUR-3994 Stage 2: tsx (used for repo-local plugin workers) keeps its
+    // compiled output in a cache under /tmp that agents can edit, and runs
+    // a cached entry without checking it. The image turns that cache off
+    // for the server; workers get a fresh environment, so pass it on.
+    if (process.env.TSX_DISABLE_CACHE) workerEnv.TSX_DISABLE_CACHE = process.env.TSX_DISABLE_CACHE;
 
     const child = fork(options.entrypointPath, [], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],

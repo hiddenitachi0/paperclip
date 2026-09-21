@@ -52,11 +52,13 @@ import { pluginDatabaseService } from "./plugin-database.js";
 import { SECRET_REF_ENABLED_PLUGIN_KEYS } from "./plugin-secrets-handler.js";
 import {
   isPathInside,
+  moduleGuardForWorker,
   pluginCodeRoot,
   trustedCodeService,
   type TrustedCodeRecordReason,
   type TrustedCodeService,
 } from "./trusted-code.js";
+import { runIsolatedNpm } from "./trusted-npm.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1245,12 +1247,22 @@ export function pluginLoader(
         "plugin-loader: fetching plugin from npm",
       );
 
+      // DUR-3994 Stage 2: everything in this shared folder is trusted after
+      // the install, so first make sure nothing in it changed since it was
+      // last recorded (otherwise it is set aside and the install starts
+      // clean); and run npm without settings agents can write.
+      await trustedCode.prepareSharedFolder({
+        kind: "plugin",
+        codeRoot: path.resolve(targetInstallDir),
+        label: "managed plugin folder",
+      });
+
       try {
         // Use execFile (not exec) to avoid shell injection from package name/version.
         // --ignore-scripts prevents preinstall/install/postinstall hooks from
         // executing arbitrary code on the host before manifest validation.
-        await execFileAsync(
-          "npm",
+        await runIsolatedNpm(
+          execFileAsync,
           ["install", spec, "--prefix", targetInstallDir, "--save", "--ignore-scripts"],
           { timeout: 120_000 }, // 2 minute timeout for npm install
         );
@@ -1277,6 +1289,23 @@ export function pluginLoader(
       }
     }
 
+    // DUR-3994 Stage 2: an admin is installing this, so its manifest (code)
+    // may be loaded from its folder even though agents can write there.
+    const installCodeRoot = path.resolve(localPath ? resolvedPackagePath : targetInstallDir);
+    trustedCode.beginInstall(installCodeRoot);
+    try {
+      return await readAndValidateFetchedPlugin(resolvedPackagePath, resolvedPackageName, localPath);
+    } catch (err) {
+      trustedCode.endInstall(installCodeRoot, false);
+      throw err;
+    }
+  }
+
+  async function readAndValidateFetchedPlugin(
+    resolvedPackagePath: string,
+    resolvedPackageName: string,
+    localPath: string | undefined,
+  ): Promise<DiscoveredPlugin> {
     // Step 3: Read and validate plugin manifest
     // Note: this.loadManifest (used via current context)
     const pkgJson = await readPackageJson(resolvedPackagePath);
@@ -1895,11 +1924,34 @@ export function pluginLoader(
         managedTargets.add(path.resolve(plugin.packagePath));
       }
 
-      const packageJsonPath = path.join(localPluginDir, "package.json");
-      if (existsSync(packageJsonPath)) {
+      // DUR-3994 Stage 2: what is left in the shared folder is recorded as
+      // trusted afterwards, so it must still be what was recorded before.
+      // If not, it is set aside (every npm plugin then needs reinstalling)
+      // and there is nothing left to uninstall or re-record.
+      const sharesManagedDir = !plugin.packagePath || isPathInsideDir(plugin.packagePath, localPluginDir);
+      let managedDirSetAside = false;
+      if (sharesManagedDir) {
         try {
-          await execFileAsync(
-            "npm",
+          const prepared = await trustedCode.prepareSharedFolder({
+            kind: "plugin",
+            codeRoot: path.resolve(localPluginDir),
+            label: "managed plugin folder",
+          });
+          managedDirSetAside = prepared.movedAsideTo !== null;
+        } catch (err) {
+          log.warn(
+            { pluginId: plugin.id, err: err instanceof Error ? err.message : String(err) },
+            "plugin-loader: could not check the managed plugin folder before an uninstall; it will not be re-recorded",
+          );
+          managedDirSetAside = true;
+        }
+      }
+
+      const packageJsonPath = path.join(localPluginDir, "package.json");
+      if (!managedDirSetAside && existsSync(packageJsonPath)) {
+        try {
+          await runIsolatedNpm(
+            execFileAsync,
             ["uninstall", plugin.packageName, "--prefix", localPluginDir, "--ignore-scripts"],
             { timeout: 120_000 },
           );
@@ -1923,7 +1975,7 @@ export function pluginLoader(
 
       // DUR-3994 Stage 2: the shared npm folder changed; keep the plugins
       // still in it trusted. (A local-path plugin's own folder is untouched.)
-      if (!plugin.packagePath || isPathInsideDir(plugin.packagePath, localPluginDir)) {
+      if (sharesManagedDir && !managedDirSetAside) {
         await rerecordManagedDir("uninstall");
       }
     },
@@ -2287,6 +2339,16 @@ export function pluginLoader(
       // the tsx loader so first-party example plugins work in development.
       if (activePlugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
         workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+      }
+
+      // DUR-3994 Stage 2: the worker runs under the same module guard as the
+      // server (when the server has it: the Docker image), allowed to load
+      // only from its own checked folder -- not from HOME's global module
+      // folders or a node_modules folder above it that agents can write.
+      const workerGuard = moduleGuardForWorker(trustedCodeSubject.codeRoot);
+      if (workerGuard.execArgv.length > 0) {
+        workerOptions.execArgv = [...workerGuard.execArgv, ...(workerOptions.execArgv ?? [])];
+        workerOptions.env = { ...(workerOptions.env ?? {}), ...workerGuard.env };
       }
 
       await workerManager.startWorker(pluginId, workerOptions);

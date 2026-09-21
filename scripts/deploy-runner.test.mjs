@@ -69,6 +69,9 @@ const FAKE_DOCKER = [
   '',
   '[ "${1:-}" = "exec" ] || exit 1',
   'shift',
+  // DUR-3994 Stage 2: every exec, flags and all, for the assertions on how
+  // the runner calls into the container (as root: no login shell, root's HOME).
+  'printf "%s\\n" "$*" >> "$SCENARIO_DIR/docker-exec-calls.log"',
   '',
   'args=("$@")',
   'n=${#args[@]}',
@@ -302,6 +305,56 @@ test("two approved deploy approvals for the same project in one poll cycle both 
     assert.deepEqual(scenario.processedIds().sort(), ["aid-newer", "aid-older"], "both approvals must be marked processed since both got a comment");
   } finally {
     scenario.cleanup();
+  }
+});
+
+test("every docker exec into the server runs as root without a login shell, with root's HOME and tsx's cache off (DUR-3994)", () => {
+  // `docker exec` runs as root, and the image's HOME (/paperclip) is writable
+  // by every agent: `sh -lc` would run an agent's $HOME/.profile as root, and
+  // Node would search the agent's $HOME/.node_modules.
+  const scenario = makeScenario();
+  try {
+    scenario.writeJson("company_list.json", [{ id: "co-1" }]);
+    scenario.writeJson("approval_list.json", [
+      {
+        id: "aid-exec",
+        type: "request_board_approval",
+        status: "approved",
+        decidedAt: "2026-08-20T20:48:05Z",
+        payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+      },
+    ]);
+    scenario.writeJson("approval-aid-exec.json", {
+      id: "aid-exec",
+      payload: { kind: "deploy", projectId: "proj-1", workspaceId: "ws-1" },
+    });
+    scenario.writeJson("project-proj-1.json", DISABLED_POLICY_PROJECT);
+
+    const result = runMain(scenario);
+    assertSuccess(result, "main()");
+
+    const callsFile = path.join(scenario.dir, "docker-exec-calls.log");
+    const calls = existsSync(callsFile) ? readFileSync(callsFile, "utf8").split("\n").filter(Boolean) : [];
+    assert.ok(calls.length >= 3, `expected the runner to exec into the container, got: ${JSON.stringify(calls)}`);
+    for (const call of calls) {
+      assert.doesNotMatch(call, /\bsh -lc\b/, `login shell used: ${call}`);
+      assert.match(call, /(^| )-e HOME=\/root( |$)/, `HOME not set to /root: ${call}`);
+      assert.match(call, /(^| )-e TSX_DISABLE_CACHE=1( |$)/, `tsx cache not turned off: ${call}`);
+    }
+    assert.equal(scenario.commentsFor("aid-exec").length, 1, "the runner must still work");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("deploy-poller.sh never uses a login shell or the container's HOME for its root docker exec (DUR-3994)", () => {
+  const poller = readFileSync(path.join(repoRoot, "scripts", "deploy-poller.sh"), "utf8");
+  const execLines = poller.split("\n").filter((line) => /docker exec/.test(line) && !/^\s*#/.test(line));
+  assert.ok(execLines.length > 0);
+  for (const line of execLines) {
+    assert.doesNotMatch(line, /\bsh -lc\b/, line);
+    assert.match(line, /-e HOME=\/root/, line);
+    assert.match(line, /-e TSX_DISABLE_CACHE=1/, line);
   }
 });
 

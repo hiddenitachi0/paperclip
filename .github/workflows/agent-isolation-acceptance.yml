@@ -48,6 +48,9 @@ on:
       - "server/src/services/plugin-worker-manager.ts"
       - "server/src/adapters/plugin-loader.ts"
       - "packages/db/src/migrations/0169_trusted_code_fingerprints.sql"
+      - "scripts/node-module-guard.cjs"
+      - "scripts/deploy-runner.sh"
+      - "server/src/services/trusted-npm.ts"
   push:
     branches:
       - custom
@@ -79,6 +82,9 @@ on:
       - "server/src/services/plugin-worker-manager.ts"
       - "server/src/adapters/plugin-loader.ts"
       - "packages/db/src/migrations/0169_trusted_code_fingerprints.sql"
+      - "scripts/node-module-guard.cjs"
+      - "scripts/deploy-runner.sh"
+      - "server/src/services/trusted-npm.ts"
 
 jobs:
   isolation-acceptance:

@@ -92,7 +92,10 @@ $payload
 PAPERCLIP_SERVER_SECRETS
     unset payload
     # shellcheck disable=SC2086 # unset_args is deliberately split into words
-    exec env $unset_args PAPERCLIP_SECRETS_FD=3 gosu node "$@"
+    exec env $unset_args PAPERCLIP_SECRETS_FD=3 TSX_DISABLE_CACHE=1 gosu node "$@"
 fi
 
-exec gosu node "$@"
+# DUR-3994 Stage 2: TSX_DISABLE_CACHE is also set image-wide (Dockerfile);
+# repeated here so a container setting cannot switch tsx's /tmp cache (which
+# agents can edit) back on for the server.
+exec env TSX_DISABLE_CACHE=1 gosu node "$@"

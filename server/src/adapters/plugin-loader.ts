@@ -24,6 +24,7 @@ import {
   adapterCodeRoot,
   detectTrustedCodeMode,
   getConfiguredTrustedCode,
+  isPathInside,
   waitForConfiguredTrustedCode,
   type TrustedCodeSubject,
 } from "../services/trusted-code.js";
@@ -84,6 +85,26 @@ export async function recordExternalAdapterCode(
   await configured.record(adapterSubject(record), reason);
 }
 
+/**
+ * Before Paperclip runs npm in the shared managed adapter folder (install,
+ * reinstall, uninstall): make sure the folder is still what was recorded,
+ * or set it aside so the install starts clean (see
+ * TrustedCodeService.prepareSharedFolder). Throws only if the check could
+ * not be done while it is enforced.
+ */
+export async function prepareManagedAdapterFolder(): Promise<{ movedAsideTo: string | null }> {
+  const configured = getConfiguredTrustedCode();
+  if (!configured) {
+    if (detectTrustedCodeMode() === "off") return { movedAsideTo: null };
+    throw new Error("the trusted-code check is not set up yet");
+  }
+  return configured.prepareSharedFolder({
+    kind: "adapter",
+    codeRoot: adapterCodeRoot({ localPath: undefined }, getAdapterPluginsDir()),
+    label: "managed adapter folder",
+  });
+}
+
 // ---------------------------------------------------------------------------
 // In-memory UI parser cache
 // ---------------------------------------------------------------------------
@@ -104,6 +125,7 @@ export function getOrExtractUiParserSource(adapterType: string): string | undefi
 
   const record = getAdapterPluginByType(adapterType);
   if (!record) return undefined;
+  if (!record.localPath && !isSafeNpmPackageName(record.packageName)) return undefined;
 
   const packageDir = resolvePackageDir(record);
   const source = extractUiParserSource(packageDir, record.packageName, record);
@@ -121,10 +143,66 @@ export function getOrExtractUiParserSource(adapterType: string): string | undefi
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * An npm package name as npm itself allows it: "name" or "@scope/name", with
+ * no absolute path and no "." / ".." part. The name of an npm-installed
+ * adapter comes from adapter-plugins.json, which agents can write; without
+ * this, "../../somewhere" (or "/somewhere") made the server import a folder
+ * outside the checked managed folder.
+ */
+const NPM_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
+
+export function isSafeNpmPackageName(packageName: unknown): packageName is string {
+  if (typeof packageName !== "string" || packageName.length === 0 || packageName.length > 214) return false;
+  if (!NPM_PACKAGE_NAME_RE.test(packageName)) return false;
+  return packageName.split("/").every((part) => part !== "." && part !== "..");
+}
+
+function managedPackageDir(packageName: string): string {
+  if (!isSafeNpmPackageName(packageName)) {
+    throw new Error(
+      `Paperclip did not load the adapter package "${packageName}": that is not a valid npm package name ` +
+        `(adapter-plugins.json may have been edited).`,
+    );
+  }
+  return path.resolve(getAdapterPluginsDir(), "node_modules", packageName);
+}
+
 function resolvePackageDir(record: Pick<AdapterPluginRecord, "localPath" | "packageName">): string {
-  return record.localPath
-    ? path.resolve(record.localPath)
-    : path.resolve(getAdapterPluginsDir(), "node_modules", record.packageName);
+  return record.localPath ? path.resolve(record.localPath) : managedPackageDir(record.packageName);
+}
+
+function realpathOrResolve(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * DUR-3994 Stage 2: the package folder and the file that gets imported must
+ * both be inside the folder whose fingerprint was just checked. Otherwise a
+ * record, a package.json "main"/"exports" or a symbolic link could send the
+ * import to code nobody checked. Enforced only where the check is.
+ */
+function assertAdapterModuleInsideCodeRoot(
+  record: Pick<AdapterPluginRecord, "localPath" | "type">,
+  packageDir: string,
+  modulePath: string,
+): void {
+  const configured = getConfiguredTrustedCode();
+  const enforced = configured ? configured.mode === "enforce" : detectTrustedCodeMode() === "enforce";
+  if (!enforced) return;
+  const codeRoot = realpathOrResolve(adapterSubject(record).codeRoot);
+  for (const candidate of [packageDir, modulePath]) {
+    if (!isPathInside(realpathOrResolve(candidate), codeRoot)) {
+      throw new Error(
+        `Paperclip did not load the adapter "${record.type}" because its code (${candidate}) is outside ` +
+          `its own checked folder (${codeRoot}).`,
+      );
+    }
+  }
 }
 
 function resolvePackageEntryPoint(packageDir: string): string {
@@ -246,12 +324,15 @@ export async function loadExternalAdapterPackage(
   localPath?: string,
   trustedRecord?: Pick<AdapterPluginRecord, "localPath" | "type">,
 ): Promise<ServerAdapterModule> {
-  const packageDir = localPath
-    ? path.resolve(localPath)
-    : path.resolve(getAdapterPluginsDir(), "node_modules", packageName);
+  const packageDir = localPath ? path.resolve(localPath) : managedPackageDir(packageName);
 
   const entryPoint = resolvePackageEntryPoint(packageDir);
   const modulePath = path.resolve(packageDir, entryPoint);
+  assertAdapterModuleInsideCodeRoot(
+    trustedRecord ?? { localPath, type: packageName },
+    packageDir,
+    modulePath,
+  );
   const uiParserSource = extractUiParserSource(packageDir, packageName, trustedRecord);
 
   logger.info({ packageName, packageDir, entryPoint, modulePath, hasUiParser: !!uiParserSource }, "Loading external adapter package");
@@ -297,6 +378,7 @@ export async function reloadExternalAdapter(
   const packageDir = resolvePackageDir(record);
   const entryPoint = resolvePackageEntryPoint(packageDir);
   const modulePath = path.resolve(packageDir, entryPoint);
+  assertAdapterModuleInsideCodeRoot(record, packageDir, modulePath);
   const fileUrl = `file://${modulePath}`;
 
   // Bust ESM module cache so re-import loads fresh code from disk.

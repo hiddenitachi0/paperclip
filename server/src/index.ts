@@ -100,6 +100,7 @@ import { startCrossCompanyAccessLogRetention } from "./services/cross-company-ac
 import { conflict } from "./errors.js";
 import {
   configureTrustedCode,
+  getNodeModuleGuard,
   listInstalledCodeSubjects,
   trustedCodeService,
 } from "./services/trusted-code.js";
@@ -578,7 +579,24 @@ export async function startServer(): Promise<StartedServer> {
         logger.error({ err }, "trusted-code: could not take the first-start baseline of installed add-ons");
       }
     }
-    logger.info({ mode: trustedCode.mode }, "trusted-code: add-on code fingerprint check set up");
+    const moduleGuard = getNodeModuleGuard();
+    logger.info(
+      {
+        mode: trustedCode.mode,
+        moduleGuard: moduleGuard
+          ? { globalPathsCleared: moduleGuard.globalPathsCleared, resolveCheck: moduleGuard.hooksActive }
+          : null,
+        tsxCacheDisabled: Boolean(process.env.TSX_DISABLE_CACHE),
+      },
+      "trusted-code: add-on code fingerprint check set up",
+    );
+    if (trustedCode.mode === "enforce" && (!moduleGuard || !moduleGuard.hooksActive || !process.env.TSX_DISABLE_CACHE)) {
+      logger.warn(
+        "trusted-code: this server's program files are read-only, but it was not started with the full module guard " +
+          "(node --require /usr/local/lib/paperclip/node-module-guard.cjs on Node.js 24+, and TSX_DISABLE_CACHE=1); " +
+          "code planted in folders agents can write may still be loaded",
+      );
+    }
     configureTrustedCode(trustedCode);
   }
 

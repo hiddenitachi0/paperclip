@@ -22,6 +22,8 @@ const mockPluginLoader = vi.hoisted(() => ({
   reloadExternalAdapter: vi.fn(),
   // DUR-3994 Stage 2: install/reinstall record the adapter's files as trusted.
   recordExternalAdapterCode: vi.fn(async () => undefined),
+  prepareManagedAdapterFolder: vi.fn(async () => ({ movedAsideTo: null })),
+  isSafeNpmPackageName: vi.fn(() => true),
 }));
 
 const overridingConfigSchemaAdapter: ServerAdapterModule = {

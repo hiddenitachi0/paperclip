@@ -122,6 +122,16 @@ COPY scripts/paperclip-git-pre-push-guard.sh /usr/local/share/paperclip/githooks
 RUN chmod +x /usr/local/share/paperclip/githooks/pre-push \
   && git config --system core.hooksPath /usr/local/share/paperclip/githooks
 
+# DUR-3994 Stage 2: the module guard every Paperclip server (and plugin
+# worker) Node process loads first (`--require`, see CMD). Agents run as the
+# same user and can write HOME, /paperclip and /tmp; without it Node loaded
+# a planted $HOME/.node_modules/<optional dependency> (ws tries `bufferutil`)
+# or a /paperclip/node_modules/<missing dependency of an add-on> into the
+# server. Root-owned and outside /app like the other files root trusts.
+COPY scripts/node-module-guard.cjs /usr/local/lib/paperclip/node-module-guard.cjs
+RUN chown root:root /usr/local/lib/paperclip/node-module-guard.cjs \
+  && chmod 0644 /usr/local/lib/paperclip/node-module-guard.cjs
+
 # uv: Python package/venv manager for agent workspaces that build Python apps
 # (e.g. the Nordstrand Django dashboard). The base image ships python3 but no
 # pip/ensurepip, so `uv venv` / `uv pip install -r requirements.txt` / `uv sync`
@@ -164,7 +174,17 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
   OPENCODE_ALLOW_ALL_MODELS=true \
-  GEMINI_SANDBOX=false
+  GEMINI_SANDBOX=false \
+  TSX_DISABLE_CACHE=1
+# DUR-3994 Stage 2: TSX_DISABLE_CACHE. The server runs under the tsx loader
+# and loads the workspace packages (packages/db, shared, adapter-utils, ...)
+# as TypeScript source. tsx keeps the compiled result in /tmp/tsx-<uid> and,
+# on the next start, runs a cached entry without checking it against the
+# source -- and /tmp is writable by every agent (and survives a restart of
+# the container). With the cache off, tsx compiles the root-owned source
+# every start. Image-wide, so it also covers the deploy runner's root
+# `docker exec` of the CLI (which would otherwise use /tmp/tsx-0, a folder an
+# agent can create first).
 
 EXPOSE 3100
 
@@ -172,4 +192,6 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 # DUR-3994 Stage 1: --disable-sigusr1 stops `kill -USR1 <server>` (which any
 # agent could send, being the same user) from opening Node's debugger on
 # 127.0.0.1:9229, through which it could read everything the server holds.
-CMD ["node", "--disable-sigusr1", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
+# DUR-3994 Stage 2: --require node-module-guard.cjs, first, stops Node
+# loading modules from folders agents can write (see that file).
+CMD ["node", "--disable-sigusr1", "--require", "/usr/local/lib/paperclip/node-module-guard.cjs", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]

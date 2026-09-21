@@ -147,7 +147,7 @@ api_call() { # method, path, [json_payload] -> stdout: response body
 cli_json() { # subcommand args... -> stdout: JSON
   local container
   container="$(resolve_container_id)"
-  docker exec "$container" sh -lc "$CLI_CMD $* $ARGS"
+  docker exec -e HOME=/root -e TSX_DISABLE_CACHE=1 "$container" sh -c "$CLI_CMD $* $ARGS"
 }
 
 wait_for_health() {

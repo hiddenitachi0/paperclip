@@ -71,8 +71,8 @@ export type UntrustedCodeReason = "changed" | "unknown" | "unverifiable";
 export class UntrustedCodeError extends Error {
   readonly reason: UntrustedCodeReason;
   readonly subject: TrustedCodeSubject;
-  constructor(subject: TrustedCodeSubject, reason: UntrustedCodeReason, detail?: string) {
-    super(describeRefusal(subject, reason, detail));
+  constructor(subject: TrustedCodeSubject, reason: UntrustedCodeReason, detail?: string, message?: string) {
+    super(message ?? describeRefusal(subject, reason, detail));
     this.name = "UntrustedCodeError";
     this.reason = reason;
     this.subject = subject;
@@ -148,6 +148,64 @@ function realpathOrResolve(p: string): string {
 export function isPathInside(child: string, parent: string): boolean {
   const relative = path.relative(parent, child);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+// ---------------------------------------------------------------------------
+// The module guard (scripts/node-module-guard.cjs)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the image's `--require` preload (scripts/node-module-guard.cjs,
+ * installed root-owned at /usr/local/lib/paperclip/node-module-guard.cjs)
+ * leaves on globalThis. It stops Node from loading modules out of folders
+ * agents can write (HOME's global module folders; node_modules folders above
+ * an add-on). Add-on folders are allowed only once their fingerprint check
+ * passed, so a checked add-on can load its own files and nothing next to it.
+ */
+export interface NodeModuleGuard {
+  preloadPath: string;
+  globalPathsCleared: boolean;
+  hooksActive: boolean;
+  denyRoots: readonly string[];
+  allowRoot(dir: string): void;
+  disallowRoot(dir: string): void;
+  allowedRoots(): string[];
+}
+
+const MODULE_GUARD_KEY = Symbol.for("paperclip.moduleGuard");
+
+export function getNodeModuleGuard(): NodeModuleGuard | null {
+  const guard = (globalThis as Record<symbol, unknown>)[MODULE_GUARD_KEY];
+  return guard && typeof guard === "object" ? (guard as NodeModuleGuard) : null;
+}
+
+/**
+ * execArgv and environment for a plugin worker, so the worker runs under the
+ * same guard as the server, allowed to load only from its own checked folder.
+ * Empty when the server itself runs without the guard (a dev checkout).
+ */
+export function moduleGuardForWorker(codeRoot: string): { execArgv: string[]; env: Record<string, string> } {
+  const guard = getNodeModuleGuard();
+  if (!guard) return { execArgv: [], env: {} };
+  const env: Record<string, string> = {
+    PAPERCLIP_MODULE_GUARD_ALLOW: realpathOrResolve(codeRoot),
+  };
+  if (guard.denyRoots.length > 0) env.PAPERCLIP_MODULE_GUARD_DENY = guard.denyRoots.join(":");
+  return { execArgv: ["--require", guard.preloadPath], env };
+}
+
+function allowInModuleGuard(codeRoot: string): void {
+  const guard = getNodeModuleGuard();
+  if (!guard) return;
+  guard.allowRoot(path.resolve(codeRoot));
+  guard.allowRoot(realpathOrResolve(codeRoot));
+}
+
+function disallowInModuleGuard(codeRoot: string): void {
+  const guard = getNodeModuleGuard();
+  if (!guard) return;
+  guard.disallowRoot(path.resolve(codeRoot));
+  guard.disallowRoot(realpathOrResolve(codeRoot));
 }
 
 // ---------------------------------------------------------------------------
@@ -347,8 +405,8 @@ export function adapterCodeRoot(
 
 const alertedRefusals = new Set<string>();
 
-async function raiseRefusalAlert(db: Db, error: UntrustedCodeError): Promise<void> {
-  const key = `${error.subject.kind}:${error.subject.codeRoot}:${error.reason}`;
+async function raiseRefusalAlert(db: Db, error: UntrustedCodeError, dedupeTag = ""): Promise<void> {
+  const key = `${error.subject.kind}:${error.subject.codeRoot}:${error.reason}:${dedupeTag}`;
   if (alertedRefusals.has(key)) return;
   alertedRefusals.add(key);
   logger.error(
@@ -418,6 +476,27 @@ export interface TrustedCodeService {
   checkFile(subject: TrustedCodeSubject, absFile: string): Promise<boolean>;
   /** Synchronous checkFile against the fingerprints this process last read. */
   checkFileSync(subject: TrustedCodeSubject, absFile: string): boolean;
+  /**
+   * Paperclip is about to change a shared add-on folder itself (an npm
+   * install, upgrade or uninstall into the folder every npm-installed plugin,
+   * or every npm-installed adapter, shares). Afterwards the WHOLE folder is
+   * recorded as trusted -- so first make sure it is still exactly what was
+   * recorded. If it is not (an agent changed a file in it, or it was never
+   * recorded), set the whole folder aside (renamed to `<folder>.untrusted-
+   * <time>`) so the install starts from an empty folder and only what npm
+   * fetches now gets trusted. This is also what stops npm from reading an
+   * agent-written .npmrc or package.json in that folder. Returns where the
+   * folder went, or null when it was left alone. Does nothing when off.
+   */
+  prepareSharedFolder(subject: TrustedCodeSubject): Promise<{ movedAsideTo: string | null }>;
+  /**
+   * Paperclip is about to read this add-on's manifest / code as part of an
+   * install an admin asked for: let Node load from its folder (the module
+   * guard refuses folders agents can write otherwise). Undo with
+   * `endInstall` if the install fails.
+   */
+  beginInstall(codeRoot: string): void;
+  endInstall(codeRoot: string, succeeded: boolean): void;
   /** One-time: trust whatever add-ons are installed when this first runs. */
   recordFirstStartBaseline(subjects: TrustedCodeSubject[]): Promise<{ alreadyTaken: boolean; recorded: number; failed: number }>;
 }
@@ -489,6 +568,7 @@ export function trustedCodeService(
         },
       });
     knownRows.set(codeRoot, { codeRoot, digest: fingerprint.digest, fileHashes: fingerprint.files });
+    allowInModuleGuard(codeRoot);
     logger.info(
       { kind: subject.kind, label: subject.label, codeRoot, files: fingerprint.fileCount, reason },
       "trusted-code: recorded the fingerprint of add-on code",
@@ -530,7 +610,11 @@ export function trustedCodeService(
   async function assertTrusted(subject: TrustedCodeSubject): Promise<void> {
     if (mode === "off") return;
     const result = await check(subject);
-    if (result.ok) return;
+    if (result.ok) {
+      allowInModuleGuard(subject.codeRoot);
+      return;
+    }
+    disallowInModuleGuard(subject.codeRoot);
     await raiseRefusalAlert(db, result.error);
     throw result.error;
   }
@@ -572,6 +656,48 @@ export function trustedCodeService(
     } catch {
       return false;
     }
+  }
+
+  async function prepareSharedFolder(subject: TrustedCodeSubject): Promise<{ movedAsideTo: string | null }> {
+    if (mode === "off") return { movedAsideTo: null };
+    const codeRoot = path.resolve(subject.codeRoot);
+    if (isProtectedByAppRoot(codeRoot) || !fs.existsSync(codeRoot)) return { movedAsideTo: null };
+    const result = await check({ ...subject, codeRoot });
+    if (result.ok) return { movedAsideTo: null };
+    disallowInModuleGuard(codeRoot);
+    const movedAsideTo = `${codeRoot}.untrusted-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    await fsp.rename(codeRoot, movedAsideTo);
+    knownRows.delete(codeRoot);
+    // Forget the old record too: whatever is installed next is recorded
+    // fresh, and until then nothing from this folder is trusted.
+    await db.delete(trustedCodeFingerprints).where(eq(trustedCodeFingerprints.codeRoot, codeRoot));
+    if (result.error.reason === "unknown") {
+      logger.info(
+        { codeRoot, movedAsideTo },
+        "trusted-code: set aside a shared add-on folder that was never recorded before installing into it",
+      );
+    } else {
+      const what = subject.kind === "plugin" ? "plugins" : "adapters";
+      const message =
+        `Paperclip found that files in the shared folder for ${what} installed from npm (${codeRoot}) were changed after ` +
+        `they were installed. An agent may have edited them. So that none of those changes become trusted, Paperclip set ` +
+        `the whole folder aside (${movedAsideTo}) and installed into a fresh, empty folder. Any other ${what} that were ` +
+        `installed from npm need to be installed again (Settings > ${subject.kind === "plugin" ? "Plugins" : "Adapters"}).`;
+      await raiseRefusalAlert(db, new UntrustedCodeError({ ...subject, codeRoot }, result.error.reason, undefined, message), `set-aside:${movedAsideTo}`);
+    }
+    return { movedAsideTo };
+  }
+
+  function beginInstall(codeRoot: string): void {
+    if (mode === "off") return;
+    allowInModuleGuard(codeRoot);
+  }
+
+  function endInstall(codeRoot: string, succeeded: boolean): void {
+    if (mode === "off" || succeeded) return;
+    // Still allowed if it was trusted before this (failed) install.
+    if (knownRows.has(path.resolve(codeRoot))) return;
+    disallowInModuleGuard(codeRoot);
   }
 
   async function recordFirstStartBaseline(subjects: TrustedCodeSubject[]) {
@@ -628,6 +754,9 @@ export function trustedCodeService(
     assertTrusted,
     checkFile,
     checkFileSync,
+    prepareSharedFolder,
+    beginInstall,
+    endInstall,
     recordFirstStartBaseline,
   };
 }
