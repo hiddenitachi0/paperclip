@@ -3443,6 +3443,130 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  // DUR-3989 (3): the two kinds of automatic recovery run (the immediate
+  // assignment/continuation recovery and the execution-review participant
+  // recovery) used to be queued with a context that named the issue but not
+  // its project, so the budget check that runs when a queued run is claimed
+  // never saw a project-level spending limit. The project's spend here is
+  // inserted directly, so nothing has paused the project: only the limit
+  // check itself can stop the run.
+  async function seedExhaustedProjectBudget(input: { companyId: string; agentId: string; issueId: string }) {
+    const projectId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId: input.companyId,
+      name: "Budgeted project",
+      status: "in_progress",
+    });
+    await db.update(issues).set({ projectId }).where(eq(issues.id, input.issueId));
+    await db.insert(budgetPolicies).values({
+      companyId: input.companyId,
+      scopeType: "project",
+      scopeId: projectId,
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 100,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await db.insert(costEvents).values({
+      companyId: input.companyId,
+      agentId: input.agentId,
+      projectId,
+      provider: "test",
+      biller: "test",
+      billingType: "tokens",
+      model: "test-model",
+      costCents: 500,
+      occurredAt: new Date(),
+    });
+    return projectId;
+  }
+
+  it("DUR-3989: the immediate continuation recovery run carries its project, so a used-up project limit stops it", async () => {
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+      processLossRetryCount: 1,
+    });
+    const projectId = await seedExhaustedProjectBudget({ companyId, agentId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.runIds).toEqual([runId]);
+
+    const continuationRun = await waitForValue(async () => {
+      const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+      return rows.find((row) =>
+        (row.contextSnapshot as Record<string, unknown> | null)?.retryReason === "issue_continuation_needed"
+      ) ?? null;
+    });
+    if (!continuationRun) throw new Error("Expected an immediate continuation recovery run");
+    expect(continuationRun.contextSnapshot).toMatchObject({ issueId, projectId, retryOfRunId: runId });
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, continuationRun.id);
+    expect(settled?.status).toBe("cancelled");
+    expect(settled?.error ?? "").toMatch(/Project .*budget/);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("DUR-3989: the execution-review participant recovery run carries its project, so a used-up project limit stops it", async () => {
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, issueId, runId } = await seedInReviewParticipantRunFixture();
+    const projectId = await seedExhaustedProjectBudget({ companyId, agentId, issueId });
+    // The reviewer's own run was queued the normal way, which attaches the
+    // project; the limit stops it when it is claimed, and it ends cancelled
+    // while the review stage is still pending. That is what triggers the
+    // review-participant recovery run.
+    const seeded = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]);
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: { ...(seeded?.contextSnapshot as Record<string, unknown>), projectId } })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const reviewRecoveryRun = await waitForValue(async () => {
+      const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+      return rows.find((row) =>
+        (row.contextSnapshot as Record<string, unknown> | null)?.retryReason ===
+          "execution_review_participant_recovery"
+      ) ?? null;
+    }, 8_000);
+    if (!reviewRecoveryRun) throw new Error("Expected an execution-review recovery run");
+    expect(reviewRecoveryRun.contextSnapshot).toMatchObject({
+      issueId,
+      projectId,
+      source: "issue.execution_review_recovery",
+      retryOfRunId: runId,
+    });
+
+    const settled = await waitForRunToSettle(heartbeat, reviewRecoveryRun.id);
+    expect(settled?.status).toBe("cancelled");
+    expect(settled?.error ?? "").toMatch(/Project .*budget/);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("DUR-3989: a queued run that names only its issue still meets that issue's project limit when claimed", async () => {
+    // Runs queued before the fix above (or by any other path that leaves the
+    // project out) are still waiting in the queue; the claim reads the
+    // project off the issue instead of skipping the project limit.
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    await seedExhaustedProjectBudget({ companyId, agentId, issueId });
+    const queued = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]);
+    expect(queued?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("projectId");
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId);
+    expect(settled?.status).toBe("cancelled");
+    expect(settled?.error ?? "").toMatch(/Project .*budget/);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
   it("re-enqueues an already stranded execution-review participant during reconciliation", async () => {
     const { agentId, issueId, runId, wakeupRequestId, stageId } = await seedInReviewParticipantRunFixture();
     const finishedAt = new Date("2026-03-19T00:05:00.000Z");

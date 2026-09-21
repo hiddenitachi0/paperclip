@@ -3309,7 +3309,9 @@ registry.registerPath({
     "Limits are checked before the model is called: a per-agent daily call cap and a cost budget (an " +
     "ordinary budget policy with metric `lane_a_transform_cents`, at scope `agent` or `company`). A 429 body " +
     "carries `details.reason`: `daily_call_cap`, `monthly_budget`, `concurrency_limit` or " +
-    "`upstream_rate_limit`.\n\n" +
+    "`upstream_rate_limit`. A paused agent or company, or an agent whose ordinary spending limit (or its " +
+    "company's) is used up, is refused with 403 before the model is called; for the spending limit, " +
+    "`details.reason` is `spending_limit`.\n\n" +
     "Retry guidance by status: 429 `concurrency_limit` and `upstream_rate_limit` are retryable for the same " +
     "item after a backoff; 429 `daily_call_cap` and `monthly_budget` are not retryable until a person or the " +
     "clock changes something; 502 is retryable (an upstream model error); 503 is not (the instance has no " +
@@ -3399,7 +3401,7 @@ registry.registerPath({
     "POST /api/lane-a/{agentId}/transform does, so another company's agents can never appear.\n\n" +
     "`usable` is computed from the same checks, in the same order, that transform performs before spending " +
     "anything, and `unavailableReason` names the first one that failed: `company_paused`, `agent_paused`, " +
-    "`daily_call_cap`, `monthly_budget`. It is a snapshot, not a reservation — another caller may consume " +
+    "`spending_limit` (the agent's or company's ordinary spending limit is used up), `daily_call_cap`, `monthly_budget`. It is a snapshot, not a reservation — another caller may consume " +
     "the last of a daily cap between this read and your call — so still handle 403 and 429 from transform.\n\n" +
     "Requires the same `lane_a:transform` scope as transform itself: discovery without the ability to call " +
     "is not a thing this credential is for.",
@@ -3432,7 +3434,7 @@ registry.registerPath({
             callsToday: z.number().int().describe("Transform calls this agent has completed since 00:00 UTC."),
             usable: z.boolean(),
             unavailableReason: z
-              .enum(["company_paused", "agent_paused", "daily_call_cap", "monthly_budget"])
+              .enum(["company_paused", "agent_paused", "spending_limit", "daily_call_cap", "monthly_budget"])
               .nullable(),
           }),
         ),

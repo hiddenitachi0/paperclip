@@ -411,6 +411,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
     for (const policy of candidatePolicies) {
       if (policy.amount <= 0) continue;
+      // DUR-3989: a narrow metric (today only `lane_a_transform_cents`) must
+      // not stop the scope's ordinary work here either. pauseAndCancelScope-
+      // ForBudget already refuses to PAUSE for such a metric, but this check
+      // runs before every run and wake-up, so without this line an exhausted
+      // "rewriting text" budget would block all of the agent's normal work
+      // anyway — through the back door rather than through a pause. The
+      // transform endpoint enforces that budget itself.
+      if (!budgetMetricPausesScope(policy.metric)) continue;
       const observed = await computeObservedAmount(db, policy);
       if (observed >= policy.amount) return policy;
     }

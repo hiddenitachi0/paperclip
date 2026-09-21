@@ -10048,9 +10048,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const context = parseObject(run.contextSnapshot);
+    const contextIssueId = readNonEmptyString(context.issueId);
+    let budgetProjectId = readNonEmptyString(context.projectId);
+    if (!budgetProjectId && contextIssueId && isUuidLike(contextIssueId)) {
+      // DUR-3989: a run queued without its project attached (automatic
+      // recovery runs did this, and ones queued before that fix may still be
+      // waiting) would otherwise slip past a project-level spending limit.
+      // Read the project off the issue. A failed lookup only means the
+      // project limit is not applied to this one run, as before.
+      try {
+        budgetProjectId = await db
+          .select({ projectId: issues.projectId })
+          .from(issues)
+          .where(and(eq(issues.id, contextIssueId), eq(issues.companyId, run.companyId)))
+          .then((rows) => rows[0]?.projectId ?? null);
+      } catch (err) {
+        logger.warn(
+          { err, runId: run.id, issueId: contextIssueId },
+          "could not read the run's project for the budget check; checking without it",
+        );
+      }
+    }
     const budgetBlock = await budgets.getInvocationBlock(run.companyId, run.agentId, {
-      issueId: readNonEmptyString(context.issueId),
-      projectId: readNonEmptyString(context.projectId),
+      issueId: contextIssueId,
+      projectId: budgetProjectId,
     });
     if (budgetBlock) {
       await cancelRunInternal(run.id, budgetBlock.reason);
@@ -14605,6 +14626,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
               source: "issue.execution_review_recovery",
               retryOfRunId: run.id,
+              // DUR-3989: carry the project, or claimQueuedRun's budget check
+              // cannot see a project-level spending limit for this run.
+              ...(issue.projectId ? { projectId: issue.projectId } : {}),
               currentStageId: executionState?.currentStageId ?? null,
               currentStageType: executionState?.currentStageType ?? null,
               reviewRecoveryInstruction:
@@ -14751,6 +14775,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             retryReason,
             source: recoverySource,
             retryOfRunId: run.id,
+            // DUR-3989: carry the project, or claimQueuedRun's budget check
+            // cannot see a project-level spending limit for this run.
+            ...(issue.projectId ? { projectId: issue.projectId } : {}),
           }, "normal_model"),
           sessionIdBefore: recoverySessionBefore,
           retryOfRunId: run.id,
