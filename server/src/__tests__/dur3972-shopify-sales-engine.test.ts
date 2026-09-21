@@ -388,6 +388,55 @@ describe("no data is never zero", () => {
     expect(fake.requests.map((request) => request.operation)).toEqual(["PaperclipShopWindow"]);
   });
 
+  it("without read_all_orders every month is refused, even one inside the 60-day window", async () => {
+    // 21 Sep: Shopify shows orders from 24 Jul, so August passes the window
+    // check, but a June order returned on 10 Aug would be invisible and August
+    // would come out one return short. Refuse instead of undercounting.
+    const juneSale = productSale("ORDER", 1, SOFA);
+    const { adapter, fake } = setup({
+      products: PRODUCTS,
+      accessScopes: ["read_orders", "read_products"],
+      visibleFrom: "2026-07-24T00:00:00Z",
+      orders: [
+        anchorOrder(),
+        order({
+          createdAt: "2026-06-15T10:00:00Z",
+          agreements: [
+            agreement("OrderAgreement", "2026-06-15T10:00:00Z", [juneSale]),
+            agreement("RefundAgreement", "2026-08-10T10:00:00Z", [productSale("RETURN", -1, SOFA, juneSale.lineItemId)]),
+          ],
+          refunds: [refund("2026-08-10T10:00:00Z", [{ quantity: 1, lineItemId: juneSale.lineItemId!, product: SOFA }])],
+        }),
+        order({
+          createdAt: "2026-07-26T10:00:00Z",
+          agreements: [placedOrder("2026-07-26T10:00:00Z", [[SOFA, 1]]).agreement],
+        }),
+        order({
+          createdAt: "2026-08-05T10:00:00Z",
+          agreements: [placedOrder("2026-08-05T10:00:00Z", [[SOFA, 2]]).agreement],
+        }),
+      ],
+    });
+    const outcome = await adapter.sales({ periods: ["last_month"] });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.refusal.code).toBe("missing_order_history_access");
+    expect(outcome.refusal.message).toContain("mangler tilgang til eldre ordre");
+    expect(outcome.refusal.message).toContain("ikke at salget var null");
+    expect(outcome.audit.refusalCode).toBe("missing_order_history_access");
+    expect(fake.requests.map((request) => request.operation)).toEqual(["PaperclipShopWindow"]);
+  });
+
+  it("without read_all_orders a future-only request still answers no_data (nothing is scanned)", async () => {
+    const { adapter } = setup({
+      products: PRODUCTS,
+      accessScopes: ["read_orders", "read_products"],
+      orders: [anchorOrder()],
+    });
+    const outcome = await salesOk(adapter, { periods: ["2026-12"] });
+    expect(outcome.result.periods[0]!.dataState).toBe("no_data");
+  });
+
   it("a future month is no_data, and the running month is marked as running", async () => {
     const { adapter } = setup({
       products: PRODUCTS,
@@ -624,6 +673,25 @@ describe("catalog", () => {
     expect(outcome.result.deletedProductUnitsSoldLast12Months).toBe(2);
     expect(outcome.result.unitsSoldStatus).toBe("beregnet");
     expect(outcome.result.earliestVisibleOrderAt).toBe("2024-11-02T10:00:00Z".replace("Z", ".000Z"));
+  });
+
+  it("does not compute 12-month units without read_all_orders", async () => {
+    const { adapter, fake } = setup({
+      products: PRODUCTS,
+      accessScopes: ["read_orders", "read_products"],
+      orders: [
+        anchorOrder(),
+        order({
+          createdAt: "2026-08-01T10:00:00Z",
+          agreements: [placedOrder("2026-08-01T10:00:00Z", [[SOFA, 1]]).agreement],
+        }),
+      ],
+    });
+    const outcome = await adapter.catalog({ includeUnitsSold: true });
+    if (!outcome.ok) throw new Error(outcome.refusal.message);
+    expect(outcome.result.productTypes.every((entry) => entry.unitsSoldLast12Months === null)).toBe(true);
+    expect(outcome.result.unitsSoldStatus).toBe("ikke beregnet: Shopify-tilkoblingen mangler tilgang til eldre ordre");
+    expect(fake.requests.map((request) => request.operation)).not.toContain("PaperclipOrdersScan");
   });
 
   it("does not show partial 12-month units when the scan is too big", async () => {

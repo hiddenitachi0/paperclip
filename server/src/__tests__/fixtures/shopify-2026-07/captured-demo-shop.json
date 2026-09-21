@@ -13,6 +13,142 @@
       "ianaTimezone": "America/Toronto",
       "currencyCode": "CAD"
      },
+     "currentAppInstallation": {
+      "accessScopes": [
+       {
+        "handle": "read_analytics"
+       },
+       {
+        "handle": "read_assigned_fulfillment_orders"
+       },
+       {
+        "handle": "read_customers"
+       },
+       {
+        "handle": "read_discounts"
+       },
+       {
+        "handle": "read_draft_orders"
+       },
+       {
+        "handle": "read_fulfillments"
+       },
+       {
+        "handle": "read_gdpr_data_request"
+       },
+       {
+        "handle": "read_gift_cards"
+       },
+       {
+        "handle": "read_inventory"
+       },
+       {
+        "handle": "read_legal_policies"
+       },
+       {
+        "handle": "read_locations"
+       },
+       {
+        "handle": "read_marketing_events"
+       },
+       {
+        "handle": "read_merchant_managed_fulfillment_orders"
+       },
+       {
+        "handle": "read_online_store_pages"
+       },
+       {
+        "handle": "read_order_edits"
+       },
+       {
+        "handle": "read_orders"
+       },
+       {
+        "handle": "read_price_rules"
+       },
+       {
+        "handle": "read_product_listings"
+       },
+       {
+        "handle": "read_products"
+       },
+       {
+        "handle": "read_publications"
+       },
+       {
+        "handle": "read_reports"
+       },
+       {
+        "handle": "read_resource_feedbacks"
+       },
+       {
+        "handle": "read_script_tags"
+       },
+       {
+        "handle": "read_shipping"
+       },
+       {
+        "handle": "read_locales"
+       },
+       {
+        "handle": "read_shopify_payments"
+       },
+       {
+        "handle": "read_shopify_payments_accounts"
+       },
+       {
+        "handle": "read_shopify_payments_bank_accounts"
+       },
+       {
+        "handle": "read_shopify_payments_disputes"
+       },
+       {
+        "handle": "read_shopify_payments_payouts"
+       },
+       {
+        "handle": "read_content"
+       },
+       {
+        "handle": "read_themes"
+       },
+       {
+        "handle": "read_third_party_fulfillment_orders"
+       },
+       {
+        "handle": "read_translations"
+       },
+       {
+        "handle": "unauthenticated_read_product_listings"
+       },
+       {
+        "handle": "unauthenticated_read_product_tags"
+       },
+       {
+        "handle": "unauthenticated_read_product_inventory"
+       },
+       {
+        "handle": "unauthenticated_write_customers"
+       },
+       {
+        "handle": "unauthenticated_read_customer_tags"
+       },
+       {
+        "handle": "unauthenticated_write_checkouts"
+       },
+       {
+        "handle": "unauthenticated_read_content"
+       },
+       {
+        "handle": "read_all_orders"
+       },
+       {
+        "handle": "unauthenticated_read_customers"
+       },
+       {
+        "handle": "unauthenticated_read_checkouts"
+       }
+      ]
+     },
      "orders": {
       "nodes": [
        {
@@ -24,16 +160,17 @@
     },
     "extensions": {
      "cost": {
-      "requestedQueryCost": 4,
-      "actualQueryCost": 4,
+      "requestedQueryCost": 6,
+      "actualQueryCost": 6,
       "throttleStatus": {
-       "maximumAvailable": 2000,
-       "currentlyAvailable": 1996,
-       "restoreRate": 100
+       "maximumAvailable": 2000.0,
+       "currentlyAvailable": 1994,
+       "restoreRate": 100.0
       }
      }
     }
-   }
+   },
+   "capturedAt": "2026-09-21T15:58:29.684963Z"
   },
   {
    "operation": "PaperclipOrdersScan",

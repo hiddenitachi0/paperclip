@@ -169,6 +169,7 @@ export const DATA_REFUSAL_CODES = [
   "invalid_request",
   "invalid_period",
   "before_visible_window",
+  "missing_order_history_access",
   "no_visible_orders",
   "unknown_product_type",
   "request_budget_exceeded",

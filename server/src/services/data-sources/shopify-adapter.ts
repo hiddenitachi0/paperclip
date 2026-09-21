@@ -119,6 +119,11 @@ export const SHOP_WINDOW_QUERY = `query PaperclipShopWindow {
     ianaTimezone
     currencyCode
   }
+  currentAppInstallation {
+    accessScopes {
+      handle
+    }
+  }
   orders(first: 1, sortKey: CREATED_AT, query: "test:false") {
     nodes {
       id
@@ -351,6 +356,8 @@ const TOO_BIG_MESSAGE =
   "Oppslaget ble for stort til å fullføres trygt (for mange ordre å gå gjennom), så jeg gir ikke et delvis tall. Prøv én måned om gangen, eller be en styrebruker om hjelp.";
 const THROTTLED_MESSAGE =
   "Shopify ba oss vente fordi det kom for mange forespørsler, så jeg gir ikke et delvis tall. Prøv igjen om et minutt.";
+const MISSING_ORDER_HISTORY_MESSAGE =
+  "Shopify-tilkoblingen mangler tilgang til eldre ordre (tillatelsen read_all_orders), så returer og endringer på eldre ordre ville mangle. Jeg gir derfor ingen tall. Det betyr ikke at salget var null.";
 const UPSTREAM_MESSAGE = "Shopify svarte med en feil, så jeg har ingen tall å gi. Prøv igjen senere.";
 const SHAPE_MESSAGE =
   "Shopify sendte data i et format jeg ikke kjenner igjen, så jeg gir ikke noe svar. Feilen er logget.";
@@ -659,6 +666,12 @@ interface ShopWindow {
   domain: string;
   timezone: string;
   earliestVisibleOrderAt: Date | null;
+  /**
+   * Whether the app holds read_all_orders. Without it Shopify hides orders
+   * created more than 60 days ago, and with them every later return, edit
+   * or cancellation on those orders, so no month can be counted completely.
+   */
+  hasAllOrdersAccess: boolean;
 }
 
 interface ResolvedPeriod {
@@ -703,6 +716,10 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
     } catch {
       throw shapeError(`unknown shop time zone ${timezone}`);
     }
+    const scopes = asArray(
+      asObject(data.currentAppInstallation, "currentAppInstallation").accessScopes,
+      "currentAppInstallation.accessScopes",
+    ).map((scope, index) => asString(asObject(scope, `accessScopes[${index}]`).handle, `accessScopes[${index}].handle`));
     const nodes = asArray(asObject(data.orders, "orders").nodes, "orders.nodes");
     const first = nodes.length > 0 ? asObject(nodes[0], "orders.nodes[0]") : null;
     return {
@@ -710,6 +727,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
       domain: asString(shop.myshopifyDomain, "shop.myshopifyDomain"),
       timezone,
       earliestVisibleOrderAt: first ? asDate(first.createdAt, "orders.nodes[0].createdAt") : null,
+      hasAllOrdersAccess: scopes.includes("read_all_orders"),
     };
   }
 
@@ -950,6 +968,13 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
 
       const scanned = periods.filter((period) => !period.future);
       if (scanned.length > 0) {
+        if (!shop.hasAllOrdersAccess) {
+          throw new LookupRefusal(
+            "missing_order_history_access",
+            MISSING_ORDER_HISTORY_MESSAGE,
+            ["app installation lacks the read_all_orders access scope"],
+          );
+        }
         if (!shop.earliestVisibleOrderAt) {
           throw new LookupRefusal(
             "no_visible_orders",
@@ -1067,7 +1092,9 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
       let deletedUnits: number | null = null;
       if (catalogOptions.includeUnitsSold) {
         const from = new Date(asOf.getTime() - 365 * 24 * 60 * 60 * 1000);
-        if (!shop.earliestVisibleOrderAt || shop.earliestVisibleOrderAt.getTime() > from.getTime()) {
+        if (!shop.hasAllOrdersAccess) {
+          unitsStatus = "ikke beregnet: Shopify-tilkoblingen mangler tilgang til eldre ordre";
+        } else if (!shop.earliestVisibleOrderAt || shop.earliestVisibleOrderAt.getTime() > from.getTime()) {
           unitsStatus = shop.earliestVisibleOrderAt
             ? `ikke beregnet: Shopify viser bare ordre fra og med ${formatZonedDate(shop.earliestVisibleOrderAt, shop.timezone)}`
             : "ikke beregnet: Shopify viser ingen ordre";

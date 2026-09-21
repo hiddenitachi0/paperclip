@@ -72,6 +72,8 @@ export interface FakeShopOptions {
    * are invisible (what happens without read_all_orders).
    */
   visibleFrom?: string;
+  /** Access scopes the app installation reports (default includes read_all_orders). */
+  accessScopes?: string[];
   /** Request numbers (1-based) that answer THROTTLED. */
   throttleOnRequests?: number[];
   /** throttleStatus.currentlyAvailable reported on every response. */
@@ -195,6 +197,11 @@ export function createFakeShopify(options: FakeShopOptions) {
             myshopifyDomain: domain,
             ianaTimezone: options.timezone ?? "Europe/Oslo",
             currencyCode: "NOK",
+          },
+          currentAppInstallation: {
+            accessScopes: (options.accessScopes ?? ["read_orders", "read_all_orders", "read_products"]).map(
+              (handle) => ({ handle }),
+            ),
           },
           orders: { nodes: earliest ? [{ id: earliest.id, createdAt: earliest.createdAt }] : [] },
         };
