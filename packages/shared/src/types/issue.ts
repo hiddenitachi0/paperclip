@@ -308,12 +308,16 @@ export interface IssueBlockedInboxAttention {
 /**
  * Why the Now page's "Needs you" lane reports that nobody is moving an open
  * task. `assignee_unavailable` and `assignee_error` fire immediately; the two
- * `idle_*` reasons only after the instance's stalled threshold has passed.
+ * `idle_*` reasons and `waiting_on_person` only after the instance's stalled
+ * threshold has passed. `waiting_on_person` is a quiet task assigned to a
+ * person with no agent on it, so the row says it is waiting on someone rather
+ * than reading as if nothing were supposed to be happening.
  */
 export type StalledTaskReason =
   | "assignee_unavailable"
   | "assignee_error"
   | "unassigned"
+  | "waiting_on_person"
   | "idle_in_review"
   | "idle";
 

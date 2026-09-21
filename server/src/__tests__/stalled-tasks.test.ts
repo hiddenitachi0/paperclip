@@ -4,6 +4,7 @@ import {
   activityLog,
   agents,
   approvals,
+  authUsers,
   companies,
   createDb,
   heartbeatRuns,
@@ -56,6 +57,7 @@ describeEmbeddedPostgres("stalled tasks (work nobody is moving)", () => {
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
+    await db.delete(authUsers);
     await db.delete(instanceSettings);
   });
 
@@ -208,6 +210,82 @@ describeEmbeddedPostgres("stalled tasks (work nobody is moving)", () => {
     expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0]).toMatchObject({ identifier: "SUN-1", reason: "unassigned" });
     expect(result.tasks[0]?.reasonText).toContain("Nobody is assigned to this");
+  });
+
+  it("says a quiet task assigned to a person is waiting on that person, by name", async () => {
+    const { companyId } = await createCompany("SPN");
+    const userId = `user-${randomUUID()}`;
+    await db.insert(authUsers).values({
+      id: userId,
+      name: "Filip",
+      email: `${userId}@example.com`,
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await insertIssue({
+      companyId,
+      identifier: "SPN-1",
+      title: "Sign the supplier contract",
+      status: "todo",
+      assigneeUserId: userId,
+      updatedAt: hoursAgo(30),
+    });
+    await insertIssue({
+      companyId,
+      identifier: "SPN-2",
+      title: "Look over the finished import",
+      status: "in_review",
+      assigneeUserId: userId,
+      updatedAt: hoursAgo(30),
+    });
+
+    const result = await list(companyId);
+    const byIdentifier = new Map(result.tasks.map((task) => [task.identifier, task]));
+
+    expect(result.tasks).toHaveLength(2);
+    for (const identifier of ["SPN-1", "SPN-2"]) {
+      const task = byIdentifier.get(identifier);
+      expect(task?.reason).toBe("waiting_on_person");
+      expect(task?.reasonText).toMatch(/^Waiting on Filip — this is with a person, not an agent\. Nothing has happened since \d{1,2} \w+\.$/);
+      // The lane is per company, not per viewer: never claim it is "you".
+      expect(task?.reasonText).not.toMatch(/\byou\b/i);
+      expect(task?.reasonText).not.toContain(userId);
+      expect(task?.agentName).toBeNull();
+    }
+  });
+
+  it("falls back to 'a person' when the assigned person cannot be found", async () => {
+    const { companyId } = await createCompany("SPX");
+    await insertIssue({
+      companyId,
+      identifier: "SPX-1",
+      title: "Assigned to someone since removed",
+      status: "in_progress",
+      assigneeUserId: "user-that-does-not-exist",
+      updatedAt: hoursAgo(30),
+    });
+
+    const result = await list(companyId);
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]?.reason).toBe("waiting_on_person");
+    expect(result.tasks[0]?.reasonText).toContain("Waiting on a person");
+    expect(result.tasks[0]?.reasonText).not.toContain("user-that-does-not-exist");
+  });
+
+  it("still waits for the threshold before showing a person-assigned task", async () => {
+    const { companyId } = await createCompany("SPQ");
+    await insertIssue({
+      companyId,
+      identifier: "SPQ-1",
+      title: "Just handed over",
+      status: "todo",
+      assigneeUserId: "user-someone",
+      updatedAt: hoursAgo(1),
+    });
+
+    expect((await list(companyId)).tasks).toHaveLength(0);
   });
 
   // --- No double-reporting: each of these is already on the page some other way.
