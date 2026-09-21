@@ -15,6 +15,7 @@ import {
   type FleetQuietMode,
   type FleetRequestLoad,
   type FleetRunCounts,
+  type FleetSchedulerRescue,
   type FleetSchedulerStatus,
   type FleetSchedulerStuckChain,
   type FleetSlotUsage,
@@ -424,9 +425,13 @@ function plural(count: number, singular: string, pluralWord = `${singular}s`): s
  *   * nothing identified  -> the original wording, unchanged.
  *   * a step is stuck     -> name it, say how long, say the server will start a
  *                            fresh attempt by itself and when.
- *   * already retried once -> name it, and say plainly that only a restart is
- *                            left, because the watchdog has spent its one
- *                            override (see MAX_ABANDONED_RUNS_PER_CHAIN).
+ *   * no restart left     -> name it, and say plainly that only a restart is
+ *                            left, because the watchdog's bounded rescues are
+ *                            spent (see MAX_RESCUES_PER_CHAIN_PER_WINDOW and
+ *                            maxAbandonedInFlightFor in
+ *                            scheduler-tick-single-flight.ts).
+ * A step already retried once but with rescues left says the server will try
+ * again by itself.
  */
 export function buildStuckSchedulerNotice(since: string, stuck: FleetSchedulerStuckChain | null): string {
   const opening = `The scheduler has not completed a tick ${since}.`;
@@ -434,10 +439,66 @@ export function buildStuckSchedulerNotice(since: string, stuck: FleetSchedulerSt
     return `${opening} Agents will not be woken until this is fixed (a server restart usually clears it).`;
   }
   const step = `The step that is stuck is ${stuck.label}, and it has been going for ${formatOperatorDuration(stuck.runningMs)}.`;
-  if (stuck.freshAttemptAlreadyTried) {
+  // DUR-3991: the server now restarts a stuck step more than once (bounded),
+  // so "already retried" no longer means "only a restart is left" -- the
+  // server says which it is. Older payloads without the field keep the
+  // original meaning.
+  const restartNeeded = stuck.restartNeeded ?? stuck.freshAttemptAlreadyTried;
+  if (stuck.restartNeeded === true) {
+    const tried = stuck.freshAttemptAlreadyTried
+      ? "The server already gave up on it and started it again as many times as it safely can, and it is still stuck"
+      : "The server has used up its automatic restarts for it";
+    return `${opening} ${step} ${tried}, so restarting the server is the only thing left.`;
+  }
+  if (restartNeeded) {
     return `${opening} ${step} The server already gave up on it once and started it again, and that is stuck too, so restarting the server is the only thing left.`;
   }
+  if (stuck.freshAttemptAlreadyTried) {
+    return `${opening} ${step} The server already gave up on it once and started it again; if this attempt is stuck too it will try again by itself after ${formatOperatorDuration(stuck.freshAttemptAfterMs)}, a limited number of times.`;
+  }
   return `${opening} ${step} No agent is woken while this lasts. The server gives up on it and starts it again by itself after ${formatOperatorDuration(stuck.freshAttemptAfterMs)}; restart the server if it is still stuck after that.`;
+}
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** "03:12 UTC on 18 September": the server cannot know the reader's time zone, so it says which one it used. */
+function formatOperatorClock(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "an unknown time";
+  const hh = String(at.getUTCHours()).padStart(2, "0");
+  const mm = String(at.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC on ${at.getUTCDate()} ${MONTHS[at.getUTCMonth()]}`;
+}
+
+/** Findings about the last automatic rescue count as recent (amber) for this long. */
+export const FLEET_SCHEDULER_RESCUE_RECENT_MS = 60 * 60_000;
+
+/**
+ * DUR-3991: "The scheduler got stuck while <phase in plain words> and was
+ * restarted automatically at <time>." The stuck phase is read from inside the
+ * abandoned tick at the moment it was given up on -- the only evidence of it.
+ */
+export function buildSchedulerRescueNotice(rescue: FleetSchedulerRescue, now: Date): string {
+  let where: string;
+  if (rescue.stuckPhase !== null) {
+    where = `while ${rescue.stuckPhaseLabel} (part of ${rescue.label})`;
+  } else if (rescue.phasesMeasured) {
+    where = `while ${rescue.label}, before its first measured step (most likely waiting for a database connection)`;
+  } else {
+    where = `while ${rescue.label}`;
+  }
+  const agoMs = Math.max(0, now.getTime() - new Date(rescue.at).getTime());
+  const stuckFor =
+    rescue.stuckPhase !== null && rescue.stuckPhaseMs !== null
+      ? ` It had been stuck at that point for ${formatOperatorDuration(rescue.stuckPhaseMs)}.`
+      : "";
+  return (
+    `The scheduler got stuck ${where} and was restarted automatically at ${formatOperatorClock(rescue.at)} ` +
+    `(${formatOperatorDuration(agoMs)} ago).${stuckFor}`
+  );
 }
 
 export function summarizeFleetHealth(input: {
@@ -450,6 +511,8 @@ export function summarizeFleetHealth(input: {
   quietMode: FleetQuietMode;
   /** DUR-3973; absent = nothing known to be waiting. */
   waitingOnUnavailableAgents?: FleetWaitingOnUnavailableAgents;
+  /** For "how long ago"; defaults to the current time. */
+  now?: Date;
 }): FleetHealthSummary {
   const findings: Array<{ level: FleetHealthLevel; text: string }> = [];
   const { runs, slots, agents: agentCounts, scheduler, requests, database, quietMode } = input;
@@ -505,6 +568,51 @@ export function summarizeFleetHealth(input: {
     findings.push({
       level: "warning",
       text: `The scheduler's last tick failed: ${scheduler.lastTickError}`,
+    });
+  }
+
+  // DUR-3991: the watchdog's bounded automatic restarts. A stuck step it will
+  // no longer restart is critical; an exhausted budget with nothing stuck yet
+  // is a warning (the next hang cannot heal itself); a recent rescue is worth
+  // knowing about even though it healed itself.
+  const rescues = scheduler.rescues ?? null;
+  if (scheduler.enabled && rescues) {
+    const alreadySaid = scheduler.stale && (scheduler.stuckChain?.restartNeeded ?? false);
+    if (rescues.restartNeededFor.length > 0 && !alreadySaid) {
+      const steps = rescues.restartNeededFor.join(", ");
+      findings.push({
+        level: "critical",
+        text:
+          `Part of the scheduler is stuck (${steps}) and the server has used up its automatic restarts for it, ` +
+          "so it will stay stuck until the server is restarted.",
+      });
+    } else if (rescues.restartNeededFor.length === 0 && rescues.abandonedStillRunning >= rescues.maxAbandonedStillRunning) {
+      findings.push({
+        level: "warning",
+        text:
+          `The scheduler has given up on ${plural(rescues.abandonedStillRunning, "stuck step that has", "stuck steps that have")} ` +
+          "still not finished, which is as many as it allows. Everything is running now, but if anything gets " +
+          "stuck again the server cannot restart it by itself. Restart the server when convenient.",
+      });
+    }
+    if (rescues.last) {
+      const agoMs = Math.max(0, (input.now ?? new Date()).getTime() - new Date(rescues.last.at).getTime());
+      findings.push({
+        level: agoMs < FLEET_SCHEDULER_RESCUE_RECENT_MS ? "warning" : "ok",
+        text: buildSchedulerRescueNotice(rescues.last, input.now ?? new Date()),
+      });
+    }
+  }
+
+  // DUR-3991: a completed tick whose slowest single step took longer than the
+  // tick interval is the early shape of a hang. Stated, not alarmed.
+  const slowest = scheduler.lastTickSlowestPhase ?? null;
+  if (scheduler.enabled && !scheduler.stale && slowest && scheduler.intervalMs && slowest.ms >= scheduler.intervalMs) {
+    findings.push({
+      level: "ok",
+      text:
+        `The last scheduler tick finished, but spent ${formatOperatorDuration(slowest.ms)} ${slowest.label}, ` +
+        "longer than the time between ticks.",
     });
   }
 
@@ -670,6 +778,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
     database,
     quietMode,
     waitingOnUnavailableAgents,
+    now,
   });
 
   return {

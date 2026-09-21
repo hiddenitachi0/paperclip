@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { QUIET_MODE_STALE_AFTER_MS, type FleetRequestLoad, type FleetSchedulerStatus, type FleetDatabaseLoad } from "@paperclipai/shared";
+import {
+  QUIET_MODE_STALE_AFTER_MS,
+  type FleetRequestLoad,
+  type FleetSchedulerRescues,
+  type FleetSchedulerStatus,
+  type FleetDatabaseLoad,
+} from "@paperclipai/shared";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -91,7 +97,32 @@ function summarize(input: Partial<Parameters<typeof summarizeFleetHealth>[0]> = 
     requests: input.requests ?? quietRequests,
     database: input.database ?? calmDatabase,
     quietMode: input.quietMode ?? quietModeOff,
+    now: input.now,
   });
+}
+
+// DUR-3991 follow-up: the watchdog's last rescue, shaped as the server sends it.
+const rescueAt = "2026-09-18T03:12:00.000Z";
+function rescues(overrides: Partial<FleetSchedulerRescues> = {}): FleetSchedulerRescues {
+  return {
+    last: {
+      at: rescueAt,
+      label: "waking agents on their timers",
+      runningMs: 5 * 60_000,
+      phasesMeasured: true,
+      stuckPhase: "loadAgents",
+      stuckPhaseLabel: "loading the list of agents",
+      stuckPhaseMs: 4 * 60_000 + 58_000,
+      completedPhases: [],
+      openPhases: [{ phase: "loadAgents", label: "loading the list of agents", ms: 4 * 60_000 + 58_000 }],
+    },
+    total: 1,
+    abandonedStillRunning: 1,
+    maxAbandonedStillRunning: 3,
+    maxPerStepPerHour: 3,
+    restartNeededFor: [],
+    ...overrides,
+  };
 }
 
 describe("computeFleetSlotUsage", () => {
@@ -214,6 +245,116 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.headline).toBe(
       "The scheduler has not completed a tick for 5 minutes. Agents will not be woken until this is fixed (a server restart usually clears it).",
     );
+  });
+
+  it("DUR-3991 reports the last automatic rescue and where it was stuck, amber for an hour", () => {
+    const summary = summarize({
+      scheduler: { ...healthyScheduler, rescues: rescues() },
+      now: new Date(Date.parse(rescueAt) + 20 * 60_000),
+    });
+    expect(summary.level).toBe("warning");
+    expect(summary.headline).toBe(
+      "The scheduler got stuck while loading the list of agents (part of waking agents on their timers) and was " +
+        "restarted automatically at 03:12 UTC on 18 September (20 minutes ago). It had been stuck at that point for 4 minutes.",
+    );
+    expect(summary.headline).not.toContain("loadAgents");
+
+    // After an hour it is history: still said, no longer amber.
+    const later = summarize({
+      scheduler: { ...healthyScheduler, rescues: rescues() },
+      now: new Date(Date.parse(rescueAt) + 3 * 3_600_000),
+    });
+    expect(later.level).toBe("ok");
+    expect(later.notes.join("\n")).toContain("was restarted automatically at 03:12 UTC on 18 September");
+  });
+
+  it("DUR-3991 says a restart is needed when a stuck step has run out of automatic restarts", () => {
+    const summary = summarize({
+      scheduler: {
+        ...healthyScheduler,
+        rescues: rescues({ restartNeededFor: ["recovering stuck work"], abandonedStillRunning: 3, total: 3 }),
+      },
+      now: new Date(Date.parse(rescueAt) + 5 * 3_600_000),
+    });
+    expect(summary.level).toBe("critical");
+    expect(summary.headline).toBe(
+      "Part of the scheduler is stuck (recovering stuck work) and the server has used up its automatic restarts for " +
+        "it, so it will stay stuck until the server is restarted.",
+    );
+  });
+
+  it("DUR-3991 warns when the rescue budget is spent even though nothing is stuck right now", () => {
+    const summary = summarize({
+      scheduler: { ...healthyScheduler, rescues: rescues({ abandonedStillRunning: 3, total: 4 }) },
+      now: new Date(Date.parse(rescueAt) + 5 * 3_600_000),
+    });
+    expect(summary.level).toBe("warning");
+    expect(summary.headline).toContain("if anything gets stuck again the server cannot restart it by itself");
+  });
+
+  it("DUR-3991 names the stuck step once, not twice, when the stale banner already says restart", () => {
+    const summary = summarize({
+      scheduler: {
+        ...healthyScheduler,
+        sinceLastTickMs: 20 * 60_000,
+        stale: true,
+        stuckChain: {
+          label: "waking agents on their timers",
+          runningMs: 6 * 60_000,
+          freshAttemptAlreadyTried: true,
+          freshAttemptAfterMs: 5 * 60_000,
+          restartNeeded: true,
+        },
+        rescues: rescues({ restartNeededFor: ["waking agents on their timers"], abandonedStillRunning: 3, total: 3 }),
+      },
+      now: new Date(Date.parse(rescueAt) + 10 * 60_000),
+    });
+    expect(summary.headline).toBe(
+      "The scheduler has not completed a tick for 20 minutes. The step that is stuck is waking agents on their " +
+        "timers, and it has been going for 6 minutes. The server already gave up on it and started it again as many " +
+        "times as it safely can, and it is still stuck, so restarting the server is the only thing left.",
+    );
+    expect(summary.notes.join("\n")).not.toContain("Part of the scheduler is stuck");
+  });
+
+  it("DUR-3991 says the server will retry again when a retried step is stuck but rescues remain", () => {
+    const summary = summarize({
+      scheduler: {
+        ...healthyScheduler,
+        sinceLastTickMs: 8 * 60_000,
+        stale: true,
+        stuckChain: {
+          label: "waking agents on their timers",
+          runningMs: 3 * 60_000,
+          freshAttemptAlreadyTried: true,
+          freshAttemptAfterMs: 5 * 60_000,
+          restartNeeded: false,
+        },
+      },
+    });
+    expect(summary.headline).toContain("it will try again by itself after 5 minutes, a limited number of times");
+    expect(summary.headline).not.toContain("only thing left");
+  });
+
+  it("DUR-3991 mentions a completed tick whose slowest step outlasted the tick interval", () => {
+    const summary = summarize({
+      scheduler: {
+        ...healthyScheduler,
+        lastTickSlowestPhase: { phase: "wakeAgents", label: "waking the agents that were due", ms: 90_000 },
+      },
+    });
+    expect(summary.level).toBe("ok");
+    expect(summary.notes).toContain(
+      "The last scheduler tick finished, but spent 1 minute waking the agents that were due, longer than the time between ticks.",
+    );
+    // A normal tick says nothing.
+    const quick = summarize({
+      scheduler: {
+        ...healthyScheduler,
+        lastTickSlowestPhase: { phase: "wakeAgents", label: "waking the agents that were due", ms: 900 },
+      },
+    });
+    expect(quick.notes).toEqual([]);
   });
 
   it("a scheduler that never ticked since boot is reported as such", () => {
@@ -674,6 +815,22 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
     expect(snapshot.summary.level).toBe("warning");
     expect(snapshot.summary.notes.join("\n")).toContain("Broken");
     expect(snapshot.summary.notes.concat(snapshot.summary.headline).join("\n")).toContain("may be stuck");
+  });
+
+  it("DUR-3991 carries the watchdog's last rescue through to the Now page summary", async () => {
+    const now = new Date(Date.parse(rescueAt) + 10 * 60_000);
+    const scheduler: FleetSchedulerStatus = {
+      ...healthyScheduler,
+      lastTickSlowestPhase: { phase: "wakeAgents", label: "waking the agents that were due", ms: 1_200 },
+      rescues: rescues(),
+    };
+    const snapshot = await computeFleetHealth(db, { now, scheduler, requests: quietRequests });
+    expect(snapshot.scheduler.rescues?.last?.stuckPhase).toBe("loadAgents");
+    expect(snapshot.scheduler.lastTickSlowestPhase).toEqual({ phase: "wakeAgents", label: "waking the agents that were due", ms: 1_200 });
+    expect(snapshot.summary.level).toBe("warning");
+    expect(snapshot.summary.headline).toContain(
+      "The scheduler got stuck while loading the list of agents (part of waking agents on their timers) and was restarted automatically at 03:12 UTC on 18 September (10 minutes ago).",
+    );
   });
 
   it("reads the instance-wide cap from settings when no override is given, and is quiet on an empty database", async () => {

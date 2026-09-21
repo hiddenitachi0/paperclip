@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createSchedulerLiveness, SCHEDULER_STALE_AFTER_INTERVALS } from "../services/scheduler-liveness.js";
+import { timeTickPhase, withTickPhases } from "../services/scheduler-tick-phases.js";
 
 // DUR-3939/DUR-3940: the health payload must be able to say whether the
 // scheduler tick itself is alive, independent of whether runs are starting.
@@ -73,5 +74,27 @@ describe("scheduler liveness (DUR-3939/DUR-3940)", () => {
     liveness.tickStarted();
     liveness.tickFinished({ checked: 0, enqueued: 0, skipped: 0 });
     expect(liveness.snapshot().lastTickError).toBeNull();
+  });
+
+  // DUR-3991: the last completed tick's slowest step, for fleet health.
+  it("reports the last completed tick's slowest phase in code and plain words", async () => {
+    const liveness = createSchedulerLiveness(() => 0);
+    liveness.configure({ enabled: true, intervalMs: 30_000 });
+    expect(liveness.snapshot().lastTickSlowestPhase).toBeNull();
+    const phases = await withTickPhases(async (report) => {
+      await timeTickPhase("loadAgents", async () => {});
+      return report();
+    });
+    liveness.tickFinished({
+      checked: 1,
+      enqueued: 0,
+      skipped: 1,
+      phases: { ...phases, slowest: { phase: "wakeAgents", totalMs: 4_200, count: 1, maxMs: 4_200 } },
+    });
+    expect(liveness.snapshot().lastTickSlowestPhase).toEqual({
+      phase: "wakeAgents",
+      label: "waking the agents that were due",
+      ms: 4_200,
+    });
   });
 });

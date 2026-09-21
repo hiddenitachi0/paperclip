@@ -54,24 +54,70 @@
 // the lesser evil past the limit:
 //   * The thing DUR-385 prevents is UNBOUNDED overlap: a chain slower than the
 //     tick interval starting a new copy every 30s until the bypass pool (cap 10)
-//     is gone. This override is bounded: at most ONE abandoned run per chain at
-//     a time (MAX_ABANDONED_RUNS_PER_CHAIN), and the fresh copy holds the flag
-//     from the moment it starts, so the normal skip rules apply again
-//     immediately. Two copies, never twenty.
+//     is gone. This override is bounded (see the follow-up note below for the
+//     exact bounds), and the fresh copy holds the flag from the moment it
+//     starts, so the normal skip rules apply again immediately.
 //   * Five minutes is ten missed ticks. A chain that has not returned in ten
 //     ticks is not "slow this time"; the overlap risk of one extra copy is
 //     smaller than the certainty of a fleet that wakes nobody.
-//   * If the fresh copy wedges too, the guard does NOT override again -- the
-//     abandoned budget is spent. Two wedged copies mean something systemic, and
-//     a third would just eat the pool DUR-385 exists to protect. From there the
-//     guard goes back to skipping and says loudly, in the log and on the Now
-//     page, that the server needs restarting. The budget frees up again if the
-//     abandoned run ever does return.
+//   * Once a bound refuses another rescue, the guard goes back to skipping and
+//     says loudly, in the log and on the Now page, that the server needs
+//     restarting. Budget frees up again if an abandoned run ever does return.
 // The override is logged once per wedge, at error level, as a wedged chain --
 // never as one of the routine skip lines.
+//
+// DUR-3991 (follow-up): more than one rescue, but bounded
+// ---------------------------------------------------------
+// The first version allowed exactly ONE rescue per chain until an abandoned run
+// settled. On production that single rescue was spent on 2026-09-18 and never
+// given back (the abandoned tick never returned), so a second hang would have
+// silently stopped every scheduled wake-up until someone restarted the server.
+// A cap of one per server life is too tight; no cap at all would be wrong too.
+// What an abandoned run can still be holding, established from the code:
+//   * ONE reserved connection from the bypass pool (runInCompanyScopeBypass in
+//     packages/db/src/company-scope.ts reserves it before the chain's work and
+//     only releases it in its `finally` -- which a promise that never settles
+//     never reaches). Possibly with a BEGIN/SAVEPOINT open on it, so possibly
+//     row locks too. This is the resource that matters. If the run is hung in
+//     `reserve()` itself it holds no connection yet, just a place in the
+//     pool's wait queue, and will run to completion once it gets one.
+//   * Company-scope turn bookkeeping (reserved-scope-turns.ts): per reserved
+//     connection, keyed by that connection's scopedDb, so it cannot block any
+//     other chain, and every turn wait gives up after 60s anyway.
+//   * Nothing else process-wide: no global lock, no run slot, no timer that
+//     keeps firing (the phase deadlines are unref'd one-shots).
+// So the bound is on abandoned-and-still-unsettled runs ACROSS ALL CHAINS,
+// because they all share one bypass pool: see maxAbandonedInFlightFor(). On top
+// of that, a per-chain rate limit (MAX_RESCUES_PER_CHAIN_PER_WINDOW in any
+// RESCUE_WINDOW_MS) so a chain that wedges on every run is called what it is --
+// systemic -- instead of being quietly restarted every five minutes forever,
+// each time leaving another transaction's locks behind for minutes. When either
+// bound refuses a rescue the guard goes back to skipping, logs loudly, and
+// fleet health says plainly that the server needs a restart.
+//
+// Every rescue also records WHERE the abandoned run was stuck: the chain runs
+// with a TickPhaseProbe (scheduler-tick-phases.ts), so the in-flight tick's
+// current phase and its phase timings so far are read at the moment it is
+// abandoned, logged in one line, and kept as `lastRescue` for fleet health.
+// Before this, step timings were only ever reported when a tick COMPLETED --
+// and a hung tick never completes, so the stuck step had never been named.
 
-import type { FleetSchedulerStuckChain } from "@paperclipai/shared";
+import type {
+  FleetSchedulerPhaseTiming,
+  FleetSchedulerRescues,
+  FleetSchedulerStuckChain,
+} from "@paperclipai/shared";
+import { getAppPoolMax } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import {
+  createTickPhaseProbe,
+  describeTickPhase,
+  describeTickPhases,
+  runWithTickPhaseProbe,
+  type OpenTickPhase,
+  type TickPhaseProbe,
+  type TickPhaseTiming,
+} from "./scheduler-tick-phases.js";
 
 /**
  * Every fire-and-forget tick chain in server/src/index.ts, in one place.
@@ -165,16 +211,75 @@ export const SKIP_LOG_INTERVAL_MS = 60_000;
 export const WEDGED_AFTER_MS = 5 * 60_000;
 
 /**
- * How many runs of one chain may be abandoned-but-unsettled at the same time.
- *
- * One. The override exists to recover from a single wedge, not to keep feeding
- * copies into a chain that is systemically broken: each in-flight chain holds a
- * reserved connection from the bypass pool (cap 10), so an uncapped watchdog
- * would reproduce exactly the pool exhaustion DUR-385 was written to stop. Once
- * the budget is spent the guard skips again and says a restart is needed. The
- * budget is given back if an abandoned run ever does settle.
+ * The rolling window the per-chain rescue rate is counted over.
  */
-export const MAX_ABANDONED_RUNS_PER_CHAIN = 1;
+export const RESCUE_WINDOW_MS = 60 * 60_000;
+
+/**
+ * How many times one chain may be rescued within any RESCUE_WINDOW_MS.
+ *
+ * Three an hour. A genuine one-off hang (the 2026-09-17/18 shape: the first
+ * tick after a start) needs one; a second unrelated hang in the same hour is
+ * plausible; a third is already a pattern. A chain wedging more often than that
+ * is broken in a way a fresh copy will not fix, and every abandoned copy may be
+ * sitting on an open transaction's row locks for as long as it hangs -- so past
+ * this the guard stops restarting it and asks for a server restart instead.
+ * With WEDGED_AFTER_MS at five minutes, three rescues also mean at most fifteen
+ * minutes of a stuck chain per hour before a human is told a restart is needed.
+ */
+export const MAX_RESCUES_PER_CHAIN_PER_WINDOW = 3;
+
+/**
+ * How many abandoned-and-still-unsettled runs may exist at once, across EVERY
+ * chain, for a bypass pool of `poolMax` connections.
+ *
+ * An abandoned run that never settles keeps its reserved bypass connection for
+ * the life of the process (see the note at the top of this file). Every chain
+ * in SCHEDULER_TICK_CHAINS -- seventeen of them -- reserves from that same pool
+ * (`createDb` in index.ts, sized by getAppPoolMax(): 10 by default, or
+ * PAPERCLIP_DB_POOL_MAX). postgres.js's reserve() waits without a timeout when
+ * the pool is empty, so the one outcome that must be impossible is abandoned
+ * runs pinning EVERY connection: then no chain could ever start again.
+ *
+ * So: at most a third of the pool, and never more than three. With the default
+ * pool of 10 that is 3 pinned connections and 7 left for the live chains --
+ * which already share 10 between seventeen chains by queueing briefly in
+ * reserve(), so losing three slows the queue, it does not stop it. The floor of
+ * one keeps the original single rescue on a tiny pool (the pre-existing
+ * behaviour, which was already reviewed as safe). The budget is given back
+ * whenever an abandoned run does settle.
+ */
+export function maxAbandonedInFlightFor(poolMax: number): number {
+  if (!Number.isFinite(poolMax) || poolMax < 1) return 1;
+  return Math.max(1, Math.min(3, Math.floor(poolMax / 3)));
+}
+
+/** Why the watchdog declined to rescue a wedged chain. */
+export type SchedulerRescueRefusal = "chain_rescued_too_often" | "too_many_abandoned_runs";
+
+/**
+ * DUR-3991: the most recent rescue, kept in memory so fleet health can say
+ * where the scheduler got stuck even though the stuck tick never reported.
+ */
+export interface SchedulerRescueRecord {
+  /** When the watchdog abandoned the run (epoch ms). */
+  at: number;
+  chain: SchedulerTickChain;
+  /** Plain-language name of the chain. */
+  label: string;
+  /** How long the abandoned run had been in flight. */
+  runningMs: number;
+  /**
+   * The phase the run was in when it was abandoned (see
+   * InFlightTickPhases.currentPhase), or null when none was measured.
+   */
+  stuckPhase: string | null;
+  stuckPhaseMs: number | null;
+  /** false when the chain never opened a phase recorder at all. */
+  phasesMeasured: boolean;
+  openPhases: OpenTickPhase[];
+  completedPhases: TickPhaseTiming[];
+}
 
 export interface SchedulerTickChainSnapshot {
   chain: SchedulerTickChain;
@@ -190,8 +295,26 @@ export interface SchedulerTickChainSnapshot {
   skipsTotal: number;
   /** Times the watchdog started a fresh copy and abandoned a wedged run. */
   overridesTotal: number;
-  /** Abandoned runs that have still never settled (0 or 1, see the cap). */
+  /** This chain's abandoned runs that have still never settled. */
   abandonedInFlight: number;
+  /** Rescues of this chain within the last RESCUE_WINDOW_MS. */
+  rescuesInWindow: number;
+  /**
+   * Set when the chain is wedged past WEDGED_AFTER_MS and the watchdog will
+   * NOT rescue it (a bound is spent): only a server restart clears it.
+   */
+  rescueRefused: SchedulerRescueRefusal | null;
+}
+
+/** Process-wide watchdog state for fleet health. */
+export interface SchedulerRescueDiagnostics {
+  lastRescue: SchedulerRescueRecord | null;
+  rescuesTotal: number;
+  /** Abandoned runs, across every chain, that have still never settled. */
+  abandonedInFlightTotal: number;
+  maxAbandonedInFlight: number;
+  maxRescuesPerChainPerWindow: number;
+  rescueWindowMs: number;
 }
 
 interface ChainState {
@@ -211,6 +334,10 @@ interface ChainState {
   lastRunMs: number | null;
   overridesTotal: number;
   abandonedInFlight: number;
+  /** When each rescue of this chain happened, pruned to RESCUE_WINDOW_MS. */
+  rescueTimes: number[];
+  /** Probe for the run that currently holds the flag. */
+  probe: TickPhaseProbe | null;
 }
 
 /** Just the logger surface this module uses, so tests can capture the lines. */
@@ -223,6 +350,8 @@ export interface TickSingleFlightLogger {
 export interface TickSingleFlightOptions {
   now?: () => number;
   log?: TickSingleFlightLogger;
+  /** Size of the bypass pool the chains reserve from; defaults to getAppPoolMax(). */
+  bypassPoolMax?: number;
 }
 
 export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions = {}) {
@@ -230,6 +359,40 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
   const log = options.log ?? (logger as unknown as TickSingleFlightLogger);
   const states = new Map<string, ChainState>();
   let nextRunId = 1;
+  let poolMax = options.bypassPoolMax;
+  if (poolMax === undefined) {
+    try {
+      poolMax = getAppPoolMax();
+    } catch {
+      poolMax = 10;
+    }
+  }
+  const maxAbandonedInFlight = maxAbandonedInFlightFor(poolMax);
+  /** Abandoned runs, across every chain, that have not settled yet. */
+  let abandonedInFlightTotal = 0;
+  let rescuesTotal = 0;
+  let lastRescue: SchedulerRescueRecord | null = null;
+
+  function pruneRescues(state: ChainState, now: number): void {
+    while (state.rescueTimes.length > 0 && now - state.rescueTimes[0]! >= RESCUE_WINDOW_MS) {
+      state.rescueTimes.shift();
+    }
+  }
+
+  /** null = a rescue is allowed right now; otherwise why not. */
+  function rescueRefusal(state: ChainState, now: number): SchedulerRescueRefusal | null {
+    pruneRescues(state, now);
+    if (abandonedInFlightTotal >= maxAbandonedInFlight) return "too_many_abandoned_runs";
+    if (state.rescueTimes.length >= MAX_RESCUES_PER_CHAIN_PER_WINDOW) return "chain_rescued_too_often";
+    return null;
+  }
+
+  function describeRefusal(refusal: SchedulerRescueRefusal): string {
+    return refusal === "too_many_abandoned_runs"
+      ? `${abandonedInFlightTotal} abandoned scheduler ${abandonedInFlightTotal === 1 ? "run is" : "runs are"} still ` +
+          `holding on to the database (the limit is ${maxAbandonedInFlight})`
+      : `it has already been restarted ${MAX_RESCUES_PER_CHAIN_PER_WINDOW} times in the last hour`;
+  }
 
   function stateFor(chain: SchedulerTickChain): ChainState {
     let state = states.get(chain);
@@ -244,6 +407,8 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
         lastRunMs: null,
         overridesTotal: 0,
         abandonedInFlight: 0,
+        rescueTimes: [],
+        probe: null,
       };
       states.set(chain, state);
     }
@@ -270,13 +435,14 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
     };
 
     // Past WEDGED_AFTER_MS the watchdog would normally have started a fresh
-    // copy, so reaching here means the abandoned budget is already spent: the
-    // replacement is wedged too and nothing else will clear it.
+    // copy, so reaching here means a rescue bound refused it: nothing else
+    // will clear this chain.
     if (runningMs >= WEDGED_AFTER_MS) {
+      const refusal = rescueRefusal(state, now) ?? "chain_rescued_too_often";
       log.error(
-        fields,
-        `scheduler chain "${chain}" has been running for ${Math.floor(runningMs / 60_000)} minutes, a fresh copy was ` +
-          "already started once and is stuck too — this server needs restarting",
+        { ...fields, rescueRefused: refusal, rescuesInWindow: state.rescueTimes.length, abandonedInFlightTotal },
+        `scheduler chain "${chain}" has been running for ${Math.floor(runningMs / 60_000)} minutes and will not be ` +
+          `restarted automatically again because ${describeRefusal(refusal)} — this server needs restarting`,
       );
       return;
     }
@@ -295,7 +461,7 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
     if (state.startedAt !== null) {
       const runningMs = now - state.startedAt;
       const wedged = runningMs >= WEDGED_AFTER_MS;
-      const mayOverride = wedged && state.abandonedInFlight < MAX_ABANDONED_RUNS_PER_CHAIN;
+      const mayOverride = wedged && rescueRefusal(state, now) === null;
 
       if (!mayOverride) {
         state.skipsTotal += 1;
@@ -310,6 +476,46 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
       // `finally` will see the flag has moved on and leave it alone.
       state.overridesTotal += 1;
       state.abandonedInFlight += 1;
+      state.rescueTimes.push(now);
+      abandonedInFlightTotal += 1;
+      rescuesTotal += 1;
+
+      // Where was it stuck? Read live from the run's own phase recorder --
+      // the only moment this can be known, since the run will never report.
+      // Diagnostics must never block the rescue itself: fail open.
+      let inFlight = null as ReturnType<TickPhaseProbe["read"]>;
+      try {
+        inFlight = state.probe?.read() ?? null;
+      } catch {
+        inFlight = null;
+      }
+      lastRescue = {
+        at: now,
+        chain,
+        label: SCHEDULER_TICK_CHAIN_LABELS[chain],
+        runningMs,
+        stuckPhase: inFlight?.currentPhase ?? null,
+        stuckPhaseMs: inFlight?.currentPhaseMs ?? null,
+        phasesMeasured: inFlight !== null,
+        openPhases: inFlight?.openPhases ?? [],
+        completedPhases: inFlight?.completedPhases ?? [],
+      };
+      const done = inFlight
+        ? describeTickPhases({ totalMs: inFlight.elapsedMs, phases: inFlight.completedPhases, slowest: inFlight.completedPhases[0] ?? null })
+        : null;
+      let where: string;
+      if (!inFlight) {
+        where = "its steps are not timed";
+      } else {
+        const stuckAt = inFlight.currentPhase
+          ? `stuck in phase "${inFlight.currentPhase}" for ${inFlight.currentPhaseMs}ms`
+          : "no timed phase in progress";
+        const open =
+          inFlight.openPhases.length > 1
+            ? `; open: ${inFlight.openPhases.map((p) => `${p.phase} ${p.runningMs}ms`).join(" > ")}`
+            : "";
+        where = `${stuckAt}${open}; finished: ${done}`;
+      }
       log.error(
         {
           chain,
@@ -319,23 +525,35 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
           skipsTotal: state.skipsTotal,
           overridesTotal: state.overridesTotal,
           abandonedInFlight: state.abandonedInFlight,
+          abandonedInFlightTotal,
+          maxAbandonedInFlight,
+          rescuesInWindow: state.rescueTimes.length,
+          maxRescuesPerChainPerWindow: MAX_RESCUES_PER_CHAIN_PER_WINDOW,
           wedgedAfterMs: WEDGED_AFTER_MS,
+          stuckPhase: lastRescue.stuckPhase,
+          stuckPhaseMs: lastRescue.stuckPhaseMs,
+          openPhases: lastRescue.openPhases,
+          completedPhases: done,
         },
-        `scheduler chain "${chain}" has been wedged for ${Math.floor(runningMs / 60_000)} minutes and is not coming ` +
-          "back — abandoning it and starting a fresh copy so the fleet keeps moving (one copy only; if this one " +
-          "wedges too the server needs restarting)",
+        `scheduler chain "${chain}" has been wedged for ${Math.floor(runningMs / 60_000)} minutes (${where}) — ` +
+          "abandoning it and starting a fresh copy so the fleet keeps moving " +
+          `(rescue ${state.rescueTimes.length} of ${MAX_RESCUES_PER_CHAIN_PER_WINDOW} this hour for this chain; ` +
+          `${abandonedInFlightTotal} of ${maxAbandonedInFlight} abandoned runs still unsettled)`,
       );
       // The replacement owns the flag from here; the wedged run is off the books.
       state.startedAt = null;
       state.runId = null;
+      state.probe = null;
     }
 
     const runId = nextRunId++;
+    const probe = createTickPhaseProbe();
     state.startedAt = now;
     state.runId = runId;
+    state.probe = probe;
     state.skipsThisRun = 0;
     try {
-      await start();
+      await runWithTickPhaseProbe(probe, start);
     } catch (err) {
       // The call sites in index.ts already .catch() and log their own failure;
       // this is the backstop for anything that escapes (a synchronous throw
@@ -353,13 +571,15 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
         // or claim its skip count -- all it does is hand back the abandoned
         // budget, since the thing that was stuck is demonstrably unstuck.
         if (state.abandonedInFlight > 0) state.abandonedInFlight -= 1;
+        if (abandonedInFlightTotal > 0) abandonedInFlightTotal -= 1;
         log.info(
-          { chain, runMs, abandonedInFlight: state.abandonedInFlight },
+          { chain, runMs, abandonedInFlight: state.abandonedInFlight, abandonedInFlightTotal },
           `scheduler chain "${chain}" finally returned after ${runMs}ms, long after it was given up on`,
         );
       } else {
         state.startedAt = null;
         state.runId = null;
+        state.probe = null;
         state.lastRunMs = runMs;
         if (state.skipsThisRun > 0) {
           log.info(
@@ -376,6 +596,9 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
     const now = nowFn();
     return SCHEDULER_TICK_CHAINS.map((chain) => {
       const state = states.get(chain);
+      const runningMs = state?.startedAt != null ? now - state.startedAt : null;
+      const rescueRefused =
+        state && runningMs !== null && runningMs >= WEDGED_AFTER_MS ? rescueRefusal(state, now) : null;
       return {
         chain,
         label: SCHEDULER_TICK_CHAIN_LABELS[chain],
@@ -385,16 +608,32 @@ export function createSchedulerTickSingleFlight(options: TickSingleFlightOptions
         skipsTotal: state?.skipsTotal ?? 0,
         overridesTotal: state?.overridesTotal ?? 0,
         abandonedInFlight: state?.abandonedInFlight ?? 0,
+        rescuesInWindow: state?.rescueTimes.length ?? 0,
+        rescueRefused,
       };
     });
+  }
+
+  function diagnostics(): SchedulerRescueDiagnostics {
+    return {
+      lastRescue,
+      rescuesTotal,
+      abandonedInFlightTotal,
+      maxAbandonedInFlight,
+      maxRescuesPerChainPerWindow: MAX_RESCUES_PER_CHAIN_PER_WINDOW,
+      rescueWindowMs: RESCUE_WINDOW_MS,
+    };
   }
 
   /** Test-only: forget every chain's state. */
   function reset(): void {
     states.clear();
+    abandonedInFlightTotal = 0;
+    rescuesTotal = 0;
+    lastRescue = null;
   }
 
-  return { run, snapshot, reset };
+  return { run, snapshot, diagnostics, reset };
 }
 
 export type SchedulerTickSingleFlight = ReturnType<typeof createSchedulerTickSingleFlight>;
@@ -426,6 +665,89 @@ export function describeStuckSchedulerChain(
     runningMs: worst.runningMs ?? 0,
     freshAttemptAlreadyTried: worst.abandonedInFlight > 0,
     freshAttemptAfterMs: WEDGED_AFTER_MS,
+    restartNeeded: worst.rescueRefused !== null,
+  };
+}
+
+/**
+ * DUR-3991: the watchdog's rescues, shaped for fleet health (board-only). Plain
+ * labels for the operator alongside the internal phase names for diagnosis;
+ * nothing about companies, agents or data -- the phase recorder never sees any.
+ */
+export function describeSchedulerRescues(
+  snapshot: SchedulerTickChainSnapshot[],
+  diagnostics: SchedulerRescueDiagnostics,
+): FleetSchedulerRescues {
+  const last = diagnostics.lastRescue;
+  const timing = (phase: string, ms: number): FleetSchedulerPhaseTiming => ({
+    phase,
+    label: describeTickPhase(phase),
+    ms,
+  });
+  return {
+    last: last
+      ? {
+          at: new Date(last.at).toISOString(),
+          label: last.label,
+          runningMs: last.runningMs,
+          phasesMeasured: last.phasesMeasured,
+          stuckPhase: last.stuckPhase,
+          stuckPhaseLabel: last.phasesMeasured
+            ? describeTickPhase(last.stuckPhase)
+            : "at a point this step does not measure",
+          stuckPhaseMs: last.stuckPhaseMs,
+          completedPhases: last.completedPhases.map((p) => timing(p.phase, p.totalMs)),
+          openPhases: last.openPhases.map((p) => timing(p.phase, p.runningMs)),
+        }
+      : null,
+    total: diagnostics.rescuesTotal,
+    abandonedStillRunning: diagnostics.abandonedInFlightTotal,
+    maxAbandonedStillRunning: diagnostics.maxAbandonedInFlight,
+    maxPerStepPerHour: diagnostics.maxRescuesPerChainPerWindow,
+    restartNeededFor: snapshot.filter((entry) => entry.rescueRefused !== null).map((entry) => entry.label),
+  };
+}
+
+/**
+ * DUR-3991: the public-safe slice of the same thing, for the reduced
+ * /api/health body that anyone can read without signing in. Phase names and
+ * millisecond timings ONLY: no chain labels beyond the fixed code name, no
+ * counts that would reveal how many agents were woken, nothing about any
+ * company, agent or piece of data.
+ */
+export interface PublicSchedulerDiagnostics {
+  restartNeeded: boolean;
+  lastRescue: {
+    at: string;
+    chain: string;
+    runningMs: number;
+    stuckPhase: string | null;
+    stuckPhaseMs: number | null;
+    /** phase -> total ms, for the phases that had finished. */
+    completedPhaseMs: Record<string, number>;
+  } | null;
+  lastTickSlowestPhase: { phase: string; ms: number } | null;
+}
+
+export function describePublicSchedulerDiagnostics(
+  snapshot: SchedulerTickChainSnapshot[],
+  diagnostics: SchedulerRescueDiagnostics,
+  lastTickSlowestPhase: { phase: string; ms: number } | null,
+): PublicSchedulerDiagnostics {
+  const last = diagnostics.lastRescue;
+  return {
+    restartNeeded: snapshot.some((entry) => entry.rescueRefused !== null),
+    lastRescue: last
+      ? {
+          at: new Date(last.at).toISOString(),
+          chain: last.chain,
+          runningMs: last.runningMs,
+          stuckPhase: last.stuckPhase,
+          stuckPhaseMs: last.stuckPhaseMs,
+          completedPhaseMs: Object.fromEntries(last.completedPhases.map((p) => [p.phase, p.totalMs])),
+        }
+      : null,
+    lastTickSlowestPhase,
   };
 }
 
