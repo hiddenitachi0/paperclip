@@ -362,6 +362,11 @@ export interface InstanceExperimentalSettings {
   enableWeeklyCheckup: boolean;
   /** Guarded cross-company instruction channel; off means nothing can be sent between companies. */
   enableCrossCompanyInstructions: boolean;
+  /**
+   * DUR-3972: business-data sources ("Datakilder"). Off means the settings
+   * routes answer "not switched on" and no agent can read any company data.
+   */
+  enableBusinessData: boolean;
 }
 
 export interface InstanceSettings {

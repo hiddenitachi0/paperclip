@@ -16,7 +16,9 @@ import { assertBoard, assertCompanyAccess, assertInstanceAdmin } from "./authz.j
 import { logActivity, secretService } from "../services/index.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { companyScope, companyScopeFromParam } from "../middleware/company-scope.js";
-import { notFound } from "../errors.js";
+import { notFound, unprocessable } from "../errors.js";
+import { and, eq } from "drizzle-orm";
+import { companySecretBindings } from "@paperclipai/db";
 
 export function secretRoutes(rawDb: Db) {
   const router = Router();
@@ -443,6 +445,32 @@ export function secretRoutes(rawDb: Db) {
     },
   );
 
+  /**
+   * DUR-3972: a Shopify key bound to a data connection is changed only under
+   * Datakilder. That path sets the connection back to "not tested", forgets
+   * what the old key was allowed to do and demands a new Test before anything
+   * reads through it. Changing the value here would skip all of that and leave
+   * an active connection running on a key nobody tested.
+   */
+  async function assertNotDataConnectionKey(companyId: string, secretId: string) {
+    const [binding] = await db
+      .select({ id: companySecretBindings.id })
+      .from(companySecretBindings)
+      .where(
+        and(
+          eq(companySecretBindings.companyId, companyId),
+          eq(companySecretBindings.secretId, secretId),
+          eq(companySecretBindings.targetType, "data_connection"),
+        ),
+      )
+      .limit(1);
+    if (!binding) return;
+    throw unprocessable(
+      "Denne nøkkelen hører til en datakobling. Bytt nøkkelen under Datakilder, så blir den testet før den tas i bruk.",
+      { code: "secret_owned_by_data_connection" },
+    );
+  }
+
   function scopeFromSecret() {
     return companyScope(rawDb, async (req) => {
       assertBoard(req);
@@ -468,6 +496,8 @@ export function secretRoutes(rawDb: Db) {
       res.status(404).json({ error: "Secret not found" });
       return;
     }
+
+    await assertNotDataConnectionKey(existing.companyId, existing.id);
 
     const rotated = await svc.rotate(
       id,
@@ -509,6 +539,17 @@ export function secretRoutes(rawDb: Db) {
       res.status(404).json({ error: "Secret not found" });
       return;
     }
+
+    // Name, key and description are labels only. Anything that changes what
+    // the secret resolves to, or whether it resolves at all, is refused for a
+    // data-connection key.
+    const changesValueOrState =
+      (req.body.status !== undefined && req.body.status !== existing.status) ||
+      (req.body.providerConfigId !== undefined && req.body.providerConfigId !== existing.providerConfigId) ||
+      (req.body.externalRef !== undefined && req.body.externalRef !== existing.externalRef) ||
+      (req.body.providerMetadata !== undefined &&
+        JSON.stringify(req.body.providerMetadata) !== JSON.stringify(existing.providerMetadata ?? null));
+    if (changesValueOrState) await assertNotDataConnectionKey(existing.companyId, existing.id);
 
     const updated = await svc.update(id, {
       name: req.body.name,
