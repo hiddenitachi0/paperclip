@@ -37,6 +37,7 @@ import {
   readGoalConditionMonitorPolicy,
   type GoalConditionGateWakeup,
 } from "./goal-condition-judge.js";
+import { MISSING_RUN_ID_GATE_MESSAGE } from "./self-review-gate.js";
 
 describe("isGoalConditionJudgeContext / isGoalConditionJudgeRun", () => {
   it("recognizes the explicit marker and the wake reason", () => {
@@ -585,6 +586,32 @@ describeEmbeddedPostgres("goal-condition-judge DB-backed behavior", () => {
     });
 
     expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+  });
+
+  it("DUR-3992: refuses done (fails closed, schedules no judge) for an agent with no trusted run id", async () => {
+    const { companyId, agentId, issueId } = await seedGoalConditionIssueFixture();
+    const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+    const issueRow = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+
+    const result = await evaluateGoalConditionDoneGate({
+      db,
+      wakeup,
+      issue: {
+        id: issueId,
+        identifier: `T-1`,
+        companyId,
+        executionPolicy: issueRow.executionPolicy,
+        executionState: issueRow.executionState,
+      },
+      actor: { actorType: "agent", agentId, runId: null },
+      requestedStatus: "done",
+      currentStatus: "todo",
+    });
+
+    expect(result).toEqual({ message: MISSING_RUN_ID_GATE_MESSAGE });
     expect(calls).toHaveLength(0);
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(0);
