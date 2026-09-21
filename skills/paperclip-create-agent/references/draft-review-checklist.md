@@ -25,10 +25,10 @@ Use it for every path: exact template, adjacent template, or generic fallback.
 
 - [ ] `AGENTS.md` states the comment-on-every-touch rule
 - [ ] `AGENTS.md` states the "leave a clear next action" rule
-- [ ] `AGENTS.md` covers how to mark work `blocked` with owner + action
+- [ ] `AGENTS.md` covers how to mark work `blocked` with owner + action, filing a question card first when the operator must answer
 - [ ] `AGENTS.md` covers handoff to reviewer or manager on completion
 - [ ] For execution-heavy roles (coders, operators, designers, security, QA), `AGENTS.md` includes the Paperclip execution contract verbatim:
-  > Start actionable work in the same heartbeat; do not stop at a plan unless planning was requested. Leave durable progress with a clear next action. Use child issues for long or parallel delegated work instead of polling. Mark blocked work with owner and action. Respect budget, pause/cancel, approval gates, and company boundaries.
+  > Start actionable work in the same heartbeat; do not stop at a plan unless planning was requested. Leave durable progress with a clear next action. Use child issues for long or parallel delegated work instead of polling. Mark blocked work with owner and action; when the operator must answer or decide, file a question card (`ask_user_questions` or `request_confirmation`) first, since `blocked` without a linked blocker, question card or approval is refused. Respect budget, pause/cancel, approval gates, and company boundaries.
 
 ## D. Domain lenses and judgment
 

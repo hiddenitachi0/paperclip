@@ -2,7 +2,15 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, agents, authUsers, companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
+import {
+  agentApiKeys,
+  agents,
+  authUsers,
+  companies,
+  companyMemberships,
+  heartbeatRuns,
+  instanceUserRoles,
+} from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { normalizeAgentApiKeyScope, normalizeDelegateTokenScopes, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
@@ -13,6 +21,63 @@ import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compa
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+// DUR-3992: the run states in which an agent is legitimately making API calls
+// on behalf of a run. Mirrors ACTIVE_RUN_STATUSES in services/issues.ts.
+const AGENT_KEY_ACTIVE_RUN_STATUSES = ["queued", "running"] as const;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * DUR-3992: an agent API key is a long-lived credential with no run bound to
+ * it, so the only run id available is the plain `x-paperclip-run-id` header,
+ * which the caller fully controls. Several checks trust `actor.runId`
+ * (checkout ownership/release, the self-review-pass bypass, run budget
+ * attribution), so a header naming someone else's run -- or a run that has
+ * already finished -- must not be believed. Accept it only when that run
+ * exists, belongs to this same agent and company, and is still active.
+ *
+ * Returns the run id to trust, or undefined to treat the request as having no
+ * run. On an unexpected database error it fails open to the pre-DUR-3992
+ * behaviour (the header as sent) and logs, so an infrastructure hiccup never
+ * blocks an agent's action.
+ */
+export async function resolveAgentKeyRunId(
+  db: Db,
+  input: { runIdHeader: string | undefined; agentId: string; companyId: string; keyId: string },
+): Promise<string | undefined> {
+  const runId = input.runIdHeader?.trim();
+  if (!runId) return undefined;
+  const logContext = { agentId: input.agentId, companyId: input.companyId, keyId: input.keyId, headerRunId: runId };
+  if (!UUID_PATTERN.test(runId)) {
+    logger.warn({ ...logContext, reason: "malformed" }, "Ignoring x-paperclip-run-id header on agent API key request");
+    return undefined;
+  }
+  let run: { agentId: string; companyId: string; status: string } | null;
+  try {
+    run = await db
+      .select({ agentId: heartbeatRuns.agentId, companyId: heartbeatRuns.companyId, status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+  } catch (err) {
+    logger.error(
+      { ...logContext, err },
+      "Could not verify x-paperclip-run-id header on agent API key request; keeping it (fail open)",
+    );
+    return runId;
+  }
+  let reason: string | null = null;
+  if (!run) reason = "run_not_found";
+  else if (run.companyId !== input.companyId) reason = "other_company";
+  else if (run.agentId !== input.agentId) reason = "other_agent";
+  else if (!(AGENT_KEY_ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) reason = `run_${run.status}`;
+  if (reason) {
+    logger.warn({ ...logContext, reason }, "Ignoring x-paperclip-run-id header on agent API key request");
+    return undefined;
+  }
+  return runId;
 }
 
 interface ActorMiddlewareOptions {
@@ -216,12 +281,29 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
+      // DUR-3992: the signed token names the run it was minted for; that is
+      // the only run this request may act as. A differing plain header is
+      // ignored rather than refused so a stale/buggy client header never
+      // blocks real work -- the request simply runs as its signed run.
+      const headerRunId = runIdHeader?.trim();
+      if (headerRunId && headerRunId !== claims.run_id) {
+        logger.warn(
+          {
+            agentId: claims.sub,
+            companyId: claims.company_id,
+            tokenRunId: claims.run_id,
+            headerRunId,
+          },
+          "Ignoring x-paperclip-run-id header that differs from the agent JWT run",
+        );
+      }
+
       req.actor = {
         type: "agent",
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        runId: runIdHeader || claims.run_id || undefined,
+        runId: claims.run_id || undefined,
         source: "agent_jwt",
       };
       next();
@@ -244,13 +326,20 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    const trustedRunId = await resolveAgentKeyRunId(db, {
+      runIdHeader,
+      agentId: key.agentId,
+      companyId: key.companyId,
+      keyId: key.id,
+    });
+
     req.actor = {
       type: "agent",
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
       keyScope: normalizeAgentApiKeyScope(key.scopeConfig),
-      runId: runIdHeader || undefined,
+      runId: trustedRunId,
       source: "agent_key",
     };
 

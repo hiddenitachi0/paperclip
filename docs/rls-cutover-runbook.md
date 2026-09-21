@@ -100,6 +100,81 @@ or change tables. Every use of the second one is written to the
 Steps 3, 4 and 6 are each reversible by putting the old connection string back
 and restarting.
 
+## This installation
+
+This section is for the one Paperclip server that runs from `/root/paperclip`
+with `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml`.
+
+### Where the settings go
+
+The four settings this runbook uses —
+
+| Setting | What it is | If you leave it out |
+| --- | --- | --- |
+| `DATABASE_URL` | the login ordinary app traffic uses | the original `paperclip` owner login, exactly as today |
+| `DATABASE_BYPASS_URL` | the login for the code that works across companies | same as `DATABASE_URL` |
+| `DATABASE_MIGRATION_URL` | the login that changes the database structure at start-up | same as `DATABASE_URL` |
+| `PAPERCLIP_SERVER_ANTHROPIC_API_KEY` | the Anthropic key the server itself uses for the quick agents, the request router and the task reviewer | quick agents stay switched off |
+
+— go in **one place only: `/root/paperclip/docker/.env`**. One line each, like
+`DATABASE_BYPASS_URL=postgres://paperclip_app_bypass_login:<password>@db:5432/paperclip`.
+
+- That file is not part of the repository, so no one can see it on GitHub, and
+  the deploy robot leaves it alone. Every deploy resets every file that **is**
+  part of the repository back to what GitHub has. Anything typed into
+  `docker-compose.yml`, `docker-compose.prod.yml` or any other tracked file on
+  the server is silently wiped at the next deploy — and the server would then
+  start with the old login again. So never put these settings in a compose
+  file.
+- Keep the file readable by root only: `chmod 600 /root/paperclip/docker/.env`
+  (and `chown root:root` it). It holds passwords.
+- Use passwords made only of letters and digits (for example
+  `openssl rand -hex 32`). Characters like `$`, `@`, `:` or `/` either get
+  read as something else by Docker or break the address.
+- A line with nothing after the `=` counts as "not set", same as no line.
+- **Use the long name `PAPERCLIP_SERVER_ANTHROPIC_API_KEY`, never plain
+  `ANTHROPIC_API_KEY`.** The server takes the long-named key out of its own
+  settings as soon as it starts, so the agents it runs never get a copy. A
+  plain `ANTHROPIC_API_KEY` would be handed to every agent: they would all
+  switch from the Claude subscription to paid per-use billing, agents with no
+  Claude login of their own would quietly start running on it, and any agent
+  could read the key. (For this reason a plain `ANTHROPIC_API_KEY` line in this
+  file is simply not passed to the server.) The key is protected the same way
+  as the database logins: agents do not inherit it, but it is still part of the
+  server container's start-up settings.
+- After changing the file, apply it with
+  `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d server`
+  from `/root/paperclip`. A plain `docker compose restart` does **not** pick up
+  changes to this file.
+- To check what the server actually got, without printing passwords:
+  `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml exec server sh -c 'env | grep -E "^(DATABASE_|PAPERCLIP_SERVER_ANTHROPIC_|ANTHROPIC_)" | cut -d= -f1'`
+  lists which of the settings are set.
+
+### The one ordering rule: migration login before step 4
+
+Before step 4 of the cutover, add `DATABASE_MIGRATION_URL` to `docker/.env`
+pointing at the **owner** login — today that is the same address the server
+already uses by default (`postgres://paperclip:<owner password>@db:5432/paperclip`)
+— and apply it. Then do step 4.
+
+Why: every start and every deploy runs the migrations. Without
+`DATABASE_MIGRATION_URL` they run as whatever `DATABASE_URL` says. After step 4
+that is a login that is **not allowed to change tables**, so the very next
+deploy that carries a migration would fail at start-up and the server would
+keep restarting until someone put the old login back. Setting the migration
+login first removes that trap; on its own it changes nothing, because it is the
+login the migrations already use.
+
+### Undoing a step
+
+Each step here is undone the same way: delete (or comment out with `#`) the line
+you added in `/root/paperclip/docker/.env`, then run the `up -d server` command
+above. The server goes back to the login it used before that line existed.
+Steps 4 and 6 both change the same `DATABASE_URL` line: to undo step 6 put back
+the step-4 value; deleting the line altogether returns to the owner login. Undo
+the steps in reverse order, and never remove `DATABASE_MIGRATION_URL` while
+`DATABASE_URL` points at a non-owner login (that brings back the trap above).
+
 ## Notes and known limits
 
 - Migrations keep running as the owner, through `DATABASE_MIGRATION_URL`.

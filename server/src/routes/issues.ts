@@ -163,6 +163,7 @@ import { evaluateDeployCompletionDoneGate } from "../services/deploy-completion-
 import { evaluateDoneGateCritic } from "../services/done-gate-critic.js";
 import { evaluateOriginCommitDoneGate } from "../services/origin-commit-gate.js";
 import { evaluateFeatureLaunchDoneGate } from "../services/feature-launch-gate.js";
+import { evaluateBlockedNeedsAskGate } from "../services/blocked-needs-ask-gate.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -6431,7 +6432,7 @@ export function issueRoutes(
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
     // DUR-45: never persist status:"blocked" for a cheap/status-only run's own
     // size limits -- escalate to a normal-model run on this issue instead.
-    await interceptCheapRunBlockedStatusTransition(req, existing);
+    const cheapRunBlockedInterception = await interceptCheapRunBlockedStatusTransition(req, existing);
 
     const actor = getActorInfo(req);
     const isClosed = isClosedIssueStatus(existing.status);
@@ -6463,6 +6464,41 @@ export function issueRoutes(
     } = req.body;
     if (!assertChangeLogFieldsAllowed(req, res, updateFields, existing)) return;
     if (!assertFeatureLaunchFieldAllowed(req, res, updateFields, existing)) return;
+    // DUR-3993: an agent may not park a task as blocked on the operator without giving
+    // the operator a way to answer (a question card, a linked approval) or linking the
+    // unfinished task it waits on. Runs after the DUR-45 cheap-run interception above,
+    // which may already have removed status:"blocked" from this request. Never gates a
+    // board user; fails open on any unexpected error.
+    const blockedNeedsAskGateResult = await evaluateBlockedNeedsAskGate({
+      db,
+      issue: {
+        id: existing.id,
+        identifier: existing.identifier,
+        companyId: existing.companyId,
+        description: existing.description ?? null,
+      },
+      actor: { actorType: actor.actorType, agentId: actor.agentId ?? null, runId: actor.runId ?? null },
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      currentStatus: existing.status,
+      requestedBlockedByIssueIds: req.body.blockedByIssueIds,
+      requestedDescription: updateFields.description,
+    });
+    // Two callers are let through even when the gate would refuse:
+    //  - DUR-45's capped cheap-run exit: escalation is used up and that path has
+    //    already posted a system comment saying the issue needs an operator, so
+    //    `blocked` is the intended landing state (refusing it would leave the
+    //    issue in progress and post a fresh comment on every retry);
+    //  - low-trust review agents: every path the gate names (question card,
+    //    blockedByIssueIds, a blocker task) is a control-plane surface they are
+    //    denied, so the gate would leave them no way to park the issue at all.
+    if (
+      blockedNeedsAskGateResult &&
+      !cheapRunBlockedInterception.escalation?.capped &&
+      !(await actorIsLowTrustReview(req, existing.companyId, existing))
+    ) {
+      res.status(409).json({ error: blockedNeedsAskGateResult.message, code: "blocked_needs_operator_ask" });
+      return;
+    }
     const selfReviewGateResult = await evaluateSelfReviewDoneGate({
       db,
       wakeup: heartbeat.wakeup,
