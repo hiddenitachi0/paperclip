@@ -31,6 +31,7 @@ import {
 import { defaultFixture, startFakeShopify, type FakeShopify } from "./helpers/fake-shopify-guarded.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { dataConnectionRoutes } from "../routes/data-connections.js";
+import { secretRoutes } from "../routes/secrets.js";
 import { agentService } from "../services/agents.js";
 import { secretService } from "../services/secrets.js";
 import { resetShopifyTokenCache } from "../services/data-sources/shopify-client.js";
@@ -183,6 +184,7 @@ d("DUR-3972 data connections", () => {
         sleep: async () => undefined,
       }),
     );
+    app.use("/api", secretRoutes(db));
     app.use(errorHandler);
     return app;
   }
@@ -522,6 +524,128 @@ d("DUR-3972 data connections", () => {
       .where(and(eq(secretAccessEvents.consumerType, "data_connection"), eq(secretAccessEvents.actorType, "agent")));
     expect(agentReads).toHaveLength(1);
     expect(agentReads[0]!.actorId).toBe(agentA.id);
+  });
+
+  // ── Review fixes: no untested key can end up behind an active connection ──
+
+  async function activeConnection(app: express.Express, companyId: string) {
+    const created = await connect(app, companyId);
+    const tested = await request(app).post(`/api/companies/${companyId}/data-connections/${created.body.id}/test`);
+    expect(tested.body.status).toBe("active");
+    await request(app).put(`/api/companies/${companyId}/dataset-sources/sales`).send({ connectionId: created.body.id });
+    return created.body.id as string;
+  }
+
+  async function secretSnapshot(secretId: string) {
+    const [secret] = await db.select().from(companySecrets).where(eq(companySecrets.id, secretId));
+    const versions = await db.select().from(companySecretVersions).where(eq(companySecretVersions.secretId, secretId));
+    return { latestVersion: secret!.latestVersion, versions: versions.length };
+  }
+
+  it("a new key together with 'switch on' is refused before anything is stored", async () => {
+    await startShop();
+    const companyId = await seedCompany();
+    const app = createApp(memberActor([companyId]));
+    const id = await activeConnection(app, companyId);
+    const before = await connectionRow(id);
+    const secretBefore = await secretSnapshot(before.credentialSecretId);
+
+    for (const credential of [
+      { kind: "admin_access_token", accessToken: ROTATED_KEY },
+      { kind: "client_credentials", clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+    ]) {
+      const res = await request(app)
+        .patch(`/api/companies/${companyId}/data-connections/${id}`)
+        .send({ credential, status: "active" });
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe("data_connection_not_verified");
+      expect(res.body.error).toContain("ny nøkkel må testes");
+    }
+
+    expect(await secretSnapshot(before.credentialSecretId)).toEqual(secretBefore);
+    const after = await connectionRow(id);
+    expect(after).toMatchObject({
+      status: "active",
+      lastCheckOk: true,
+      credentialKind: before.credentialKind,
+      credentialHint: before.credentialHint,
+    });
+    expect(after.observed).toEqual(before.observed);
+
+    // A new key on its own is stored and sends the connection back to draft.
+    const rotated = await request(app)
+      .patch(`/api/companies/${companyId}/data-connections/${id}`)
+      .send({ credential: { kind: "admin_access_token", accessToken: ROTATED_KEY } });
+    expect(rotated.status).toBe(200);
+    expect(rotated.body).toMatchObject({ status: "draft", lastCheckOk: null, observed: null });
+    expect((await secretSnapshot(before.credentialSecretId)).latestVersion).toBe(secretBefore.latestVersion + 1);
+  });
+
+  it("the Secrets screen cannot change a data-connection key's value, only its label", async () => {
+    await startShop();
+    const companyId = await seedCompany();
+    const app = createApp(memberActor([companyId]));
+    const id = await activeConnection(app, companyId);
+    const secretId = (await connectionRow(id)).credentialSecretId;
+    const secretBefore = await secretSnapshot(secretId);
+
+    const rotate = await request(app).post(`/api/secrets/${secretId}/rotate`).send({ value: ROTATED_KEY });
+    expect(rotate.status).toBe(422);
+    expect(rotate.body.code).toBe("secret_owned_by_data_connection");
+    expect(rotate.body.error).toContain("Datakilder");
+
+    const disable = await request(app).patch(`/api/secrets/${secretId}`).send({ status: "disabled" });
+    expect(disable.status).toBe(422);
+    expect(disable.body.code).toBe("secret_owned_by_data_connection");
+
+    expect(await secretSnapshot(secretId)).toEqual(secretBefore);
+    expect((await connectionRow(id)).status).toBe("active");
+
+    // A label change is harmless and still allowed.
+    const renamed = await request(app).patch(`/api/secrets/${secretId}`).send({ description: "Nettbutikkens lesenøkkel" });
+    expect(renamed.status, JSON.stringify(renamed.body)).toBe(200);
+
+    // An ordinary password in the same company can still be rotated there.
+    const plain = await secretService(db).create(
+      companyId,
+      { name: "Vanlig passord", provider: "local_encrypted", value: "hello-world-value" },
+      { userId: "member", agentId: null },
+    );
+    const plainRotate = await request(app).post(`/api/secrets/${plain.id}/rotate`).send({ value: "another-value-1" });
+    expect(plainRotate.status, JSON.stringify(plainRotate.body)).toBe(200);
+  });
+
+  it("switching the feature off stops every read at once, and a key can still be revoked", async () => {
+    await startShop();
+    const companyId = await seedCompany();
+    const agent = await seedAgent(companyId);
+    const app = createApp(memberActor([companyId]));
+    const id = await activeConnection(app, companyId);
+    const svc = dataConnectionService(db, { fetchImpl: fake!.guardedFetch(), now: () => clock });
+    expect((await svc.getActiveDatasetSource(companyId, "sales"))?.id).toBe(id);
+
+    const requestsBefore = fake!.requests.length;
+    await setFlag(false);
+    expect(await svc.getActiveDatasetSource(companyId, "sales")).toBeNull();
+    await expect(
+      svc.openReadContext(companyId, id, { actorType: "agent", actorId: agent.id }),
+    ).rejects.toMatchObject({ status: 422, details: { code: "business_data_disabled" } });
+    expect(fake!.requests.length).toBe(requestsBefore);
+
+    // Other changes stay behind the switch...
+    const rename = await request(app).patch(`/api/companies/${companyId}/data-connections/${id}`).send({ name: "Ny" });
+    expect(rename.status).toBe(404);
+    const disableAndRename = await request(app)
+      .patch(`/api/companies/${companyId}/data-connections/${id}`)
+      .send({ status: "disabled", name: "Ny" });
+    expect(disableAndRename.status).toBe(404);
+    // ...but switching the connection off and removing it always work.
+    const off = await request(app).patch(`/api/companies/${companyId}/data-connections/${id}`).send({ status: "disabled" });
+    expect(off.status, JSON.stringify(off.body)).toBe(200);
+    expect(off.body.status).toBe("disabled");
+    const removed = await request(app).delete(`/api/companies/${companyId}/data-connections/${id}`);
+    expect(removed.status).toBe(200);
+    expect(await db.select().from(dataConnections)).toHaveLength(0);
   });
 
   // ── (e) client-credentials tokens ──────────────────────────────────────────

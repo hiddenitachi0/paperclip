@@ -32,6 +32,11 @@
  *   key, never builds a URL, and never calls fetch itself.
  *
  *   S4 calls, in this order:
+ *     0. the instance switch: instanceSettings.getExperimental().enableBusinessData
+ *        -- off means "not available", say so plainly. (Steps 1 and 3 check it
+ *        again themselves: getActiveDatasetSource returns null and
+ *        openReadContext refuses with code business_data_disabled, so an
+ *        operator switching it off stops every read even if a caller forgets.)
  *     1. dataConnectionService.getActiveDatasetSource(companyId, "sales")
  *        -- company from the CALLER's context only, never from input;
  *        null means "not connected": say so plainly

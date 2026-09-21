@@ -28,7 +28,8 @@ import { dataConnectionService, type DataConnectionServiceDeps } from "../servic
  * Switched off by default. Until an instance admin turns on
  * `enableBusinessData` in the experimental settings, every route here answers
  * 404 with a plain sentence -- after the actor checks, so an agent is refused
- * the same way whether the feature is on or off.
+ * the same way whether the feature is on or off. Two exceptions, so a key can
+ * always be revoked: switching a connection off, and removing it.
  *
  * None of these routes ever returns the key. The activity log gets names and
  * ids only, never the key and never its hint.
@@ -56,6 +57,27 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
       );
     }
     next();
+  }
+
+  /**
+   * Switching a connection off and removing it (and its key) must always be
+   * possible -- an operator who turned the whole feature off during an
+   * incident still has to be able to revoke a key. Everything else stays
+   * behind the switch.
+   */
+  async function requireFeatureOnUnlessRevoking(req: Request, res: Response, next: NextFunction) {
+    const body = req.body as Record<string, unknown> | undefined;
+    const onlyDisabling =
+      req.method === "PATCH" &&
+      body !== null &&
+      typeof body === "object" &&
+      Object.keys(body).length === 1 &&
+      body.status === "disabled";
+    if (req.method === "DELETE" || onlyDisabling) {
+      next();
+      return;
+    }
+    await requireFeatureOn(req, res, next);
   }
 
   function actorUserId(req: Request): string {
@@ -96,7 +118,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   router.patch(
     "/companies/:companyId/data-connections/:connectionId",
     boardScope(),
-    requireFeatureOn,
+    requireFeatureOnUnlessRevoking,
     validate(updateDataConnectionSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
@@ -121,7 +143,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
     },
   );
 
-  router.delete("/companies/:companyId/data-connections/:connectionId", boardScope(), requireFeatureOn, async (req, res) => {
+  router.delete("/companies/:companyId/data-connections/:connectionId", boardScope(), requireFeatureOnUnlessRevoking, async (req, res) => {
     const companyId = req.params.companyId as string;
     const connectionId = req.params.connectionId as string;
     const existing = await svc.get(companyId, connectionId);

@@ -21,6 +21,7 @@ import {
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { secretService } from "./secrets.js";
+import { instanceSettingsService } from "./instance-settings.js";
 import type { OutboundFetch } from "./safe-outbound-fetch.js";
 import {
   DEFAULT_LOOKUP_BUDGET,
@@ -153,7 +154,19 @@ export interface DataConnectionServiceDeps {
 
 export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = {}) {
   const secrets = secretService(db);
+  const instanceSettings = instanceSettingsService(db);
   const now = deps.now ?? Date.now;
+
+  /**
+   * The instance switch "Business data sources". Off means no connection can
+   * be USED, not only that the settings screen is hidden: every read path in
+   * this file checks it itself, so a caller (S4, quick agents, Telegram)
+   * cannot read through a connection while an operator has it switched off.
+   */
+  async function businessDataEnabled(): Promise<boolean> {
+    const experimental = await instanceSettings.getExperimental();
+    return experimental.enableBusinessData === true;
+  }
 
   async function datasetsByConnection(companyId: string): Promise<Map<string, DataDataset[]>> {
     const rows = await db
@@ -281,44 +294,67 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     if (patch.name !== undefined) set.name = patch.name;
     if (patch.dailyLookupCap !== undefined) set.dailyLookupCap = patch.dailyLookupCap;
 
-    if (patch.credential) {
-      await secrets.rotate(
-        row.credentialSecretId,
-        { value: encodeCredential(patch.credential) },
-        { userId: actor.userId, agentId: null },
-      );
-      forgetShopifyTokensForConnection(row.id);
-      set.credentialKind = patch.credential.kind;
-      set.credentialHint = dataConnectionCredentialHint(patch.credential);
-      // The last Test said something about a key that no longer exists. The
-      // honest state is "not tested": the connection must be tested again
-      // before anything can read through it.
-      set.lastCheckAt = null;
-      set.lastCheckOk = null;
-      set.lastCheckError = null;
-      set.observed = null;
-      if (row.status !== "disabled") set.status = "draft";
-    }
-
-    if (patch.status === "disabled") {
-      set.status = "disabled";
-    } else if (patch.status === "active") {
+    // Every refusal is decided BEFORE anything is written. A new key has never
+    // been tested, so "new key and switch on" in one step is always refused --
+    // and refused before the key is stored, so a refusal changes nothing.
+    if (patch.status === "active") {
       const lastCheckOk = patch.credential ? null : row.lastCheckOk;
       const scopes = evaluateShopifyScopes(normalizeObserved(patch.credential ? null : row.observed)?.grantedScopes ?? []);
       if (lastCheckOk !== true || !scopes.canActivate) {
         throw unprocessable(
-          "Koblingen kan ikke slås på før Test har gått gjennom med en nøkkel som bare kan lese. Trykk Test først.",
+          patch.credential
+            ? "En ny nøkkel må testes før koblingen kan slås på. Lagre nøkkelen, trykk Test, og slå den på etterpå."
+            : "Koblingen kan ikke slås på før Test har gått gjennom med en nøkkel som bare kan lese. Trykk Test først.",
           { code: "data_connection_not_verified", problems: scopes.problems },
         );
       }
       set.status = "active";
     }
+    if (patch.status === "disabled") set.status = "disabled";
 
+    if (!patch.credential) {
+      const [updated] = await db
+        .update(dataConnections)
+        .set(set)
+        .where(and(eq(dataConnections.id, row.id), eq(dataConnections.companyId, companyId)))
+        .returning();
+      const datasets = await datasetsByConnection(companyId);
+      return toSummary(updated ?? row, datasets.get(row.id) ?? []);
+    }
+
+    // A new key. The row is switched to "not tested" FIRST and the key stored
+    // second, so there is no moment -- and no failure halfway -- where an
+    // active connection serves a key that was never tested. The last Test said
+    // something about a key that no longer exists; it is forgotten.
+    set.credentialKind = patch.credential.kind;
+    set.credentialHint = dataConnectionCredentialHint(patch.credential);
+    set.lastCheckAt = null;
+    set.lastCheckOk = null;
+    set.lastCheckError = null;
+    set.observed = null;
+    set.status = patch.status === "disabled" || row.status === "disabled" ? "disabled" : "draft";
     const [updated] = await db
       .update(dataConnections)
       .set(set)
       .where(and(eq(dataConnections.id, row.id), eq(dataConnections.companyId, companyId)))
       .returning();
+    forgetShopifyTokensForConnection(row.id);
+    try {
+      await secrets.rotate(
+        row.credentialSecretId,
+        { value: encodeCredential(patch.credential) },
+        { userId: actor.userId, agentId: null },
+      );
+    } catch (error) {
+      // The old key is still the stored one: put back what describes it, but
+      // stay "not tested" -- never back to active without a Test.
+      await db
+        .update(dataConnections)
+        .set({ credentialKind: row.credentialKind, credentialHint: row.credentialHint, updatedAt: new Date(now()) })
+        .where(and(eq(dataConnections.id, row.id), eq(dataConnections.companyId, companyId)))
+        .catch(() => undefined);
+      throw error;
+    }
     const datasets = await datasetsByConnection(companyId);
     return toSummary(updated ?? row, datasets.get(row.id) ?? []);
   }
@@ -432,7 +468,8 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
 
   /**
    * For S4: everything an adapter needs for one lookup through this company's
-   * connection, without the key. Refuses a connection that is not active.
+   * connection, without the key. Refuses a connection that is not active, and
+   * refuses everything while the instance switch "Business data sources" is off.
    */
   async function openReadContext(
     companyId: string,
@@ -440,6 +477,12 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     context: DataConnectionAccessContext,
     budget: DataSourceCallBudget = DEFAULT_LOOKUP_BUDGET,
   ): Promise<{ read: DataSourceReadContext; knownSecrets: () => string[] }> {
+    if (!(await businessDataEnabled())) {
+      throw unprocessable(
+        "Datakilder er slått av for denne Paperclip-installasjonen, så ingen data kan leses nå.",
+        { code: "business_data_disabled" },
+      );
+    }
     const row = await getRow(companyId, connectionId);
     if (row.status !== "active") {
       throw unprocessable("Datakoblingen er ikke slått på.", { code: "data_connection_not_active" });
@@ -606,8 +649,10 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
   /**
    * For S4: the connection that answers `dataset` for this company, if it is
    * switched on. Null means "not connected" -- say so plainly, never guess.
+   * Also null while the instance switch "Business data sources" is off.
    */
   async function getActiveDatasetSource(companyId: string, dataset: DataDataset): Promise<DataConnectionRow | null> {
+    if (!(await businessDataEnabled())) return null;
     const [grant] = await db
       .select()
       .from(dataDatasetSources)
