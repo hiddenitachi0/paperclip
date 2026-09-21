@@ -5,6 +5,7 @@ import { laneATransformSchema, sendLaneAMessageSchema } from "@paperclipai/share
 import { badRequest, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { agentService, laneAService } from "../services/index.js";
+import type { LaneAServiceOptions } from "../services/lane-a.js";
 import { assertCompanyAccess, assertServiceOrBoard, getActorInfo } from "./authz.js";
 
 /**
@@ -42,10 +43,10 @@ function resolveTransformCompanyId(req: Parameters<typeof getActorInfo>[0]): str
   return parsed.data.companyId;
 }
 
-export function laneARoutes(db: Db) {
+export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {}) {
   const router = Router();
   const agents = agentService(db);
-  const laneA = laneAService(db);
+  const laneA = laneAService(db, options.laneA);
 
   function requesterFor(req: Parameters<typeof getActorInfo>[0]) {
     const actor = getActorInfo(req);

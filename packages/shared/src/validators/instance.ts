@@ -252,6 +252,9 @@ export const instanceExperimentalSettingsSchema = z.object({
   // Guarded cross-company instruction channel (migration 0163). Off by
   // default: with it off, no instruction can be sent between companies at all.
   enableCrossCompanyInstructions: z.boolean().default(false),
+  // DUR-3972: business-data sources (Shopify first). Off by default: with it
+  // off, no data connection can be made or used on this instance.
+  enableBusinessData: z.boolean().default(false),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

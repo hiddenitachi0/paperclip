@@ -42,7 +42,8 @@ function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-function periodRange(period: SalesPeriod, timezone: string): string {
+/** "Juli 2026 (1.–31. juli 2026, avsluttet)": the exact dates and whether the month is closed. */
+export function periodRange(period: SalesPeriod, timezone: string): string {
   const start = new Date(period.start);
   const startParts = zonedParts(start, timezone);
   const monthName = NORWEGIAN_MONTHS[startParts.month - 1];
@@ -96,7 +97,7 @@ export function renderSalesAnswerCard(result: SalesResult, options: SalesAnswerC
     lines.push("");
     lines.push(periodRange(period, tz));
     if (period.dataState === "no_data") {
-      lines.push(`Ingen data: ${period.noDataReason ?? "ingen tall for perioden"} (ikke det samme som 0)`);
+      lines.push(`Ingen data: ${period.noDataReason ?? "ingen tall for perioden"} (ikke det samme som null salg)`);
       continue;
     }
     const headline = filtered ? period.selection! : period.total!;
