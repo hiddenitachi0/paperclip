@@ -67,6 +67,7 @@ export function normalizeRememberedInstanceSettingsPath(rawPath: string | null):
     suffix === "/environments" ||
     suffix === "/access" ||
     suffix === "/security" ||
+    suffix === "/cross-company-access" ||
     suffix === "/heartbeats" ||
     suffix === "/plugins" ||
     suffix === "/experimental" ||

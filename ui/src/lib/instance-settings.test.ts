@@ -36,6 +36,9 @@ describe("normalizeRememberedInstanceSettingsPath", () => {
     expect(normalizeRememberedInstanceSettingsPath("/PAP/settings/plugins/example")).toBe(
       "/company/settings/instance/plugins/example",
     );
+    expect(normalizeRememberedInstanceSettingsPath("/company/settings/instance/cross-company-access")).toBe(
+      "/company/settings/instance/cross-company-access",
+    );
   });
 
   it("falls back to the default page for unknown paths", () => {

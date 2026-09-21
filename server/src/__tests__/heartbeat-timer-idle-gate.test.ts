@@ -444,11 +444,36 @@ describeEmbeddedPostgres("heartbeat timer idle gate (DUR-3943)", () => {
       updatedAt: ago(2 * 24 * 60),
     });
 
-    // The periodic recovery pipeline (every 30 s on production) asks to wake
-    // the agent for that task on every pass; the heartbeat turns each ask
-    // down. This is the row the gate used to count as news.
+    // The periodic recovery pipeline (every 30 s on production) used to ask to
+    // wake the agent for that task on every pass. Since DUR-3988 it holds a
+    // task whose blockers are still open, so its passes leave no rows at all.
     await heartbeat.reconcileStrandedAssignedIssues();
     await heartbeat.reconcileStrandedAssignedIssues();
+    const sweepRows = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, s.agentId));
+    expect(sweepRows).toHaveLength(0);
+
+    // Any other caller asking for that task (here: the exact request the old
+    // sweep sent) is still turned down by the heartbeat, which records a
+    // skipped row. This is the row the gate used to count as news.
+    for (let ask = 0; ask < 2; ask += 1) {
+      await heartbeat.wakeup(s.agentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId: blockedTodoId, mutation: "assigned_todo_liveness_dispatch" },
+        requestedByActorType: "system",
+        requestedByActorId: null,
+        contextSnapshot: {
+          issueId: blockedTodoId,
+          taskId: blockedTodoId,
+          wakeReason: "issue_assigned",
+          source: "issue.assigned_todo_liveness_dispatch",
+        },
+      });
+    }
     const rejected = await db
       .select({ reason: agentWakeupRequests.reason, status: agentWakeupRequests.status, source: agentWakeupRequests.source })
       .from(agentWakeupRequests)

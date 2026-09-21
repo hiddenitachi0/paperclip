@@ -3246,6 +3246,84 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(runs).toHaveLength(0);
   });
 
+  // DUR-3988: the sweep used to ask to wake the agent for a never-run todo
+  // task every pass while its blockers were still open; the heartbeat refused
+  // each ask with a fresh skipped "issue_dependencies_blocked" row (~34,700 in
+  // production). The sweep must now hold such a task silently and dispatch it
+  // on the first pass after the blocker resolves.
+  it("DUR-3988: holds a never-run todo task with an open blocker across sweeps without writing wake-ups, then dispatches it once the blocker is done", async () => {
+    const { companyId, agentId, issueId } = await seedAssignedTodoNoRunFixture();
+    const blockerId = randomUUID();
+    const blockerPrefix = await db
+      .select({ issuePrefix: companies.issuePrefix })
+      .from(companies)
+      .where(eq(companies.id, companyId))
+      .then((rows) => rows[0]!.issuePrefix);
+    await db.insert(issues).values({
+      id: blockerId,
+      companyId,
+      title: "Open blocker nobody is working on yet",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+      issueNumber: 2,
+      identifier: `${blockerPrefix}-2`,
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: issueId,
+      type: "blocks",
+    });
+    const heartbeat = heartbeatService(db);
+
+    for (let sweep = 0; sweep < 4; sweep += 1) {
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.assignmentDispatched).toBe(0);
+      expect(result.dispatchRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(result.dependencyBlockedHeld).toBe(1);
+      expect(result.issueIds).not.toContain(issueId);
+    }
+
+    const heldWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(heldWakeups).toHaveLength(0);
+    const heldRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(heldRuns).toHaveLength(0);
+    const heldIssue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(heldIssue?.status).toBe("todo");
+
+    await db
+      .update(issues)
+      .set({ status: "done", completedAt: new Date(), updatedAt: new Date() })
+      .where(eq(issues.id, blockerId));
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.dependencyBlockedHeld).toBe(0);
+    expect(result.assignmentDispatched).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+    expect(wakeups[0]).toMatchObject({
+      reason: "issue_assigned",
+      payload: expect.objectContaining({ issueId, mutation: "assigned_todo_liveness_dispatch" }),
+    });
+    expect(wakeups[0]?.status).not.toBe("skipped");
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    if (runs[0]?.id) {
+      await waitForRunToSettle(heartbeat, runs[0].id);
+    }
+  });
+
   it("skips budget-blocked assigned todo work with no prior run and continues the sweep", async () => {
     const blocked = await seedAssignedTodoNoRunFixture();
     const unblocked = await seedAssignedTodoNoRunFixture();
@@ -3363,6 +3441,130 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     if (retryRun) {
       await waitForRunToSettle(heartbeat, retryRun.id);
     }
+  });
+
+  // DUR-3989 (3): the two kinds of automatic recovery run (the immediate
+  // assignment/continuation recovery and the execution-review participant
+  // recovery) used to be queued with a context that named the issue but not
+  // its project, so the budget check that runs when a queued run is claimed
+  // never saw a project-level spending limit. The project's spend here is
+  // inserted directly, so nothing has paused the project: only the limit
+  // check itself can stop the run.
+  async function seedExhaustedProjectBudget(input: { companyId: string; agentId: string; issueId: string }) {
+    const projectId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId: input.companyId,
+      name: "Budgeted project",
+      status: "in_progress",
+    });
+    await db.update(issues).set({ projectId }).where(eq(issues.id, input.issueId));
+    await db.insert(budgetPolicies).values({
+      companyId: input.companyId,
+      scopeType: "project",
+      scopeId: projectId,
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 100,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await db.insert(costEvents).values({
+      companyId: input.companyId,
+      agentId: input.agentId,
+      projectId,
+      provider: "test",
+      biller: "test",
+      billingType: "tokens",
+      model: "test-model",
+      costCents: 500,
+      occurredAt: new Date(),
+    });
+    return projectId;
+  }
+
+  it("DUR-3989: the immediate continuation recovery run carries its project, so a used-up project limit stops it", async () => {
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+      processLossRetryCount: 1,
+    });
+    const projectId = await seedExhaustedProjectBudget({ companyId, agentId, issueId });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.runIds).toEqual([runId]);
+
+    const continuationRun = await waitForValue(async () => {
+      const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+      return rows.find((row) =>
+        (row.contextSnapshot as Record<string, unknown> | null)?.retryReason === "issue_continuation_needed"
+      ) ?? null;
+    });
+    if (!continuationRun) throw new Error("Expected an immediate continuation recovery run");
+    expect(continuationRun.contextSnapshot).toMatchObject({ issueId, projectId, retryOfRunId: runId });
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, continuationRun.id);
+    expect(settled?.status).toBe("cancelled");
+    expect(settled?.error ?? "").toMatch(/Project .*budget/);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("DUR-3989: the execution-review participant recovery run carries its project, so a used-up project limit stops it", async () => {
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, issueId, runId } = await seedInReviewParticipantRunFixture();
+    const projectId = await seedExhaustedProjectBudget({ companyId, agentId, issueId });
+    // The reviewer's own run was queued the normal way, which attaches the
+    // project; the limit stops it when it is claimed, and it ends cancelled
+    // while the review stage is still pending. That is what triggers the
+    // review-participant recovery run.
+    const seeded = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]);
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: { ...(seeded?.contextSnapshot as Record<string, unknown>), projectId } })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const reviewRecoveryRun = await waitForValue(async () => {
+      const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+      return rows.find((row) =>
+        (row.contextSnapshot as Record<string, unknown> | null)?.retryReason ===
+          "execution_review_participant_recovery"
+      ) ?? null;
+    }, 8_000);
+    if (!reviewRecoveryRun) throw new Error("Expected an execution-review recovery run");
+    expect(reviewRecoveryRun.contextSnapshot).toMatchObject({
+      issueId,
+      projectId,
+      source: "issue.execution_review_recovery",
+      retryOfRunId: runId,
+    });
+
+    const settled = await waitForRunToSettle(heartbeat, reviewRecoveryRun.id);
+    expect(settled?.status).toBe("cancelled");
+    expect(settled?.error ?? "").toMatch(/Project .*budget/);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("DUR-3989: a queued run that names only its issue still meets that issue's project limit when claimed", async () => {
+    // Runs queued before the fix above (or by any other path that leaves the
+    // project out) are still waiting in the queue; the claim reads the
+    // project off the issue instead of skipping the project limit.
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    await seedExhaustedProjectBudget({ companyId, agentId, issueId });
+    const queued = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]);
+    expect(queued?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("projectId");
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    const settled = await waitForRunToSettle(heartbeat, runId);
+    expect(settled?.status).toBe("cancelled");
+    expect(settled?.error ?? "").toMatch(/Project .*budget/);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 
   it("re-enqueues an already stranded execution-review participant during reconciliation", async () => {

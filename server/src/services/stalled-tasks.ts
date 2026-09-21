@@ -4,6 +4,7 @@ import {
   agentWakeupRequests,
   agents,
   approvals,
+  authUsers,
   companies,
   heartbeatRuns,
   issueApprovals,
@@ -21,6 +22,7 @@ import {
   type StalledTasksResult,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { classifyAssigneePickup } from "./assignee-pickup.js";
 import { evaluateAgentInvokability } from "./agent-invokability.js";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -79,6 +81,11 @@ function formatSince(at: Date): string {
   return at.toLocaleDateString("en-GB", { day: "numeric", month: "long", timeZone: "UTC" });
 }
 
+function personLabel(name: string | null | undefined): string | null {
+  const trimmed = name?.trim();
+  return trimmed ? trimmed : null;
+}
+
 function agentLabel(name: string | null): string {
   return name?.trim() ? name.trim() : "the assigned agent";
 }
@@ -93,6 +100,12 @@ export function buildStalledReasonText(input: {
   agentName: string | null;
   unavailableReason: AssigneeUnavailableReason | null;
   sinceAt: Date;
+  /**
+   * The assigned person's display name, for `waiting_on_person`. The lane is
+   * per company, not per viewer, so the sentence names the person (or says
+   * "a person") and never assumes the reader is the one it is waiting on.
+   */
+  personName?: string | null;
 }): string {
   const since = formatSince(input.sinceAt);
   switch (input.reason) {
@@ -106,12 +119,42 @@ export function buildStalledReasonText(input: {
       return `Nobody is working on this — ${agentLabel(input.agentName)} has hit an error and needs a look. Waiting since ${since}.`;
     case "unassigned":
       return `Nobody is assigned to this. Waiting since ${since}.`;
+    case "waiting_on_person": {
+      const person = personLabel(input.personName);
+      return person
+        ? `Waiting on ${person} — this is with a person, not an agent. Nothing has happened since ${since}.`
+        : `Waiting on a person — this is with someone, not an agent. Nothing has happened since ${since}.`;
+    }
     case "idle_in_review":
       return `Finished and waiting for you since ${since}.`;
     case "idle":
     default:
       return `Nothing has happened on this since ${since}.`;
   }
+}
+
+/**
+ * Display names for people tasks are assigned to. Only wording depends on
+ * this, so a failed lookup must never take the lane down: log it and fall
+ * back to "a person".
+ */
+async function loadPersonNames(db: Db, userIds: string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(userIds)];
+  const names = new Map<string, string>();
+  if (unique.length === 0) return names;
+  try {
+    const rows = await db
+      .select({ id: authUsers.id, name: authUsers.name })
+      .from(authUsers)
+      .where(inArray(authUsers.id, unique));
+    for (const row of rows) {
+      const name = personLabel(row.name);
+      if (name) names.set(row.id, name);
+    }
+  } catch (error) {
+    logger.warn({ err: error }, "stalled tasks: could not look up assignee names; using a generic label");
+  }
+  return names;
 }
 
 export function stalledTasksService(db: Db) {
@@ -298,6 +341,12 @@ export function stalledTasksService(db: Db) {
       for (const row of activityRows) bump(row.issueId, row.latest);
 
       const agentById = new Map(agentRows.map((row) => [row.id, row]));
+      const personNames = await loadPersonNames(
+        db,
+        candidates.flatMap((row) =>
+          row.assigneeUserId && !row.assigneeAgentId ? [row.assigneeUserId] : [],
+        ),
+      );
       const quietMode = general.quietMode;
       const thresholdMs = stalledAfterHours * 60 * 60 * 1000;
       const now = Date.now();
@@ -347,7 +396,13 @@ export function stalledTasksService(db: Db) {
         const isIdle = now - sinceAt.getTime() >= thresholdMs;
         if (!reason) {
           if (!isIdle) continue;
-          reason = candidate.status === "in_review" ? "idle_in_review" : "idle";
+          if (!agent && candidate.assigneeUserId) {
+            // Assigned to a person, no agent involved: the same quiet task as
+            // before, but said as what it is -- waiting on that person.
+            reason = "waiting_on_person";
+          } else {
+            reason = candidate.status === "in_review" ? "idle_in_review" : "idle";
+          }
         } else if (requiresIdle && !isIdle) {
           continue;
         }
@@ -363,6 +418,10 @@ export function stalledTasksService(db: Db) {
             agentName: agent?.name ?? null,
             unavailableReason,
             sinceAt,
+            personName:
+              reason === "waiting_on_person" && candidate.assigneeUserId
+                ? personNames.get(candidate.assigneeUserId) ?? null
+                : null,
           }),
           sinceAt: sinceAt.toISOString(),
           agentName: agent?.name ?? null,

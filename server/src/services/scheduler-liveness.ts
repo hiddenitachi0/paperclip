@@ -5,7 +5,7 @@
 // here (same process as the API, by design: run dispatch is single-process,
 // see agent-start-lock.ts) and /api/health reads it back.
 
-import type { TickPhaseReport } from "./scheduler-tick-phases.js";
+import { describeTickPhase, type TickPhaseReport } from "./scheduler-tick-phases.js";
 
 export interface SchedulerTickResult {
   checked: number;
@@ -33,6 +33,11 @@ export interface SchedulerLivenessSnapshot {
   /** ms since the last tick finished (null when it never ran). */
   sinceLastTickMs: number | null;
   /**
+   * DUR-3991: the slowest step of the last completed tick and its total ms,
+   * or null when no completed tick reported its steps.
+   */
+  lastTickSlowestPhase: { phase: string; label: string; ms: number } | null;
+  /**
    * true when the scheduler is enabled and no tick has completed within
    * three intervals (or it has never completed one and the process has been
    * up for longer than three intervals).
@@ -51,6 +56,12 @@ interface SchedulerLivenessState {
 }
 
 export const SCHEDULER_STALE_AFTER_INTERVALS = 3;
+
+function slowestPhaseOf(result: SchedulerTickResult | null): { phase: string; label: string; ms: number } | null {
+  const slowest = result?.phases?.slowest;
+  if (!slowest) return null;
+  return { phase: slowest.phase, label: describeTickPhase(slowest.phase), ms: slowest.totalMs };
+}
 
 export function createSchedulerLiveness(nowFn: () => number = () => Date.now()) {
   const state: SchedulerLivenessState = {
@@ -104,6 +115,7 @@ export function createSchedulerLiveness(nowFn: () => number = () => Date.now()) 
       lastTickResult: state.lastTickResult,
       lastTickError: state.lastTickError,
       sinceLastTickMs,
+      lastTickSlowestPhase: slowestPhaseOf(state.lastTickResult),
       stale,
     };
   }

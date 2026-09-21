@@ -739,12 +739,28 @@ function StalledTaskRow({ task }: { task: StalledTask }) {
       data-testid="now-stalled-task"
     >
       <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      {/* The plain reason leads: a task title can be developer shorthand and
+          an identifier means nothing on its own, so both sit underneath. */}
       <div className="min-w-0">
-        <p className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline">
-          {task.identifier ? `${task.identifier} · ` : ""}
-          {task.title}
+        <p
+          className="line-clamp-2 text-xs font-medium text-foreground group-hover:underline"
+          data-testid="now-stalled-task-reason"
+        >
+          {task.reasonText}
         </p>
-        <p className="line-clamp-2 text-[10px] text-muted-foreground">{task.reasonText}</p>
+        <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="min-w-0 truncate" data-testid="now-stalled-task-title">
+            {task.title}
+          </span>
+          {task.identifier ? (
+            <span
+              className="shrink-0 rounded border border-border/60 px-1 font-mono text-[9px] leading-4 text-muted-foreground/80"
+              data-testid="now-stalled-task-id"
+            >
+              {task.identifier}
+            </span>
+          ) : null}
+        </p>
       </div>
     </Link>
   );

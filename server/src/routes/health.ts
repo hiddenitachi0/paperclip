@@ -12,10 +12,13 @@ import { computeFleetHealth } from "../services/fleet-health.js";
 import { getRequestLoadSnapshot } from "../services/request-load.js";
 import { schedulerLiveness } from "../services/scheduler-liveness.js";
 import {
+  describePublicSchedulerDiagnostics,
+  describeSchedulerRescues,
   describeStuckSchedulerChain,
   schedulerTickSingleFlight,
+  type PublicSchedulerDiagnostics,
 } from "../services/scheduler-tick-single-flight.js";
-import type { FleetHealth } from "@paperclipai/shared";
+import type { FleetHealth, FleetSchedulerRescues } from "@paperclipai/shared";
 import { serverVersion } from "../version.js";
 
 function shouldExposeFullHealthDetails(
@@ -38,6 +41,48 @@ function hasDevServerStatusToken(providedToken: string | undefined) {
   const provided = Buffer.from(token);
   if (expected.length !== provided.length) return false;
   return timingSafeEqual(expected, provided);
+}
+
+/**
+ * DUR-3991: the scheduler watchdog's last rescue and the last tick's slowest
+ * step, as code-level phase names and millisecond timings only -- no company,
+ * agent, user, task, or count of any of them (describePublicSchedulerDiagnostics
+ * drops the per-phase run counts because they would reveal how many agents
+ * were woken).
+ *
+ * Who gets it: every FULL-details caller (the board, agents, and any caller in
+ * local_trusted mode) -- NOT the anonymous body in authenticated mode, which
+ * stays exactly status/deployment/bootstrap. Considered and rejected for the
+ * anonymous body: on an internet-exposed instance, "the scheduler is wedged and
+ * out of automatic restarts" is precisely the feedback someone trying to knock
+ * the server over would want, and nobody who needs it lacks a sign-in -- the
+ * operator reads it on the Now page and an on-box script can use an agent key.
+ *
+ * Diagnostics only: any failure to build it omits the field rather than
+ * failing the health check (fail open).
+ */
+function publicSchedulerDiagnostics(): PublicSchedulerDiagnostics | undefined {
+  try {
+    const slowest = schedulerLiveness.snapshot().lastTickSlowestPhase;
+    return describePublicSchedulerDiagnostics(
+      schedulerTickSingleFlight.snapshot(),
+      schedulerTickSingleFlight.diagnostics(),
+      slowest ? { phase: slowest.phase, ms: slowest.ms } : null,
+    );
+  } catch (error) {
+    logger.warn({ err: error }, "Health check scheduler diagnostics failed to compute");
+    return undefined;
+  }
+}
+
+/** Fail open: a failure here drops the rescue detail, never the fleet signal. */
+function safeSchedulerRescues(): FleetSchedulerRescues | null {
+  try {
+    return describeSchedulerRescues(schedulerTickSingleFlight.snapshot(), schedulerTickSingleFlight.diagnostics());
+  } catch (error) {
+    logger.warn({ err: error }, "Health check scheduler rescue detail failed to compute");
+    return null;
+  }
 }
 
 /**
@@ -196,6 +241,8 @@ export function healthRoutes(
       return;
     }
 
+    const schedulerDiagnostics = publicSchedulerDiagnostics();
+
     // DUR-3939/DUR-3940/DUR-272: fleet run-rate, slot saturation, agents in
     // error, zombie candidates, scheduler liveness and request load -- all
     // computed from live state right now. Board callers only: the signal
@@ -215,6 +262,9 @@ export function healthRoutes(
             // single-flight guard is the only thing that knows which, so the
             // Now page can name it instead of saying "something is stuck".
             stuckChain: describeStuckSchedulerChain(schedulerTickSingleFlight.snapshot()),
+            // DUR-3991: the watchdog's last rescue (with where it was stuck)
+            // and whether any stuck step has run out of automatic restarts.
+            rescues: safeSchedulerRescues(),
           },
           requests: getRequestLoadSnapshot(),
         });
@@ -240,6 +290,7 @@ export function healthRoutes(
       },
       serverInfo,
       ...(devServer ? { devServer } : {}),
+      ...(schedulerDiagnostics ? { scheduler: schedulerDiagnostics } : {}),
       ...(fleet ? { fleet } : {}),
     });
   });

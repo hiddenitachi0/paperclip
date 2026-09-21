@@ -81,6 +81,65 @@ export interface FleetSchedulerStuckChain {
   freshAttemptAlreadyTried: boolean;
   /** How long the server waits before starting a fresh attempt by itself. */
   freshAttemptAfterMs: number;
+  /**
+   * DUR-3991: true when the server will NOT start another fresh attempt by
+   * itself (its bounded rescue budget is spent), so only a restart clears it.
+   * Absent from older servers: fall back to freshAttemptAlreadyTried.
+   */
+  restartNeeded?: boolean;
+}
+
+/** DUR-3991: one timed step of a scheduler tick. */
+export interface FleetSchedulerPhaseTiming {
+  /** Internal step name, for diagnosis (e.g. "loadAgents"). */
+  phase: string;
+  /** The same step in plain words, for the operator. */
+  label: string;
+  /** Total ms spent in that step. */
+  ms: number;
+}
+
+/**
+ * DUR-3991: the most recent time the scheduler watchdog gave up on a stuck
+ * step and started it again -- and where that step was stuck, read from inside
+ * it at the moment it was abandoned.
+ */
+export interface FleetSchedulerRescue {
+  at: string;
+  /** Plain-language name of the scheduler step that got stuck. */
+  label: string;
+  /** How long it had been running when it was given up on. */
+  runningMs: number;
+  /** false when this step does not time its phases at all. */
+  phasesMeasured: boolean;
+  /** Internal name of the phase it was stuck in, or null when none was measured. */
+  stuckPhase: string | null;
+  /** That phase in plain words. */
+  stuckPhaseLabel: string;
+  /** How long it had been in that phase. */
+  stuckPhaseMs: number | null;
+  /** Phases that had finished before it got stuck, slowest first. */
+  completedPhases: FleetSchedulerPhaseTiming[];
+  /** Phases still in progress when it was abandoned, outermost first. */
+  openPhases: FleetSchedulerPhaseTiming[];
+}
+
+/** DUR-3991: the scheduler watchdog's bounded automatic restarts. */
+export interface FleetSchedulerRescues {
+  last: FleetSchedulerRescue | null;
+  /** Automatic restarts since the server started. */
+  total: number;
+  /** Given-up-on runs that have still not returned (each may hold a database connection). */
+  abandonedStillRunning: number;
+  /** The most of those the server tolerates before it stops restarting anything. */
+  maxAbandonedStillRunning: number;
+  /** How many automatic restarts one step may get per hour. */
+  maxPerStepPerHour: number;
+  /**
+   * Plain-language names of steps that are stuck right now and will not be
+   * restarted automatically again: a server restart is needed.
+   */
+  restartNeededFor: string[];
 }
 
 export interface FleetSchedulerStatus {
@@ -94,6 +153,10 @@ export interface FleetSchedulerStatus {
   stale: boolean;
   /** DUR-3991: the step that is holding the scheduler up, when one is. */
   stuckChain?: FleetSchedulerStuckChain | null;
+  /** DUR-3991: the slowest step of the last completed timer tick. */
+  lastTickSlowestPhase?: FleetSchedulerPhaseTiming | null;
+  /** DUR-3991: the watchdog's automatic restarts, and the last one. */
+  rescues?: FleetSchedulerRescues | null;
 }
 
 export interface FleetRequestLoad {

@@ -25,6 +25,8 @@ import {
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests } from "../errors.js";
 import { costService } from "./costs.js";
+import { budgetService } from "./budgets.js";
+import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import type { AuthorizationActor } from "./authorization.js";
@@ -493,6 +495,41 @@ function assertConversationOwnedBy(
   if (!ownedByRequester) throw forbidden("This conversation belongs to someone else");
 }
 
+/**
+ * DUR-3989: what a quick agent is being asked to do, so a refusal can say it
+ * in the operator's words ("answer" in chat, "rewriting text" for transform).
+ */
+type LaneAWorkKind = "chat" | "transform";
+
+/**
+ * The plain sentence an operator (or the person on the other end of a
+ * Telegram chat) reads when a spending limit stops a quick agent. One place,
+ * so chat and transform never drift into saying different things about the
+ * same limit.
+ */
+export function describeLaneASpendingLimitRefusal(
+  scopeType: "company" | "agent" | "project",
+  kind: LaneAWorkKind,
+): string {
+  const doing = kind === "chat" ? "answering messages" : "doing any work, including rewriting text,";
+  if (scopeType === "company") {
+    return (
+      `This company has reached its spending limit in Paperclip, so its quick agents are not ${doing} right now. ` +
+      "Raise the company budget in Paperclip (or answer the budget question about it) and try again."
+    );
+  }
+  if (scopeType === "project") {
+    return (
+      `The project this quick agent works in has reached its spending limit, so it is not ${doing} right now. ` +
+      "Raise the project budget in Paperclip and try again."
+    );
+  }
+  return (
+    `This quick agent has reached its spending limit, so it is not ${doing} right now. ` +
+    "Raise its budget in Paperclip (or answer the budget question about it) and try again."
+  );
+}
+
 export interface LaneAServiceOptions {
   /** Test seam: override any of the built-in tools' dependencies (agents, issues, fetch). */
   toolDeps?: Partial<LaneAToolDeps>;
@@ -502,6 +539,99 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   const toolDeps: LaneAToolDeps = { ...createDbLaneAToolDeps(db), ...options.toolDeps };
   const executeBuiltinTool = createLaneABuiltinToolExecutor(toolDeps);
   const builtinToolDefinitions = buildLaneABuiltinToolDefinitions();
+  const budgets = budgetService(db);
+
+  /**
+   * DUR-3989: the ordinary spending limits (agent and company `billed_cents` /
+   * `total_tokens` hard stops) read through the same getInvocationBlock the
+   * heartbeat uses before it starts a run, so a quick agent is stopped by
+   * exactly the limits that stop its ordinary work, no more and no fewer.
+   * The narrow `lane_a_transform_cents` budget is deliberately NOT part of
+   * this: getInvocationBlock skips it, and transform checks it separately
+   * with its own 429.
+   *
+   * Fails open. This sits in front of every quick-agent message, so an
+   * unexpected error here is logged and the call goes through rather than
+   * turning a normal chat message into a server error. The hard stop itself
+   * still pauses the agent on the next cost event, which the paused check
+   * below catches.
+   */
+  async function findSpendingLimitBlock(companyId: string, agentId: string) {
+    try {
+      return await budgets.getInvocationBlock(companyId, agentId);
+    } catch (err) {
+      logger.warn(
+        { err, companyId, agentId },
+        "lane A: spending-limit check failed unexpectedly; letting the quick-agent call through",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * DUR-3989: one gate in front of every model call a quick agent makes, chat
+   * and transform alike. Before this, chat (including the Telegram bridge,
+   * which reaches it through POST /chat/:agentId/messages) called the model
+   * for a paused or over-limit agent, and transform stopped a paused agent but
+   * not one whose ordinary limit was exceeded while it was still unpaused
+   * (a limit lowered below this month's spend, or an agent resumed by hand).
+   *
+   * The agent's status is read from the database, not only from what the
+   * caller passed: neither chat route passes it, and a stale object must not
+   * be the thing that lets a paused agent spend.
+   *
+   * 403 throughout, never 429: no amount of waiting lifts any of these — a
+   * person has to act — and a 429 invites a batch caller to retry.
+   */
+  async function assertAgentMayWork(params: {
+    companyId: string;
+    targetAgent: LaneATargetAgent;
+    kind: LaneAWorkKind;
+  }) {
+    let agentStatus: string | null = null;
+    let companyStatus: string | null = null;
+    try {
+      const [agentRow] = await db
+        .select({ status: agents.status })
+        .from(agents)
+        .where(and(eq(agents.id, params.targetAgent.id), eq(agents.companyId, params.companyId)));
+      agentStatus = agentRow?.status ?? null;
+      const [companyRow] = await db
+        .select({ status: companies.status })
+        .from(companies)
+        .where(eq(companies.id, params.companyId));
+      companyStatus = companyRow?.status ?? null;
+    } catch (err) {
+      logger.warn(
+        { err, companyId: params.companyId, agentId: params.targetAgent.id },
+        "lane A: could not read agent/company status; letting the quick-agent call through",
+      );
+    }
+
+    if (params.targetAgent.status === "paused" || agentStatus === "paused") {
+      throw forbidden(
+        params.kind === "chat"
+          ? "This quick agent is paused, so it cannot answer right now. " +
+              "Resume it in Paperclip (or answer the budget question that paused it) and try again."
+          : "This quick agent is paused, so it is not doing any work right now — including rewriting text. " +
+              "Resume it in Paperclip (or answer the budget question that paused it) and try again.",
+      );
+    }
+    if (companyStatus && companyStatus !== "active") {
+      throw forbidden(
+        `This company is ${companyStatus} in Paperclip, so its quick agents are not doing any work right now.`,
+      );
+    }
+
+    const block = await findSpendingLimitBlock(params.companyId, params.targetAgent.id);
+    if (block) {
+      throw forbidden(describeLaneASpendingLimitRefusal(block.scopeType, params.kind), {
+        reason: "spending_limit",
+        scopeType: block.scopeType,
+        scopeId: block.scopeId,
+      });
+    }
+  }
 
   async function assertUnderDailyCap(companyId: string, requester: LaneARequester) {
     const conditions = [
@@ -796,6 +926,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     if (!params.targetAgent.laneAEnabled) {
       throw forbidden("Lane A is not enabled for this agent");
     }
+    // DUR-3989: paused / over-limit agents do not get a model call, in chat
+    // exactly as in transform. Checked before anything else can spend.
+    await assertAgentMayWork({ companyId: params.companyId, targetAgent: params.targetAgent, kind: "chat" });
     await assertUnderDailyCap(params.companyId, params.requester);
     const conversation = await resolveConversation({
       companyId: params.companyId,
@@ -1077,30 +1210,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // Three separate mechanisms pause an agent — an operator clicking pause,
     // an agent-scope `billed_cents` hard stop, and a company-scope hard stop
     // cascading down — and every one of them is a decision that this agent
-    // should stop spending. Before this check, all three left the transform
-    // endpoint spending happily: the metric-aware pausing added for
+    // should stop spending. The metric-aware pausing added for
     // `lane_a_transform_cents` correctly stopped that narrow metric from
     // pausing the whole agent, but nothing then covered the metrics that DO
-    // still pause. A paused agent that keeps billing is the exact failure the
-    // hard stop exists to prevent.
-    //
-    // 403 rather than 429: a 429 invites a batch caller to retry, and no
-    // amount of waiting un-pauses an agent — a person has to act.
-    if (params.targetAgent.status === "paused") {
-      throw forbidden(
-        "This quick agent is paused, so it is not doing any work right now — including rewriting text. " +
-          "Resume it in Paperclip (or answer the budget question that paused it) and try again.",
-      );
-    }
-    const [company] = await db
-      .select({ status: companies.status, name: companies.name })
-      .from(companies)
-      .where(eq(companies.id, params.companyId));
-    if (company && company.status !== "active") {
-      throw forbidden(
-        `This company is ${company.status} in Paperclip, so its quick agents are not doing any work right now.`,
-      );
-    }
+    // still pause. DUR-3989 extends the same gate to an ordinary limit that is
+    // exceeded while the agent is not (yet) paused, and shares it with chat.
+    await assertAgentMayWork({ companyId: params.companyId, targetAgent: params.targetAgent, kind: "transform" });
 
     const settings = resolveLaneASettings(params.targetAgent);
 
@@ -1321,6 +1436,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       let unavailableReason: string | null = null;
       if (companyPaused) unavailableReason = "company_paused";
       else if (row.status === "paused") unavailableReason = "agent_paused";
+      // DUR-3989: same ordinary-limit check transform now makes, in the same
+      // place in the order, so "usable" keeps predicting transform's answer.
+      else if (await findSpendingLimitBlock(companyId, row.id)) unavailableReason = "spending_limit";
       else if (callsToday >= settings.dailyCallCap) unavailableReason = "daily_call_cap";
       else if (exceededBudget) unavailableReason = "monthly_budget";
 
