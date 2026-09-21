@@ -779,6 +779,7 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   "POST /api/instance/security/check",
   "POST /api/instance/security/sign-out-everywhere",
   "DELETE /api/instance/security/sessions/{sessionId}",
+  "GET /api/instance/cross-company-access",
   // DUR-3978: what the host-side Telegram bridge reads. The roster carries no
   // token; the second one carries exactly one, for one bot, and is recorded in
   // secret_access_events like every other credential read.
@@ -3184,6 +3185,22 @@ for (const route of [
     ...(route[3] ? { body: route[3] } : {}),
   });
 }
+
+// DUR-3983: read-only view of cross_company_access_log, newest first.
+registerCurrentRoute({
+  method: "get",
+  path: "/api/instance/cross-company-access",
+  tags: ["instance"],
+  summary:
+    "List who or what read across company boundaries, newest first, one keyset page at a time",
+  query: z.object({
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+    cursor: z.string().optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    routine: z.enum(["show", "hide"]).optional(),
+  }),
+});
 
 registry.registerPath({
   method: "post",

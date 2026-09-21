@@ -6,6 +6,7 @@ import { instanceSecurityApi } from "@/api/instanceSecurity";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Link } from "@/lib/router";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDateTime, relativeTime } from "../lib/utils";
@@ -154,6 +155,13 @@ export function InstanceSecurity() {
         <p className="text-sm text-muted-foreground">
           Who can administer this server, which devices are signed in right now, and whether anyone has changed the
           admin accounts behind the app's back. Anything suspicious is also posted to every company's Activity feed.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          To see who or what looked across company boundaries, open{" "}
+          <Link to="/company/settings/instance/cross-company-access" className="underline underline-offset-2 hover:text-foreground">
+            Who looked at another company's data
+          </Link>
+          .
         </p>
       </div>
 

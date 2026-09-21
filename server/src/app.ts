@@ -53,6 +53,7 @@ import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { instanceClaudeAuthRoutes } from "./routes/instance-claude-auth.js";
 import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructions.js";
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
+import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
 import { telegramBotRoutes } from "./routes/telegram-bots.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
@@ -318,6 +319,7 @@ export async function createApp(
   api.use(instanceClaudeAuthRoutes(db));
   api.use(telegramBotRoutes(db));
   api.use(instanceSecurityRoutes(db, { checkIntervalMinutes: opts.adminAuthCheckIntervalMinutes ?? 0 }));
+  api.use(crossCompanyAccessLogRoutes(db));
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
