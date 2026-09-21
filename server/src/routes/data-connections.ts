@@ -15,6 +15,7 @@ import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { dataConnectionService, type DataConnectionServiceDeps } from "../services/data-connections.js";
+import { businessDataService } from "../services/business-data.js";
 
 /**
  * DUR-3972 slice S1: "Datakilder" -- connecting a company to its own business
@@ -38,6 +39,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   const router = Router();
   const db = createRequestScopedDb(rawDb);
   const svc = dataConnectionService(db, deps);
+  const businessData = businessDataService(db, deps);
   const instanceSettings = instanceSettingsService(rawDb);
 
   function boardScope() {
@@ -173,6 +175,35 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
       details: { ok: result.ok, canActivate: result.canActivate, status: result.status },
     });
     res.json(result);
+  });
+
+  /**
+   * DUR-3972 S4: "Prøveberegning". Runs the same lookup an agent would, for the
+   * two last closed months grouped by product type, through this connection
+   * (which need not be ticked for "Salg" yet), so the operator can compare it
+   * with Shopify Analytics before any agent sees a number. Audited with
+   * channel settings_test and counted against the same limits.
+   */
+  router.post("/companies/:companyId/data-connections/:connectionId/trial", boardScope(), requireFeatureOn, async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const connectionId = req.params.connectionId as string;
+    const answer = await businessData.trial(companyId, connectionId, actorUserId(req));
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: actorUserId(req),
+      action: "data_connection.trial_run",
+      entityType: "data_connection",
+      entityId: connectionId,
+      details: { outcome: answer.outcome, refusalCode: answer.refusalCode, lookupId: answer.lookupId },
+    });
+    res.json({
+      ok: answer.ok,
+      outcome: answer.outcome,
+      refusalCode: answer.refusalCode,
+      lookupId: answer.lookupId,
+      text: answer.text,
+    });
   });
 
   router.get("/companies/:companyId/dataset-sources", boardScope(), requireFeatureOn, async (req, res) => {
