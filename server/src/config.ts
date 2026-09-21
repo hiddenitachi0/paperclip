@@ -11,6 +11,7 @@ import {
   normalizeHeartbeatTimerJitterRatio,
 } from "./services/heartbeat-timer-jitter.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
+import { readNonBlankEnvValue } from "./env-values.js";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,
@@ -213,6 +214,23 @@ export function resolveHeartbeatTimerJitterMaxMs(
   return normalizeHeartbeatTimerJitterMaxMs(Number(raw));
 }
 
+/**
+ * DUR-3945: the two optional extra database logins. Empty or whitespace-only
+ * values mean "not set" (a blank `DATABASE_MIGRATION_URL=` line in docker/.env
+ * must not become the address migrations connect to). Unset bypass falls back
+ * to DATABASE_URL; unset migration stays undefined so startup migrates with
+ * DATABASE_URL, exactly as before the variable existed.
+ */
+export function resolveDatabaseRoleUrls(
+  env: NodeJS.ProcessEnv,
+  resolvedDatabaseUrl: string | undefined,
+): { databaseBypassUrl: string | undefined; databaseMigrationUrl: string | undefined } {
+  return {
+    databaseBypassUrl: readNonBlankEnvValue(env.DATABASE_BYPASS_URL) ?? resolvedDatabaseUrl,
+    databaseMigrationUrl: readNonBlankEnvValue(env.DATABASE_MIGRATION_URL),
+  };
+}
+
 export function loadConfig(): Config {
   const fileConfig = readConfigFile();
   const fileDatabaseMode =
@@ -396,7 +414,10 @@ export function loadConfig(): Config {
   // future Phase 2 cutover (DUR-250) can repoint one without the other.
   // Defaults to DATABASE_URL so bypass connections behave exactly like today's
   // until a deployment opts into a distinct bypass role via pure config.
-  const databaseBypassUrl = process.env.DATABASE_BYPASS_URL?.trim() || resolvedDatabaseUrl;
+  const { databaseBypassUrl, databaseMigrationUrl } = resolveDatabaseRoleUrls(
+    process.env,
+    resolvedDatabaseUrl,
+  );
 
   return {
     deploymentMode,
@@ -411,7 +432,7 @@ export function loadConfig(): Config {
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
     databaseUrl: resolvedDatabaseUrl,
-    databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
+    databaseMigrationUrl,
     databaseBypassUrl,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),

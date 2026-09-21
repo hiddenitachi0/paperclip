@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { HttpError } from "../errors.js";
+import { readAnthropicApiKey } from "../env-values.js";
 
 /**
  * DUR-251/DUR-335: the "secretary" that stands in for the hardcoded CEO
@@ -89,7 +90,7 @@ export function secretaryClassifierService() {
     if (roster.length === 0) {
       throw new HttpError(409, "No agents are available to route this request to");
     }
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = readAnthropicApiKey();
     if (!apiKey) {
       throw new HttpError(503, "Secretary classifier is not configured on this instance (ANTHROPIC_API_KEY unset)");
     }
