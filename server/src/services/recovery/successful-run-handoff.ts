@@ -328,7 +328,7 @@ export function buildSuccessfulRunHandoffInstruction(input: {
     "2. Move it to `in_review` with a real reviewer path — `executionState.currentParticipant`, a human owner via `assigneeUserId`, a pending issue-thread interaction, or a linked pending approval.",
     "",
     "**Can it not continue right now?**",
-    "3. Mark it `blocked` with first-class blockers (`blockedByIssueIds`) or a clearly named unblock owner/action.",
+    "3. Mark it `blocked` with first-class blockers (`blockedByIssueIds`) or a clearly named unblock owner/action. If the operator must answer or decide something, file a question card first (an `ask_user_questions` or `request_confirmation` interaction); `blocked` with no linked blocking task, pending question card or linked approval is refused.",
     "",
     "**Is there more work to do?**",
     `4. Either delegate follow-up work (create/link a follow-up issue and block this one on it, or close this issue if its scope is independently complete) or record an explicit continuation path with \`resumeIntent: true\`, \`resumeFromRunId: ${input.sourceRunId}\`, and a concrete next action. Do not perform the remaining source work in this recovery run; the follow-up/resume wake must use the normal model lane.`,

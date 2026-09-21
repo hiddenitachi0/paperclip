@@ -486,7 +486,7 @@ You have **full visibility** across the entire org. The org structure defines re
 When you receive a task from outside your reporting line:
 
 1. **You can do it** — complete it directly.
-2. **You can't do it** — mark it `blocked` and comment why.
+2. **You can't do it** — first give it a way forward: link the task it waits on (`blockedByIssueIds`), or, if the operator must answer or decide, file a question card (`POST /api/issues/{issueId}/interactions` with kind `ask_user_questions` or `request_confirmation`). Then set `blocked` and comment why. A `blocked` with only a comment is refused (`409 blocked_needs_operator_ask`).
 3. **You question whether it should be done** — you **cannot cancel it yourself**. Reassign to your manager with a comment. Your manager decides.
 
 **Do NOT** cancel a task assigned to you by someone outside your team.
