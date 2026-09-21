@@ -16,6 +16,13 @@
 #    the script can create companies and agents without a sign-in dance (the
 #    same pattern docker-compose.ci-recreate-test.yml uses). Ports are
 #    unpublished; every call goes through `docker exec`.
+#  - PAPERCLIP_PG_DUMP_PATH points the server's backups at a spy the script
+#    installs after boot; it records (PASS/LEAK only) whether pg_dump's
+#    command line or environment carried a canary, then runs the real
+#    pg_dump. Until it is installed a backup simply falls back as usual.
+#  - With ISOLATION_SECRETS_MODE=file the script also layers
+#    docker-compose.secrets.yml on top, which blanks every key here and hands
+#    them to the server from a root-only file instead.
 services:
   db:
     environment:
@@ -31,4 +38,5 @@ services:
       PAPERCLIP_AGENT_JWT_SECRET: "${PAPERCLIP_AGENT_JWT_SECRET:?run scripts/agent-isolation-acceptance.sh}"
       PAPERCLIP_SECRETS_MASTER_KEY: "${PAPERCLIP_SECRETS_MASTER_KEY:?run scripts/agent-isolation-acceptance.sh}"
       PAPERCLIP_SERVER_ANTHROPIC_API_KEY: "${PAPERCLIP_SERVER_ANTHROPIC_API_KEY:?run scripts/agent-isolation-acceptance.sh}"
+      PAPERCLIP_PG_DUMP_PATH: "/usr/local/bin/dur3994-pg-dump-spy"
     ports: !override []

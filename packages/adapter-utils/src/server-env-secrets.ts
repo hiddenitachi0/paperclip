@@ -43,6 +43,44 @@ export function isServerOnlyEnvName(name: string): boolean {
 }
 
 /**
+ * DUR-3994 Stage 1: every name the server treats as its own secret -- the
+ * server-only names above plus its database addresses. The server keeps the
+ * values of these names in memory only (server/src/server-secrets.ts), and
+ * the container entrypoint hands them over through a one-shot pipe instead of
+ * the environment, so they never appear in /proc/<server>/environ. This is the
+ * one list both of those read (the entrypoint asks it through
+ * server/src/server-secrets-handoff.ts); do not copy it anywhere else.
+ */
+export function isServerSecretEnvName(name: string): boolean {
+  return isServerOnlyEnvName(name) || SERVER_DATABASE_ENV_NAMES.includes(name);
+}
+
+/**
+ * Where the server's in-memory secrets are published for the equality rule
+ * below. Once the server has moved its database addresses out of process.env
+ * (Stage 1), `stripServerSecrets` can no longer find them there, so the
+ * server registers a reader here. Kept on a global symbol, not a module
+ * variable, so a second copy of this module (source vs. built) still sees it.
+ */
+const SERVER_SECRET_VALUES_KEY = Symbol.for("paperclip.dur3994.serverSecretValues");
+
+type ServerSecretValuesReader = () => Iterable<readonly [string, string]>;
+
+export function registerServerSecretValuesReader(reader: ServerSecretValuesReader | null): void {
+  (globalThis as Record<symbol, unknown>)[SERVER_SECRET_VALUES_KEY] = reader ?? undefined;
+}
+
+function readRegisteredServerSecretValues(): Array<readonly [string, string]> {
+  const reader = (globalThis as Record<symbol, unknown>)[SERVER_SECRET_VALUES_KEY];
+  if (typeof reader !== "function") return [];
+  try {
+    return Array.from((reader as ServerSecretValuesReader)());
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Remove the server's own keys from `env` IN PLACE and return it.
  *
  * Apply this to the FINAL environment a child will receive -- after every
@@ -50,7 +88,8 @@ export function isServerOnlyEnvName(name: string): boolean {
  * (hermes does) is covered too, not only the inherited base.
  *
  * `serverEnv` is where the server's own database addresses are read from for
- * the equality rule (process.env by default). Never throws: a malformed
+ * the equality rule (process.env by default), together with any values the
+ * server registered through `registerServerSecretValuesReader`. Never throws: a malformed
  * entry is simply left for the name rule.
  */
 export function stripServerSecrets<T extends Record<string, string | undefined>>(
@@ -58,12 +97,18 @@ export function stripServerSecrets<T extends Record<string, string | undefined>>
   serverEnv: NodeJS.ProcessEnv = process.env,
 ): T {
   const serverDatabaseValues = new Set<string>();
-  for (const name of SERVER_DATABASE_ENV_NAMES) {
-    const value = serverEnv[name];
-    if (typeof value !== "string") continue;
+  const addServerDatabaseValue = (value: unknown) => {
+    if (typeof value !== "string") return;
     const trimmed = value.trim();
-    if (trimmed.length === 0) continue;
+    if (trimmed.length === 0) return;
     serverDatabaseValues.add(trimmed);
+  };
+  for (const name of SERVER_DATABASE_ENV_NAMES) {
+    addServerDatabaseValue(serverEnv[name]);
+  }
+  // Stage 1: the server's own addresses now live in memory, not process.env.
+  for (const [name, value] of readRegisteredServerSecretValues()) {
+    if (SERVER_DATABASE_ENV_NAMES.includes(name)) addServerDatabaseValue(value);
   }
   for (const key of Object.keys(env)) {
     if (isServerOnlyEnvName(key)) {

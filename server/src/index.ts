@@ -1,4 +1,8 @@
 /// <reference path="./types/express.d.ts" />
+// DUR-3994 Stage 1: must stay the FIRST import. It moves the server's keys out
+// of process.env (and reads + closes the entrypoint's hand-over descriptor)
+// before anything else runs. See server-secrets.ts.
+import "./server-secrets-boot.js";
 // Kicks off the OTel bootstrap as early as possible (no-op unless
 // OTEL_EXPORTER_OTLP_ENDPOINT is set). startServer() awaits
 // instrumentationReady before opening DB connections or constructing the

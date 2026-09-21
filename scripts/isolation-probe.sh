@@ -121,6 +121,70 @@ for dir in /proc/[0-9]*; do
 done
 [ "$proc_clean" = 1 ] && pass 1 proc-other "no-canary-in-other-processes"
 
+# The root-only secrets file (docker-compose.secrets.yml) must stay root-only.
+if [ -e /run/secrets/paperclip_server ]; then
+  if [ -r /run/secrets/paperclip_server ]; then
+    found 1 secrets-file /run/secrets/paperclip_server
+  else
+    pass 1 secrets-file /run/secrets/paperclip_server
+  fi
+fi
+
+# Reopen every descriptor the server holds (the key hand-over pipe must be
+# gone). Sockets and devices cannot carry a key this way; the probe's own
+# output pipes are skipped so it does not read back its own report.
+own_out="$(readlink /proc/$$/fd/1 2>/dev/null || true)"
+own_err="$(readlink /proc/$$/fd/2 2>/dev/null || true)"
+fd_clean=1
+for fdpath in /proc/1/fd/*; do
+  [ -e "$fdpath" ] || continue
+  target="$(readlink "$fdpath" 2>/dev/null || true)"
+  case "$target" in
+    socket:*|anon_inode:*|/dev/*|"") continue ;;
+  esac
+  [ "$target" = "$own_out" ] && continue
+  [ "$target" = "$own_err" ] && continue
+  case "$target" in
+    pipe:*)
+      if timeout 1 head -c 262144 "$fdpath" 2>/dev/null | grep -qaF -f "$PATTERN_FILE"; then
+        found 1 server-fd "$fdpath"
+        fd_clean=0
+      fi
+      ;;
+    *)
+      if [ -f "$target" ] && [ -r "$fdpath" ] && file_has_marker "$fdpath"; then
+        found 1 server-fd "$fdpath"
+        fd_clean=0
+      fi
+      ;;
+  esac
+done
+[ "$fd_clean" = 1 ] && pass 1 server-fd "no-canary-in-server-descriptors"
+
+# The server's memory must not be readable (ptrace protection).
+if ( exec 9</proc/1/mem ) 2>/dev/null; then
+  found 1 server-mem /proc/1/mem
+else
+  pass 1 server-mem /proc/1/mem
+fi
+scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo missing)"
+case "$scope" in
+  1|2|3) pass 1 ptrace-scope "yama-$scope" ;;
+  *) found 1 ptrace-scope "yama-$scope" ;;
+esac
+
+# `kill -USR1` must not open Node's debugger on the server. (PID 1 ignores a
+# signal it has no handler for, so this cannot stop the server.)
+if [ "${PROBE_SKIP_SIGUSR1:-0}" != 1 ]; then
+  kill -USR1 1 2>/dev/null || true
+  sleep 2
+  if curl -s --max-time 2 -o /dev/null http://127.0.0.1:9229/json/version 2>/dev/null; then
+    found 1 debug-port 127.0.0.1:9229
+  else
+    pass 1 debug-port 127.0.0.1:9229
+  fi
+fi
+
 # --- Stage 2: the server's own program files --------------------------------
 if [ -e /app/server/dist/index.js ]; then
   # Only asks the kernel whether a write WOULD be allowed; never writes.

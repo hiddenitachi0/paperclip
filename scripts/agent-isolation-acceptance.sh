@@ -17,8 +17,21 @@
 #      KNOWN_GAP plus a path or variable NAME, never a value.
 #
 # Pass rule: no LEAK for the stages listed in ISOLATION_ENFORCED_STAGES
-# (default "0"). Checks for later stages are printed as KNOWN_GAP and do not
+# (default "0 1"). Checks for later stages are printed as KNOWN_GAP and do not
 # fail the run; each later stage adds its number here when it ships.
+#
+# Stage 1 (the server keeps its keys out of reach) adds:
+#   - the probe's server checks: /proc/1/environ, every other readable
+#     /proc/*/environ and /proc/*/cmdline, reopening every /proc/1/fd/*,
+#     /proc/1/mem, yama ptrace_scope, and `kill -USR1 1` must not open a
+#     debugger on 127.0.0.1:9229 (and the server must stay up);
+#   - a real backup through the server while a spy in front of pg_dump
+#     records whether its command line or environment carries a canary; the
+#     backup must still be a pg_dump backup with today's file name, in
+#     today's folder, and restore with psql into a fresh database;
+#   - ISOLATION_SECRETS_MODE=env (keys in the container settings, as
+#     production today) or file (keys only in a root-only secrets file,
+#     docker/docker-compose.secrets.yml, as after Stage 3).
 #
 # Negative controls (the harness must be able to see a leak, or a green run
 # means nothing):
@@ -37,13 +50,19 @@ cd "$REPO_ROOT"
 
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-dur3994-isolation-acceptance}"
 DOCKER_ENV_FILE="$REPO_ROOT/docker/.env"
+SECRETS_MODE="${ISOLATION_SECRETS_MODE:-env}"
+case "$SECRETS_MODE" in env|file) ;; *) echo "ISOLATION_SECRETS_MODE must be env or file" >&2; exit 2 ;; esac
 COMPOSE=(docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$DOCKER_ENV_FILE" \
   -f docker/docker-compose.yml \
   -f docker/docker-compose.prod.yml \
   -f docker/docker-compose.ci-isolation-test.yml)
+if [ "$SECRETS_MODE" = file ]; then
+  COMPOSE+=(-f docker/docker-compose.secrets.yml)
+fi
 
-ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0}"
+ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0 1}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-isolation-acceptance.XXXXXX")"
+SERVER_SECRETS_FILE="$WORK_DIR/server-secrets.env"
 PAYLOAD_FILE="$WORK_DIR/payload.json"
 LOG_DIR="${ISOLATION_LOG_DIR:-$REPO_ROOT/.dur3994-isolation-acceptance-logs}"
 rm -rf "$LOG_DIR"
@@ -180,6 +199,86 @@ check_dockerignore() {
   [ "$FAIL" -eq 0 ] && log "PASS 0 build-context: .env files stay out of the image, examples stay in"
 }
 
+stage_enforced() { # stage -> 0 if enforced
+  case " $(printf '%s' "$ENFORCED_STAGES" | tr ',' ' ') " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# Stage 1: a real backup through the server, with a spy in front of pg_dump
+# that records (PASS/LEAK only) whether pg_dump's command line or environment
+# carried a canary. Then the backup must be today's kind of backup and
+# restore into a fresh database with psql.
+stage1_server_checks() {
+  local container="$1" spy_report backup_json engine backup_file
+  log "stage 1: the server is still up after the probe's kill -USR1"
+  if ! docker exec "$container" curl -fsS "$API_BASE/api/health" >/dev/null 2>&1; then
+    fail "the server did not survive kill -USR1 from an agent"
+  fi
+
+  log "stage 1: backup through the server with a pg_dump spy"
+  docker exec -u 0 -i "$container" sh -c 'cat >/usr/local/bin/dur3994-pg-dump-spy && chmod 755 /usr/local/bin/dur3994-pg-dump-spy' <<'SPY'
+#!/bin/sh
+pattern="$(mktemp)"
+printf '%s%s\n' DUR3994 CANARY >"$pattern"
+for leaf in cmdline environ; do
+  if grep -qaF -f "$pattern" "/proc/$$/$leaf"; then
+    echo "LEAK 1 pg-dump-$leaf" >>/tmp/dur3994-pg-dump-spy.txt
+  else
+    echo "PASS 1 pg-dump-$leaf" >>/tmp/dur3994-pg-dump-spy.txt
+  fi
+done
+rm -f "$pattern"
+exec pg_dump "$@"
+SPY
+  backup_json="$(api_call POST /api/instance/database-backups '{}')" || true
+  printf '%s\n' "$backup_json" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(json.dumps({k:d.get(k) for k in ("backupFile","engine","sizeBytes","pgDumpFailureReason")}))' >"$LOG_DIR/backup-result.json" 2>/dev/null || true
+  engine="$(printf '%s' "$backup_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("engine",""))' 2>/dev/null || true)"
+  backup_file="$(printf '%s' "$backup_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("backupFile",""))' 2>/dev/null || true)"
+
+  spy_report="$(docker exec "$container" cat /tmp/dur3994-pg-dump-spy.txt 2>/dev/null || true)"
+  printf '%s\n' "$spy_report" >"$LOG_DIR/pg-dump-spy.txt"
+  log "pg_dump spy report: $(printf '%s' "$spy_report" | tr '\n' ' ')"
+  if [ -z "$spy_report" ]; then
+    fail "pg_dump never ran (the spy recorded nothing)"
+  elif printf '%s\n' "$spy_report" | grep -q '^LEAK '; then
+    fail "the backup's pg_dump carried a canary on its command line or in its environment"
+  fi
+
+  if [ "$engine" != "pg_dump" ]; then
+    fail "the backup did not use pg_dump (engine: ${engine:-none})"
+  fi
+  case "$backup_file" in
+    /paperclip/instances/default/data/backups/paperclip-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].sql.gz)
+      log "PASS 1 backup-name: $backup_file" ;;
+    *) fail "the backup file name or folder changed: ${backup_file:-none}" ; return ;;
+  esac
+
+  log "stage 1: restoring that backup with psql into a fresh database"
+  local db_container local_copy
+  db_container="$("${COMPOSE[@]}" ps -q db)"
+  local_copy="$WORK_DIR/restore-check.sql.gz"
+  if ! docker cp "$container:$backup_file" "$local_copy" >/dev/null 2>&1; then
+    fail "could not copy the backup out of the container"
+    return
+  fi
+  docker exec "$db_container" createdb -U paperclip dur3994_restore_check >/dev/null 2>&1 || true
+  if ! gunzip -c "$local_copy" | docker exec -i "$db_container" psql -U paperclip -d dur3994_restore_check \
+    -v ON_ERROR_STOP=1 -q >"$LOG_DIR/restore.log" 2>&1; then
+    fail "the backup did not restore with psql (see restore.log)"
+    return
+  fi
+  local source_count restored_count
+  source_count="$(docker exec "$db_container" psql -U paperclip -d paperclip -tAc 'SELECT count(*) FROM companies' 2>/dev/null | tr -d '[:space:]')"
+  restored_count="$(docker exec "$db_container" psql -U paperclip -d dur3994_restore_check -tAc 'SELECT count(*) FROM companies' 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$source_count" ] && [ "$source_count" = "$restored_count" ]; then
+    log "PASS 1 backup-restore: $restored_count companies restored"
+  else
+    fail "the restored database does not match (companies: source=${source_count:-?} restored=${restored_count:-?})"
+  fi
+}
+
 count_lines() { # prefix, text -> count
   printf '%s\n' "$2" | grep -c "^$1 " || true
 }
@@ -190,20 +289,42 @@ main() {
   log "negative control (c) + .dockerignore check"
   check_dockerignore
 
-  log "writing canary keys to docker/.env (the file production keeps its keys in)"
-  local master_key
+  log "writing canary keys to docker/.env (the file production keeps its keys in; secrets mode: $SECRETS_MODE)"
+  local master_key db_password auth_secret jwt_secret anthropic_key
   master_key="DUR3994CANARY$(openssl rand -hex 10 | cut -c1-19)" # exactly 32 characters
+  db_password="$(canary)"
+  auth_secret="$(canary)"
+  jwt_secret="$(canary)"
+  anthropic_key="$(canary)"
   {
     echo "# DUR-3994 acceptance run: random decoy values only. Removed on exit."
-    echo "BETTER_AUTH_SECRET=$(canary)"
+    echo "BETTER_AUTH_SECRET=$auth_secret"
     echo "PAPERCLIP_PUBLIC_URL=$API_BASE"
-    echo "ISOLATION_CANARY_DB_PASSWORD=$(canary)"
-    echo "PAPERCLIP_AGENT_JWT_SECRET=$(canary)"
+    echo "ISOLATION_CANARY_DB_PASSWORD=$db_password"
+    echo "PAPERCLIP_AGENT_JWT_SECRET=$jwt_secret"
     echo "PAPERCLIP_SECRETS_MASTER_KEY=$master_key"
-    echo "PAPERCLIP_SERVER_ANTHROPIC_API_KEY=$(canary)"
+    echo "PAPERCLIP_SERVER_ANTHROPIC_API_KEY=$anthropic_key"
     echo "DUR3994_ONLY_IN_ENV_FILE=$(canary)"
+    if [ "$SECRETS_MODE" = file ]; then
+      echo "PAPERCLIP_SERVER_SECRETS_FILE=$SERVER_SECRETS_FILE"
+    fi
   } >"$DOCKER_ENV_FILE"
   chmod 600 "$DOCKER_ENV_FILE"
+  if [ "$SECRETS_MODE" = file ]; then
+    # Same keys, but in the root-only secrets file; the overlay blanks them
+    # in the container settings.
+    local db_url="postgres://paperclip:$db_password@db:5432/paperclip"
+    {
+      echo "BETTER_AUTH_SECRET=$auth_secret"
+      echo "DATABASE_URL=$db_url"
+      echo "DATABASE_BYPASS_URL=$db_url"
+      echo "DATABASE_MIGRATION_URL=$db_url"
+      echo "PAPERCLIP_AGENT_JWT_SECRET=$jwt_secret"
+      echo "PAPERCLIP_SECRETS_MASTER_KEY=$master_key"
+      echo "PAPERCLIP_SERVER_ANTHROPIC_API_KEY=$anthropic_key"
+    } >"$SERVER_SECRETS_FILE"
+    chmod 400 "$SERVER_SECRETS_FILE"
+  fi
 
   log "building and booting the stack (project=$COMPOSE_PROJECT_NAME)"
   if ! "${COMPOSE[@]}" up -d --build >"$LOG_DIR/compose-up.log" 2>&1; then
@@ -258,6 +379,20 @@ main() {
         fail "stage 0 check '$check' did not pass"
       fi
     done
+    if stage_enforced 1; then
+      for check in proc-environ proc-other server-fd server-mem ptrace-scope debug-port; do
+        if ! printf '%s\n' "$report" | grep -q "^PASS 1 $check "; then
+          fail "stage 1 check '$check' did not pass"
+        fi
+      done
+      if [ "$SECRETS_MODE" = file ] && ! printf '%s\n' "$report" | grep -q '^PASS 1 secrets-file '; then
+        fail "stage 1 check 'secrets-file' did not pass"
+      fi
+    fi
+  fi
+
+  if stage_enforced 1; then
+    stage1_server_checks "$container"
   fi
 
   log "negative control (b): an agent whose settings carry a canary must be caught"
@@ -271,15 +406,41 @@ main() {
     fail "negative control (b): the probe did not catch a canary planted in the agent's own env"
   fi
 
-  log "negative control (a): the container's full env (what agents inherited before Stage 0) must show LEAK"
-  local unfixed_report
-  unfixed_report="$(docker exec -u node -e PROBE_ENFORCED_STAGES=0 "$container" sh "$PROBE_PATH" 2>/dev/null || true)"
-  printf '%s\n' "$unfixed_report" >"$LOG_DIR/unfixed-env-report.txt"
-  if printf '%s\n' "$unfixed_report" | grep -q '^LEAK 0 env-names BETTER_AUTH_SECRET$' \
-    && printf '%s\n' "$unfixed_report" | grep -q '^LEAK 0 env-marker DATABASE_URL$'; then
-    log "PASS negative control (a): the unfixed environment shows LEAK"
+  if [ "$SECRETS_MODE" = env ]; then
+    log "negative control (a): the container's full env (what agents inherited before Stage 0) must show LEAK"
+    local unfixed_report
+    # A second process started with the container's full environment -- the
+    # same record /proc/1/environ held before Stage 1 -- so the probe's
+    # /proc scan has something it must find.
+    docker exec -u node -d "$container" sleep 120 >/dev/null 2>&1 || true
+    sleep 1
+    unfixed_report="$(docker exec -u node -e PROBE_ENFORCED_STAGES=0 -e PROBE_SKIP_SIGUSR1=1 "$container" sh "$PROBE_PATH" 2>/dev/null || true)"
+    printf '%s\n' "$unfixed_report" >"$LOG_DIR/unfixed-env-report.txt"
+    if printf '%s\n' "$unfixed_report" | grep -q '^LEAK 0 env-names BETTER_AUTH_SECRET$' \
+      && printf '%s\n' "$unfixed_report" | grep -q '^LEAK 0 env-marker DATABASE_URL$'; then
+      log "PASS negative control (a): the unfixed environment shows LEAK"
+    else
+      fail "negative control (a): the probe did not flag the unfixed environment"
+    fi
+    if printf '%s\n' "$unfixed_report" | grep -q '^KNOWN_GAP 1 proc-environ /proc/[0-9]*/environ$'; then
+      log "PASS negative control (a, stage 1): the probe sees keys in a process environment record"
+    else
+      fail "negative control (a, stage 1): the probe's /proc scan did not see a process started with the keys"
+    fi
   else
-    fail "negative control (a): the probe did not flag the unfixed environment"
+    # File mode: the container settings must not carry any key at all, and
+    # the secrets file must hold them (so the checks above were looking at a
+    # server that really had canary keys).
+    if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | grep -qF "DUR3994CANARY"; then
+      fail "LEAK 1 container-settings (docker inspect shows a key in file mode)"
+    else
+      log "PASS 1 container-settings: no key in the container settings (file mode)"
+    fi
+    if docker exec "$container" sh -c 'grep -qF DUR3994CANARY /run/secrets/paperclip_server'; then
+      log "PASS negative control (a, file mode): the server's secrets file carries the canary keys"
+    else
+      fail "negative control (a, file mode): the secrets file was not mounted with the canary keys"
+    fi
   fi
 
   if [ "$FAIL" -eq 0 ]; then

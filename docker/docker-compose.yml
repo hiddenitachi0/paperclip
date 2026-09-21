@@ -28,7 +28,9 @@ services:
       PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
       PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
-      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      # DUR-3994: may also come from the secrets file instead (see
+      # docker-compose.secrets.yml); the server refuses to start without it.
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:-}"
     volumes:
       - paperclip-data:/paperclip
     depends_on:

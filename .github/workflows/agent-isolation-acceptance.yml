@@ -15,7 +15,7 @@ on:
       enforced_stages:
         description: "Stages whose checks must pass (space separated)"
         required: false
-        default: "0"
+        default: "0 1"
   workflow_call: {}
   pull_request:
     branches:
@@ -34,6 +34,14 @@ on:
       - "server/src/services/runtime-env.ts"
       - "server/src/services/workspace-runtime.ts"
       - "server/src/adapters/process/**"
+      - "docker/docker-compose.secrets.yml"
+      - "server/src/server-secrets.ts"
+      - "server/src/server-secrets-boot.ts"
+      - "server/src/server-secrets-handoff.ts"
+      - "server/src/index.ts"
+      - "server/src/config.ts"
+      - "packages/adapter-utils/src/server-env-secrets.ts"
+      - "packages/db/src/backup-lib.ts"
   push:
     branches:
       - custom
@@ -51,11 +59,26 @@ on:
       - "server/src/services/runtime-env.ts"
       - "server/src/services/workspace-runtime.ts"
       - "server/src/adapters/process/**"
+      - "docker/docker-compose.secrets.yml"
+      - "server/src/server-secrets.ts"
+      - "server/src/server-secrets-boot.ts"
+      - "server/src/server-secrets-handoff.ts"
+      - "server/src/index.ts"
+      - "server/src/config.ts"
+      - "packages/adapter-utils/src/server-env-secrets.ts"
+      - "packages/db/src/backup-lib.ts"
 
 jobs:
   isolation-acceptance:
+    name: isolation-acceptance (${{ matrix.secrets_mode }} mode)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # env: keys in the container settings (production today).
+        # file: keys only in a root-only secrets file (after DUR-3994 Stage 3).
+        secrets_mode: [env, file]
 
     steps:
       - name: Checkout repository
@@ -63,14 +86,16 @@ jobs:
 
       - name: Run agent isolation acceptance test
         env:
-          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0' }}
+          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1' }}
+          ISOLATION_SECRETS_MODE: ${{ matrix.secrets_mode }}
+          COMPOSE_PROJECT_NAME: dur3994-isolation-${{ matrix.secrets_mode }}
         run: ./scripts/agent-isolation-acceptance.sh
 
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: agent-isolation-acceptance
+          name: agent-isolation-acceptance-${{ matrix.secrets_mode }}
           path: .dur3994-isolation-acceptance-logs/
           retention-days: 14
           if-no-files-found: ignore

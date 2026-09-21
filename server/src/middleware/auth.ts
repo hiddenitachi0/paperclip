@@ -18,6 +18,7 @@ import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { companyServiceTokenService } from "../services/company-service-tokens.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
+import { readServerSecret } from "../server-secrets.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -348,7 +349,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 }
 
 export async function resolveCloudTenantActor(db: Db, req: Request): Promise<Express.Request["actor"] | null> {
-  const expectedToken = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN?.trim();
+  const expectedToken = readServerSecret("PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN")?.trim();
   if (!expectedToken) return null;
 
   const token = req.header("x-paperclip-cloud-tenant-token")?.trim();

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { PaperclipConfig } from "@paperclipai/shared";
 import { resolvePaperclipConfigPath, resolvePaperclipEnvPath } from "./paths.js";
+import { readServerSecret } from "./server-secrets.js";
 
 function nonEmpty(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -468,7 +469,7 @@ export function maybePersistWorktreeRuntimePorts(input: {
     serverPort: input.serverPort,
     databasePort: input.databasePort,
     allowServerPortWrite: !nonEmpty(process.env.PORT),
-    allowDatabasePortWrite: !nonEmpty(process.env.DATABASE_URL),
+    allowDatabasePortWrite: !nonEmpty(readServerSecret("DATABASE_URL")),
   });
 
   if (changed) {

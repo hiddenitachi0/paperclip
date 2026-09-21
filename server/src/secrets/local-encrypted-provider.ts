@@ -10,6 +10,7 @@ import type {
   StoredSecretVersionMaterial,
 } from "./types.js";
 import { badRequest } from "../errors.js";
+import { readServerSecret } from "../server-secrets.js";
 
 interface LocalEncryptedMaterial extends StoredSecretVersionMaterial {
   scheme: "local_encrypted_v1";
@@ -46,7 +47,7 @@ function decodeMasterKey(raw: string): Buffer | null {
 }
 
 function loadOrCreateMasterKey(): Buffer {
-  const envKeyRaw = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+  const envKeyRaw = readServerSecret("PAPERCLIP_SECRETS_MASTER_KEY");
   if (envKeyRaw && envKeyRaw.trim().length > 0) {
     const fromEnv = decodeMasterKey(envKeyRaw);
     if (!fromEnv) {
@@ -107,7 +108,7 @@ function prepareManagedVersion(value: string): PreparedSecretVersion {
 }
 
 async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck> {
-  const envKeyRaw = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+  const envKeyRaw = readServerSecret("PAPERCLIP_SECRETS_MASTER_KEY");
   if (envKeyRaw && envKeyRaw.trim().length > 0) {
     if (!decodeMasterKey(envKeyRaw)) {
       return {

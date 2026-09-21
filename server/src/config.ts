@@ -2,7 +2,8 @@ import { readConfigFile } from "./config-file.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { config as loadDotenv } from "dotenv";
+import { parse as parseDotenv } from "dotenv";
+import { readFileSync } from "node:fs";
 import { resolvePaperclipEnvPath } from "./paths.js";
 import {
   DEFAULT_HEARTBEAT_TIMER_JITTER_MAX_MS,
@@ -12,6 +13,7 @@ import {
 } from "./services/heartbeat-timer-jitter.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
 import { readNonBlankEnvValue } from "./env-values.js";
+import { adoptServerSecretsFromEnvFile, readServerSecret } from "./server-secrets.js";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,
@@ -37,9 +39,29 @@ import {
   resolveHomeAwarePath,
 } from "./home-paths.js";
 
+/**
+ * Load a .env file into process.env without overriding what is already set
+ * (dotenv's `override: false`). DUR-3994 Stage 1: the server's own key names
+ * never go into process.env from here -- agents would inherit them, and an
+ * agent can write these files, so a key there could be planted for the next
+ * restart. See adoptServerSecretsFromEnvFile for what happens to them.
+ */
+function loadEnvFileIntoProcessEnv(path: string, label: string): void {
+  let entries: Record<string, string>;
+  try {
+    entries = parseDotenv(readFileSync(path));
+  } catch {
+    return;
+  }
+  const passThrough = adoptServerSecretsFromEnvFile(entries, label);
+  for (const [name, value] of Object.entries(passThrough)) {
+    if (process.env[name] === undefined) process.env[name] = value;
+  }
+}
+
 const PAPERCLIP_ENV_FILE_PATH = resolvePaperclipEnvPath();
 if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
-  loadDotenv({ path: PAPERCLIP_ENV_FILE_PATH, override: false, quiet: true });
+  loadEnvFileIntoProcessEnv(PAPERCLIP_ENV_FILE_PATH, "the instance .env file");
 }
 
 const CWD_ENV_PATH = resolve(process.cwd(), ".env");
@@ -47,7 +69,7 @@ const isSameFile = existsSync(CWD_ENV_PATH) && existsSync(PAPERCLIP_ENV_FILE_PAT
   ? realpathSync(CWD_ENV_PATH) === realpathSync(PAPERCLIP_ENV_FILE_PATH)
   : CWD_ENV_PATH === PAPERCLIP_ENV_FILE_PATH;
 if (!isSameFile && existsSync(CWD_ENV_PATH)) {
-  loadDotenv({ path: CWD_ENV_PATH, override: false, quiet: true });
+  loadEnvFileIntoProcessEnv(CWD_ENV_PATH, "the .env file in the working directory");
 }
 
 maybeRepairLegacyWorktreeConfigAndEnvFiles();
@@ -276,8 +298,8 @@ export function loadConfig(): Config {
     process.env.PAPERCLIP_TELEMETRY_BACKEND_URL?.trim() ||
     undefined;
   const feedbackExportBackendToken =
-    process.env.PAPERCLIP_FEEDBACK_EXPORT_BACKEND_TOKEN?.trim() ||
-    process.env.PAPERCLIP_TELEMETRY_BACKEND_TOKEN?.trim() ||
+    readServerSecret("PAPERCLIP_FEEDBACK_EXPORT_BACKEND_TOKEN")?.trim() ||
+    readServerSecret("PAPERCLIP_TELEMETRY_BACKEND_TOKEN")?.trim() ||
     undefined;
 
   const deploymentModeFromEnvRaw = process.env.PAPERCLIP_DEPLOYMENT_MODE;
@@ -408,14 +430,17 @@ export function loadConfig(): Config {
     throw new Error(resolvedBind.errors[0]);
   }
 
-  const resolvedDatabaseUrl = process.env.DATABASE_URL ?? fileDbUrl;
+  const resolvedDatabaseUrl = readServerSecret("DATABASE_URL") ?? fileDbUrl;
   // DUR-275/DUR-277 §4: a second connection string for runInCompanyScopeBypass's
   // reserved connections, decoupled from the tenant-request DATABASE_URL so a
   // future Phase 2 cutover (DUR-250) can repoint one without the other.
   // Defaults to DATABASE_URL so bypass connections behave exactly like today's
   // until a deployment opts into a distinct bypass role via pure config.
   const { databaseBypassUrl, databaseMigrationUrl } = resolveDatabaseRoleUrls(
-    process.env,
+    {
+      DATABASE_BYPASS_URL: readServerSecret("DATABASE_BYPASS_URL"),
+      DATABASE_MIGRATION_URL: readServerSecret("DATABASE_MIGRATION_URL"),
+    },
     resolvedDatabaseUrl,
   );
 

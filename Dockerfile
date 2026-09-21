@@ -137,4 +137,7 @@ ENV NODE_ENV=production \
 EXPOSE 3100
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
+# DUR-3994 Stage 1: --disable-sigusr1 stops `kill -USR1 <server>` (which any
+# agent could send, being the same user) from opening Node's debugger on
+# 127.0.0.1:9229, through which it could read everything the server holds.
+CMD ["node", "--disable-sigusr1", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
