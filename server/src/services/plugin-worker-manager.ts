@@ -179,6 +179,13 @@ export interface WorkerStartOptions {
   rpcTimeoutMs?: number;
   /** Whether to auto-restart on crash. Defaults to true. */
   autoRestart?: boolean;
+  /**
+   * DUR-3994 Stage 2: called before EVERY start of the worker process,
+   * including restarts after a crash (which read the plugin's files from disk
+   * again). If it rejects, the process is not started and the start fails
+   * with its message; a crash-restart is not retried.
+   */
+  verifyBeforeSpawn?: () => Promise<void>;
   /** Node.js execArgv passed to the child process. */
   execArgv?: string[];
   /** Environment variables passed to the child process. */
@@ -996,6 +1003,18 @@ export function createPluginWorkerHandle(
     }
 
     intentionalStop = false;
+
+    if (options.verifyBeforeSpawn) {
+      try {
+        await options.verifyBeforeSpawn();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error({ err: msg }, "worker not started: its files failed the trusted-code check");
+        setStatus("crashed");
+        throw err instanceof Error ? err : new Error(msg);
+      }
+    }
+
     setStatus("starting");
     stderrExcerpt = "";
 

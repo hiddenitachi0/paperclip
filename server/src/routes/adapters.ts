@@ -49,7 +49,13 @@ import {
 } from "../services/adapter-plugin-store.js";
 import type { AdapterPluginRecord } from "../services/adapter-plugin-store.js";
 import type { ServerAdapterModule, AdapterConfigSchema } from "../adapters/types.js";
-import { loadExternalAdapterPackage, getUiParserSource, getOrExtractUiParserSource, reloadExternalAdapter } from "../adapters/plugin-loader.js";
+import {
+  loadExternalAdapterPackage,
+  getUiParserSource,
+  getOrExtractUiParserSource,
+  recordExternalAdapterCode,
+  reloadExternalAdapter,
+} from "../adapters/plugin-loader.js";
 import { logger } from "../middleware/logger.js";
 import { assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { BUILTIN_ADAPTER_TYPES } from "../adapters/builtin-adapter-types.js";
@@ -301,6 +307,11 @@ export function adapterRoutes() {
         }
       }
 
+      // DUR-3994 Stage 2: an admin just installed this code, so its files are
+      // the trusted ones from now on; the server refuses to load it later if
+      // they change. Recorded before the first import.
+      await recordExternalAdapterCode({ localPath: moduleLocalPath, type: canonicalName }, "install");
+
       // Load and register the adapter (use canonicalName for path resolution)
       const adapterModule = await loadExternalAdapterPackage(canonicalName, moduleLocalPath);
 
@@ -492,6 +503,16 @@ export function adapterRoutes() {
           { type: adapterType, packageName: externalRecord.packageName },
           "npm uninstall completed for external adapter",
         );
+        // DUR-3994 Stage 2: the shared npm folder changed; keep the other
+        // npm-installed adapters in it trusted. Best effort.
+        await recordExternalAdapterCode({ localPath: undefined, type: "managed adapter folder" }, "uninstall").catch(
+          (recordErr) => {
+            logger.warn(
+              { err: recordErr, type: adapterType },
+              "could not re-record the managed adapter folder after an uninstall; npm-installed adapters in it will be refused until one is installed again",
+            );
+          },
+        );
       } catch (err) {
         logger.warn(
           { err, type: adapterType, packageName: externalRecord.packageName },
@@ -601,6 +622,9 @@ export function adapterRoutes() {
         cwd: pluginsDir,
         timeout: 120_000,
       });
+
+      // DUR-3994 Stage 2: the freshly installed files are the trusted ones.
+      await recordExternalAdapterCode(record, "reinstall");
 
       // Reload the freshly installed adapter
       const newModule = await reloadExternalAdapter(type);

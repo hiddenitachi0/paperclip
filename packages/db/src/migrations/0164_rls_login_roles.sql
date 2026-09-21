@@ -262,6 +262,10 @@ DECLARE
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
     'telegram_bots',
+    -- DUR-3994 Stage 2. Created (and granted on) in
+    -- 0169_trusted_code_fingerprints.sql; instance-wide (no company_id), so it
+    -- is in this list only, not in the company-scoped one below.
+    'trusted_code_fingerprints',
     'untracked_write_incidents',
     'user',
     'user_sidebar_preferences',

@@ -17,7 +17,7 @@
 #      KNOWN_GAP plus a path or variable NAME, never a value.
 #
 # Pass rule: no LEAK for the stages listed in ISOLATION_ENFORCED_STAGES
-# (default "0 1"). Checks for later stages are printed as KNOWN_GAP and do not
+# (default "0 1 2"). Checks for later stages are printed as KNOWN_GAP and do not
 # fail the run; each later stage adds its number here when it ships.
 #
 # Stage 1 (the server keeps its keys out of reach) adds:
@@ -35,6 +35,19 @@
 #   - ISOLATION_SECRETS_MODE=env (keys in the container settings, as
 #     production today) or file (keys only in a root-only secrets file,
 #     docker/docker-compose.secrets.yml, as after Stage 3).
+#
+# Stage 2 (agents can't plant code the server will run) adds:
+#   - the probe's checks that, as an agent, it cannot change anything under
+#     /app (the server's program; opening a file for append must fail with
+#     EACCES, and `find /app -writable` must find nothing);
+#   - a real local plugin installed through the API before the probe's
+#     heartbeat, so that heartbeat runs with a plugin worker loaded;
+#   - the server restarted with the plugin untouched: it must load again
+#     (negative control d: the check does not refuse everything);
+#   - the plugin's manifest edited as the `node` user (what an agent could
+#     do), the server restarted: the plugin must be refused (status error,
+#     the plain "changed after it was installed" message), the edited code
+#     must never have run, and the refusal must be in the Activity feed.
 #
 # Negative controls (the harness must be able to see a leak, or a green run
 # means nothing):
@@ -63,7 +76,7 @@ if [ "$SECRETS_MODE" = file ]; then
   COMPOSE+=(-f docker/docker-compose.secrets.yml)
 fi
 
-ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0 1}"
+ENFORCED_STAGES="${ISOLATION_ENFORCED_STAGES:-0 1 2}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-isolation-acceptance.XXXXXX")"
 SERVER_SECRETS_FILE="$WORK_DIR/server-secrets.env"
 PAYLOAD_FILE="$WORK_DIR/payload.json"
@@ -315,6 +328,157 @@ print(json.dumps({k:d.get(k) for k in ("backupFile","engine","sizeBytes","pgDump
   fi
 }
 
+db_query() { # sql -> single value (trimmed)
+  docker exec "$("${COMPOSE[@]}" ps -q db)" psql -U paperclip -d paperclip -tAc "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+TEST_PLUGIN_DIR=/paperclip/dur3994-test-plugin
+TEST_PLUGIN_KEY=dur3994.test-plugin
+TEST_PLUGIN_MARKER=/tmp/dur3994-tampered-plugin-code-ran
+
+# Stage 2: a minimal real plugin (manifest + JSON-RPC worker), written by the
+# node user into /paperclip -- the kind of folder add-ons are installed from
+# -- and installed through the API like an admin would.
+stage2_install_test_plugin() {
+  local container="$1" install_json
+  docker exec -u node -i -e "PLUGIN_DIR=$TEST_PLUGIN_DIR" "$container" sh -c '
+    set -e
+    mkdir -p "$PLUGIN_DIR"
+    cat >"$PLUGIN_DIR/package.json" <<JSON
+{"name":"dur3994-test-plugin","version":"0.0.1","type":"module","paperclipPlugin":{"manifest":"./manifest.js"}}
+JSON
+    cat >"$PLUGIN_DIR/manifest.js" <<JS
+export default {
+  id: "dur3994.test-plugin",
+  apiVersion: 1,
+  version: "0.0.1",
+  displayName: "DUR-3994 test plugin",
+  description: "Acceptance-test plugin: proves edited add-on code is refused.",
+  author: "Paperclip CI",
+  categories: ["automation"],
+  capabilities: ["companies.read"],
+  entrypoints: { worker: "./worker.cjs" },
+};
+JS
+    cat >"$PLUGIN_DIR/worker.cjs" <<JS
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
+rl.on("line", (line) => {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.id === undefined || msg.id === null || !msg.method) return;
+  if (msg.method === "initialize") return send({ jsonrpc: "2.0", id: msg.id, result: { ok: true, supportedMethods: [] } });
+  if (msg.method === "shutdown") { send({ jsonrpc: "2.0", id: msg.id, result: null }); setTimeout(() => process.exit(0), 50); return; }
+  send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "not implemented" } });
+});
+JS
+  '
+  install_json="$(api_call POST /api/plugins/install \
+    "$(python3 -c 'import json,sys;print(json.dumps({"packageName":sys.argv[1],"isLocalPath":True}))' "$TEST_PLUGIN_DIR")")" || true
+  printf '%s\n' "$install_json" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(json.dumps({k:d.get(k) for k in ("pluginKey","status","lastError")}))' >"$LOG_DIR/test-plugin-install.json" 2>/dev/null || true
+  local status
+  status="$(db_query "SELECT status FROM plugins WHERE plugin_key='$TEST_PLUGIN_KEY'")"
+  if [ "$status" = ready ] && wait_for_test_plugin_worker; then
+    log "PASS 2 plugin-install: the test plugin installed and its worker started"
+  else
+    fail "the test plugin did not install and start (status: ${status:-none}; see test-plugin-install.json and server.log)"
+  fi
+}
+
+restart_server() {
+  "${COMPOSE[@]}" restart -t 60 server >>"$LOG_DIR/compose-restart.log" 2>&1 || return 1
+  wait_for_health
+}
+
+# Is the test plugin's worker process running in the container right now?
+# (The pattern is assembled at run time so this check's own command line
+# never matches it.)
+test_plugin_worker_running() {
+  docker exec "$(server_container)" sh -c '
+    a=dur3994-test-plugin; b=worker.cjs
+    for f in /proc/[0-9]*/cmdline; do
+      [ "${f#/proc/}" = "$$/cmdline" ] && continue
+      tr "\0" " " <"$f" 2>/dev/null | grep -q "$a/$b" && exit 0
+    done
+    exit 1
+  ' >/dev/null 2>&1
+}
+
+wait_for_test_plugin_worker() { # -> 0 when the worker runs within ~60s
+  local i
+  for i in $(seq 1 30); do
+    test_plugin_worker_running && return 0
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_plugin_status() { # expected -> 0 when reached within ~60s
+  local i status
+  for i in $(seq 1 30); do
+    status="$(db_query "SELECT status FROM plugins WHERE plugin_key='$TEST_PLUGIN_KEY'")"
+    [ "$status" = "$1" ] && return 0
+    sleep 2
+  done
+  return 1
+}
+
+stage2_plugin_tamper_checks() {
+  log "stage 2: restart with the plugin untouched -- it must load again (negative control d)"
+  if ! restart_server; then
+    fail "the server did not come back after a restart"
+    return
+  fi
+  # The row says "ready" from before the restart, so the proof that it was
+  # loaded again is its worker process running in the restarted container.
+  if wait_for_test_plugin_worker && wait_for_plugin_status ready; then
+    log "PASS negative control (d): an unchanged plugin still loads after a restart"
+  else
+    fail "negative control (d): the unchanged test plugin did not load after a restart (status: $(db_query "SELECT status FROM plugins WHERE plugin_key='$TEST_PLUGIN_KEY'"))"
+    return
+  fi
+
+  log "stage 2: edit the plugin's manifest as the node user (what an agent can do), then restart"
+  docker exec -u node -e "PLUGIN_DIR=$TEST_PLUGIN_DIR" -e "MARKER=$TEST_PLUGIN_MARKER" "$(server_container)" sh -c '
+    printf "\nimport { writeFileSync } from \"node:fs\";\ntry { writeFileSync(\"%s\", \"ran\"); } catch {}\n" "$MARKER" >>"$PLUGIN_DIR/manifest.js"
+  '
+  if ! restart_server; then
+    fail "the server did not come back after a restart with an edited plugin"
+    return
+  fi
+  local container status last_error alerts
+  container="$(server_container)"
+  if wait_for_plugin_status error; then
+    last_error="$(docker exec "$("${COMPOSE[@]}" ps -q db)" psql -U paperclip -d paperclip -tAc \
+      "SELECT last_error FROM plugins WHERE plugin_key='$TEST_PLUGIN_KEY'" 2>/dev/null)"
+    printf '%s\n' "$last_error" >"$LOG_DIR/test-plugin-last-error.txt"
+    if printf '%s' "$last_error" | grep -q "changed after it was installed"; then
+      log "PASS 2 plugin-tamper: the edited plugin was refused with the plain message"
+    else
+      fail "the edited plugin was stopped, but not by the trusted-code check (see test-plugin-last-error.txt)"
+    fi
+  else
+    status="$(db_query "SELECT status FROM plugins WHERE plugin_key='$TEST_PLUGIN_KEY'")"
+    fail "LEAK 2 plugin-tamper: the server loaded a plugin whose manifest an agent edited (status: ${status:-none})"
+  fi
+  if docker exec "$container" test -e "$TEST_PLUGIN_MARKER"; then
+    fail "LEAK 2 plugin-tamper-ran: the edited plugin code ran inside the server"
+  elif test_plugin_worker_running; then
+    fail "LEAK 2 plugin-tamper-ran: the edited plugin's worker is running"
+  else
+    log "PASS 2 plugin-tamper-ran: the edited code never ran and its worker was not started"
+  fi
+  alerts="$(db_query "SELECT count(*) FROM activity_log WHERE action='instance.untrusted_code_refused'")"
+  if [ "${alerts:-0}" -ge 1 ] 2>/dev/null; then
+    log "PASS 2 plugin-tamper-alert: the refusal is in the Activity feed ($alerts row(s))"
+  else
+    fail "the refusal was not written to the Activity feed"
+  fi
+}
+
 count_lines() { # prefix, text -> count
   printf '%s\n' "$2" | grep -c "^$1 " || true
 }
@@ -394,6 +558,11 @@ main() {
     return 1
   fi
 
+  if stage_enforced 2; then
+    log "stage 2: installing a real local plugin, so the probe's heartbeat runs with a plugin loaded"
+    stage2_install_test_plugin "$container"
+  fi
+
   log "running the probe as an agent (real heartbeat -> runChildProcess)"
   run_heartbeat "$probe_agent" "$LOG_DIR/probe-heartbeat.log"
   local report
@@ -415,6 +584,13 @@ main() {
         fail "stage 0 check '$check' did not pass"
       fi
     done
+    if stage_enforced 2; then
+      for check in app-writable app-tree-writable; do
+        if ! printf '%s\n' "$report" | grep -q "^PASS 2 $check "; then
+          fail "stage 2 check '$check' did not pass"
+        fi
+      done
+    fi
     if stage_enforced 1; then
       for check in proc-environ proc-other server-fd server-mem ptrace-scope debug-port; do
         if ! printf '%s\n' "$report" | grep -q "^PASS 1 $check "; then
@@ -478,6 +654,10 @@ main() {
     else
       fail "negative control (a, file mode): the secrets file was not mounted with the canary keys"
     fi
+  fi
+
+  if stage_enforced 2; then
+    stage2_plugin_tamper_checks
   fi
 
   if [ "$FAIL" -eq 0 ]; then

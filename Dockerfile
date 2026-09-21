@@ -62,6 +62,12 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 # every agent can write -- as root.
 RUN node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/server-secret-names.js >/tmp/paperclip-server-secret-names \
   && grep -q '^name BETTER_AUTH_SECRET$' /tmp/paperclip-server-secret-names
+# DUR-3994 Stage 2: the program files are copied into the final image owned by
+# root (see below). Also make sure none of them is writable by group or others,
+# so ownership alone decides: only root can change Paperclip's program. Only
+# touches the (normally zero) files that need it, so this layer stays small.
+RUN find /app \( -perm -g+w -o -perm -o+w \) ! -type l -exec chmod go-w {} + \
+  && test -z "$(find /app \( -perm -g+w -o -perm -o+w \) ! -type l -print -quit)"
 
 FROM base AS production
 ARG USER_UID=1000
@@ -133,7 +139,17 @@ RUN chown root:root /usr/local/share/paperclip /usr/local/share/paperclip/server
 # Deliberately last: this is the only layer that changes on every commit, so
 # putting it after the network-fetching steps above keeps their cache valid
 # across ordinary deploys.
-COPY --chown=node:node --from=build /app /app
+#
+# DUR-3994 Stage 2: owned by root (no --chown), so the `node` user -- the
+# server AND every agent it runs -- can read Paperclip's program but not
+# change it. Before this, an agent could edit /app/server/dist, crash the
+# server (same user) and have its code run at the restart; or edit the CLI
+# that the deploy runner runs as root with `docker exec`. Nothing writes
+# under /app at run time: logs, data, caches, plugins and workspaces all live
+# under /paperclip (PAPERCLIP_HOME/HOME), and the one thing that used to
+# (building a bundled example plugin on install) now says plainly that it
+# must be built into the image.
+COPY --from=build /app /app
 
 ENV NODE_ENV=production \
   HOME=/paperclip \

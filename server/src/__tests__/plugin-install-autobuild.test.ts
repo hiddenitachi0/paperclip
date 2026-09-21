@@ -213,6 +213,25 @@ describe("ensureLocalPluginBuilt", () => {
     expect(execStub).not.toHaveBeenCalled();
   });
 
+  it("says plainly that a bundled plugin cannot be built when the program folder is read-only (DUR-3994 Stage 2)", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root can write anything
+    const fixture = await createBundledPluginFixture("readonly");
+    cleanupPaths.add(fixture.packageRoot);
+    const pkgJson = JSON.parse(await readFile(path.join(fixture.packageRoot, "package.json"), "utf8")) as Record<string, unknown>;
+
+    const execStub = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const { chmod } = await import("node:fs/promises");
+    await chmod(fixture.packageRoot, 0o555);
+    try {
+      await expect(
+        ensureLocalPluginBuilt(fixture.packageRoot, pkgJson, { execFileAsyncImpl: execStub }),
+      ).rejects.toThrow(/is not built into this Paperclip installation.*read-only/);
+      expect(execStub).not.toHaveBeenCalled();
+    } finally {
+      await chmod(fixture.packageRoot, 0o755);
+    }
+  });
+
   it("bootstraps standalone bundled plugins before building them", async () => {
     const fixture = await createBundledPluginFixture("standalone", { rootDir: standaloneRepoPluginRoot });
     cleanupPaths.add(fixture.packageRoot);

@@ -186,12 +186,30 @@ if [ "${PROBE_SKIP_SIGUSR1:-0}" != 1 ]; then
 fi
 
 # --- Stage 2: the server's own program files --------------------------------
-if [ -e /app/server/dist/index.js ]; then
-  # Only asks the kernel whether a write WOULD be allowed; never writes.
-  if [ -w /app/server/dist/index.js ]; then
-    found 2 app-writable /app/server/dist/index.js
+# An agent that can change these gets its code run by the server at the next
+# restart (it can crash the server itself: same user), and by the deploy
+# runner, which runs the CLI from /app as root.
+#
+# The kernel is asked for real: each file is opened for appending, which
+# fails with EACCES when it is read-only. Nothing is ever written -- opening
+# for append and closing again changes neither the content nor the
+# modification time -- so this is safe to run against a live server.
+for target in /app/server/dist/index.js /app/cli/src/index.ts; do
+  [ -e "$target" ] || continue
+  if ( : >>"$target" ) 2>/dev/null; then
+    found 2 app-writable "$target"
   else
-    pass 2 app-writable /app/server/dist/index.js
+    pass 2 app-writable "$target"
+  fi
+done
+# Anything at all under /app that this agent could change (files and
+# folders; a writable folder lets it add or replace files).
+if [ -d /app ]; then
+  writable="$(find /app ! -type l -writable -print -quit 2>/dev/null)"
+  if [ -n "$writable" ]; then
+    found 2 app-tree-writable "$writable"
+  else
+    pass 2 app-tree-writable /app
   fi
 fi
 

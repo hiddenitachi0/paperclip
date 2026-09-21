@@ -98,6 +98,13 @@ import { waitForInFlightRunsToDrain } from "./shutdown-drain.js";
 import { startHeartbeatRunRetention } from "./services/heartbeat-run-retention.js";
 import { startCrossCompanyAccessLogRetention } from "./services/cross-company-access-log-retention.js";
 import { conflict } from "./errors.js";
+import {
+  configureTrustedCode,
+  listInstalledCodeSubjects,
+  trustedCodeService,
+} from "./services/trusted-code.js";
+import { DEFAULT_LOCAL_PLUGIN_DIR } from "./services/plugin-loader.js";
+import { getAdapterPluginsDir, listAdapterPlugins } from "./services/adapter-plugin-store.js";
 import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
@@ -546,6 +553,34 @@ export async function startServer(): Promise<StartedServer> {
   // fn_flag_untracked_write trigger (DUR-130) still recognizes writes made
   // through it as service-layer, not out-of-band.
   const bypassDb = createDb(config.databaseBypassUrl || activeDatabaseConnectionString);
+
+  // DUR-3994 Stage 2: agents can't plant code the server will run. Plugins
+  // and external adapters are loaded from folders agents can write, so the
+  // server checks their files against fingerprints recorded (in the
+  // database, out of agents' reach) when Paperclip installed them. On the
+  // first start with this check, the add-ons installed right now are taken
+  // as trusted, once. Then the check is handed to the external-adapter
+  // loader, which has been waiting for it. Enforced only where this server's
+  // own program files are read-only (the Docker image); see trusted-code.ts.
+  {
+    const trustedCode = trustedCodeService(db as any);
+    if (trustedCode.mode === "enforce") {
+      try {
+        const subjects = await listInstalledCodeSubjects(db as any, {
+          localPluginDir: DEFAULT_LOCAL_PLUGIN_DIR,
+          managedAdapterDir: getAdapterPluginsDir(),
+          adapterRecords: listAdapterPlugins(),
+        });
+        await trustedCode.recordFirstStartBaseline(subjects);
+      } catch (err) {
+        // Not fatal: without a baseline, installed add-ons are refused (and
+        // reported) until they are installed again; the server itself runs.
+        logger.error({ err }, "trusted-code: could not take the first-start baseline of installed add-ons");
+      }
+    }
+    logger.info({ mode: trustedCode.mode }, "trusted-code: add-on code fingerprint check set up");
+    configureTrustedCode(trustedCode);
+  }
 
   if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(

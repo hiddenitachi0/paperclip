@@ -34,6 +34,7 @@ import crypto from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { logger } from "../middleware/logger.js";
+import { pluginCodeRoot, trustedCodeService, type TrustedCodeService } from "../services/trusted-code.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -190,6 +191,8 @@ export interface PluginUiStaticRouteOptions {
    * Defaults to the standard `~/.paperclip/plugins/` location.
    */
   localPluginDir: string;
+  /** DUR-3994 Stage 2: the add-on code fingerprint check (defaults to one on `db`). */
+  trustedCode?: TrustedCodeService;
 }
 
 /**
@@ -209,6 +212,7 @@ export function pluginUiStaticRoutes(db: Db, options: PluginUiStaticRouteOptions
   const router = Router();
   const registry = pluginRegistryService(db);
   const log = logger.child({ service: "plugin-ui-static" });
+  const trustedCode = options.trustedCode ?? trustedCodeService(db);
 
   /**
    * GET /_plugins/:pluginId/ui/*
@@ -439,6 +443,28 @@ export function pluginUiStaticRoutes(db: Db, options: PluginUiStaticRouteOptions
 
     if (!fileStat.isFile()) {
       res.status(404).json({ error: "File not found" });
+      return;
+    }
+
+    // DUR-3994 Stage 2: plugin UI code runs in the board's browser. Serve a
+    // file only if it is exactly what Paperclip installed -- agents run as
+    // the same user as the server and could otherwise edit it.
+    const fileIsTrusted = await trustedCode.checkFile(
+      {
+        kind: "plugin",
+        codeRoot: pluginCodeRoot(plugin, options.localPluginDir),
+        label: plugin.pluginKey,
+      },
+      resolvedFilePath,
+    );
+    if (!fileIsTrusted) {
+      log.warn(
+        { pluginId: plugin.id, pluginKey: plugin.pluginKey, filePath: resolvedFilePath },
+        "plugin-ui-static: refusing a UI file that changed after the plugin was installed",
+      );
+      res.status(403).json({
+        error: "This plugin's files were changed after it was installed, so Paperclip will not serve them. Install the plugin again to trust the current files.",
+      });
       return;
     }
 

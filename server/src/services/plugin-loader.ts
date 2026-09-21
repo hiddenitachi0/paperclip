@@ -24,7 +24,7 @@
  * @see PLUGIN_SPEC.md §10 — Package Contract
  * @see PLUGIN_SPEC.md §12 — Process Model
  */
-import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync } from "node:fs";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
@@ -50,6 +50,13 @@ import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
 import { pluginDatabaseService } from "./plugin-database.js";
 import { SECRET_REF_ENABLED_PLUGIN_KEYS } from "./plugin-secrets-handler.js";
+import {
+  isPathInside,
+  pluginCodeRoot,
+  trustedCodeService,
+  type TrustedCodeRecordReason,
+  type TrustedCodeService,
+} from "./trusted-code.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -245,6 +252,13 @@ export interface PluginLoaderOptions {
    * Registry support is not yet implemented; this field is reserved.
    */
   registryUrl?: string;
+
+  /**
+   * DUR-3994 Stage 2: the add-on code fingerprint check. Defaults to one on
+   * `db` whose mode follows whether this server's own program files are
+   * read-only (enforced in the hardened image, off in a dev checkout).
+   */
+  trustedCode?: TrustedCodeService;
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +837,18 @@ export async function ensureLocalPluginBuilt(
   const manualBuildCommand = buildLocalPluginRecoveryCommand(packageRoot, pkgJson, { repoRoot: options.repoRoot });
   if (typeof packageName !== "string" || packageName.trim().length === 0 || !manualBuildCommand) return;
 
+  // DUR-3994 Stage 2: in the Docker image Paperclip's own program folder
+  // (where bundled plugins live) is owned by root and read-only, so a
+  // bundled plugin that was not built into the image cannot be built here.
+  // Say that plainly instead of failing half-way through a build.
+  if (!isDirectoryWritable(packageRoot)) {
+    throw new Error(
+      `The built-in plugin ${packageName} is not built into this Paperclip installation, and ` +
+        `Paperclip's program folder (${packageRoot}) is read-only, so it cannot be built here. ` +
+        `It has to be built into the Paperclip image (\`${manualBuildCommand}\` in the Dockerfile).`,
+    );
+  }
+
   const runExecFileAsync = options.execFileAsyncImpl ?? execFileAsync;
   const buildCommands = buildLocalPluginBuildCommands(packageRoot, pkgJson, {
     repoRoot: options.repoRoot,
@@ -1077,6 +1103,7 @@ export function pluginLoader(
     enableLocalFilesystem = true,
     enableNpmDiscovery = true,
   } = options;
+  const trustedCode = options.trustedCode ?? trustedCodeService(db);
 
   const registry = pluginRegistryService(db);
   const manifestValidator = pluginManifestValidator();
@@ -1105,6 +1132,57 @@ export function pluginLoader(
           `Plugin ${manifest.id} routePath "${conflictingRoute}" conflicts with installed plugin ${plugin.pluginKey}`,
         );
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // DUR-3994 Stage 2: add-on code fingerprints
+  // -------------------------------------------------------------------------
+
+  /**
+   * Record the plugin's code folder as trusted right after Paperclip itself
+   * wrote (or was pointed at) it. A failure aborts the install when the check
+   * is enforced: a plugin whose files could not be recorded would be refused
+   * at every load anyway, so say so now, in the install response.
+   */
+  async function recordPluginCode(
+    discovered: DiscoveredPlugin,
+    installDir: string,
+    reason: TrustedCodeRecordReason,
+  ): Promise<void> {
+    const codeRoot = discovered.source === "local-filesystem"
+      ? path.resolve(discovered.packagePath)
+      : path.resolve(installDir);
+    const label = discovered.manifest?.id ?? discovered.packageName;
+    try {
+      await trustedCode.record({ kind: "plugin", codeRoot, label }, reason);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log.error({ codeRoot, label, err: detail }, "plugin-loader: could not record the plugin's files as trusted");
+      throw new Error(
+        `Paperclip could not record the files of plugin "${label}" as trusted (${detail}), ` +
+          `so it would refuse to start it. The plugin was not installed or upgraded.`,
+      );
+    }
+  }
+
+  /**
+   * After Paperclip itself changed the shared npm install folder (an
+   * uninstall), record what is left there as trusted, so the other npm
+   * plugins in it keep loading. Best effort: logged, never thrown.
+   */
+  async function rerecordManagedDir(reason: TrustedCodeRecordReason): Promise<void> {
+    if (!existsSync(localPluginDir)) return;
+    try {
+      await trustedCode.record(
+        { kind: "plugin", codeRoot: path.resolve(localPluginDir), label: "managed plugin folder" },
+        reason,
+      );
+    } catch (err) {
+      log.warn(
+        { localPluginDir, err: err instanceof Error ? err.message : String(err) },
+        "plugin-loader: could not re-record the managed plugin folder after a change; npm-installed plugins in it will be refused until one is installed again",
+      );
     }
   }
 
@@ -1647,6 +1725,10 @@ export function pluginLoader(
       const discovered = await fetchAndValidate(installOptions);
       const manifest = discovered.manifest!;
 
+      // DUR-3994 Stage 2: these files are trusted from here on; any later
+      // change to them makes the server refuse to load the plugin.
+      await recordPluginCode(discovered, installOptions.installDir ?? localPluginDir, "install");
+
       // Step 6: Persist install record and apply plugin-owned schema migrations
       // in one database transaction. If migration validation fails, the plugin
       // row, namespace record, migration ledger, and created schema all roll back.
@@ -1771,6 +1853,9 @@ export function pluginLoader(
         );
       }
 
+      // DUR-3994 Stage 2: the upgraded files are the trusted ones now.
+      await recordPluginCode(discovered, localPluginDir, "upgrade");
+
       // 4. Update the existing record
       await registry.update(pluginId, {
         packageName: discovered.packageName,
@@ -1834,6 +1919,12 @@ export function pluginLoader(
       for (const target of managedTargets) {
         if (!existsSync(target)) continue;
         await rm(target, { recursive: true, force: true });
+      }
+
+      // DUR-3994 Stage 2: the shared npm folder changed; keep the plugins
+      // still in it trusted. (A local-path plugin's own folder is untouched.)
+      if (!plugin.packagePath || isPathInsideDir(plugin.packagePath, localPluginDir)) {
+        await rerecordManagedDir("uninstall");
       }
     },
 
@@ -2117,9 +2208,31 @@ export function pluginLoader(
       // 1. Resolve worker entrypoint
       // ------------------------------------------------------------------
       const packageRoot = resolvePluginPackageRoot(activePlugin, localPluginDir);
+
+      // DUR-3994 Stage 2: refuse to run plugin code whose files changed since
+      // Paperclip installed it (an agent could have edited them: agents run
+      // as the same user). Checked BEFORE anything from the package is
+      // imported -- the manifest below is itself code, run in this process.
+      const trustedCodeSubject = {
+        kind: "plugin" as const,
+        codeRoot: pluginCodeRoot(activePlugin, localPluginDir),
+        label: pluginKey,
+      };
+      await trustedCode.assertTrusted(trustedCodeSubject);
+
       activePlugin = await refreshPluginManifestFromPackage(activePlugin, packageRoot);
       manifest = activePlugin.manifestJson;
       const workerEntrypoint = resolveWorkerEntrypoint(activePlugin, localPluginDir);
+      if (
+        trustedCode.mode === "enforce" &&
+        !trustedCode.isProtectedByAppRoot(workerEntrypoint) &&
+        !isPathInside(path.resolve(workerEntrypoint), path.resolve(trustedCodeSubject.codeRoot))
+      ) {
+        throw new Error(
+          `Paperclip did not start the plugin "${pluginKey}" because its worker file (${workerEntrypoint}) ` +
+            `is outside the plugin's own checked folder (${trustedCodeSubject.codeRoot}).`,
+        );
+      }
 
       // ------------------------------------------------------------------
       // 2. Apply restricted database migrations before worker startup
@@ -2159,6 +2272,9 @@ export function pluginLoader(
         databaseNamespace,
         hostHandlers,
         autoRestart: true,
+        // DUR-3994 Stage 2: the worker is started again after a crash, from
+        // the files on disk at that moment -- check them every time.
+        verifyBeforeSpawn: () => trustedCode.assertTrusted(trustedCodeSubject),
         env: buildPluginWorkerEnv({ manifest, instanceInfo }),
         // Only plugins that can actually resolve secrets from an invocation
         // scope need cross-company invocations serialized — see DUR-188/
@@ -2396,6 +2512,15 @@ function resolveManagedInstallPackageDir(localPluginDir: string, packageName: st
     return path.join(localPluginDir, "node_modules", ...packageName.split("/"));
   }
   return path.join(localPluginDir, "node_modules", packageName);
+}
+
+function isDirectoryWritable(dir: string): boolean {
+  try {
+    accessSync(dir, fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isPathInsideDir(candidatePath: string, parentDir: string): boolean {
