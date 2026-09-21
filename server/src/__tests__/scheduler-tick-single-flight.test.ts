@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   createSchedulerTickSingleFlight,
+  describeSchedulerRescues,
   describeStuckSchedulerChain,
-  MAX_ABANDONED_RUNS_PER_CHAIN,
+  MAX_RESCUES_PER_CHAIN_PER_WINDOW,
+  maxAbandonedInFlightFor,
+  RESCUE_WINDOW_MS,
   SCHEDULER_TICK_CHAIN_LABELS,
   SCHEDULER_TICK_CHAINS,
   SKIP_LOG_INTERVAL_MS,
@@ -214,7 +217,9 @@ describe("DUR-385 scheduler tick single-flight guard", () => {
   it("gets louder once a chain has been stuck long enough to need a human", async () => {
     let clock = 0;
     const { lines, log } = captureLog();
-    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+    // A one-connection bypass pool allows a single rescue in total, so the
+    // second wedge is the one no automatic restart may clear.
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log, bypassPoolMax: 1 });
 
     const wedged = deferred();
     void guard.run("deployCarriedIssues", () => wedged.promise);
@@ -227,7 +232,7 @@ describe("DUR-385 scheduler tick single-flight guard", () => {
 
     // DUR-3991: the first time it passes the limit the watchdog overrides
     // instead of skipping, so the loud "restart this" line only arrives once
-    // that override has been spent and the replacement is wedged too.
+    // the rescue bound is spent and the replacement is wedged too.
     clock += WEDGED_AFTER_MS;
     const replacement = deferred();
     void guard.run("deployCarriedIssues", () => replacement.promise);
@@ -238,8 +243,9 @@ describe("DUR-385 scheduler tick single-flight guard", () => {
     const errors = lines.filter((l) => l.level === "error");
     expect(errors).toHaveLength(2);
     expect(errors[1]!.msg).toBe(
-      'scheduler chain "deployCarriedIssues" has been running for 5 minutes, a fresh copy was already started once ' +
-        "and is stuck too — this server needs restarting",
+      'scheduler chain "deployCarriedIssues" has been running for 5 minutes and will not be restarted automatically ' +
+        "again because 1 abandoned scheduler run is still holding on to the database (the limit is 1) — this " +
+        "server needs restarting",
     );
 
     wedged.resolve();
@@ -256,7 +262,7 @@ describe("DUR-3991 scheduler tick wedge watchdog", () => {
   it("starts a fresh copy once a chain has been wedged past the limit, and says so once, loudly", async () => {
     let clock = 0;
     const { lines, log } = captureLog();
-    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log, bypassPoolMax: 10 });
 
     const wedged = deferred();
     let starts = 0;
@@ -290,9 +296,12 @@ describe("DUR-3991 scheduler tick wedge watchdog", () => {
     const errors = lines.filter((l) => l.level === "error");
     expect(errors).toHaveLength(1);
     expect(errors[0]!.msg).toBe(
-      'scheduler chain "tickTimers" has been wedged for 5 minutes and is not coming back — abandoning it and ' +
-        "starting a fresh copy so the fleet keeps moving (one copy only; if this one wedges too the server needs " +
-        "restarting)",
+      // tickTimers is a timed chain whose tick never opened here: that is the
+      // wait for its database connection, named as such, not "not timed".
+      'scheduler chain "tickTimers" has been wedged for 5 minutes (stuck in phase "beforeTick" for 300000ms; ' +
+        "finished: no phases recorded) — abandoning it and " +
+        "starting a fresh copy so the fleet keeps moving (rescue 1 of 3 this hour for this chain; 1 of 3 abandoned " +
+        "runs still unsettled)",
     );
     expect(errors[0]!.fields).toMatchObject({
       chain: "tickTimers",
@@ -369,48 +378,148 @@ describe("DUR-3991 scheduler tick wedge watchdog", () => {
     expect(snapshot).toMatchObject({ inFlight: false, overridesTotal: 0, abandonedInFlight: 0, lastRunMs: 4 * 60_000 });
   });
 
-  it("overrides at most once per wedge: a replacement that wedges too is not overridden again", async () => {
+  // DUR-3991 follow-up: the original cap was ONE rescue per chain until the
+  // abandoned run settled -- spent on production on 2026-09-18 and never given
+  // back. The replacement bound: rescues continue, but abandoned-and-unsettled
+  // runs (each pinning a bypass connection) never exceed a third of the pool.
+  it("rescues a replacement that wedges too, up to the abandoned-run bound, and never beyond it", async () => {
     let clock = 0;
     const { lines, log } = captureLog();
-    const guard = createSchedulerTickSingleFlight({ now: () => clock, log });
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log, bypassPoolMax: 10 });
+    expect(maxAbandonedInFlightFor(10)).toBe(3);
 
-    const first = deferred();
-    const second = deferred();
+    const hangs: Array<ReturnType<typeof deferred>> = [];
     let starts = 0;
-    const chainFor = (promise: Promise<void>) => () => {
+    const wedgingChain = () => {
       starts += 1;
-      return promise;
+      const hang = deferred();
+      hangs.push(hang);
+      return hang.promise;
     };
 
-    void guard.run("tickTimers", chainFor(first.promise));
+    void guard.run("tickTimers", wedgingChain);
     await flush();
 
-    // Crossing the limit the first time: one override.
-    clock += WEDGED_AFTER_MS;
-    void guard.run("tickTimers", chainFor(second.promise));
-    await flush();
-    expect(starts).toBe(2);
+    // Each wedge past the limit is rescued, three times over.
+    for (let rescue = 1; rescue <= 3; rescue += 1) {
+      clock += WEDGED_AFTER_MS;
+      void guard.run("tickTimers", wedgingChain);
+      await flush();
+      expect(starts).toBe(rescue + 1);
+    }
+    expect(guard.diagnostics().abandonedInFlightTotal).toBe(3);
 
-    // The replacement wedges too. Twenty more minutes of ticks and the guard
-    // never starts a third copy -- the abandoned budget is spent.
+    // The fourth copy wedges too. Twenty more minutes of ticks and the guard
+    // never starts a fifth -- the bound holds.
     for (let tick = 0; tick < 40; tick += 1) {
       clock += 30_000;
-      await guard.run("tickTimers", chainFor(second.promise));
+      await guard.run("tickTimers", wedgingChain);
     }
-    expect(starts).toBe(2);
-    expect(MAX_ABANDONED_RUNS_PER_CHAIN).toBe(1);
+    expect(starts).toBe(4);
     expect(guard.snapshot().find((s) => s.chain === "tickTimers")).toMatchObject({
-      overridesTotal: 1,
-      abandonedInFlight: 1,
+      overridesTotal: 3,
+      abandonedInFlight: 3,
+      rescueRefused: "too_many_abandoned_runs",
     });
+    expect(describeStuckSchedulerChain(guard.snapshot())).toMatchObject({ restartNeeded: true });
+    expect(describeSchedulerRescues(guard.snapshot(), guard.diagnostics()).restartNeededFor).toEqual([
+      "waking agents on their timers",
+    ]);
 
     // It says what is left to do instead of silently skipping.
     const loud = lines.filter((l) => l.level === "error").map((l) => l.msg);
     expect(loud.some((msg) => msg.includes("this server needs restarting"))).toBe(true);
 
-    first.resolve();
-    second.resolve();
+    for (const hang of hangs) hang.resolve();
     await flush();
+    expect(guard.diagnostics().abandonedInFlightTotal).toBe(0);
+  });
+
+  it("counts the abandoned-run bound across every chain, because they share one pool", async () => {
+    let clock = 0;
+    const { log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log, bypassPoolMax: 10 });
+    const hangs: Array<ReturnType<typeof deferred>> = [];
+    const wedgingChain = () => {
+      const hang = deferred();
+      hangs.push(hang);
+      return hang.promise;
+    };
+    const chains = ["tickTimers", "periodicRecoveryPipeline", "agentErrorAlerts", "quietModeAlerts"] as const;
+    for (const chain of chains) void guard.run(chain, wedgingChain);
+    await flush();
+
+    clock += WEDGED_AFTER_MS;
+    for (const chain of chains) void guard.run(chain, wedgingChain);
+    await flush();
+
+    // Three rescued (one each), the fourth refused: 3 of 10 connections pinned, never 4.
+    expect(guard.diagnostics().abandonedInFlightTotal).toBe(3);
+    const refused = guard.snapshot().filter((s) => s.rescueRefused !== null).map((s) => s.chain);
+    expect(refused).toEqual(["quietModeAlerts"]);
+
+    for (const hang of hangs) hang.resolve();
+    await flush();
+  });
+
+  it("rescues one chain at most three times in any rolling hour, even when every abandoned run comes back", async () => {
+    let clock = 0;
+    const { lines, log } = captureLog();
+    const guard = createSchedulerTickSingleFlight({ now: () => clock, log, bypassPoolMax: 10 });
+    expect(MAX_RESCUES_PER_CHAIN_PER_WINDOW).toBe(3);
+
+    let starts = 0;
+    let current = deferred();
+    const chain = () => {
+      starts += 1;
+      return current.promise;
+    };
+    void guard.run("periodicRecoveryPipeline", chain);
+    await flush();
+
+    // Three wedge-and-rescue cycles in 15 minutes; each abandoned run returns
+    // right after it was given up on, so the abandoned-run bound never bites.
+    for (let rescue = 1; rescue <= 3; rescue += 1) {
+      const abandoned = current;
+      current = deferred();
+      clock += WEDGED_AFTER_MS;
+      void guard.run("periodicRecoveryPipeline", chain);
+      await flush();
+      abandoned.resolve();
+      await flush();
+      expect(starts).toBe(rescue + 1);
+    }
+    expect(guard.diagnostics().abandonedInFlightTotal).toBe(0);
+
+    // A fourth wedge within the same hour is refused: it is systemic.
+    clock += WEDGED_AFTER_MS;
+    await guard.run("periodicRecoveryPipeline", chain);
+    expect(starts).toBe(4);
+    expect(guard.snapshot().find((s) => s.chain === "periodicRecoveryPipeline")?.rescueRefused).toBe(
+      "chain_rescued_too_often",
+    );
+    expect(lines.some((l) => l.msg.includes("already been restarted 3 times in the last hour"))).toBe(true);
+
+    // Once the first rescue falls out of the rolling hour, one more is allowed.
+    clock = WEDGED_AFTER_MS + RESCUE_WINDOW_MS;
+    const abandoned = current;
+    current = deferred();
+    void guard.run("periodicRecoveryPipeline", chain);
+    await flush();
+    expect(starts).toBe(5);
+
+    abandoned.resolve();
+    current.resolve();
+    await flush();
+  });
+
+  it("sizes the abandoned-run bound from the pool: a third, at most three, at least one", () => {
+    expect(maxAbandonedInFlightFor(1)).toBe(1);
+    expect(maxAbandonedInFlightFor(3)).toBe(1);
+    expect(maxAbandonedInFlightFor(6)).toBe(2);
+    expect(maxAbandonedInFlightFor(10)).toBe(3);
+    expect(maxAbandonedInFlightFor(50)).toBe(3);
+    expect(maxAbandonedInFlightFor(Number.NaN)).toBe(1);
   });
 
   it("an abandoned run that finally returns hands its budget back and does not clear the replacement", async () => {
@@ -496,6 +605,7 @@ describe("DUR-3991 operator-facing chain names", () => {
       runningMs: 3 * 60_000 + 50_000,
       freshAttemptAlreadyTried: false,
       freshAttemptAfterMs: WEDGED_AFTER_MS,
+      restartNeeded: false,
     });
     expect(stuck!.label).not.toContain("tickTimers");
 

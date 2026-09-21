@@ -48,10 +48,154 @@ export interface TickPhaseReport {
 interface PhaseRecorder {
   startedAt: number;
   phases: Map<string, { totalMs: number; count: number; maxMs: number }>;
+  /**
+   * Phases that have started and not yet finished, keyed by a per-occurrence
+   * token. A hung tick never reaches report(), so this is the only record of
+   * WHERE it is stuck -- read live by the watchdog through a TickPhaseProbe.
+   */
+  open: Map<number, { phase: string; startedAt: number }>;
+  nextOpenToken: number;
+  /** Set once the tick's own work has returned (it may still be tearing down). */
+  finishedAt: number | null;
   now: () => number;
 }
 
 const storage = new AsyncLocalStorage<PhaseRecorder>();
+
+/**
+ * DUR-3991: a phase that is in progress right now, and how long it has been
+ * going. What a stuck tick looks like from the outside.
+ */
+export interface OpenTickPhase {
+  phase: string;
+  runningMs: number;
+}
+
+/**
+ * DUR-3991: a live look inside a tick that has NOT finished -- the evidence the
+ * completed-tick report can never give, because a hung tick never completes.
+ */
+export interface InFlightTickPhases {
+  /** ms since the tick opened its recorder. */
+  elapsedMs: number;
+  /**
+   * The innermost phase still in progress (the most recently started one that
+   * has not finished) -- "where it is stuck". AFTER_TICK_PHASE when the tick's
+   * own work returned but the chain around it has not (handing its database
+   * connection back), and null when no timed phase is in progress.
+   */
+  currentPhase: string | null;
+  /** How long currentPhase has been going, when there is one. */
+  currentPhaseMs: number | null;
+  /** Every phase still in progress, outermost first. */
+  openPhases: OpenTickPhase[];
+  /** Phases that finished, slowest total first (same shape as a completed report). */
+  completedPhases: TickPhaseTiming[];
+}
+
+/**
+ * The pseudo-phase reported when the tick's own work has already returned but
+ * the chain wrapped around it has not -- i.e. it is stuck handing back its
+ * reserved database connection (runInCompanyScopeBypass's release path).
+ */
+export const AFTER_TICK_PHASE = "afterTick";
+
+/**
+ * The pseudo-phase reported when a chain that DOES time its steps has not yet
+ * reached its first one: it is still in the wrapper around the tick, which
+ * awaits a reserved database connection (runInCompanyScopeBypass's reserve()
+ * and its role check) before the tick's own recorder ever opens. Without this
+ * that wait -- the likeliest shape of a hang right after a restart -- read as
+ * "this chain is not timed", which was false and pointed away from it.
+ */
+export const BEFORE_TICK_PHASE = "beforeTick";
+
+/**
+ * DUR-3991: a slot the scheduler watchdog hands to a tick chain before it
+ * starts, so it can look inside the chain later if the chain never returns.
+ * The chain's withTickPhases() attaches its recorder to the slot; a chain that
+ * times no phases simply leaves it empty.
+ */
+export interface TickPhaseProbe {
+  /** Live view of the attached tick, or null when no tick has attached. Never throws. */
+  read(): InFlightTickPhases | null;
+}
+
+interface ProbeSlot extends TickPhaseProbe {
+  recorder: PhaseRecorder | null;
+}
+
+export interface TickPhaseProbeOptions {
+  /**
+   * true for a chain known to open withTickPhases() (see
+   * TICK_PHASE_TIMED_CHAINS in scheduler-tick-single-flight.ts). Until its
+   * recorder attaches, read() then reports BEFORE_TICK_PHASE rather than null,
+   * so a hang in the connection wait is named instead of called "not timed".
+   */
+  expectsTick?: boolean;
+  now?: () => number;
+}
+
+const probeStorage = new AsyncLocalStorage<ProbeSlot>();
+
+function readInFlight(recorder: PhaseRecorder): InFlightTickPhases {
+  const now = recorder.now();
+  const openPhases = [...recorder.open.values()]
+    .sort((a, b) => a.startedAt - b.startedAt)
+    .map((entry) => ({ phase: entry.phase, runningMs: Math.max(0, now - entry.startedAt), startedAt: entry.startedAt }));
+  const innermost = openPhases.length > 0 ? openPhases[openPhases.length - 1]! : null;
+  const completedPhases: TickPhaseTiming[] = [...recorder.phases.entries()]
+    .map(([phase, value]) => ({ phase, totalMs: value.totalMs, count: value.count, maxMs: value.maxMs }))
+    .sort((a, b) => b.totalMs - a.totalMs);
+  let currentPhase: string | null = innermost?.phase ?? null;
+  let currentPhaseMs: number | null = innermost?.runningMs ?? null;
+  if (!innermost && recorder.finishedAt !== null) {
+    currentPhase = AFTER_TICK_PHASE;
+    currentPhaseMs = Math.max(0, now - recorder.finishedAt);
+  }
+  return {
+    elapsedMs: Math.max(0, now - recorder.startedAt),
+    currentPhase,
+    currentPhaseMs,
+    openPhases: openPhases.map(({ phase, runningMs }) => ({ phase, runningMs })),
+    completedPhases,
+  };
+}
+
+/** A fresh, empty probe for one chain run. */
+export function createTickPhaseProbe(options: TickPhaseProbeOptions = {}): TickPhaseProbe {
+  const now = options.now ?? (() => Date.now());
+  const createdAt = now();
+  const slot: ProbeSlot = {
+    recorder: null,
+    read() {
+      try {
+        if (slot.recorder) return readInFlight(slot.recorder);
+        if (!options.expectsTick) return null;
+        const waitingMs = Math.max(0, now() - createdAt);
+        return {
+          elapsedMs: waitingMs,
+          currentPhase: BEFORE_TICK_PHASE,
+          currentPhaseMs: waitingMs,
+          openPhases: [{ phase: BEFORE_TICK_PHASE, runningMs: waitingMs }],
+          completedPhases: [],
+        };
+      } catch {
+        // Diagnostics only: a failure to read must never reach the watchdog.
+        return null;
+      }
+    },
+  };
+  return slot;
+}
+
+/**
+ * Run `fn` with `probe` visible to any withTickPhases() it opens, however deep
+ * (AsyncLocalStorage, so it survives the company-scope wrapper in between).
+ */
+export function runWithTickPhaseProbe<T>(probe: TickPhaseProbe, fn: () => T): T {
+  return probeStorage.run(probe as ProbeSlot, fn);
+}
 
 /**
  * Record `ms` against `phase` for the tick this call is running inside.
@@ -76,9 +220,12 @@ export async function timeTickPhase<T>(phase: string, fn: () => Promise<T>): Pro
   const recorder = storage.getStore();
   if (!recorder) return fn();
   const startedAt = recorder.now();
+  const token = recorder.nextOpenToken++;
+  recorder.open.set(token, { phase, startedAt });
   try {
     return await fn();
   } finally {
+    recorder.open.delete(token);
     recordTickPhase(phase, recorder.now() - startedAt);
   }
 }
@@ -92,14 +239,32 @@ export async function withTickPhases<T>(
   options: { now?: () => number } = {},
 ): Promise<T> {
   const now = options.now ?? (() => Date.now());
-  const recorder: PhaseRecorder = { startedAt: now(), phases: new Map(), now };
+  const recorder: PhaseRecorder = {
+    startedAt: now(),
+    phases: new Map(),
+    open: new Map(),
+    nextOpenToken: 1,
+    finishedAt: null,
+    now,
+  };
+  // DUR-3991: let the watchdog that started this chain see inside it. Only the
+  // first tick to open inside a probe claims it (a nested recorder would be a
+  // bug elsewhere, and the outer one is the tick the watchdog is timing).
+  const probe = probeStorage.getStore();
+  if (probe && probe.recorder === null) probe.recorder = recorder;
   const report = (): TickPhaseReport => {
     const phases: TickPhaseTiming[] = [...recorder.phases.entries()]
       .map(([phase, value]) => ({ phase, totalMs: value.totalMs, count: value.count, maxMs: value.maxMs }))
       .sort((a, b) => b.totalMs - a.totalMs);
     return { totalMs: now() - recorder.startedAt, phases, slowest: phases[0] ?? null };
   };
-  return storage.run(recorder, () => fn(report));
+  return storage.run(recorder, async () => {
+    try {
+      return await fn(report);
+    } finally {
+      recorder.finishedAt = now();
+    }
+  });
 }
 
 /** One line an operator-free log can carry: "wakeAgents 41200ms over 63 runs". */
@@ -158,4 +323,29 @@ export function withTickPhaseTimeout<T>(phase: string, timeoutMs: number, promis
       },
     );
   });
+}
+
+/**
+ * DUR-3991: what each timed phase is, in words an operator can read. Phase
+ * names are code identifiers ("loadAgents"); Filip is not a developer and
+ * operator text never carries one (house rule 7). Unknown phases fall back to
+ * a neutral phrase rather than leaking the identifier.
+ */
+export const TICK_PHASE_LABELS: Record<string, string> = {
+  loadAgents: "loading the list of agents",
+  wakeAgents: "waking the agents that were due",
+  wakeAgent: "waking one of the agents that was due",
+  actionableWorkGate: "checking whether an agent has work to do",
+  idleGate: "checking whether an agent is free to wake",
+  issueMonitors: "checking task monitors",
+  customerInboxHandoff: "passing customer inbox messages to agents",
+  [BEFORE_TICK_PHASE]: "waiting for a database connection before starting its work",
+  [AFTER_TICK_PHASE]: "handing its database connection back after finishing its work",
+};
+
+export function describeTickPhase(phase: string | null): string {
+  // null with a recorder attached: the tick is between two timed steps (the
+  // time before the first one is BEFORE_TICK_PHASE, after the last AFTER_TICK_PHASE).
+  if (phase === null) return "between two of its measured steps";
+  return TICK_PHASE_LABELS[phase] ?? "a step without a plain-language name";
 }

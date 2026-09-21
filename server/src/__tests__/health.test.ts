@@ -339,6 +339,35 @@ describe("GET /health", () => {
     expect(res.body.fleet).toEqual(testFleet);
   });
 
+  // DUR-3991: where the scheduler got stuck, as phase names and milliseconds
+  // only. Full-details callers get it; the anonymous body (exact-body tests
+  // above) deliberately does not.
+  it("DUR-3991 carries the scheduler rescue diagnostics to full-details callers, with nothing about companies or agents", async () => {
+    const db = {
+      execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ count: 1 }]),
+        })),
+      })),
+    } as unknown as Db;
+    const app = createApp(db);
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.scheduler).toEqual({ restartNeeded: false, lastRescue: null, lastTickSlowestPhase: null });
+    const [, options] = mockComputeFleetHealth.mock.calls[0]!;
+    expect(options.scheduler.rescues).toMatchObject({
+      last: null,
+      total: 0,
+      abandonedStillRunning: 0,
+      maxAbandonedStillRunning: 3,
+      maxPerStepPerHour: 3,
+      restartNeededFor: [],
+    });
+  });
+
   it("omits the fleet signal for agent callers, who still get the rest of the full-details body", async () => {
     const db = {
       execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
