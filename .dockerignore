@@ -8,3 +8,11 @@ coverage
 data
 tmp
 *.log
+
+# DUR-3994: never copy an environment file into the image. `COPY . .` would
+# otherwise put docker/.env (the server's keys) at /app/docker/.env, readable
+# by every agent. Example files stay: they hold no values.
+.env
+**/.env
+**/.env.*
+!**/*.example

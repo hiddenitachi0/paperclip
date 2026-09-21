@@ -29,7 +29,7 @@ import {
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
-import { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
+import { sanitizeRuntimeServiceBaseEnv, stripServerSecrets } from "./runtime-env.js";
 
 export { sanitizeRuntimeServiceBaseEnv } from "./runtime-env.js";
 
@@ -488,7 +488,10 @@ async function executeProcess(input: {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: input.env ?? process.env,
+      // DUR-3994: every git / setup / teardown command in a workspace goes
+      // through here, including git in agent-controlled repos (whose hooks run
+      // with this env). Strip the server's keys from whatever env it gets.
+      env: stripServerSecrets({ ...(input.env ?? process.env) }),
     });
     const stdout = createProcessOutputCapture(input.maxStdoutBytes ?? DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES);
     const stderr = createProcessOutputCapture(input.maxStderrBytes ?? DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES);
@@ -1356,6 +1359,8 @@ export function buildWorkspaceCommandEnv(input: {
   delete env.DATABASE_BYPASS_URL;
   delete env.npm_config_tailscale_auth;
   delete env.npm_config_authenticated_private;
+  // DUR-3994: keeps the PAPERCLIP_* settings above but never the server's keys.
+  stripServerSecrets(env);
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
@@ -2917,6 +2922,9 @@ async function startLocalRuntimeService(input: {
   });
 
   const shell = resolveShell();
+  // DUR-3994: final env for a runtime service, after the agent's adapter env
+  // and the service's own env config were merged in.
+  stripServerSecrets(env);
   const child = spawn(shell, ["-lc", command], {
     cwd: serviceCwd,
     env,

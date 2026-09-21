@@ -17,6 +17,7 @@ import {
   type PreviewEnvironmentStatus,
 } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
+import { serverChildProcessEnv } from "./runtime-env.js";
 import { parseProjectDeployPolicy } from "./deploy-policy.js";
 import {
   cleanupExecutionWorkspaceArtifacts,
@@ -117,7 +118,8 @@ async function git(args: string[], cwd: string): Promise<string> {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    // DUR-3994: this git runs in an agent-controlled checkout (its hooks see this env).
+    env: serverChildProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
   });
   return stdout.trim();
 }

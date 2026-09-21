@@ -22,6 +22,8 @@ import {
   runningProcesses,
   runChildProcess,
   sanitizeSshRemoteEnv,
+  SERVER_ONLY_ENV_NAMES,
+  stripServerSecrets,
   shapePaperclipWorkspaceEnvForExecution,
   rewriteWorkspaceCwdEnvVarsForExecution,
   stringifyPaperclipWakePayload,
@@ -449,6 +451,127 @@ describe("runChildProcess", () => {
       if (originalBypassUrl === undefined) delete process.env.DATABASE_BYPASS_URL;
       else process.env.DATABASE_BYPASS_URL = originalBypassUrl;
     }
+  });
+
+  describe("DUR-3994: the server's own keys never reach a child process", () => {
+    const canary = (label: string) => `canary-${label}-${randomUUID()}`;
+    const SERVER_KEY_NAMES = [
+      ...SERVER_ONLY_ENV_NAMES,
+      "PAPERCLIP_SERVER_ANTHROPIC_API_KEY",
+      "PAPERCLIP_SERVER_SOMETHING_NEW",
+      "DATABASE_URL",
+      "DATABASE_BYPASS_URL",
+      "DATABASE_MIGRATION_URL",
+    ];
+    // Prints only which of the names are present, never a value.
+    const PRINT_PRESENT_NAMES = `process.stdout.write(JSON.stringify(${JSON.stringify([
+      ...SERVER_KEY_NAMES,
+      "HOME",
+      "PAPERCLIP_HOME",
+      "OPENCODE_ALLOW_ALL_MODELS",
+    ])}.filter((n) => typeof process.env[n] === "string")))`;
+
+    async function withServerCanaries<T>(fn: (values: Record<string, string>) => Promise<T>): Promise<T> {
+      const saved: Record<string, string | undefined> = {};
+      const values: Record<string, string> = {};
+      for (const name of [...SERVER_KEY_NAMES, "PAPERCLIP_HOME", "OPENCODE_ALLOW_ALL_MODELS"]) {
+        saved[name] = process.env[name];
+        values[name] = canary(name.toLowerCase());
+        process.env[name] = values[name];
+      }
+      try {
+        return await fn(values);
+      } finally {
+        for (const [name, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+      }
+    }
+
+    async function runAndListNames(env: Record<string, string>): Promise<string[]> {
+      const result = await runChildProcess(randomUUID(), process.execPath, ["-e", PRINT_PRESENT_NAMES], {
+        cwd: process.cwd(),
+        env,
+        timeoutSec: 10,
+        graceSec: 1,
+        onLog: async () => {},
+      });
+      expect(result.exitCode).toBe(0);
+      return JSON.parse(result.stdout) as string[];
+    }
+
+    it("strips every server key inherited from process.env", async () => {
+      await withServerCanaries(async () => {
+        const present = await runAndListNames({});
+        for (const name of SERVER_KEY_NAMES) expect(present).not.toContain(name);
+        // Nothing agents rely on disappears.
+        expect(present).toContain("HOME");
+        expect(present).toContain("OPENCODE_ALLOW_ALL_MODELS");
+      });
+    });
+
+    it("strips them from the FINAL env even when an adapter copies all of process.env into opts.env (hermes)", async () => {
+      await withServerCanaries(async () => {
+        const hermesStyleEnv = { ...(process.env as Record<string, string>) };
+        const present = await runAndListNames(hermesStyleEnv);
+        for (const name of SERVER_KEY_NAMES) expect(present).not.toContain(name);
+        // The non-secret PAPERCLIP_* settings an adapter passes on purpose survive.
+        expect(present).toContain("PAPERCLIP_HOME");
+      });
+    });
+
+    it("keeps a deliberately different per-agent DATABASE_URL, even inside a hermes-style full copy", async () => {
+      await withServerCanaries(async () => {
+        const perAgent = canary("per-agent-db");
+        const result = await runChildProcess(
+          randomUUID(),
+          process.execPath,
+          ["-e", "process.stdout.write(process.env.DATABASE_URL ?? '')"],
+          {
+            cwd: process.cwd(),
+            env: { ...(process.env as Record<string, string>), DATABASE_URL: perAgent },
+            timeoutSec: 10,
+            graceSec: 1,
+            onLog: async () => {},
+          },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout === perAgent).toBe(true);
+      });
+    });
+
+    it("stripServerSecrets: removes by name and prefix, and database addresses only when they are the server's own", () => {
+      const serverEnv = {
+        DATABASE_URL: "postgres://owner@db/one",
+        DATABASE_BYPASS_URL: "postgres://bypass@db/one",
+        DATABASE_MIGRATION_URL: "  ",
+      };
+      const env: Record<string, string | undefined> = {
+        BETTER_AUTH_SECRET: "x",
+        PAPERCLIP_AGENT_JWT_SECRET: "x",
+        PAPERCLIP_SECRETS_MASTER_KEY: "x",
+        PAPERCLIP_SERVER_ANTHROPIC_API_KEY: "x",
+        PAPERCLIP_TELEMETRY_BACKEND_TOKEN: "x",
+        // The server's bypass address handed over under another database name.
+        DATABASE_URL: " postgres://bypass@db/one ",
+        DATABASE_BYPASS_URL: "postgres://scoped@db/one",
+        DATABASE_MIGRATION_URL: "",
+        PAPERCLIP_HOME: "/paperclip",
+        PAPERCLIP_API_KEY: "agent-token",
+        HOME: "/paperclip",
+      };
+      const out = stripServerSecrets(env, serverEnv);
+      expect(out).toBe(env);
+      expect(Object.keys(out).sort()).toEqual(
+        ["DATABASE_BYPASS_URL", "DATABASE_MIGRATION_URL", "HOME", "PAPERCLIP_API_KEY", "PAPERCLIP_HOME"].sort(),
+      );
+    });
+
+    it("stripServerSecrets: with no server database address set, a per-agent one is always kept", () => {
+      const env = stripServerSecrets({ DATABASE_URL: "postgres://scoped@db/one" }, {});
+      expect(env.DATABASE_URL).toBe("postgres://scoped@db/one");
+    });
   });
 
   it("DUR-294: still honors an explicitly configured DATABASE_URL in opts.env", async () => {

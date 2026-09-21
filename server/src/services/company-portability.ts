@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { execFile } from "node:child_process";
+import { serverChildProcessEnv } from "./runtime-env.js";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
@@ -1017,7 +1018,7 @@ function stripPortableProjectExecutionWorkspaceRefs(policy: Record<string, unkno
 }
 
 async function readGitOutput(cwd: string, args: string[]) {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { cwd });
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { cwd, env: serverChildProcessEnv() });
   const trimmed = stdout.trim();
   return trimmed.length > 0 ? trimmed : null;
 }

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { serverChildProcessEnv } from "./runtime-env.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -867,7 +868,7 @@ async function listChangedWorkspaceFiles(input: {
     const result = await execFileAsync(
       "git",
       ["-C", input.rootReal, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-      { maxBuffer: GIT_STATUS_MAX_BUFFER_BYTES },
+      { maxBuffer: GIT_STATUS_MAX_BUFFER_BYTES, env: serverChildProcessEnv() },
     );
     stdout = result.stdout;
   } catch {

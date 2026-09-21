@@ -1,0 +1,76 @@
+name: Agent Isolation Acceptance
+
+# DUR-3994: boots the real stack with random decoy keys ("canaries") and has
+# a real agent run scripts/isolation-probe.sh, which reports what that agent
+# can reach that it should not. Stages already shipped must show no LEAK;
+# later stages' checks are reported as KNOWN GAP. Includes negative controls
+# proving the probe does catch a leak. See
+# scripts/agent-isolation-acceptance.sh for the full scenario.
+#
+# Like deploy-runner-recreate-acceptance.yml this builds the full image from
+# a cold cache, so it only runs when the files it guards change.
+on:
+  workflow_dispatch:
+    inputs:
+      enforced_stages:
+        description: "Stages whose checks must pass (space separated)"
+        required: false
+        default: "0"
+  workflow_call: {}
+  pull_request:
+    branches:
+      - custom
+    paths:
+      - ".dockerignore"
+      - "Dockerfile"
+      - "scripts/docker-entrypoint.sh"
+      - "scripts/isolation-probe.sh"
+      - "scripts/agent-isolation-acceptance.sh"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.prod.yml"
+      - "docker/docker-compose.ci-isolation-test.yml"
+      - ".github/workflows/agent-isolation-acceptance.yml"
+      - "packages/adapter-utils/src/server-utils.ts"
+      - "server/src/services/runtime-env.ts"
+      - "server/src/services/workspace-runtime.ts"
+      - "server/src/adapters/process/**"
+  push:
+    branches:
+      - custom
+    paths:
+      - ".dockerignore"
+      - "Dockerfile"
+      - "scripts/docker-entrypoint.sh"
+      - "scripts/isolation-probe.sh"
+      - "scripts/agent-isolation-acceptance.sh"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.prod.yml"
+      - "docker/docker-compose.ci-isolation-test.yml"
+      - ".github/workflows/agent-isolation-acceptance.yml"
+      - "packages/adapter-utils/src/server-utils.ts"
+      - "server/src/services/runtime-env.ts"
+      - "server/src/services/workspace-runtime.ts"
+      - "server/src/adapters/process/**"
+
+jobs:
+  isolation-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run agent isolation acceptance test
+        env:
+          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0' }}
+        run: ./scripts/agent-isolation-acceptance.sh
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-isolation-acceptance
+          path: .dur3994-isolation-acceptance-logs/
+          retention-days: 14
+          if-no-files-found: ignore

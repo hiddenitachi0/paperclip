@@ -275,6 +275,55 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
   });
 });
 
+describe("DUR-3994: server keys in the runtime-service and workspace-command envs", () => {
+  it("sanitizeRuntimeServiceBaseEnv removes BETTER_AUTH_SECRET and the other server-only keys", () => {
+    const sanitized = sanitizeRuntimeServiceBaseEnv({
+      PATH: process.env.PATH,
+      BETTER_AUTH_SECRET: "canary",
+      PAPERCLIP_AGENT_JWT_SECRET: "canary",
+      HOST: "0.0.0.0",
+    });
+    expect(sanitized.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(sanitized.PAPERCLIP_AGENT_JWT_SECRET).toBeUndefined();
+    expect(sanitized.HOST).toBe("0.0.0.0");
+  });
+
+  it("buildWorkspaceCommandEnv keeps the PAPERCLIP_* settings setup commands read but never the server's keys", () => {
+    const names = ["BETTER_AUTH_SECRET", "PAPERCLIP_SECRETS_MASTER_KEY", "PAPERCLIP_SERVER_ANTHROPIC_API_KEY", "PAPERCLIP_HOME"];
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    for (const name of names) process.env[name] = "canary";
+    try {
+      const env = buildWorkspaceCommandEnv({
+        base: {
+          baseCwd: "/tmp/base",
+          source: "worktree",
+          repoRef: null,
+          repoUrl: null,
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+        } as unknown as Parameters<typeof buildWorkspaceCommandEnv>[0]["base"],
+        repoRoot: "/tmp/repo",
+        worktreePath: "/tmp/repo/worktree",
+        branchName: "some-branch",
+        issue: null,
+        agent: { id: "agent-1", name: "Agent", companyId: "company-1" } as unknown as Parameters<
+          typeof buildWorkspaceCommandEnv
+        >[0]["agent"],
+        created: false,
+      });
+      expect(env.BETTER_AUTH_SECRET).toBeUndefined();
+      expect(env.PAPERCLIP_SECRETS_MASTER_KEY).toBeUndefined();
+      expect(env.PAPERCLIP_SERVER_ANTHROPIC_API_KEY).toBeUndefined();
+      expect(env.PAPERCLIP_HOME).toBe("canary");
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+});
+
 describe("buildWorkspaceCommandEnv", () => {
   it("DUR-247: never forwards the host DATABASE_URL into a spawned workspace command", () => {
     process.env.DATABASE_URL = "postgres://example.test/paperclip";
@@ -1206,6 +1255,82 @@ describe("realizeExecutionWorkspace", () => {
     });
 
     await expect(fs.readFile(path.join(reused.cwd, ".paperclip-provision-created"), "utf8")).resolves.toBe("false\n");
+  });
+
+  it("DUR-3994: neither the provision command nor a git hook the repo plants can see the server's keys", async () => {
+    const serverKeyNames = [
+      "BETTER_AUTH_SECRET",
+      "PAPERCLIP_AGENT_JWT_SECRET",
+      "PAPERCLIP_SECRETS_MASTER_KEY",
+      "PAPERCLIP_SERVER_ANTHROPIC_API_KEY",
+      "DATABASE_URL",
+    ];
+    const saved = Object.fromEntries(serverKeyNames.map((name) => [name, process.env[name]]));
+    for (const name of serverKeyNames) process.env[name] = `canary-${randomUUID()}`;
+    try {
+      const repoRoot = await createTempRepo();
+      // Lists only which names are set -- never a value.
+      const listNames = (file: string) =>
+        [
+          `: > ${file}`,
+          ...serverKeyNames.map((name) => `if [ -n "\${${name}+x}" ]; then echo ${name} >> ${file}; fi`),
+          `if [ -n "\${PAPERCLIP_WORKSPACE_BRANCH+x}" ]; then echo PAPERCLIP_WORKSPACE_BRANCH >> ${file}; fi`,
+        ].join("\n");
+      await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(repoRoot, "scripts", "provision.sh"),
+        ["#!/usr/bin/env bash", listNames(".paperclip-provision-names")].join("\n"),
+        "utf8",
+      );
+      const hookDir = path.join(repoRoot, ".planted-hooks");
+      const hookMarker = path.join(repoRoot, ".paperclip-hook-names");
+      await fs.mkdir(hookDir, { recursive: true });
+      await fs.writeFile(path.join(hookDir, "post-checkout"), ["#!/bin/sh", listNames(hookMarker)].join("\n"), {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+      await runGit(repoRoot, ["config", "core.hooksPath", hookDir]);
+      await runGit(repoRoot, ["add", "scripts/provision.sh"]);
+      await runGit(repoRoot, ["commit", "-m", "Add provision script"]);
+      await fs.rm(hookMarker, { force: true });
+
+      const workspace = await realizeExecutionWorkspace({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
+        },
+        config: {
+          workspaceStrategy: {
+            type: "git_worktree",
+            branchTemplate: "{{issue.identifier}}-{{slug}}",
+            provisionCommand: "bash ./scripts/provision.sh",
+          },
+        },
+        issue: { id: "issue-1", identifier: "DUR-3994", title: "Canary check" },
+        agent: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+      });
+
+      const provisionNames = (await fs.readFile(path.join(workspace.cwd, ".paperclip-provision-names"), "utf8"))
+        .split("\n")
+        .filter(Boolean);
+      // The provision command did run with its normal settings...
+      expect(provisionNames).toContain("PAPERCLIP_WORKSPACE_BRANCH");
+      // ...but none of the server's keys.
+      for (const name of serverKeyNames) expect(provisionNames).not.toContain(name);
+
+      // `git worktree add` fired the planted post-checkout hook.
+      const hookNames = (await fs.readFile(hookMarker, "utf8")).split("\n").filter(Boolean);
+      for (const name of serverKeyNames) expect(hookNames).not.toContain(name);
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   it("uses the latest repo-managed provision script when reusing an existing worktree", async () => {

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { serverChildProcessEnv } from "./runtime-env.js";
 import { promisify } from "node:util";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -112,6 +113,7 @@ export async function classifyCommitAgainstCheckout(
     await execFileAsync("git", ["-C", workspacePath, "rev-parse", "--quiet", "--verify", `${sha}^{commit}`], {
       cwd: workspacePath,
       timeout: GIT_TIMEOUT_MS,
+      env: serverChildProcessEnv(),
     });
   } catch {
     return "unknown_to_repo";
@@ -121,7 +123,7 @@ export async function classifyCommitAgainstCheckout(
     const { stdout } = await execFileAsync(
       "git",
       ["-C", workspacePath, "for-each-ref", "--contains", sha, "--count", "1", "--format=%(refname)", "refs/remotes/"],
-      { cwd: workspacePath, timeout: GIT_TIMEOUT_MS },
+      { cwd: workspacePath, timeout: GIT_TIMEOUT_MS, env: serverChildProcessEnv() },
     );
     return stdout.trim().length > 0 ? "on_remote" : "local_only";
   } catch {
