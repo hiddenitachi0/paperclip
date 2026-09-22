@@ -30,6 +30,13 @@ interface SecretBindingPickerProps {
    * Pass null to disable the filter and show every secret in the company.
    */
   statusFilter?: Array<CompanySecret["status"]> | null;
+  /**
+   * DUR-3997: optional ordering. Lower ranks first; ties keep the server's
+   * order. Lets a caller put the secrets that look like a provider's key
+   * (by kind when the company has tagged them, else by name) at the top
+   * without hiding the rest.
+   */
+  rankSecret?: (secret: CompanySecret) => number;
 }
 
 const VERSION_LATEST: SecretVersionSelector = "latest";
@@ -67,6 +74,7 @@ export function SecretBindingPicker({
   className,
   disabled,
   statusFilter = ["active"],
+  rankSecret,
 }: SecretBindingPickerProps) {
   const queryClient = useQueryClient();
   const { selectedCompanyId } = useCompany();
@@ -86,9 +94,14 @@ export function SecretBindingPicker({
 
   const filteredSecrets = useMemo(() => {
     const all = secretsQuery.data ?? [];
-    if (statusFilter === null) return all;
-    return all.filter((secret) => statusFilter.includes(secret.status));
-  }, [secretsQuery.data, statusFilter]);
+    const kept = statusFilter === null ? all : all.filter((secret) => statusFilter.includes(secret.status));
+    if (!rankSecret) return kept;
+    // Stable: equal ranks keep the order the server returned them in.
+    return kept
+      .map((secret, index) => ({ secret, index, rank: rankSecret(secret) }))
+      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .map((entry) => entry.secret);
+  }, [secretsQuery.data, statusFilter, rankSecret]);
 
   const selectedSecret = useMemo(() => {
     if (!value) return null;
