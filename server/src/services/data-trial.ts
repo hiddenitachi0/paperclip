@@ -12,7 +12,7 @@ import {
   type DataRefusalCode,
   type SalesResult,
 } from "./data-sources/contract.js";
-import { createShopifySalesAdapter } from "./data-sources/shopify-adapter.js";
+import { getDataSourceKind } from "./data-sources/registry.js";
 import { scrubSecrets } from "./data-sources/shopify-client.js";
 import { NORWEGIAN_MONTHS, parseMonthKey, zonedParts } from "./data-sources/zoned-time.js";
 
@@ -21,7 +21,8 @@ import { NORWEGIAN_MONTHS, parseMonthKey, zonedParts } from "./data-sources/zone
  * Datakilder settings screen.
  *
  * The operator picks one or two calendar months; Paperclip counts units sold
- * through the company's own connection with the S3 engine, runs the same
+ * through the company's own connection with the kind's sales adapter
+ * (registry.ts; the Shopify engine today), runs the same
  * consistency checks an agent answer gets, writes one audit row (channel
  * `settings_test`, refusals included), and hands back the fixed answer card so
  * it can be compared with Shopify Analytics BEFORE "Salg" is ticked.
@@ -235,10 +236,15 @@ export async function runTrialCalculation(
       throw error;
     }
 
-    const adapter = createShopifySalesAdapter({
-      client: read.shopifyTransport,
-      clock: { now: read.now, ...(deps.sleep ? { sleep: deps.sleep } : {}) },
-    });
+    const source = getDataSourceKind(read.kind);
+    if (!source.adapters.sales) {
+      return refuse(
+        "data_source_kind_unsupported",
+        `${source.label}-koblinger kan ikke regne ut salg ennå. Koblingen er lagret, og tas i bruk når støtten er klar.`,
+        "refused",
+      );
+    }
+    const adapter = source.adapters.sales(read, deps.sleep ? { sleep: deps.sleep } : {});
     const outcome = await adapter.sales({ periods: input.periods, measure: ["units"], groupBy: input.groupBy });
     if (!outcome.ok) {
       return refuse(outcome.refusal.code, outcome.refusal.message, outcomeForRefusal(outcome.refusal.code), {

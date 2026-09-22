@@ -1,5 +1,6 @@
 import type {
   DataConnectionAccessLevel,
+  DataConnectionConfig,
   DataConnectionCredentialKind,
   DataConnectionKind,
   DataConnectionStatus,
@@ -36,9 +37,22 @@ export type DataConnectionSummary = {
   id: string;
   companyId: string;
   kind: DataConnectionKind;
+  /** Plain name of the kind, e.g. "Shopify". */
+  kindLabel: string;
+  /** False for a kind that is saved but cannot be read through yet ("kommer snart"). */
+  supported: boolean;
   name: string;
-  shopDomain: string;
-  apiVersion: string;
+  /**
+   * Where the connection points, in words: the shop address, the store URL's
+   * host, the Fiken company slug, or "host:/path" for files. Never a secret.
+   */
+  target: string;
+  /** Shopify only; null for every other kind. */
+  shopDomain: string | null;
+  /** Shopify only; null for every other kind. */
+  apiVersion: string | null;
+  /** Per-kind non-secret settings (data_connections.config), tagged with the kind. */
+  config: DataConnectionConfig;
   credentialKind: DataConnectionCredentialKind;
   credentialHint: string;
   access: DataConnectionAccessLevel;
@@ -47,6 +61,8 @@ export type DataConnectionSummary = {
   observed: DataConnectionObservedSummary | null;
   /** Datasets this company currently answers from this connection. */
   datasets: DataDataset[];
+  /** Datasets this kind of source can answer at all (what may be granted). */
+  datasetsOffered: DataDataset[];
   lastCheckAt: string | null;
   lastCheckOk: boolean | null;
   lastCheckError: string | null;
@@ -54,7 +70,7 @@ export type DataConnectionSummary = {
   updatedAt: string;
 };
 
-/** The answer to "Test": what Shopify says, and whether it may be switched on. */
+/** The answer to "Test": what the source says, and whether it may be switched on. */
 export type DataConnectionCheckResult = {
   ok: boolean;
   /** True only when every check passed and the key cannot write. */

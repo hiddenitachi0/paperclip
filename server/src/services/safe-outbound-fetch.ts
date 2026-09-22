@@ -3,6 +3,7 @@ import type { IncomingMessage, RequestOptions as HttpRequestOptions } from "node
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { FIKEN_API_HOST, normalizeStoreUrlInput } from "@paperclipai/shared";
 
 /**
  * Outbound HTTP calls the server makes on someone else's behalf.
@@ -14,12 +15,14 @@ import { isIP } from "node:net";
  *     here unchanged from that file (DUR-3972 S1) and are re-used there, so a
  *     plugin's fetch behaves exactly as before.
  *
- *  2. Business-data connections (DUR-3972). `createSafeOutboundFetch` adds a
- *     per-source-kind host allow-list on top: for Shopify, https only and
- *     *.myshopify.com only; every resolved address must be public (a stricter
- *     list than the plugin one -- it also refuses carrier-grade NAT, which is
- *     where a tailnet lives); no redirects are followed; each request has a
- *     10 s limit and a response size cap.
+ *  2. Business-data connections (DUR-3972, DUR-3997). `createSafeOutboundFetch`
+ *     adds a per-source-kind host allow-list on top: https only, and for
+ *     Shopify *.myshopify.com only, for Fiken api.fiken.no only, for
+ *     WooCommerce the one store host saved on the connection; every resolved
+ *     address must be public (a stricter list than the plugin one -- it also
+ *     refuses carrier-grade NAT, which is where a tailnet lives); no
+ *     redirects are followed; each request has a 10 s limit and a response
+ *     size cap.
  *
  * Every connection is pinned to the address that was checked, so a DNS answer
  * that changes between the check and the connect (DNS rebinding) cannot move
@@ -346,7 +349,13 @@ export async function executePinnedHttpRequest(
 // Business-data sources (DUR-3972)
 // ---------------------------------------------------------------------------
 
-/** Which hosts one kind of data source may reach. */
+/**
+ * Which hosts one connection of one kind of data source may reach. The host
+ * pattern is per kind -- and for WooCommerce per connection, since the store
+ * lives on the operator's own domain. Everything else (https only, port 443
+ * only, public addresses only, no redirects, size and time caps) is the same
+ * for every kind and enforced in createSafeOutboundFetch below.
+ */
 export interface OutboundHostPolicy {
   /** Shown in refusals and logs; e.g. "shopify". */
   sourceKind: string;
@@ -358,13 +367,53 @@ export interface OutboundHostPolicy {
   maxResponseBytes: number;
 }
 
+const DATA_SOURCE_REQUEST_TIMEOUT_MS = 10_000;
+const DATA_SOURCE_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+
 export const SHOPIFY_OUTBOUND_POLICY: OutboundHostPolicy = {
   sourceKind: "shopify",
   protocols: ["https:"],
   hostPattern: /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/,
-  timeoutMs: 10_000,
-  maxResponseBytes: 5 * 1024 * 1024,
+  timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
+  maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
 };
+
+/** Fiken has exactly one API host. Nothing an operator types can change it. */
+export const FIKEN_OUTBOUND_POLICY: OutboundHostPolicy = {
+  sourceKind: "fiken",
+  protocols: ["https:"],
+  hostPattern: new RegExp(`^${FIKEN_API_HOST.replace(/\./g, "\\.")}$`),
+  timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
+  maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * A WooCommerce store runs on the operator's own domain, so its policy is
+ * built per connection from the store URL saved on it: that one host, exactly,
+ * and nothing else. The URL must be https, without a user name, password or a
+ * port other than 443, and must name a public-looking DNS name (not an IP
+ * address, not localhost, not a .local/.internal/.lan name). Whether the name
+ * really resolves to a public address is checked again on every request, so a
+ * store name that later points at something private is refused at that
+ * moment too.
+ */
+export function createWooCommerceOutboundPolicy(storeUrl: string): OutboundHostPolicy {
+  const normalized = normalizeStoreUrlInput(storeUrl);
+  if (!normalized.ok) {
+    throw new SafeOutboundFetchError("host_not_allowed", normalized.message);
+  }
+  return {
+    sourceKind: "woocommerce",
+    protocols: ["https:"],
+    hostPattern: new RegExp(`^${escapeRegExp(normalized.host)}$`),
+    timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
+    maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
+  };
+}
 
 export type SafeOutboundRefusalCode =
   | "invalid_url"

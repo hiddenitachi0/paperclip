@@ -91,6 +91,10 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         // for the same agent.
         laneAModel: targetAgent.laneAModel ?? null,
         laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
+        // DUR-3997: which provider answers, and where for OpenRouter / local.
+        // The key binding itself is read off the agent row by the service.
+        laneAProvider: targetAgent.laneAProvider ?? null,
+        laneABaseUrl: targetAgent.laneABaseUrl ?? null,
       },
       requester: requesterFor(req),
       actor: req.actor,
@@ -152,6 +156,9 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         laneAModel: targetAgent.laneAModel ?? null,
         laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
         laneATransformDailyCallCap: targetAgent.laneATransformDailyCallCap ?? null,
+        // DUR-3997: same two fields the chat route passes.
+        laneAProvider: targetAgent.laneAProvider ?? null,
+        laneABaseUrl: targetAgent.laneABaseUrl ?? null,
       },
       input,
       variables,

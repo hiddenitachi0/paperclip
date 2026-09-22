@@ -424,6 +424,16 @@ export function approvalService(db: Db) {
             laneAEnabled: payload.laneAEnabled === true,
             laneAInstructions:
               typeof payload.laneAInstructions === "string" ? payload.laneAInstructions : null,
+            // DUR-3977 / DUR-3997: the rest of the quick-agent settings the
+            // card carries, for the same reason. Anything not on the card
+            // stays null = the platform default.
+            laneAModel: typeof payload.laneAModel === "string" ? payload.laneAModel : null,
+            laneAMaxOutputTokens:
+              typeof payload.laneAMaxOutputTokens === "number" ? payload.laneAMaxOutputTokens : null,
+            laneATransformDailyCallCap:
+              typeof payload.laneATransformDailyCallCap === "number" ? payload.laneATransformDailyCallCap : null,
+            laneAProvider: typeof payload.laneAProvider === "string" ? payload.laneAProvider : null,
+            laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
             status: "idle",
             spentMonthlyCents: 0,
             permissions: undefined,

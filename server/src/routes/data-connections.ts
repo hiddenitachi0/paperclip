@@ -20,7 +20,9 @@ import { runTrialCalculation } from "../services/data-trial.js";
 
 /**
  * DUR-3972 slice S1: "Datakilder" -- connecting a company to its own business
- * data (Shopify first), from company settings.
+ * data (Shopify, and since DUR-3997 also WooCommerce, Fiken and SFTP files as
+ * stored-but-not-yet-readable kinds), from company settings. Nothing here is
+ * about one kind: the service asks the source-kind registry.
  *
  * Owner-or-instance-admin only (slice S2 tightened this from "any board
  * member"): agents, service tokens and delegate tokens are refused, a board
@@ -91,7 +93,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   function datasetParam(req: Request): DataDataset {
     const value = req.params.dataset as string;
     if (!(DATA_DATASETS as readonly string[]).includes(value)) {
-      throw notFound("Ukjent datasett. Bare «sales» (Salg) finnes foreløpig.");
+      throw notFound("Ukjent datasett. Bruk «sales» (Salg), «finance» (Regnskap) eller «custom» (Filer).");
     }
     return value as DataDataset;
   }
@@ -110,7 +112,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
       action: "data_connection.connected",
       entityType: "data_connection",
       entityId: created.id,
-      details: { name: created.name, kind: created.kind, shopDomain: created.shopDomain },
+      details: { name: created.name, kind: created.kind, target: created.target, shopDomain: created.shopDomain },
     });
     res.status(201).json(created);
   });
@@ -159,7 +161,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
       action: "data_connection.removed",
       entityType: "data_connection",
       entityId: connectionId,
-      details: { name: existing.name, shopDomain: existing.shopDomain },
+      details: { name: existing.name, kind: existing.kind, target: existing.target, shopDomain: existing.shopDomain },
     });
     res.json({ ok: true });
   });

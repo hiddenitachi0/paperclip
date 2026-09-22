@@ -3210,7 +3210,7 @@ for (const route of [
 // responses carry the last four characters as `credentialHint` at most.
 for (const route of [
   ["get", "/api/companies/{companyId}/data-connections", "List this company's business-data connections (never the key)", undefined],
-  ["post", "/api/companies/{companyId}/data-connections", "Connect a read-only Shopify source to this company", createDataConnectionSchema],
+  ["post", "/api/companies/{companyId}/data-connections", "Connect a read-only business-data source (Shopify; WooCommerce, Fiken and SFTP files are stored until their adapters ship) to this company", createDataConnectionSchema],
   ["get", "/api/companies/{companyId}/data-connections/{connectionId}", "Get one business-data connection (never the key)", undefined],
   ["patch", "/api/companies/{companyId}/data-connections/{connectionId}", "Rename, change the daily cap, switch on/off, or replace the key", updateDataConnectionSchema],
   ["delete", "/api/companies/{companyId}/data-connections/{connectionId}", "Disconnect a source and delete its saved key", undefined],
@@ -3465,7 +3465,7 @@ registry.registerPath({
     503: {
       description:
         "This Paperclip instance has no working model credentials — either ANTHROPIC_API_KEY is unset " +
-        "(\"Lane A is not configured on this instance…\") or it was rejected (\"Lane A model credentials are " +
+        "(\"This quick agent has no Claude key…\") or it was rejected (\"Lane A model credentials are " +
         "invalid\"). NOT retryable: every call will fail the same way until an operator fixes it. Stop the " +
         "run rather than burning through the queue.",
       content: { "application/json": { schema: ErrorSchema } },
