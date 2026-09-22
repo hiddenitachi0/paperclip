@@ -3465,7 +3465,7 @@ registry.registerPath({
     503: {
       description:
         "This Paperclip instance has no working model credentials — either ANTHROPIC_API_KEY is unset " +
-        "(\"Lane A is not configured on this instance…\") or it was rejected (\"Lane A model credentials are " +
+        "(\"This quick agent has no Claude key…\") or it was rejected (\"Lane A model credentials are " +
         "invalid\"). NOT retryable: every call will fail the same way until an operator fixes it. Stop the " +
         "run rather than burning through the queue.",
       content: { "application/json": { schema: ErrorSchema } },

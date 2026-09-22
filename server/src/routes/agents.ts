@@ -32,6 +32,7 @@ import {
   parseSorteringsreglerRuleTargetNames,
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   QUICK_AGENT_FIELDS,
+  laneAProviderModelIssue,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -2853,6 +2854,10 @@ export function agentRoutes(
           laneAModel: agent.laneAModel ?? null,
           laneAMaxOutputTokens: agent.laneAMaxOutputTokens ?? null,
           laneATransformDailyCallCap: agent.laneATransformDailyCallCap ?? null,
+          // DUR-3997: provider and endpoint chosen at hire time. The key is a
+          // binding inside adapterConfig (already on the card above).
+          laneAProvider: agent.laneAProvider ?? null,
+          laneABaseUrl: agent.laneABaseUrl ?? null,
           agentId: agent.id,
           requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
           requestedConfigurationSnapshot: {
@@ -3446,6 +3451,22 @@ export function agentRoutes(
     assertNoAgentLaneAFlagMutation(req, patchData);
     if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
+      // DUR-3997: the model must fit the provider. A patch may carry one
+      // without the other, so the check runs against the stored value of
+      // whichever it leaves out (the create schema does the same with
+      // "missing provider = Claude").
+      const laneAIssue = laneAProviderModelIssue({
+        laneAProvider: hasOwn(patchData, "laneAProvider")
+          ? (patchData.laneAProvider as string | null)
+          : (existing.laneAProvider ?? null),
+        laneAModel: hasOwn(patchData, "laneAModel")
+          ? (patchData.laneAModel as string | null)
+          : (existing.laneAModel ?? null),
+      });
+      if (laneAIssue) {
+        res.status(422).json({ error: laneAIssue });
+        return;
+      }
     }
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;

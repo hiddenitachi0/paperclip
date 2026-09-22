@@ -75,6 +75,15 @@ export const agents = pgTable(
     laneAModel: text("lane_a_model"),
     laneAMaxOutputTokens: integer("lane_a_max_output_tokens"),
     laneATransformDailyCallCap: integer("lane_a_transform_daily_call_cap"),
+    // DUR-3997 (migration 0172). Which provider answers this quick agent's
+    // calls (anthropic | openai | google | openrouter | local) and, for
+    // OpenRouter / a local model, the OpenAI-compatible endpoint. Null on
+    // both = Claude via Paperclip's own instance key, i.e. exactly what every
+    // quick agent did before. The provider KEY is not a column: it is a
+    // secret binding at adapterConfig.laneA.apiKey (LANE_A_API_KEY_CONFIG_PATH
+    // in packages/shared), resolved binding-gated and audited at call time.
+    laneAProvider: text("lane_a_provider"),
+    laneABaseUrl: text("lane_a_base_url"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // DUR-109: last time a human (direct bundle/file edit) or an approved
