@@ -231,6 +231,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
           value: encodeCredential(credential),
           description:
             "Lesenøkkel for Shopify. Brukes bare av datakoblingen, og kan ikke kobles til en agent eller noe annet.",
+          kind: "shopify_admin_token",
         },
         { userId: actor.userId, agentId: null },
       );

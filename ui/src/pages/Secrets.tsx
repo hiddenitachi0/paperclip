@@ -23,6 +23,7 @@ import {
   X,
   Filter,
   Info,
+  Wrench,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import type {
@@ -37,7 +38,9 @@ import type {
   SecretProviderConfigStatus,
   SecretProviderDescriptor,
   SecretStatus,
+  SecretKind,
 } from "@paperclipai/shared";
+import { isTestableSecretKind, secretKindLabel, secretValueLooksWrongForKind } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -77,6 +80,7 @@ import { cn } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { ImportFromVaultDialog } from "./secrets/ImportFromVaultDialog";
 import { AddIntegrationTokenDialog } from "../components/AddIntegrationTokenDialog";
+import { SecretKindSelect } from "../components/SecretKindSelect";
 
 type CreateMode = "managed" | "external";
 type SecretsTab = "secrets" | "vaults";
@@ -418,6 +422,7 @@ export function Secrets() {
     externalRef: "",
     provider: "local_encrypted" as SecretProvider,
     providerConfigId: "",
+    kind: null as SecretKind | null,
   });
   const [createError, setCreateError] = useState<string | null>(null);
   const [rotateOpen, setRotateOpen] = useState(false);
@@ -571,13 +576,14 @@ export function Secrets() {
   }
 
   const createMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const input: CreateSecretInput = {
         name: createForm.name.trim(),
         provider: createForm.provider,
         providerConfigId: createForm.providerConfigId || null,
         managedMode: createMode === "external" ? "external_reference" : "paperclip_managed",
         description: createForm.description.trim() || null,
+        kind: createForm.kind,
       };
       if (createForm.key.trim()) input.key = createForm.key.trim();
       if (createMode === "managed") {
@@ -585,10 +591,24 @@ export function Secrets() {
       } else {
         input.externalRef = createForm.externalRef.trim();
       }
-      return secretsApi.create(selectedCompanyId!, input);
+      const created = await secretsApi.create(selectedCompanyId!, input);
+      // DUR-3997: check an AI-provider key with its provider straight away.
+      // The secret is kept either way; a failed check is shown, not thrown.
+      const verdict = isTestableSecretKind(created.kind)
+        ? await secretsApi.test(selectedCompanyId!, created.id).catch(() => null)
+        : null;
+      return { created, verdict };
     },
-    onSuccess: (created) => {
-      pushToast({ title: "Secret created", body: created.name, tone: "success" });
+    onSuccess: ({ created, verdict }) => {
+      pushToast({
+        title: verdict
+          ? verdict.ok
+            ? "Secret created and the key works"
+            : "Secret created, but the provider did not accept the key"
+          : "Secret created",
+        body: verdict ? verdict.message : created.name,
+        tone: verdict?.ok === false ? "warn" : "success",
+      });
       setCreateOpen(false);
       setCreateForm({
         name: "",
@@ -598,6 +618,7 @@ export function Secrets() {
         externalRef: "",
         provider: createForm.provider,
         providerConfigId: getDefaultProviderConfigId(providerConfigs, createForm.provider),
+        kind: null,
       });
       setCreateError(null);
       setSelectedSecretId(created.id);
@@ -659,6 +680,33 @@ export function Secrets() {
         body: error instanceof Error ? error.message : "Try again",
         tone: "error",
       });
+    },
+  });
+
+  // DUR-3997: the Test button. One harmless call to the provider; the
+  // verdict is recorded on the row and shown here, never the value.
+  const testMutation = useMutation({
+    mutationFn: (id: string) => secretsApi.test(selectedCompanyId!, id),
+    onSuccess: (result) => {
+      pushToast({
+        title: result.ok ? "The key works" : "The provider did not accept this key",
+        body: result.message,
+        tone: result.ok ? "success" : "warn",
+      });
+      invalidateAll([result.secret.id]);
+    },
+    onError: (error) => {
+      pushToast({ title: "Could not test the key", body: readableErrorMessage(error), tone: "error" });
+    },
+  });
+
+  const kindMutation = useMutation({
+    mutationFn: ({ id, kind }: { id: string; kind: SecretKind | null }) => secretsApi.update(id, { kind }),
+    onSuccess: (updated) => {
+      invalidateAll([updated.id]);
+    },
+    onError: (error) => {
+      pushToast({ title: "Could not change the kind", body: readableErrorMessage(error), tone: "error" });
     },
   });
 
@@ -958,6 +1006,7 @@ export function Secrets() {
               <thead className="bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Name</th>
+                  <th className="px-2 py-2 text-left font-medium">Kind</th>
                   <th className="px-2 py-2 text-left font-medium">Mode</th>
                   <th className="px-2 py-2 text-left font-medium">Provider</th>
                   <th className="px-2 py-2 text-left font-medium">Status</th>
@@ -981,6 +1030,9 @@ export function Secrets() {
                   >
                     <td className="px-3 py-2.5">
                       <div className="font-medium text-foreground">{secret.name}</div>
+                    </td>
+                    <td className="px-2 py-2.5 text-xs">
+                      <SecretKindCell secret={secret} />
                     </td>
                     <td className="px-2 py-2.5 text-xs text-muted-foreground">
                       {modeLabel(secret.managedMode)}
@@ -1085,6 +1137,21 @@ export function Secrets() {
                 </SheetDescription>
               </SheetHeader>
               <div className="flex flex-wrap gap-2 px-4 pb-2">
+                {isTestableSecretKind(selectedSecret.kind) && selectedSecret.status === "active" ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => testMutation.mutate(selectedSecret.id)}
+                    disabled={testMutation.isPending}
+                  >
+                    {testMutation.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                    ) : (
+                      <Wrench className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    Test key
+                  </Button>
+                ) : null}
                 <Button
                   size="sm"
                   variant="outline"
@@ -1164,7 +1231,12 @@ export function Secrets() {
                 </div>
                 <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
                   <TabsContent value="details">
-                    <SecretDetailsTab secret={selectedSecret} providerConfigs={providerConfigs} />
+                    <SecretDetailsTab
+                      secret={selectedSecret}
+                      providerConfigs={providerConfigs}
+                      onKindChange={(kind) => kindMutation.mutate({ id: selectedSecret.id, kind })}
+                      kindPending={kindMutation.isPending}
+                    />
                   </TabsContent>
                   <TabsContent value="usage">
                     <SecretUsageTab loading={usageQuery.isPending} bindings={usageQuery.data?.bindings ?? []} />
@@ -1274,6 +1346,14 @@ export function Secrets() {
               </div>
             </div>
             <div>
+              <label className="text-xs font-medium" htmlFor="new-secret-kind">What kind of key is this?</label>
+              <SecretKindSelect
+                id="new-secret-kind"
+                value={createForm.kind}
+                onChange={(kind) => setCreateForm((current) => ({ ...current, kind }))}
+              />
+            </div>
+            <div>
               <label className="text-xs font-medium" htmlFor="new-secret-provider">Provider</label>
               <select
                 id="new-secret-provider"
@@ -1371,7 +1451,17 @@ export function Secrets() {
                     rows={3}
                     className="min-w-0 overflow-x-hidden break-all font-mono text-xs"
                     placeholder="Stored once, never re-displayed"
+                    aria-invalid={secretValueLooksWrongForKind(createForm.kind, createForm.value)}
                   />
+                  {secretValueLooksWrongForKind(createForm.kind, createForm.value) ? (
+                    <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                      That does not look like the usual shape for this kind of key. You can still save it.
+                    </p>
+                  ) : isTestableSecretKind(createForm.kind) ? (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Paperclip will check it with the provider as soon as it is saved.
+                    </p>
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -2492,12 +2582,59 @@ function TextField({
   );
 }
 
+/**
+ * DUR-3997: the Kind column. The plain label, and for kinds Paperclip can
+ * test, whether the provider accepted the key the last time it was asked.
+ */
+function SecretKindCell({ secret }: { secret: CompanySecret }) {
+  const label = secretKindLabel(secret.kind);
+  if (!label) return <span className="text-muted-foreground">—</span>;
+  const testable = isTestableSecretKind(secret.kind);
+  return (
+    <div className="flex items-center gap-1.5">
+      <span>{label}</span>
+      {testable ? (
+        secret.lastTestOk === true ? (
+          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-label="The key works" />
+        ) : secret.lastTestOk === false ? (
+          <AlertCircle className="h-3.5 w-3.5 text-destructive" aria-label="The provider did not accept this key" />
+        ) : (
+          <span className="text-[11px] text-muted-foreground">not tested</span>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+function SecretLastTest({ secret }: { secret: CompanySecret }) {
+  if (!isTestableSecretKind(secret.kind)) {
+    return <span className="text-muted-foreground">Paperclip cannot test this kind of key.</span>;
+  }
+  if (secret.lastTestOk === null || secret.lastTestOk === undefined) {
+    return <span className="text-muted-foreground">Not tested yet. Press Test key above.</span>;
+  }
+  return (
+    <div className="space-y-0.5">
+      <div className={cn("flex items-center gap-1", secret.lastTestOk ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>
+        {secret.lastTestOk ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertCircle className="h-3.5 w-3.5" />}
+        {secret.lastTestOk ? "The key works" : "The provider did not accept this key"}
+        <span className="text-muted-foreground font-normal">· {formatRelative(secret.lastTestAt)}</span>
+      </div>
+      {secret.lastTestMessage ? <div className="text-muted-foreground">{secret.lastTestMessage}</div> : null}
+    </div>
+  );
+}
+
 function SecretDetailsTab({
   secret,
   providerConfigs,
+  onKindChange,
+  kindPending,
 }: {
   secret: CompanySecret;
   providerConfigs: CompanySecretProviderConfig[];
+  onKindChange: (kind: SecretKind | null) => void;
+  kindPending: boolean;
 }) {
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
@@ -2505,6 +2642,18 @@ function SecretDetailsTab({
         <span>{secret.description ?? <span className="text-muted-foreground">—</span>}</span>
       </DetailRow>
       <DetailRow label="Custody">{modeLabel(secret.managedMode)}</DetailRow>
+      <div className="col-span-2">
+        <dt className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1">What kind of key is this?</dt>
+        <dd>
+          <SecretKindSelect value={secret.kind} onChange={onKindChange} disabled={kindPending} />
+        </dd>
+      </div>
+      <div className="col-span-2">
+        <dt className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1">Last test</dt>
+        <dd className="text-foreground">
+          <SecretLastTest secret={secret} />
+        </dd>
+      </div>
       <DetailRow label="Provider">{secret.provider.replaceAll("_", " ")}</DetailRow>
       <DetailRow label="Provider vault">{providerVaultLabel(providerConfigs, secret.providerConfigId)}</DetailRow>
       <DetailRow label="Latest version">v{secret.latestVersion}</DetailRow>

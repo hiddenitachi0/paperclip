@@ -492,6 +492,24 @@ export {
   type IntegrationKeyDescriptor,
   type IntegrationKeyCategory,
 } from "./integration-keys.js";
+export {
+  SECRET_KINDS,
+  SECRET_KIND_IDS,
+  SECRET_KIND_CATEGORY_LABELS,
+  SECRET_KIND_CATEGORY_ORDER,
+  getSecretKind,
+  isSecretKind,
+  isTestableSecretKind,
+  secretKindEnvKeyPairs,
+  secretKindForEnvKey,
+  secretKindLabel,
+  secretKindsByCategory,
+  secretValueLooksWrongForKind,
+  type SecretKind,
+  type SecretKindCategory,
+  type SecretKindDescriptor,
+  type SecretKindProvider,
+} from "./secret-kinds.js";
 
 export {
   ALL_INTERFACES_BIND_HOST,
@@ -962,6 +980,7 @@ export type {
   EnvSecretRefBinding,
   AgentEnvConfig,
   CompanySecret,
+  CompanySecretTestResult,
   CompanySecretProviderConfig,
   SecretProviderConfigPayload,
   SecretProviderConfigHealthDetails,

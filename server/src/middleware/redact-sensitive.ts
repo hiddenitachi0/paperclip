@@ -47,6 +47,13 @@ const SENSITIVE_KEYS = new Set<string>([
   "key",
   "anthropic_api_key",
   "anthropicapikey",
+  // DUR-3997: `value` too. Every body that stores or rotates a company
+  // secret carries the plaintext as `value` (POST /companies/:id/secrets,
+  // POST /secrets/:id/rotate, and the plain env binding {type:"plain",value}),
+  // and a 409 "name already taken" on either used to write it to server.log.
+  // A field called `value` is very rarely something an operator needs to
+  // read back from an error log.
+  "value",
 ]);
 
 const MAX_DEPTH = 6;

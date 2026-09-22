@@ -744,6 +744,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/secret-provider-configs/{id}/health",
   "POST /api/companies/{companyId}/secrets/remote-import",
   "POST /api/companies/{companyId}/secrets/remote-import/preview",
+  "POST /api/companies/{companyId}/secrets/{id}/test",
   "GET /api/secrets/{id}/usage",
   "GET /api/secrets/{id}/access-events",
   "POST /api/health/dev-server/restart",
@@ -2588,6 +2589,16 @@ registry.registerPath({
     body: jsonBody(createSecretSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/secrets/{id}/test",
+  tags: ["secrets"],
+  summary:
+    "Check a stored AI-provider key with one harmless call to its provider and record the verdict (never returns the value)",
+  request: { params: z.object({ companyId: z.string(), id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
 });
 
 registry.registerPath({

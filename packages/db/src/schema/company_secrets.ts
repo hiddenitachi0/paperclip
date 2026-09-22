@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, integer, jsonb, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { companySecretProviderConfigs } from "./company_secret_provider_configs.js";
@@ -18,6 +18,16 @@ export const companySecrets = pgTable(
     providerMetadata: jsonb("provider_metadata").$type<Record<string, unknown>>(),
     latestVersion: integer("latest_version").notNull().default(1),
     description: text("description"),
+    // DUR-3997: what the value is (see packages/shared/src/secret-kinds.ts).
+    // Null for secrets saved before kinds existed. Plain text on purpose, not
+    // a CHECK: a new kind must never need a migration to be storable.
+    kind: text("kind"),
+    // DUR-3997: outcome of the last Test (AI-provider keys only). The message
+    // is one plain sentence with anything key-shaped removed before it is
+    // written here.
+    lastTestAt: timestamp("last_test_at", { withTimezone: true }),
+    lastTestOk: boolean("last_test_ok"),
+    lastTestMessage: text("last_test_message"),
     lastResolvedAt: timestamp("last_resolved_at", { withTimezone: true }),
     lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
