@@ -24,6 +24,7 @@ import type {
   RemoteSecretImportRowResult,
   SecretProviderConfigDiscoveryPreviewResult,
   SecretBindingTargetType,
+  SecretKind,
   SecretProvider,
   SecretProviderConfigHealthResponse,
   SecretProviderConfigHealthStatus,
@@ -904,6 +905,28 @@ export function secretService(db: Db, rawDb: Db = db) {
    * wins. Used by the on-box deploy runner to authenticate `git fetch` against
    * private repos without ever exposing arbitrary secret values by id.
    */
+  /**
+   * DUR-3997: resolve a secret VALUE so the Test button can check it with its
+   * provider. Authorization is the board-only test route's; like the export
+   * path this asserts no per-consumer binding (the secret may be bound to
+   * nothing yet -- testing happens right after it is saved) but still records
+   * an access event, so every test shows up in the secret's audit trail.
+   */
+  async function resolveSecretValueForTest(
+    companyId: string,
+    secretId: string,
+    actor: { userId: string | null },
+  ): Promise<string> {
+    return (await resolveSecretValueInternal(companyId, secretId, "latest", {
+      accessContext: {
+        consumerType: "system",
+        consumerId: "secret-test",
+        actorType: actor.userId ? "user" : "system",
+        actorId: actor.userId,
+      },
+    })).value;
+  }
+
   async function resolveGitHubToken(companyId: string, context?: SecretConsumerContext): Promise<string | null> {
     for (const secretName of GITHUB_TOKEN_SECRET_NAMES) {
       const secret = await getByName(companyId, secretName).catch(() => null);
@@ -2108,6 +2131,7 @@ export function secretService(db: Db, rawDb: Db = db) {
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForExport,
     resolveSecretValueForPlugin,
+    resolveSecretValueForTest,
     resolveGitHubToken,
 
     create: async (
@@ -2123,6 +2147,8 @@ export function secretService(db: Db, rawDb: Db = db) {
         externalRef?: string | null;
         providerVersionRef?: string | null;
         providerMetadata?: Record<string, unknown> | null;
+        /** DUR-3997: what the value is; see packages/shared/src/secret-kinds.ts. */
+        kind?: SecretKind | null;
       },
       actor?: { userId?: string | null; agentId?: string | null },
     ) => {
@@ -2177,6 +2203,7 @@ export function secretService(db: Db, rawDb: Db = db) {
           providerMetadata: input.providerMetadata ?? null,
           latestVersion: 0,
           description: input.description ?? null,
+          kind: input.kind ?? null,
           createdByAgentId: actor?.agentId ?? null,
           createdByUserId: actor?.userId ?? null,
         })
@@ -2439,6 +2466,8 @@ export function secretService(db: Db, rawDb: Db = db) {
         description?: string | null;
         externalRef?: string | null;
         providerMetadata?: Record<string, unknown> | null;
+        /** DUR-3997: what the value is; see packages/shared/src/secret-kinds.ts. */
+        kind?: SecretKind | null;
       },
     ) => {
       const secret = await getById(secretId);
@@ -2523,6 +2552,12 @@ export function secretService(db: Db, rawDb: Db = db) {
             patch.externalRef === undefined ? secret.externalRef : patch.externalRef,
           providerMetadata:
             patch.providerMetadata === undefined ? secret.providerMetadata : patch.providerMetadata,
+          kind: patch.kind === undefined ? secret.kind : patch.kind,
+          // A different kind means a different provider to ask: the old
+          // verdict no longer says anything about this secret.
+          ...(patch.kind !== undefined && patch.kind !== secret.kind
+            ? { lastTestAt: null, lastTestOk: null, lastTestMessage: null }
+            : {}),
           deletedAt: deleting ? new Date() : secret.deletedAt,
           updatedAt: new Date(),
         })

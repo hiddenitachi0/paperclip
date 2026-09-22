@@ -32,6 +32,17 @@ describe("redactSensitive", () => {
     }
   });
 
+  // DUR-3997: the body that saves or rotates a company secret carries the
+  // plaintext as `value`, and a 409 on either used to put it in server.log.
+  it("redacts a `value` field, which is how a secret's plaintext travels in a request body", () => {
+    const out = redactSensitive({ name: "OPENAI_API_KEY", value: "sk-canary-1234567890", kind: "openai_api_key" }) as Record<string, unknown>;
+
+    expect(out.name).toBe("OPENAI_API_KEY");
+    expect(out.kind).toBe("openai_api_key");
+    expect(out.value).toBe("[REDACTED]");
+    expect((redactSensitive({ env: { A: { type: "plain", value: "hunter2" } } }) as any).env.A.value).toBe("[REDACTED]");
+  });
+
   it("does not redact a bare `token` field — pagination cursors and CSRF tokens are not credentials", () => {
     const out = redactSensitive({ token: "next-page-cursor", limit: 20 }) as Record<string, unknown>;
 

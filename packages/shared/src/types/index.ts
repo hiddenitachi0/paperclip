@@ -446,6 +446,7 @@ export type {
   EnvBinding,
   AgentEnvConfig,
   CompanySecret,
+  CompanySecretTestResult,
   CompanySecretProviderConfig,
   SecretProviderConfigPayload,
   SecretProviderConfigHealthDetails,
