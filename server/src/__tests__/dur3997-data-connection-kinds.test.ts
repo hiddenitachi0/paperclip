@@ -246,7 +246,8 @@ d("DUR-3997 data connection kinds", () => {
       target: "filer.butikken.no/rapporter",
       config: { kind: "sftp_file", host: "filer.butikken.no", port: 22, username: "paperclip", remotePath: "/rapporter" },
       credentialKind: "password",
-      credentialHint: `••••${SFTP_PASSWORD.slice(-4)}`,
+      // A password never shows its tail (it may be short); the mask is constant.
+      credentialHint: "••••",
       datasetsOffered: ["custom"],
     });
 

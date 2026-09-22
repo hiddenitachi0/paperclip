@@ -12,9 +12,16 @@ import { unprocessable } from "../../errors.js";
  * same two shapes: a single value is stored bare, several values as JSON.
  */
 
-/** The last four characters of the secret part, and nothing else. */
+/**
+ * The last four characters of the secret part, and nothing else -- but only
+ * for token-shaped values that are long by construction. A password can be
+ * short, so showing its tail could give away half of it; a private key's tail
+ * is just the PEM footer. Those two get a constant mask.
+ */
 export function credentialHint(credential: DataConnectionCredentialInput): string {
+  if (credential.kind === "password" || credential.kind === "private_key") return "••••";
   const secretPart = credentialSecretValues(credential)[0] ?? "";
+  if (secretPart.length < 16) return "••••";
   return `••••${secretPart.slice(-4)}`;
 }
 

@@ -47,6 +47,18 @@ const SENSITIVE_KEYS = new Set<string>([
   "key",
   "anthropic_api_key",
   "anthropicapikey",
+  // DUR-3997: every credential field a data-source form can carry, plus the
+  // `credential` object itself as belt and braces. A 400 from the new form is
+  // the most likely first outcome of a paste, and that line must not carry
+  // the pasted key.
+  "credential",
+  "consumerkey",
+  "consumer_key",
+  "consumersecret",
+  "consumer_secret",
+  "apitoken",
+  "api_token",
+  "passphrase",
 ]);
 
 const MAX_DEPTH = 6;
