@@ -62,6 +62,12 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 # every agent can write -- as root.
 RUN node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/server-secret-names.js >/tmp/paperclip-server-secret-names \
   && grep -q '^name BETTER_AUTH_SECRET$' /tmp/paperclip-server-secret-names
+# DUR-3994 Stage 2: the program files are copied into the final image owned by
+# root (see below). Also make sure none of them is writable by group or others,
+# so ownership alone decides: only root can change Paperclip's program. Only
+# touches the (normally zero) files that need it, so this layer stays small.
+RUN find /app \( -perm -g+w -o -perm -o+w \) ! -type l -exec chmod go-w {} + \
+  && test -z "$(find /app \( -perm -g+w -o -perm -o+w \) ! -type l -print -quit)"
 
 FROM base AS production
 ARG USER_UID=1000
@@ -126,6 +132,16 @@ COPY scripts/paperclip-git-pre-push-guard.sh /usr/local/share/paperclip/githooks
 RUN chmod +x /usr/local/share/paperclip/githooks/pre-push \
   && git config --system core.hooksPath /usr/local/share/paperclip/githooks
 
+# DUR-3994 Stage 2: the module guard every Paperclip server (and plugin
+# worker) Node process loads first (`--require`, see CMD). Agents run as the
+# same user and can write HOME, /paperclip and /tmp; without it Node loaded
+# a planted $HOME/.node_modules/<optional dependency> (ws tries `bufferutil`)
+# or a /paperclip/node_modules/<missing dependency of an add-on> into the
+# server. Root-owned and outside /app like the other files root trusts.
+COPY scripts/node-module-guard.cjs /usr/local/lib/paperclip/node-module-guard.cjs
+RUN chown root:root /usr/local/lib/paperclip/node-module-guard.cjs \
+  && chmod 0644 /usr/local/lib/paperclip/node-module-guard.cjs
+
 # uv: Python package/venv manager for agent workspaces that build Python apps
 # (e.g. the Nordstrand Django dashboard). The base image ships python3 but no
 # pip/ensurepip, so `uv venv` / `uv pip install -r requirements.txt` / `uv sync`
@@ -143,7 +159,17 @@ RUN chown root:root /usr/local/share/paperclip /usr/local/share/paperclip/server
 # Deliberately last: this is the only layer that changes on every commit, so
 # putting it after the network-fetching steps above keeps their cache valid
 # across ordinary deploys.
-COPY --chown=node:node --from=build /app /app
+#
+# DUR-3994 Stage 2: owned by root (no --chown), so the `node` user -- the
+# server AND every agent it runs -- can read Paperclip's program but not
+# change it. Before this, an agent could edit /app/server/dist, crash the
+# server (same user) and have its code run at the restart; or edit the CLI
+# that the deploy runner runs as root with `docker exec`. Nothing writes
+# under /app at run time: logs, data, caches, plugins and workspaces all live
+# under /paperclip (PAPERCLIP_HOME/HOME), and the one thing that used to
+# (building a bundled example plugin on install) now says plainly that it
+# must be built into the image.
+COPY --from=build /app /app
 
 ENV NODE_ENV=production \
   HOME=/paperclip \
@@ -158,7 +184,17 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
   OPENCODE_ALLOW_ALL_MODELS=true \
-  GEMINI_SANDBOX=false
+  GEMINI_SANDBOX=false \
+  TSX_DISABLE_CACHE=1
+# DUR-3994 Stage 2: TSX_DISABLE_CACHE. The server runs under the tsx loader
+# and loads the workspace packages (packages/db, shared, adapter-utils, ...)
+# as TypeScript source. tsx keeps the compiled result in /tmp/tsx-<uid> and,
+# on the next start, runs a cached entry without checking it against the
+# source -- and /tmp is writable by every agent (and survives a restart of
+# the container). With the cache off, tsx compiles the root-owned source
+# every start. Image-wide, so it also covers the deploy runner's root
+# `docker exec` of the CLI (which would otherwise use /tmp/tsx-0, a folder an
+# agent can create first).
 
 EXPOSE 3100
 
@@ -169,4 +205,6 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 # With it, Node keeps SIGUSR1 blocked in every thread, so the signal is simply
 # never delivered (the server neither stops nor hangs). The server runs from
 # the unreadable copy of Node installed above (see there).
-CMD ["/usr/local/lib/paperclip/node", "--disable-sigusr1", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
+# DUR-3994 Stage 2: --require node-module-guard.cjs, first, stops Node
+# loading modules from folders agents can write (see that file).
+CMD ["/usr/local/lib/paperclip/node", "--disable-sigusr1", "--require", "/usr/local/lib/paperclip/node-module-guard.cjs", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]

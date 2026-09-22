@@ -29,10 +29,10 @@ flock -n 9 || exit 0
 touch "$PROCESSED"
 
 comment() { # approval_id, body
-  docker exec -e BODY="$2" docker-server-1 sh -lc "$CLI approval comment $1 --body \"\$BODY\" $ARGS" >/dev/null 2>&1 || true
+  docker exec -e HOME=/root -e TSX_DISABLE_CACHE=1 -e BODY="$2" docker-server-1 sh -c "$CLI approval comment $1 --body \"\$BODY\" $ARGS" >/dev/null 2>&1 || true
 }
 
-LIST="$(docker exec docker-server-1 sh -lc "$CLI approval list -C $COMPANY_ID $ARGS" 2>/dev/null)" || {
+LIST="$(docker exec -e HOME=/root -e TSX_DISABLE_CACHE=1 docker-server-1 sh -c "$CLI approval list -C $COMPANY_ID $ARGS" 2>/dev/null)" || {
   log "poller: approval list failed (auth expired? re-run 'auth login')"; exit 0;
 }
 

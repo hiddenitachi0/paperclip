@@ -130,6 +130,14 @@ LOG="${PAPERCLIP_DEPLOY_RUNNER_LOG:-$REPO_DIR/deploy-runner.log}"
 DOCKER_SERVER_CONTAINER="${PAPERCLIP_DEPLOY_RUNNER_CONTAINER:-docker-server-1}"
 CLI='cd /app && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts'
 ARGS='--api-base http://127.0.0.1:3100 --data-dir /paperclip/cli-state --json'
+# DUR-3994 Stage 2: `docker exec` runs these commands as root inside the
+# server container, where the image sets HOME=/paperclip -- a folder every
+# agent can write. So: `sh -c`, never `sh -lc` (a login shell runs
+# $HOME/.profile, i.e. an agent's file, as root); HOME=/root, so Node's
+# global module folders ($HOME/.node_modules) are root's own; and tsx's
+# compile cache off (as root it would read /tmp/tsx-0, which an agent can
+# create and fill first).
+CLI_EXEC_ENV=(-e HOME=/root -e TSX_DISABLE_CACHE=1)
 # DUR-164: 8b89106e's own code booted clean and passed /api/health in ~11s
 # when reproduced in isolation (fresh embedded Postgres, all 142 migrations
 # incl. 0140/0141 applied) — no startup crash, no slow migration. The 90s
@@ -263,7 +271,7 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
 cli_json() { # subcommand args... -> JSON on stdout (runs inside the server container)
-  docker exec "$DOCKER_SERVER_CONTAINER" sh -lc "$CLI $* $ARGS" 2>>"$LOG"
+  docker exec "${CLI_EXEC_ENV[@]}" "$DOCKER_SERVER_CONTAINER" sh -c "$CLI $* $ARGS" 2>>"$LOG"
 }
 
 # Mirrors every comment attempt (delivered or not) into $STATUS_PATH inside
@@ -296,7 +304,7 @@ if os.environ.get("COMMIT"):
 print(json.dumps(entry))
 ' 2>>"$LOG")"
   [ -z "$line" ] && return 0
-  docker exec -e STATUS_LINE="$line" -e STATUS_PATH="$STATUS_PATH" "$DOCKER_SERVER_CONTAINER" sh -lc \
+  docker exec "${CLI_EXEC_ENV[@]}" -e STATUS_LINE="$line" -e STATUS_PATH="$STATUS_PATH" "$DOCKER_SERVER_CONTAINER" sh -c \
     'mkdir -p "$(dirname "$STATUS_PATH")" && printf "%s\n" "$STATUS_LINE" >> "$STATUS_PATH" && tail -n 500 "$STATUS_PATH" > "$STATUS_PATH.tmp" 2>/dev/null && mv "$STATUS_PATH.tmp" "$STATUS_PATH"' \
     >/dev/null 2>>"$LOG" || log "runner: $aid failed to record status line (non-fatal)"
 }
@@ -304,7 +312,7 @@ print(json.dumps(entry))
 comment() { # approval_id, company_id, body, outcome(optional), commit(optional) -> 0 if delivered, 1 if not (after retries)
   local aid="$1" company_id="$2" body="$3" outcome="${4:-}" commit="${5:-}" attempt=1 delivered=1
   while [ "$attempt" -le "$COMMENT_RETRIES" ]; do
-    if docker exec -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -lc \
+    if docker exec "${CLI_EXEC_ENV[@]}" -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -c \
          "$CLI approval comment $aid --body \"\$BODY\" $ARGS" >/dev/null 2>>"$LOG"; then
       delivered=0
       break
@@ -331,7 +339,7 @@ comment() { # approval_id, company_id, body, outcome(optional), commit(optional)
 # logged and swallowed, same as record_status.
 mirror_comment_to_linked_issues() { # approval_id, body
   local aid="$1" body="$2" issue_ids issue_id
-  issue_ids="$(docker exec "$DOCKER_SERVER_CONTAINER" sh -lc "$CLI approval issues $aid $ARGS" 2>>"$LOG" | \
+  issue_ids="$(docker exec "${CLI_EXEC_ENV[@]}" "$DOCKER_SERVER_CONTAINER" sh -c "$CLI approval issues $aid $ARGS" 2>>"$LOG" | \
     python3 -c 'import json,sys
 try:
     items = json.load(sys.stdin)
@@ -345,7 +353,7 @@ for i in items:
   [ -z "${issue_ids//[[:space:]]/}" ] && return 0
   while IFS= read -r issue_id; do
     [ -z "$issue_id" ] && continue
-    docker exec -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -lc \
+    docker exec "${CLI_EXEC_ENV[@]}" -e BODY="$body" "$DOCKER_SERVER_CONTAINER" sh -c \
       "$CLI issue comment $issue_id --body \"\$BODY\" $ARGS" >/dev/null 2>>"$LOG" || \
       log "runner: $aid could not mirror comment onto issue $issue_id (non-fatal)"
   done <<< "$issue_ids"

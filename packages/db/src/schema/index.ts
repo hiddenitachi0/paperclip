@@ -123,3 +123,4 @@ export { untrackedWriteIncidents } from "./untracked_write_incidents.js";
 export { telegramBots } from "./telegram_bots.js";
 export { dataConnections, dataDatasetSources, type DataConnectionObserved } from "./data_connections.js";
 export { dataReadEvents } from "./data_read_events.js";
+export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";

@@ -20,6 +20,90 @@ import {
   getAdapterPluginByType,
 } from "../services/adapter-plugin-store.js";
 import type { AdapterPluginRecord } from "../services/adapter-plugin-store.js";
+import {
+  adapterCodeRoot,
+  detectTrustedCodeMode,
+  getConfiguredTrustedCode,
+  isPathInside,
+  waitForConfiguredTrustedCode,
+  type TrustedCodeSubject,
+} from "../services/trusted-code.js";
+
+// ---------------------------------------------------------------------------
+// DUR-3994 Stage 2: add-on code fingerprints
+// ---------------------------------------------------------------------------
+
+/**
+ * How long the external-adapter loader (which starts when this module is
+ * first imported, before the server has a database) waits for the server to
+ * set up the trusted-code check. The server does that right after its
+ * database migrations, well within this.
+ */
+const TRUSTED_CODE_WAIT_MS = 10 * 60 * 1000;
+
+function adapterSubject(record: Pick<AdapterPluginRecord, "localPath" | "type">): TrustedCodeSubject {
+  return {
+    kind: "adapter",
+    codeRoot: adapterCodeRoot(record, getAdapterPluginsDir()),
+    label: record.type,
+  };
+}
+
+/**
+ * Refuse (throw, with a plain message) to load an external adapter whose
+ * files changed since Paperclip installed it. Enforced only where the
+ * server's own program files are read-only (see services/trusted-code.ts);
+ * elsewhere it returns at once without waiting for anything.
+ */
+async function assertAdapterCodeTrusted(record: Pick<AdapterPluginRecord, "localPath" | "type">): Promise<void> {
+  const configured = getConfiguredTrustedCode();
+  if (!configured && detectTrustedCodeMode() === "off") return;
+  const service = configured ?? (await waitForConfiguredTrustedCode(TRUSTED_CODE_WAIT_MS));
+  if (!service) {
+    throw new Error(
+      `Paperclip did not start the adapter "${record.type}" because it could not check its files ` +
+        `(the trusted-code check was never set up).`,
+    );
+  }
+  await service.assertTrusted(adapterSubject(record));
+}
+
+/**
+ * Record an external adapter's code folder as trusted, right after Paperclip
+ * itself installed it (install / reinstall routes). Throws if the files could
+ * not be recorded while the check is enforced.
+ */
+export async function recordExternalAdapterCode(
+  record: Pick<AdapterPluginRecord, "localPath" | "type">,
+  reason: "install" | "reinstall" | "uninstall",
+): Promise<void> {
+  const configured = getConfiguredTrustedCode();
+  if (!configured) {
+    if (detectTrustedCodeMode() === "off") return;
+    throw new Error("the trusted-code check is not set up yet");
+  }
+  await configured.record(adapterSubject(record), reason);
+}
+
+/**
+ * Before Paperclip runs npm in the shared managed adapter folder (install,
+ * reinstall, uninstall): make sure the folder is still what was recorded,
+ * or set it aside so the install starts clean (see
+ * TrustedCodeService.prepareSharedFolder). Throws only if the check could
+ * not be done while it is enforced.
+ */
+export async function prepareManagedAdapterFolder(): Promise<{ movedAsideTo: string | null }> {
+  const configured = getConfiguredTrustedCode();
+  if (!configured) {
+    if (detectTrustedCodeMode() === "off") return { movedAsideTo: null };
+    throw new Error("the trusted-code check is not set up yet");
+  }
+  return configured.prepareSharedFolder({
+    kind: "adapter",
+    codeRoot: adapterCodeRoot({ localPath: undefined }, getAdapterPluginsDir()),
+    label: "managed adapter folder",
+  });
+}
 
 // ---------------------------------------------------------------------------
 // In-memory UI parser cache
@@ -41,9 +125,10 @@ export function getOrExtractUiParserSource(adapterType: string): string | undefi
 
   const record = getAdapterPluginByType(adapterType);
   if (!record) return undefined;
+  if (!record.localPath && !isSafeNpmPackageName(record.packageName)) return undefined;
 
   const packageDir = resolvePackageDir(record);
-  const source = extractUiParserSource(packageDir, record.packageName);
+  const source = extractUiParserSource(packageDir, record.packageName, record);
   if (source) {
     uiParserCache.set(adapterType, source);
     logger.info(
@@ -58,10 +143,66 @@ export function getOrExtractUiParserSource(adapterType: string): string | undefi
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * An npm package name as npm itself allows it: "name" or "@scope/name", with
+ * no absolute path and no "." / ".." part. The name of an npm-installed
+ * adapter comes from adapter-plugins.json, which agents can write; without
+ * this, "../../somewhere" (or "/somewhere") made the server import a folder
+ * outside the checked managed folder.
+ */
+const NPM_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
+
+export function isSafeNpmPackageName(packageName: unknown): packageName is string {
+  if (typeof packageName !== "string" || packageName.length === 0 || packageName.length > 214) return false;
+  if (!NPM_PACKAGE_NAME_RE.test(packageName)) return false;
+  return packageName.split("/").every((part) => part !== "." && part !== "..");
+}
+
+function managedPackageDir(packageName: string): string {
+  if (!isSafeNpmPackageName(packageName)) {
+    throw new Error(
+      `Paperclip did not load the adapter package "${packageName}": that is not a valid npm package name ` +
+        `(adapter-plugins.json may have been edited).`,
+    );
+  }
+  return path.resolve(getAdapterPluginsDir(), "node_modules", packageName);
+}
+
 function resolvePackageDir(record: Pick<AdapterPluginRecord, "localPath" | "packageName">): string {
-  return record.localPath
-    ? path.resolve(record.localPath)
-    : path.resolve(getAdapterPluginsDir(), "node_modules", record.packageName);
+  return record.localPath ? path.resolve(record.localPath) : managedPackageDir(record.packageName);
+}
+
+function realpathOrResolve(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * DUR-3994 Stage 2: the package folder and the file that gets imported must
+ * both be inside the folder whose fingerprint was just checked. Otherwise a
+ * record, a package.json "main"/"exports" or a symbolic link could send the
+ * import to code nobody checked. Enforced only where the check is.
+ */
+function assertAdapterModuleInsideCodeRoot(
+  record: Pick<AdapterPluginRecord, "localPath" | "type">,
+  packageDir: string,
+  modulePath: string,
+): void {
+  const configured = getConfiguredTrustedCode();
+  const enforced = configured ? configured.mode === "enforce" : detectTrustedCodeMode() === "enforce";
+  if (!enforced) return;
+  const codeRoot = realpathOrResolve(adapterSubject(record).codeRoot);
+  for (const candidate of [packageDir, modulePath]) {
+    if (!isPathInside(realpathOrResolve(candidate), codeRoot)) {
+      throw new Error(
+        `Paperclip did not load the adapter "${record.type}" because its code (${candidate}) is outside ` +
+          `its own checked folder (${codeRoot}).`,
+      );
+    }
+  }
 }
 
 function resolvePackageEntryPoint(packageDir: string): string {
@@ -84,6 +225,7 @@ const SUPPORTED_PARSER_CONTRACT = "1";
 function extractUiParserSource(
   packageDir: string,
   packageName: string,
+  trustedRecord?: Pick<AdapterPluginRecord, "localPath" | "type">,
 ): string | undefined {
   const pkgJsonPath = path.join(packageDir, "package.json");
   const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
@@ -127,6 +269,20 @@ function extractUiParserSource(
     return undefined;
   }
 
+  // DUR-3994 Stage 2: this source is sent to the board's browser and run
+  // there. Serve it only if the file is exactly what Paperclip installed.
+  if (trustedRecord) {
+    const configured = getConfiguredTrustedCode();
+    const enforced = configured ? configured.mode === "enforce" : detectTrustedCodeMode() === "enforce";
+    if (enforced && !(configured?.checkFileSync(adapterSubject(trustedRecord), uiParserPath) ?? false)) {
+      logger.warn(
+        { packageName, uiParserFile },
+        "Refusing the adapter's UI parser: the file changed after the adapter was installed",
+      );
+      return undefined;
+    }
+  }
+
   try {
     const source = fs.readFileSync(uiParserPath, "utf-8");
     logger.info(
@@ -166,14 +322,18 @@ function validateAdapterModule(mod: unknown, packageName: string): ServerAdapter
 export async function loadExternalAdapterPackage(
   packageName: string,
   localPath?: string,
+  trustedRecord?: Pick<AdapterPluginRecord, "localPath" | "type">,
 ): Promise<ServerAdapterModule> {
-  const packageDir = localPath
-    ? path.resolve(localPath)
-    : path.resolve(getAdapterPluginsDir(), "node_modules", packageName);
+  const packageDir = localPath ? path.resolve(localPath) : managedPackageDir(packageName);
 
   const entryPoint = resolvePackageEntryPoint(packageDir);
   const modulePath = path.resolve(packageDir, entryPoint);
-  const uiParserSource = extractUiParserSource(packageDir, packageName);
+  assertAdapterModuleInsideCodeRoot(
+    trustedRecord ?? { localPath, type: packageName },
+    packageDir,
+    modulePath,
+  );
+  const uiParserSource = extractUiParserSource(packageDir, packageName, trustedRecord);
 
   logger.info({ packageName, packageDir, entryPoint, modulePath, hasUiParser: !!uiParserSource }, "Loading external adapter package");
 
@@ -189,7 +349,9 @@ export async function loadExternalAdapterPackage(
 
 async function loadFromRecord(record: AdapterPluginRecord): Promise<ServerAdapterModule | null> {
   try {
-    return await loadExternalAdapterPackage(record.packageName, record.localPath);
+    // DUR-3994 Stage 2: checked before anything from the package is imported.
+    await assertAdapterCodeTrusted(record);
+    return await loadExternalAdapterPackage(record.packageName, record.localPath, record);
   } catch (err) {
     logger.warn(
       { err, packageName: record.packageName, type: record.type },
@@ -209,9 +371,14 @@ export async function reloadExternalAdapter(
   const record = getAdapterPluginByType(type);
   if (!record) return null;
 
+  // DUR-3994 Stage 2: reloading reads the files from disk again; refuse if
+  // they changed since Paperclip installed them.
+  await assertAdapterCodeTrusted(record);
+
   const packageDir = resolvePackageDir(record);
   const entryPoint = resolvePackageEntryPoint(packageDir);
   const modulePath = path.resolve(packageDir, entryPoint);
+  assertAdapterModuleInsideCodeRoot(record, packageDir, modulePath);
   const fileUrl = `file://${modulePath}`;
 
   // Bust ESM module cache so re-import loads fresh code from disk.
@@ -239,7 +406,7 @@ export async function reloadExternalAdapter(
   const adapterModule = validateAdapterModule(mod, record.packageName);
 
   uiParserCache.delete(type);
-  const uiParserSource = extractUiParserSource(packageDir, record.packageName);
+  const uiParserSource = extractUiParserSource(packageDir, record.packageName, record);
   if (uiParserSource) {
     uiParserCache.set(adapterModule.type, uiParserSource);
   }

@@ -15,7 +15,7 @@ on:
       enforced_stages:
         description: "Stages whose checks must pass (space separated)"
         required: false
-        default: "0 1"
+        default: "0 1 2"
   workflow_call: {}
   pull_request:
     branches:
@@ -43,6 +43,14 @@ on:
       - "server/src/config.ts"
       - "packages/adapter-utils/src/server-env-secrets.ts"
       - "packages/db/src/backup-lib.ts"
+      - "server/src/services/trusted-code.ts"
+      - "server/src/services/plugin-loader.ts"
+      - "server/src/services/plugin-worker-manager.ts"
+      - "server/src/adapters/plugin-loader.ts"
+      - "packages/db/src/migrations/0169_trusted_code_fingerprints.sql"
+      - "scripts/node-module-guard.cjs"
+      - "scripts/deploy-runner.sh"
+      - "server/src/services/trusted-npm.ts"
   push:
     branches:
       - custom
@@ -69,6 +77,14 @@ on:
       - "server/src/config.ts"
       - "packages/adapter-utils/src/server-env-secrets.ts"
       - "packages/db/src/backup-lib.ts"
+      - "server/src/services/trusted-code.ts"
+      - "server/src/services/plugin-loader.ts"
+      - "server/src/services/plugin-worker-manager.ts"
+      - "server/src/adapters/plugin-loader.ts"
+      - "packages/db/src/migrations/0169_trusted_code_fingerprints.sql"
+      - "scripts/node-module-guard.cjs"
+      - "scripts/deploy-runner.sh"
+      - "server/src/services/trusted-npm.ts"
 
 jobs:
   isolation-acceptance:
@@ -88,7 +104,7 @@ jobs:
 
       - name: Run agent isolation acceptance test
         env:
-          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1' }}
+          ISOLATION_ENFORCED_STAGES: ${{ inputs.enforced_stages || '0 1 2' }}
           ISOLATION_SECRETS_MODE: ${{ matrix.secrets_mode }}
           COMPOSE_PROJECT_NAME: dur3994-isolation-${{ matrix.secrets_mode }}
         run: ./scripts/agent-isolation-acceptance.sh
