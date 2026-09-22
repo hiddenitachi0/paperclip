@@ -264,6 +264,7 @@ export const queryKeys = {
     experimentalSettings: ["instance", "experimental-settings"] as const,
     quietMode: ["instance", "quiet-mode"] as const,
     claudeAuth: ["instance", "claude-auth"] as const,
+    serverAnthropicKey: ["instance", "server-anthropic-key"] as const,
     security: ["instance", "security"] as const,
     crossCompanyAccess: (filters: { from: string | null; to: string | null; cursor: string | null; showRoutine: boolean }) =>
       ["instance", "cross-company-access", filters] as const,

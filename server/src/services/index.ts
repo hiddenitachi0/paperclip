@@ -138,6 +138,7 @@ export { boardAuthService } from "./board-auth.js";
 export { companyServiceTokenService } from "./company-service-tokens.js";
 export { instanceSettingsService } from "./instance-settings.js";
 export { instanceClaudeAuthService } from "./instance-claude-auth.js";
+export { serverAnthropicKeyService } from "./server-anthropic-key.js";
 export { bootstrapExecutionPolicyFromEnv } from "./execution-policy-bootstrap.js";
 export { cloudUpstreamService, reconcileCloudUpstreamRunsOnStartup } from "./cloud-upstreams.js";
 export { companyPortabilityService } from "./company-portability.js";

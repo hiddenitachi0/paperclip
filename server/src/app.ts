@@ -51,6 +51,7 @@ import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { instanceClaudeAuthRoutes } from "./routes/instance-claude-auth.js";
+import { instanceServerAnthropicKeyRoutes } from "./routes/instance-server-anthropic-key.js";
 import { crossCompanyInstructionRoutes } from "./routes/cross-company-instructions.js";
 import { instanceSecurityRoutes } from "./routes/instance-security.js";
 import { crossCompanyAccessLogRoutes } from "./routes/cross-company-access-log.js";
@@ -318,6 +319,7 @@ export async function createApp(
   api.use(inboxDismissalRoutes(db));
   api.use(instanceSettingsRoutes(db));
   api.use(instanceClaudeAuthRoutes(db));
+  api.use(instanceServerAnthropicKeyRoutes(db));
   api.use(telegramBotRoutes(db));
   // DUR-3972 S1: business-data sources. Off until enableBusinessData is on.
   api.use(dataConnectionRoutes(db));

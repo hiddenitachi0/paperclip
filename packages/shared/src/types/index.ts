@@ -653,6 +653,11 @@ export type {
   InstanceClaudeSignInSession,
   InstanceClaudeSignInStatus,
 } from "./instance-claude-auth.js";
+export type {
+  InstanceServerAnthropicKeyStatus,
+  InstanceServerAnthropicKeyTestResult,
+  ServerAnthropicKeySource,
+} from "./instance-server-anthropic-key.js";
 export {
   ADMIN_AUTH_CHECK_STATUSES,
   ADMIN_AUTH_CHECK_TRIGGERS,

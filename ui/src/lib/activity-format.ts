@@ -93,6 +93,9 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "instance.claude_auth.removed": "removed the shared Claude sign-in",
   "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
   "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
+  // DUR-3995: Paperclip's own Claude key (not the one agents use).
+  "instance.server_anthropic_key.saved": "changed Paperclip's own Claude key",
+  "instance.server_anthropic_key.removed": "removed Paperclip's own Claude key",
   // DUR-3965: quiet mode is still on and every agent in every company is
   // still frozen. The row carries the whole plain sentence in details.message.
   "instance.quiet_mode_stuck": "reported that every agent is still paused (quiet mode)",
@@ -189,6 +192,9 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "instance.claude_auth.removed": "removed the shared Claude sign-in",
   "instance.claude_auth.check_failed": "found that the shared Claude sign-in stopped working",
   "instance.claude_auth.expiring": "warned that the shared Claude sign-in expires soon",
+  // DUR-3995: Paperclip's own Claude key (not the one agents use).
+  "instance.server_anthropic_key.saved": "changed Paperclip's own Claude key",
+  "instance.server_anthropic_key.removed": "removed Paperclip's own Claude key",
   "instance.quiet_mode_stuck": "reported that every agent is still paused (quiet mode)",
   "agent.terminated": "terminated the agent",
   "heartbeat.invoked": "invoked a heartbeat",

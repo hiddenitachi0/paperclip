@@ -159,6 +159,7 @@ import {
   sendLaneAMessageSchema,
   sendCrossCompanyInstructionSchema,
   saveInstanceClaudeAuthTokenSchema,
+  saveInstanceServerAnthropicKeySchema,
   signOutEverywhereSchema,
   submitInstanceClaudeSignInCodeSchema,
 } from "@paperclipai/shared";
@@ -793,6 +794,12 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
   "GET /api/instance/claude-auth/sign-in/{sessionId}",
   "POST /api/instance/claude-auth/sign-in/{sessionId}/code",
   "POST /api/instance/claude-auth/sign-in/{sessionId}/cancel",
+  // DUR-3995: Paperclip's own Claude key. Admin-only including the read --
+  // the page exists to change the server's own credential.
+  "GET /api/instance/server-anthropic-key",
+  "PUT /api/instance/server-anthropic-key",
+  "POST /api/instance/server-anthropic-key/test",
+  "DELETE /api/instance/server-anthropic-key",
   "GET /api/instance/security",
   "POST /api/instance/security/check",
   "POST /api/instance/security/sign-out-everywhere",
@@ -3155,6 +3162,27 @@ for (const route of [
   ["get", "/api/instance/claude-auth/sign-in/{sessionId}", "Poll an interactive Claude sign-in", undefined],
   ["post", "/api/instance/claude-auth/sign-in/{sessionId}/code", "Hand the code from claude.com to the interactive sign-in", submitInstanceClaudeSignInCodeSchema],
   ["post", "/api/instance/claude-auth/sign-in/{sessionId}/cancel", "Cancel an interactive Claude sign-in", undefined],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["instance"],
+    summary: route[2],
+    ...(route[3] ? { body: route[3] } : {}),
+  });
+}
+
+// ─── Paperclip's own Claude key (DUR-3995) ─────────────────────────
+// The Anthropic API key the SERVER itself calls Claude with (quick answers,
+// request routing, the done-gate check, the business-data trial) -- not the
+// credential agents run on, and never handed to one. Instance-admin only,
+// including the read. No response here carries the key; at most its last four
+// characters as `hint`.
+for (const route of [
+  ["get", "/api/instance/server-anthropic-key", "Show whether Paperclip has its own Claude key (never the key)", undefined],
+  ["put", "/api/instance/server-anthropic-key", "Set or replace Paperclip's own Claude key and check it with one Claude call", saveInstanceServerAnthropicKeySchema],
+  ["post", "/api/instance/server-anthropic-key/test", "Check the key Paperclip would use with one minimal Claude call", undefined],
+  ["delete", "/api/instance/server-anthropic-key", "Remove Paperclip's own Claude key", undefined],
 ] as const) {
   registerCurrentRoute({
     method: route[0],

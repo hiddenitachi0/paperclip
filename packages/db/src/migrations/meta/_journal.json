@@ -1184,6 +1184,13 @@
       "when": 1787160400000,
       "tag": "0169_trusted_code_fingerprints",
       "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1787160410000,
+      "tag": "0170_instance_server_anthropic_key",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { ServerClaudeKeyCard } from "@/components/ServerClaudeKeyCard";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -207,6 +208,7 @@ export function InstanceClaudeAuth() {
         <p className="text-sm text-muted-foreground">
           Sign in once with your Claude subscription and every Claude agent on this server uses it — no
           per-agent token to create or bind. Agents that already have their own token keep using theirs.
+          Paperclip's own Claude key, further down, is a separate thing: agents never use it.
         </p>
       </div>
 
@@ -439,6 +441,10 @@ export function InstanceClaudeAuth() {
           </div>
         </div>
       </section>
+
+      {/* DUR-3995: the key Paperclip itself calls Claude with — a different
+          credential from the sign-in above, and never handed to an agent. */}
+      <ServerClaudeKeyCard />
 
       <p className="text-xs text-muted-foreground">
         Claude CLI on this server: {status.cli.version ?? `not found (command "${status.cli.command}")`}.

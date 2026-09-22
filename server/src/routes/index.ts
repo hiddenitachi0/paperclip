@@ -25,6 +25,7 @@ export { llmRoutes } from "./llms.js";
 export { accessRoutes } from "./access.js";
 export { instanceSettingsRoutes } from "./instance-settings.js";
 export { instanceClaudeAuthRoutes } from "./instance-claude-auth.js";
+export { instanceServerAnthropicKeyRoutes } from "./instance-server-anthropic-key.js";
 export { instanceSecurityRoutes } from "./instance-security.js";
 export { telegramBotRoutes } from "./telegram-bots.js";
 export { dataConnectionRoutes } from "./data-connections.js";

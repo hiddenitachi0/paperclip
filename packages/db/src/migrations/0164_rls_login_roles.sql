@@ -199,6 +199,10 @@ DECLARE
     'heartbeat_runs',
     'inbox_dismissals',
     'instance_claude_auth',
+    -- DUR-3995. Created (and granted on) in
+    -- 0170_instance_server_anthropic_key.sql; instance-wide (no company_id),
+    -- so it is in this list only, not in the company-scoped one below.
+    'instance_server_anthropic_key',
     'instance_settings',
     'instance_user_roles',
     'invites',
