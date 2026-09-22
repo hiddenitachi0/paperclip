@@ -182,6 +182,7 @@ export function telegramBotService(db: Db, deps: { fetchImpl?: typeof fetch } = 
           provider: "local_encrypted",
           value: token,
           description: "Bot-token fra BotFather. Brukes bare av Telegram-koblingen.",
+          kind: "telegram_bot_token",
         },
         // agentId is null on purpose: this secret is created by the operator,
         // never by an agent, so it can never qualify for the DUR-3980

@@ -37,6 +37,7 @@ const mockSecretsApi = vi.hoisted(() => ({
   remove: vi.fn(),
   usage: vi.fn(),
   accessEvents: vi.fn(),
+  test: vi.fn(),
 }));
 
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
@@ -517,6 +518,97 @@ describe("Secrets page layout", () => {
     expect(document.body.textContent).toContain("Secret references");
     expect(document.body.textContent).toContain("CodexCoder");
     expect(document.body.textContent).toContain("env.OPENAI_API_KEY");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  // DUR-3997: a secret that knows what it is shows its kind in the list, and
+  // an AI-provider key can be tested from its detail sheet.
+  it("shows a secret's kind and tests an AI-provider key from the detail sheet", async () => {
+    const row = {
+      id: "secret-openai",
+      companyId: "company-1",
+      key: "openai_api_key",
+      name: "OPENAI_API_KEY",
+      provider: "local_encrypted",
+      status: "active",
+      managedMode: "paperclip_managed",
+      externalRef: null,
+      providerConfigId: null,
+      providerMetadata: null,
+      latestVersion: 1,
+      description: null,
+      kind: "openai_api_key",
+      lastTestAt: new Date("2026-09-23T10:00:00.000Z"),
+      lastTestOk: false,
+      lastTestMessage: "OpenAI did not accept this key (Incorrect API key provided).",
+      lastResolvedAt: null,
+      lastRotatedAt: null,
+      deletedAt: null,
+      createdByAgentId: null,
+      createdByUserId: "user-1",
+      referenceCount: 0,
+      createdAt: new Date("2026-05-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-05-06T00:00:00.000Z"),
+    };
+    mockSecretsApi.list.mockResolvedValue([row]);
+    mockSecretsApi.usage.mockResolvedValue({ secretId: "secret-openai", bindings: [] });
+    mockSecretsApi.accessEvents.mockResolvedValue([]);
+    mockSecretsApi.test.mockResolvedValue({
+      ok: true,
+      message: "OpenAI answered. This key works.",
+      secret: { ...row, lastTestOk: true, lastTestMessage: "OpenAI answered. This key works." },
+    });
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <Secrets />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    // The Kind column: the plain label plus the last verdict, never an id.
+    expect(container.textContent).toContain("OpenAI API key");
+    expect(container.textContent).not.toContain("openai_api_key");
+    expect(container.querySelector('[aria-label="The provider did not accept this key"]')).not.toBeNull();
+
+    const openButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Open",
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      openButton?.click();
+    });
+    await flushReact();
+
+    expect(document.body.textContent).toContain("Last test");
+    expect(document.body.textContent).toContain("OpenAI did not accept this key (Incorrect API key provided).");
+
+    const testButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.includes("Test key"),
+    ) as HTMLButtonElement | undefined;
+    expect(testButton).toBeDefined();
+    await act(async () => {
+      testButton?.click();
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(mockSecretsApi.test).toHaveBeenCalledWith("company-1", "secret-openai");
+    expect(mockPushToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "The key works", body: "OpenAI answered. This key works.", tone: "success" }),
+    );
 
     await act(async () => {
       root.unmount();

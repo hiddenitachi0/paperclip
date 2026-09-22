@@ -13,6 +13,8 @@
  * name at runtime.
  */
 
+import type { SecretKind } from "./secret-kinds.js";
+
 export type IntegrationKeyCategory = "vcs" | "llm" | "chat" | "other";
 
 export interface IntegrationKeyDescriptor {
@@ -41,6 +43,12 @@ export interface IntegrationKeyDescriptor {
    * discovering a missing permission only after an agent's push is rejected.
    */
   scopeGuidance?: string;
+  /**
+   * DUR-3997: what kind of secret this env var carries (see secret-kinds.ts),
+   * so the Add-integration-token dialog can store the kind alongside the
+   * value and the Test button knows which provider to ask.
+   */
+  kind?: SecretKind;
 }
 
 /**
@@ -65,6 +73,7 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
     gitPush: true,
     secretNameHints: ["GITHUB_TOKEN", "GH_TOKEN", "PAPERCLIP_GITHUB_TOKEN"],
     scopeGuidance: GITHUB_TOKEN_SCOPE_GUIDANCE,
+    kind: "github_token",
   },
   {
     key: "GH_TOKEN",
@@ -74,6 +83,7 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
     gitPush: true,
     secretNameHints: ["GH_TOKEN", "GITHUB_TOKEN"],
     scopeGuidance: GITHUB_TOKEN_SCOPE_GUIDANCE,
+    kind: "github_token",
   },
   {
     key: "CLAUDE_CODE_OAUTH_TOKEN",
@@ -82,30 +92,42 @@ export const KNOWN_INTEGRATION_ENV_KEYS: readonly IntegrationKeyDescriptor[] = [
       "OAuth token for Claude Code subscription billing (the claude_local adapter). From `claude setup-token`. " +
       "Tip: you usually don't need this per agent — sign in once for every Claude agent under Instance settings → Claude sign-in.",
     category: "llm",
+    kind: "claude_subscription_token",
   },
   {
     key: "ANTHROPIC_API_KEY",
     label: "Anthropic API key",
     description: "API key for Claude models via the metered Anthropic API.",
     category: "llm",
+    kind: "anthropic_api_key",
   },
   {
     key: "OPENAI_API_KEY",
     label: "OpenAI API key",
     description: "API key for OpenAI / GPT models.",
     category: "llm",
+    kind: "openai_api_key",
+  },
+  {
+    key: "OPENROUTER_API_KEY",
+    label: "OpenRouter API key",
+    description: "API key for openrouter.ai, which fronts many models through one account.",
+    category: "llm",
+    kind: "openrouter_api_key",
   },
   {
     key: "GEMINI_API_KEY",
     label: "Google Gemini API key",
     description: "API key for Google Gemini models.",
     category: "llm",
+    kind: "google_api_key",
   },
   {
     key: "SLACK_BOT_TOKEN",
     label: "Slack bot token",
     description: "Bot token (xoxb-…) for posting to Slack.",
     category: "chat",
+    kind: "slack_bot_token",
   },
 ] as const;
 

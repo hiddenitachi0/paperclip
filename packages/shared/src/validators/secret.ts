@@ -6,6 +6,7 @@ import {
   SECRET_PROVIDERS,
   SECRET_STATUSES,
 } from "../constants.js";
+import { SECRET_KIND_IDS } from "../secret-kinds.js";
 
 export const envBindingPlainSchema = z.object({
   type: z.literal("plain"),
@@ -38,6 +39,7 @@ export const createSecretSchema = z.object({
   externalRef: z.string().optional().nullable(),
   providerMetadata: z.record(z.string(), z.unknown()).optional().nullable(),
   providerVersionRef: z.string().optional().nullable(),
+  kind: z.enum(SECRET_KIND_IDS).optional().nullable(),
 }).superRefine((value, ctx) => {
   if ((value.managedMode ?? "paperclip_managed") === "external_reference") {
     if (!value.externalRef?.trim()) {
@@ -84,6 +86,7 @@ export const updateSecretSchema = z.object({
   description: z.string().optional().nullable(),
   externalRef: z.string().optional().nullable(),
   providerMetadata: z.record(z.string(), z.unknown()).optional().nullable(),
+  kind: z.enum(SECRET_KIND_IDS).optional().nullable(),
 });
 
 export type UpdateSecret = z.infer<typeof updateSecretSchema>;

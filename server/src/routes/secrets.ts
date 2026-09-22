@@ -19,8 +19,9 @@ import { companyScope, companyScopeFromParam } from "../middleware/company-scope
 import { notFound, unprocessable } from "../errors.js";
 import { and, eq } from "drizzle-orm";
 import { companySecretBindings } from "@paperclipai/db";
+import { secretTestService, type SecretTestService } from "../services/secret-tests.js";
 
-export function secretRoutes(rawDb: Db) {
+export function secretRoutes(rawDb: Db, deps: { secretTests?: SecretTestService } = {}) {
   const router = Router();
   // DUR-348 (DUR-277 Wave 2): this file's own request-scoped instance; the
   // raw `rawDb` stays unwrapped for the pre-scope lookups the (b)-category
@@ -30,6 +31,8 @@ export function secretRoutes(rawDb: Db) {
   const svc = secretService(db, rawDb);
   const rawSvc = secretService(rawDb);
   const defaultProvider = getConfiguredSecretProvider();
+  // DUR-3997: the Test button. Injectable so route tests never touch a provider.
+  const secretTests = deps.secretTests ?? secretTestService(db, { secrets: svc });
 
   // Instance-admin-only: resolves the company's GITHUB_TOKEN/GH_TOKEN secret
   // value by name convention (see resolveGitHubToken), never by arbitrary
@@ -352,6 +355,7 @@ export function secretRoutes(rawDb: Db) {
         externalRef: req.body.externalRef,
         providerVersionRef: req.body.providerVersionRef,
         providerMetadata: req.body.providerMetadata,
+        kind: req.body.kind,
       },
       { userId: req.actor.userId ?? "board", agentId: null },
     );
@@ -363,10 +367,45 @@ export function secretRoutes(rawDb: Db) {
       action: "secret.created",
       entityType: "secret",
       entityId: created.id,
-      details: { name: created.name, provider: created.provider },
+      details: { name: created.name, provider: created.provider, kind: created.kind },
     });
 
     res.status(201).json(created);
+    },
+  );
+
+  /**
+   * DUR-3997: check a stored AI-provider key with one harmless call to its
+   * provider and record the verdict on the row. Board-only, same access rule
+   * as listing the company's secrets. Takes no body: the value is read from
+   * the store, so nothing secret can arrive in a request that might be
+   * logged. The answer is {ok, message, secret}; the message never contains
+   * the value, and a refused key is a 200 with ok:false, not an error.
+   */
+  router.post(
+    "/companies/:companyId/secrets/:id/test",
+    companyScopeFromParam(rawDb, (req, companyId) => {
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+    }),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const id = req.params.id as string;
+      const result = await secretTests.test(companyId, id, { userId: req.actor.userId ?? null });
+
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "secret.tested",
+        entityType: "secret",
+        entityId: result.secret.id,
+        // The verdict only. The sentence is scrubbed, but the activity feed
+        // does not need it: the secret's own detail page shows it.
+        details: { name: result.secret.name, kind: result.secret.kind, ok: result.ok },
+      });
+
+      res.json(result);
     },
   );
 
@@ -559,6 +598,7 @@ export function secretRoutes(rawDb: Db) {
       description: req.body.description,
       externalRef: req.body.externalRef,
       providerMetadata: req.body.providerMetadata,
+      kind: req.body.kind,
     });
 
     if (!updated) {

@@ -12,6 +12,8 @@ import type {
   SecretProviderConfigHealthResponse,
   SecretProviderDescriptor,
   SecretStatus,
+  SecretKind,
+  CompanySecretTestResult,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -31,6 +33,8 @@ export interface CreateSecretInput {
   providerVersionRef?: string | null;
   providerConfigId?: string | null;
   providerMetadata?: Record<string, unknown> | null;
+  /** DUR-3997: what the value is (an OpenAI key, a Fiken token…). */
+  kind?: SecretKind | null;
 }
 
 export interface SecretProviderHealthResponse {
@@ -51,6 +55,7 @@ export interface UpdateSecretInput {
   description?: string | null;
   externalRef?: string | null;
   providerMetadata?: Record<string, unknown> | null;
+  kind?: SecretKind | null;
 }
 
 export interface RotateSecretInput {
@@ -145,6 +150,13 @@ export const secretsApi = {
   archive: (id: string) =>
     api.patch<CompanySecret>(`/secrets/${id}`, { status: "archived" satisfies SecretStatus }),
   remove: (id: string) => api.delete<{ ok: true }>(`/secrets/${id}`),
+  /**
+   * DUR-3997: check a stored AI-provider key with one harmless call to its
+   * provider. Sends no body; the value is read from the store. A refused key
+   * is a normal answer with ok:false, not an error.
+   */
+  test: (companyId: string, id: string) =>
+    api.post<CompanySecretTestResult>(`/companies/${companyId}/secrets/${id}/test`, undefined),
   usage: (id: string) => api.get<SecretUsageResponse>(`/secrets/${id}/usage`),
   accessEvents: (id: string) => api.get<SecretAccessEvent[]>(`/secrets/${id}/access-events`),
   remoteImportPreview: (companyId: string, data: RemoteImportPreviewInput) =>
