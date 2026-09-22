@@ -89,4 +89,19 @@ describe("redactSensitive", () => {
     expect(json).not.toContain("null");
     expect(json).not.toContain("[1,2,3]");
   });
+  // DUR-3995 review finding 1: the HTTP logger copies req.body into the log
+  // line on every 4xx/5xx, and on this server every agent can read that file.
+  // A body whose one secret is called `key` or `token` must not land there.
+  it("redacts a secret carried in a bare `key` field", () => {
+    const out = redactSensitive({
+      key: "sk-ant-api03-CANARY-should-never-be-logged",
+      authToken: "sk-ant-oat01-CANARY-should-never-be-logged",
+      name: "kept",
+    }) as Record<string, unknown>;
+
+    expect(JSON.stringify(out)).not.toContain("CANARY");
+    expect(out.key).toBe("[REDACTED]");
+    expect(out.authToken).toBe("[REDACTED]");
+    expect(out.name).toBe("kept");
+  });
 });

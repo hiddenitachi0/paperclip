@@ -1195,6 +1195,11 @@ export type {
   InstanceClaudeSignInSession,
   InstanceClaudeSignInStatus,
 } from "./types/instance-claude-auth.js";
+export type {
+  InstanceServerAnthropicKeyStatus,
+  InstanceServerAnthropicKeyTestResult,
+  ServerAnthropicKeySource,
+} from "./types/instance-server-anthropic-key.js";
 export {
   CLAUDE_OAUTH_TOKEN_PATTERN,
   saveInstanceClaudeAuthTokenSchema,
@@ -1202,6 +1207,11 @@ export {
   type SaveInstanceClaudeAuthTokenInput,
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./validators/instance-claude-auth.js";
+export {
+  ANTHROPIC_API_KEY_PATTERN,
+  saveInstanceServerAnthropicKeySchema,
+  type SaveInstanceServerAnthropicKeyInput,
+} from "./validators/instance-server-anthropic-key.js";
 export type {
   TelegramBotCheckResult,
   TelegramBotSummary,

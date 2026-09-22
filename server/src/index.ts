@@ -39,6 +39,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { captureServerOnlyAnthropicApiKey, resolveMigrationConnectionString } from "./env-values.js";
+import { installServerAnthropicKeyReader } from "./services/server-anthropic-key.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
@@ -599,6 +600,14 @@ export async function startServer(): Promise<StartedServer> {
     }
     configureTrustedCode(trustedCode);
   }
+
+  // DUR-3995: Paperclip's own Claude key, when an instance admin set one from
+  // the settings page. Decrypted once here and held in memory (never in
+  // process.env, so nothing the server spawns can inherit it), so the first
+  // quick answer after a restart already has it. Failures are logged, not
+  // fatal: the server still starts and falls back to
+  // PAPERCLIP_SERVER_ANTHROPIC_API_KEY if that is set.
+  await installServerAnthropicKeyReader(db as any);
 
   if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(

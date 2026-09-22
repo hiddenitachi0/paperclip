@@ -753,6 +753,11 @@ export {
   type SubmitInstanceClaudeSignInCodeInput,
 } from "./instance-claude-auth.js";
 export {
+  ANTHROPIC_API_KEY_PATTERN,
+  saveInstanceServerAnthropicKeySchema,
+  type SaveInstanceServerAnthropicKeyInput,
+} from "./instance-server-anthropic-key.js";
+export {
   MAX_TELEGRAM_BOT_ALLOWED_USERS,
   TELEGRAM_BOT_TOKEN_PATTERN,
   TELEGRAM_USER_ID_PATTERN,

@@ -100,7 +100,7 @@ describe("instance Claude auth routes", () => {
 
   it("only an instance admin may save, check, remove, or sign in", async () => {
     const app = createApp(member);
-    expect((await request(app).post("/api/instance/claude-auth/token").send({ token: TOKEN })).status).toBe(403);
+    expect((await request(app).post("/api/instance/claude-auth/token").send({ authToken: TOKEN })).status).toBe(403);
     expect((await request(app).post("/api/instance/claude-auth/check")).status).toBe(403);
     expect((await request(app).delete("/api/instance/claude-auth")).status).toBe(403);
     expect((await request(app).post("/api/instance/claude-auth/sign-in")).status).toBe(403);
@@ -110,11 +110,11 @@ describe("instance Claude auth routes", () => {
 
   it("saves a pasted token through the service with the acting user, after validation", async () => {
     const app = createApp(admin);
-    const bad = await request(app).post("/api/instance/claude-auth/token").send({ token: "sk-ant-api03-wrong-kind" });
+    const bad = await request(app).post("/api/instance/claude-auth/token").send({ authToken: "sk-ant-api03-wrong-kind" });
     expect(bad.status).toBe(400);
     expect(service.saveToken).not.toHaveBeenCalled();
 
-    const ok = await request(app).post("/api/instance/claude-auth/token").send({ token: `  ${TOKEN}  ` });
+    const ok = await request(app).post("/api/instance/claude-auth/token").send({ authToken: `  ${TOKEN}  ` });
     expect(ok.status).toBe(200);
     expect(service.saveToken).toHaveBeenCalledWith({ token: TOKEN, source: "pasted", userId: "user-1" });
     expect(JSON.stringify(ok.body)).not.toContain(TOKEN);
@@ -122,7 +122,7 @@ describe("instance Claude auth routes", () => {
 
   it("surfaces a rejected token as 422 with the service's plain-language message", async () => {
     service.saveToken.mockRejectedValue(new HttpError(422, "Claude rejected this token. Sign in again."));
-    const res = await request(createApp(admin)).post("/api/instance/claude-auth/token").send({ token: TOKEN });
+    const res = await request(createApp(admin)).post("/api/instance/claude-auth/token").send({ authToken: TOKEN });
     expect(res.status).toBe(422);
     expect(res.body.error).toMatch(/rejected this token/);
   });

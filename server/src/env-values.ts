@@ -68,12 +68,63 @@ export function resetCapturedServerAnthropicApiKeyForTests(): void {
 }
 
 /**
+ * DUR-3995: the key an instance admin set from the settings page.
+ *
+ * It is kept encrypted in the database and decrypted into memory by
+ * server/src/services/server-anthropic-key.ts, which registers a reader here.
+ * This module deliberately knows nothing about the database (it must stay
+ * cheap and free of config.ts), so the dependency points this way only: the
+ * service pushes a reader in, `readAnthropicApiKey()` asks it first.
+ *
+ * The value never goes into `process.env` -- exactly like the captured
+ * server-only variable it takes precedence over -- so nothing the server
+ * spawns can inherit it (see server-secrets.ts and
+ * packages/adapter-utils/src/server-env-secrets.ts `stripServerSecrets`).
+ */
+type StoredAnthropicApiKeyReader = () => string | undefined;
+let storedAnthropicApiKeyReader: StoredAnthropicApiKeyReader | null = null;
+
+export function registerStoredAnthropicApiKeyReader(reader: StoredAnthropicApiKeyReader | null): void {
+  storedAnthropicApiKeyReader = reader;
+}
+
+function readStoredAnthropicApiKey(): string | undefined {
+  if (!storedAnthropicApiKeyReader) return undefined;
+  try {
+    return readNonBlankEnvValue(storedAnthropicApiKeyReader());
+  } catch {
+    // A broken reader must never take the server's fallback key away.
+    return undefined;
+  }
+}
+
+/**
  * The Anthropic API key the server itself uses, or undefined when none is set
- * (unset, empty and whitespace-only all count as none). Order: the captured
- * server-only key, the server-only variable if not captured yet, then plain
- * ANTHROPIC_API_KEY (installs that deliberately share one key with agents).
+ * (unset, empty and whitespace-only all count as none). Order: the key set in
+ * the settings page (DUR-3995), the captured server-only key, the server-only
+ * variable if not captured yet, then plain ANTHROPIC_API_KEY (installs that
+ * deliberately share one key with agents).
+ *
+ * The stored key is consulted only for the real process environment: a caller
+ * that passes its own `env` is asking what THAT environment says.
  */
 export function readAnthropicApiKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env === process.env) {
+    const stored = readStoredAnthropicApiKey();
+    if (stored !== undefined) return stored;
+  }
+  return readAnthropicApiKeyIgnoringStored(env);
+}
+
+/**
+ * The same resolution WITHOUT the key set in the settings page: what this
+ * server would use if nothing were stored. The settings page asks this to
+ * tell "using the key set up on the server itself" apart from "no key at
+ * all", without ever handling either value.
+ */
+export function readAnthropicApiKeyIgnoringStored(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
   return (
     (env === process.env ? readNonBlankEnvValue(readHeldServerSecret(SERVER_ANTHROPIC_API_KEY_ENV)) : undefined) ??
     readNonBlankEnv(SERVER_ANTHROPIC_API_KEY_ENV, env) ??

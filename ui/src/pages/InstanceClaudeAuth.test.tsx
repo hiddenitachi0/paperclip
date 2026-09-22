@@ -20,6 +20,27 @@ const mockApi = vi.hoisted(() => ({
 const mockPushToast = vi.hoisted(() => vi.fn());
 
 vi.mock("@/api/instanceClaudeAuth", () => ({ instanceClaudeAuthApi: mockApi }));
+// DUR-3995: the page also renders the "Paperclip's own Claude key" card,
+// which has its own API. Stub it so this test stays about the sign-in.
+vi.mock("@/api/instanceServerAnthropicKey", () => ({
+  instanceServerAnthropicKeyApi: {
+    get: vi.fn().mockResolvedValue({
+      configured: false,
+      source: null,
+      headline: "Paperclip has no Claude key of its own yet.",
+      hint: null,
+      fingerprint: null,
+      savedAt: null,
+      savedByUserId: null,
+      lastTestAt: null,
+      lastTestOk: null,
+      lastTestMessage: null,
+    }),
+    save: vi.fn(),
+    test: vi.fn(),
+    remove: vi.fn(),
+  },
+}));
 vi.mock("../context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
 vi.mock("../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: mockPushToast }) }));
 
