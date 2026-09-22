@@ -21,6 +21,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { SecretKind } from "@paperclipai/shared";
+import { isNonPublicAddress, validateAndResolveFetchUrl, type DnsLookupAll } from "./safe-outbound-fetch.js";
 import {
   SERVER_ANTHROPIC_KEY_TEST_MODEL,
   describeAnthropicTestError,
@@ -76,6 +77,10 @@ export function parseLocalModelEndpoint(value: string): { baseUrl: string; apiKe
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   if (url.username || url.password) return null;
+  // A query string or fragment on the address would ride along on every
+  // request, so drop them here rather than append /v1/models after them.
+  url.search = "";
+  url.hash = "";
   const baseUrl = url.toString().replace(/\/+$/, "");
   const apiKey = rest.join(" ").trim();
   return { baseUrl, apiKey: apiKey.length > 0 ? apiKey : null };
@@ -149,6 +154,13 @@ async function probeModelsList(input: {
   url: string;
   headers: Record<string, string>;
   fetchImpl: ProbeFetch;
+  /**
+   * Whether a short piece of the provider's error body may be quoted in the
+   * verdict. True for the known cloud providers, whose messages are useful
+   * ("invalid x-api-key"); false for an operator-supplied server, whose reply
+   * is not ours to repeat.
+   */
+  echoBody: boolean;
 }): Promise<SecretProbeResult> {
   let lastMessage = `Could not reach ${input.provider}.`;
   for (let attempt = 0; attempt <= PROBE_MAX_RETRIES; attempt += 1) {
@@ -167,7 +179,7 @@ async function probeModelsList(input: {
     if (response.ok) {
       return { ok: true, message: `${input.provider} answered. This key works.` };
     }
-    const hint = await errorBodyHint(response);
+    const hint = input.echoBody ? await errorBodyHint(response) : "";
     lastMessage = describeHttpProbeStatus(input.provider, response.status, hint);
     if (response.status < 500) break;
   }
@@ -190,6 +202,8 @@ async function probeAnthropic(key: string): Promise<SecretProbeResult> {
 
 export interface SecretProbeDeps {
   fetchImpl?: ProbeFetch;
+  /** DNS resolver for the local-server address check; tests inject one. */
+  lookup?: DnsLookupAll;
   /** Injected so tests never go near Anthropic. */
   probeAnthropicImpl?: (key: string) => Promise<SecretProbeResult>;
 }
@@ -218,6 +232,7 @@ export async function probeSecretKind(
         case "openai_api_key":
           result = await probeModelsList({
             provider: "OpenAI",
+            echoBody: true,
             url: "https://api.openai.com/v1/models",
             headers: { authorization: `Bearer ${trimmed}` },
             fetchImpl,
@@ -226,6 +241,7 @@ export async function probeSecretKind(
         case "openrouter_api_key":
           result = await probeModelsList({
             provider: "OpenRouter",
+            echoBody: true,
             url: "https://openrouter.ai/api/v1/models",
             headers: { authorization: `Bearer ${trimmed}` },
             fetchImpl,
@@ -236,6 +252,7 @@ export async function probeSecretKind(
           // end up in anyone's access log.
           result = await probeModelsList({
             provider: "Google",
+            echoBody: true,
             url: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
             headers: { "x-goog-api-key": trimmed },
             fetchImpl,
@@ -247,7 +264,27 @@ export async function probeSecretKind(
             result = {
               ok: false,
               message:
-                "The stored value should be the server's address, like http://localhost:11434, optionally followed by a space and its key.",
+                "The stored value should be the server's address, like https://models.example.com, optionally followed by a space and its key.",
+            };
+            break;
+          }
+          // The address comes from the operator, and this request is made by
+          // the server: without this check a board user could point it at
+          // the box's own loopback services (the database port, the cloud
+          // metadata address) and read the answer back through the verdict.
+          // Same rule as every other outbound call: public addresses only,
+          // every resolved address must be public.
+          try {
+            await validateAndResolveFetchUrl(endpoint.baseUrl, {
+              isBlockedAddress: isNonPublicAddress,
+              requireAllPublic: true,
+              ...(deps.lookup ? { lookup: deps.lookup } : {}),
+            });
+          } catch {
+            result = {
+              ok: false,
+              message:
+                "Paperclip can only test model servers that are reachable from the internet. Addresses on this machine or on a private network are not allowed yet.",
             };
             break;
           }
@@ -256,6 +293,7 @@ export async function probeSecretKind(
             url: `${endpoint.baseUrl}/v1/models`,
             headers: endpoint.apiKey ? { authorization: `Bearer ${endpoint.apiKey}` } : {},
             fetchImpl,
+            echoBody: false,
           });
           break;
         }

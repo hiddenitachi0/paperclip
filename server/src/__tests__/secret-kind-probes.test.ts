@@ -159,20 +159,49 @@ describe("probeSecretKind", () => {
     expect((fetchImpl.calls[0].init.headers as Record<string, string>)["x-goog-api-key"] === key).toBe(true);
   });
 
-  it("probes a local server at <base>/v1/models, with a bearer only when a key is stored", async () => {
+  // The model server's address is operator-supplied and the request is made
+  // by the server, so it goes through the same public-address rule as every
+  // other outbound call. Tests resolve names themselves so nothing touches DNS.
+  const publicLookup = async () => [{ address: "203.0.113.10", family: 4 }];
+  const loopbackLookup = async () => [{ address: "127.0.0.1", family: 4 }];
+
+  it("probes a public model server at <base>/v1/models, with a bearer only when a key is stored", async () => {
     const fetchImpl = fakeFetch(() => jsonResponse(200, { data: [] }));
-    expect((await probeSecretKind("local_model_endpoint", "http://localhost:11434/", { fetchImpl })).ok).toBe(true);
-    expect(fetchImpl.calls[0].url).toBe("http://localhost:11434/v1/models");
+    const opts = { fetchImpl, lookup: publicLookup };
+    expect((await probeSecretKind("local_model_endpoint", "http://models.example.com:11434/", opts)).ok).toBe(true);
+    expect(fetchImpl.calls[0].url).toBe("http://models.example.com:11434/v1/models");
     expect(authHeader(fetchImpl.calls[0].init)).toBeUndefined();
 
     const key = canary("lm-");
-    await probeSecretKind("local_model_endpoint", `http://localhost:11434 ${key}`, { fetchImpl });
+    await probeSecretKind("local_model_endpoint", `http://models.example.com:11434 ${key}`, opts);
     expect(authHeader(fetchImpl.calls[1].init) === `Bearer ${key}`).toBe(true);
 
-    const bad = await probeSecretKind("local_model_endpoint", "not a url", { fetchImpl });
+    const bad = await probeSecretKind("local_model_endpoint", "not a url", opts);
     expect(bad.ok).toBe(false);
     expect(bad.message).toContain("server's address");
     expect(fetchImpl.calls).toHaveLength(2);
+  });
+
+  it("refuses a model server on this machine or a private network without sending anything", async () => {
+    const fetchImpl = fakeFetch(() => jsonResponse(200, { data: [] }));
+    for (const address of ["http://localhost:11434", "http://127.0.0.1:5432", "http://169.254.169.254/latest", "http://10.0.0.5:8080"]) {
+      const verdict = await probeSecretKind("local_model_endpoint", address, { fetchImpl, lookup: loopbackLookup });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.message).toContain("reachable from the internet");
+    }
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it("drops a query string from the address and never repeats a model server's error body", async () => {
+    const fetchImpl = fakeFetch(() => jsonResponse(401, { error: { message: "postgres://paperclip:INTERNAL@db/paperclip" } }));
+    const verdict = await probeSecretKind("local_model_endpoint", "http://models.example.com/?x=1#frag", {
+      fetchImpl,
+      lookup: publicLookup,
+    });
+    expect(fetchImpl.calls[0].url).toBe("http://models.example.com/v1/models");
+    expect(verdict.ok).toBe(false);
+    expect(verdict.message).not.toContain("INTERNAL");
+    expect(verdict.message).toContain("did not accept this key");
   });
 
   it("uses the injected Claude call and scrubs whatever it says", async () => {
