@@ -1,13 +1,17 @@
 import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type {
-  DataConnectionCheckResult,
-  DataConnectionCredentialInput,
-  DataConnectionSummary,
-  DataReadEventSummary,
-  DataTrialCalculationResult,
+import {
+  DATA_CONNECTION_KINDS,
+  DATA_CONNECTION_KIND_LABELS,
+  SUPPORTED_DATA_CONNECTION_KINDS,
+  type DataConnectionCheckResult,
+  type DataConnectionKind,
+  type DataConnectionSummary,
+  type DataReadEventSummary,
+  type DataTrialCalculationResult,
+  type ShopifyCredentialInput,
 } from "@paperclipai/shared";
-import { dataConnectionsApi } from "../api/dataConnections";
+import { dataConnectionsApi, type CreateDataConnectionRequest } from "../api/dataConnections";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { useToastActions } from "../context/ToastContext";
@@ -198,9 +202,17 @@ function errorMessage(error: unknown, fallback: string): string {
   return error.message || fallback;
 }
 
-type CredentialKind = DataConnectionCredentialInput["kind"];
+type CredentialKind = ShopifyCredentialInput["kind"];
 
-/** The write-only key fields. Never pre-filled, always type=password. */
+const KIND_COMING_SOON_TEXT = "Kommer snart – lagret, ikke koblet til ennå.";
+
+function kindSupported(kind: DataConnectionKind): boolean {
+  return SUPPORTED_DATA_CONNECTION_KINDS.includes(kind);
+}
+
+const SELECT_CLASS = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm";
+
+/** The write-only Shopify key fields. Never pre-filled, always type=password. */
 function CredentialFields({
   idPrefix,
   kind,
@@ -289,7 +301,7 @@ function useCredentialState() {
   const [accessToken, setAccessToken] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const credential: DataConnectionCredentialInput =
+  const credential: ShopifyCredentialInput =
     kind === "admin_access_token"
       ? { kind, accessToken: accessToken.trim() }
       : { kind, clientId: clientId.trim(), clientSecret: clientSecret.trim() };
@@ -631,12 +643,51 @@ function ConnectionPanel({
   const capValue = Number.parseInt(cap, 10);
   const capValid = Number.isInteger(capValue) && capValue >= 1 && capValue <= 100_000;
 
+  if (!connection.supported) {
+    // Saved, credential locked to it, but no adapter yet: nothing to test,
+    // nothing to calculate. It can be removed (and its key deleted) at any time.
+    return (
+      <li className="space-y-3 px-3 py-3" data-testid="data-connection-pending">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">
+              {connection.name} – {connection.target}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {connection.kindLabel} · Nøkkel {connection.credentialHint}
+            </p>
+            <p className="text-xs text-muted-foreground">{KIND_COMING_SOON_TEXT}</p>
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {confirmRemove ? (
+              <>
+                <Button size="sm" variant="destructive" onClick={() => removeMutation.mutate()} disabled={removeMutation.isPending}>
+                  Ja, fjern koblingen
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmRemove(false)}>
+                  Avbryt
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" variant="ghost" onClick={() => setConfirmRemove(true)}>
+                Fjern
+              </Button>
+            )}
+          </div>
+        </div>
+        {confirmRemove && (
+          <p className="text-xs text-destructive">Den lagrede nøkkelen slettes. Du kan koble til igjen senere.</p>
+        )}
+      </li>
+    );
+  }
+
   return (
     <li className="space-y-3 px-3 py-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">
-            {connection.name} – {connection.shopDomain}
+            {connection.name} – {connection.target}
           </p>
           <p className="text-xs text-muted-foreground">
             Nøkkel {connection.credentialHint} · {statusText(connection)}
@@ -753,7 +804,9 @@ function DatasetChoice({
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const current = connections.find((connection) => connection.datasets.includes("sales")) ?? null;
-  const usable = connections.filter((connection) => connection.status === "active");
+  const usable = connections.filter(
+    (connection) => connection.status === "active" && connection.supported && connection.datasetsOffered.includes("sales"),
+  );
   const [chosenId, setChosenId] = useState<string>(usable[0]?.id ?? "");
   const target = current ?? usable.find((connection) => connection.id === chosenId) ?? usable[0] ?? null;
 
@@ -790,9 +843,9 @@ function DatasetChoice({
           <span className="font-medium">Salg</span>
           <span className="block text-xs text-muted-foreground">
             {current
-              ? `Antall solgte og returnerte enheter per måned og produkttype, fra ${current.shopDomain}.`
+              ? `Antall solgte og returnerte enheter per måned og produkttype, fra ${current.target}.`
               : target
-                ? `Antall solgte og returnerte enheter per måned og produkttype, fra ${target.shopDomain}. Kjør prøveberegningen først.`
+                ? `Antall solgte og returnerte enheter per måned og produkttype, fra ${target.target}. Kjør prøveberegningen først.`
                 : "Koble til og test en butikk først."}
           </span>
         </span>
@@ -806,7 +859,7 @@ function DatasetChoice({
         >
           {usable.map((connection) => (
             <option key={connection.id} value={connection.id}>
-              {connection.name} – {connection.shopDomain}
+              {connection.name} – {connection.target}
             </option>
           ))}
         </select>
@@ -848,36 +901,393 @@ function RecentLookups({ companyId }: { companyId: string }) {
   );
 }
 
-export function DataSourcesSection({ companyId }: { companyId: string }) {
+function Field({
+  id,
+  label,
+  help,
+  children,
+}: {
+  id: string;
+  label: string;
+  help?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="text-sm font-medium" htmlFor={id}>
+        {label}
+      </label>
+      {children}
+      {help && <p className="text-xs text-muted-foreground">{help}</p>}
+    </div>
+  );
+}
+
+/**
+ * "Koble til": pick a kind, fill its fields, save. Every secret field is
+ * type=password (or a password-styled textarea for a private key), never
+ * pre-filled, and emptied the moment a save succeeds. A kind that is not
+ * readable yet is saved all the same and shown as "kommer snart".
+ */
+function NewConnectionForm({
+  companyId,
+  onSaved,
+  onError,
+}: {
+  companyId: string;
+  onSaved: () => void;
+  onError: (message: string | null) => void;
+}) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
-  const [error, setError] = useState<string | null>(null);
+  const [kind, setKind] = useState<DataConnectionKind>("shopify");
+  const [name, setName] = useState("");
+  // Shopify
   const [shopDomain, setShopDomain] = useState("");
   const newCredential = useCredentialState();
+  // WooCommerce
+  const [storeUrl, setStoreUrl] = useState("");
+  const [consumerKey, setConsumerKey] = useState("");
+  const [consumerSecret, setConsumerSecret] = useState("");
+  // Fiken
+  const [companySlug, setCompanySlug] = useState("");
+  const [apiToken, setApiToken] = useState("");
+  // SFTP
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("22");
+  const [username, setUsername] = useState("");
+  const [remotePath, setRemotePath] = useState("");
+  const [sftpCredentialKind, setSftpCredentialKind] = useState<"password" | "private_key">("password");
+  const [password, setPassword] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+
+  const clearSecrets = () => {
+    newCredential.clear();
+    setConsumerKey("");
+    setConsumerSecret("");
+    setApiToken("");
+    setPassword("");
+    setPrivateKey("");
+    setPassphrase("");
+  };
+
+  const displayName = name.trim() || DATA_CONNECTION_KIND_LABELS[kind];
+  const portValue = Number.parseInt(port, 10);
+
+  function buildRequest(): CreateDataConnectionRequest | null {
+    switch (kind) {
+      case "shopify":
+        if (!shopDomain.trim() || !newCredential.filled) return null;
+        return { kind, name: displayName, shopDomain: shopDomain.trim(), credential: newCredential.credential };
+      case "woocommerce":
+        if (!storeUrl.trim() || !consumerKey.trim() || !consumerSecret.trim()) return null;
+        return {
+          kind,
+          name: displayName,
+          storeUrl: storeUrl.trim(),
+          credential: { kind: "consumer_key_secret", consumerKey: consumerKey.trim(), consumerSecret: consumerSecret.trim() },
+        };
+      case "fiken":
+        if (!companySlug.trim() || !apiToken.trim()) return null;
+        return { kind, name: displayName, companySlug: companySlug.trim(), credential: { kind: "api_token", apiToken: apiToken.trim() } };
+      case "sftp_file": {
+        if (!host.trim() || !username.trim() || !remotePath.trim() || !Number.isInteger(portValue)) return null;
+        if (sftpCredentialKind === "password" && !password) return null;
+        if (sftpCredentialKind === "private_key" && !privateKey.trim()) return null;
+        return {
+          kind,
+          name: displayName,
+          host: host.trim(),
+          port: portValue,
+          username: username.trim(),
+          remotePath: remotePath.trim(),
+          credential:
+            sftpCredentialKind === "password"
+              ? { kind: "password", password }
+              : { kind: "private_key", privateKey: privateKey.trim(), ...(passphrase ? { passphrase } : {}) },
+        };
+      }
+    }
+  }
+
+  const request = buildRequest();
+
+  const createMutation = useMutation({
+    mutationFn: (data: CreateDataConnectionRequest) => dataConnectionsApi.create(companyId, data),
+    onSuccess: (_created, data) => {
+      // Clear the key first: it must not sit in the page after it is saved.
+      clearSecrets();
+      setShopDomain("");
+      setStoreUrl("");
+      setCompanySlug("");
+      setHost("");
+      setPort("22");
+      setUsername("");
+      setRemotePath("");
+      setName("");
+      onError(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.dataConnections(companyId) });
+      pushToast({
+        title: kindSupported(data.kind)
+          ? "Butikken er koblet til. Trykk Test for å sjekke den."
+          : `${DATA_CONNECTION_KIND_LABELS[data.kind]} er lagret. ${KIND_COMING_SOON_TEXT}`,
+        tone: "success",
+      });
+      onSaved();
+    },
+    onError: (err) => onError(errorMessage(err, "Kunne ikke koble til datakilden")),
+  });
+
+  return (
+    <div className="space-y-2 rounded-md border p-3" data-testid="data-new-connection">
+      <p className="text-sm font-medium">Koble til {DATA_CONNECTION_KIND_LABELS[kind]}</p>
+      <Field id="data-source-kind" label="Hva slags datakilde?">
+        <select
+          id="data-source-kind"
+          className={SELECT_CLASS}
+          value={kind}
+          onChange={(event) => {
+            clearSecrets();
+            setKind(event.target.value as DataConnectionKind);
+          }}
+        >
+          {DATA_CONNECTION_KINDS.map((entry) => (
+            <option key={entry} value={entry}>
+              {DATA_CONNECTION_KIND_LABELS[entry]}
+              {kindSupported(entry) ? "" : " (kommer snart)"}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {!kindSupported(kind) && (
+        <p className="text-xs text-muted-foreground" data-testid="data-kind-coming-soon">
+          {DATA_CONNECTION_KIND_LABELS[kind]} kan lagres nå, men Paperclip kan ikke lese fra den ennå. Nøkkelen lagres
+          låst til denne koblingen og tas i bruk når støtten er klar.
+        </p>
+      )}
+
+      {kind === "shopify" && (
+        <>
+          <Field
+            id="data-shop-domain"
+            label="Butikkens Shopify-adresse"
+            help="Adressen som slutter på .myshopify.com. Du finner den i Shopify under Innstillinger → Domener."
+          >
+            <Input
+              id="data-shop-domain"
+              value={shopDomain}
+              onChange={(event) => setShopDomain(event.target.value)}
+              placeholder="nordstrand.myshopify.com"
+              autoComplete="off"
+            />
+          </Field>
+          <CredentialFields idPrefix="data-new" {...newCredential.fieldProps} />
+          <ScopeHelp />
+        </>
+      )}
+
+      {kind === "woocommerce" && (
+        <>
+          <Field id="data-store-url" label="Butikkens adresse" help="Den offentlige https-adressen til nettbutikken.">
+            <Input
+              id="data-store-url"
+              value={storeUrl}
+              onChange={(event) => setStoreUrl(event.target.value)}
+              placeholder="https://butikken.no"
+              autoComplete="off"
+            />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <div className="min-w-[12rem] flex-1">
+              <Field id="data-new-consumer-key" label="Consumer key">
+                <Input
+                  id="data-new-consumer-key"
+                  type="password"
+                  autoComplete="off"
+                  value={consumerKey}
+                  onChange={(event) => setConsumerKey(event.target.value)}
+                  placeholder="ck_…"
+                />
+              </Field>
+            </div>
+            <div className="min-w-[12rem] flex-1">
+              <Field id="data-new-consumer-secret" label="Consumer secret">
+                <Input
+                  id="data-new-consumer-secret"
+                  type="password"
+                  autoComplete="off"
+                  value={consumerSecret}
+                  onChange={(event) => setConsumerSecret(event.target.value)}
+                  placeholder="cs_…"
+                />
+              </Field>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Lag nøkkelen i WooCommerce under Innstillinger → Avansert → REST API, med tilgang «Les» (Read), ikke
+            «Les/skriv».
+          </p>
+        </>
+      )}
+
+      {kind === "fiken" && (
+        <>
+          <Field
+            id="data-fiken-slug"
+            label="Selskapets Fiken-slug"
+            help="Du finner den i adressen når du er inne i selskapet i Fiken, for eksempel fiken-demo-firma-as."
+          >
+            <Input
+              id="data-fiken-slug"
+              value={companySlug}
+              onChange={(event) => setCompanySlug(event.target.value)}
+              placeholder="fiken-demo-firma-as"
+              autoComplete="off"
+            />
+          </Field>
+          <Field id="data-new-api-token" label="API-nøkkel fra Fiken">
+            <Input
+              id="data-new-api-token"
+              type="password"
+              autoComplete="off"
+              value={apiToken}
+              onChange={(event) => setApiToken(event.target.value)}
+            />
+          </Field>
+        </>
+      )}
+
+      {kind === "sftp_file" && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <div className="min-w-[12rem] flex-1">
+              <Field id="data-sftp-host" label="Server">
+                <Input
+                  id="data-sftp-host"
+                  value={host}
+                  onChange={(event) => setHost(event.target.value)}
+                  placeholder="filer.butikken.no"
+                  autoComplete="off"
+                />
+              </Field>
+            </div>
+            <div className="w-24">
+              <Field id="data-sftp-port" label="Port">
+                <Input
+                  id="data-sftp-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={port}
+                  onChange={(event) => setPort(event.target.value)}
+                />
+              </Field>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <div className="min-w-[12rem] flex-1">
+              <Field id="data-sftp-username" label="Brukernavn">
+                <Input
+                  id="data-sftp-username"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  autoComplete="off"
+                />
+              </Field>
+            </div>
+            <div className="min-w-[12rem] flex-1">
+              <Field id="data-sftp-path" label="Mappe med filer" help="Full sti på serveren. Paperclip skal bare lese der, aldri skrive.">
+                <Input
+                  id="data-sftp-path"
+                  value={remotePath}
+                  onChange={(event) => setRemotePath(event.target.value)}
+                  placeholder="/rapporter"
+                  autoComplete="off"
+                />
+              </Field>
+            </div>
+          </div>
+          <Field id="data-new-sftp-credential-kind" label="Hvordan logger Paperclip inn?">
+            <select
+              id="data-new-sftp-credential-kind"
+              className={SELECT_CLASS}
+              value={sftpCredentialKind}
+              onChange={(event) => {
+                clearSecrets();
+                setSftpCredentialKind(event.target.value as "password" | "private_key");
+              }}
+            >
+              <option value="password">Med passord</option>
+              <option value="private_key">Med privat nøkkel (SSH)</option>
+            </select>
+          </Field>
+          {sftpCredentialKind === "password" ? (
+            <Field id="data-new-sftp-password" label="Passord">
+              <Input
+                id="data-new-sftp-password"
+                type="password"
+                autoComplete="off"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </Field>
+          ) : (
+            <>
+              <Field id="data-new-private-key" label="Privat nøkkel" help="Hele nøkkelen, fra -----BEGIN til -----END.">
+                <textarea
+                  id="data-new-private-key"
+                  className="flex min-h-24 w-full rounded-md border border-input bg-transparent px-3 py-1 font-mono text-xs shadow-sm"
+                  style={{ WebkitTextSecurity: "disc" } as React.CSSProperties}
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={privateKey}
+                  onChange={(event) => setPrivateKey(event.target.value)}
+                />
+              </Field>
+              <Field id="data-new-passphrase" label="Passfrase (hvis nøkkelen har en)">
+                <Input
+                  id="data-new-passphrase"
+                  type="password"
+                  autoComplete="off"
+                  value={passphrase}
+                  onChange={(event) => setPassphrase(event.target.value)}
+                />
+              </Field>
+            </>
+          )}
+        </>
+      )}
+
+      <Field id="data-connection-name" label="Navn (valgfritt)" help={`Vises i listen. Tomt betyr «${DATA_CONNECTION_KIND_LABELS[kind]}».`}>
+        <Input
+          id="data-connection-name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder={DATA_CONNECTION_KIND_LABELS[kind]}
+          autoComplete="off"
+          maxLength={80}
+        />
+      </Field>
+      <p className="text-xs text-muted-foreground">
+        Nøkkelen lagres som et låst passord som bare denne koblingen kan bruke, og vises aldri igjen. Du kan bytte den
+        når som helst.
+      </p>
+      <Button onClick={() => request && createMutation.mutate(request)} disabled={!request || createMutation.isPending}>
+        {createMutation.isPending ? "Kobler til…" : kindSupported(kind) ? "Koble til" : "Lagre"}
+      </Button>
+    </div>
+  );
+}
+
+export function DataSourcesSection({ companyId }: { companyId: string }) {
+  const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   const connectionsQuery = useQuery({
     queryKey: queryKeys.companies.dataConnections(companyId),
     queryFn: () => dataConnectionsApi.list(companyId),
     retry: false,
-  });
-
-  const createMutation = useMutation({
-    mutationFn: () =>
-      dataConnectionsApi.create(companyId, {
-        kind: "shopify",
-        name: "Shopify",
-        shopDomain: shopDomain.trim(),
-        credential: newCredential.credential,
-      }),
-    onSuccess: () => {
-      // Clear the key first: it must not sit in the page after it is saved.
-      newCredential.clear();
-      setShopDomain("");
-      setError(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.companies.dataConnections(companyId) });
-      pushToast({ title: "Butikken er koblet til. Trykk Test for å sjekke den.", tone: "success" });
-    },
-    onError: (err) => setError(errorMessage(err, "Kunne ikke koble til butikken")),
   });
 
   const header = (
@@ -916,43 +1326,23 @@ export function DataSourcesSection({ companyId }: { companyId: string }) {
       <CardContent className="space-y-4">
         {connectionsQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">Henter…</p>
-        ) : connections.length === 0 ? (
-          <div className="space-y-2 rounded-md border p-3">
-            <p className="text-sm font-medium">Koble til Shopify</p>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="data-shop-domain">
-                Butikkens Shopify-adresse
-              </label>
-              <Input
-                id="data-shop-domain"
-                value={shopDomain}
-                onChange={(event) => setShopDomain(event.target.value)}
-                placeholder="nordstrand.myshopify.com"
-                autoComplete="off"
-              />
-              <p className="text-xs text-muted-foreground">
-                Adressen som slutter på .myshopify.com. Du finner den i Shopify under Innstillinger → Domener.
-              </p>
-            </div>
-            <CredentialFields idPrefix="data-new" {...newCredential.fieldProps} />
-            <ScopeHelp />
-            <p className="text-xs text-muted-foreground">
-              Nøkkelen lagres som et låst passord som bare denne koblingen kan bruke, og vises aldri igjen. Du kan bytte
-              den når som helst.
-            </p>
-            <Button
-              onClick={() => createMutation.mutate()}
-              disabled={!shopDomain.trim() || !newCredential.filled || createMutation.isPending}
-            >
-              {createMutation.isPending ? "Kobler til…" : "Koble til"}
-            </Button>
-          </div>
         ) : (
-          <ul className="divide-y rounded-md border">
-            {connections.map((connection) => (
-              <ConnectionPanel key={connection.id} companyId={companyId} connection={connection} onError={setError} />
-            ))}
-          </ul>
+          <>
+            {connections.length > 0 && (
+              <ul className="divide-y rounded-md border">
+                {connections.map((connection) => (
+                  <ConnectionPanel key={connection.id} companyId={companyId} connection={connection} onError={setError} />
+                ))}
+              </ul>
+            )}
+            {connections.length === 0 || adding ? (
+              <NewConnectionForm companyId={companyId} onSaved={() => setAdding(false)} onError={setError} />
+            ) : (
+              <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
+                Legg til datakilde
+              </Button>
+            )}
+          </>
         )}
 
         {connections.length > 0 && (
