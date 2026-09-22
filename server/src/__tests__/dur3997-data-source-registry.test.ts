@@ -213,12 +213,16 @@ describe("DUR-3997 credential codec", () => {
     });
   });
 
-  it("hints with the last four characters of the secret part only, and lists what to scrub", () => {
+  it("hints with the last four characters of a long token only, never of a password or a short value, and lists what to scrub", () => {
     expect(credentialHint({ kind: "admin_access_token", accessToken: KEY })).toBe(`••••${KEY.slice(-4)}`);
     expect(credentialHint({ kind: "client_credentials", clientId: "client-id-0001", clientSecret: "shp" + "ss_secret0123456789" })).toBe("••••6789");
     expect(credentialHint({ kind: "consumer_key_secret", consumerKey: CK, consumerSecret: CS })).toBe(`••••${CS.slice(-4)}`);
     expect(credentialHint({ kind: "api_token", apiToken: "0123456789abcdef0123456789abcdef" })).toBe("••••cdef");
-    expect(credentialHint({ kind: "password", password: "hunter2" })).toBe("••••ter2");
+    // A password may be short, so its tail would give away half of it.
+    expect(credentialHint({ kind: "password", password: "hunter2" })).toBe("••••");
+    expect(credentialHint({ kind: "password", password: "a-much-longer-password-than-usual" })).toBe("••••");
+    expect(credentialHint({ kind: "private_key", privateKey: PEM })).toBe("••••");
+    expect(credentialHint({ kind: "api_token", apiToken: "short-token" })).toBe("••••");
     expect(credentialSecretValues({ kind: "consumer_key_secret", consumerKey: CK, consumerSecret: CS })).toEqual([CS, CK]);
     expect(credentialSecretValues({ kind: "private_key", privateKey: PEM, passphrase: "pp" })).toEqual([PEM, "pp"]);
   });
