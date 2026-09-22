@@ -41,7 +41,8 @@ export interface LaneATool {
 export interface LaneAToolCall {
   id: string;
   name: string;
-  input: Record<string, unknown>;
+  /** `null` when the provider sent arguments that were not a JSON object. */
+  input: Record<string, unknown> | null;
 }
 
 export interface LaneAToolResult {
@@ -377,14 +378,20 @@ function textFromOpenAiContent(content: unknown): string {
   return "";
 }
 
-function parseToolArguments(raw: unknown): Record<string, unknown> {
+/**
+ * Returns the parsed arguments, or `null` when the provider sent arguments
+ * that are not a JSON object. A null is turned into an error tool result by
+ * the caller rather than running the tool with `{}`: an empty call would
+ * burn one of the few tool calls a message gets and answer the wrong question.
+ */
+function parseToolArguments(raw: unknown): Record<string, unknown> | null {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
   if (typeof raw !== "string" || raw.trim().length === 0) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -427,6 +434,35 @@ export function fromOpenAiCompletion(payload: unknown): LaneACompletion {
   };
 }
 
+/** Upper bound on a provider's response body; anything past it is refused. */
+export const LANE_A_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+async function readBodyCapped(response: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const onAbort = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`the answer was larger than ${Math.round(maxBytes / (1024 * 1024))} MB`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+}
+
 function createOpenAiCompatibleLaneAClient(input: {
   provider: LaneAProvider;
   apiKey: string;
@@ -452,8 +488,12 @@ function createOpenAiCompatibleLaneAClient(input: {
           },
           body: JSON.stringify(buildOpenAiCompatibleBody(input.provider, request)),
           signal: controller.signal,
+          // Never follow a redirect: the key travels as a header, and a
+          // bounce to another host is not something a model endpoint does.
+          redirect: "error",
         });
       } catch (err) {
+        clearTimeout(timer);
         const reason = err instanceof Error ? err.message : String(err);
         throw new LaneAProviderError({
           kind: "network",
@@ -462,11 +502,25 @@ function createOpenAiCompatibleLaneAClient(input: {
             ? `${label} did not answer within ${Math.round(input.timeoutMs / 1000)} seconds.`
             : `Could not reach ${label}: ${scrubLaneASecrets(reason, input.apiKey)}`,
         });
+      }
+
+      // The time limit covers the body too: a server that sends headers and
+      // then stalls must not hold the chat request (or a transform slot) open
+      // for ever. The body is also capped, since it is parsed in memory.
+      let rawBody: string;
+      try {
+        rawBody = await readBodyCapped(response, LANE_A_MAX_RESPONSE_BYTES, controller.signal);
+      } catch (err) {
+        throw new LaneAProviderError({
+          kind: "network",
+          provider: input.provider,
+          message: controller.signal.aborted
+            ? `${label} did not finish answering within ${Math.round(input.timeoutMs / 1000)} seconds.`
+            : `${label} sent an answer Paperclip could not read: ${scrubLaneASecrets(err instanceof Error ? err.message : String(err), input.apiKey)}`,
+        });
       } finally {
         clearTimeout(timer);
       }
-
-      const rawBody = await response.text().catch(() => "");
       if (response.status === 401 || response.status === 403) {
         throw new LaneAProviderError({
           kind: "auth",

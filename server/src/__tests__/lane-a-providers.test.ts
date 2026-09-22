@@ -197,7 +197,9 @@ describe("OpenAI-compatible provider client", () => {
     expect(completion.text).toBe("Part one. Part two.");
     expect(completion.toolCalls).toEqual([
       { id: "call_1", name: "get_weather", input: { city: "Bergen" } },
-      { id: "call_2", name: "lookup_issue", input: {} },
+      // Arguments that are not JSON come through as null, so the loop can
+      // refuse that one call instead of running the tool with nothing.
+      { id: "call_2", name: "lookup_issue", input: null },
     ]);
     expect(completion.stop).toBe("tool_use");
     expect(completion.usage).toEqual({ inputTokens: 0, outputTokens: 0 });

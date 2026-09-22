@@ -384,11 +384,15 @@ const createAgentObjectSchema = z.object({
     .refine((raw) => {
       try {
         const url = new URL(raw);
-        return url.protocol === "http:" || url.protocol === "https:";
+        if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+        // The server appends /chat/completions to this; a query string,
+        // fragment or sign-in part would ride along on every request.
+        if (url.search || url.hash || url.username || url.password) return false;
+        return true;
       } catch {
         return false;
       }
-    }, "The model address must be a full http(s) URL, for example http://localhost:11434/v1.")
+    }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.")
     .nullable()
     .optional(),
   laneAMaxOutputTokens: z

@@ -1140,8 +1140,23 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             });
             continue;
           }
+          if (block.input === null) {
+            // The provider sent arguments that were not valid JSON. Running the
+            // tool with nothing would answer the wrong question and still
+            // spend one of the few calls a message gets; tell the model instead.
+            if (block.name === READ_BUSINESS_DATA_TOOL) {
+              businessDataOutputs.push({ content: "", footer: null, lookupId: null });
+            }
+            toolResults.push({
+              toolCallId: block.id,
+              name: block.name,
+              content: "The tool arguments were not valid JSON. Send a JSON object.",
+              isError: true,
+            });
+            continue;
+          }
           toolCallsUsed++;
-          const input = (block.input as Record<string, unknown>) ?? {};
+          const input = block.input;
 
           if (isLaneABuiltinTool(block.name)) {
             let result: {
@@ -1282,6 +1297,37 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       requester: params.requester,
     });
 
+    // Settle everything that can refuse the call BEFORE opening the agent's
+    // MCP tool servers: those are child processes and connections, and the
+    // close below only runs once the toolset exists. Refusing after opening
+    // them leaked one set per refused message (review finding on DUR-3997).
+    // DUR-3977: chat uses the same per-agent model/output ceiling the
+    // transform path does, so an operator who moves a quick agent to a
+    // cheaper model does not get one price in chat and another in batch.
+    // DUR-3997: the provider and key binding are read off the agent row, so a
+    // caller that did not copy them cannot silently bill the instance key.
+    const agentRow = await loadLaneAAgentRow(params.companyId, params.targetAgent.id);
+    const chatSettings = resolveLaneASettings({
+      ...params.targetAgent,
+      laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
+      laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
+      laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+    });
+    const chatModel = assertLaneASettingsRunnable(chatSettings);
+    const credential = await resolveLaneACredential({
+      companyId: params.companyId,
+      agentId: params.targetAgent.id,
+      provider: chatSettings.provider,
+      adapterConfig: agentRow?.adapterConfig,
+      actor: params.actor,
+      keyOptional: chatSettings.provider === "anthropic" && Boolean(options.createModelClient),
+    });
+    const client = buildProviderClient({
+      provider: chatSettings.provider,
+      baseUrl: chatSettings.baseUrl,
+      credential,
+    });
+
     const [toolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
       loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? []),
       loadReplayHistory(conversation.id),
@@ -1310,33 +1356,6 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       logger.warn({ err, companyId: params.companyId }, "lane A: business-data availability check failed");
       businessDataPrompt = undefined;
     }
-
-    // DUR-3977: chat uses the same per-agent model/output ceiling the
-    // transform path does, so an operator who moves a quick agent to a
-    // cheaper model does not get one price in chat and another in batch.
-    // DUR-3997: the provider and key binding are read off the agent row, so a
-    // caller that did not copy them cannot silently bill the instance key.
-    const agentRow = await loadLaneAAgentRow(params.companyId, params.targetAgent.id);
-    const chatSettings = resolveLaneASettings({
-      ...params.targetAgent,
-      laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
-      laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
-      laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
-    });
-    const chatModel = assertLaneASettingsRunnable(chatSettings);
-    const credential = await resolveLaneACredential({
-      companyId: params.companyId,
-      agentId: params.targetAgent.id,
-      provider: chatSettings.provider,
-      adapterConfig: agentRow?.adapterConfig,
-      actor: params.actor,
-      keyOptional: chatSettings.provider === "anthropic" && Boolean(options.createModelClient),
-    });
-    const client = buildProviderClient({
-      provider: chatSettings.provider,
-      baseUrl: chatSettings.baseUrl,
-      credential,
-    });
 
     let text: string;
     let inputTokens: number;
