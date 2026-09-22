@@ -8,6 +8,7 @@ import type {
   SecretStatus,
   SecretVersionStatus,
 } from "../constants.js";
+import type { SecretKind } from "../secret-kinds.js";
 
 export type {
   SecretAccessOutcome,
@@ -51,6 +52,16 @@ export interface CompanySecret {
   providerMetadata: Record<string, unknown> | null;
   latestVersion: number;
   description: string | null;
+  /**
+   * DUR-3997: what the value is (an OpenAI key, a Fiken token…). Null for
+   * secrets saved before kinds existed, or when the operator chose nothing.
+   * See packages/shared/src/secret-kinds.ts.
+   */
+  kind: SecretKind | null;
+  /** DUR-3997: outcome of the last Test, for kinds Paperclip can test. */
+  lastTestAt: Date | null;
+  lastTestOk: boolean | null;
+  lastTestMessage: string | null;
   lastResolvedAt: Date | null;
   lastRotatedAt: Date | null;
   deletedAt: Date | null;
@@ -59,6 +70,17 @@ export interface CompanySecret {
   referenceCount?: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * What POST /companies/:companyId/secrets/:id/test answers. `message` is one
+ * plain sentence and never contains the value. `secret` is the row after the
+ * outcome was recorded on it.
+ */
+export interface CompanySecretTestResult {
+  ok: boolean;
+  message: string;
+  secret: CompanySecret;
 }
 
 export interface SecretProviderDescriptor {

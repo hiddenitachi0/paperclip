@@ -8,13 +8,16 @@ import {
 import { agentAdapterTypeSchema } from "../adapter-type.js";
 import { DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS } from "../hire-spending-limit.js";
 import {
+  LANE_A_BASE_URL_MAX_LENGTH,
+  LANE_A_FREE_FORM_MODEL_MAX_LENGTH,
   LANE_A_MAX_MAX_OUTPUT_TOKENS,
   LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_MIN_MAX_OUTPUT_TOKENS,
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
-  LANE_A_MODELS,
+  LANE_A_PROVIDERS,
+  laneAModelIssueForProvider,
 } from "../lane-a-models.js";
-import { envBindingSchema, envConfigSchema } from "./secret.js";
+import { envBindingSchema, envBindingSecretRefSchema, envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
@@ -41,8 +44,42 @@ export const QUICK_AGENT_FIELDS = [
   "laneAModel",
   "laneAMaxOutputTokens",
   "laneATransformDailyCallCap",
+  // DUR-3997: which provider answers (Claude, OpenAI, Google, OpenRouter, a
+  // local model) and, for OpenRouter/local, where. The key itself is not a
+  // column: it is a secret binding at adapterConfig.laneA.apiKey
+  // (LANE_A_API_KEY_CONFIG_PATH). Null provider = Claude via Paperclip's own
+  // key, exactly as before.
+  "laneAProvider",
+  "laneABaseUrl",
 ] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
+
+/**
+ * DUR-3997: the shape of adapterConfig.laneA. The key may only ever be a
+ * reference to a saved company secret — a literal string is refused, so a
+ * provider key can never sit readable in adapter_config, and the binding
+ * sync (server/src/services/agent-secret-bindings.ts) can gate and audit
+ * every use of it.
+ */
+export const laneAAdapterConfigSchema = z
+  .object({
+    apiKey: envBindingSecretRefSchema.nullable().optional(),
+  })
+  .strict();
+
+/**
+ * Cross-check between a quick agent's provider and model. Runs on create/hire
+ * (where a missing provider means Claude) and again on PATCH in
+ * server/src/routes/agents.ts against the stored provider, since a patch body
+ * may carry one without the other.
+ */
+export function laneAProviderModelIssue(input: {
+  laneAProvider?: string | null;
+  laneAModel?: string | null;
+}): string | null {
+  if (input.laneAModel === null || input.laneAModel === undefined) return null;
+  return laneAModelIssueForProvider(input.laneAProvider ?? undefined, input.laneAModel);
+}
 
 export const agentPermissionsSchema = z.object({
   canCreateAgents: z.boolean().optional().default(false),
@@ -140,6 +177,20 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
       });
     }
   }
+  // DUR-3997: the quick agent's provider key lives here as a secret binding
+  // only. A pasted key is refused with the reason in plain words.
+  const laneAValue = value.laneA;
+  if (laneAValue !== undefined && laneAValue !== null) {
+    const parsed = laneAAdapterConfigSchema.safeParse(laneAValue);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.",
+        path: ["laneA"],
+      });
+    }
+  }
   // DUR-210: operator-declared boundary for when this agent's Claude subscription
   // quota ran out and spend moved to paid overage/credits. The CLI itself never
   // reports this, so runs at/after this timestamp are stamped with
@@ -211,7 +262,13 @@ export const agentRuntimeConfigSchema = z.object({
  * body may omit adapterType.
  */
 function refineAgentModelEffort(
-  value: { adapterType?: string | null; adapterConfig?: unknown; runtimeConfig?: unknown },
+  value: {
+    adapterType?: string | null;
+    adapterConfig?: unknown;
+    runtimeConfig?: unknown;
+    laneAProvider?: string | null;
+    laneAModel?: string | null;
+  },
   ctx: z.RefinementCtx,
 ) {
   const baseError = validateAdapterModelEffort({
@@ -220,6 +277,13 @@ function refineAgentModelEffort(
   });
   if (baseError) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: baseError, path: ["adapterConfig"] });
+  }
+  // DUR-3997: a quick agent's model must fit its provider. On create/hire an
+  // absent provider means Claude, so the check is complete here; PATCH
+  // re-runs it against the stored provider in server/src/routes/agents.ts.
+  const laneAIssue = laneAProviderModelIssue(value);
+  if (laneAIssue) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: laneAIssue, path: ["laneAModel"] });
   }
   const runtimeConfig = value.runtimeConfig;
   const modelProfiles =
@@ -303,7 +367,34 @@ const createAgentObjectSchema = z.object({
   // DUR-3977. Null on all three means "use the platform default" — the agent
   // row stays untouched for every quick agent that existed before this, and
   // the defaults live in packages/shared/src/lane-a-models.ts.
-  laneAModel: z.enum(LANE_A_MODELS).nullable().optional(),
+  //
+  // DUR-3997: the model is a string checked against the chosen provider's
+  // catalogue (refineAgentModelEffort below, and the PATCH route against the
+  // stored provider), no longer a Claude-only enum. Free-form ids are allowed
+  // only for OpenRouter and local models.
+  laneAModel: z.string().trim().min(1).max(LANE_A_FREE_FORM_MODEL_MAX_LENGTH).nullable().optional(),
+  // DUR-3997: which provider answers. Null = Claude via Paperclip's own key.
+  laneAProvider: z.enum(LANE_A_PROVIDERS).nullable().optional(),
+  // DUR-3997: OpenAI-compatible endpoint for OpenRouter / a local model.
+  // Ignored for the fixed providers. http(s) only.
+  laneABaseUrl: z
+    .string()
+    .trim()
+    .max(LANE_A_BASE_URL_MAX_LENGTH)
+    .refine((raw) => {
+      try {
+        const url = new URL(raw);
+        if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+        // The server appends /chat/completions to this; a query string,
+        // fragment or sign-in part would ride along on every request.
+        if (url.search || url.hash || url.username || url.password) return false;
+        return true;
+      } catch {
+        return false;
+      }
+    }, "The model address must be a plain http(s) URL with no query string or sign-in part, for example https://models.example.com/v1.")
+    .nullable()
+    .optional(),
   laneAMaxOutputTokens: z
     .number()
     .int()

@@ -162,6 +162,10 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           // a quick agent would get it on one chat path and not the other.
           laneAModel: targetAgent.laneAModel ?? null,
           laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
+          // DUR-3997: provider and endpoint; the key binding is read off the
+          // agent row by the service, so it cannot be forgotten here.
+          laneAProvider: targetAgent.laneAProvider ?? null,
+          laneABaseUrl: targetAgent.laneABaseUrl ?? null,
         },
         requester,
         actor: req.actor,

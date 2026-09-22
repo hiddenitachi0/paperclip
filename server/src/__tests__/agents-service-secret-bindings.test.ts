@@ -115,6 +115,49 @@ describeEmbeddedPostgres("agent service secret binding sync", () => {
     });
   });
 
+  // DUR-3997: a quick agent's provider key is bound at adapterConfig.laneA.apiKey
+  // (LANE_A_API_KEY_CONFIG_PATH), so lane-a.ts can resolve it through the
+  // binding gate; removing it from adapterConfig removes the binding row.
+  it("binds a quick agent's provider key at laneA.apiKey and unbinds it when removed", async () => {
+    const companyId = await seedCompany();
+    const secrets = secretService(db);
+    const secret = await secrets.create(companyId, {
+      name: `openai-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "sk-proj-123",
+    });
+
+    const created = await agentService(db).create(companyId, {
+      name: "Front desk",
+      role: "engineer",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {
+        laneA: { apiKey: { type: "secret_ref", secretId: secret.id, version: "latest" } },
+      },
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+
+    const bindingsFor = () =>
+      db
+        .select()
+        .from(companySecretBindings)
+        .where(and(
+          eq(companySecretBindings.companyId, companyId),
+          eq(companySecretBindings.targetType, "agent"),
+          eq(companySecretBindings.targetId, created.id),
+        ));
+
+    expect(await bindingsFor()).toMatchObject([
+      { secretId: secret.id, configPath: "laneA.apiKey", versionSelector: "latest" },
+    ]);
+
+    await agentService(db).update(created.id, { adapterConfig: { laneA: { apiKey: null } } });
+    expect(await bindingsFor()).toHaveLength(0);
+  });
+
   it("converts Hermes gateway apiKey strings into persisted secret refs", async () => {
     const companyId = await seedCompany();
     const literalApiKey = `hermes-key-${randomUUID()}`;

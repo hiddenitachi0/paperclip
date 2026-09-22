@@ -120,6 +120,10 @@ export interface Agent {
   laneAModel?: string | null;
   laneAMaxOutputTokens?: number | null;
   laneATransformDailyCallCap?: number | null;
+  /** DUR-3997: anthropic | openai | google | openrouter | local. Null = Claude via Paperclip's own key. */
+  laneAProvider?: string | null;
+  /** DUR-3997: OpenAI-compatible endpoint for OpenRouter / local. Null = the provider's default. */
+  laneABaseUrl?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

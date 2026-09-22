@@ -1,0 +1,28 @@
+-- DUR-3997 (Connections, slice 2): quick agents get a provider and a stored key.
+--
+-- Until now a quick agent (agents.lane_a_enabled) could only ever call Claude,
+-- always on the one instance-wide key, and no company could bring its own key
+-- or pick ChatGPT, Gemini, OpenRouter or a local model. Two nullable columns:
+--   lane_a_provider  — anthropic | openai | google | openrouter | local
+--   lane_a_base_url  — the OpenAI-compatible endpoint for openrouter / local
+-- Null on both, which is what every existing row has, means "Claude via
+-- Paperclip's own key": nothing changes for any quick agent that exists today.
+--
+-- The provider KEY is deliberately not a column. It is a company secret bound
+-- to the agent at adapter_config path `laneA.apiKey` (company_secret_bindings,
+-- the same spine MCP-server credentials use), so it is encrypted at rest,
+-- resolved only for the agent it is bound to, and every use is recorded in
+-- secret_access_events. It is never written to process.env (DUR-3994).
+--
+-- Numbered 0172, not 0171: 0171 is taken on custom by the secret-kind change
+-- this branch does not contain; gaps are allowed and the migration runner
+-- applies by content hash, not by position.
+--
+-- Strictly additive: no DROP, no TRUNCATE, no REVOKE, every statement guarded
+-- so a re-run is a no-op. No table is discovered by column shape anywhere in
+-- this file (see the note at the top of 0164_rls_login_roles.sql for why that
+-- rule exists); the only table named is agents, which already carries the
+-- company-scope row-level-security policy and grants from 0149/0164, so no
+-- policy or grant changes are needed for two new columns on it.
+ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "lane_a_provider" text;--> statement-breakpoint
+ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "lane_a_base_url" text;

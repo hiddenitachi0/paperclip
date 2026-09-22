@@ -375,6 +375,9 @@ describe.sequential("every quick-agent field is handled on the employment path",
     laneAModel: "claude-haiku-4-5",
     laneAMaxOutputTokens: 512,
     laneATransformDailyCallCap: 1500,
+    // DUR-3997: provider and, for OpenRouter / local, the model address.
+    laneAProvider: "openai",
+    laneABaseUrl: "http://localhost:11434/v1",
   };
 
   beforeEach(() => {

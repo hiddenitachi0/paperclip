@@ -1,4 +1,4 @@
-import { envBindingSchema, type SecretVersionSelector } from "@paperclipai/shared";
+import { LANE_A_API_KEY_CONFIG_PATH, envBindingSchema, type SecretVersionSelector } from "@paperclipai/shared";
 import { forbidden, unprocessable } from "../errors.js";
 import { ENV_KEY_RE } from "./secrets.js";
 
@@ -59,7 +59,7 @@ function collectSecretRefs(adapterConfig: unknown): Array<{
   }
 
   for (const [key, rawBinding] of Object.entries(config)) {
-    if (key === "env" || key === "mcpServers") continue;
+    if (key === "env" || key === "mcpServers" || key === "laneA") continue;
     const parsed = envBindingSchema.safeParse(rawBinding);
     if (!parsed.success) continue;
     const binding = parsed.data;
@@ -72,8 +72,35 @@ function collectSecretRefs(adapterConfig: unknown): Array<{
   }
 
   refs.push(...collectMcpServerSecretRefs(config.mcpServers));
+  refs.push(...collectLaneASecretRefs(config.laneA));
 
   return refs;
+}
+
+// DUR-3997: the quick agent's provider key, `adapterConfig.laneA.apiKey`, is
+// a secret_ref bound at LANE_A_API_KEY_CONFIG_PATH ("laneA.apiKey"), so the
+// quick-agent call can resolve it through the same binding gate and audit
+// trail an MCP-server credential goes through (lane-a.ts resolves it with
+// consumer agent:<id> at exactly this path). A literal string here is refused
+// by the validator (laneAAdapterConfigSchema) before it can be saved.
+function collectLaneASecretRefs(rawLaneA: unknown): Array<{
+  secretId: string;
+  configPath: string;
+  versionSelector?: SecretVersionSelector;
+}> {
+  const laneA = asRecord(rawLaneA);
+  if (!laneA) return [];
+  const parsed = envBindingSchema.safeParse(laneA.apiKey);
+  if (!parsed.success) return [];
+  const binding = parsed.data;
+  if (typeof binding !== "object" || binding === null || binding.type !== "secret_ref") return [];
+  return [
+    {
+      secretId: binding.secretId,
+      configPath: LANE_A_API_KEY_CONFIG_PATH,
+      versionSelector: binding.version ?? "latest",
+    },
+  ];
 }
 
 // DUR-132: adapterConfig.mcpServers[*].env / .headers may carry secret_ref

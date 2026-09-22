@@ -744,6 +744,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/secret-provider-configs/{id}/health",
   "POST /api/companies/{companyId}/secrets/remote-import",
   "POST /api/companies/{companyId}/secrets/remote-import/preview",
+  "POST /api/companies/{companyId}/secrets/{id}/test",
   "GET /api/secrets/{id}/usage",
   "GET /api/secrets/{id}/access-events",
   "POST /api/health/dev-server/restart",
@@ -2591,6 +2592,16 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/secrets/{id}/test",
+  tags: ["secrets"],
+  summary:
+    "Check a stored AI-provider key with one harmless call to its provider and record the verdict (never returns the value)",
+  request: { params: z.object({ companyId: z.string(), id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+
+registry.registerPath({
   method: "patch",
   path: "/api/secrets/{id}",
   tags: ["secrets"],
@@ -3454,7 +3465,7 @@ registry.registerPath({
     503: {
       description:
         "This Paperclip instance has no working model credentials — either ANTHROPIC_API_KEY is unset " +
-        "(\"Lane A is not configured on this instance…\") or it was rejected (\"Lane A model credentials are " +
+        "(\"This quick agent has no Claude key…\") or it was rejected (\"Lane A model credentials are " +
         "invalid\"). NOT retryable: every call will fail the same way until an operator fixes it. Stop the " +
         "run rather than burning through the queue.",
       content: { "application/json": { schema: ErrorSchema } },

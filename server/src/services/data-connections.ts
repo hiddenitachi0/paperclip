@@ -18,6 +18,7 @@ import {
   type DataReadOutcome,
   type UpdateDataConnectionInput,
 } from "@paperclipai/shared";
+import type { DataConnectionKind, SecretKind } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { secretService } from "./secrets.js";
@@ -58,6 +59,23 @@ import { tryRecordDataReadEvent } from "./data-read-audit.js";
 
 // One credential per connection, always at this configPath. A constant rather
 // than a caller-supplied string, same reasoning as TELEGRAM_BOT_TOKEN_CONFIG_PATH.
+
+/**
+ * Which secret kind (DUR-3997 slice 1) a data source's dedicated credential
+ * is tagged with, so it shows up correctly on the Secrets page. Kinds without
+ * a taxonomy entry yet are tagged "other" rather than left blank.
+ */
+function secretKindForDataSource(kind: DataConnectionKind): SecretKind {
+  switch (kind) {
+    case "shopify":
+      return "shopify_admin_token";
+    case "fiken":
+      return "fiken_api_token";
+    default:
+      return "other";
+  }
+}
+
 export const DATA_CONNECTION_CREDENTIAL_CONFIG_PATH = "credential";
 
 type DataConnectionRow = typeof dataConnections.$inferSelect;
@@ -242,6 +260,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
           provider: "local_encrypted",
           value: encodeCredential(credential),
           description: `Lesenøkkel for ${definition.label}. Brukes bare av datakoblingen, og kan ikke kobles til en agent eller noe annet.`,
+          kind: secretKindForDataSource(definition.kind),
         },
         { userId: actor.userId, agentId: null },
       );

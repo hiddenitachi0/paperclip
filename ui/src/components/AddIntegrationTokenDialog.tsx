@@ -1,7 +1,15 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KNOWN_INTEGRATION_ENV_KEYS, getIntegrationKey } from "@paperclipai/shared";
+import {
+  KNOWN_INTEGRATION_ENV_KEYS,
+  getIntegrationKey,
+  isTestableSecretKind,
+  secretKindForEnvKey,
+  secretValueLooksWrongForKind,
+  type SecretKind,
+} from "@paperclipai/shared";
 import { Info, KeyRound, Loader2 } from "lucide-react";
+import { SecretKindSelect } from "./SecretKindSelect";
 import { agentsApi } from "../api/agents";
 import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
@@ -93,6 +101,9 @@ export function AddIntegrationTokenDialog({
   const [value, setValue] = useState("");
   const [description, setDescription] = useState("");
   const [targetAgentId, setTargetAgentId] = useState<string>(ALL_AGENTS);
+  // DUR-3997: what the token is. `undefined` means "follow the chosen env
+  // key"; the operator can override it (or say "Not sure").
+  const [kindOverride, setKindOverride] = useState<SecretKind | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
 
   const agentsQuery = useQuery({
@@ -105,6 +116,9 @@ export function AddIntegrationTokenDialog({
   const envKey = keyChoice === CUSTOM_KEY ? customKey.trim() : keyChoice;
   const descriptor = getIntegrationKey(envKey);
   const envKeyValid = ENV_NAME_RE.test(envKey);
+  const kind: SecretKind | null =
+    kindOverride !== undefined ? kindOverride : (descriptor?.kind ?? secretKindForEnvKey(envKey));
+  const valueLooksWrong = secretValueLooksWrongForKind(kind, value);
 
   const targetLabel = useMemo(() => {
     if (targetAgentId === ALL_AGENTS) return "all agents";
@@ -119,6 +133,7 @@ export function AddIntegrationTokenDialog({
     setValue("");
     setDescription("");
     setTargetAgentId(ALL_AGENTS);
+    setKindOverride(undefined);
     setError(null);
   }
 
@@ -135,7 +150,7 @@ export function AddIntegrationTokenDialog({
       //    (e.g. a retry after a partial failure), rotate its value so the flow
       //    is idempotent instead of colliding on the unique key.
       const priorSecret = existingSecrets.find((s) => s.key === secretKey);
-      const secret = priorSecret
+      let secret = priorSecret
         ? await secretsApi.rotate(priorSecret.id, { value })
         : await secretsApi.create(companyId, {
             name: previewSecretName,
@@ -143,7 +158,19 @@ export function AddIntegrationTokenDialog({
             provider: "local_encrypted",
             value,
             description: description.trim() || descriptor?.description || null,
+            kind,
           });
+      // A retried token keeps its row; make sure the row says what it is.
+      if (priorSecret && (priorSecret.kind ?? null) !== kind) {
+        secret = await secretsApi.update(secret.id, { kind });
+      }
+
+      // DUR-3997: check an AI-provider key with its provider straight away,
+      // so a mistyped key is obvious now and not on the first agent run.
+      // Binding goes ahead either way: a network blip must not stop it.
+      const verdict = isTestableSecretKind(kind)
+        ? await secretsApi.test(companyId, secret.id).catch(() => null)
+        : null;
 
       // Set of secret ids that still exist, used to prune bindings left
       // dangling by deleted secrets (else the server rejects the whole save).
@@ -178,18 +205,25 @@ export function AddIntegrationTokenDialog({
           `Secret saved, but binding failed for ${failures.length} agent(s): ${failures.join("; ")}`,
         );
       }
-      return { boundCount: targets.length, pruned: [...prunedKeys] };
+      return { boundCount: targets.length, pruned: [...prunedKeys], verdict };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.secrets.list(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
+      const notes: string[] = [];
+      if (result.verdict) notes.push(result.verdict.message);
+      if (result.pruned.length > 0) {
+        notes.push(
+          `Also removed stale bindings that pointed to deleted secrets: ${result.pruned.join(", ")}. Re-add those to restore them.`,
+        );
+      }
       pushToast({
-        tone: result.pruned.length > 0 ? "warn" : "success",
-        title: `${envKey} bound to ${result.boundCount} agent${result.boundCount === 1 ? "" : "s"}`,
-        body:
-          result.pruned.length > 0
-            ? `Also removed stale bindings that pointed to deleted secrets: ${result.pruned.join(", ")}. Re-add those to restore them.`
-            : undefined,
+        tone: result.pruned.length > 0 || result.verdict?.ok === false ? "warn" : "success",
+        title:
+          result.verdict?.ok === false
+            ? `${envKey} saved and bound, but the provider did not accept it`
+            : `${envKey} bound to ${result.boundCount} agent${result.boundCount === 1 ? "" : "s"}`,
+        body: notes.length > 0 ? notes.join(" ") : undefined,
       });
       reset();
       onOpenChange(false);
@@ -222,7 +256,14 @@ export function AddIntegrationTokenDialog({
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="int-key">Token / environment variable</Label>
-            <Select value={keyChoice} onValueChange={setKeyChoice}>
+            <Select
+              value={keyChoice}
+              onValueChange={(next) => {
+                setKeyChoice(next);
+                // A new env key brings its own kind; drop any manual override.
+                setKindOverride(undefined);
+              }}
+            >
               <SelectTrigger id="int-key">
                 <SelectValue />
               </SelectTrigger>
@@ -267,6 +308,11 @@ export function AddIntegrationTokenDialog({
           </div>
 
           <div className="space-y-1.5">
+            <Label htmlFor="int-kind">What kind of key is this?</Label>
+            <SecretKindSelect id="int-kind" value={kind} onChange={(next) => setKindOverride(next)} />
+          </div>
+
+          <div className="space-y-1.5">
             <Label htmlFor="int-value">Token value</Label>
             <Input
               id="int-value"
@@ -275,7 +321,16 @@ export function AddIntegrationTokenDialog({
               placeholder="Paste the token"
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              aria-invalid={valueLooksWrong}
             />
+            {valueLooksWrong && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                That does not look like the usual shape for this kind of key. You can still save it.
+              </p>
+            )}
+            {isTestableSecretKind(kind) && (
+              <p className="text-xs text-muted-foreground">Paperclip will check it with the provider as soon as it is saved.</p>
+            )}
           </div>
 
           <div className="space-y-1.5">
