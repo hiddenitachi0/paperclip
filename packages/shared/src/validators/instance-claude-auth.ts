@@ -4,7 +4,10 @@ import { z } from "zod";
 export const CLAUDE_OAUTH_TOKEN_PATTERN = /^sk-ant-oat01-[A-Za-z0-9_-]{40,}$/;
 
 export const saveInstanceClaudeAuthTokenSchema = z.object({
-  token: z
+  // Named `authToken`, not `token`: the HTTP logger redacts by field name
+  // and a bare `token` is not on that list, so a failed paste used to write
+  // the subscription token to server.log in plain text (DUR-3995 review).
+  authToken: z
     .string()
     .trim()
     .min(1, "Paste the token first.")

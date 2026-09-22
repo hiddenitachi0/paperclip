@@ -39,6 +39,14 @@ const SENSITIVE_KEYS = new Set<string>([
   "sessiontoken",
   "private_key",
   "privatekey",
+  // DUR-3995: `key` too. A request body that calls its one secret `key` used
+  // to land verbatim in server.log and stdout on any 4xx/5xx, and on this
+  // server every agent can read that file. Bare `token` stays readable on
+  // purpose -- it is a pagination cursor far more often than a credential --
+  // so bodies that carry a real token name the field `authToken` instead.
+  "key",
+  "anthropic_api_key",
+  "anthropicapikey",
 ]);
 
 const MAX_DEPTH = 6;

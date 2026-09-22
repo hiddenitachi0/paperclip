@@ -11,7 +11,7 @@ import { api } from "./client";
 export const instanceServerAnthropicKeyApi = {
   get: () => api.get<InstanceServerAnthropicKeyStatus>("/instance/server-anthropic-key"),
   save: (key: string) =>
-    api.put<InstanceServerAnthropicKeyTestResult>("/instance/server-anthropic-key", { key }),
+    api.put<InstanceServerAnthropicKeyTestResult>("/instance/server-anthropic-key", { apiKey: key }),
   test: () =>
     api.post<InstanceServerAnthropicKeyTestResult>("/instance/server-anthropic-key/test", undefined),
   remove: () => api.delete<InstanceServerAnthropicKeyStatus>("/instance/server-anthropic-key"),

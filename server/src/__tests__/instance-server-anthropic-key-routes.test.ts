@@ -74,7 +74,7 @@ describe("instance server Anthropic key routes", () => {
     for (const actor of [member, agent]) {
       const app = createApp(actor);
       expect((await request(app).get("/api/instance/server-anthropic-key")).status).toBe(403);
-      expect((await request(app).put("/api/instance/server-anthropic-key").send({ key: KEY })).status).toBe(403);
+      expect((await request(app).put("/api/instance/server-anthropic-key").send({ apiKey: KEY })).status).toBe(403);
       expect((await request(app).post("/api/instance/server-anthropic-key/test")).status).toBe(403);
       expect((await request(app).delete("/api/instance/server-anthropic-key")).status).toBe(403);
     }
@@ -83,7 +83,7 @@ describe("instance server Anthropic key routes", () => {
   });
 
   it("saves a pasted key and records the change without the key", async () => {
-    const res = await request(createApp(admin)).put("/api/instance/server-anthropic-key").send({ key: KEY });
+    const res = await request(createApp(admin)).put("/api/instance/server-anthropic-key").send({ apiKey: KEY });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(JSON.stringify(res.body).includes(KEY)).toBe(false);
@@ -98,7 +98,7 @@ describe("instance server Anthropic key routes", () => {
   it("refuses a key that is not shaped like a Claude API key", async () => {
     const res = await request(createApp(admin))
       .put("/api/instance/server-anthropic-key")
-      .send({ key: "not a key" });
+      .send({ apiKey: "not a key" });
     expect(res.status).toBe(400);
     expect(service.save).not.toHaveBeenCalled();
   });
@@ -114,5 +114,37 @@ describe("instance server Anthropic key routes", () => {
     expect(removed.body.configured).toBe(false);
     expect(logActivity).toHaveBeenCalledTimes(1);
     expect((logActivity.mock.calls[0] as any[])[1].action).toBe("instance.server_anthropic_key.removed");
+  });
+  // DUR-3995 review finding 2: in `local_trusted` deployment mode an
+  // unauthenticated local request counts as an implicit instance admin, and
+  // agents run on this host. They may read the status, but must not be able to
+  // swap in their own key or delete the owner's.
+  it("refuses the implicit local admin on every write route but allows the read", async () => {
+    const localImplicit = {
+      type: "board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      userId: null,
+      companyIds: ["c1"],
+    };
+    const app = createApp(localImplicit);
+
+    expect((await request(app).get("/api/instance/server-anthropic-key")).status).toBe(200);
+    expect((await request(app).put("/api/instance/server-anthropic-key").send({ apiKey: KEY })).status).toBe(403);
+    expect((await request(app).post("/api/instance/server-anthropic-key/test")).status).toBe(403);
+    expect((await request(app).delete("/api/instance/server-anthropic-key")).status).toBe(403);
+    expect(service.save).not.toHaveBeenCalled();
+    expect(service.remove).not.toHaveBeenCalled();
+  });
+
+  // The body must never reach the validator (and therefore the error path,
+  // which logs it) for someone who is not allowed to save at all.
+  it("checks admin before it looks at the body", async () => {
+    const res = await request(createApp(member))
+      .put("/api/instance/server-anthropic-key")
+      .send({ apiKey: "not a key" });
+
+    expect(res.status).toBe(403);
+    expect(service.save).not.toHaveBeenCalled();
   });
 });

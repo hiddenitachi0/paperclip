@@ -4,7 +4,7 @@ import { api } from "./client";
 /** One-click Claude sign-in (instance-wide Claude subscription token). No call here ever returns the token. */
 export const instanceClaudeAuthApi = {
   get: () => api.get<InstanceClaudeAuthStatus>("/instance/claude-auth"),
-  saveToken: (token: string) => api.post<InstanceClaudeAuthStatus>("/instance/claude-auth/token", { token }),
+  saveToken: (token: string) => api.post<InstanceClaudeAuthStatus>("/instance/claude-auth/token", { authToken: token }),
   check: () => api.post<InstanceClaudeAuthStatus>("/instance/claude-auth/check", undefined),
   remove: () => api.delete<InstanceClaudeAuthStatus>("/instance/claude-auth"),
   startSignIn: () => api.post<InstanceClaudeSignInSession>("/instance/claude-auth/sign-in", undefined),

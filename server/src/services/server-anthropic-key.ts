@@ -62,6 +62,9 @@ export const SERVER_ANTHROPIC_KEY_CACHE_TTL_MS = 60_000;
  */
 export const SERVER_ANTHROPIC_KEY_TEST_MODEL = "claude-haiku-4-5";
 
+/** How long the one test call may take before the page gets an answer. */
+export const SERVER_ANTHROPIC_KEY_TEST_TIMEOUT_MS = 15_000;
+
 // ---------------------------------------------------------------------------
 // Pure helpers (no database, no network) -- unit-tested directly.
 // ---------------------------------------------------------------------------
@@ -96,7 +99,28 @@ export interface ServerAnthropicKeyRow {
 export function describeServerAnthropicKeyStatus(
   row: ServerAnthropicKeyRow | null,
   environmentKeyPresent: boolean,
+  storedKeyUnreadable = false,
 ): InstanceServerAnthropicKeyStatus {
+  if (row && storedKeyUnreadable) {
+    // The row is there but the server cannot decrypt it (master key rotated,
+    // lost, or the blob is damaged). Saying "in place" here would be a lie:
+    // Claude calls are either failing or quietly running on the server's old
+    // environment key instead (review finding 4).
+    return {
+      configured: false,
+      source: "stored",
+      headline: environmentKeyPresent
+        ? "A key is saved but Paperclip cannot read it, so it is still using the key set up on the server itself. Paste the key again."
+        : "A key is saved but Paperclip cannot read it, so quick answers, routing and the quality check are off. Paste the key again.",
+      hint: row.hint,
+      fingerprint: row.fingerprintSha256,
+      savedAt: row.savedAt.toISOString(),
+      savedByUserId: row.savedByUserId,
+      lastTestAt: row.lastTestAt ? row.lastTestAt.toISOString() : null,
+      lastTestOk: false,
+      lastTestMessage: "Paperclip could not unlock the saved key.",
+    };
+  }
   if (row) {
     const headline =
       row.lastTestOk === false
@@ -205,19 +229,36 @@ let cache: CacheEntry | null = null;
 let loader: (() => Promise<string | undefined>) | null = null;
 let refreshing: Promise<void> | null = null;
 let now: () => number = () => Date.now();
+/**
+ * Bumped by every save and remove. A background refresh started before the
+ * write would otherwise resolve from an older database snapshot and reinstall
+ * the key the operator just replaced or revoked (review finding 3), so a
+ * refresh whose generation is stale throws its result away.
+ */
+let generation = 0;
+/** Last failure from the loader, surfaced in the status (review finding 4). */
+let lastLoadError: string | null = null;
 
 function kickRefresh(): void {
   if (!loader || refreshing) return;
   const run = loader;
+  const startedAt = generation;
   refreshing = run()
     .then((value) => {
+      if (generation !== startedAt) return;
+      lastLoadError = null;
       cache = { value, at: now() };
     })
     .catch((err) => {
       // Never take the server's fallback key away because one read failed;
-      // the last known value (or the environment key) keeps working.
+      // the last known value (or the environment key) keeps working. The
+      // failure is remembered so the settings page can say so instead of
+      // showing a saved key as healthy, and so a permanently broken read does
+      // not re-query on every single call.
+      lastLoadError = err instanceof Error ? err.message : String(err);
+      if (generation === startedAt && !cache) cache = { value: undefined, at: now() };
       logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
+        { err: lastLoadError },
         "server-anthropic-key: could not read the saved Claude key",
       );
     })
@@ -250,12 +291,23 @@ export async function installServerAnthropicKeyReader(
   registerStoredAnthropicApiKeyReader(readCachedKey);
   try {
     cache = { value: await loadStoredKey(db), at: now() };
+    lastLoadError = null;
   } catch (err) {
+    lastLoadError = err instanceof Error ? err.message : String(err);
+    cache = { value: undefined, at: now() };
     logger.warn(
-      { err: err instanceof Error ? err.message : String(err) },
+      { err: lastLoadError },
       "server-anthropic-key: could not read the saved Claude key at start-up",
     );
   }
+}
+
+/**
+ * True when a key is stored but the server could not turn it back into a
+ * usable value on the last read.
+ */
+export function storedKeyUnreadable(): boolean {
+  return lastLoadError !== null;
 }
 
 /** Test hook: forget the cache and unregister the reader. */
@@ -263,6 +315,8 @@ export function resetServerAnthropicKeyCacheForTests(): void {
   cache = null;
   loader = null;
   refreshing = null;
+  generation = 0;
+  lastLoadError = null;
   now = () => Date.now();
   registerStoredAnthropicApiKeyReader(null);
 }
@@ -298,7 +352,14 @@ export interface ServerAnthropicKeyServiceDeps {
 }
 
 async function defaultCallAnthropic(key: string): Promise<void> {
-  const client = new Anthropic({ apiKey: key });
+  // Bounded like done-gate-critic.ts: "Save and test" waits for this inline,
+  // so the SDK defaults (10 minutes, 2 retries) would leave the operator on a
+  // spinner for half an hour if Anthropic were unreachable (review finding 5).
+  const client = new Anthropic({
+    apiKey: key,
+    timeout: SERVER_ANTHROPIC_KEY_TEST_TIMEOUT_MS,
+    maxRetries: 1,
+  });
   await client.messages.create({
     model: SERVER_ANTHROPIC_KEY_TEST_MODEL,
     max_tokens: 1,
@@ -324,7 +385,11 @@ export function serverAnthropicKeyService(db: Db, deps: ServerAnthropicKeyServic
     // "environment" means: this server would still have a key even with
     // nothing saved here (PAPERCLIP_SERVER_ANTHROPIC_API_KEY, captured at
     // boot, or a shared ANTHROPIC_API_KEY). Never the value, only whether.
-    return describeServerAnthropicKeyStatus(row, readAnthropicApiKeyIgnoringStored() !== undefined);
+    return describeServerAnthropicKeyStatus(
+      row,
+      readAnthropicApiKeyIgnoringStored() !== undefined,
+      row !== null && storedKeyUnreadable(),
+    );
   }
 
   return {
@@ -377,10 +442,12 @@ export function serverAnthropicKeyService(db: Db, deps: ServerAnthropicKeyServic
         });
 
       // No restart: the new key is live for the next quick answer.
+      generation += 1;
+      lastLoadError = null;
       cache = { value: key, at: now() };
       registerStoredAnthropicApiKeyReader(readCachedKey);
 
-      return runTest(key);
+      return runTest(key, true);
     },
 
     /** One minimal Claude call with whatever key the server would use. */
@@ -393,7 +460,11 @@ export function serverAnthropicKeyService(db: Db, deps: ServerAnthropicKeyServic
           status: await getStatus(),
         };
       }
-      return runTest(key);
+      // Only record the verdict on the stored row when the stored key is what
+      // was actually tested: otherwise a row the server cannot decrypt would
+      // be marked "Claude accepted it" on the strength of the environment key
+      // (review finding 4).
+      return runTest(key, !storedKeyUnreadable());
     },
 
     /** Forget the saved key. An install that also has the old server-file key falls back to it. */
@@ -401,13 +472,18 @@ export function serverAnthropicKeyService(db: Db, deps: ServerAnthropicKeyServic
       await db
         .delete(instanceServerAnthropicKey)
         .where(eq(instanceServerAnthropicKey.singletonKey, SINGLETON_KEY));
+      generation += 1;
+      lastLoadError = null;
       cache = { value: undefined, at: now() };
       registerStoredAnthropicApiKeyReader(readCachedKey);
       return getStatus();
     },
   };
 
-  async function runTest(key: string): Promise<InstanceServerAnthropicKeyTestResult> {
+  async function runTest(
+    key: string,
+    recordOnStoredRow: boolean,
+  ): Promise<InstanceServerAnthropicKeyTestResult> {
     let ok = true;
     let message = "Claude answered. This key works.";
     try {
@@ -420,10 +496,12 @@ export function serverAnthropicKeyService(db: Db, deps: ServerAnthropicKeyServic
     const at = clock();
     // Only a stored key has a row to record the result on; an environment key
     // is still worth testing, it just has nowhere to write the outcome.
-    await db
-      .update(instanceServerAnthropicKey)
-      .set({ lastTestAt: at, lastTestOk: ok, lastTestMessage: message, updatedAt: at })
-      .where(eq(instanceServerAnthropicKey.singletonKey, SINGLETON_KEY));
+    if (recordOnStoredRow) {
+      await db
+        .update(instanceServerAnthropicKey)
+        .set({ lastTestAt: at, lastTestOk: ok, lastTestMessage: message, updatedAt: at })
+        .where(eq(instanceServerAnthropicKey.singletonKey, SINGLETON_KEY));
+    }
 
     return { ok, message, status: await getStatus() };
   }

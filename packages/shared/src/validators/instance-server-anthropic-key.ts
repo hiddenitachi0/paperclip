@@ -9,8 +9,13 @@ import { z } from "zod";
  */
 export const ANTHROPIC_API_KEY_PATTERN = /^sk-ant-[A-Za-z0-9_-]{20,}$/;
 
+/**
+ * The field is called `apiKey`, not `key`: the HTTP logger redacts a body
+ * field by name, and `key` was not on that list, so a failed save used to put
+ * the pasted key in server.log in plain text (DUR-3995 review finding 1).
+ */
 export const saveInstanceServerAnthropicKeySchema = z.object({
-  key: z
+  apiKey: z
     .string()
     .trim()
     .min(1, "Paste the key first.")

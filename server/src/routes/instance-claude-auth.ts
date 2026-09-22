@@ -53,7 +53,7 @@ export function instanceClaudeAuthRoutes(db: Db, deps: { service?: InstanceClaud
   // Paste path: a token made elsewhere with `claude setup-token`.
   router.post("/instance/claude-auth/token", validate(saveInstanceClaudeAuthTokenSchema), async (req, res) => {
     assertInstanceAdmin(req);
-    const status = await svc.saveToken({ token: req.body.token, source: "pasted", userId: actorUserId(req) });
+    const status = await svc.saveToken({ token: req.body.authToken, source: "pasted", userId: actorUserId(req) });
     await logInstanceActivity(req, "instance.claude_auth.saved", { source: "pasted", fingerprint: status.fingerprint });
     res.json(status);
   });
