@@ -7,6 +7,7 @@ import {
   type OutboundFetch,
 } from "../safe-outbound-fetch.js";
 import type { DataSourceCallBudget } from "./connection-kind.js";
+import { DataSourceUpstreamError } from "./contract.js";
 
 /**
  * DUR-3972 S1: a query-only Shopify Admin GraphQL client.
@@ -36,16 +37,15 @@ export type ShopifyClientErrorCode =
   | "bad_response"
   | "network";
 
-export class ShopifyClientError extends Error {
-  readonly code: ShopifyClientErrorCode;
+export class ShopifyClientError extends DataSourceUpstreamError {
+  declare readonly code: ShopifyClientErrorCode;
   /** The HTTP status Shopify answered with, when there was one. */
   readonly httpStatus: number | null;
   /** From a 429's Retry-After header, in ms. */
   readonly retryAfterMs: number | null;
   constructor(code: ShopifyClientErrorCode, message: string, httpStatus: number | null = null, retryAfterMs: number | null = null) {
-    super(message);
+    super(code, message);
     this.name = "ShopifyClientError";
-    this.code = code;
     this.httpStatus = httpStatus;
     this.retryAfterMs = retryAfterMs;
   }

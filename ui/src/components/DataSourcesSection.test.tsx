@@ -51,9 +51,13 @@ function connection(overrides: Partial<DataConnectionSummary> = {}): DataConnect
     id: CONNECTION,
     companyId: COMPANY,
     kind: "shopify",
+    kindLabel: "Shopify",
+    supported: true,
     name: "Shopify",
+    target: "nordstrand.myshopify.com",
     shopDomain: "nordstrand.myshopify.com",
     apiVersion: "2026-07",
+    config: { kind: "shopify" },
     credentialKind: "admin_access_token",
     credentialHint: "••••abcd",
     access: "read",
@@ -78,6 +82,7 @@ function connection(overrides: Partial<DataConnectionSummary> = {}): DataConnect
       checkedAt: "2026-09-21T08:00:00.000Z",
     },
     datasets: [],
+    datasetsOffered: ["sales"],
     lastCheckAt: "2026-09-21T08:00:00.000Z",
     lastCheckOk: true,
     lastCheckError: null,
@@ -409,6 +414,98 @@ describe("DataSourcesSection", () => {
     });
     expect(container.innerHTML).not.toContain(KEY);
     expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Ny nøkkel lagret. Trykk Test før den tas i bruk." }));
+    await act(async () => root.unmount());
+  });
+
+  it("offers the other kinds in the dropdown, saves a WooCommerce store, and says it is not readable yet", async () => {
+    mockApi.list.mockResolvedValue([]);
+    const woo = "ck_" + "0123456789abcdef0123456789abcdef";
+    const wooSecret = "cs_" + "fedcba9876543210fedcba9876543210";
+    mockApi.create.mockResolvedValue(
+      connection({
+        kind: "woocommerce",
+        kindLabel: "WooCommerce",
+        supported: false,
+        target: "butikken.no",
+        shopDomain: null,
+        apiVersion: null,
+        config: { kind: "woocommerce", storeUrl: "https://butikken.no" },
+        credentialKind: "consumer_key_secret",
+        status: "draft",
+        observed: null,
+      }),
+    );
+    const root = await render();
+
+    const kind = container.querySelector<HTMLSelectElement>("#data-source-kind")!;
+    expect(kind.value).toBe("shopify");
+    const labels = Array.from(kind.options).map((option) => option.textContent);
+    expect(labels).toEqual(["Shopify", "WooCommerce (kommer snart)", "Fiken (kommer snart)", "Filer (SFTP) (kommer snart)"]);
+    // Shopify fields are there by default, nothing else.
+    expect(container.querySelector("#data-shop-domain")).not.toBeNull();
+    expect(container.querySelector("#data-store-url")).toBeNull();
+
+    await act(async () => setInput(kind, "woocommerce"));
+    expect(container.querySelector("#data-shop-domain")).toBeNull();
+    expect(container.querySelector('[data-testid="data-kind-coming-soon"]')?.textContent).toContain("kan ikke lese fra den ennå");
+    for (const id of ["#data-new-consumer-key", "#data-new-consumer-secret"]) {
+      expect(container.querySelector<HTMLInputElement>(id)!.type).toBe("password");
+    }
+    await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-store-url")!, "https://butikken.no"));
+    await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-new-consumer-key")!, woo));
+    await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-new-consumer-secret")!, wooSecret));
+    await act(async () => button("Lagre")?.click());
+    await flushReact();
+
+    expect(mockApi.create).toHaveBeenCalledWith(COMPANY, {
+      kind: "woocommerce",
+      name: "WooCommerce",
+      storeUrl: "https://butikken.no",
+      credential: { kind: "consumer_key_secret", consumerKey: woo, consumerSecret: wooSecret },
+    });
+    expect(container.innerHTML).not.toContain(wooSecret);
+    expect(container.innerHTML).not.toContain(woo);
+    expect(mockPushToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "WooCommerce er lagret. Kommer snart – lagret, ikke koblet til ennå." }),
+    );
+    await act(async () => root.unmount());
+  });
+
+  it("shows a saved-but-unsupported connection as coming soon, with no Test and no trial, and lets it be removed", async () => {
+    mockApi.list.mockResolvedValue([
+      connection(),
+      connection({
+        id: "66666666-6666-4666-8666-666666666666",
+        kind: "fiken",
+        kindLabel: "Fiken",
+        supported: false,
+        name: "Regnskapet",
+        target: "fiken-demo-firma-as",
+        shopDomain: null,
+        apiVersion: null,
+        config: { kind: "fiken", companySlug: "fiken-demo-firma-as" },
+        credentialKind: "api_token",
+        credentialHint: "••••zz99",
+        status: "draft",
+        observed: null,
+        datasetsOffered: ["finance"],
+      }),
+    ]);
+    const root = await render();
+    const pending = container.querySelector('[data-testid="data-connection-pending"]')!;
+    expect(pending.textContent).toContain("Regnskapet – fiken-demo-firma-as");
+    expect(pending.textContent).toContain("Fiken · Nøkkel ••••zz99");
+    expect(pending.textContent).toContain("Kommer snart – lagret, ikke koblet til ennå.");
+    const pendingButtons = Array.from(pending.querySelectorAll("button")).map((element) => element.textContent?.trim());
+    expect(pendingButtons).toEqual(["Fjern"]);
+    // The Shopify connection next to it still has its full panel.
+    expect(container.querySelectorAll('[data-testid="data-trial"]')).toHaveLength(1);
+    // The Salg tick can only point at the Shopify connection.
+    expect(container.querySelector('select[aria-label="Hvilken butikk skal salgstallene komme fra?"]')).toBeNull();
+    // With connections present the form is behind a button.
+    expect(container.querySelector('[data-testid="data-new-connection"]')).toBeNull();
+    await act(async () => button("Legg til datakilde")?.click());
+    expect(container.querySelector('[data-testid="data-new-connection"]')).not.toBeNull();
     await act(async () => root.unmount());
   });
 

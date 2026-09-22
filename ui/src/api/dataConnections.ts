@@ -1,4 +1,5 @@
 import type {
+  CreateDataConnectionInput,
   DataConnectionCheckResult,
   DataConnectionCredentialInput,
   DataConnectionSummary,
@@ -10,19 +11,29 @@ import type {
 import { api } from "./client";
 
 /**
- * DUR-3972 slice S2: the "Datakilder" screen in company settings.
+ * DUR-3972 slice S2 / DUR-3997 slice 3: the "Datakilder" screen in company
+ * settings.
  *
- * The shop key only ever travels one way: in the body of `create` and of an
+ * A source's key only ever travels one way: in the body of `create` and of an
  * `update` that replaces it. No response type below has room for it; the
  * server answers with a masked hint (the last four characters).
+ *
+ * `create` takes the shared discriminated union: the Shopify shape is exactly
+ * what it was, and WooCommerce, Fiken and SFTP-file connections are accepted
+ * and stored (shown as "kommer snart" until their adapters ship).
  */
+export type CreateDataConnectionRequest = {
+  [K in CreateDataConnectionInput["kind"]]: Omit<Extract<CreateDataConnectionInput, { kind: K }>, "name" | "port"> & {
+    name: string;
+    port?: number;
+  };
+}[CreateDataConnectionInput["kind"]];
+
 export const dataConnectionsApi = {
   list: (companyId: string) =>
     api.get<DataConnectionSummary[]>(`/companies/${companyId}/data-connections`),
-  create: (
-    companyId: string,
-    data: { kind: "shopify"; name: string; shopDomain: string; credential: DataConnectionCredentialInput },
-  ) => api.post<DataConnectionSummary>(`/companies/${companyId}/data-connections`, data),
+  create: (companyId: string, data: CreateDataConnectionRequest) =>
+    api.post<DataConnectionSummary>(`/companies/${companyId}/data-connections`, data),
   update: (
     companyId: string,
     connectionId: string,
