@@ -67,7 +67,11 @@ d("DUR-3997 migration 0173_data_connection_kinds", () => {
 
   it("widened the kind, credential-kind and dataset rules and relaxed the Shopify-only columns", async () => {
     const s = await snapshot();
-    expect(s.kind).toBe("CHECK ((kind = ANY (ARRAY['shopify'::text, 'woocommerce'::text, 'fiken'::text, 'sftp_file'::text])))");
+    // 0174 (file servers) widens this further with ftp_file/ftps_file at
+    // migrated head; the four kinds 0173 introduced are all present.
+    expect(s.kind).toBe(
+      "CHECK ((kind = ANY (ARRAY['shopify'::text, 'woocommerce'::text, 'fiken'::text, 'ftp_file'::text, 'ftps_file'::text, 'sftp_file'::text])))",
+    );
     expect(s.shopDomain).toContain("kind <> 'shopify'::text");
     expect(s.shopDomain).toContain("shop_domain IS NOT NULL");
     expect(s.shopDomain).toContain("api_version IS NOT NULL");
@@ -84,7 +88,8 @@ d("DUR-3997 migration 0173_data_connection_kinds", () => {
     // Untouched on purpose.
     expect(s.pk).toBe("PRIMARY KEY (company_id, dataset)");
     expect(s.fk).toBe("FOREIGN KEY (connection_id, company_id) REFERENCES data_connections(id, company_id) ON DELETE CASCADE");
-    expect(s.access).toBe("CHECK ((access = 'read'::text))");
+    // 0174 widens access to read_write for file-server connections at head.
+    expect(s.access).toBe("CHECK ((access = ANY (ARRAY['read'::text, 'read_write'::text])))");
 
     expect(s.columns.get("shop_domain")).toEqual({ nullable: true, def: null });
     expect(s.columns.get("api_version")).toEqual({ nullable: true, def: null });
@@ -108,12 +113,21 @@ d("DUR-3997 migration 0173_data_connection_kinds", () => {
 
   it("is idempotent: running the file a second time changes nothing and raises nothing", async () => {
     const before = await snapshot();
-    const statements = readFileSync(MIGRATION_PATH, "utf8")
-      .split("--> statement-breakpoint")
-      .map((statement) => statement.trim())
-      .filter((statement) => statement.length > 0);
+    const statementsOf = (path: string) =>
+      readFileSync(path, "utf8")
+        .split("--> statement-breakpoint")
+        .map((statement) => statement.trim())
+        .filter((statement) => statement.length > 0);
+    const statements = statementsOf(MIGRATION_PATH);
     expect(statements.length).toBeGreaterThanOrEqual(5);
     for (const statement of statements) {
+      await db.execute(sql.raw(statement));
+    }
+    // 0174 widens the same kind/credential-kind/access constraints AFTER 0173,
+    // so re-running 0173 alone reverts them; re-run 0174 too to restore the
+    // migrated-head state this snapshot was taken at. Each file stays a no-op
+    // on the state its own predecessor leaves.
+    for (const statement of statementsOf(fileURLToPath(new URL("./migrations/0174_file_server_connections.sql", import.meta.url)))) {
       await db.execute(sql.raw(statement));
     }
     const after = await snapshot();

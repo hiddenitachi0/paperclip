@@ -182,6 +182,32 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   });
 
   /**
+   * DUR-3997 (files on a server): forget an SFTP connection's pinned host
+   * key, so the next Test accepts the key the server presents then. The
+   * only way a changed host key is ever accepted.
+   */
+  router.post(
+    "/companies/:companyId/data-connections/:connectionId/forget-host-key",
+    boardScope(),
+    requireFeatureOn,
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const connectionId = req.params.connectionId as string;
+      const result = await svc.forgetHostKey(companyId, connectionId);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "data_connection.host_key_forgotten",
+        entityType: "data_connection",
+        entityId: connectionId,
+        details: { name: result.name, kind: result.kind, target: result.target, status: result.status },
+      });
+      res.json(result);
+    },
+  );
+
+  /**
    * DUR-3972 S2: "Trial calculation". Counts units sold in one or two months
    * through this connection, exactly as an agent answer would, so the numbers
    * can be compared with Shopify Analytics before "Sales" is ticked. A refusal

@@ -40,19 +40,26 @@
  *
  * WHAT IS NOT HERE ON PURPOSE
  * ---------------------------
- *   - No write access of any kind. `access` is 'read' by database constraint.
+ *   - No write access for anything but a `read_write` file-server connection
+ *     (the company's own server), and even there only through
+ *     FileServerOperations, which refuses a write on a `read` connection
+ *     before any command is sent. `access` is 'read' or 'read_write' by
+ *     database constraint; every other kind is stored with 'read'.
  *   - No route for a full agent (run token) to read data. When one is built it
  *     must count runs by the signed claims.run_id only, never by the
  *     x-paperclip-run-id header.
  */
 import type {
+  DataConnectionAccessLevel,
   DataConnectionConfig,
   DataConnectionCredentialInput,
   DataConnectionKind,
   DataConnectionObservedSummary,
   DataReadChannel,
+  FileServerKind,
 } from "@paperclipai/shared";
 import type { CatalogResult, DataLookupOutcome, SalesRequest, SalesResult } from "./contract.js";
+import type { FileServerOperations } from "./file-server/operations.js";
 import type { ShopifyGraphQLClient, ShopifyRawTransport } from "./shopify-client.js";
 
 /** The limits one lookup runs under. Hitting either means a refusal, never a partial answer. */
@@ -77,6 +84,10 @@ export interface DataSourceConnectionInfo {
   apiVersion: string | null;
   /** Per-kind non-secret settings, tagged with the kind. */
   config: DataConnectionConfig;
+  /** `read_write` only for a file-server connection to the company's own server. */
+  access: DataConnectionAccessLevel;
+  /** SFTP: the host-key fingerprint pinned at the first Test; null otherwise. */
+  hostKeyFingerprint: string | null;
   /** From the last successful Test; may be null on a connection never tested. */
   ianaTimezone: string | null;
   currencyCode: string | null;
@@ -121,16 +132,27 @@ export interface ShopifyReadContext extends DataSourceReadContextBase {
 }
 
 /**
+ * What the file-server Test and the quick-agent file tool get: list, read
+ * and (on a read-write connection) write, every path confined under the
+ * connection's base folder. The session behind it is opened on the first
+ * operation and closed by the caller.
+ */
+export interface FileServerReadContext extends DataSourceReadContextBase {
+  kind: FileServerKind;
+  files: FileServerOperations;
+}
+
+/**
  * Kinds whose transport is not built yet. The registry refuses to open one
  * (code data_source_kind_unsupported) so no adapter ever receives it; the
  * shape exists so the union is complete and exhaustive switches stay honest.
  */
 export interface PendingReadContext extends DataSourceReadContextBase {
-  kind: "woocommerce" | "fiken" | "sftp_file";
+  kind: "woocommerce" | "fiken";
 }
 
 /** Everything an adapter gets for one lookup, by kind. */
-export type DataSourceReadContext = ShopifyReadContext | PendingReadContext;
+export type DataSourceReadContext = ShopifyReadContext | FileServerReadContext | PendingReadContext;
 
 /**
  * The credential as stored in the company secret, decoded. Only

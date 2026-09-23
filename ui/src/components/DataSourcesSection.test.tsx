@@ -79,6 +79,7 @@ function connection(overrides: Partial<DataConnectionSummary> = {}): DataConnect
           { productType: "Hjørnesofa", products: 1 },
         ],
       },
+      fileServer: null,
       checkedAt: "2026-09-21T08:00:00.000Z",
     },
     datasets: [],
@@ -440,7 +441,14 @@ describe("DataSourcesSection", () => {
     const kind = container.querySelector<HTMLSelectElement>("#data-source-kind")!;
     expect(kind.value).toBe("shopify");
     const labels = Array.from(kind.options).map((option) => option.textContent);
-    expect(labels).toEqual(["Shopify", "WooCommerce (coming soon)", "Fiken (coming soon)", "Files (SFTP) (coming soon)"]);
+    expect(labels).toEqual([
+      "Shopify",
+      "WooCommerce (coming soon)",
+      "Fiken (coming soon)",
+      "FTP server",
+      "FTPS server (encrypted)",
+      "SFTP server (encrypted)",
+    ]);
     // Shopify fields are there by default, nothing else.
     expect(container.querySelector("#data-shop-domain")).not.toBeNull();
     expect(container.querySelector("#data-store-url")).toBeNull();

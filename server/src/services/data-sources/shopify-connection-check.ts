@@ -127,6 +127,7 @@ export async function runShopifyConnectionCheck(
     grantedScopes,
     earliestVisibleOrderAt: null,
     productTypeCoverage: null,
+    fileServer: null,
     checkedAt: now().toISOString(),
   };
 

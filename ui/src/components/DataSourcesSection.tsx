@@ -3,12 +3,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DATA_CONNECTION_KINDS,
   DATA_CONNECTION_KIND_LABELS,
+  FILE_SERVER_DEFAULT_PORTS,
+  isFileServerKind,
   SUPPORTED_DATA_CONNECTION_KINDS,
+  type DataConnectionAccessLevel,
   type DataConnectionCheckResult,
   type DataConnectionKind,
   type DataConnectionSummary,
   type DataReadEventSummary,
   type DataTrialCalculationResult,
+  type FileServerKind,
   type ShopifyCredentialInput,
 } from "@paperclipai/shared";
 import { dataConnectionsApi, type CreateDataConnectionRequest } from "../api/dataConnections";
@@ -629,6 +633,17 @@ function ConnectionPanel({
     onError: fail("Could not save the limit"),
   });
 
+  const forgetHostKeyMutation = useMutation({
+    mutationFn: () => dataConnectionsApi.forgetHostKey(companyId, connection.id),
+    onSuccess: () => {
+      onError(null);
+      setLastTest(null);
+      invalidate();
+      pushToast({ title: "Host key forgotten. Press Test to pin the server's current key.", tone: "success" });
+    },
+    onError: fail("Could not forget the host key"),
+  });
+
   const removeMutation = useMutation({
     mutationFn: () => dataConnectionsApi.remove(companyId, connection.id),
     onSuccess: () => {
@@ -757,6 +772,18 @@ function ConnectionPanel({
       )}
 
       <TestFindings connection={connection} lastTest={lastTest} />
+
+      {connection.kind === "sftp_file" && connection.observed?.fileServer?.hostKeyFingerprint && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="data-host-key">
+          <span>
+            Pinned SSH host key: <span className="font-mono">{connection.observed.fileServer.hostKeyFingerprint}</span>. A
+            different key is refused. If the server was reinstalled, forget the key and press Test again.
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => forgetHostKeyMutation.mutate()} disabled={forgetHostKeyMutation.isPending}>
+            Forget host key
+          </Button>
+        </div>
+      )}
 
       <TrialCalculation companyId={companyId} connection={connection} />
 
@@ -952,11 +979,13 @@ function NewConnectionForm({
   // Fiken
   const [companySlug, setCompanySlug] = useState("");
   const [apiToken, setApiToken] = useState("");
-  // SFTP
+  // File servers (FTP / FTPS / SFTP)
   const [host, setHost] = useState("");
   const [port, setPort] = useState("22");
   const [username, setUsername] = useState("");
   const [remotePath, setRemotePath] = useState("");
+  const [access, setAccess] = useState<DataConnectionAccessLevel>("read");
+  const [acknowledgedUnencrypted, setAcknowledgedUnencrypted] = useState(false);
   const [sftpCredentialKind, setSftpCredentialKind] = useState<"password" | "private_key">("password");
   const [password, setPassword] = useState("");
   const [privateKey, setPrivateKey] = useState("");
@@ -991,22 +1020,36 @@ function NewConnectionForm({
       case "fiken":
         if (!companySlug.trim() || !apiToken.trim()) return null;
         return { kind, name: displayName, companySlug: companySlug.trim(), credential: { kind: "api_token", apiToken: apiToken.trim() } };
+      case "ftp_file":
+      case "ftps_file":
       case "sftp_file": {
         if (!host.trim() || !username.trim() || !remotePath.trim() || !Number.isInteger(portValue)) return null;
-        if (sftpCredentialKind === "password" && !password) return null;
-        if (sftpCredentialKind === "private_key" && !privateKey.trim()) return null;
-        return {
-          kind,
+        const base = {
           name: displayName,
           host: host.trim(),
           port: portValue,
           username: username.trim(),
           remotePath: remotePath.trim(),
-          credential:
-            sftpCredentialKind === "password"
-              ? { kind: "password", password }
-              : { kind: "private_key", privateKey: privateKey.trim(), ...(passphrase ? { passphrase } : {}) },
+          access,
         };
+        // Only SFTP takes a private key; FTP and FTPS take a password.
+        if (kind === "sftp_file") {
+          const useKey = sftpCredentialKind === "private_key";
+          if (useKey ? !privateKey.trim() : !password) return null;
+          return {
+            kind,
+            ...base,
+            credential: useKey
+              ? { kind: "private_key", privateKey: privateKey.trim(), ...(passphrase ? { passphrase } : {}) }
+              : { kind: "password", password },
+          };
+        }
+        if (!password) return null;
+        if (kind === "ftp_file") {
+          if (!acknowledgedUnencrypted) return null;
+          return { kind, ...base, credential: { kind: "password", password }, acknowledgedUnencrypted: true };
+        }
+        return { kind, ...base, credential: { kind: "password", password } };
       }
     }
   }
@@ -1049,7 +1092,11 @@ function NewConnectionForm({
           value={kind}
           onChange={(event) => {
             clearSecrets();
-            setKind(event.target.value as DataConnectionKind);
+            const next = event.target.value as DataConnectionKind;
+            setKind(next);
+            setSftpCredentialKind("password");
+            setAcknowledgedUnencrypted(false);
+            if (isFileServerKind(next)) setPort(String(FILE_SERVER_DEFAULT_PORTS[next as FileServerKind]));
           }}
         >
           {DATA_CONNECTION_KINDS.map((entry) => (
@@ -1157,7 +1204,7 @@ function NewConnectionForm({
         </>
       )}
 
-      {kind === "sftp_file" && (
+      {isFileServerKind(kind) && (
         <>
           <div className="flex flex-wrap gap-2">
             <div className="min-w-[12rem] flex-1">
@@ -1166,7 +1213,7 @@ function NewConnectionForm({
                   id="data-sftp-host"
                   value={host}
                   onChange={(event) => setHost(event.target.value)}
-                  placeholder="filer.butikken.no"
+                  placeholder="files.example.com"
                   autoComplete="off"
                 />
               </Field>
@@ -1196,42 +1243,49 @@ function NewConnectionForm({
               </Field>
             </div>
             <div className="min-w-[12rem] flex-1">
-              <Field id="data-sftp-path" label="Folder with files" help="Full path on the server. Paperclip will only read there, never write.">
+              <Field id="data-sftp-path" label="Base folder" help="The full path on the server. Paths agents ask for are confined to this folder.">
                 <Input
                   id="data-sftp-path"
                   value={remotePath}
                   onChange={(event) => setRemotePath(event.target.value)}
-                  placeholder="/rapporter"
+                  placeholder="/reports"
                   autoComplete="off"
                 />
               </Field>
             </div>
           </div>
-          <Field id="data-new-sftp-credential-kind" label="How does Paperclip log in?">
+          <Field
+            id="data-sftp-access"
+            label="Access"
+            help="Read-only for a partner's server. Read and write only for the company's own server, where agents may push reports later."
+          >
             <select
-              id="data-new-sftp-credential-kind"
+              id="data-sftp-access"
               className={SELECT_CLASS}
-              value={sftpCredentialKind}
-              onChange={(event) => {
-                clearSecrets();
-                setSftpCredentialKind(event.target.value as "password" | "private_key");
-              }}
+              value={access}
+              onChange={(event) => setAccess(event.target.value as DataConnectionAccessLevel)}
             >
-              <option value="password">With a password</option>
-              <option value="private_key">With a private key (SSH)</option>
+              <option value="read">Read only</option>
+              <option value="read_write">Read and write</option>
             </select>
           </Field>
-          {sftpCredentialKind === "password" ? (
-            <Field id="data-new-sftp-password" label="Password">
-              <Input
-                id="data-new-sftp-password"
-                type="password"
-                autoComplete="off"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
+          {kind === "sftp_file" && (
+            <Field id="data-new-sftp-credential-kind" label="How does Paperclip log in?">
+              <select
+                id="data-new-sftp-credential-kind"
+                className={SELECT_CLASS}
+                value={sftpCredentialKind}
+                onChange={(event) => {
+                  clearSecrets();
+                  setSftpCredentialKind(event.target.value as "password" | "private_key");
+                }}
+              >
+                <option value="password">With a password</option>
+                <option value="private_key">With a private key (SSH)</option>
+              </select>
             </Field>
-          ) : (
+          )}
+          {kind === "sftp_file" && sftpCredentialKind === "private_key" ? (
             <>
               <Field id="data-new-private-key" label="Private key" help="The whole key, from -----BEGIN to -----END.">
                 <textarea
@@ -1254,6 +1308,30 @@ function NewConnectionForm({
                 />
               </Field>
             </>
+          ) : (
+            <Field id="data-new-sftp-password" label="Password">
+              <Input
+                id="data-new-sftp-password"
+                type="password"
+                autoComplete="off"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </Field>
+          )}
+          {kind === "ftp_file" && (
+            <label className="flex items-start gap-2 text-xs text-destructive" htmlFor="data-ftp-ack">
+              <input
+                id="data-ftp-ack"
+                type="checkbox"
+                checked={acknowledgedUnencrypted}
+                onChange={(event) => setAcknowledgedUnencrypted(event.target.checked)}
+              />
+              <span>
+                Plain FTP sends the password and every file unencrypted. I understand the password travels unencrypted.
+                Choose FTPS or SFTP for an encrypted connection.
+              </span>
+            </label>
           )}
         </>
       )}

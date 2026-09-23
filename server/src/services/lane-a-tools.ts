@@ -15,6 +15,12 @@ import {
   type BusinessDataAnswer,
   type BusinessDataServiceDeps,
 } from "./business-data.js";
+import {
+  COMPANY_FILE_LOOKUP_TIMEOUT_MS,
+  companyFileService,
+  READABLE_TEXT_EXTENSIONS,
+  type CompanyFileAnswer,
+} from "./company-files.js";
 
 /**
  * Quick agents (Lane A, round 2): the small set of things a quick agent is
@@ -29,7 +35,13 @@ import {
  * up to LANE_A_MAX_TOOL_CALLS times per message.
  */
 
-export const LANE_A_BUILTIN_TOOL_NAMES = ["route_to_agent", "get_weather", "lookup_issue", "read_business_data"] as const;
+export const LANE_A_BUILTIN_TOOL_NAMES = [
+  "route_to_agent",
+  "get_weather",
+  "lookup_issue",
+  "read_business_data",
+  "read_company_file",
+] as const;
 export type LaneABuiltinToolName = (typeof LANE_A_BUILTIN_TOOL_NAMES)[number];
 
 const BUILTIN_TOOL_NAME_SET: ReadonlySet<string> = new Set(LANE_A_BUILTIN_TOOL_NAMES);
@@ -46,6 +58,10 @@ export const LANE_A_TOOL_HTTP_TIMEOUT_MS = 6_000;
  */
 export const LANE_A_BUSINESS_DATA_TIMEOUT_MS = BUSINESS_DATA_LOOKUP_TIMEOUT_MS;
 export const READ_BUSINESS_DATA_TOOL = "read_business_data";
+/** DUR-3997 (files on a server): offered only when the company has an active file-server connection. */
+export const READ_COMPANY_FILE_TOOL = "read_company_file";
+/** A file read may connect, list or fetch up to 256 KB; the transport enforces this deadline itself. */
+export const LANE_A_COMPANY_FILE_TIMEOUT_MS = COMPANY_FILE_LOOKUP_TIMEOUT_MS;
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ROUTE_REQUEST_MAX_CHARS = 20_000;
@@ -141,6 +157,11 @@ export interface LaneAToolDeps {
    * means the tool is not wired here, which answers with a plain refusal.
    */
   readBusinessData?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<BusinessDataAnswer>;
+  /**
+   * DUR-3997: one file read or folder listing from the caller's own company's
+   * file server. Absent means the tool is not wired here.
+   */
+  readCompanyFile?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<CompanyFileAnswer>;
 }
 
 export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
@@ -237,6 +258,36 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           },
         },
         required: ["action"],
+      },
+    },
+    {
+      name: READ_COMPANY_FILE_TOOL,
+      description:
+        "Read a file from a file server this company has connected (FTP, FTPS or SFTP), or list a folder on it. " +
+        `Only text files can be read: ${READABLE_TEXT_EXTENSIONS.map((entry) => `.${entry}`).join(", ")} (up to 200 KB; a longer file is cut ` +
+        "with a note). Spreadsheets (.xlsx) cannot be read yet: say so and suggest a CSV export. Paths are relative to the " +
+        "server's base folder; nothing outside it can be reached. Start with action 'list' when you do not know the exact " +
+        "file name. The server returns the file's contents with a lookup id; quote only what it returned. You cannot " +
+        "write, change or delete files. Relay refusals word for word.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          action: {
+            type: "string",
+            enum: ["read", "list"],
+            description: "'read' for a file's contents; 'list' for the entries in a folder. Default 'read'.",
+          },
+          path: {
+            type: "string",
+            description: "The file or folder, relative to the server's base folder, e.g. 'reports/2026-08.csv'. Empty or '/' means the base folder.",
+          },
+          server: {
+            type: "string",
+            description: "The connected server's name. Needed only when the company has more than one; the list is in your instructions.",
+          },
+        },
+        required: ["path"],
       },
     },
   ];
@@ -521,6 +572,26 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     };
   }
 
+  async function readCompanyFile(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    if (!deps.readCompanyFile) {
+      return {
+        ok: false,
+        content: "Company files cannot be read from here. Say so plainly, and do not guess what a file contains.",
+        summary: "Company files are not available on this path.",
+      };
+    }
+    const answer = await deps.readCompanyFile(input, ctx);
+    const path = readString(input, "path").slice(0, 120);
+    const listing = readString(input, "action") === "list";
+    return {
+      ok: answer.ok,
+      content: answer.text,
+      summary: answer.ok
+        ? `${listing ? "Listed folder" : "Read file"} "${path || "/"}" on the company's file server (lookup ${answer.lookupId}).`
+        : `Company file ${listing ? "listing" : "read"} ${answer.outcome}${answer.refusalCode ? ` (${answer.refusalCode})` : ""}.`,
+    };
+  }
+
   return async function execute(
     name: string,
     input: Record<string, unknown>,
@@ -535,6 +606,8 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         return lookupIssue(input, ctx);
       case "read_business_data":
         return readBusinessData(input, ctx);
+      case "read_company_file":
+        return readCompanyFile(input, ctx);
       default:
         return {
           ok: false,
@@ -551,6 +624,7 @@ export function createDbLaneAToolDeps(
   options: { businessData?: BusinessDataServiceDeps } = {},
 ): LaneAToolDeps {
   const businessData = businessDataService(db, options.businessData);
+  const companyFiles = companyFileService(db, options.businessData);
   return {
     async listAgents(companyId) {
       const rows = await agentService(db).list(companyId);
@@ -645,6 +719,20 @@ export function createDbLaneAToolDeps(
       // The company is the quick agent's own, from the server; the tool input
       // has no field that could name another one.
       return businessData.read(
+        {
+          companyId: ctx.companyId,
+          channel: "quick_chat",
+          agentId: ctx.agent.id,
+          userId: ctx.requester.userId,
+          runId: ctx.runId ?? null,
+          laneAConversationId: ctx.conversationId,
+        },
+        input,
+      );
+    },
+    async readCompanyFile(input, ctx) {
+      // Same rule: the company is the quick agent's own, from the server.
+      return companyFiles.read(
         {
           companyId: ctx.companyId,
           channel: "quick_chat",

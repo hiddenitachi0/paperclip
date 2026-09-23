@@ -48,6 +48,8 @@ function connection(kind: DataSourceConnectionInfo["kind"], config: DataConnecti
     shopDomain: kind === "shopify" ? "nordstrand-test.myshopify.com" : null,
     apiVersion: kind === "shopify" ? "2026-07" : null,
     config,
+    access: "read",
+    hostKeyFingerprint: null,
     ianaTimezone: null,
     currencyCode: null,
     earliestVisibleOrderAt: null,
@@ -133,8 +135,8 @@ describe("DUR-3997 data-source registry", () => {
     expect(shopify.outboundPolicy({ kind: "shopify" })).toBe(SHOPIFY_OUTBOUND_POLICY);
     expect(shopify.describeTarget({ shopDomain: "nordstrand-test.myshopify.com", config: { kind: "shopify" } })).toBe("nordstrand-test.myshopify.com");
     expect(shopify.storedShape({ kind: "shopify", name: "x", shopDomain: "nordstrand-test.myshopify.com", credential: { kind: "admin_access_token", accessToken: KEY } }))
-      .toEqual({ shopDomain: "nordstrand-test.myshopify.com", apiVersion: "2026-07", config: {} });
-    expect(shopify.canActivate({ shopName: null, shopDomain: null, ianaTimezone: null, currencyCode: null, grantedScopes: ["read_orders", "read_all_orders", "read_products"], earliestVisibleOrderAt: null, productTypeCoverage: null, checkedAt: null }).ok).toBe(true);
+      .toEqual({ shopDomain: "nordstrand-test.myshopify.com", apiVersion: "2026-07", config: {}, access: "read" });
+    expect(shopify.canActivate({ shopName: null, shopDomain: null, ianaTimezone: null, currencyCode: null, grantedScopes: ["read_orders", "read_all_orders", "read_products"], earliestVisibleOrderAt: null, productTypeCoverage: null, fileServer: null, checkedAt: null }).ok).toBe(true);
     expect(shopify.canActivate(null).ok).toBe(false);
   });
 
@@ -148,7 +150,6 @@ describe("DUR-3997 data-source registry", () => {
     const cases: Array<[string, DataConnectionConfig]> = [
       ["woocommerce", { kind: "woocommerce", storeUrl: "https://butikken.no" }],
       ["fiken", { kind: "fiken", companySlug: "fiken-demo-firma-as" }],
-      ["sftp_file", { kind: "sftp_file", host: "filer.butikken.no", port: 22, username: "u", remotePath: "/rapporter" }],
     ];
     for (const [kind, config] of cases) {
       const entry = getDataSourceKind(kind);
@@ -163,11 +164,49 @@ describe("DUR-3997 data-source registry", () => {
     }
   });
 
+  it("registers the three file-server kinds as supported, on the custom dataset, with no HTTP outbound policy", () => {
+    for (const kind of ["ftp_file", "ftps_file", "sftp_file"] as const) {
+      const entry = getDataSourceKind(kind);
+      expect(entry.supported).toBe(true);
+      expect(entry.datasets).toEqual(["custom"]);
+      expect(entry.adapters).toEqual({});
+      // The file transports carry their own address rule, not the HTTP guard.
+      expect(entry.outboundPolicy({ kind, host: "files.example.com", port: 21, username: "u", remotePath: "/reports", access: "read" } as DataConnectionConfig)).toBeNull();
+    }
+    expect(getDataSourceKind("ftp_file").credentialKinds).toEqual(["password"]);
+    expect(getDataSourceKind("sftp_file").credentialKinds).toEqual(["password", "private_key"]);
+  });
+
+  it("a file-server connection cannot be activated before a passing Test, and stores only non-secret settings", () => {
+    const sftp = getDataSourceKind("sftp_file");
+    expect(sftp.canActivate(null).ok).toBe(false);
+    // A read-write connection whose write check failed cannot be switched on.
+    const failedWrite = {
+      shopName: null, shopDomain: null, ianaTimezone: null, currencyCode: null, grantedScopes: [],
+      earliestVisibleOrderAt: null, productTypeCoverage: null,
+      fileServer: { protocol: "sftp" as const, fileCount: 3, directoryCount: 1, writable: false, hostKeyFingerprint: "SHA256:x", serverSoftware: null },
+      checkedAt: "2026-09-23T00:00:00.000Z",
+    };
+    expect(sftp.canActivate(failedWrite).ok).toBe(false);
+    expect(sftp.canActivate({ ...failedWrite, fileServer: { ...failedWrite.fileServer, writable: true } }).ok).toBe(true);
+    // Read-only: no write attempted, writable stays null, activation is allowed.
+    expect(sftp.canActivate({ ...failedWrite, fileServer: { ...failedWrite.fileServer, writable: null } }).ok).toBe(true);
+
+    const shape = sftp.storedShape({
+      kind: "sftp_file", name: "Files", host: "files.example.com", port: 2222, username: "paperclip",
+      remotePath: "/reports", access: "read_write", credential: { kind: "password", password: "hunter2" },
+    });
+    expect(shape).toEqual({ shopDomain: null, apiVersion: null, access: "read_write", config: { host: "files.example.com", port: 2222, username: "paperclip", remotePath: "/reports" } });
+    expect(JSON.stringify(shape)).not.toContain("hunter2");
+    expect(sftp.describeTarget({ shopDomain: null, config: { kind: "sftp_file", host: "files.example.com", port: 2222, username: "paperclip", remotePath: "/reports" } })).toBe("files.example.com:2222/reports");
+    expect(getDataSourceKind("ftp_file").describeTarget({ shopDomain: null, config: { kind: "ftp_file", host: "files.example.com", port: 21, username: "u", remotePath: "/reports", acknowledgedUnencrypted: true } })).toBe("files.example.com/reports");
+  });
+
   it("stores only each kind's own non-secret settings in config, and describes where it points", () => {
     const woo = getDataSourceKind("woocommerce");
     expect(
       woo.storedShape({ kind: "woocommerce", name: "Butikken", storeUrl: "https://butikken.no", credential: { kind: "consumer_key_secret", consumerKey: CK, consumerSecret: CS }, dailyLookupCap: 5 }),
-    ).toEqual({ shopDomain: null, apiVersion: null, config: { storeUrl: "https://butikken.no" } });
+    ).toEqual({ shopDomain: null, apiVersion: null, access: "read", config: { storeUrl: "https://butikken.no" } });
     expect(woo.describeTarget({ shopDomain: null, config: { kind: "woocommerce", storeUrl: "https://butikken.no" } })).toBe("butikken.no");
     expect(woo.outboundPolicy({ kind: "woocommerce", storeUrl: "https://butikken.no" })?.hostPattern.test("butikken.no")).toBe(true);
     expect(woo.outboundPolicy({ kind: "woocommerce", storeUrl: "https://butikken.no" })?.hostPattern.test("evil.no")).toBe(false);
@@ -175,14 +214,14 @@ describe("DUR-3997 data-source registry", () => {
 
     const fiken = getDataSourceKind("fiken");
     expect(fiken.storedShape({ kind: "fiken", name: "Regnskap", companySlug: "fiken-demo-firma-as", credential: { kind: "api_token", apiToken: "0123456789abcdef0123456789abcdef" } }))
-      .toEqual({ shopDomain: null, apiVersion: null, config: { companySlug: "fiken-demo-firma-as" } });
+      .toEqual({ shopDomain: null, apiVersion: null, access: "read", config: { companySlug: "fiken-demo-firma-as" } });
     expect(fiken.describeTarget({ shopDomain: null, config: { kind: "fiken", companySlug: "fiken-demo-firma-as" } })).toBe("fiken-demo-firma-as");
     expect(fiken.outboundPolicy({ kind: "fiken", companySlug: "x" })?.hostPattern.test("api.fiken.no")).toBe(true);
     expect(fiken.datasets).toEqual(["finance"]);
 
     const sftp = getDataSourceKind("sftp_file");
-    const shape = sftp.storedShape({ kind: "sftp_file", name: "Filer", host: "filer.butikken.no", port: 2222, username: "paperclip", remotePath: "/rapporter", credential: { kind: "password", password: "hunter2" } });
-    expect(shape).toEqual({ shopDomain: null, apiVersion: null, config: { host: "filer.butikken.no", port: 2222, username: "paperclip", remotePath: "/rapporter" } });
+    const shape = sftp.storedShape({ kind: "sftp_file", name: "Filer", host: "filer.butikken.no", port: 2222, username: "paperclip", remotePath: "/rapporter", access: "read", credential: { kind: "password", password: "hunter2" } });
+    expect(shape).toEqual({ shopDomain: null, apiVersion: null, access: "read", config: { host: "filer.butikken.no", port: 2222, username: "paperclip", remotePath: "/rapporter" } });
     expect(JSON.stringify(shape)).not.toContain("hunter2");
     expect(sftp.describeTarget({ shopDomain: null, config: { kind: "sftp_file", host: "filer.butikken.no", port: 2222, username: "paperclip", remotePath: "/rapporter" } })).toBe("filer.butikken.no:2222/rapporter");
     expect(sftp.describeTarget({ shopDomain: null, config: { kind: "sftp_file", host: "filer.butikken.no", port: 22, username: "paperclip", remotePath: "/rapporter" } })).toBe("filer.butikken.no/rapporter");

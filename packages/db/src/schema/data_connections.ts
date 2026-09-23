@@ -21,21 +21,24 @@ import { companySecrets } from "./company_secrets.js";
  * DUR-3972 slice S1 / DUR-3997 slice 3: a company's connection to an outside
  * business-data source, made by a board user in company settings.
  *
- * Kinds: 'shopify' (readable today), 'woocommerce', 'fiken' and 'sftp_file'
- * (accepted and stored; their adapters come later). Shopify keeps its own
- * columns from S1 (shop_domain, api_version); every other kind stores its
- * non-secret settings in `config` and leaves those two columns null. The
- * check constraints below tie the shape to the kind, so a Shopify row without
- * a *.myshopify.com address, or a Fiken row with a Shopify credential kind,
- * cannot be stored by any code path.
+ * Kinds: 'shopify' and the three file-server kinds 'ftp_file', 'ftps_file',
+ * 'sftp_file' (readable today), plus 'woocommerce' and 'fiken' (accepted and
+ * stored; their adapters come later). Shopify keeps its own columns from S1
+ * (shop_domain, api_version); every other kind stores its non-secret settings
+ * in `config` and leaves those two columns null. The check constraints below
+ * tie the shape to the kind, so a Shopify row without a *.myshopify.com
+ * address, a Fiken row with a Shopify credential kind, or an FTP row with a
+ * private key, cannot be stored by any code path.
  *
  * The credential is NOT stored here. It is an ordinary company secret
  * (encrypted, rotatable, every read in secret_access_events) and this row only
  * points at it through `credential_secret_id`. That makes "no read route can
  * return the key" a property of the schema, the same way telegram_bots does it.
  *
- * `access` can only ever hold 'read'. The check constraint is there so that a
- * write grant cannot be stored by any code path, not only by the routes.
+ * `access` holds 'read' or, for a file-server connection to the company's own
+ * server, 'read_write' (migration 0174). The check constraint is there so that
+ * no other value can be stored by any code path, not only by the routes; the
+ * service refuses `read_write` for every kind that has no write operation.
  */
 export type DataConnectionObserved = {
   shopName?: string | null;
@@ -50,10 +53,19 @@ export type DataConnectionObserved = {
     productsWithoutType: number;
     types: Array<{ productType: string; products: number }>;
   } | null;
+  fileServer?: {
+    protocol: "ftp" | "ftps" | "sftp";
+    fileCount: number;
+    directoryCount: number;
+    writable: boolean | null;
+    hostKeyFingerprint: string | null;
+    serverSoftware: string | null;
+  } | null;
   checkedAt?: string | null;
 };
 
-export const DATA_CONNECTION_KIND_VALUES = ["shopify", "woocommerce", "fiken", "sftp_file"] as const;
+export const DATA_CONNECTION_KIND_VALUES = ["shopify", "woocommerce", "fiken", "ftp_file", "ftps_file", "sftp_file"] as const;
+export const DATA_CONNECTION_ACCESS_VALUES = ["read", "read_write"] as const;
 export const DATA_CONNECTION_CREDENTIAL_KIND_VALUES = [
   "admin_access_token",
   "client_credentials",
@@ -99,7 +111,7 @@ export const dataConnections = pgTable(
     idCompanyUq: unique("data_connections_id_company_uq").on(table.id, table.companyId),
     kindCheck: check(
       "data_connections_kind_check",
-      sql`${table.kind} IN ('shopify', 'woocommerce', 'fiken', 'sftp_file')`,
+      sql`${table.kind} IN ('shopify', 'woocommerce', 'fiken', 'ftp_file', 'ftps_file', 'sftp_file')`,
     ),
     // A Shopify row must carry a *.myshopify.com address and an API version
     // (the S1 rule, unchanged for Shopify); other kinds keep their settings in
@@ -108,12 +120,13 @@ export const dataConnections = pgTable(
       "data_connections_shop_domain_check",
       sql`${table.kind} <> 'shopify' OR (${table.shopDomain} IS NOT NULL AND ${table.apiVersion} IS NOT NULL AND ${table.shopDomain} ~ '^[a-z0-9][a-z0-9-]*\\.myshopify\\.com$')`,
     ),
-    // The credential kind must belong to the source kind.
+    // The credential kind must belong to the source kind: a private key is
+    // SFTP-only; plain FTP and FTPS take a password.
     credentialKindCheck: check(
       "data_connections_credential_kind_check",
-      sql`(${table.kind} = 'shopify' AND ${table.credentialKind} IN ('admin_access_token', 'client_credentials')) OR (${table.kind} = 'woocommerce' AND ${table.credentialKind} = 'consumer_key_secret') OR (${table.kind} = 'fiken' AND ${table.credentialKind} = 'api_token') OR (${table.kind} = 'sftp_file' AND ${table.credentialKind} IN ('password', 'private_key'))`,
+      sql`(${table.kind} = 'shopify' AND ${table.credentialKind} IN ('admin_access_token', 'client_credentials')) OR (${table.kind} = 'woocommerce' AND ${table.credentialKind} = 'consumer_key_secret') OR (${table.kind} = 'fiken' AND ${table.credentialKind} = 'api_token') OR (${table.kind} IN ('ftp_file', 'ftps_file') AND ${table.credentialKind} = 'password') OR (${table.kind} = 'sftp_file' AND ${table.credentialKind} IN ('password', 'private_key'))`,
     ),
-    accessCheck: check("data_connections_access_check", sql`${table.access} = 'read'`),
+    accessCheck: check("data_connections_access_check", sql`${table.access} IN ('read', 'read_write')`),
     statusCheck: check(
       "data_connections_status_check",
       sql`${table.status} IN ('draft', 'active', 'error', 'disabled')`,
