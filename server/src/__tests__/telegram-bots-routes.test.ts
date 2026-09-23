@@ -162,7 +162,7 @@ d("telegram bot routes", () => {
     token = TOKEN,
     name = "Daglig leder",
   ) {
-    return request(app).post(`/api/companies/${companyId}/telegram-bots`).send({ agentId, name, token });
+    return request(app).post(`/api/companies/${companyId}/telegram-bots`).send({ agentId, name, botToken: token });
   }
 
   // ── The happy path, and the token never coming back ───────────────────────
@@ -289,7 +289,7 @@ d("telegram bot routes", () => {
 
     const rotated = await request(app)
       .post(`/api/companies/${companyId}/telegram-bots/${created.body.id}/token`)
-      .send({ token: NEW_TOKEN });
+      .send({ botToken: NEW_TOKEN });
 
     expect(rotated.status, JSON.stringify(rotated.body)).toBe(200);
     expect(rotated.body.tokenHint).toBe("8100000002:••••ond2");

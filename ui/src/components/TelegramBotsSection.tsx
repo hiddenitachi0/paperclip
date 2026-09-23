@@ -63,7 +63,7 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
 
   const createMutation = useMutation({
     mutationFn: () =>
-      telegramBotsApi.create(companyId, { agentId, name: name.trim(), token: token.trim() }),
+      telegramBotsApi.create(companyId, { agentId, name: name.trim(), botToken: token.trim() }),
     onSuccess: () => {
       // Clear the token first: it must not sit in the page after it is saved.
       setToken("");

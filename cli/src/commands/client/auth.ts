@@ -177,7 +177,10 @@ export function registerClientAuthCommands(auth: Command): void {
         .action(async (id: string, opts: AuthChallengeOptions) => {
           try {
             const ctx = resolveCommandContext(opts);
-            printOutput(await ctx.api.post(`${apiPath`/api/cli-auth/challenges/${id}`}/${action}`, { token: resolveChallengeToken(opts) }), { json: ctx.json });
+            // DUR-3996: the wire field is `authToken` (the server's HTTP log
+            // blanks it on a failed request; a bare `token` it would not).
+            // The --token / --token-env flags keep their names.
+            printOutput(await ctx.api.post(`${apiPath`/api/cli-auth/challenges/${id}`}/${action}`, { authToken: resolveChallengeToken(opts) }), { json: ctx.json });
           } catch (err) {
             handleCommandError(err);
           }

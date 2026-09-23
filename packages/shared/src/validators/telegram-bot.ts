@@ -30,7 +30,14 @@ const telegramBotTokenSchema = z
 export const createTelegramBotSchema = z.object({
   agentId: z.string().uuid(),
   name: z.string().trim().min(1, "Gi boten et navn.").max(80),
-  token: telegramBotTokenSchema,
+  /**
+   * DUR-3996: `botToken`, not `token`. The HTTP logger writes the body of
+   * every failed request to server.log and blanks fields by name; a bare
+   * `token` is left readable there on purpose (it is usually a paging
+   * cursor), `botToken` is not. The server still accepts `token` for one
+   * release (see server/src/middleware/legacy-body-field.ts).
+   */
+  botToken: telegramBotTokenSchema,
   /**
    * The link base used in the messages this bot sends. Optional: the bridge
    * falls back to the instance's own UI address when it is not set, which is
@@ -40,7 +47,8 @@ export const createTelegramBotSchema = z.object({
 });
 
 export const rotateTelegramBotTokenSchema = z.object({
-  token: telegramBotTokenSchema,
+  /** DUR-3996: see createTelegramBotSchema.botToken. */
+  botToken: telegramBotTokenSchema,
 });
 
 export const updateTelegramBotAllowedUsersSchema = z.object({

@@ -80,7 +80,14 @@ export const createCliAuthChallengeSchema = z.object({
 export type CreateCliAuthChallenge = z.infer<typeof createCliAuthChallengeSchema>;
 
 export const resolveCliAuthChallengeSchema = z.object({
-  token: z.string().min(16).max(256),
+  /**
+   * DUR-3996: `authToken`, not `token`. The HTTP logger writes the body of
+   * every failed request to server.log and blanks fields by name; a bare
+   * `token` is left readable there on purpose (it is usually a paging
+   * cursor), `authToken` is not. The server still accepts `token` for one
+   * release (see server/src/middleware/legacy-body-field.ts).
+   */
+  authToken: z.string().min(16).max(256),
 });
 
 export type ResolveCliAuthChallenge = z.infer<typeof resolveCliAuthChallengeSchema>;
