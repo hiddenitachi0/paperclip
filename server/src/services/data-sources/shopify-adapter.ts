@@ -353,16 +353,16 @@ class LookupRefusal extends Error {
 }
 
 const TOO_BIG_MESSAGE =
-  "Oppslaget ble for stort til å fullføres trygt (for mange ordre å gå gjennom), så jeg gir ikke et delvis tall. Prøv én måned om gangen, eller be en styrebruker om hjelp.";
+  "The lookup became too big to finish safely (too many orders to go through), so I am not giving a partial figure. Try one month at a time, or ask a board user for help.";
 const THROTTLED_MESSAGE =
-  "Shopify ba oss vente fordi det kom for mange forespørsler, så jeg gir ikke et delvis tall. Prøv igjen om et minutt.";
+  "Shopify asked us to wait because too many requests came in, so I am not giving a partial figure. Try again in a minute.";
 const MISSING_ORDER_HISTORY_MESSAGE =
-  "Shopify-tilkoblingen mangler tilgang til eldre ordre (tillatelsen read_all_orders), så returer og endringer på eldre ordre ville mangle. Jeg gir derfor ingen tall. Det betyr ikke at salget var null.";
-const UPSTREAM_MESSAGE = "Shopify svarte med en feil, så jeg har ingen tall å gi. Prøv igjen senere.";
+  "The Shopify connection lacks access to older orders (the read_all_orders permission), so returns and edits on older orders would be missing. I am therefore giving no figures. That does not mean sales were zero.";
+const UPSTREAM_MESSAGE = "Shopify answered with an error, so I have no figures to give. Try again later.";
 const SHAPE_MESSAGE =
-  "Shopify sendte data i et format jeg ikke kjenner igjen, så jeg gir ikke noe svar. Feilen er logget.";
+  "Shopify sent data in a format I do not recognise, so I am not giving an answer. The error has been logged.";
 const INVARIANT_MESSAGE =
-  "Tallene fra Shopify gikk ikke opp da jeg kontrollerte dem, så jeg gir ikke noe svar. Feilen er logget.";
+  "The figures from Shopify did not add up when I checked them, so I am not giving an answer. The error has been logged.";
 
 // ---------------------------------------------------------------------------
 // One lookup's request runner: budget, deadline, pacing, THROTTLED retries.
@@ -909,7 +909,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
       else if (token === "this_month_to_date") ym = { year: today.year, month: today.month };
       else ym = parseMonthKey(token);
       if (!ym) {
-        throw new LookupRefusal("invalid_period", `Jeg forstår ikke perioden «${token}». Bruk en måned, for eksempel 2026-07.`);
+        throw new LookupRefusal("invalid_period", `I do not understand the period "${token}". Use a month, for example 2026-07.`);
       }
       const next = addMonths(ym.year, ym.month, 1);
       const start = zonedMonthStart(ym.year, ym.month, timezone);
@@ -927,7 +927,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
     });
     const keys = new Set(resolved.map((period) => period.key));
     if (keys.size !== resolved.length) {
-      throw new LookupRefusal("invalid_request", "De to periodene er samme måned. Velg to forskjellige måneder.");
+      throw new LookupRefusal("invalid_request", "The two periods are the same month. Choose two different months.");
     }
     return resolved.sort((a, b) => a.start.getTime() - b.start.getTime());
   }
@@ -946,7 +946,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         }
         throw new LookupRefusal(
           "invalid_request",
-          "Spørsmålet kunne ikke gjøres om til et gyldig oppslag (maks to måneder, oppgitt som måned).",
+          "The question could not be turned into a valid lookup (at most two months, given as months).",
           parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
         );
       }
@@ -959,7 +959,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         ? [...new Set(input.productTypes.map((type) => type.trim()).filter(Boolean))]
         : null;
       if (requestedTypes && requestedTypes.length === 0) {
-        throw new LookupRefusal("invalid_request", "Ingen produkttype ble oppgitt.");
+        throw new LookupRefusal("invalid_request", "No product type was given.");
       }
 
       const shop = await readShopWindow(runner);
@@ -978,7 +978,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         if (!shop.earliestVisibleOrderAt) {
           throw new LookupRefusal(
             "no_visible_orders",
-            `Shopify viser ingen ordre for nettbutikken ${shop.domain}, så jeg har ingen tall å gi. Det betyr ikke at salget var null.`,
+            `Shopify shows no orders for the online store ${shop.domain}, so I have no figures to give. That does not mean sales were zero.`,
           );
         }
         const tooEarly = scanned.find((period) => period.start.getTime() < shop.earliestVisibleOrderAt!.getTime());
@@ -998,7 +998,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
           const nearest = nearestValues(unknown[0]!, [...catalogTypes], 3);
           throw new LookupRefusal(
             "unknown_product_type",
-            `Produkttypen «${unknown[0]}» finnes ikke i Shopify-katalogen.${nearest.length > 0 ? ` Nærmeste: ${nearest.join(", ")}.` : ""}`,
+            `The product type "${unknown[0]}" does not exist in the Shopify catalog.${nearest.length > 0 ? ` Nearest: ${nearest.join(", ")}.` : ""}`,
             unknown.map((type) => `unknown product type ${type}`),
           );
         }

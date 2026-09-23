@@ -108,7 +108,7 @@ export interface DataSourceKindDefinition {
 }
 
 export function unsupportedKindMessage(kind: DataConnectionKind): string {
-  return `${DATA_CONNECTION_KIND_LABELS[kind]}-koblinger kan ikke leses ennå. Koblingen er lagret, og tas i bruk når støtten er klar.`;
+  return `${DATA_CONNECTION_KIND_LABELS[kind]} connections cannot be read yet. The connection is saved and will be used once support is ready.`;
 }
 
 export function unsupportedKindError(kind: DataConnectionKind) {
@@ -135,7 +135,7 @@ function pendingKind(input: {
     datasets: input.datasets,
     configSchema: input.configSchema,
     storedShape(create) {
-      if (create.kind !== kind) throw unprocessable(`Feil type kobling for ${DATA_CONNECTION_KIND_LABELS[kind]}.`);
+      if (create.kind !== kind) throw unprocessable(`Wrong kind of connection for ${DATA_CONNECTION_KIND_LABELS[kind]}.`);
       // The config schema keeps only its own fields: the credential, the name
       // and the cap are stripped, so no secret can land in `config`.
       return { shopDomain: null, apiVersion: null, config: input.configSchema.parse(create) as Record<string, unknown> };
@@ -209,7 +209,7 @@ export function isDataSourceKind(kind: string): kind is DataConnectionKind {
 /** The entry for a kind. An unknown kind (a row nobody in this codebase wrote) is refused, never guessed. */
 export function getDataSourceKind(kind: string): DataSourceKindDefinition {
   if (!isDataSourceKind(kind)) {
-    throw unprocessable("Denne datakoblingen er av en type Paperclip ikke kjenner.", {
+    throw unprocessable("This data connection is of a kind Paperclip does not know.", {
       code: "data_source_kind_unknown",
     });
   }

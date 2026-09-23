@@ -152,9 +152,9 @@ export function findUngroundedNumbers(reply: string, toolOutputs: string[]): str
   return missing;
 }
 
-export const NUMBER_CHECK_REPLACEMENT_NOTE = "(Tallene er hentet direkte fra datakilden.)";
+export const NUMBER_CHECK_REPLACEMENT_NOTE = "(The figures come straight from the data source.)";
 /** When a lookup was asked for but nothing came back to relay (e.g. the per-message tool cap). */
-export const NO_NUMBERS_SENTENCE = "Jeg fikk ikke hentet tall fra datakilden for dette spørsmålet, så jeg gir ingen tall. Spør gjerne igjen.";
+export const NO_NUMBERS_SENTENCE = "I could not fetch figures from the data source for this question, so I am not giving any figures. Please ask again.";
 
 export interface BusinessDataTurnOutput {
   /** Exactly what the model was shown. */
@@ -209,8 +209,8 @@ export function applyBusinessDataNumberCheck(reply: string, outputs: BusinessDat
 
 /** Sent instead of a reply that states sales figures without a lookup in this turn. */
 export const NO_LOOKUP_SENTENCE =
-  "Jeg har ikke hentet tallene på nytt for dette svaret, så jeg gir ingen tall her. " +
-  "Spør meg om tallene igjen, så slår jeg dem opp i datakilden.";
+  "I have not fetched the figures afresh for this answer, so I am not giving any figures here. " +
+  "Ask me for the figures again and I will look them up in the data source.";
 
 // Words that make a nearby number a claim about sales, for the no-lookup guard.
 const SALES_WORDS = `${COUNT_WORDS}|netto|net|totalt|total|sum|returnerte|endring`;

@@ -34,7 +34,7 @@ import { evaluateShopifyScopes, runShopifyConnectionCheck } from "./shopify-conn
 function openShopifyContext(input: OpenReadContextInput): ShopifyReadContext {
   const { connection, deps } = input;
   if (connection.kind !== "shopify" || !connection.shopDomain || !connection.apiVersion) {
-    throw unprocessable("Denne koblingen mangler butikkadresse og kan ikke brukes.", { code: "data_connection_incomplete" });
+    throw unprocessable("This connection has no shop address and cannot be used.", { code: "data_connection_incomplete" });
   }
   const shopDomain = connection.shopDomain;
   const apiVersion = connection.apiVersion;
@@ -48,7 +48,7 @@ function openShopifyContext(input: OpenReadContextInput): ShopifyReadContext {
       const value = await input.loadCredential();
       if (value.kind === "admin_access_token") return value.accessToken;
       if (value.kind !== "client_credentials") {
-        throw unprocessable("Den lagrede nøkkelen passer ikke til en Shopify-kobling. Lim den inn på nytt.", {
+        throw unprocessable("The stored key does not fit a Shopify connection. Paste it in again.", {
           code: "credential_kind_mismatch",
         });
       }
@@ -88,7 +88,7 @@ function openShopifyContext(input: OpenReadContextInput): ShopifyReadContext {
 
 function assertShopify(context: { kind: string }): asserts context is ShopifyReadContext {
   if (context.kind !== "shopify") {
-    throw unprocessable("Shopify-adapteren fikk en kobling av en annen type.", { code: "data_source_kind_mismatch" });
+    throw unprocessable("The Shopify adapter was given a connection of another kind.", { code: "data_source_kind_mismatch" });
   }
 }
 
@@ -119,7 +119,7 @@ export const shopifyDataSource: DataSourceKindDefinition = {
   datasets: ["sales"],
   configSchema: shopifyConnectionConfigSchema,
   storedShape(input) {
-    if (input.kind !== "shopify") throw unprocessable("Feil type kobling for Shopify.");
+    if (input.kind !== "shopify") throw unprocessable("Wrong kind of connection for Shopify.");
     return { shopDomain: input.shopDomain, apiVersion: SHOPIFY_API_VERSION, config: {} };
   },
   describeTarget(connection) {

@@ -248,7 +248,7 @@ d("DUR-3972 S2 Datakilder routes", () => {
         ];
         for (const res of await Promise.all(attempts)) {
           expect(res.status, `${role} ${res.req.method} ${res.req.path}`).toBe(403);
-          expect(res.body.error).toContain("Bare eieren av selskapet");
+          expect(res.body.error).toContain("Only the company's owner");
         }
       }
       // A refused member stored nothing.
@@ -353,8 +353,8 @@ d("DUR-3972 S2 Datakilder routes", () => {
         .post(`/api/companies/${companyId}/data-connections/${connectionId}/trial`)
         .send({ periods: ["2026-07"] });
       expect(res.body.ok).toBe(true);
-      expect(res.body.reconciliationNotes.join(" ")).toContain("juli 2026");
-      expect(res.body.reconciliationNotes.join(" ")).toContain("Shopifys salgslogg viser 1 returnerte stk, men refusjonene viser 0 stk");
+      expect(res.body.reconciliationNotes.join(" ")).toContain("July 2026");
+      expect(res.body.reconciliationNotes.join(" ")).toContain("Shopify's sales ledger shows 1 returned unit, but the refunds show 0 units");
       expect(res.body.reconciliationNotes.join(" ")).not.toMatch(/refunds_cross_check|ledger/);
     });
 
@@ -367,7 +367,7 @@ d("DUR-3972 S2 Datakilder routes", () => {
         .send({ periods: ["2026-07"] });
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ ok: false, code: "data_connection_not_active" });
-      expect(res.body.message).toContain("Trykk Test først");
+      expect(res.body.message).toContain("Press Test first");
       expect(res.body.card).toBeUndefined();
       expect(shop.requests).toHaveLength(0);
       const rows = await db.select().from(dataReadEvents).where(eq(dataReadEvents.companyId, companyId));
@@ -446,7 +446,7 @@ d("DUR-3972 S2 Datakilder routes", () => {
         .post(`/api/companies/${companyId}/data-connections/${connectionId}/trial`)
         .send({ periods: ["2026-07"] });
       expect(res.body).toMatchObject({ ok: false, code: "rate_limited_minute" });
-      expect(res.body.message).toContain("Vent et minutt");
+      expect(res.body.message).toContain("Wait a minute");
       expect(shop.requests).toHaveLength(0);
     });
 
@@ -470,7 +470,7 @@ d("DUR-3972 S2 Datakilder routes", () => {
         .post(`/api/companies/${companyId}/data-connections/${connectionId}/trial`)
         .send({ periods: ["2026-07"] });
       expect(res.body).toMatchObject({ ok: false, code: "rate_limited_day" });
-      expect(res.body.message).toContain("Eieren av selskapet kan øke grensen");
+      expect(res.body.message).toContain("The company's owner can raise the limit");
       expect(shop.requests).toHaveLength(0);
     });
 
@@ -535,15 +535,15 @@ describe("DUR-3972 S2 trial helpers", () => {
     expect(zonedDayStart(new Date("2026-03-29T12:00:00Z"), "Europe/Oslo").toISOString()).toBe("2026-03-28T23:00:00.000Z");
   });
 
-  it("turns the engine's log warnings into plain Norwegian, and counts the rest", () => {
+  it("turns the engine's log warnings into plain English, and counts the rest", () => {
     expect(
       describeReconciliationWarnings([
         "refunds_cross_check 2026-08 Sofa: ledger returns 2, refund lines 1",
         "catalog units sold skipped: request_budget_exceeded",
       ]),
     ).toEqual([
-      "august 2026, produkttypen Sofa: Shopifys salgslogg viser 2 returnerte stk, men refusjonene viser 1 stk. Tallene over bruker salgsloggen, som Shopify Analytics. Forskjellen bør forklares før Salg slås på.",
-      "1 annen merknad fra beregningen er lagret i loggen.",
+      "August 2026, product type Sofa: Shopify's sales ledger shows 2 returned units, but the refunds show 1 unit. The figures above use the sales ledger, as Shopify Analytics does. The difference should be explained before Sales is switched on.",
+      "1 other note from the calculation was saved in the log.",
     ]);
   });
 });

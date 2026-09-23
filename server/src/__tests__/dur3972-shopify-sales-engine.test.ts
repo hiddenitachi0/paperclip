@@ -421,8 +421,8 @@ describe("no data is never zero", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.refusal.code).toBe("missing_order_history_access");
-    expect(outcome.refusal.message).toContain("mangler tilgang til eldre ordre");
-    expect(outcome.refusal.message).toContain("ikke at salget var null");
+    expect(outcome.refusal.message).toContain("lacks access to older orders");
+    expect(outcome.refusal.message).toContain("does not mean sales were zero");
     expect(outcome.audit.refusalCode).toBe("missing_order_history_access");
     expect(fake.requests.map((request) => request.operation)).toEqual(["PaperclipShopWindow"]);
   });
@@ -513,7 +513,7 @@ describe("complete or nothing", () => {
     const outcome = await adapter.sales({ periods: ["2026-08"] });
     expect(outcome.ok ? null : outcome.refusal.code).toBe("request_budget_exceeded");
     expect(fake.requests.length).toBe(3);
-    if (!outcome.ok) expect(outcome.refusal.message).toContain("delvis tall");
+    if (!outcome.ok) expect(outcome.refusal.message).toContain("partial figure");
   });
 
   it("the default budget is 60 requests and 25 seconds", async () => {
@@ -547,7 +547,7 @@ describe("requests the engine refuses", () => {
       const { adapter, fake } = setup({ products: PRODUCTS, orders: [anchorOrder()] });
       const outcome = await adapter.sales({ periods: ["last_month"], measure });
       expect(outcome.ok ? null : outcome.refusal.code).toBe("kroner_not_enabled");
-      if (!outcome.ok) expect(outcome.refusal.message).toMatch(/^Kronebeløp er ikke slått på ennå/);
+      if (!outcome.ok) expect(outcome.refusal.message).toMatch(/^Amounts in kroner are not switched on yet/);
       expect(fake.requests).toHaveLength(0);
     }
   });
@@ -556,7 +556,7 @@ describe("requests the engine refuses", () => {
     const { adapter } = setup({ products: PRODUCTS, orders: [anchorOrder()] });
     const outcome = await adapter.sales({ periods: ["last_month"], productTypes: ["Sofaa"] });
     expect(outcome.ok ? null : outcome.refusal.code).toBe("unknown_product_type");
-    if (!outcome.ok) expect(outcome.refusal.message).toContain("Nærmeste: Sofa");
+    if (!outcome.ok) expect(outcome.refusal.message).toContain("Nearest: Sofa");
     expect(nearestValues("hjornesofa", ["Hjørnesofa", "Sofa", "Lenestol"], 1)).toEqual(["Hjørnesofa"]);
   });
 

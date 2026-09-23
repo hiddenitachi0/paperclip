@@ -24,13 +24,13 @@ export const DATA_CONNECTION_KIND_LABELS: Record<DataConnectionKind, string> = {
   shopify: "Shopify",
   woocommerce: "WooCommerce",
   fiken: "Fiken",
-  sftp_file: "Filer (SFTP)",
+  sftp_file: "Files (SFTP)",
 };
 
 /**
  * Kinds Paperclip can actually read through today. The other kinds are
  * accepted by validation and stored (with their credential locked to the
- * connection), and answer "kommer snart" everywhere a read would happen. The
+ * connection), and answer "coming soon" everywhere a read would happen. The
  * server-side registry is the source of truth for behaviour; this list is
  * what the settings screen shows before anything is saved, and a test keeps
  * the two in step.
@@ -121,7 +121,7 @@ const shopDomainSchema = z
   .transform(normalizeShopDomainInput)
   .refine((value) => SHOPIFY_SHOP_DOMAIN_PATTERN.test(value), {
     message:
-      "Bruk butikkens myshopify-adresse, for eksempel nordstrand.myshopify.com. Du finner den i Shopify under Innstillinger → Domener.",
+      "Use the shop's myshopify address, for example nordstrand.myshopify.com. You find it in Shopify under Settings → Domains.",
   });
 
 /**
@@ -135,7 +135,7 @@ const shopDomainSchema = z
  * .internal, .lan, .home, .arpa).
  */
 export const WOOCOMMERCE_STORE_URL_MESSAGE =
-  "Bruk butikkens offentlige https-adresse, for eksempel https://butikken.no. Ikke http, ikke en IP-adresse, og ikke en adresse som bare virker på et internt nett.";
+  "Use the store's public https address, for example https://butikken.no. Not http, not an IP address, and not an address that only works on an internal network.";
 
 const NON_PUBLIC_HOST_SUFFIXES = [".local", ".localhost", ".internal", ".lan", ".home", ".arpa", ".test", ".example", ".invalid"];
 
@@ -186,7 +186,7 @@ const fikenCompanySlugSchema = z
   .trim()
   .toLowerCase()
   .refine((value) => FIKEN_COMPANY_SLUG_PATTERN.test(value), {
-    message: "Bruk selskapets Fiken-slug, for eksempel fiken-demo-firma-as. Du finner den i adressen når du er inne i selskapet i Fiken.",
+    message: "Use the company's Fiken slug, for example fiken-demo-firma-as. You find it in the address when you are inside the company in Fiken.",
   });
 
 const sftpHostSchema = z
@@ -195,7 +195,7 @@ const sftpHostSchema = z
   .toLowerCase()
   .max(253)
   .refine((value) => isPublicLookingHostName(value), {
-    message: "Bruk serverens offentlige navn, for eksempel filer.butikken.no. Ikke en IP-adresse, og ikke et navn som bare virker på et internt nett.",
+    message: "Use the server's public name, for example filer.butikken.no. Not an IP address, and not a name that only works on an internal network.",
   });
 
 const noWhitespace = (value: string) => !/\s/.test(value);
@@ -207,24 +207,24 @@ export const shopifyCredentialSchema = z.discriminatedUnion("kind", [
     accessToken: z
       .string()
       .trim()
-      .min(20, "Tilgangsnøkkelen er for kort. Den starter som regel med shpat_ og er en lang bokstavrekke.")
+      .min(20, "The access token is too short. It usually starts with shpat_ and is a long string of characters.")
       .max(512)
-      .refine(noWhitespace, { message: "Tilgangsnøkkelen skal være én sammenhengende rekke uten mellomrom." }),
+      .refine(noWhitespace, { message: "The access token must be one continuous string without spaces." }),
   }).strict(),
   z.object({
     kind: z.literal("client_credentials"),
     clientId: z
       .string()
       .trim()
-      .min(8, "Lim inn klient-ID-en fra appen i Shopify Dev Dashboard.")
+      .min(8, "Paste the client ID from the app in Shopify Dev Dashboard.")
       .max(256)
-      .refine(noWhitespace, { message: "Klient-ID-en skal være én sammenhengende rekke uten mellomrom." }),
+      .refine(noWhitespace, { message: "The client ID must be one continuous string without spaces." }),
     clientSecret: z
       .string()
       .trim()
-      .min(16, "Klienthemmeligheten er for kort. Lim inn hele verdien fra Shopify Dev Dashboard.")
+      .min(16, "The client secret is too short. Paste the whole value from Shopify Dev Dashboard.")
       .max(512)
-      .refine(noWhitespace, { message: "Klienthemmeligheten skal være én sammenhengende rekke uten mellomrom." }),
+      .refine(noWhitespace, { message: "The client secret must be one continuous string without spaces." }),
   }).strict(),
 ]);
 export type ShopifyCredentialInput = z.infer<typeof shopifyCredentialSchema>;
@@ -235,15 +235,15 @@ export const wooCommerceCredentialSchema = z.object({
   consumerKey: z
     .string()
     .trim()
-    .min(16, "Consumer key er for kort. Den starter som regel med ck_ og er en lang bokstavrekke.")
+    .min(16, "The consumer key is too short. It usually starts with ck_ and is a long string of characters.")
     .max(512)
-    .refine(noWhitespace, { message: "Consumer key skal være én sammenhengende rekke uten mellomrom." }),
+    .refine(noWhitespace, { message: "The consumer key must be one continuous string without spaces." }),
   consumerSecret: z
     .string()
     .trim()
-    .min(16, "Consumer secret er for kort. Den starter som regel med cs_ og er en lang bokstavrekke.")
+    .min(16, "The consumer secret is too short. It usually starts with cs_ and is a long string of characters.")
     .max(512)
-    .refine(noWhitespace, { message: "Consumer secret skal være én sammenhengende rekke uten mellomrom." }),
+    .refine(noWhitespace, { message: "The consumer secret must be one continuous string without spaces." }),
 }).strict();
 export type WooCommerceCredentialInput = z.infer<typeof wooCommerceCredentialSchema>;
 
@@ -253,9 +253,9 @@ export const fikenCredentialSchema = z.object({
   apiToken: z
     .string()
     .trim()
-    .min(16, "API-nøkkelen er for kort. Lim inn hele verdien fra Fiken.")
+    .min(16, "The API key is too short. Paste the whole value from Fiken.")
     .max(512)
-    .refine(noWhitespace, { message: "API-nøkkelen skal være én sammenhengende rekke uten mellomrom." }),
+    .refine(noWhitespace, { message: "The API key must be one continuous string without spaces." }),
 }).strict();
 export type FikenCredentialInput = z.infer<typeof fikenCredentialSchema>;
 
@@ -263,17 +263,17 @@ export type FikenCredentialInput = z.infer<typeof fikenCredentialSchema>;
 export const sftpCredentialSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("password"),
-    password: z.string().min(1, "Skriv inn passordet.").max(1024),
+    password: z.string().min(1, "Enter the password.").max(1024),
   }).strict(),
   z.object({
     kind: z.literal("private_key"),
     privateKey: z
       .string()
       .trim()
-      .min(64, "Lim inn hele den private nøkkelen, fra -----BEGIN til -----END.")
+      .min(64, "Paste the whole private key, from -----BEGIN to -----END.")
       .max(16_384)
       .refine((value) => /^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value), {
-        message: "Den private nøkkelen skal starte med -----BEGIN … PRIVATE KEY-----.",
+        message: "The private key must start with -----BEGIN … PRIVATE KEY-----.",
       }),
     passphrase: z.string().max(1024).optional(),
   }).strict(),
@@ -295,7 +295,7 @@ export type DataConnectionCredentialInput = z.infer<typeof dataConnectionCredent
 
 const dailyLookupCapSchema = z.number().int().min(1).max(100_000);
 const connectionNameSchema = (fallback: string) =>
-  z.string().trim().min(1, "Gi koblingen et navn.").max(80).default(fallback);
+  z.string().trim().min(1, "Give the connection a name.").max(80).default(fallback);
 
 /** Exactly slice S1's shape: nothing here may change while the live Shopify setup is in progress. */
 export const createShopifyConnectionSchema = z.object({
@@ -325,23 +325,23 @@ export const createFikenConnectionSchema = z.object({
 
 export const createSftpFileConnectionSchema = z.object({
   kind: z.literal("sftp_file"),
-  name: connectionNameSchema("Filer (SFTP)"),
+  name: connectionNameSchema("Files (SFTP)"),
   host: sftpHostSchema,
   port: z.number().int().min(1).max(65_535).default(22),
   username: z
     .string()
     .trim()
-    .min(1, "Skriv inn brukernavnet på serveren.")
+    .min(1, "Enter the user name on the server.")
     .max(128)
-    .refine(noWhitespace, { message: "Brukernavnet kan ikke inneholde mellomrom." }),
+    .refine(noWhitespace, { message: "The user name cannot contain spaces." }),
   /** Absolute path on the server to read files from. Never written to. */
   remotePath: z
     .string()
     .trim()
-    .min(1, "Skriv inn mappen filene ligger i, for eksempel /rapporter.")
+    .min(1, "Enter the folder the files are in, for example /rapporter.")
     .max(512)
-    .refine((value) => value.startsWith("/"), { message: "Mappen skal være en full sti som starter med /, for eksempel /rapporter." })
-    .refine((value) => !value.split("/").includes(".."), { message: "Mappen kan ikke inneholde «..»." }),
+    .refine((value) => value.startsWith("/"), { message: "The folder must be a full path starting with /, for example /rapporter." })
+    .refine((value) => !value.split("/").includes(".."), { message: 'The folder cannot contain "..".' }),
   credential: sftpCredentialSchema,
   dailyLookupCap: dailyLookupCapSchema.optional(),
 }).strict();
@@ -396,18 +396,18 @@ export const setDatasetSourceSchema = z.object({
 export type SetDatasetSourceInput = z.infer<typeof setDatasetSourceSchema>;
 
 /**
- * DUR-3972 slice S2: "Prøveberegning" in Datakilder. The operator picks one or
- * two calendar months (never free dates) and Paperclip counts units sold in
- * them through the connection, exactly as an agent answer would, so the
- * numbers can be compared with Shopify Analytics before "Salg" is ticked.
+ * DUR-3972 slice S2: "Trial calculation" in Data sources. The operator picks
+ * one or two calendar months (never free dates) and Paperclip counts units
+ * sold in them through the connection, exactly as an agent answer would, so
+ * the numbers can be compared with Shopify Analytics before "Sales" is ticked.
  */
 export const DATA_TRIAL_MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 export const dataTrialCalculationSchema = z.object({
   periods: z
-    .array(z.string().regex(DATA_TRIAL_MONTH_PATTERN, "Velg en måned, for eksempel 2026-07."))
-    .min(1, "Velg minst én måned.")
-    .max(2, "Velg høyst to måneder."),
+    .array(z.string().regex(DATA_TRIAL_MONTH_PATTERN, "Choose a month, for example 2026-07."))
+    .min(1, "Choose at least one month.")
+    .max(2, "Choose at most two months."),
   groupBy: z.enum(["none", "product_type"]).default("product_type"),
 }).strict();
 export type DataTrialCalculationInput = z.input<typeof dataTrialCalculationSchema>;

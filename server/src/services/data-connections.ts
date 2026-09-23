@@ -101,7 +101,7 @@ export function dataConnectionCredentialHint(credential: DataConnectionCredentia
  */
 export function dataConnectionSecretName(definition: DataSourceKindDefinition, connectionName: string, connectionId: string): string {
   const name = connectionName.trim().slice(0, 60) || definition.label;
-  return `${definition.label}-nøkkel: ${name} (${connectionId.replace(/-/g, "").slice(0, 8)})`;
+  return `${definition.label} key: ${name} (${connectionId.replace(/-/g, "").slice(0, 8)})`;
 }
 
 function normalizeObserved(raw: DataConnectionRow["observed"]): DataConnectionObservedSummary | null {
@@ -215,7 +215,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
       .select()
       .from(dataConnections)
       .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.companyId, companyId)));
-    if (!row) throw notFound("Fant ikke denne datakoblingen.");
+    if (!row) throw notFound("This data connection was not found.");
     return row;
   }
 
@@ -259,13 +259,13 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
           name,
           provider: "local_encrypted",
           value: encodeCredential(credential),
-          description: `Lesenøkkel for ${definition.label}. Brukes bare av datakoblingen, og kan ikke kobles til en agent eller noe annet.`,
+          description: `Read-only key for ${definition.label}. Used only by the data connection; it cannot be attached to an agent or anything else.`,
           kind: secretKindForDataSource(definition.kind),
         },
         { userId: actor.userId, agentId: null },
       );
     }
-    throw conflict("Kunne ikke gi det lagrede passordet for denne koblingen et navn.");
+    throw conflict("Could not find a free name for this connection's stored key.");
   }
 
   async function create(
@@ -275,7 +275,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
   ): Promise<DataConnectionSummary> {
     const definition = getDataSourceKind(input.kind);
     if (!definition.credentialKinds.includes(input.credential.kind)) {
-      throw unprocessable(`En ${definition.label}-kobling kan ikke bruke denne typen nøkkel.`, {
+      throw unprocessable(`A ${definition.label} connection cannot use this kind of key.`, {
         code: "credential_kind_mismatch",
       });
     }
@@ -314,7 +314,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
       await secrets.syncSecretRefsForTarget(
         companyId,
         { targetType: "data_connection", targetId: row!.id },
-        [{ secretId: secret.id, configPath: DATA_CONNECTION_CREDENTIAL_CONFIG_PATH, label: `Datakilde: ${input.name}` }],
+        [{ secretId: secret.id, configPath: DATA_CONNECTION_CREDENTIAL_CONFIG_PATH, label: `Data source: ${input.name}` }],
         { replaceAll: true },
       );
     } catch (error) {
@@ -340,7 +340,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     // A replacement key must be of a kind this source takes. Decided before
     // anything is written.
     if (patch.credential && !definition.credentialKinds.includes(patch.credential.kind)) {
-      throw unprocessable(`En ${definition.label}-kobling kan ikke bruke denne typen nøkkel.`, {
+      throw unprocessable(`A ${definition.label} connection cannot use this kind of key.`, {
         code: "credential_kind_mismatch",
       });
     }
@@ -354,8 +354,8 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
       if (lastCheckOk !== true || !verdict.ok) {
         throw unprocessable(
           patch.credential
-            ? "En ny nøkkel må testes før koblingen kan slås på. Lagre nøkkelen, trykk Test, og slå den på etterpå."
-            : "Koblingen kan ikke slås på før Test har gått gjennom med en nøkkel som bare kan lese. Trykk Test først.",
+            ? "A new key must be tested before the connection can be switched on. Save the key, press Test, and switch it on afterwards."
+            : "The connection cannot be switched on until Test has passed with a key that can only read. Press Test first.",
           { code: "data_connection_not_verified", problems: verdict.problems },
         );
       }
@@ -454,7 +454,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
         ),
       );
     if (!binding || binding.secretId !== row.credentialSecretId) {
-      throw unprocessable("Ingen nøkkel er koblet til denne datakoblingen.", { code: "binding_missing" });
+      throw unprocessable("No key is attached to this data connection.", { code: "binding_missing" });
     }
     const raw = await secrets.resolveSecretValue(companyId, binding.secretId, "latest", {
       consumerType: "data_connection",
@@ -518,13 +518,13 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
   ): Promise<{ read: DataSourceReadContext; knownSecrets: () => string[] }> {
     if (!(await businessDataEnabled())) {
       throw unprocessable(
-        "Datakilder er slått av for denne Paperclip-installasjonen, så ingen data kan leses nå.",
+        "Data sources are switched off for this Paperclip instance, so no data can be read right now.",
         { code: "business_data_disabled" },
       );
     }
     const row = await getRow(companyId, connectionId);
     if (row.status !== "active") {
-      throw unprocessable("Datakoblingen er ikke slått på.", { code: "data_connection_not_active" });
+      throw unprocessable("The data connection is not switched on.", { code: "data_connection_not_active" });
     }
     const definition = getDataSourceKind(row.kind);
     const { input, knownSecrets } = registryInput(row, definition, context, budget);
@@ -535,7 +535,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
    * "Test": ask the source who it is and what the key may do, remember the
    * answer, and switch the connection on only if the key can read everything
    * it needs and write nothing. A kind without a transport answers with a
-   * plain "kommer snart" sentence and touches nothing.
+   * plain "coming soon" sentence and touches nothing.
    */
   async function test(
     companyId: string,
@@ -573,7 +573,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
       const message =
         error instanceof HttpError && error.status === 422
           ? scrubSecrets(error.message, knownSecrets())
-          : "Noe uventet gikk galt under testen. Prøv igjen om litt.";
+          : "Something unexpected went wrong during the test. Try again in a moment.";
       outcome = { ok: false, canActivate: false, problems: [message], notes: [], observed: null, stats: { requests: 0, costPoints: 0 } };
     }
 
@@ -660,14 +660,14 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     const row = await getRow(companyId, connectionId);
     const definition = getDataSourceKind(row.kind);
     if (!definition.datasets.includes(dataset)) {
-      throw unprocessable(`En ${definition.label}-kobling kan ikke svare på dette datasettet.`, {
+      throw unprocessable(`A ${definition.label} connection cannot answer this dataset.`, {
         code: "dataset_not_offered",
         datasetsOffered: [...definition.datasets],
       });
     }
     if (row.status !== "active") {
       throw unprocessable(
-        "Koblingen må være testet og slått på før den kan brukes. Trykk Test først.",
+        "The connection must be tested and switched on before it can be used. Press Test first.",
         { code: "data_connection_not_active" },
       );
     }

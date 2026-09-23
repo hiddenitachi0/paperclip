@@ -177,7 +177,7 @@ export const catalogResultSchema = z.object({
 export type CatalogResult = z.infer<typeof catalogResultSchema>;
 
 export const KRONER_NOT_ENABLED_MESSAGE =
-  "Kronebeløp er ikke slått på ennå. Foreløpig kan jeg bare svare i antall enheter (stk), ikke i kroner.";
+  "Amounts in kroner are not switched on yet. For now I can only answer in number of units, not in kroner.";
 
 /** Plain refusals. `message` is shown to the person word for word. */
 export const DATA_REFUSAL_CODES = [
