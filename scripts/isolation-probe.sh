@@ -244,7 +244,10 @@ fi
 # fails with EACCES when it is read-only. Nothing is ever written -- opening
 # for append and closing again changes neither the content nor the
 # modification time -- so this is safe to run against a live server.
-for target in /app/server/dist/index.js /app/cli/src/index.ts; do
+# cli/dist/index.js and cli/node_modules/tsx/dist/cli.mjs are the prebuilt
+# CLI and the file that runs it (DUR-3998): what every agent command and the
+# deploy runner's root `docker exec` actually execute.
+for target in /app/server/dist/index.js /app/cli/src/index.ts /app/cli/dist/index.js /app/cli/node_modules/tsx/dist/cli.mjs; do
   [ -e "$target" ] || continue
   if ( : >>"$target" ) 2>/dev/null; then
     found 2 app-writable "$target"

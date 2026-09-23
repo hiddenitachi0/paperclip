@@ -14,7 +14,9 @@ const repoRoot = resolve(__dirname, "..");
 
 // Workspace packages whose code should be bundled into the CLI.
 // Note: "server" is excluded — it's published separately and resolved at runtime.
-const workspacePaths = [
+// Exported for scripts/build-cli-prebuilt.mjs (the Docker image's prebuilt
+// CLI), which links the externals these packages depend on next to the bundle.
+export const workspacePaths = [
   "cli",
   "packages/db",
   "packages/shared",
@@ -33,7 +35,7 @@ const externalWorkspacePackages = new Set([
 ]);
 
 // Collect all external (non-workspace) npm package names
-const externals = new Set();
+export const externals = new Set();
 for (const p of workspacePaths) {
   const pkg = JSON.parse(readFileSync(resolve(repoRoot, p, "package.json"), "utf8"));
   for (const name of Object.keys(pkg.dependencies || {})) {

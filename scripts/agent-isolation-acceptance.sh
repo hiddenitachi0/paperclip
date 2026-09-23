@@ -36,9 +36,15 @@
 #     server still answers /api/health after the probe and after its own
 #     `kill -USR1 <server>` as node;
 #   - no zombie processes after the CLI has run a few times (the heartbeat
-#     runs above start the CLI, whose tsx loader leaves an `esbuild` helper
+#     runs above start the CLI, whose tsx loader left an `esbuild` helper
 #     behind each time): with Node as PID 1 those were never reaped and the
 #     container ran out of processes after ~16 hours ("Cannot fork");
+#   - DUR-3998: the CLI command line every agent runs executes the prebuilt
+#     cli/dist/index.js and never starts esbuild: no esbuild process with the
+#     CLI as its parent while the heartbeat runs execute it, and `--version`
+#     still answers with esbuild made unusable (as the agent user and as the
+#     deploy runner's root exec; negative control g: the real tsx then fails);
+#     both are also timed, for the record;
 #   - a real backup through the server while a spy in front of pg_dump
 #     records whether its command line or environment carries a canary; the
 #     backup must still be a pg_dump backup with today's file name, in
@@ -231,6 +237,107 @@ check_no_zombies() { # container
     tail -20 "$LOG_DIR/zombies.txt" | sed 's/^/    /' >&2
     fail "LEAK 1 no-zombies: ${zombies:-an unknown number of} zombie process(es) left in the container after the CLI runs (PID 1 is ${pid1:-unknown}; a proper init must reap them -- docker-compose.yml init: true)"
   fi
+}
+
+# DUR-3998: the CLI is prebuilt into the image (cli/dist/index.js, run by the
+# shim installed as cli/node_modules/tsx/dist/cli.mjs). The command line every
+# agent runs (CLI_CMD) must run that bundle and never compile the CLI:
+#   (a) sampled for real while the heartbeat runs execute the CLI: every
+#       `esbuild` process in the container is recorded with its parent's
+#       command line, and one whose parent is the CLI means the CLI was
+#       compiled (the server's own tsx helper is expected and ignored);
+#   (b) proved directly: with ESBUILD_BINARY_PATH pointing at a program that
+#       is not esbuild, compiling TypeScript fails outright, so `--version`
+#       only answers when the prebuilt program ran -- checked as the agent
+#       user and with the deploy runner's root exec settings. Negative control
+#       (g): the real tsx (kept beside the shim as tsx-cli.mjs) fails the same
+#       way, so (b) proves something.
+# Both paths are timed too, for the record (INFO line, never a failure).
+#
+# The watcher must be shown to have been running: the server's own tsx
+# loader keeps an esbuild helper alive for as long as the server runs, so a
+# working scan always records at least that one -- an empty record means the
+# watcher never ran (and proves nothing). It also stamps each scan; a stamp
+# that is missing or older than ESBUILD_WATCH_MAX_STALE_S seconds when the
+# record is read means the watcher had stopped early.
+ESBUILD_WATCH_FILE=/tmp/dur3998-esbuild-seen.txt
+ESBUILD_WATCH_STAMP=/tmp/dur3998-esbuild-last-scan
+ESBUILD_WATCH_STOP=/tmp/dur3998-esbuild-watch-stop
+ESBUILD_WATCH_MAX_STALE_S=10
+REAL_TSX_CLI='/app/cli/node_modules/tsx/dist/tsx-cli.mjs'
+REAL_TSX_CLI_CMD="cd /app && node $REAL_TSX_CLI cli/src/index.ts"
+
+start_esbuild_watch() { # container
+  tdocker 15 exec -u 0 "$1" sh -c 'rm -f "$1" "$2" "$3" && : >"$1"' _ "$ESBUILD_WATCH_FILE" "$ESBUILD_WATCH_STOP" "$ESBUILD_WATCH_STAMP" >/dev/null 2>&1 || true
+  tdocker 15 exec -d -u 0 "$1" sh -c '
+    seen="$1"; stop="$2"; stamp="$3"; end=$(( $(date +%s) + 900 ))
+    while [ ! -e "$stop" ] && [ "$(date +%s)" -lt "$end" ]; do
+      for d in /proc/[0-9]*; do
+        [ "$(cat "$d/comm" 2>/dev/null)" = esbuild ] || continue
+        ppid="$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)"
+        printf "%s %s %s\n" "${d#/proc/}" "${ppid:-?}" "$(tr "\0" " " <"/proc/${ppid:-0}/cmdline" 2>/dev/null)" >>"$seen"
+      done
+      date +%s >"$stamp.tmp" && mv -f "$stamp.tmp" "$stamp"
+      sleep 0.2
+    done' _ "$ESBUILD_WATCH_FILE" "$ESBUILD_WATCH_STOP" "$ESBUILD_WATCH_STAMP" >/dev/null 2>&1 || true
+}
+
+time_cli_ms() { # container, command -> milliseconds on stdout (nothing when the command failed)
+  tdocker 120 exec -u node "$1" sh -c 's=$(date +%s%N); { '"$2"'; } >/dev/null 2>&1 || exit 1; e=$(date +%s%N); echo $(( (e - s) / 1000000 ))' 2>/dev/null
+}
+
+check_cli_prebuilt() { # container
+  local container="$1" seen cli_started version rc ms_prebuilt ms_tsx stamp_age
+  # Read the scan stamp before stopping the watcher: the stamp is refreshed
+  # every scan, so its age says whether the watcher was still running now.
+  stamp_age="$(tdocker 15 exec "$container" sh -c '[ -f "$1" ] && echo $(( $(date +%s) - $(cat "$1") ))' _ "$ESBUILD_WATCH_STAMP" 2>/dev/null | tr -d '[:space:]' || true)"
+  tdocker 15 exec -u 0 "$container" sh -c 'touch "$1"' _ "$ESBUILD_WATCH_STOP" >/dev/null 2>&1 || true
+  seen="$(tdocker 15 exec "$container" sh -c 'sort -u "$1" 2>/dev/null' _ "$ESBUILD_WATCH_FILE" | grep . || true)"
+  printf '%s\n' "$seen" >"$LOG_DIR/esbuild-processes.txt"
+  cli_started="$(printf '%s\n' "$seen" | grep -E 'cli/src/index\.ts|cli/dist/index\.js|tsx/dist/cli\.mjs' || true)"
+  if [ -z "$stamp_age" ]; then
+    fail "cli-no-esbuild: the esbuild watcher recorded no scan at all (no stamp file), so it was not running and the check below proves nothing"
+  elif [ "$stamp_age" -gt "$ESBUILD_WATCH_MAX_STALE_S" ]; then
+    fail "cli-no-esbuild: the esbuild watcher's last scan is $stamp_age s old (limit $ESBUILD_WATCH_MAX_STALE_S s), so it stopped before the CLI runs ended and the check below proves nothing"
+  elif [ -z "$seen" ]; then
+    fail "cli-no-esbuild: the esbuild watcher recorded nothing -- not even the server's own tsx helper, which is always running -- so its scan does not work and the check below proves nothing"
+  elif [ -n "$cli_started" ]; then
+    log "  esbuild processes started for the CLI (pid ppid parent-command):"
+    printf '%s\n' "$cli_started" | sed 's/^/    /' >&2
+    fail "LEAK 1 cli-no-esbuild: the CLI started an esbuild helper while the heartbeat runs executed it (it is meant to run the prebuilt cli/dist/index.js)"
+  else
+    log "PASS 1 cli-no-esbuild: no esbuild process was started for the CLI during the heartbeat runs ($(printf '%s\n' "$seen" | grep -c . || true) esbuild process(es) seen, none with the CLI as parent; watcher's last scan ${stamp_age} s ago)"
+  fi
+
+  version="$(tdocker 60 exec -u node -e ESBUILD_BINARY_PATH=/bin/false "$container" sh -c "$CLI_CMD --version" 2>"$LOG_DIR/cli-prebuilt-agent.err")"
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+    log "PASS 1 cli-prebuilt: as the agent user, the CLI command line answered --version ($version) with esbuild unusable, so it ran the prebuilt program"
+  else
+    fail "LEAK 1 cli-prebuilt: as the agent user, the CLI command line did not answer --version with esbuild unusable (exit $rc): it still compiles the CLI (see cli-prebuilt-agent.err)"
+  fi
+  local CLI_EXEC_ENV=()
+  eval "$(grep '^CLI_EXEC_ENV=' "$REPO_ROOT/scripts/deploy-runner.sh")"
+  version="$(tdocker 60 exec "${CLI_EXEC_ENV[@]}" -e ESBUILD_BINARY_PATH=/bin/false "$container" sh -c "$CLI_CMD --version" 2>"$LOG_DIR/cli-prebuilt-runner.err")"
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+    log "PASS 1 cli-prebuilt-runner: the deploy runner's root exec of the CLI answered --version ($version) with esbuild unusable"
+  else
+    fail "LEAK 1 cli-prebuilt-runner: the deploy runner's root exec of the CLI did not answer --version with esbuild unusable (exit $rc; see cli-prebuilt-runner.err)"
+  fi
+  # The real tsx must be there to run, or "it failed" would mean nothing
+  # (an image from before the shim has no tsx-cli.mjs at all).
+  if ! tdocker 15 exec "$container" test -f "$REAL_TSX_CLI"; then
+    fail "negative control (g): $REAL_TSX_CLI is missing (an image without the prebuilt CLI?), so the real tsx cannot be run and the cli-prebuilt checks above prove nothing"
+  elif tdocker 120 exec -u node -e ESBUILD_BINARY_PATH=/bin/false "$container" sh -c "$REAL_TSX_CLI_CMD --version" >/dev/null 2>&1; then
+    fail "negative control (g): compiling the CLI with the real tsx still worked with esbuild unusable, so the cli-prebuilt checks above prove nothing"
+  else
+    log "PASS negative control (g): with esbuild unusable, compiling the CLI with the real tsx ($REAL_TSX_CLI) fails"
+  fi
+
+  ms_prebuilt="$(time_cli_ms "$container" "$CLI_CMD --version" || true)"
+  ms_tsx="$(time_cli_ms "$container" "$REAL_TSX_CLI_CMD --version" || true)"
+  log "INFO 1 cli-timing: paperclipai --version took ${ms_prebuilt:-?} ms prebuilt vs ${ms_tsx:-?} ms compiled by tsx (agent user, compile cache off)"
 }
 
 API_TIMEOUT=120 # seconds for one API call
@@ -877,6 +984,12 @@ main() {
     stage2_install_test_plugin "$container"
   fi
 
+  # DUR-3998: record every esbuild process (and its parent) while the CLI
+  # runs below; check_cli_prebuilt reads the record after the heartbeat runs.
+  if stage_enforced 1; then
+    start_esbuild_watch "$container"
+  fi
+
   log "running the probe as an agent (real heartbeat -> runChildProcess)"
   run_heartbeat "$probe_agent" "$LOG_DIR/probe-heartbeat.log"
   local report
@@ -979,11 +1092,14 @@ main() {
     fi
   fi
 
-  # By now the CLI has run at least twice (the two heartbeat runs), each
-  # leaving an `esbuild` helper for PID 1 to reap. Before stage 2's restarts,
-  # which would clear the evidence: nothing may be left as a zombie.
+  # By now the CLI has run at least twice (the two heartbeat runs); before
+  # DUR-3998 each run left an `esbuild` helper for PID 1 to reap. Before
+  # stage 2's restarts, which would clear the evidence: nothing may be left
+  # as a zombie, and (DUR-3998) the CLI must have run prebuilt, never
+  # starting esbuild at all.
   if stage_enforced 1; then
     check_no_zombies "$container"
+    check_cli_prebuilt "$container"
   fi
 
   if stage_enforced 2; then

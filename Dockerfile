@@ -62,6 +62,29 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 # every agent can write -- as root.
 RUN node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/server-secret-names.js >/tmp/paperclip-server-secret-names \
   && grep -q '^name BETTER_AUTH_SECRET$' /tmp/paperclip-server-secret-names
+# DUR-3998: build the CLI once, here, instead of compiling it on every call.
+# Every agent command runs
+#   node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts <command...>
+# (baked into agent instructions, skills, docs, the deploy runner and the
+# Telegram bridge, so that command line must keep working unchanged). Under
+# tsx that compiled the CLI's TypeScript on every call -- an `esbuild` helper
+# process each time, with the compile cache off on purpose (TSX_DISABLE_CACHE,
+# below) -- which made agent commands slow and, before the container had an
+# init process, left a dead helper per call. scripts/build-cli-prebuilt.mjs
+# bundles the CLI into cli/dist/index.js (the npm build's esbuild config,
+# with third-party packages left external and linked next to the bundle) and
+# then replaces cli/node_modules/tsx/dist/cli.mjs -- in this image only, never
+# a checkout -- with scripts/cli-prebuilt-shim.mjs, which runs the bundle
+# in-process for cli/src/index.ts and hands any other script to the real tsx
+# (kept beside it as tsx-cli.mjs). The script ends by running the command
+# line above with esbuild made unusable, so a build whose CLI still compiled
+# would fail here. The server's own start (CMD below, tsx loader) is untouched.
+# Placed before the ownership sweep below so the bundle, the links and the
+# shim get the same root-only writability as the rest of /app.
+RUN node scripts/build-cli-prebuilt.mjs --install-shim \
+  && test -f cli/dist/index.js \
+  && test -f cli/node_modules/tsx/dist/tsx-cli.mjs \
+  && grep -q 'DUR-3998' cli/node_modules/tsx/dist/cli.mjs
 # DUR-3994 Stage 2: the program files are copied into the final image owned by
 # root (see below). Also make sure none of them is writable by group or others,
 # so ownership alone decides: only root can change Paperclip's program. Only
@@ -203,9 +226,10 @@ EXPOSE 3100
 # the container with `init: true`, so Docker's init (tini) is PID 1 and the
 # entrypoint -- and the server it execs into -- is its child. PID 1 has to
 # collect every process whose parent has gone away, which Node does not do;
-# with Node as PID 1 the `esbuild` helper each CLI run leaves behind stayed a
-# zombie until the container ran out of processes (~16 hours). tini passes
-# SIGTERM on to the server, so the drain-on-stop behaviour is unchanged.
+# with Node as PID 1 the `esbuild` helper each CLI run left behind (before
+# DUR-3998 prebuilt the CLI, see the build stage) stayed a zombie until the
+# container ran out of processes (~16 hours). tini passes SIGTERM on to the
+# server, so the drain-on-stop behaviour is unchanged.
 # Anything that needs the server's pid must look it up by its command line.
 ENTRYPOINT ["docker-entrypoint.sh"]
 # DUR-3994 Stage 1: --disable-sigusr1 stops `kill -USR1 <server>` (which any
