@@ -240,9 +240,11 @@ d("DUR-3997 data connection kinds", () => {
       credentialKind: "api_token",
       datasetsOffered: ["finance"],
     });
+    // Since the file-server slice, SFTP is readable (supported) and defaults to read-only access.
     expect(sftp.body).toMatchObject({
       kind: "sftp_file",
-      supported: false,
+      supported: true,
+      access: "read",
       target: "filer.butikken.no/rapporter",
       config: { kind: "sftp_file", host: "filer.butikken.no", port: 22, username: "paperclip", remotePath: "/rapporter" },
       credentialKind: "password",
@@ -268,11 +270,11 @@ d("DUR-3997 data connection kinds", () => {
     const bindings = await db.select().from(companySecretBindings).where(eq(companySecretBindings.companyId, companyId));
     expect(bindings.map((binding) => binding.targetType)).toEqual(["data_connection", "data_connection", "data_connection"]);
 
-    // The list shows them next to each other, each marked as not readable yet.
+    // The list shows them next to each other; WooCommerce and Fiken are marked not readable yet, SFTP is readable.
     const listed = await request(app).get(`/api/companies/${companyId}/data-connections`);
     expect(listed.status).toBe(200);
     expect(listed.body.map((entry: { kind: string; supported: boolean }) => [entry.kind, entry.supported])).toEqual(
-      expect.arrayContaining([["woocommerce", false], ["fiken", false], ["sftp_file", false]]),
+      expect.arrayContaining([["woocommerce", false], ["fiken", false], ["sftp_file", true]]),
     );
 
     // Test: a plain sentence, nothing contacted, nothing written, status untouched.
