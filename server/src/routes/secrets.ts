@@ -505,7 +505,7 @@ export function secretRoutes(rawDb: Db, deps: { secretTests?: SecretTestService 
       .limit(1);
     if (!binding) return;
     throw unprocessable(
-      "Denne nøkkelen hører til en datakobling. Bytt nøkkelen under Datakilder, så blir den testet før den tas i bruk.",
+      "This key belongs to a data connection. Change the key under Data sources, so it is tested before it is used.",
       { code: "secret_owned_by_data_connection" },
     );
   }

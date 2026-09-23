@@ -184,7 +184,7 @@ d("DUR-3997 data connection kinds", () => {
     expect(new Set(secrets.map((secret) => secret.name)).size).toBe(2);
     expect(new Set(secrets.map((secret) => secret.key)).size).toBe(2);
     for (const secret of secrets) {
-      expect(secret.name).toMatch(/^Shopify-nøkkel: Nettbutikken \([0-9a-f]{8}\)$/);
+      expect(secret.name).toMatch(/^Shopify key: Nettbutikken \([0-9a-f]{8}\)$/);
     }
     for (const created of [first.body, second.body]) {
       const [row] = await db.select().from(dataConnections).where(eq(dataConnections.id, created.id));
@@ -279,7 +279,7 @@ d("DUR-3997 data connection kinds", () => {
     const tested = await request(app).post(`/api/companies/${companyId}/data-connections/${woo.body.id}/test`);
     expect(tested.status).toBe(200);
     expect(tested.body).toMatchObject({ ok: false, canActivate: false, status: "draft", observed: null, notes: [] });
-    expect(tested.body.problems).toEqual([expect.stringContaining("WooCommerce-koblinger kan ikke leses ennå")]);
+    expect(tested.body.problems).toEqual([expect.stringContaining("WooCommerce connections cannot be read yet")]);
     expect(await db.select().from(dataReadEvents)).toHaveLength(0);
     const [afterTest] = await db.select().from(dataConnections).where(eq(dataConnections.id, woo.body.id));
     expect(afterTest!.status).toBe("draft");
@@ -342,7 +342,7 @@ d("DUR-3997 data connection kinds", () => {
     );
     expect(answer.ok).toBe(false);
     expect(answer.refusalCode).toBe("data_source_kind_unsupported");
-    expect(answer.text).toContain("WooCommerce-koblinger kan ikke leses ennå");
+    expect(answer.text).toContain("WooCommerce connections cannot be read yet");
     const audit = await db.select().from(dataReadEvents);
     expect(audit).toHaveLength(1);
     expect(audit[0]!.refusalCode).toBe("data_source_kind_unsupported");

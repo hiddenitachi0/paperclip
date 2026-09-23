@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionsRevisions, agents, approvalComments, approvals, personaPosts } from "@paperclipai/db";
-import { hireMonthlySpendingLimitCentsFromPayload } from "@paperclipai/shared";
+import { hireMonthlySpendingLimitCentsFromPayload, parseAgentLimits } from "@paperclipai/shared";
 import {
   instructionsChangeRequestPayloadSchema,
   modelBoostRequestPayloadSchema,
@@ -434,6 +434,12 @@ export function approvalService(db: Db) {
               typeof payload.laneATransformDailyCallCap === "number" ? payload.laneATransformDailyCallCap : null,
             laneAProvider: typeof payload.laneAProvider === "string" ? payload.laneAProvider : null,
             laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
+            // DUR-4000: which person does this job and the job's limits box,
+            // read back off the card for the same reason; the service still
+            // refuses a persona from another company. A malformed limits
+            // box reads as no limits.
+            personaId: typeof payload.personaId === "string" ? payload.personaId : null,
+            limits: parseAgentLimits(payload.limits),
             status: "idle",
             spentMonthlyCents: 0,
             permissions: undefined,

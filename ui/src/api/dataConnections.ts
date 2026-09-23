@@ -11,7 +11,7 @@ import type {
 import { api } from "./client";
 
 /**
- * DUR-3972 slice S2 / DUR-3997 slice 3: the "Datakilder" screen in company
+ * DUR-3972 slice S2 / DUR-3997 slice 3: the "Data sources" screen in company
  * settings.
  *
  * A source's key only ever travels one way: in the body of `create` and of an
@@ -20,7 +20,7 @@ import { api } from "./client";
  *
  * `create` takes the shared discriminated union: the Shopify shape is exactly
  * what it was, and WooCommerce, Fiken and SFTP-file connections are accepted
- * and stored (shown as "kommer snart" until their adapters ship).
+ * and stored (shown as "coming soon" until their adapters ship).
  */
 export type CreateDataConnectionRequest = {
   [K in CreateDataConnectionInput["kind"]]: Omit<Extract<CreateDataConnectionInput, { kind: K }>, "name" | "port"> & {

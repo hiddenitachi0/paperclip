@@ -59,13 +59,13 @@ export type SalesRequest = z.input<typeof salesRequestSchema>;
 export type NormalizedSalesRequest = z.output<typeof salesRequestSchema>;
 
 /** Buckets that are never a real product type. */
-export const UNTYPED_BUCKET_LABEL = "(uten produkttype)";
-export const DELETED_PRODUCT_BUCKET_LABEL = "(slettet produkt)";
+export const UNTYPED_BUCKET_LABEL = "(without product type)";
+export const DELETED_PRODUCT_BUCKET_LABEL = "(deleted product)";
 
 const int = () => z.number().int();
 const nonNegativeInt = () => z.number().int().nonnegative();
 
-/** The three-line answer (plus edits). All in units (stk). */
+/** The three-line answer (plus edits). All in units. */
 export const salesLinesSchema = z.object({
   /** Units on new orders placed in the period (before returns). */
   sold: nonNegativeInt(),
@@ -86,20 +86,20 @@ export const productTypeBucketSchema = z.object({
 });
 export type ProductTypeBucket = z.infer<typeof productTypeBucketSchema>;
 
-export const PERIOD_STATUSES = ["avsluttet", "pågår"] as const;
+export const PERIOD_STATUSES = ["closed", "running"] as const;
 
 export const salesPeriodSchema = z.object({
   key: z.string().regex(/^\d{4}-\d{2}$/),
   /** The token the caller asked for, e.g. "last_month". */
   token: z.string(),
-  /** "juli 2026". */
+  /** "July 2026". */
   label: z.string(),
   /** Inclusive start (UTC ISO) of the month in the shop's zone. */
   start: z.string(),
   /** Exclusive end (UTC ISO): the next month's start, or `asOf` while the month is running. */
   end: z.string(),
   status: z.enum(PERIOD_STATUSES),
-  /** "avsluttet" or "pågår, per 21.09.2026 kl. 10:14". */
+  /** "closed", "running, as of 21.09.2026 at 10:14", or "not started". */
   statusText: z.string(),
   /** `no_data` is NEVER zero: numbers are null and `noDataReason` says why. */
   dataState: z.enum(["data", "no_data"]),
@@ -141,7 +141,7 @@ export const salesResultSchema = z.object({
   groupBy: z.enum(SALES_GROUP_BY),
   /** Exact product types counted in `selection`; null = no filter (all products). */
   productTypesCounted: z.array(z.string()).nullable(),
-  /** The fixed Norwegian definitions printed with every answer. */
+  /** The fixed definitions printed with every answer. */
   definitions: z.array(z.string()),
   periods: z.array(salesPeriodSchema).min(1).max(2),
   comparison: salesComparisonSchema.nullable(),
@@ -169,7 +169,7 @@ export const catalogResultSchema = z.object({
   untypedUnitsSoldLast12Months: nonNegativeInt().nullable(),
   /** Units on lines whose product has since been deleted; null when not calculated. */
   deletedProductUnitsSoldLast12Months: nonNegativeInt().nullable(),
-  /** "beregnet" or a plain reason why units sold were not calculated. */
+  /** "calculated" or a plain reason why units sold were not calculated. */
   unitsSoldStatus: z.string(),
   /** Earliest order Shopify lets us see (UTC ISO); null when there are no orders at all. */
   earliestVisibleOrderAt: z.string().nullable(),
@@ -177,7 +177,7 @@ export const catalogResultSchema = z.object({
 export type CatalogResult = z.infer<typeof catalogResultSchema>;
 
 export const KRONER_NOT_ENABLED_MESSAGE =
-  "Kronebeløp er ikke slått på ennå. Foreløpig kan jeg bare svare i antall enheter (stk), ikke i kroner.";
+  "Amounts in kroner are not switched on yet. For now I can only answer in number of units, not in kroner.";
 
 /** Plain refusals. `message` is shown to the person word for word. */
 export const DATA_REFUSAL_CODES = [
@@ -361,13 +361,13 @@ export function computeChangePercent(fromNet: number, toNet: number): number | n
   return Math.round(((toNet - fromNet) / Math.abs(fromNet)) * 1000) / 10;
 }
 
-export const SALES_DEFINITIONS_NB: readonly string[] = [
-  "Antall enheter (stk), ikke kroner.",
-  "Solgt = enheter på ordre lagt inn i måneden, før returer.",
-  "Returer telles i måneden returen skjer, også når ordren er fra en tidligere måned.",
-  "Endringer = enheter lagt til eller fjernet ved ordreendring i måneden.",
-  "Netto = solgt - returer + endringer.",
-  "Testordre er holdt utenfor.",
-  "Gruppert etter dagens produkttype i Shopify.",
-  `Linjer uten produkttype og linjer der produktet er slettet, vises for seg som ${UNTYPED_BUCKET_LABEL} og ${DELETED_PRODUCT_BUCKET_LABEL}.`,
+export const SALES_DEFINITIONS: readonly string[] = [
+  "Number of units, not kroner.",
+  "Sold = units on orders placed in the month, before returns.",
+  "Returns are counted in the month the return happens, even when the order is from an earlier month.",
+  "Edits = units added or removed by order edits in the month.",
+  "Net = sold - returns + edits.",
+  "Test orders are left out.",
+  "Grouped by today's product type in Shopify.",
+  `Lines without a product type and lines whose product has been deleted are shown separately as ${UNTYPED_BUCKET_LABEL} and ${DELETED_PRODUCT_BUCKET_LABEL}.`,
 ];

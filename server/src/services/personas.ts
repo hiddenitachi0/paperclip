@@ -8,7 +8,7 @@
 // The persona reaches the model at prompt time instead — see
 // resolveAgentForAdapter in heartbeat.ts (full agents) and buildSystemPrompt
 // in lane-a.ts (quick agents).
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, personas } from "@paperclipai/db";
 import type { CreatePersonaInput, UpdatePersonaInput } from "@paperclipai/shared/validators/persona";
@@ -107,14 +107,19 @@ export function personaService(db: Db) {
     return row ?? null;
   }
 
-  /** agents.persona_id -> [agentId, ...], one query for a batch of personas. */
+  /**
+   * agents.persona_id -> [agentId, ...], one query for a batch of personas.
+   * Terminated jobs are left out so a persona's job count (agentIds.length on
+   * the persona pages) is not inflated by jobs that no longer exist;
+   * listAgentsForPersona still lists them with their status.
+   */
   async function attachedAgentIdsByPersonaId(personaIds: string[]): Promise<Map<string, string[]>> {
     const result = new Map<string, string[]>();
     if (personaIds.length === 0) return result;
     const rows = await db
       .select({ id: agents.id, personaId: agents.personaId, name: agents.name })
       .from(agents)
-      .where(inArray(agents.personaId, personaIds))
+      .where(and(inArray(agents.personaId, personaIds), ne(agents.status, "terminated")))
       .orderBy(asc(agents.name));
     for (const row of rows) {
       if (!row.personaId) continue;

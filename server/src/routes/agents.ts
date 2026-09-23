@@ -33,6 +33,7 @@ import {
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   QUICK_AGENT_FIELDS,
   PERSONA_JOB_FIELDS,
+  parseAgentLimits,
   laneAProviderModelIssue,
 } from "@paperclipai/shared";
 import {
@@ -1060,7 +1061,7 @@ export function agentRoutes(
     for (const { ruleIndex, name } of parseSorteringsreglerRuleTargetNames(block)) {
       if (liveNames.has(name)) continue;
       throw unprocessable(
-        `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
+        `Rule ${ruleIndex} points to "${name}", which no longer exists. Correct the name or pick another agent.`,
       );
     }
   }
@@ -2877,6 +2878,14 @@ export function agentRoutes(
           // binding inside adapterConfig (already on the card above).
           laneAProvider: agent.laneAProvider ?? null,
           laneABaseUrl: agent.laneABaseUrl ?? null,
+          // DUR-4000: which person does this job and the job's limits box,
+          // for the same reason — the card is what the board reads, and the
+          // legacy branch in approvals.ts rebuilds the agent from it. The
+          // display name comes off the created row's own persona summary
+          // (joined in-company by the service), never from the request.
+          personaId: agent.personaId ?? null,
+          personaDisplayName: agent.persona?.displayName ?? null,
+          limits: parseAgentLimits(agent.limits),
           agentId: agent.id,
           requestedByAgentId: actor.actorType === "agent" ? actor.actorId : null,
           requestedConfigurationSnapshot: {
