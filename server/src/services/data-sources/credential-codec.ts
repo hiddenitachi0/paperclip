@@ -76,7 +76,7 @@ function parseRecord(raw: string): Record<string, unknown> {
 const str = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
 
 function unreadable(): never {
-  throw unprocessable("Den lagrede nøkkelen for denne koblingen kan ikke leses. Lim den inn på nytt.", {
+  throw unprocessable("The stored key for this connection cannot be read. Paste it in again.", {
     code: "credential_unreadable",
   });
 }

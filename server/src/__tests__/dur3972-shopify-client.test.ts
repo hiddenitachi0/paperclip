@@ -223,7 +223,7 @@ describe("DUR-3972 Shopify Test check", () => {
     const noAll = evaluateShopifyScopes(["read_orders", "read_products"]);
     expect(noAll.canActivate).toBe(false);
     expect(noAll.missingScopes).toEqual(["read_all_orders"]);
-    expect(noAll.problems.join(" ")).toContain("60 dagene");
+    expect(noAll.problems.join(" ")).toContain("60 days");
   });
 });
 
