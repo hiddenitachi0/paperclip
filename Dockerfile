@@ -103,10 +103,11 @@ RUN chown root:root /usr/local/bin/docker-entrypoint.sh /usr/local/lib/paperclip
 # user (i.e. every agent) may start but not read. Linux marks a process
 # started from a program it cannot read as "not dumpable", which makes its
 # /proc/<pid>/{environ,fd,mem,...} root-only. Without this any agent could
-# open the server's descriptors through /proc/1/fd and read from its internal
-# pipes -- one of which is libuv's signal lock, so a single
-# `cat /proc/1/fd/<n>` froze the whole server (found by the isolation
-# acceptance run). Agents keep using the ordinary, readable /usr/local/bin/node.
+# open the server's descriptors through /proc/<server pid>/fd and read from
+# its internal pipes -- one of which is libuv's signal lock, so a single
+# `cat /proc/<server pid>/fd/<n>` froze the whole server (found by the
+# isolation acceptance run). Agents keep using the ordinary, readable
+# /usr/local/bin/node.
 RUN install -o root -g root -m 0711 /usr/local/bin/node /usr/local/lib/paperclip/node
 
 # Global git credential helper: lets any agent (and managed clones) authenticate
@@ -198,6 +199,14 @@ ENV NODE_ENV=production \
 
 EXPOSE 3100
 
+# The server is NOT the container's PID 1: docker/docker-compose.yml starts
+# the container with `init: true`, so Docker's init (tini) is PID 1 and the
+# entrypoint -- and the server it execs into -- is its child. PID 1 has to
+# collect every process whose parent has gone away, which Node does not do;
+# with Node as PID 1 the `esbuild` helper each CLI run leaves behind stayed a
+# zombie until the container ran out of processes (~16 hours). tini passes
+# SIGTERM on to the server, so the drain-on-stop behaviour is unchanged.
+# Anything that needs the server's pid must look it up by its command line.
 ENTRYPOINT ["docker-entrypoint.sh"]
 # DUR-3994 Stage 1: --disable-sigusr1 stops `kill -USR1 <server>` (which any
 # agent could send, being the same user) from opening Node's debugger on

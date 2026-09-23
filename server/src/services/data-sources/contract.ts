@@ -14,8 +14,24 @@ import { z } from "zod";
  * reconciliation against Shopify Analytics.
  */
 
-export const DATA_SOURCE_KINDS = ["shopify"] as const;
+/** Every source kind a result may name. Mirrors DATA_CONNECTION_KINDS in @paperclipai/shared. */
+export const DATA_SOURCE_KINDS = ["shopify", "woocommerce", "fiken", "sftp_file"] as const;
 export type DataSourceKind = (typeof DATA_SOURCE_KINDS)[number];
+
+/**
+ * The base of every "the source answered badly" error a client throws. Its
+ * message is a plain sentence that is safe to show a person: every client
+ * scrubs its own credential values out before throwing. Callers that do not
+ * care which source failed test `instanceof DataSourceUpstreamError`.
+ */
+export class DataSourceUpstreamError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "DataSourceUpstreamError";
+    this.code = code;
+  }
+}
 
 /** The only measure answered in this release. */
 export const SALES_MEASURES = ["units"] as const;
