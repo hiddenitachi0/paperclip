@@ -134,6 +134,25 @@ d("DUR-3997 migration 0174_file_server_connections", () => {
     expect(counts[0]?.n).toBe(3);
   });
 
+  it("is registered in the journal with a strictly increasing timestamp (Drizzle applies only strictly greater `when`)", () => {
+    const journal = JSON.parse(readFileSync(fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url)), "utf8")) as {
+      entries: Array<{ idx: number; when: number; tag: string }>;
+    };
+    const position = journal.entries.findIndex((entry) => entry.tag === "0174_file_server_connections");
+    expect(position).toBeGreaterThan(0);
+    const mine = journal.entries[position]!;
+    const previous = journal.entries[position - 1]!;
+    expect(mine).toMatchObject({ idx: 174 });
+    expect(previous.tag).toBe("0173_data_connection_kinds");
+    expect(mine.when).toBeGreaterThan(previous.when);
+    // The persona migration in flight as 0175 uses 1787160450000; 0174 must sit strictly below it or one of the two is skipped.
+    expect(mine.when).toBeLessThan(1787160450000);
+    expect(journal.entries.filter((entry) => entry.when === mine.when)).toHaveLength(1);
+    for (const entry of journal.entries.slice(position + 1)) {
+      expect(entry.when, `${entry.tag} must come strictly after 0174`).toBeGreaterThan(mine.when);
+    }
+  });
+
   it("the file itself only ever drops the constraints it re-adds, and touches no data", () => {
     const text = readFileSync(MIGRATION_PATH, "utf8")
       .split("\n")

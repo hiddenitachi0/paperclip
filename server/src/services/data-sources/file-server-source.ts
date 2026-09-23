@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   DATA_CONNECTION_CREDENTIAL_KINDS_BY_KIND,
   DATA_CONNECTION_KIND_LABELS,
@@ -29,7 +30,12 @@ import type { DataSourceKindDefinition, OpenReadContextInput } from "./registry.
  * A read-write connection that cannot write is not switched on.
  */
 
-export const FILE_SERVER_WRITE_CHECK_NAME = ".paperclip-write-check";
+/** The write check's file name: a fixed prefix plus a random suffix, so it never collides with a real file. */
+export const FILE_SERVER_WRITE_CHECK_PREFIX = ".paperclip-write-check-";
+
+export function writeCheckFileName(): string {
+  return `${FILE_SERVER_WRITE_CHECK_PREFIX}${randomBytes(6).toString("hex")}`;
+}
 
 /** Plain sentence for anything the transports throw. Never an unknown error's text. */
 export function fileServerProblem(error: unknown): string {
@@ -84,7 +90,9 @@ function openFileServerContext(kind: FileServerKind, input: OpenReadContextInput
     basePath: config.remotePath,
     access: connection.access,
     maxRequests: input.budget.maxRequests,
+    deadlineMs: input.budget.deadlineMs,
     openSession,
+    now,
   });
   return {
     kind,
@@ -138,7 +146,9 @@ export function fileServerDataSource(kind: FileServerKind): DataSourceKindDefini
     },
     canActivate(observed) {
       const seen = observed?.fileServer ?? null;
-      if (!seen) return { ok: false, problems: ["The connection has not passed Test yet. Press Test first."] };
+      // A pinned host key alone (kept across a credential rotation) is not a
+      // passed Test: checkedAt is set only by check().
+      if (!seen || !observed?.checkedAt) return { ok: false, problems: ["The connection has not passed Test yet. Press Test first."] };
       if (seen.writable === false) {
         return { ok: false, problems: ["The write check failed at the last Test, so this read-and-write connection cannot be switched on."] };
       }
@@ -164,11 +174,15 @@ export function fileServerDataSource(kind: FileServerKind): DataSourceKindDefini
         );
         let writable: boolean | null = null;
         if (connection.access === "read_write") {
+          const checkName = writeCheckFileName();
           try {
-            await files.write(FILE_SERVER_WRITE_CHECK_NAME, Buffer.alloc(0));
-            await files.remove(FILE_SERVER_WRITE_CHECK_NAME);
+            if (listing.entries.some((entry) => entry.name === checkName)) {
+              throw new FileServerError("protocol_error", `A file called ${checkName} already exists in ${files.basePath}; the write check was not attempted.`);
+            }
+            await files.write(checkName, Buffer.alloc(0));
+            await files.remove(checkName);
             writable = true;
-            notes.push(`Write check passed: an empty ${FILE_SERVER_WRITE_CHECK_NAME} was created and deleted in ${files.basePath}.`);
+            notes.push(`Write check passed: an empty ${checkName} was created and deleted in ${files.basePath}.`);
           } catch (error) {
             writable = false;
             problems.push(

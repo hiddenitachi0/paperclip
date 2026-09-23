@@ -58,10 +58,19 @@ export const COMPANY_FILE_LIMITS = {
 
 /** The most text one read hands back to the model. */
 export const COMPANY_FILE_TEXT_MAX_BYTES = 200 * 1024;
+/**
+ * The most a file read for an agent pulls from the server at all: a little
+ * over the text cap, so a file between the two is cut with a note and a
+ * larger one is refused by size (SIZE/stat, or the stream cap) with a plain
+ * sentence -- never 25 MB fetched to show 200 KB.
+ */
+export const COMPANY_FILE_READ_MAX_BYTES = 256 * 1024;
 /** Folder entries shown per listing at most. */
 export const COMPANY_FILE_LIST_MAX_ENTRIES = 200;
+/** The whole lookup (connect, list or read, close) must finish in this time; the transport enforces it. */
+export const COMPANY_FILE_LOOKUP_TIMEOUT_MS = 70_000;
 /** Server operations one lookup may spend (a read is one; a listing is one). */
-const LOOKUP_BUDGET = { maxRequests: 2, deadlineMs: 70_000 };
+const LOOKUP_BUDGET = { maxRequests: 2, deadlineMs: COMPANY_FILE_LOOKUP_TIMEOUT_MS };
 const LIMIT_DAY_TIMEZONE = "Europe/Oslo";
 /** Rows that do not count towards any limit: a refusal for being over a limit. */
 const NOT_COUNTED_OUTCOMES: DataReadOutcome[] = ["rate_limited"];
@@ -453,7 +462,7 @@ export function companyFileService(db: Db, deps: CompanyFileServiceDeps = {}) {
           ].join("\n");
           facts = { path: display, entries: listing.entries.length };
         } else {
-          const result = await files.read(input.path);
+          const result = await files.read(input.path, { maxBytes: COMPANY_FILE_READ_MAX_BYTES });
           const display = displayRemotePath(files.basePath, result.path);
           const rendered = renderFileText(result.bytes);
           const modified = result.modifiedAt ? `, modified ${result.modifiedAt.toISOString().slice(0, 16).replace("T", " ")} UTC` : "";

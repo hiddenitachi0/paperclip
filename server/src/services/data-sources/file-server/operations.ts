@@ -4,6 +4,8 @@ import { confineRemotePath } from "./paths.js";
 import {
   FILE_SERVER_MAX_READ_BYTES,
   FILE_SERVER_MAX_WRITE_BYTES,
+  formatSize,
+  withDeadline,
   type FileServerEntry,
   type FileServerReadResult,
   type FileServerSession,
@@ -19,7 +21,10 @@ import {
  *    `read` connection they are refused here, before any command is sent;
  *  - the session is opened lazily, once, on the first operation (so the
  *    credential is resolved only when something is actually read);
- *  - operations are counted against the lookup's request budget.
+ *  - operations are counted against the lookup's request budget, and the
+ *    whole context has one wall-clock deadline (budget.deadlineMs): an
+ *    operation that would run past it is refused, and one that hits it is
+ *    torn down (sockets destroyed), never left hanging.
  */
 
 export interface FileServerOperations {
@@ -27,7 +32,8 @@ export interface FileServerOperations {
   readonly access: DataConnectionAccessLevel;
   /** `directory` is relative to the base folder ("" or "/" for the base itself), or absolute inside it. */
   list(directory: string): Promise<{ path: string; entries: FileServerEntry[] }>;
-  read(path: string): Promise<FileServerReadResult & { path: string }>;
+  /** `maxBytes` caps this one read (default: the context's cap); a larger file is refused, never cut. */
+  read(path: string, options?: { maxBytes?: number }): Promise<FileServerReadResult & { path: string }>;
   write(path: string, bytes: Buffer): Promise<{ path: string }>;
   remove(path: string): Promise<{ path: string }>;
   /** The absolute path a caller's path resolves to, or a refusal; no server contact. */
@@ -43,15 +49,39 @@ export interface CreateFileServerOperationsInput {
   access: DataConnectionAccessLevel;
   /** Operations allowed in this context (list, read, write and delete each count one). */
   maxRequests: number;
+  /** Wall-clock time the whole context may use, from creation; absent means no context deadline. */
+  deadlineMs?: number;
   maxReadBytes?: number;
   openSession: () => Promise<FileServerSession>;
+  now?: () => number;
 }
 
 export function createFileServerOperations(input: CreateFileServerOperationsInput): FileServerOperations {
   const maxReadBytes = input.maxReadBytes ?? FILE_SERVER_MAX_READ_BYTES;
+  const now = input.now ?? Date.now;
+  const deadlineAt = input.deadlineMs === undefined ? null : now() + input.deadlineMs;
   let opening: Promise<FileServerSession> | null = null;
   let opened: FileServerSession | null = null;
   let requests = 0;
+
+  /** Drops every socket now; a later close() is then a no-op. */
+  function abort(): void {
+    const pending = opening;
+    opening = null;
+    opened?.abort();
+    opened = null;
+    pending?.then((session) => session.abort(), () => undefined);
+  }
+
+  /** Runs one operation under what is left of the context deadline. */
+  function timed<T>(work: () => Promise<T>, what: string): Promise<T> {
+    if (deadlineAt === null) return work();
+    const remaining = deadlineAt - now();
+    if (remaining <= 0) {
+      return Promise.reject(new FileServerError("timeout", `${what} was not started: this lookup's time is used up.`));
+    }
+    return withDeadline(work(), remaining, abort, what);
+  }
 
   function session(): Promise<FileServerSession> {
     if (!opening) {
@@ -89,30 +119,31 @@ export function createFileServerOperations(input: CreateFileServerOperationsInpu
     async list(directory) {
       const path = confineRemotePath(input.basePath, directory);
       spend();
-      const entries = await (await session()).list(path);
+      const entries = await timed(async () => (await session()).list(path), `Listing ${path}`);
       return { path, entries };
     },
-    async read(path) {
+    async read(path, options = {}) {
       const absolute = confineRemotePath(input.basePath, path);
+      const maxBytes = Math.min(options.maxBytes ?? maxReadBytes, maxReadBytes);
       spend();
-      const result = await (await session()).read(absolute, maxReadBytes);
+      const result = await timed(async () => (await session()).read(absolute, maxBytes), `Reading ${absolute}`);
       return { path: absolute, ...result };
     },
     async write(path, bytes) {
       requireWrite("write a file");
       const absolute = confineRemotePath(input.basePath, path);
       if (bytes.length > FILE_SERVER_MAX_WRITE_BYTES) {
-        throw new FileServerError("too_large", `The file is larger than ${Math.round(FILE_SERVER_MAX_WRITE_BYTES / (1024 * 1024))} MB, which is the most Paperclip writes.`);
+        throw new FileServerError("too_large", `The file is larger than ${formatSize(FILE_SERVER_MAX_WRITE_BYTES)}, which is the most Paperclip writes.`);
       }
       spend();
-      await (await session()).write(absolute, bytes);
+      await timed(async () => (await session()).write(absolute, bytes), `Writing ${absolute}`);
       return { path: absolute };
     },
     async remove(path) {
       requireWrite("delete a file");
       const absolute = confineRemotePath(input.basePath, path);
       spend();
-      await (await session()).remove(absolute);
+      await timed(async () => (await session()).remove(absolute), `Deleting ${absolute}`);
       return { path: absolute };
     },
     session: () =>

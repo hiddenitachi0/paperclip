@@ -4,6 +4,7 @@ import { isSamePeerAddress } from "./address.js";
 import { FileServerError } from "./errors.js";
 import {
   cleanServerLine,
+  formatSize,
   FILE_SERVER_CONNECT_TIMEOUT_MS,
   FILE_SERVER_MAX_LISTING_BYTES,
   FILE_SERVER_MAX_LISTING_ENTRIES,
@@ -59,6 +60,11 @@ interface FtpReply {
 }
 
 type Waiter = { resolve: (reply: FtpReply) => void; reject: (error: Error) => void };
+
+/** A control reply (all lines of a multi-line reply) may hold at most this much unread text. */
+const MAX_CONTROL_BUFFER_BYTES = 64 * 1024;
+/** A multi-line reply may have at most this many lines. */
+const MAX_REPLY_LINES = 200;
 
 function assertCommandArgument(value: string): void {
   if (/[\r\n\0]/.test(value)) {
@@ -128,6 +134,10 @@ function upgradeToTls(
 class FtpControl {
   socket!: Socket | TLSSocket;
   private buffer = "";
+  /** Where the next unread line starts in `buffer`; lines before it belong to the reply being assembled. */
+  private scanOffset = 0;
+  private partialCode: string | null = null;
+  private partialLines: string[] = [];
   private readonly queued: FtpReply[] = [];
   private readonly waiters: Waiter[] = [];
   private failure: Error | null = null;
@@ -160,6 +170,11 @@ class FtpControl {
   }
 
   private onData(chunk: string): void {
+    if (this.buffer.length + chunk.length > MAX_CONTROL_BUFFER_BYTES) {
+      this.fail(new FileServerError("protocol_error", "The server sent a reply that is too long to be an FTP reply."));
+      this.socket.destroy();
+      return;
+    }
     this.buffer += chunk;
     for (;;) {
       const reply = this.takeReply();
@@ -170,30 +185,48 @@ class FtpControl {
     }
   }
 
+  /**
+   * Takes one complete reply off the buffer, or null while one is still
+   * arriving. Scanning resumes where it stopped last time (lines already
+   * examined are kept in partialLines), so a slow multi-line reply is read
+   * once, not re-read on every chunk.
+   */
   private takeReply(): FtpReply | null {
-    const lines: string[] = [];
-    let position = 0;
-    let code: string | null = null;
+    let position = this.scanOffset;
     for (;;) {
       const newline = this.buffer.indexOf("\n", position);
-      if (newline === -1) return null;
+      if (newline === -1) {
+        this.scanOffset = position;
+        return null;
+      }
       let line = this.buffer.slice(position, newline);
       if (line.endsWith("\r")) line = line.slice(0, -1);
       position = newline + 1;
-      lines.push(line);
+      this.partialLines.push(line);
+      if (this.partialLines.length > MAX_REPLY_LINES) {
+        this.fail(new FileServerError("protocol_error", "The server sent a reply with too many lines to be an FTP reply."));
+        this.socket.destroy();
+        return null;
+      }
       const match = /^(\d{3})([ -])/.exec(line);
-      if (code === null) {
+      if (this.partialCode === null) {
         if (!match) {
           this.fail(new FileServerError("protocol_error", "The server sent a reply Paperclip could not read."));
+          this.socket.destroy();
           return null;
         }
-        code = match[1]!;
+        this.partialCode = match[1]!;
         if (match[2] === " ") break;
-      } else if (match && match[1] === code && match[2] === " ") {
+      } else if (match && match[1] === this.partialCode && match[2] === " ") {
         break;
       }
     }
+    const lines = this.partialLines;
+    const code = this.partialCode!;
+    this.partialLines = [];
+    this.partialCode = null;
     this.buffer = this.buffer.slice(position);
+    this.scanOffset = 0;
     return {
       code: Number(code),
       lines,
@@ -339,6 +372,14 @@ export async function connectFtp(options: FtpConnectOptions): Promise<FileServer
   const features = new Set<string>();
   let serverSoftware: string | null = null;
   let controlTls: TLSSocket | null = null;
+  /** The data socket of the transfer in flight, so a timeout or close tears it down too. */
+  let activeData: Socket | TLSSocket | null = null;
+
+  const abort = () => {
+    activeData?.destroy();
+    activeData = null;
+    control.destroy();
+  };
 
   const control = new FtpControl(await dial(controlTarget, connectTimeoutMs, describe));
 
@@ -393,7 +434,7 @@ export async function connectFtp(options: FtpConnectOptions): Promise<FileServer
   }
 
   try {
-    await withDeadline(setup(), connectTimeoutMs, () => control.destroy(), `Connecting to ${describe}`);
+    await withDeadline(setup(), connectTimeoutMs, abort, `Connecting to ${describe}`);
   } catch (error) {
     control.destroy();
     throw error;
@@ -434,6 +475,7 @@ export async function connectFtp(options: FtpConnectOptions): Promise<FileServer
   /** One transfer: open the data connection, send the command, move the bytes, read the final reply. */
   async function transfer(command: string, what: string, direction: "download" | "upload", payload: Buffer | null, maxBytes: number): Promise<Buffer> {
     const data = await openDataSocket();
+    activeData = data;
     const chunks: Buffer[] = [];
     let received = 0;
     let overflow = false;
@@ -451,33 +493,41 @@ export async function connectFtp(options: FtpConnectOptions): Promise<FileServer
       data.on("error", () => (overflow ? resolve() : reject(new FileServerError("connect_failed", `The data connection to ${options.host} failed.`))));
       data.on("close", () => resolve());
     });
-    let reply: FtpReply;
+    // The data socket can fail (a reset) before the control reply arrives.
+    // Observe the outcome now so an early rejection is never unhandled; the
+    // await below still sees it.
+    finished.catch(() => undefined);
     try {
-      reply = await control.send(command);
-    } catch (error) {
-      data.destroy();
-      throw error;
+      let reply: FtpReply;
+      try {
+        reply = await control.send(command);
+      } catch (error) {
+        data.destroy();
+        throw error;
+      }
+      if (reply.code !== 150 && reply.code !== 125) {
+        data.destroy();
+        throw replyError(reply, what);
+      }
+      if (direction === "upload") {
+        data.end(payload ?? Buffer.alloc(0));
+      }
+      await finished;
+      if (overflow) {
+        // The server is still sending; the session cannot be reused cleanly.
+        control.destroy();
+        throw new FileServerError("too_large", `The file is larger than ${formatSize(maxBytes)}, which is the most Paperclip reads here.`);
+      }
+      const done = await control.read();
+      if (done.code !== 226 && done.code !== 250) throw replyError(done, what);
+      return Buffer.concat(chunks);
+    } finally {
+      if (activeData === data) activeData = null;
     }
-    if (reply.code !== 150 && reply.code !== 125) {
-      data.destroy();
-      throw replyError(reply, what);
-    }
-    if (direction === "upload") {
-      data.end(payload ?? Buffer.alloc(0));
-    }
-    await finished;
-    if (overflow) {
-      // The server is still sending; the session cannot be reused cleanly.
-      control.destroy();
-      throw new FileServerError("too_large", `The file is larger than ${Math.round(maxBytes / (1024 * 1024))} MB, which is the most Paperclip reads.`);
-    }
-    const done = await control.read();
-    if (done.code !== 226 && done.code !== 250) throw replyError(done, what);
-    return Buffer.concat(chunks);
   }
 
   const guarded = <T>(work: () => Promise<T>, what: string): Promise<T> =>
-    withDeadline(work(), operationTimeoutMs, () => control.destroy(), what);
+    withDeadline(work(), operationTimeoutMs, abort, what);
 
   const session: FileServerSession = {
     protocol: options.secure ? "ftps" : "ftp",
@@ -511,7 +561,7 @@ export async function connectFtp(options: FtpConnectOptions): Promise<FileServer
           if (size.code === 213) {
             const known = Number.parseInt(size.text.trim(), 10);
             if (Number.isFinite(known) && known > maxBytes) {
-              throw new FileServerError("too_large", `${path} is ${Math.round(known / (1024 * 1024))} MB, more than the ${Math.round(maxBytes / (1024 * 1024))} MB Paperclip reads at most.`);
+              throw new FileServerError("too_large", `${path} is ${formatSize(known)}, more than the ${formatSize(maxBytes)} Paperclip reads here at most.`);
             }
           } else if (size.code === 550) {
             throw replyError(size, `read ${path}`);
@@ -541,7 +591,10 @@ export async function connectFtp(options: FtpConnectOptions): Promise<FileServer
       }, `Deleting ${path} on ${options.host}`);
     },
 
+    abort,
     async close() {
+      activeData?.destroy();
+      activeData = null;
       if (!control.broken) {
         await withDeadline(control.send("QUIT"), 3_000, () => control.destroy(), "Closing the connection").catch(() => undefined);
       }

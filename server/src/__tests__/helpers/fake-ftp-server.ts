@@ -1,15 +1,21 @@
 import { createServer, type Server, type Socket } from "node:net";
 import type { AddressInfo } from "node:net";
+import { createSecureContext, TLSSocket, type SecureContext } from "node:tls";
 
 /**
  * A tiny in-process FTP server for tests. It speaks just enough RFC 959 for
  * the client under test: USER/PASS, FEAT, TYPE, PWD/CWD, PASV/EPSV, LIST/MLSD,
- * RETR, STOR, DELE, SIZE, MDTM, QUIT. No TLS, no real filesystem -- an
- * in-memory tree of files.
+ * RETR, STOR, DELE, SIZE, MDTM, QUIT, and (with `tls`) the explicit FTPS
+ * upgrade: AUTH TLS, PBSZ, PROT P, with encrypted data connections. No real
+ * filesystem -- an in-memory tree of files. It never touches the network
+ * beyond 127.0.0.1.
  *
- * It can be told to lie in a PASV reply (a different address than its own),
- * so the client's FTP-bounce refusal can be exercised. It never touches the
- * network beyond 127.0.0.1.
+ * Misbehaviour it can be told to show, so the client's defences are tested:
+ *  - `pasvLieAddress`: PASV names a different address than its own (bounce);
+ *  - `resetDataOn`: the data socket is reset before the transfer command is
+ *    answered, then the command gets a 550;
+ *  - `oversizedReplyOn`: one unterminated reply far longer than any FTP reply;
+ *  - `stallOn`: the command is never answered.
  */
 
 export interface FakeFtpFile {
@@ -26,12 +32,22 @@ export interface FakeFtpOptions {
   pasvLieAddress?: string;
   /** Use MLSD for listings (default) or fall back to LIST. */
   useMlsd?: boolean;
+  /** Reset the data socket when one of these transfer commands arrives, then answer it 550. */
+  resetDataOn?: Array<"RETR" | "LIST" | "MLSD" | "STOR">;
+  /** Answer this command with one enormous unterminated line. */
+  oversizedReplyOn?: string;
+  /** Never answer this command. */
+  stallOn?: string;
+  /** Offer AUTH TLS with this certificate (PEM key + cert). */
+  tls?: { key: string; cert: string };
 }
 
 export interface FakeFtpServer {
   port: number;
   files: Record<string, FakeFtpFile>;
   loginAttempts: Array<{ user: string; pass: string }>;
+  /** Commands seen on the control connection, in order. */
+  commands: string[];
   close(): Promise<void>;
 }
 
@@ -49,25 +65,38 @@ function normalize(base: string, target: string): string {
 export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeFtpServer> {
   const files = { ...options.files };
   const loginAttempts: Array<{ user: string; pass: string }> = [];
+  const commands: string[] = [];
   const useMlsd = options.useMlsd !== false;
+  const secureContext: SecureContext | null = options.tls ? createSecureContext({ key: options.tls.key, cert: options.tls.cert }) : null;
+  const sockets = new Set<Socket>();
 
-  const server: Server = createServer((socket: Socket) => {
-    socket.setEncoding("utf8");
+  const server: Server = createServer((plain: Socket) => {
+    sockets.add(plain);
+    plain.on("close", () => sockets.delete(plain));
+    let control: Socket | TLSSocket = plain;
     let cwd = "/";
     let pendingUser = "";
+    let protectedData = false;
     // In passive FTP the client connects the data channel after PASV/EPSV but
     // BEFORE the transfer command, so the data socket and the command's
     // handler can arrive in either order; pair whichever comes second.
-    let dataListener: ((data: Socket) => void) | null = null;
-    let pendingDataSocket: Socket | null = null;
+    let dataListener: ((data: Socket | TLSSocket) => void) | null = null;
+    let pendingDataSocket: Socket | TLSSocket | null = null;
     let dataServer: Server | null = null;
     let buffer = "";
 
-    const send = (line: string) => socket.write(`${line}\r\n`);
+    const send = (line: string) => control.write(`${line}\r\n`);
 
     const openPassive = (): Promise<number> =>
       new Promise((resolve) => {
-        dataServer = createServer((dataSocket) => {
+        dataServer = createServer((raw) => {
+          sockets.add(raw);
+          raw.on("close", () => sockets.delete(raw));
+          let dataSocket: Socket | TLSSocket = raw;
+          if (protectedData && secureContext) {
+            dataSocket = new TLSSocket(raw, { isServer: true, secureContext });
+            dataSocket.on("error", () => undefined);
+          }
           if (dataListener) {
             const listener = dataListener;
             dataListener = null;
@@ -79,7 +108,7 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
         dataServer.listen(0, "127.0.0.1", () => resolve((dataServer!.address() as AddressInfo).port));
       });
 
-    const withData = (fn: (dataSocket: Socket) => void) => {
+    const withData = (fn: (dataSocket: Socket | TLSSocket) => void) => {
       if (pendingDataSocket) {
         const dataSocket = pendingDataSocket;
         pendingDataSocket = null;
@@ -89,9 +118,7 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
       }
     };
 
-    send("220 fake-ftp ready");
-
-    socket.on("data", (chunk: string) => {
+    const onData = (chunk: string) => {
       buffer += chunk;
       let newline: number;
       while ((newline = buffer.indexOf("\n")) !== -1) {
@@ -99,7 +126,12 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
         buffer = buffer.slice(newline + 1);
         handle(raw);
       }
-    });
+    };
+
+    plain.setEncoding("utf8");
+    plain.on("data", onData);
+    plain.on("error", () => undefined);
+    send("220 fake-ftp ready");
 
     function listingFor(dir: string): string {
       const prefix = dir === "/" ? "/" : `${dir}/`;
@@ -127,11 +159,57 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
       return lines.join("\r\n") + (lines.length ? "\r\n" : "");
     }
 
+    /** The misbehaviours: true when the command was consumed by one of them. */
+    function misbehave(command: string): boolean {
+      if (options.stallOn === command) return true;
+      if (options.oversizedReplyOn === command) {
+        control.write(`200-${"x".repeat(100 * 1024)}`);
+        return true;
+      }
+      if (options.resetDataOn?.includes(command as "RETR")) {
+        withData((dataSocket) => {
+          const raw = dataSocket instanceof TLSSocket ? plain : dataSocket;
+          if ("resetAndDestroy" in raw) (raw as Socket).resetAndDestroy();
+          else dataSocket.destroy();
+          setTimeout(() => send("550 the data connection was dropped for the test"), 30);
+        });
+        return true;
+      }
+      return false;
+    }
+
     function handle(line: string): void {
       const spaceAt = line.indexOf(" ");
       const command = (spaceAt === -1 ? line : line.slice(0, spaceAt)).toUpperCase();
       const arg = spaceAt === -1 ? "" : line.slice(spaceAt + 1);
+      commands.push(command);
+      if (misbehave(command)) return;
       switch (command) {
+        case "AUTH": {
+          if (!secureContext || arg.toUpperCase() !== "TLS") {
+            send("502 AUTH not supported");
+            return;
+          }
+          // Reply in the clear, then hand the same socket to TLS; the client
+          // starts the handshake after reading the 234.
+          plain.removeListener("data", onData);
+          plain.pause();
+          plain.write("234 Proceed with negotiation\r\n", () => {
+            const secure = new TLSSocket(plain, { isServer: true, secureContext });
+            secure.setEncoding("utf8");
+            secure.on("data", onData);
+            secure.on("error", () => undefined);
+            control = secure;
+          });
+          return;
+        }
+        case "PBSZ":
+          send("200 PBSZ=0");
+          return;
+        case "PROT":
+          protectedData = arg.toUpperCase() === "P";
+          send("200 Protection level set");
+          return;
         case "USER":
           pendingUser = arg;
           send("331 need password");
@@ -143,10 +221,11 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
           return;
         case "FEAT":
           send("211-Features:");
-          send(useMlsd ? " MLSD" : " SIZE");
+          if (useMlsd) send(" MLSD");
           send(" SIZE");
           send(" MDTM");
           send(" UTF8");
+          if (secureContext) send(" AUTH TLS");
           if (!options.pasvLieAddress) send(" EPSV");
           send("211 End");
           return;
@@ -221,7 +300,7 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
           send("150 ready");
           withData((dataSocket) => {
             const chunks: Buffer[] = [];
-            dataSocket.on("data", (data: Buffer) => chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(data)));
+            dataSocket.on("data", (data: Buffer | string) => chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(data)));
             dataSocket.on("end", () => {
               files[path] = { content: Buffer.concat(chunks) };
               send("226 stored");
@@ -241,17 +320,16 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
         }
         case "QUIT":
           send("221 bye");
-          socket.end();
+          control.end();
           return;
         default:
           send("502 not implemented");
       }
     }
 
-    socket.on("close", () => {
+    plain.on("close", () => {
       dataServer?.close();
     });
-    socket.on("error", () => undefined);
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -260,6 +338,10 @@ export async function startFakeFtpServer(options: FakeFtpOptions): Promise<FakeF
     port,
     files,
     loginAttempts,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    commands,
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
 }

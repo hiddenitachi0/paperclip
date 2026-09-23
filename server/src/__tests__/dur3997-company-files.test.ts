@@ -9,6 +9,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { startFakeFtpServer, type FakeFtpServer } from "./helpers/fake-ftp-server.js";
 import { dataConnectionService } from "../services/data-connections.js";
 import { companyFileService, type CompanyFileCaller } from "../services/company-files.js";
+import { getDataSourceKind } from "../services/data-sources/registry.js";
 import {
   buildLaneABuiltinToolDefinitions,
   createLaneABuiltinToolExecutor,
@@ -199,16 +200,63 @@ d("DUR-3997 company files", () => {
     expect(await files.isAvailable(companyId)).toBe(false);
   });
 
-  it("truncates a file over 200 KB with a note", async () => {
+  it("cuts a file between 200 KB and 256 KB with a note, and refuses a larger one by size with a plain sentence", async () => {
     const companyId = await seedCompany();
     const connectionId = await connectFileServer(companyId);
     await activate(companyId, connectionId);
-    const big = "row,value\n" + Array.from({ length: 40_000 }, (_, index) => `${index},x`).join("\n") + "\n";
-    ftp!.files["/reports/big.csv"] = { content: Buffer.from(big) };
-    const read = await companyFileService(db, deps()).read(caller(companyId), { action: "read", path: "big.csv" });
-    expect(read.ok).toBe(true);
-    expect(read.text).toContain("Truncated: showing the first");
-    expect(Buffer.byteLength(read.text, "utf8")).toBeLessThan(220 * 1024);
+    const line = (index: number) => `${String(index).padStart(6, "0")},x\n`;
+    const medium = "row,value\n" + Array.from({ length: 25_000 }, (_, index) => line(index)).join(""); // ~225 KB
+    const large = "row,value\n" + Array.from({ length: 60_000 }, (_, index) => line(index)).join(""); // ~540 KB
+    ftp!.files["/reports/medium.csv"] = { content: Buffer.from(medium) };
+    ftp!.files["/reports/large.csv"] = { content: Buffer.from(large) };
+    const files = companyFileService(db, deps());
+
+    const cut = await files.read(caller(companyId), { action: "read", path: "medium.csv" });
+    expect(cut.ok).toBe(true);
+    expect(cut.text).toContain("Truncated: showing the first");
+    expect(Buffer.byteLength(cut.text, "utf8")).toBeLessThan(210 * 1024);
+
+    const refused = await files.read(caller(companyId), { action: "read", path: "large.csv" });
+    expect(refused.ok).toBe(false);
+    expect(refused.refusalCode).toBe("too_large");
+    expect(refused.text).toContain("256 KB");
+    // The server was asked for the size, never for the bytes.
+    expect(ftp!.commands.filter((command) => command === "RETR")).toHaveLength(1);
+  });
+
+  it("keeps the SFTP host-key pin across a credential rotation, and only forgetHostKey clears it", async () => {
+    const companyId = await seedCompany();
+    const svc = dataConnectionService(db, deps());
+    const created = await svc.create(
+      companyId,
+      { kind: "sftp_file", name: "Own server", host: "files.example.com", port: 22, username: USER, remotePath: "/reports", access: "read", credential: { kind: "password", password: PASS } },
+      { userId: "board-user" },
+    );
+    // As a passed Test would have left it.
+    await db
+      .update(dataConnections)
+      .set({
+        status: "active",
+        lastCheckOk: true,
+        lastCheckAt: new Date(),
+        observed: { fileServer: { protocol: "sftp", fileCount: 2, directoryCount: 0, writable: null, hostKeyFingerprint: "SHA256:pinned", serverSoftware: null }, checkedAt: new Date().toISOString() },
+      })
+      .where(eq(dataConnections.id, created.id));
+
+    const rotated = await svc.update(companyId, created.id, { credential: { kind: "password", password: "a-new-password" } }, { userId: "board-user" });
+    expect(rotated.status).toBe("draft");
+    expect(rotated.lastCheckOk).toBeNull();
+    expect(rotated.observed?.fileServer?.hostKeyFingerprint).toBe("SHA256:pinned");
+    // The pin alone is not a passed Test.
+    expect(getDataSourceKind("sftp_file").canActivate(rotated.observed).ok).toBe(false);
+    await expect(svc.update(companyId, created.id, { status: "active" }, { userId: "board-user" })).rejects.toMatchObject({ status: 422 });
+
+    const forgotten = await svc.forgetHostKey(companyId, created.id);
+    expect(forgotten.observed).toBeNull();
+    expect(forgotten.status).toBe("draft");
+
+    const ftpId = await connectFileServer(companyId, { name: "Partner" });
+    await expect(svc.forgetHostKey(companyId, ftpId)).rejects.toMatchObject({ status: 422 });
   });
 
   it("the Lane A tool is offered only when a file server is active, and its input is confined", async () => {
@@ -256,7 +304,43 @@ d("DUR-3997 company files", () => {
     const confined = await execute(READ_COMPANY_FILE_TOOL, { action: "read", path: "../secret.txt" }, ctx);
     expect(confined.ok).toBe(false);
     expect(confined.content).toContain("outside the connection's base folder");
-    // A company-B file is never reachable from company A: another company's read is its own scope.
-    expect(confined.content).not.toContain("outside the base folder\n"); // never the file body itself
+    expect(confined.content).not.toContain("outside the base folder");
+  });
+
+  it("keeps two companies apart: a company cannot name, read through, or see audit rows of another company's server", async () => {
+    const companyA = await seedCompany("Company A");
+    const companyB = await seedCompany("Company B");
+    const aId = await connectFileServer(companyA, { name: "A files" });
+    const bId = await connectFileServer(companyB, { name: "B files" });
+    await activate(companyA, aId);
+    await activate(companyB, bId);
+    ftp!.files["/reports/b-only.csv"] = { content: Buffer.from("only,b\n1,2\n") };
+    const files = companyFileService(db, deps());
+
+    // Naming B's connection (by id or name) from A is "no such server" -- B's server is not in A's list.
+    for (const server of [bId, "B files"]) {
+      const answer = await files.read(caller(companyA), { action: "read", path: "august.csv", server });
+      expect(answer.ok).toBe(false);
+      expect(answer.refusalCode).toBe("unknown_server");
+      // The request's own words are echoed back; the list of what IS available names only A's server.
+      const available = answer.text.split("Available:")[1] ?? "";
+      expect(available).toContain("A files");
+      expect(available).not.toContain("B files");
+      expect(available).not.toContain(bId);
+    }
+    expect((await files.listAvailable(companyA)).map((server) => server.id)).toEqual([aId]);
+    expect((await files.listAvailable(companyB)).map((server) => server.id)).toEqual([bId]);
+
+    // Each company's reads go through its own connection and land in its own audit trail.
+    const readA = await files.read(caller(companyA), { action: "read", path: "august.csv" });
+    const readB = await files.read(caller(companyB), { action: "read", path: "b-only.csv" });
+    expect(readA.ok && readB.ok).toBe(true);
+    const rowsA = await db.select().from(dataReadEvents).where(eq(dataReadEvents.companyId, companyA));
+    const rowsB = await db.select().from(dataReadEvents).where(eq(dataReadEvents.companyId, companyB));
+    // A refusal before a server was chosen is audited with no connection; a read names its own company's connection, never the other's.
+    expect(rowsA.every((row) => row.connectionId === aId || row.connectionId === null)).toBe(true);
+    expect(rowsA.some((row) => row.connectionId === aId && row.outcome === "ok")).toBe(true);
+    expect(rowsB.every((row) => row.connectionId === bId || row.connectionId === null)).toBe(true);
+    expect(rowsB.some((row) => row.connectionId === bId && row.outcome === "ok")).toBe(true);
   });
 });

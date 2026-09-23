@@ -14,7 +14,12 @@ import {
   type BusinessDataAnswer,
   type BusinessDataServiceDeps,
 } from "./business-data.js";
-import { companyFileService, READABLE_TEXT_EXTENSIONS, type CompanyFileAnswer } from "./company-files.js";
+import {
+  COMPANY_FILE_LOOKUP_TIMEOUT_MS,
+  companyFileService,
+  READABLE_TEXT_EXTENSIONS,
+  type CompanyFileAnswer,
+} from "./company-files.js";
 
 /**
  * Quick agents (Lane A, round 2): the small set of things a quick agent is
@@ -54,6 +59,8 @@ export const LANE_A_BUSINESS_DATA_TIMEOUT_MS = BUSINESS_DATA_LOOKUP_TIMEOUT_MS;
 export const READ_BUSINESS_DATA_TOOL = "read_business_data";
 /** DUR-3997 (files on a server): offered only when the company has an active file-server connection. */
 export const READ_COMPANY_FILE_TOOL = "read_company_file";
+/** A file read may connect, list or fetch up to 256 KB; the transport enforces this deadline itself. */
+export const LANE_A_COMPANY_FILE_TIMEOUT_MS = COMPANY_FILE_LOOKUP_TIMEOUT_MS;
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ROUTE_REQUEST_MAX_CHARS = 20_000;

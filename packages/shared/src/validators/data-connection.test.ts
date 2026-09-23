@@ -169,6 +169,21 @@ describe("createDataConnectionSchema", () => {
     }
   });
 
+  it("normalises the base folder: repeated slashes, '.' segments and a trailing slash collapse; '..' is still refused", () => {
+    const parse = (remotePath: string) =>
+      createDataConnectionSchema.safeParse({
+        kind: "sftp_file",
+        host: "files.example.com",
+        username: "paperclip",
+        remotePath,
+        credential: { kind: "password", password: "hunter2" },
+      });
+    expect(parse("/reports//2026/./").data).toMatchObject({ remotePath: "/reports/2026" });
+    expect(parse("/").data).toMatchObject({ remotePath: "/" });
+    expect(parse("\\reports\\2026").data).toMatchObject({ remotePath: "/reports/2026" });
+    expect(parse("/reports/../etc").success).toBe(false);
+  });
+
   it("accepts FTPS with a password and port 21 by default, and refuses a private key on FTP or FTPS", () => {
     const ftps = createDataConnectionSchema.parse({
       kind: "ftps_file",

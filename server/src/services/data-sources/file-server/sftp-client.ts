@@ -4,6 +4,7 @@ import { createConnection, type Socket } from "node:net";
 import { FileServerError } from "./errors.js";
 import {
   cleanServerLine,
+  formatSize,
   FILE_SERVER_CONNECT_TIMEOUT_MS,
   FILE_SERVER_MAX_LISTING_ENTRIES,
   FILE_SERVER_OPERATION_TIMEOUT_MS,
@@ -276,7 +277,7 @@ export async function connectSftp(options: SftpConnectOptions): Promise<FileServ
         if (typeof attrs.size === "number" && attrs.size > maxBytes) {
           throw new FileServerError(
             "too_large",
-            `${path} is ${Math.round(attrs.size / (1024 * 1024))} MB, more than the ${Math.round(maxBytes / (1024 * 1024))} MB Paperclip reads at most.`,
+            `${path} is ${formatSize(attrs.size)}, more than the ${formatSize(maxBytes)} Paperclip reads here at most.`,
           );
         }
         const bytes = await new Promise<Buffer>((resolve, reject) => {
@@ -295,7 +296,7 @@ export async function connectSftp(options: SftpConnectOptions): Promise<FileServ
               stream.destroy();
               finish(() =>
                 reject(
-                  new FileServerError("too_large", `${path} is larger than ${Math.round(maxBytes / (1024 * 1024))} MB, which is the most Paperclip reads.`),
+                  new FileServerError("too_large", `${path} is larger than ${formatSize(maxBytes)}, which is the most Paperclip reads here.`),
                 ),
               );
               return;
@@ -335,6 +336,11 @@ export async function connectSftp(options: SftpConnectOptions): Promise<FileServ
       );
     },
 
+    abort() {
+      broken = true;
+      client.destroy();
+      sock.destroy();
+    },
     async close() {
       broken = true;
       try {

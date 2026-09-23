@@ -633,6 +633,17 @@ function ConnectionPanel({
     onError: fail("Kunne ikke lagre grensen"),
   });
 
+  const forgetHostKeyMutation = useMutation({
+    mutationFn: () => dataConnectionsApi.forgetHostKey(companyId, connection.id),
+    onSuccess: () => {
+      onError(null);
+      setLastTest(null);
+      invalidate();
+      pushToast({ title: "Host key forgotten. Press Test to pin the server's current key.", tone: "success" });
+    },
+    onError: fail("Could not forget the host key"),
+  });
+
   const removeMutation = useMutation({
     mutationFn: () => dataConnectionsApi.remove(companyId, connection.id),
     onSuccess: () => {
@@ -761,6 +772,18 @@ function ConnectionPanel({
       )}
 
       <TestFindings connection={connection} lastTest={lastTest} />
+
+      {connection.kind === "sftp_file" && connection.observed?.fileServer?.hostKeyFingerprint && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="data-host-key">
+          <span>
+            Pinned SSH host key: <span className="font-mono">{connection.observed.fileServer.hostKeyFingerprint}</span>. A
+            different key is refused. If the server was reinstalled, forget the key and press Test again.
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => forgetHostKeyMutation.mutate()} disabled={forgetHostKeyMutation.isPending}>
+            Forget host key
+          </Button>
+        </div>
+      )}
 
       <TrialCalculation companyId={companyId} connection={connection} />
 

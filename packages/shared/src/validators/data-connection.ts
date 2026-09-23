@@ -381,10 +381,16 @@ export const createFikenConnectionSchema = z.object({
 export const FILE_SERVER_BASE_PATH_MESSAGE =
   "The base folder must be a full path starting with /, for example /reports.";
 
+/**
+ * Collapses repeated slashes and "." segments and drops a trailing slash
+ * (posix-normalise without node:path, since this file also runs in the
+ * browser). ".." is kept as-is so the schema can refuse it.
+ */
 export function normalizeRemotePathInput(raw: string): string {
   const value = raw.trim().replace(/\\/g, "/");
-  if (value.length > 1 && value.endsWith("/")) return value.replace(/\/+$/, "") || "/";
-  return value;
+  if (!value.startsWith("/")) return value;
+  const segments = value.split("/").filter((segment) => segment !== "" && segment !== ".");
+  return `/${segments.join("/")}`;
 }
 
 const fileServerBasePathSchema = z

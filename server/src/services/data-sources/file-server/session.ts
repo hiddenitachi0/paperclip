@@ -48,7 +48,10 @@ export interface FileServerSession {
   read(path: string, maxBytes: number): Promise<FileServerReadResult>;
   write(path: string, bytes: Buffer): Promise<void>;
   remove(path: string): Promise<void>;
+  /** Polite close: finish the protocol, then drop the sockets. */
   close(): Promise<void>;
+  /** Hard teardown, for a deadline: drop every socket now, including a transfer in flight. */
+  abort(): void;
 }
 
 /**
@@ -79,6 +82,12 @@ export function withDeadline<T>(
   return Promise.race([work, deadline]).finally(() => {
     if (timer) clearTimeout(timer);
   }) as Promise<T>;
+}
+
+/** "180 KB" or "2.5 MB", for size limits in messages. */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 1)} MB`;
 }
 
 /** Keeps only printable characters and clips, for a server's greeting in a message. */

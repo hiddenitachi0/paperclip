@@ -129,6 +129,26 @@ function accessOf(row: DataConnectionRow): DataConnectionAccessLevel {
   return row.access === "read_write" ? "read_write" : "read";
 }
 
+/**
+ * What survives a credential rotation: the SFTP host-key pin and nothing
+ * else. `checkedAt` is left null so canActivate still demands a fresh Test.
+ */
+function pinnedHostKeyOnly(observed: DataConnectionRow["observed"]): DataConnectionRow["observed"] {
+  const fingerprint = observed?.fileServer?.hostKeyFingerprint ?? null;
+  if (!fingerprint || !observed?.fileServer) return null;
+  return {
+    fileServer: {
+      protocol: observed.fileServer.protocol,
+      fileCount: 0,
+      directoryCount: 0,
+      writable: null,
+      hostKeyFingerprint: fingerprint,
+      serverSoftware: null,
+    },
+    checkedAt: null,
+  };
+}
+
 /** The row's `config` as the kind's typed shape; an unreadable config is treated as empty, never thrown at a reader. */
 function typedConfig(definition: DataSourceKindDefinition, raw: DataConnectionRow["config"]): DataConnectionConfig {
   const parsed = definition.configSchema.safeParse(raw ?? {});
@@ -391,13 +411,16 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     // A new key. The row is switched to "not tested" FIRST and the key stored
     // second, so there is no moment -- and no failure halfway -- where an
     // active connection serves a key that was never tested. The last Test said
-    // something about a key that no longer exists; it is forgotten.
+    // something about a key that no longer exists; it is forgotten -- except
+    // an SFTP host-key pin, which is about the SERVER, not the credential: it
+    // stays, so the next Test with the new credential still refuses a
+    // different server. Only forgetHostKey clears it.
     set.credentialKind = patch.credential.kind;
     set.credentialHint = credentialHint(patch.credential);
     set.lastCheckAt = null;
     set.lastCheckOk = null;
     set.lastCheckError = null;
-    set.observed = null;
+    set.observed = pinnedHostKeyOnly(row.observed);
     set.status = patch.status === "disabled" || row.status === "disabled" ? "disabled" : "draft";
     const [updated] = await db
       .update(dataConnections)
@@ -650,6 +673,35 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     };
   }
 
+  /**
+   * DUR-3997 (files on a server): forget the SSH host key pinned at the first
+   * Test -- the one explicit way to accept a reinstalled server's new key.
+   * The connection goes back to "not tested" (and off, if it was on), so the
+   * next Test pins the key that server presents then. Nothing else about the
+   * connection changes; the credential stays.
+   */
+  async function forgetHostKey(companyId: string, connectionId: string): Promise<DataConnectionSummary> {
+    const row = await getRow(companyId, connectionId);
+    if (row.kind !== "sftp_file") {
+      throw unprocessable("Only an SFTP connection has a pinned host key.", { code: "no_host_key" });
+    }
+    const checkedAt = new Date(now());
+    const [updated] = await db
+      .update(dataConnections)
+      .set({
+        observed: null,
+        lastCheckAt: null,
+        lastCheckOk: null,
+        lastCheckError: null,
+        status: row.status === "disabled" ? "disabled" : "draft",
+        updatedAt: checkedAt,
+      })
+      .where(and(eq(dataConnections.id, row.id), eq(dataConnections.companyId, companyId)))
+      .returning();
+    const datasets = await datasetsByConnection(companyId);
+    return toSummary(updated ?? row, datasets.get(row.id) ?? []);
+  }
+
   async function listDatasetSources(companyId: string): Promise<DataDatasetSourceSummary[]> {
     const rows = await db.select().from(dataDatasetSources).where(eq(dataDatasetSources.companyId, companyId));
     return rows.map((row) => ({
@@ -772,6 +824,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
     resolveCredential,
     openReadContext,
     test,
+    forgetHostKey,
     listDatasetSources,
     setDatasetSource,
     getActiveDatasetSource,

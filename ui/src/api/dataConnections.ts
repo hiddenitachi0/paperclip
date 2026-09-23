@@ -60,6 +60,12 @@ export const dataConnectionsApi = {
       `/companies/${companyId}/data-connections/${encodeURIComponent(connectionId)}/trial`,
       data,
     ),
+  /** SFTP only: forget the pinned host key so the next Test accepts the server's current key. */
+  forgetHostKey: (companyId: string, connectionId: string) =>
+    api.post<DataConnectionSummary>(
+      `/companies/${companyId}/data-connections/${encodeURIComponent(connectionId)}/forget-host-key`,
+      {},
+    ),
   listDatasetSources: (companyId: string) =>
     api.get<DataDatasetSourceSummary[]>(`/companies/${companyId}/dataset-sources`),
   setDatasetSource: (companyId: string, dataset: DataDataset, connectionId: string | null) =>
