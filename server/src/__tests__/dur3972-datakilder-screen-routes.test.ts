@@ -293,16 +293,16 @@ d("DUR-3972 S2 Datakilder routes", () => {
       expect(res.status).toBe(200);
       expect(res.body.ok).toBe(true);
       const card = res.body.card as string;
-      expect(card).toContain("Juli 2026 (1.–31. juli 2026, avsluttet)");
-      expect(card).toContain("August 2026 (1.–31. august 2026, avsluttet)");
+      expect(card).toContain("July 2026 (1–31 July 2026, closed)");
+      expect(card).toContain("August 2026 (1–31 August 2026, closed)");
       // July: 4 sold, no returns. August: 2 sold, 1 return of a July order, net 1.
-      expect(card).toContain("Solgt: 4 stk");
-      expect(card).toContain("Solgt: 2 stk");
-      expect(card).toContain("Returer i måneden: 1 stk (herav 1 fra tidligere måneder)");
-      expect(card).toContain("Netto: 1 stk");
+      expect(card).toContain("Sold: 4 units");
+      expect(card).toContain("Sold: 2 units");
+      expect(card).toContain("Returns in the month: 1 unit (of which 1 from earlier months)");
+      expect(card).toContain("Net: 1 unit");
       expect(card).toContain("Sofa:");
-      expect(card).toContain(`Kilde: Shopify (nettbutikken ${SHOP}), ikke regnskap`);
-      expect(card).toContain(`oppslag ${res.body.lookupId}`);
+      expect(card).toContain(`Source: Shopify (online store ${SHOP}), not the accounts`);
+      expect(card).toContain(`lookup ${res.body.lookupId}`);
       expect(res.body.reconciliationNotes).toEqual([]);
 
       // The key went to Shopify in the header, and nowhere back to the browser.
@@ -354,7 +354,7 @@ d("DUR-3972 S2 Datakilder routes", () => {
         .send({ periods: ["2026-07"] });
       expect(res.body.ok).toBe(true);
       expect(res.body.reconciliationNotes.join(" ")).toContain("July 2026");
-      expect(res.body.reconciliationNotes.join(" ")).toContain("Shopify's sales ledger shows 1 returned unit, but the refunds show 0 units");
+      expect(res.body.reconciliationNotes.join(" ")).toContain("Shopify's sales record shows 1 returned unit, but the refunds show 0 units");
       expect(res.body.reconciliationNotes.join(" ")).not.toMatch(/refunds_cross_check|ledger/);
     });
 
@@ -398,11 +398,11 @@ d("DUR-3972 S2 Datakilder routes", () => {
         .post(`/api/companies/${companyId}/data-connections/${connectionId}/trial`)
         .send({ periods: ["2026-11"] });
       expect(res.body.ok).toBe(true);
-      expect(res.body.card).toContain("Ingen data");
+      expect(res.body.card).toContain("No data");
       // S4 dropped the digit from this warning on purpose: a literal "0" there
       // let a reply claiming zero sales pass the number check.
-      expect(res.body.card).toContain("ikke det samme som null salg");
-      expect(res.body.card).not.toContain("Solgt: 0");
+      expect(res.body.card).toContain("not the same as nothing sold");
+      expect(res.body.card).not.toContain("Sold: 0");
       const [row] = await db.select().from(dataReadEvents).where(eq(dataReadEvents.companyId, companyId));
       expect(row!.outcome).toBe("no_data");
     });
@@ -542,7 +542,7 @@ describe("DUR-3972 S2 trial helpers", () => {
         "catalog units sold skipped: request_budget_exceeded",
       ]),
     ).toEqual([
-      "August 2026, product type Sofa: Shopify's sales ledger shows 2 returned units, but the refunds show 1 unit. The figures above use the sales ledger, as Shopify Analytics does. The difference should be explained before Sales is switched on.",
+      "August 2026, product type Sofa: Shopify's sales record shows 2 returned units, but the refunds show 1 unit. The figures above use the sales record, as Shopify Analytics does. The difference should be explained before Sales is switched on.",
       "1 other note from the calculation was saved in the log.",
     ]);
   });

@@ -180,6 +180,81 @@ describe("review fixes: dates, 'ingen data' and answers from memory", () => {
   });
 });
 
+describe("the English card", () => {
+  const CARD_EN = [
+    "Sales in units for product type: Sofa",
+    "",
+    "July 2026 (1–31 July 2026, closed)",
+    "Sold: 1 234 units",
+    "Returns in the month: 3 units (of which 1 from earlier months)",
+    "Net: 1 231 units",
+    "",
+    "Net change from July 2026 to August 2026: +12 units (+12.5 %)",
+    "Source: Shopify (online store nordstrand-test.myshopify.com), not the accounts · Europe/Oslo · fetched 21.09.2026 at 10:14 · lookup 3f2a9c1e-0b7d-4e21-9a55-1c2d3e4f5a6b",
+  ].join("\n");
+
+  it("reads English number formats and sets aside English dates", () => {
+    expect(extractQuantities("1,234 units")).toEqual(["1234"]);
+    expect(extractQuantities("1,234.5 units")).toEqual(["1234.5"]);
+    expect(extractQuantities("12.5 %")).toEqual(["12.5"]);
+    expect(
+      extractQuantities(
+        "lookup 3f2a9c1e-0b7d-4e21-9a55-1c2d3e4f5a6b at nordstrand-2.myshopify.com, fetched 21.09.2026 at 10:14, " +
+          "the period 1–31 July 2026, 31 August 2026, July 2026 and 2026-08",
+      ),
+    ).toEqual([]);
+    expect(extractQuantities("five returns")).toEqual(["5"]);
+    expect(extractQuantities("no sales")).toEqual(["0"]);
+    expect(extractQuantities("zero sofas")).toEqual(["0"]);
+  });
+
+  it("grounds a correct English paraphrase and catches a wrong one", () => {
+    const reply = "In July 2026 we sold 1,234 sofas, 3 returns (1 from earlier months), net 1 231. That is +12.5%.";
+    expect(findUngroundedNumbers(reply, [CARD_EN])).toEqual([]);
+    expect(findUngroundedNumbers("We sold 1,240 sofas in July 2026.", [CARD_EN])).toEqual(["1240"]);
+    expect(findUngroundedNumbers("There were five returns in July.", [CARD_EN])).toEqual(["5"]);
+    // The card's "1–31 July" is a date range, so it grounds no 31.
+    expect(findUngroundedNumbers("Net 31 units in July.", [CARD_EN])).toEqual(["31"]);
+    // A day the card names is still a date in the reply; one it does not name is a number.
+    expect(findUngroundedNumbers("From 1 July to 31 July: net 1 231.", [CARD_EN])).toEqual([]);
+    expect(findUngroundedNumbers("Net 13 July: 1 231 sold.", [CARD_EN])).toEqual(["13"]);
+  });
+
+  it("drops the 'No data' line before grounding, so 'no' cannot ground a zero", () => {
+    const noData = [
+      "Sales in units for product type: Sofa",
+      "",
+      "October 2026 (not started)",
+      "No data: The period has not started yet. (not the same as nothing sold)",
+    ].join("\n");
+    for (const reply of ["You sold 0 sofas in October.", "You sold zero sofas in October.", "No sales in October."]) {
+      const result = applyBusinessDataNumberCheck(reply, [{ content: noData, footer: null, lookupId: "id" }]);
+      expect(result.replaced, reply).toBe(true);
+      expect(result.text).toContain("No data");
+    }
+    // Saying there is no data is fine.
+    expect(
+      applyBusinessDataNumberCheck("There is no data for October yet.", [{ content: noData, footer: null, lookupId: "id" }]).replaced,
+    ).toBe(false);
+  });
+
+  it("the no-lookup guard reads English sales words too", () => {
+    expect(findSalesQuantityClaims("In total we sold 27 units over the two months.")).toEqual(["27"]);
+    expect(findSalesQuantityClaims("Net: 13. Total: 27")).toEqual(["13", "27"]);
+    expect(findSalesQuantityClaims("There were five returns.")).toEqual(["5"]);
+    expect(findSalesQuantityClaims("Sales rose by 12.5 %.")).toEqual(["12.5"]);
+    expect(findSalesQuantityClaims("No sales in October.")).toEqual(["0"]);
+    for (const text of [
+      "Hi! What would you like to know about sales?",
+      "I can look up sales for the last two months.",
+      "The meeting is on 14 October at 10:00.",
+      "The shop is nordstrand-2.myshopify.com.",
+    ]) {
+      expect(applyNoLookupGuard(text).replaced, text).toBe(false);
+    }
+  });
+});
+
 describe("the per-run key comes from a signed token only", () => {
   it("uses actor.runId for an agent JWT, and nothing else", () => {
     expect(signedRunIdFromActor({ type: "agent", agentId: "a", source: "agent_jwt", runId: "run-1" })).toBe("run-1");

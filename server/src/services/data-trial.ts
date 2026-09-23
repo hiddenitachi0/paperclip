@@ -14,7 +14,7 @@ import {
 } from "./data-sources/contract.js";
 import { getDataSourceKind } from "./data-sources/registry.js";
 import { scrubSecrets } from "./data-sources/shopify-client.js";
-import { parseMonthKey, zonedParts } from "./data-sources/zoned-time.js";
+import { MONTH_NAMES, parseMonthKey, zonedParts } from "./data-sources/zoned-time.js";
 
 /**
  * DUR-3972 slice S2: "Trial calculation" on the Data sources settings screen.
@@ -64,13 +64,11 @@ export function zonedDayStart(now: Date, timeZone: string): Date {
   return new Date(candidate);
 }
 
-const MONTH_NAME = new Intl.DateTimeFormat("en-GB", { month: "long", timeZone: "UTC" });
-
 /** "July 2026" for the key "2026-07". */
 function monthLabel(key: string): string {
   const parsed = parseMonthKey(key);
   if (!parsed) return key;
-  return `${MONTH_NAME.format(new Date(Date.UTC(parsed.year, parsed.month - 1, 1)))} ${parsed.year}`;
+  return `${MONTH_NAMES[parsed.month - 1]} ${parsed.year}`;
 }
 
 const units = (count: string) => (count === "1" || count === "-1" ? "unit" : "units");
@@ -93,8 +91,8 @@ export function describeReconciliationWarnings(warnings: string[]): string[] {
     const [, month, bucket, ledger, refunds] = match;
     const where = bucket === "total" ? "all products" : `product type ${bucket}`;
     notes.push(
-      `${monthLabel(month!)}, ${where}: Shopify's sales ledger shows ${ledger} returned ${units(ledger!)}, but the refunds show ${refunds} ${units(refunds!)}. ` +
-        "The figures above use the sales ledger, as Shopify Analytics does. The difference should be explained before Sales is switched on.",
+      `${monthLabel(month!)}, ${where}: Shopify's sales record shows ${ledger} returned ${units(ledger!)}, but the refunds show ${refunds} ${units(refunds!)}. ` +
+        "The figures above use the sales record, as Shopify Analytics does. The difference should be explained before Sales is switched on.",
     );
   }
   if (other > 0) {

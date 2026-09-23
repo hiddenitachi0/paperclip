@@ -288,8 +288,8 @@ describe("DataSourcesSection", () => {
     mockApi.trial.mockResolvedValue({
       ok: true,
       lookupId: "66666666-6666-4666-8666-666666666666",
-      card: "Salg i antall enheter, alle produkter\n\nJuli 2026 (1.–31. juli 2026, avsluttet)\nSolgt: 4 stk",
-      reconciliationNotes: ["August 2026, product type Sofa: Shopify's sales ledger shows 2 returned units, but the refunds show 1 unit."],
+      card: "Sales in units, all products\n\nJuly 2026 (1–31 July 2026, closed)\nSold: 4 units",
+      reconciliationNotes: ["August 2026, product type Sofa: Shopify's sales record shows 2 returned units, but the refunds show 1 unit."],
     });
     const root = await render();
 
@@ -300,7 +300,7 @@ describe("DataSourcesSection", () => {
 
     expect(mockApi.trial).toHaveBeenCalledWith(COMPANY, CONNECTION, { periods: ["2026-07", "2026-08"], groupBy: "product_type" });
     const card = container.querySelector('[data-testid="data-trial-card"]');
-    expect(card?.textContent).toContain("Solgt: 4 stk");
+    expect(card?.textContent).toContain("Sold: 4 units");
     expect(container.textContent).toContain("Notes on the comparison");
     expect(container.textContent).toContain("Net items sold by product type");
 
@@ -312,12 +312,12 @@ describe("DataSourcesSection", () => {
       ok: false,
       lookupId: null,
       code: "before_visible_window",
-      message: "Shopify viser bare ordre fra og med 1. juli 2026, så mai 2026 kan ikke regnes ut.",
+      message: "Shopify only lets me see orders from 01.07.2026, so I cannot give figures for May 2026. That does not mean sales were zero.",
     });
     const root = await render();
     await act(async () => button("Calculate")?.click());
     await flushReact();
-    expect(container.textContent).toContain("så mai 2026 kan ikke regnes ut");
+    expect(container.textContent).toContain("so I cannot give figures for May 2026");
     expect(container.querySelector('[data-testid="data-trial-card"]')).toBeNull();
     await act(async () => root.unmount());
   });

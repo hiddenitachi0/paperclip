@@ -230,7 +230,7 @@ describe("the ledger places every movement in the month it happened", () => {
     expect(january!.total).toEqual(lines(2 + 0, 0, 0, 0));
     expect(december!.total).toEqual(lines(0, 1, 1, 0));
     expect(december!.total!.net).toBe(-1);
-    expect(december!.status).toBe("avsluttet");
+    expect(december!.status).toBe("closed");
     expect(outcome.audit.warnings).toEqual([]);
   });
 
@@ -383,8 +383,8 @@ describe("no data is never zero", () => {
     if (outcome.ok) return;
     expect(outcome.refusal.code).toBe("before_visible_window");
     expect(outcome.refusal.message).toContain("26.07.2026");
-    expect(outcome.refusal.message).toContain("juli 2026");
-    expect(outcome.refusal.message).toContain("ikke at salget var null");
+    expect(outcome.refusal.message).toContain("July 2026");
+    expect(outcome.refusal.message).toContain("does not mean sales were zero");
     expect(fake.requests.map((request) => request.operation)).toEqual(["PaperclipShopWindow"]);
   });
 
@@ -450,12 +450,12 @@ describe("no data is never zero", () => {
     });
     const outcome = await salesOk(adapter, { periods: ["this_month_to_date", "2026-10"] });
     const [september, october] = outcome.result.periods;
-    expect(september!.status).toBe("pågår");
-    expect(september!.statusText).toBe("pågår, per 21.09.2026 kl. 10:14");
+    expect(september!.status).toBe("running");
+    expect(september!.statusText).toBe("running, as of 21.09.2026 at 10:14");
     expect(september!.total).toEqual(lines(1, 0, 0, 0));
     expect(october!.dataState).toBe("no_data");
     expect(october!.total).toBeNull();
-    expect(october!.noDataReason).toBe("Perioden har ikke startet ennå.");
+    expect(october!.noDataReason).toBe("The period has not started yet.");
     expect(outcome.result.comparison).toBeNull();
   });
 
@@ -671,7 +671,7 @@ describe("catalog", () => {
     expect(outcome.result.untypedProductCount).toBe(2);
     expect(outcome.result.untypedUnitsSoldLast12Months).toBe(1);
     expect(outcome.result.deletedProductUnitsSoldLast12Months).toBe(2);
-    expect(outcome.result.unitsSoldStatus).toBe("beregnet");
+    expect(outcome.result.unitsSoldStatus).toBe("calculated");
     expect(outcome.result.earliestVisibleOrderAt).toBe("2024-11-02T10:00:00Z".replace("Z", ".000Z"));
   });
 
@@ -690,7 +690,7 @@ describe("catalog", () => {
     const outcome = await adapter.catalog({ includeUnitsSold: true });
     if (!outcome.ok) throw new Error(outcome.refusal.message);
     expect(outcome.result.productTypes.every((entry) => entry.unitsSoldLast12Months === null)).toBe(true);
-    expect(outcome.result.unitsSoldStatus).toBe("ikke beregnet: Shopify-tilkoblingen mangler tilgang til eldre ordre");
+    expect(outcome.result.unitsSoldStatus).toBe("not calculated: the Shopify connection lacks access to older orders");
     expect(fake.requests.map((request) => request.operation)).not.toContain("PaperclipOrdersScan");
   });
 
@@ -713,7 +713,7 @@ describe("catalog", () => {
     const outcome = await adapter.catalog({ includeUnitsSold: true });
     if (!outcome.ok) throw new Error(outcome.refusal.message);
     expect(outcome.result.productTypes.every((entry) => entry.unitsSoldLast12Months === null)).toBe(true);
-    expect(outcome.result.unitsSoldStatus).toMatch(/^ikke beregnet/);
+    expect(outcome.result.unitsSoldStatus).toMatch(/^not calculated/);
     expect(outcome.result.productTypes.find((entry) => entry.productType === "Sofa")!.productCount).toBe(1);
   });
 });
