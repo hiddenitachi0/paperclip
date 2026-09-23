@@ -594,7 +594,7 @@ d("DUR-3972 data connections", () => {
     const rotate = await request(app).post(`/api/secrets/${secretId}/rotate`).send({ value: ROTATED_KEY });
     expect(rotate.status).toBe(422);
     expect(rotate.body.code).toBe("secret_owned_by_data_connection");
-    expect(rotate.body.error).toContain("Datakilder");
+    expect(rotate.body.error).toContain("Data sources");
 
     const disable = await request(app).patch(`/api/secrets/${secretId}`).send({ status: "disabled" });
     expect(disable.status).toBe(422);

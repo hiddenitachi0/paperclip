@@ -86,7 +86,7 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         // chat path too. `sendMessage` calls resolveLaneASettings and comments
         // that chat runs on the same model as batch — but it only got what
         // this object carries, so omitting these two silently fell back to the
-        // platform default. An operator who picks "Rask og billig" would have
+        // platform default. An operator who picks "Fast and cheap" would have
         // got haiku in batch and sonnet in chat, billed at two different rates
         // for the same agent.
         laneAModel: targetAgent.laneAModel ?? null,

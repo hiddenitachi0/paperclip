@@ -69,7 +69,7 @@ export interface LaneAProviderDescriptor {
  */
 export const LANE_A_MODEL_CATALOGUE = {
   "claude-haiku-4-5": {
-    label: "Rask og billig",
+    label: "Fast and cheap",
     inputUsdPerMillion: 1.0,
     outputUsdPerMillion: 5.0,
   },
@@ -79,7 +79,7 @@ export const LANE_A_MODEL_CATALOGUE = {
     outputUsdPerMillion: 10.0,
   },
   "claude-opus-5": {
-    label: "Best kvalitet",
+    label: "Best quality",
     inputUsdPerMillion: 5.0,
     outputUsdPerMillion: 25.0,
   },
@@ -103,9 +103,9 @@ export const LANE_A_PROVIDER_CATALOGUE: Record<LaneAProvider, LaneAProviderDescr
     defaultBaseUrl: "https://api.openai.com/v1",
     baseUrlEditable: false,
     models: {
-      "gpt-4.1-mini": { label: "Rask og billig", inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6 },
+      "gpt-4.1-mini": { label: "Fast and cheap", inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6 },
       "gpt-4.1": { label: "Standard", inputUsdPerMillion: 2.0, outputUsdPerMillion: 8.0 },
-      "o4-mini": { label: "Resonnering", inputUsdPerMillion: 1.1, outputUsdPerMillion: 4.4 },
+      "o4-mini": { label: "Reasoning", inputUsdPerMillion: 1.1, outputUsdPerMillion: 4.4 },
     },
   },
   google: {
@@ -116,8 +116,8 @@ export const LANE_A_PROVIDER_CATALOGUE: Record<LaneAProvider, LaneAProviderDescr
     defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     baseUrlEditable: false,
     models: {
-      "gemini-2.5-flash": { label: "Rask og billig", inputUsdPerMillion: 0.3, outputUsdPerMillion: 2.5 },
-      "gemini-2.5-pro": { label: "Best kvalitet", inputUsdPerMillion: 1.25, outputUsdPerMillion: 10.0 },
+      "gemini-2.5-flash": { label: "Fast and cheap", inputUsdPerMillion: 0.3, outputUsdPerMillion: 2.5 },
+      "gemini-2.5-pro": { label: "Best quality", inputUsdPerMillion: 1.25, outputUsdPerMillion: 10.0 },
     },
   },
   openrouter: {
@@ -280,7 +280,7 @@ export const LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP = 100_000;
  *
  * DUR-3977 review: "no monthly budget set" is the default, and it is the
  * default on the first thing that can spend Paperclip's money from outside
- * Paperclip. "Tomt = ingen grense" is honest but it is not informative — this
+ * Paperclip. "Empty = no limit" is honest but it is not informative — this
  * turns it into a number the operator can react to. Worst case means: every
  * call carries the maximum payload the validator allows
  * (LANE_A_TRANSFORM_MAX_TOTAL_CHARS, at the usual ~4 characters per token),

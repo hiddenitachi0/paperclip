@@ -104,10 +104,10 @@ export function QuickAgentSection({
     onSuccess: () => {
       setError(null);
       invalidate();
-      pushToast({ title: "Innstillingen er lagret", tone: "success" });
+      pushToast({ title: "Setting saved", tone: "success" });
     },
     onError: (err) => {
-      setError(err instanceof ApiError ? err.message : "Kunne ikke lagre innstillingen");
+      setError(err instanceof ApiError ? err.message : "Could not save the setting");
     },
   });
 
@@ -287,10 +287,10 @@ export function QuickAgentSection({
             and how far it can run before it stops on its own. */}
         <div className="space-y-3 border-t pt-4">
           <div className="space-y-1.5">
-            <p className="text-sm font-medium">Modell og grenser</p>
+            <p className="text-sm font-medium">Model and limits</p>
             <p className="text-xs text-muted-foreground">
-              Brukes både i chat og når et annet system ber om omskriving av tekst. Alt her kan stå tomt —
-              da bruker vi standardverdiene.
+              Used both in chat and when another system asks for a text to be rewritten. Everything here can be left
+              empty — then the defaults apply.
             </p>
           </div>
 
@@ -309,7 +309,7 @@ export function QuickAgentSection({
             />
           ) : (
             <label className="block space-y-1">
-              <span className="text-xs text-muted-foreground">Modell</span>
+              <span className="text-xs text-muted-foreground">Model</span>
               <select
                 className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
                 value={providerModels.includes(agent.laneAModel ?? "") ? (agent.laneAModel ?? "") : ""}
@@ -319,7 +319,7 @@ export function QuickAgentSection({
                 }
               >
                 <option value="">
-                  Standard
+                  Default
                   {providerDescriptor.defaultModel
                     ? ` (${providerDescriptor.models[providerDescriptor.defaultModel]?.label ?? providerDescriptor.defaultModel})`
                     : ""}
@@ -334,8 +334,8 @@ export function QuickAgentSection({
           )}
 
           <NumberSetting
-            label="Lengste svar (ord-deler)"
-            hint={`Tomt = ${LANE_A_DEFAULT_MAX_OUTPUT_TOKENS}. Stopper et svar fra å bli uventet langt og dyrt.`}
+            label="Longest answer (tokens)"
+            hint={`Empty = ${LANE_A_DEFAULT_MAX_OUTPUT_TOKENS}. Stops an answer from becoming unexpectedly long and expensive.`}
             value={agent.laneAMaxOutputTokens ?? null}
             min={LANE_A_MIN_MAX_OUTPUT_TOKENS}
             max={LANE_A_MAX_MAX_OUTPUT_TOKENS}
@@ -344,8 +344,8 @@ export function QuickAgentSection({
           />
 
           <NumberSetting
-            label="Hvor mange tekster per døgn"
-            hint={`Tomt = ${LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP}. Gjelder bare omskriving fra andre systemer, ikke chat. Når grensen er nådd stopper den til midnatt.`}
+            label="How many texts per day"
+            hint={`Empty = ${LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP}. Only applies to rewrites from other systems, not chat. When the limit is reached it stops until midnight.`}
             value={agent.laneATransformDailyCallCap ?? null}
             min={LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP}
             max={LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP}
@@ -489,7 +489,7 @@ function NumberSetting({
           min={min}
           max={max}
           value={shown}
-          placeholder="Standard"
+          placeholder="Default"
           disabled={disabled}
           onChange={(event) => setDraft(event.target.value)}
         />
@@ -503,7 +503,7 @@ function NumberSetting({
             setDraft(null);
           }}
         >
-          Lagre
+          Save
         </Button>
       </div>
       <span className="block text-xs text-muted-foreground">{hint}</span>
@@ -572,10 +572,10 @@ function MonthlyTransformBudget({
       setDraft(null);
       setError(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(companyId) });
-      pushToast({ title: "Månedsgrensen er lagret", tone: "success" });
+      pushToast({ title: "Monthly limit saved", tone: "success" });
     },
     onError: (err) => {
-      setError(err instanceof ApiError ? err.message : "Kunne ikke lagre månedsgrensen");
+      setError(err instanceof ApiError ? err.message : "Could not save the monthly limit");
     },
   });
 
@@ -584,7 +584,7 @@ function MonthlyTransformBudget({
   return (
     <label className="block space-y-1">
       <span className="text-xs text-muted-foreground">
-        Maks kostnad per måned for omskriving (dollar)
+        Maximum cost per month for rewriting (dollars)
       </span>
       <div className="flex items-center gap-2">
         <Input
@@ -593,7 +593,7 @@ function MonthlyTransformBudget({
           step="0.01"
           min={0}
           value={shown}
-          placeholder="Ingen grense"
+          placeholder="No limit"
           onChange={(event) => setDraft(event.target.value)}
         />
         <Button
@@ -602,22 +602,22 @@ function MonthlyTransformBudget({
           disabled={!dirty || saveMutation.isPending}
           onClick={() => saveMutation.mutate(Number(shown.trim() || 0))}
         >
-          Lagre
+          Save
         </Button>
       </div>
       <span className="block text-xs text-muted-foreground">
         {policy && policy.amount > 0
-          ? `Brukt så langt denne måneden: $${spentDollars}. Når grensen er nådd slutter den å skrive om tekst, men jobber ellers videre — og du får spørsmål om å heve grensen.`
+          ? `Spent so far this month: $${spentDollars}. When the limit is reached it stops rewriting text but keeps working otherwise — and you are asked whether to raise the limit.`
           : worstCaseDailyCents > 0
-            ? // "Tomt = ingen grense" is true but useless as a default on the
+            ? // "Empty = no limit" is true but useless as a default on the
               // first thing that can spend Paperclip's money from outside
               // Paperclip. Say what no-limit actually means, in money.
-              `Tomt = ingen grense. Uten grense kan denne hurtigansatte i verste fall bruke rundt $${centsToDollarString(worstCaseDailyCents)} på ett døgn, med dagsgrensen og modellen som er satt over. Sett et tall hvis du vil være sikker.`
-            : `Tomt = ingen grense. Paperclip kjenner ingen pris for denne modellen, så kostnaden føres som 0 — sett en grense hos leverandøren hvis du vil være sikker.`}
+              `Empty = no limit. Without a limit this quick agent could in the worst case spend around $${centsToDollarString(worstCaseDailyCents)} in one day, with the daily cap and model set above. Set a number if you want to be sure.`
+            : `Empty = no limit. Paperclip has no price for this model, so its cost is recorded as 0 — set a limit with the provider if you want to be sure.`}
       </span>
       <span className="block text-xs text-muted-foreground">
-        Beløpet er i dollar fordi modellkjøringen faktureres i dollar — samme enhet som de andre
-        budsjettene i Paperclip.
+        The amount is in dollars because model runs are billed in dollars — the same unit as the other
+        budgets in Paperclip.
       </span>
       {error && <span className="block text-xs text-destructive">{error}</span>}
     </label>

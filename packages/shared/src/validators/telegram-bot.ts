@@ -20,11 +20,11 @@ export const MAX_TELEGRAM_BOT_ALLOWED_USERS = 50;
 const telegramBotTokenSchema = z
   .string()
   .trim()
-  .min(1, "Lim inn tokenet fra BotFather først.")
+  .min(1, "Paste the token from BotFather first.")
   .max(512)
   .refine((value) => TELEGRAM_BOT_TOKEN_PATTERN.test(value), {
     message:
-      "Dette ser ikke ut som et bot-token fra BotFather. Det skal se slik ut: 8123456789:AAH… — tall, kolon, og en lang bokstavrekke, alt på én linje.",
+      "This does not look like a bot token from BotFather. It should look like this: 8123456789:AAH… — digits, a colon, and a long run of letters, all on one line.",
   });
 
 export const createTelegramBotSchema = z.object({

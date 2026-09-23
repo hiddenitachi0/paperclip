@@ -480,7 +480,7 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     if (!deps.readBusinessData) {
       return {
         ok: false,
-        content: "Salgsdata kan ikke leses herfra. Si det rett ut, og ikke gi noen tall.",
+        content: "Sales data cannot be read from here. Say so plainly, and do not give any figures.",
         summary: "Business data is not available on this path.",
         businessData: { footer: null, lookupId: null },
       };
