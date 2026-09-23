@@ -202,7 +202,7 @@ export function buildBusinessDataPromptParagraph(input: { available: boolean; co
     `- Use only numbers the tool returned in this turn. Never calculate, round, estimate or reuse a number from earlier in the conversation; call the tool again for every new question, including follow-ups like "and the month before that?".`,
     `- Always state the period with its exact dates, the source, and that the figures are units (stk), not kroner.`,
     `- Give the three lines for each month (sold, returns in the month with how many are from earlier months, net), never one net figure alone.`,
-    `- "Ingen data" (no data) is not 0: if the tool says there is no data, say that, never zero.`,
+    `- "No data" is not 0: if the tool says there is no data, say that, never zero.`,
     `- Sales here means units sold, not income or revenue, and the numbers are not accounting figures.`,
     `- Kroner amounts are not available yet; if asked, relay the tool's refusal.`,
     `- If the tool says a product word matches several product types, ask the person which ones to count. Do not pick for them.`,

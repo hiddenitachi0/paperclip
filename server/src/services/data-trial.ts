@@ -12,19 +12,19 @@ import {
   type DataRefusalCode,
   type SalesResult,
 } from "./data-sources/contract.js";
-import { createShopifySalesAdapter } from "./data-sources/shopify-adapter.js";
+import { getDataSourceKind } from "./data-sources/registry.js";
 import { scrubSecrets } from "./data-sources/shopify-client.js";
-import { NORWEGIAN_MONTHS, parseMonthKey, zonedParts } from "./data-sources/zoned-time.js";
+import { MONTH_NAMES, parseMonthKey, zonedParts } from "./data-sources/zoned-time.js";
 
 /**
- * DUR-3972 slice S2: "Prøveberegning" -- the trial calculation on the
- * Datakilder settings screen.
+ * DUR-3972 slice S2: "Trial calculation" on the Data sources settings screen.
  *
  * The operator picks one or two calendar months; Paperclip counts units sold
- * through the company's own connection with the S3 engine, runs the same
+ * through the company's own connection with the kind's sales adapter
+ * (registry.ts; the Shopify engine today), runs the same
  * consistency checks an agent answer gets, writes one audit row (channel
  * `settings_test`, refusals included), and hands back the fixed answer card so
- * it can be compared with Shopify Analytics BEFORE "Salg" is ticked.
+ * it can be compared with Shopify Analytics BEFORE "Sales" is ticked.
  *
  * Rules this file keeps:
  *  - Company from the URL the board route already authorised; the connection
@@ -44,11 +44,11 @@ export const TRIAL_PER_MINUTE_LIMIT = 6;
 
 const FALLBACK_TIMEZONE = "Europe/Oslo";
 
-const UNEXPECTED_MESSAGE = "Noe uventet gikk galt under prøveberegningen, så ingen tall vises. Prøv igjen om litt.";
+const UNEXPECTED_MESSAGE = "Something unexpected went wrong during the trial calculation, so no figures are shown. Try again in a moment.";
 const AUDIT_FAILED_MESSAGE =
-  "Oppslaget kunne ikke skrives i loggen, så tallene vises ikke. Prøv igjen om litt.";
+  "The lookup could not be written to the log, so the figures are not shown. Try again in a moment.";
 const INVARIANT_MESSAGE =
-  "Tallene fra Shopify gikk ikke opp når de ble kontrollert, så de vises ikke. Prøv igjen; skjer det igjen, må det undersøkes før Salg slås på.";
+  "The figures from Shopify did not add up when they were checked, so they are not shown. Try again; if it happens again, it must be looked into before Sales is switched on.";
 
 /** Midnight today in `timeZone`, as a UTC instant. Same two-step correction as zonedMonthStart. */
 export function zonedDayStart(now: Date, timeZone: string): Date {
@@ -64,11 +64,14 @@ export function zonedDayStart(now: Date, timeZone: string): Date {
   return new Date(candidate);
 }
 
+/** "July 2026" for the key "2026-07". */
 function monthLabel(key: string): string {
   const parsed = parseMonthKey(key);
   if (!parsed) return key;
-  return `${NORWEGIAN_MONTHS[parsed.month - 1]} ${parsed.year}`;
+  return `${MONTH_NAMES[parsed.month - 1]} ${parsed.year}`;
 }
+
+const units = (count: string) => (count === "1" || count === "-1" ? "unit" : "units");
 
 /**
  * The engine's audit warnings are written for the log. The one kind worth
@@ -86,17 +89,17 @@ export function describeReconciliationWarnings(warnings: string[]): string[] {
       continue;
     }
     const [, month, bucket, ledger, refunds] = match;
-    const where = bucket === "total" ? "alle produkter" : `produkttypen ${bucket}`;
+    const where = bucket === "total" ? "all products" : `product type ${bucket}`;
     notes.push(
-      `${monthLabel(month!)}, ${where}: Shopifys salgslogg viser ${ledger} returnerte stk, men refusjonene viser ${refunds} stk. ` +
-        "Tallene over bruker salgsloggen, som Shopify Analytics. Forskjellen bør forklares før Salg slås på.",
+      `${monthLabel(month!)}, ${where}: Shopify's sales record shows ${ledger} returned ${units(ledger!)}, but the refunds show ${refunds} ${units(refunds!)}. ` +
+        "The figures above use the sales record, as Shopify Analytics does. The difference should be explained before Sales is switched on.",
     );
   }
   if (other > 0) {
     notes.push(
       other === 1
-        ? "1 annen merknad fra beregningen er lagret i loggen."
-        : `${other} andre merknader fra beregningen er lagret i loggen.`,
+        ? "1 other note from the calculation was saved in the log."
+        : `${other} other notes from the calculation were saved in the log.`,
     );
   }
   return notes;
@@ -202,14 +205,14 @@ export async function runTrialCalculation(
   if (lastMinute >= TRIAL_PER_MINUTE_LIMIT) {
     return refuse(
       "rate_limited_minute",
-      `Det er kjørt ${TRIAL_PER_MINUTE_LIMIT} prøveberegninger eller tester det siste minuttet. Vent et minutt og prøv igjen.`,
+      `${TRIAL_PER_MINUTE_LIMIT} trial calculations or tests have been run in the last minute. Wait a minute and try again.`,
       "rate_limited",
     );
   }
   if (today >= row.dailyLookupCap) {
     return refuse(
       "rate_limited_day",
-      `Selskapet har brukt opp dagens ${row.dailyLookupCap} oppslag. Eieren av selskapet kan øke grensen under «Oppslag per dag» her i Datakilder, ellers åpner det seg igjen ved midnatt.`,
+      `The company has used up today's ${row.dailyLookupCap} lookups. The company's owner can raise the limit under "Lookups per day" here in Data sources; otherwise it opens again at midnight.`,
       "rate_limited",
     );
   }
@@ -228,17 +231,22 @@ export async function runTrialCalculation(
             : "not_available";
         const message =
           code === "data_connection_not_active"
-            ? "Koblingen er ikke slått på. Trykk Test først, og slå den på hvis den er slått av; prøveberegningen virker når testen har gått gjennom."
+            ? "The connection is not switched on. Press Test first, and switch it on if it is switched off; the trial calculation works once the test has passed."
             : error.message;
         return refuse(code, message, "refused");
       }
       throw error;
     }
 
-    const adapter = createShopifySalesAdapter({
-      client: read.shopifyTransport,
-      clock: { now: read.now, ...(deps.sleep ? { sleep: deps.sleep } : {}) },
-    });
+    const source = getDataSourceKind(read.kind);
+    if (!source.adapters.sales) {
+      return refuse(
+        "data_source_kind_unsupported",
+        `${source.label} connections cannot calculate sales yet. The connection is saved and will be used once support is ready.`,
+        "refused",
+      );
+    }
+    const adapter = source.adapters.sales(read, deps.sleep ? { sleep: deps.sleep } : {});
     const outcome = await adapter.sales({ periods: input.periods, measure: ["units"], groupBy: input.groupBy });
     if (!outcome.ok) {
       return refuse(outcome.refusal.code, outcome.refusal.message, outcomeForRefusal(outcome.refusal.code), {

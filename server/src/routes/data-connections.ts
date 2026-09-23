@@ -19,8 +19,10 @@ import { dataConnectionService, type DataConnectionServiceDeps } from "../servic
 import { runTrialCalculation } from "../services/data-trial.js";
 
 /**
- * DUR-3972 slice S1: "Datakilder" -- connecting a company to its own business
- * data (Shopify first), from company settings.
+ * DUR-3972 slice S1: "Data sources" -- connecting a company to its own business
+ * data (Shopify, and since DUR-3997 also WooCommerce, Fiken and SFTP files as
+ * stored-but-not-yet-readable kinds), from company settings. Nothing here is
+ * about one kind: the service asks the source-kind registry.
  *
  * Owner-or-instance-admin only (slice S2 tightened this from "any board
  * member"): agents, service tokens and delegate tokens are refused, a board
@@ -47,7 +49,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
     // DUR-3972 S2: owner of the company or instance admin only. A plain board
     // member (admin, operator, viewer) is refused, as are agents and tokens.
     return companyScopeFromParam(rawDb, (req, companyId) => {
-      assertCompanyOwnerOrInstanceAdmin(req, companyId, "datakilder");
+      assertCompanyOwnerOrInstanceAdmin(req, companyId, "data sources");
     });
   }
 
@@ -56,7 +58,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
     if (!experimental.enableBusinessData) {
       throw new HttpError(
         404,
-        "Datakilder er ikke slått på for denne Paperclip-installasjonen. En administrator kan slå det på under Instansinnstillinger → Eksperimentelt.",
+        "Data sources are not switched on for this Paperclip instance. An administrator can switch them on under Instance settings → Experimental.",
         { code: "business_data_disabled" },
       );
     }
@@ -91,7 +93,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   function datasetParam(req: Request): DataDataset {
     const value = req.params.dataset as string;
     if (!(DATA_DATASETS as readonly string[]).includes(value)) {
-      throw notFound("Ukjent datasett. Bare «sales» (Salg) finnes foreløpig.");
+      throw notFound('Unknown dataset. Use "sales" (Sales), "finance" (Accounting) or "custom" (Files).');
     }
     return value as DataDataset;
   }
@@ -110,7 +112,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
       action: "data_connection.connected",
       entityType: "data_connection",
       entityId: created.id,
-      details: { name: created.name, kind: created.kind, shopDomain: created.shopDomain },
+      details: { name: created.name, kind: created.kind, target: created.target, shopDomain: created.shopDomain },
     });
     res.status(201).json(created);
   });
@@ -159,7 +161,7 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
       action: "data_connection.removed",
       entityType: "data_connection",
       entityId: connectionId,
-      details: { name: existing.name, shopDomain: existing.shopDomain },
+      details: { name: existing.name, kind: existing.kind, target: existing.target, shopDomain: existing.shopDomain },
     });
     res.json({ ok: true });
   });
@@ -180,9 +182,9 @@ export function dataConnectionRoutes(rawDb: Db, deps: DataConnectionServiceDeps 
   });
 
   /**
-   * DUR-3972 S2: "Prøveberegning". Counts units sold in one or two months
+   * DUR-3972 S2: "Trial calculation". Counts units sold in one or two months
    * through this connection, exactly as an agent answer would, so the numbers
-   * can be compared with Shopify Analytics before "Salg" is ticked. A refusal
+   * can be compared with Shopify Analytics before "Sales" is ticked. A refusal
    * is a 200 with ok:false and a plain sentence, like Test.
    */
   router.post(

@@ -416,7 +416,7 @@ d("DUR-3972 data connections", () => {
     expect(rotated.body.status).toBe("draft");
     expect(rotated.body.credentialHint).toBe("••••ng12");
     const wrong = keep(await request(app).post(`/api/companies/${companyId}/data-connections/${id}/test`));
-    expect(wrong.body.problems.join(" ")).toContain("godtok ikke nøkkelen");
+    expect(wrong.body.problems.join(" ")).toContain("did not accept the key");
 
     keep(
       await request(app)
@@ -561,7 +561,7 @@ d("DUR-3972 data connections", () => {
         .send({ credential, status: "active" });
       expect(res.status).toBe(422);
       expect(res.body.code).toBe("data_connection_not_verified");
-      expect(res.body.error).toContain("ny nøkkel må testes");
+      expect(res.body.error).toContain("new key must be tested");
     }
 
     expect(await secretSnapshot(before.credentialSecretId)).toEqual(secretBefore);

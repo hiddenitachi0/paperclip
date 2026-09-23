@@ -12,6 +12,7 @@ import { dataConnectionService, type DataConnectionServiceDeps } from "./data-co
 import { countDataReadEvents, DATA_READ_FACTS_MAX_BYTES, recordDataReadEvent } from "./data-read-audit.js";
 import {
   checkSalesInvariants,
+  DataSourceUpstreamError,
   isKronerOnlyRefusal,
   KRONER_NOT_ENABLED_MESSAGE,
   periodTokenSchema,
@@ -22,8 +23,9 @@ import {
   type SalesResult,
 } from "./data-sources/contract.js";
 import { periodRange, renderCatalogAnswerCard, renderSalesAnswerCard, renderSourceFooter } from "./data-sources/answer-card.js";
-import { createShopifySalesAdapter, nearestValues, normalizeForMatch, PRODUCT_TYPES_QUERY } from "./data-sources/shopify-adapter.js";
-import { scrubSecrets, ShopifyClientError } from "./data-sources/shopify-client.js";
+import { nearestValues, normalizeForMatch } from "./data-sources/shopify-adapter.js";
+import { getDataSourceKind } from "./data-sources/registry.js";
+import { scrubSecrets } from "./data-sources/shopify-client.js";
 import { zonedDayStart, zonedParts } from "./data-sources/zoned-time.js";
 
 /**
@@ -39,7 +41,8 @@ import { zonedDayStart, zonedParts } from "./data-sources/zoned-time.js";
  *      restart): per run (signed run id only), per agent per minute, per
  *      company per minute, and the company's daily cap by Oslo day
  *   6. the key is resolved (inside openReadContext; never returned here)
- *   7. the S3 engine is called (periods are tokens it resolves on the server)
+ *   7. the source kind's sales adapter (registry.ts) is called; periods are
+ *      tokens it resolves on the server
  *   8. the result is re-validated and the consistency checks run again
  *   9. the answer is capped at 8 KB -- too big is a refusal, never a cut-off
  *  10. the answer is scrubbed of any key value
@@ -470,21 +473,35 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       }
       const { read: context, knownSecrets } = opened;
       scrubValues = knownSecrets;
+      const source = getDataSourceKind(context.kind);
+      if (!source.adapters.sales) {
+        return refuse(caller, {
+          connectionId, params, outcome: "refused", code: "data_source_kind_unsupported",
+          message: `${source.label} connections cannot answer sales-data questions yet.`, startedAt,
+        });
+      }
 
       // Product-type matching happens here, on the server, against the catalog.
       let productTypes: string[] | undefined = input.product_types;
       if (input.action === "sales" && input.product_type_query) {
+        if (!source.adapters.productTypes) {
+          return refuse(caller, {
+            connectionId, params, outcome: "refused", code: "invalid_request",
+            message: `${source.label} does not have a list of product types to look up. Use product_types with exact names.`,
+            startedAt,
+          });
+        }
         let catalogTypes: string[];
         try {
-          catalogTypes = await readProductTypes(context.shopify);
+          catalogTypes = await source.adapters.productTypes(context);
         } catch (error) {
           const message =
-            error instanceof ShopifyClientError
+            error instanceof DataSourceUpstreamError
               ? `${error.message} So I am not giving any figures.`
-              : "Shopify answered with an error, so I am not giving any figures. Try again later.";
+              : `${source.label} answered with an error, so I am not giving any figures. Try again later.`;
           return refuse(caller, {
             connectionId, params, outcome: "upstream_error", code: "upstream_error", message, startedAt,
-            audit: { upstreamRequests: context.shopify.stats().requests, costPoints: context.shopify.stats().costPoints },
+            audit: { upstreamRequests: context.stats().requests, costPoints: context.stats().costPoints },
             scrubValues: knownSecrets(),
           });
         }
@@ -493,10 +510,10 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
           return refuse(caller, {
             connectionId, params, outcome: "ambiguous", code: "ambiguous_product_type",
             message:
-              `"${input.product_type_query}" matches several product types in Shopify: ${match.candidates.join(", ")}. ` +
+              `"${input.product_type_query}" matches several product types in ${source.label}: ${match.candidates.join(", ")}. ` +
               "Ask the person which of these to count, and call the tool again with product_types. Do not guess.",
             detail: { candidates: match.candidates },
-            audit: { upstreamRequests: context.shopify.stats().requests },
+            audit: { upstreamRequests: context.stats().requests },
             startedAt,
             scrubValues: knownSecrets(),
           });
@@ -505,9 +522,9 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
           return refuse(caller, {
             connectionId, params, outcome: "refused", code: "unknown_product_type",
             message:
-              `Could not find a product type matching "${input.product_type_query}" in Shopify.` +
+              `Could not find a product type matching "${input.product_type_query}" in ${source.label}.` +
               (match.nearest.length > 0 ? ` Closest: ${match.nearest.join(", ")}.` : ""),
-            audit: { upstreamRequests: context.shopify.stats().requests },
+            audit: { upstreamRequests: context.stats().requests },
             startedAt,
             scrubValues: knownSecrets(),
           });
@@ -515,14 +532,13 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         productTypes = [match.type];
       }
 
-      // 7: the engine, inside what is left of the lookup's time.
+      // 7: the kind's sales adapter, inside what is left of the lookup's time.
       const remainingMs = Math.max(1_000, BUSINESS_DATA_LOOKUP_TIMEOUT_MS - (nowMs() - startedAt));
-      const adapter = createShopifySalesAdapter({
-        client: context.shopifyTransport,
+      const adapter = source.adapters.sales(context, {
         limits: { maxDurationMs: remainingMs },
-        clock: { now: context.now, ...(deps.sleep ? { sleep: deps.sleep } : {}) },
+        ...(deps.sleep ? { sleep: deps.sleep } : {}),
       });
-      const extraRequests = context.shopify.stats().requests;
+      const extraRequests = context.stats().requests;
       const lookupId = randomUUID();
 
       if (input.action === "catalog") {
@@ -571,7 +587,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       if (!checked.success || violations.length > 0) {
         return refuse(caller, {
           connectionId, params, outcome: "refused", code: "invariant_failed",
-          message: "The figures from Shopify did not add up when I checked them, so I am not giving an answer. The error has been logged.",
+          message: `The figures from ${source.label} did not add up when I checked them, so I am not giving an answer. The error has been logged.`,
           detail: { invariantViolations: violations.slice(0, 20) }, audit, startedAt, scrubValues: knownSecrets(),
         });
       }
@@ -664,29 +680,11 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
     };
   }
 
-  // The board's "Prøveberegning" is served by services/data-trial.ts (slice S2),
+  // The board's trial calculation is served by services/data-trial.ts (slice S2),
   // which runs the same S3 sales engine as read() above with the operator's own
   // choice of months. Moving it onto read() itself, so trial and agent answers
   // share one path end to end, is a tracked follow-up.
   return { featureOn, isAvailable, read, companyName };
-}
-
-async function readProductTypes(client: { query<T>(document: string, variables?: Record<string, unknown>): Promise<T> }) {
-  const types = new Set<string>();
-  let after: string | null = null;
-  for (let page = 0; page < 8; page += 1) {
-    const data: { productTypes: { nodes: string[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } | null } =
-      await client.query(PRODUCT_TYPES_QUERY, { first: 250, after });
-    if (!data.productTypes) return [...types];
-    for (const value of data.productTypes.nodes) {
-      const type = typeof value === "string" ? value.trim() : "";
-      if (type) types.add(type);
-    }
-    if (!data.productTypes.pageInfo.hasNextPage) return [...types];
-    after = data.productTypes.pageInfo.endCursor;
-  }
-  // More product types than we read: a match against a partial list could be wrong.
-  throw new Error("product type list longer than the read limit");
 }
 
 export type BusinessDataService = ReturnType<typeof businessDataService>;

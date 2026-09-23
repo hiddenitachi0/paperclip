@@ -7,6 +7,7 @@ import {
   type OutboundFetch,
 } from "../safe-outbound-fetch.js";
 import type { DataSourceCallBudget } from "./connection-kind.js";
+import { DataSourceUpstreamError } from "./contract.js";
 
 /**
  * DUR-3972 S1: a query-only Shopify Admin GraphQL client.
@@ -36,16 +37,15 @@ export type ShopifyClientErrorCode =
   | "bad_response"
   | "network";
 
-export class ShopifyClientError extends Error {
-  readonly code: ShopifyClientErrorCode;
+export class ShopifyClientError extends DataSourceUpstreamError {
+  declare readonly code: ShopifyClientErrorCode;
   /** The HTTP status Shopify answered with, when there was one. */
   readonly httpStatus: number | null;
   /** From a 429's Retry-After header, in ms. */
   readonly retryAfterMs: number | null;
   constructor(code: ShopifyClientErrorCode, message: string, httpStatus: number | null = null, retryAfterMs: number | null = null) {
-    super(message);
+    super(code, message);
     this.name = "ShopifyClientError";
-    this.code = code;
     this.httpStatus = httpStatus;
     this.retryAfterMs = retryAfterMs;
   }
@@ -121,7 +121,7 @@ export function createShopifyRawTransport(options: ShopifyTransportOptions): Sho
       if (isWriteLikeShopifyDocument(document)) {
         throw new ShopifyClientError(
           "mutation_refused",
-          "Paperclip leser bare fra Shopify. Forespørsler som kan endre noe blir aldri sendt.",
+          "Paperclip only reads from Shopify. Requests that could change anything are never sent.",
         );
       }
       const token = await options.getAccessToken();
@@ -143,32 +143,32 @@ export function createShopifyRawTransport(options: ShopifyTransportOptions): Sho
       } catch (error) {
         throw new ShopifyClientError(
           "network",
-          error instanceof SafeOutboundFetchError ? scrub(error.message) : "Fikk ikke kontakt med Shopify. Prøv igjen om litt.",
+          error instanceof SafeOutboundFetchError ? scrub(error.message) : "Could not reach Shopify. Try again in a moment.",
         );
       }
 
       if (response.status === 401) {
         throw new ShopifyClientError(
           "unauthorized",
-          "Shopify godtok ikke nøkkelen. Sjekk at du limte inn riktig nøkkel for denne butikken, og at appen fortsatt er installert.",
+          "Shopify did not accept the key. Check that you pasted the right key for this shop, and that the app is still installed.",
           401,
         );
       }
       if (response.status === 403) {
         throw new ShopifyClientError(
           "forbidden",
-          "Shopify sier at nøkkelen ikke har lov til dette. Sjekk at appen har tilgangene read_orders, read_all_orders og read_products.",
+          "Shopify says the key is not allowed to do this. Check that the app has the read_orders, read_all_orders and read_products permissions.",
           403,
         );
       }
       if (response.status === 404) {
-        throw new ShopifyClientError("not_found", "Fant ikke butikken eller API-versjonen hos Shopify. Sjekk butikkadressen.", 404);
+        throw new ShopifyClientError("not_found", "Shopify could not find the shop or the API version. Check the shop address.", 404);
       }
       if (response.status === 429) {
         const retryAfter = Number.parseFloat(response.headers.get("retry-after") ?? "");
         throw new ShopifyClientError(
           "throttled",
-          "Shopify har for mye å gjøre akkurat nå. Prøv igjen om litt.",
+          "Shopify is too busy right now. Try again in a moment.",
           429,
           Number.isFinite(retryAfter) && retryAfter > 0 ? Math.ceil(retryAfter * 1000) : null,
         );
@@ -176,7 +176,7 @@ export function createShopifyRawTransport(options: ShopifyTransportOptions): Sho
       if (response.status !== 200) {
         throw new ShopifyClientError(
           "http_error",
-          `Shopify svarte med en feil (${response.status}). Prøv igjen om litt.`,
+          `Shopify answered with an error (${response.status}). Try again in a moment.`,
           response.status,
         );
       }
@@ -184,10 +184,10 @@ export function createShopifyRawTransport(options: ShopifyTransportOptions): Sho
       try {
         body = await response.json();
       } catch {
-        throw new ShopifyClientError("bad_response", "Shopify svarte ikke som forventet.", 200);
+        throw new ShopifyClientError("bad_response", "Shopify did not answer as expected.", 200);
       }
       if (!asRecord(body)) {
-        throw new ShopifyClientError("bad_response", "Shopify svarte ikke som forventet.", 200);
+        throw new ShopifyClientError("bad_response", "Shopify did not answer as expected.", 200);
       }
       const record = body as ShopifyRawResponse;
       // Error messages can echo what was sent; clean them before anyone reads them.
@@ -265,7 +265,7 @@ export function createShopifyClient(options: ShopifyClientOptions): ShopifyGraph
     if (now() + ms > deadlineAt) {
       throw new ShopifyClientError(
         "deadline_exceeded",
-        "Shopify ba oss vente lenger enn tidsgrensen for ett oppslag. Prøv igjen om litt.",
+        "Shopify asked us to wait longer than the time limit for one lookup. Try again in a moment.",
       );
     }
     await sleep(ms);
@@ -283,7 +283,7 @@ export function createShopifyClient(options: ShopifyClientOptions): ShopifyGraph
     if (isWriteLikeShopifyDocument(document)) {
       throw new ShopifyClientError(
         "mutation_refused",
-        "Paperclip leser bare fra Shopify. Forespørsler som kan endre noe blir aldri sendt.",
+        "Paperclip only reads from Shopify. Requests that could change anything are never sent.",
       );
     }
 
@@ -292,14 +292,14 @@ export function createShopifyClient(options: ShopifyClientOptions): ShopifyGraph
       if (stats.requests >= budget.maxRequests) {
         throw new ShopifyClientError(
           "budget_exhausted",
-          `Oppslaget trengte mer enn ${budget.maxRequests} forespørsler til Shopify og ble stoppet, så det ikke gir et halvt svar.`,
+          `The lookup needed more than ${budget.maxRequests} requests to Shopify and was stopped, so it does not give a half answer.`,
         );
       }
       const remaining = deadlineAt - now();
       if (remaining <= 0) {
         throw new ShopifyClientError(
           "deadline_exceeded",
-          `Oppslaget tok mer enn ${Math.round(budget.deadlineMs / 1000)} sekunder og ble stoppet, så det ikke gir et halvt svar.`,
+          `The lookup took more than ${Math.round(budget.deadlineMs / 1000)} seconds and was stopped, so it does not give a half answer.`,
         );
       }
       stats.requests += 1;
@@ -325,7 +325,7 @@ export function createShopifyClient(options: ShopifyClientOptions): ShopifyGraph
         const throttled = errors.some((entry) => asRecord(asRecord(entry)?.extensions)?.code === "THROTTLED");
         if (throttled) {
           if (attempt >= maxThrottleRetries) {
-            throw new ShopifyClientError("throttled", "Shopify har for mye å gjøre akkurat nå. Prøv igjen om litt.");
+            throw new ShopifyClientError("throttled", "Shopify is too busy right now. Try again in a moment.");
           }
           stats.throttledRetries += 1;
           // Paced on the next loop from the throttle status just read; if that
@@ -337,17 +337,17 @@ export function createShopifyClient(options: ShopifyClientOptions): ShopifyGraph
           .map((entry) => {
             const record = asRecord(entry);
             const code = asRecord(record?.extensions)?.code;
-            const message = typeof record?.message === "string" ? record.message : "ukjent feil";
+            const message = typeof record?.message === "string" ? record.message : "unknown error";
             return typeof code === "string" ? `${code}: ${message}` : message;
           })
           .slice(0, 5)
           .join("; ");
         // Complete or nothing: data that came back alongside an error is dropped.
-        throw new ShopifyClientError("graphql_error", `Shopify avviste spørringen: ${messages}`.slice(0, 1000));
+        throw new ShopifyClientError("graphql_error", `Shopify rejected the query: ${messages}`.slice(0, 1000));
       }
 
       if (!asRecord(body.data)) {
-        throw new ShopifyClientError("bad_response", "Shopify svarte uten data.");
+        throw new ShopifyClientError("bad_response", "Shopify answered without data.");
       }
       return body.data as TData;
     }
@@ -428,17 +428,17 @@ export async function getClientCredentialsAccessToken(input: {
     } catch (error) {
       throw new ShopifyClientError(
         "network",
-        error instanceof SafeOutboundFetchError ? scrub(error.message) : "Fikk ikke kontakt med Shopify. Prøv igjen om litt.",
+        error instanceof SafeOutboundFetchError ? scrub(error.message) : "Could not reach Shopify. Try again in a moment.",
       );
     }
     if (response.status === 400 || response.status === 401 || response.status === 403) {
       throw new ShopifyClientError(
         "unauthorized",
-        "Shopify godtok ikke klient-ID-en og klienthemmeligheten. Sjekk at begge er fra appen som er installert i denne butikken.",
+        "Shopify did not accept the client ID and client secret. Check that both are from the app installed in this shop.",
       );
     }
     if (!response.ok) {
-      throw new ShopifyClientError("http_error", `Shopify svarte med en feil (${response.status}) da vi ba om tilgang.`);
+      throw new ShopifyClientError("http_error", `Shopify answered with an error (${response.status}) when we asked for access.`);
     }
     let body: Record<string, unknown> | null = null;
     try {
@@ -449,7 +449,7 @@ export async function getClientCredentialsAccessToken(input: {
     const accessToken = typeof body?.access_token === "string" ? body.access_token : "";
     const expiresIn = typeof body?.expires_in === "number" && body.expires_in > 0 ? body.expires_in : 3600;
     if (!accessToken) {
-      throw new ShopifyClientError("bad_response", "Shopify ga ikke noen tilgangsnøkkel tilbake.");
+      throw new ShopifyClientError("bad_response", "Shopify did not return an access token.");
     }
     const obtainedAt = now();
     return { accessToken, obtainedAt, expiresAt: obtainedAt + expiresIn * 1000 };
