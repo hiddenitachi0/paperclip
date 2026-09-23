@@ -11,11 +11,9 @@ import { assetsApi } from "../api/assets";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Settings, CloudUpload, Download, Upload } from "lucide-react";
+import { Link } from "@/lib/router";
+import { Settings, CloudUpload, Download, Plug, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
-import { ServiceTokensSection } from "../components/ServiceTokensSection";
-import { TelegramBotsSection } from "../components/TelegramBotsSection";
-import { DataSourcesSection } from "../components/DataSourcesSection";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
   Field,
@@ -64,7 +62,6 @@ export function CompanySettings() {
     && attachmentMaxBytes >= BYTES_PER_MIB
     && attachmentMaxBytes <= MAX_COMPANY_ATTACHMENT_MAX_BYTES;
   const cloudSyncEnabled = experimentalSettings?.enableCloudSync === true;
-  const businessDataEnabled = experimentalSettings?.enableBusinessData === true;
 
   const generalDirty =
     !!selectedCompany &&
@@ -390,46 +387,53 @@ export function CompanySettings() {
         <div className="rounded-md border border-border px-4 py-4">
           <p className="text-sm text-muted-foreground">
             Import and export have moved to dedicated pages accessible from the{" "}
-            <a href="/org" className="underline hover:text-foreground">Org Chart</a> header.
+            <Link to="/org" className="underline hover:text-foreground">Org Chart</Link> header.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {cloudSyncEnabled ? (
               <Button size="sm" asChild>
-                <a href="/company/settings/cloud-upstream">
+                <Link to="/company/settings/cloud-upstream">
                   <CloudUpload className="mr-1.5 h-3.5 w-3.5" />
                   Send to Paperclip Cloud
-                </a>
+                </Link>
               </Button>
             ) : null}
             <Button size="sm" variant="outline" asChild>
-              <a href="/company/export">
+              <Link to="/company/export">
                 <Download className="mr-1.5 h-3.5 w-3.5" />
                 Export
-              </a>
+              </Link>
             </Button>
             <Button size="sm" variant="outline" asChild>
-              <a href="/company/import">
+              <Link to="/company/import">
                 <Upload className="mr-1.5 h-3.5 w-3.5" />
                 Import
-              </a>
+              </Link>
             </Button>
           </div>
         </div>
       </div>
 
-      {/* Service tokens (DUR-3977) */}
-      {selectedCompanyId ? (
-        <div className="space-y-4">
-          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Other systems
-          </div>
-          <ServiceTokensSection companyId={selectedCompanyId} />
-          {/* Telegram bots (DUR-3978) */}
-          <TelegramBotsSection companyId={selectedCompanyId} />
-          {/* Datakilder: the company's own sales data (DUR-3972), behind the instance switch */}
-          {businessDataEnabled ? <DataSourcesSection companyId={selectedCompanyId} /> : null}
+      {/* DUR-3997: AI-provider keys, data sources, Telegram bots and service
+          tokens all live on the Connections page now. */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Connections
         </div>
-      ) : null}
+        <div className="rounded-md border border-border px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            AI-provider keys, data sources, Telegram bots and keys for other systems have their own page.
+          </p>
+          <div className="mt-3">
+            <Button size="sm" variant="outline" asChild>
+              <Link to="/company/settings/connections">
+                <Plug className="mr-1.5 h-3.5 w-3.5" />
+                Open Connections
+              </Link>
+            </Button>
+          </div>
+        </div>
+      </div>
 
       {/* Danger Zone */}
       <div className="space-y-4">

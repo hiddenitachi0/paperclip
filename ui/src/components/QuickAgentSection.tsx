@@ -17,11 +17,28 @@ import {
   type CompanySecret,
   type LaneAProvider,
 } from "@paperclipai/shared";
+import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
+import { Link } from "@/lib/router";
 import { agentsApi } from "../api/agents";
 import { budgetsApi } from "../api/budgets";
+import { dataConnectionsApi } from "../api/dataConnections";
+import { instanceServerAnthropicKeyApi } from "../api/instanceServerAnthropicKey";
+import { instanceSettingsApi } from "../api/instanceSettings";
+import { mcpToolLibraryApi } from "../api/mcpToolLibrary";
 import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
+import { agentRouteRef } from "../lib/utils";
+import {
+  dataLine,
+  instructionsLine,
+  modelAndKeyLine,
+  readinessBlocksSwitchOn,
+  toolsLine,
+  type DataSourceCheck,
+  type ReadinessLine,
+} from "../lib/quick-agent-readiness";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,6 +56,13 @@ import { SecretBindingPicker, type SecretBindingValue } from "./SecretBindingPic
  * Google, OpenRouter or a local model) and which of the company's saved keys
  * it uses. The key is stored as a secret binding at adapterConfig.laneA.apiKey,
  * never as text on the agent.
+ *
+ * DUR-3997 slice 4: a four-line readiness checklist at the top (model and
+ * key, tools, data, instructions). Only the first line can block: the switch
+ * cannot be turned ON until the agent has a model and a key that Paperclip
+ * can use, and the line says exactly what to do. Switching OFF is always
+ * allowed. Everything is computed from endpoints the page already calls; no
+ * new server route.
  */
 export function QuickAgentSection({
   agent,
@@ -161,6 +185,100 @@ export function QuickAgentSection({
       },
     });
 
+  // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
+  // Paperclip's own key is only readable by an instance admin (the route is
+  // assertInstanceAdmin), so it is only asked for as one; everyone else gets
+  // "cannot see, assume it is there".
+  const { isInstanceAdmin } = useCompanyRole(effectiveCompanyId);
+  const instanceKeyQuery = useQuery({
+    queryKey: queryKeys.instance.serverAnthropicKey,
+    queryFn: () => instanceServerAnthropicKeyApi.get(),
+    enabled: provider === "anthropic" && !keyBinding && isInstanceAdmin,
+    retry: false,
+  });
+  const agentToolsQuery = useQuery({
+    queryKey: queryKeys.mcpTools.forAgent(agent.id),
+    queryFn: () => mcpToolLibraryApi.listForAgent(agent.id),
+  });
+  const experimentalQuery = useQuery({
+    queryKey: queryKeys.instance.experimentalSettings,
+    queryFn: () => instanceSettingsApi.getExperimental(),
+    retry: false,
+  });
+  const businessDataEnabled = experimentalQuery.data?.enableBusinessData === true;
+  const datasetSourcesQuery = useQuery({
+    queryKey: queryKeys.companies.datasetSources(effectiveCompanyId),
+    queryFn: () => dataConnectionsApi.listDatasetSources(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId) && businessDataEnabled,
+    retry: false,
+  });
+
+  const readiness: ReadinessLine[] = useMemo(() => {
+    const model = modelAndKeyLine({
+      provider,
+      providerLabel: providerDescriptor.label,
+      model: agent.laneAModel ?? null,
+      bindingSecretId: keyBinding?.secretId ?? null,
+      boundSecret: keyBinding ? (secretsQuery.data ? boundSecret : undefined) : null,
+      secretsFailed: secretsQuery.isError,
+      instanceKey: !isInstanceAdmin || instanceKeyQuery.isError
+        ? null
+        : instanceKeyQuery.data
+          ? {
+              configured: instanceKeyQuery.data.configured,
+              lastTestOk: instanceKeyQuery.data.lastTestOk,
+              lastTestMessage: instanceKeyQuery.data.lastTestMessage,
+            }
+          : undefined,
+      baseUrl: agent.laneABaseUrl ?? null,
+    });
+    const tools = toolsLine({
+      enabledCount: agentToolsQuery.data ? agentToolsQuery.data.filter((tool) => tool.enabled).length : undefined,
+      failed: agentToolsQuery.isError,
+      toolsTabPath: `/agents/${agentRouteRef(agent)}/tools`,
+    });
+    let dataCheck: DataSourceCheck;
+    if (experimentalQuery.isPending) dataCheck = { kind: "checking" };
+    else if (!businessDataEnabled) dataCheck = { kind: "feature_off" };
+    else if (datasetSourcesQuery.isPending) dataCheck = { kind: "checking" };
+    else if (datasetSourcesQuery.isError) {
+      const status = datasetSourcesQuery.error instanceof ApiError ? datasetSourcesQuery.error.status : null;
+      dataCheck = status === 403 ? { kind: "forbidden" } : status === 404 ? { kind: "feature_off" } : { kind: "failed" };
+    } else {
+      dataCheck = {
+        kind: "loaded",
+        hasSales: (datasetSourcesQuery.data ?? []).some((source) => source.dataset === "sales"),
+      };
+    }
+    return [model, tools, dataLine(dataCheck), instructionsLine(savedInstructions)];
+  }, [
+    provider,
+    providerDescriptor.label,
+    keyBinding,
+    secretsQuery.data,
+    secretsQuery.isError,
+    boundSecret,
+    isInstanceAdmin,
+    instanceKeyQuery.isError,
+    instanceKeyQuery.data,
+    agent,
+    agentToolsQuery.data,
+    agentToolsQuery.isError,
+    experimentalQuery.isPending,
+    businessDataEnabled,
+    datasetSourcesQuery.isPending,
+    datasetSourcesQuery.isError,
+    datasetSourcesQuery.error,
+    datasetSourcesQuery.data,
+    savedInstructions,
+  ]);
+  const modelLine = readiness[0];
+  // Switching ON needs a usable model and key (a "todo" — say, a key whose last
+  // test hit a rate limit — is a warning, not a block). Switching OFF is always
+  // allowed, so a key that stops working can never trap an agent in the "on"
+  // state.
+  const cannotSwitchOn = !savedEnabled && readinessBlocksSwitchOn(modelLine.state);
+
   return (
     <Card>
       <CardHeader>
@@ -168,21 +286,30 @@ export function QuickAgentSection({
           <div className="space-y-1.5">
             <CardTitle>Quick agent</CardTitle>
             <CardDescription>
-              A quick agent answers you directly in chat instead of running as a full agent. It remembers the
-              conversation and can do three things: hand work to a colleague, look up the weather, and read a task
-              summary. Good for a secretary or a weather helper. Only you can switch this on.
+              A quick agent answers you directly in chat instead of running as a full agent in its own workspace.
+              It remembers the conversation and can do three things: hand work to a colleague, look up the weather,
+              and read a task summary. Good for a secretary or a weather helper. Only you can switch this on.
             </CardDescription>
           </div>
           <ToggleSwitch
             checked={savedEnabled}
             onCheckedChange={(next) => toggleMutation.mutate(next)}
-            disabled={toggleMutation.isPending}
+            disabled={toggleMutation.isPending || cannotSwitchOn}
             aria-label="Quick agent on or off"
           />
         </div>
+        {cannotSwitchOn && (
+          <p className="text-xs text-muted-foreground" data-testid="quick-agent-switch-reason">
+            {modelLine.state === "checking"
+              ? "Checking the model and key before the switch can be used…"
+              : `Cannot switch on yet: ${modelLine.text}`}
+          </p>
+        )}
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="space-y-1.5">
+        <ReadinessChecklist lines={readiness} />
+
+        <div className="space-y-1.5 border-t pt-4">
           <p className="text-sm font-medium">Instructions</p>
           <p className="text-xs text-muted-foreground">
             Tell the quick agent who it is and what to do, in plain words. Example: "You are the front desk. Anything
@@ -367,6 +494,45 @@ export function QuickAgentSection({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * The four readiness lines. Green means done; a grey circle means optional
+ * and not set; red means the agent cannot be switched on until it is fixed.
+ */
+function ReadinessChecklist({ lines }: { lines: ReadinessLine[] }) {
+  return (
+    <div className="space-y-1.5" data-testid="quick-agent-readiness">
+      <p className="text-sm font-medium">Is it ready?</p>
+      <ul className="space-y-1.5">
+        {lines.map((line) => (
+          <li key={line.id} className="flex items-start gap-2 text-xs" data-testid={`readiness-${line.id}`} data-state={line.state}>
+            {line.state === "ok" ? (
+              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-label="Ready" />
+            ) : line.state === "blocked" || line.state === "error" ? (
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" aria-label="Needs attention" />
+            ) : line.state === "checking" ? (
+              <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Checking" />
+            ) : (
+              <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label="Optional" />
+            )}
+            <span className="min-w-0">
+              <span className="font-medium">{line.label}: </span>
+              <span className={line.state === "blocked" || line.state === "error" ? "text-destructive" : "text-muted-foreground"}>{line.text}</span>
+              {line.link && (
+                <>
+                  {" "}
+                  <Link to={line.link.to} className="underline hover:text-foreground">
+                    {line.link.label}
+                  </Link>
+                </>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
