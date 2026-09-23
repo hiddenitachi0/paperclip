@@ -71,7 +71,10 @@ describe("client auth API commands", () => {
       ["POST", "http://localhost:3100/api/cli-auth/challenges/challenge-1/cancel"],
       ["POST", "http://localhost:3100/api/cli-auth/revoke-current"],
     ]);
-    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({ token: "env-secret" });
+    // DUR-3996: the secret travels as `authToken`, never as a bare `token`.
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({ authToken: "secret" });
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({ authToken: "env-secret" });
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toEqual({ authToken: "secret" });
   });
 });
 

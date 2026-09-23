@@ -63,6 +63,7 @@ import {
 } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
+import { acceptLegacyBodyField } from "../middleware/legacy-body-field.js";
 import { collectReachableInterfaceHosts } from "../runtime-api.js";
 import {
   accessService,
@@ -2854,6 +2855,11 @@ export function accessRoutes(
 
   router.post(
     "/cli-auth/challenges/:id/approve",
+    // DUR-3996: first in the chain, before anything can refuse. The secret is
+    // `authToken` so the HTTP log blanks it on a failed request (a 401 here
+    // used to write a live sign-in secret to server.log); `token` is still
+    // accepted for one release. See legacy-body-field.ts.
+    acceptLegacyBodyField("token", "authToken"),
     companyScopeBypassForRoute(rawDb, "CLI device-auth approval: a board actor may approve access spanning multiple companies in one request"),
     validate(resolveCliAuthChallengeSchema),
     async (req, res) => {
@@ -2868,7 +2874,7 @@ export function accessRoutes(
       const userId = req.actor.userId ?? "local-board";
       const approved = await boardAuth.approveCliAuthChallenge(
         id,
-        req.body.token,
+        req.body.authToken,
         userId,
       );
 
@@ -2908,11 +2914,12 @@ export function accessRoutes(
 
   router.post(
     "/cli-auth/challenges/:id/cancel",
+    acceptLegacyBodyField("token", "authToken"),
     companyScopeBypassForRoute(rawDb, "CLI device-auth cancellation: pre-auth"),
     validate(resolveCliAuthChallengeSchema),
     async (req, res) => {
       const id = (req.params.id as string).trim();
-      const cancelled = await boardAuth.cancelCliAuthChallenge(id, req.body.token);
+      const cancelled = await boardAuth.cancelCliAuthChallenge(id, req.body.authToken);
       res.json({
         status: cancelled.status,
         cancelled: cancelled.status === "cancelled",

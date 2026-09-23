@@ -231,7 +231,7 @@ describe.sequential("cli auth routes", () => {
     });
     const res = await request(app)
       .post("/api/cli-auth/challenges/challenge-1/approve")
-      .send({ token: "pcp_cli_auth_secret" });
+      .send({ authToken: "pcp_cli_auth_secret" });
 
     expect(res.status).toBe(200);
     expect(mockBoardAuthService.approveCliAuthChallenge).toHaveBeenCalledWith(
@@ -271,7 +271,7 @@ describe.sequential("cli auth routes", () => {
     });
     const res = await request(app)
       .post("/api/cli-auth/challenges/challenge-2/approve")
-      .send({ token: "pcp_cli_auth_secret" });
+      .send({ authToken: "pcp_cli_auth_secret" });
 
     expect(res.status).toBe(200);
     expect(mockBoardAuthService.resolveBoardActivityCompanyIds).toHaveBeenCalledWith({

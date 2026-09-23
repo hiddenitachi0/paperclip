@@ -22,12 +22,14 @@ services:
     # Run Docker's small init (tini) as the container's PID 1, with the server
     # as its child. PID 1 is the process that must collect ("reap") every
     # process whose parent has gone away; Node does not do that. Every agent
-    # run starts the Paperclip CLI, whose TypeScript loader (tsx) starts an
-    # `esbuild` helper; when the CLI exits the helper is handed to PID 1 and,
-    # with Node there, stayed behind as a dead "zombie" entry forever. At about
-    # 19 per minute the container hit its process limit after ~16 hours
-    # (`Cannot fork`, every CLI call aborted, no agent could start). Applies
-    # to every overlay layered on this file (prod, secrets, CI tests).
+    # run starts the Paperclip CLI, whose TypeScript loader (tsx) started an
+    # `esbuild` helper (until DUR-3998 prebuilt the CLI into the image); when
+    # the CLI exited the helper was handed to PID 1 and, with Node there,
+    # stayed behind as a dead "zombie" entry forever. At about 19 per minute
+    # the container hit its process limit after ~16 hours (`Cannot fork`,
+    # every CLI call aborted, no agent could start). Kept for everything else
+    # agent runs leave behind. Applies to every overlay layered on this file
+    # (prod, secrets, CI tests).
     init: true
     ports:
       - "3100:3100"

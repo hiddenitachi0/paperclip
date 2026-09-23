@@ -390,14 +390,16 @@ export const accessApi = {
   getCliAuthChallenge: (id: string, token: string) =>
     api.get<CliAuthChallengeStatus>(`/cli-auth/challenges/${id}?token=${encodeURIComponent(token)}`),
 
+  // DUR-3996: the body field is `authToken`, not `token`, so the server's HTTP
+  // log blanks it when the request fails (redaction is by field name).
   approveCliAuthChallenge: (id: string, token: string) =>
     api.post<{ approved: boolean; status: string; userId: string; keyId: string | null; expiresAt: string }>(
       `/cli-auth/challenges/${id}/approve`,
-      { token },
+      { authToken: token },
     ),
 
   cancelCliAuthChallenge: (id: string, token: string) =>
-    api.post<{ cancelled: boolean; status: string }>(`/cli-auth/challenges/${id}/cancel`, { token }),
+    api.post<{ cancelled: boolean; status: string }>(`/cli-auth/challenges/${id}/cancel`, { authToken: token }),
 
   searchAdminUsers: (query: string) =>
     api.get<AdminUserDirectoryEntry[]>(`/admin/users?query=${encodeURIComponent(query)}`),
