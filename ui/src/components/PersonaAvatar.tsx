@@ -22,7 +22,7 @@ function initials(name: string | null | undefined): string {
 
 // Same content path an agent's uploaded avatar uses (/api/assets/{id}/content)
 // -- personas carry their own avatarAssetId (packages/db/src/schema/personas.ts)
-// so a persona's face never has to be the same as her underlying agent's.
+// so a persona's face never has to be the same as the picture of any agent it works as.
 export function PersonaAvatar({ persona, size = "default", className }: PersonaAvatarProps) {
   const src = agentAvatarUrl(persona);
   return (

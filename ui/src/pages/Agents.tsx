@@ -23,7 +23,13 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { AlertTriangle, Bot, Plus, List, GitBranch, Pencil, X } from "lucide-react";
 import { BulkAgentEditDialog } from "../components/BulkAgentEditDialog";
-import { AGENT_ROLE_LABELS, type Agent, type Environment, type EnvironmentCapabilities } from "@paperclipai/shared";
+import {
+  AGENT_ROLE_LABELS,
+  formatAgentDisplayName,
+  type Agent,
+  type Environment,
+  type EnvironmentCapabilities,
+} from "@paperclipai/shared";
 import {
   resourceMembershipState,
   useResourceMembershipMutation,
@@ -289,7 +295,8 @@ export function Agents() {
     return (
       <EntityRow
         key={agent.id}
-        title={agent.name}
+        // DUR-4000: "Sales agent 1 (Maja)" -- the job name with the person in brackets.
+        title={formatAgentDisplayName(agent, agent.persona)}
         // Fixed (truncating) title width so the `meta` group starts at a
         // constant x on every row — that's what makes the model + timestamp
         // columns line up vertically. Agent names vary in width, so
@@ -591,7 +598,7 @@ function OrgTreeNode({
           <AgentStatusCapsule status={node.status} />
         )}
         <div className="flex-1 min-w-[7rem]">
-          <span className="text-sm font-medium">{node.name}</span>
+          <span className="text-sm font-medium">{formatAgentDisplayName(node, agent?.persona)}</span>
           <span className="text-xs text-muted-foreground ml-2">
             {roleLabels[node.role] ?? node.role}
             {agent?.title ? ` - ${agent.title}` : ""}

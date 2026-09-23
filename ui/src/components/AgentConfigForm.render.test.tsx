@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent, Environment } from "@paperclipai/shared";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AgentConfigForm } from "./AgentConfigForm";
+import { PERSONA_VOICE_WINS_HINT } from "./AgentPersonaFields";
 
 const mockAgentsApi = vi.hoisted(() => ({
   adapterModelProfiles: vi.fn(),
@@ -14,6 +16,22 @@ const mockAgentsApi = vi.hoisted(() => ({
   detectModel: vi.fn(),
   list: vi.fn(),
   testEnvironment: vi.fn(),
+}));
+
+const mockPersonasApi = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
+vi.mock("../api/personas", () => ({
+  personasApi: mockPersonasApi,
+}));
+
+vi.mock("@/lib/router", () => ({
+  Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
 }));
 
 const mockEnvironmentsApi = vi.hoisted(() => ({
@@ -184,6 +202,29 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function setSelectValue(select: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+  setter?.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/** The input a "Pictures per day"-style label points at. */
+function inputForLabel(container: HTMLElement, text: string): HTMLInputElement | HTMLTextAreaElement | null {
+  const label = Array.from(container.querySelectorAll("label")).find((el) => el.textContent?.trim() === text);
+  if (!label?.htmlFor) return null;
+  // useId() ids carry colons, so go through getElementById rather than a selector.
+  const element = document.getElementById(label.htmlFor);
+  return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? element : null;
+}
+
+function personalityEditor(container: HTMLElement): HTMLTextAreaElement | null {
+  return (
+    Array.from(container.querySelectorAll<HTMLTextAreaElement>("textarea")).find((el) =>
+      el.getAttribute("aria-label")?.startsWith("Backstory, likes and dislikes"),
+    ) ?? null
+  );
+}
+
 async function renderForm(
   environments: Environment[],
   agentOverrides: Partial<Agent> = {},
@@ -240,6 +281,7 @@ describe("AgentConfigForm environment selector", () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableEnvironments: true });
     mockInstanceSettingsApi.getGeneral.mockResolvedValue({ executionMode: "any" });
     mockSecretsApi.list.mockResolvedValue([]);
+    mockPersonasApi.list.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -260,7 +302,7 @@ describe("AgentConfigForm environment selector", () => {
     roots.push(result.root);
 
     expect(result.container.textContent).not.toContain("Environment override");
-    expect(result.container.querySelector("select")).toBeNull();
+    expect(result.container.querySelector('select[aria-label="Environment override"]')).toBeNull();
   });
 
   it("shows concise Environment copy when one runnable non-local environment exists", async () => {
@@ -276,7 +318,7 @@ describe("AgentConfigForm environment selector", () => {
     roots.push(result.root);
 
     const text = result.container.textContent ?? "";
-    const selector = result.container.querySelector("select");
+    const selector = result.container.querySelector('select[aria-label="Environment override"]');
 
     expect(text).toContain("Environment");
     expect(text).toContain("Environment override");
@@ -303,7 +345,7 @@ describe("AgentConfigForm environment selector", () => {
     roots.push(result.root);
 
     const text = result.container.textContent ?? "";
-    const selector = result.container.querySelector("select");
+    const selector = result.container.querySelector('select[aria-label="Environment override"]');
 
     expect(text).toContain("Environment override");
     expect(selector?.textContent).toContain("Default: Local");
@@ -515,5 +557,214 @@ describe("AgentConfigForm environment selector", () => {
     expect(patch.replaceAdapterConfig).toBe(true);
     expect(patch.adapterConfig.silentRunTimeoutMinutes).toBe(0);
     expect(patch.adapterConfig).not.toHaveProperty("maxRunDurationMinutes");
+  });
+});
+
+// DUR-4000: a persona is a person, an agent is a job. The Identity section
+// gets a Persona picker; while a persona is attached the Personality field is
+// hidden and Tone says the persona's voice wins. The Limits box is the job's
+// own and round-trips as one `limits` field.
+describe("AgentConfigForm persona and limits (DUR-4000)", () => {
+  let roots: Root[] = [];
+
+  const maja = {
+    id: "11111111-1111-4111-8111-111111111111",
+    companyId: "company-1",
+    displayName: "Maja",
+    pronouns: "she/her",
+    traits: null,
+    backstory: null,
+    voice: "Short sentences.",
+    avatarAssetId: null,
+    handle: "maja",
+    status: "active",
+    publishingPaused: false,
+    agentIds: [],
+    agentId: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  beforeEach(() => {
+    mockAgentsApi.adapterModelProfiles.mockResolvedValue([]);
+    mockAgentsApi.adapterModels.mockResolvedValue([]);
+    mockAgentsApi.detectModel.mockResolvedValue(null);
+    mockAgentsApi.list.mockResolvedValue([]);
+    mockEnvironmentsApi.list.mockResolvedValue([]);
+    mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableEnvironments: false });
+    mockInstanceSettingsApi.getGeneral.mockResolvedValue({ executionMode: "any" });
+    mockSecretsApi.list.mockResolvedValue([]);
+    mockPersonasApi.list.mockResolvedValue([maja]);
+  });
+
+  afterEach(async () => {
+    for (const root of roots) {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+    roots = [];
+    document.body.innerHTML = "";
+    vi.clearAllMocks();
+  });
+
+  async function renderEditForm(agentOverrides: Partial<Agent>) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const onSave = vi.fn();
+    let saveAction: (() => void) | null = null;
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <AgentConfigForm
+              mode="edit"
+              agent={makeAgent(agentOverrides)}
+              onSave={onSave}
+              onSaveActionChange={(action) => {
+                saveAction = action;
+              }}
+              hidePromptTemplate
+              showAdapterTypeField={false}
+              showAdapterTestEnvironmentButton={false}
+            />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    return { container, onSave, save: () => saveAction?.() };
+  }
+
+  it("shows Personality for a blank job and never says she/her", async () => {
+    const { container } = await renderEditForm({});
+    const text = container.textContent ?? "";
+
+    expect(personalityEditor(container)).not.toBeNull();
+    expect(text).not.toContain(PERSONA_VOICE_WINS_HINT);
+    // The only gendered words on the form are the persona's own pronouns in the picker.
+    expect(text.replace("Maja (she/her)", "")).not.toMatch(/\b(she|her)\b/i);
+    expect(personalityEditor(container)?.getAttribute("aria-label")).not.toMatch(/\b(she|her)\b/i);
+
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Persona"]');
+    expect(picker?.value).toBe("");
+    expect(picker?.textContent).toContain("None");
+    expect(picker?.textContent).toContain("Maja (she/her)");
+    expect(text).toContain("Create one");
+  });
+
+  it("hides Personality and says the persona's voice wins while a persona is attached", async () => {
+    const { container } = await renderEditForm({ personaId: maja.id, personality: "Old personality text" });
+
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Persona"]');
+    expect(picker?.value).toBe(maja.id);
+    expect(personalityEditor(container)).toBeNull();
+    expect(container.textContent).toContain(PERSONA_VOICE_WINS_HINT);
+    // Tone stays editable as the default for when the persona has no voice.
+    expect(container.textContent).toContain("Tone");
+  });
+
+  it("names a removed persona 'Unknown persona (removed)' instead of showing the uuid", async () => {
+    const goneId = "22222222-2222-4222-8222-222222222222";
+    const { container } = await renderEditForm({ personaId: goneId });
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Persona"]');
+    expect(picker?.value).toBe(goneId);
+    expect(picker?.selectedOptions[0]?.textContent).toBe("Unknown persona (removed)");
+    expect(container.textContent).not.toContain(goneId);
+  });
+
+  it("caps the daily limit inputs at the validator's ceiling", async () => {
+    const { container } = await renderEditForm({});
+    const pictures = inputForLabel(container, "Pictures per day") as HTMLInputElement | null;
+    expect(pictures?.max).toBe("100000");
+  });
+
+  it("attaching a persona from the picker hides Personality and saves personaId", async () => {
+    const { container, onSave, save } = await renderEditForm({});
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Persona"]');
+    expect(personalityEditor(container)).not.toBeNull();
+
+    await act(async () => {
+      setSelectValue(picker!, maja.id);
+    });
+    await flushReact();
+
+    expect(personalityEditor(container)).toBeNull();
+    expect(container.textContent).toContain(PERSONA_VOICE_WINS_HINT);
+
+    await act(async () => {
+      await save();
+    });
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0]![0]).toMatchObject({ personaId: maja.id });
+
+    // Detaching sends null, not "".
+    await act(async () => {
+      setSelectValue(picker!, "");
+    });
+    await flushReact();
+    expect(personalityEditor(container)).not.toBeNull();
+  });
+
+  it("round-trips the Limits box as one `limits` field and says which limits are enforced", async () => {
+    const { container, onSave, save } = await renderEditForm({
+      limits: { dailyImageGenerations: 3, notes: "Do not repeat mistakes you made before." },
+    });
+    const text = container.textContent ?? "";
+
+    expect(text).toContain("Limits");
+    expect(text).toContain("Pictures per day");
+    expect(text).toContain("Posts per day");
+    expect(text).toContain("Runs per day");
+    expect(text).toContain("Standing rules");
+    expect(text).toContain("Enforced");
+    expect(text).toContain("Guidance");
+
+    const pictures = inputForLabel(container, "Pictures per day") as HTMLInputElement | null;
+    const posts = inputForLabel(container, "Posts per day") as HTMLInputElement | null;
+    const runs = inputForLabel(container, "Runs per day") as HTMLInputElement | null;
+    const notes = inputForLabel(container, "Standing rules") as HTMLTextAreaElement | null;
+    expect(pictures?.value).toBe("3");
+    expect(posts?.value).toBe("");
+    expect(runs?.value).toBe("");
+    expect(notes?.value).toBe("Do not repeat mistakes you made before.");
+
+    await act(async () => {
+      setInputValue(pictures!, "5");
+      setInputValue(posts!, "2");
+    });
+    await flushReact();
+
+    await act(async () => {
+      await save();
+    });
+    expect(onSave).toHaveBeenCalledTimes(1);
+    // One whole `limits` object, so the server can replace the column in one go.
+    expect((onSave.mock.calls[0]![0] as { limits: unknown }).limits).toEqual({
+      dailyImageGenerations: 5,
+      dailyPosts: 2,
+      notes: "Do not repeat mistakes you made before.",
+    });
+  });
+
+  it("clearing a limit sends null for that key so the server reads 'no limit'", async () => {
+    const { container, onSave, save } = await renderEditForm({ limits: { dailyImageGenerations: 3 } });
+    const pictures = inputForLabel(container, "Pictures per day") as HTMLInputElement | null;
+
+    await act(async () => {
+      setInputValue(pictures!, "");
+    });
+    await flushReact();
+    await act(async () => {
+      await save();
+    });
+    expect((onSave.mock.calls[0]![0] as { limits: unknown }).limits).toEqual({ dailyImageGenerations: null });
   });
 });

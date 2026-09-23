@@ -176,3 +176,42 @@ describe("buildNewAgentHirePayload", () => {
     expect(payload.budgetMonthlyCents).toBe(0);
   });
 });
+
+// DUR-4000: a persona is a person; an agent is a job.
+describe("buildNewAgentHirePayload persona and limits (DUR-4000)", () => {
+  const base = {
+    name: "Sales agent 1",
+    effectiveRole: "general",
+    configValues: { ...defaultCreateValues, adapterType: "claude_local" },
+    adapterConfig: {},
+    budgetMonthlyCents: 5000,
+  };
+
+  it("sends personaId when a persona is picked and drops the personality text so nothing is said twice", () => {
+    const payload = buildNewAgentHirePayload({
+      ...base,
+      personaId: "11111111-1111-4111-8111-111111111111",
+      personality: "Typed before picking the persona",
+    });
+    expect(payload).toMatchObject({ personaId: "11111111-1111-4111-8111-111111111111" });
+    expect(Object.hasOwn(payload, "personality")).toBe(false);
+  });
+
+  it("sends nothing extra for a blank job", () => {
+    const payload = buildNewAgentHirePayload({ ...base, personaId: null, limits: {} });
+    expect(Object.hasOwn(payload, "personaId")).toBe(false);
+    expect(Object.hasOwn(payload, "limits")).toBe(false);
+  });
+
+  it("sends the limits box only when at least one limit is set", () => {
+    expect(
+      buildNewAgentHirePayload({ ...base, limits: { dailyImageGenerations: null, dailyPosts: null, notes: "  " } }),
+    ).not.toHaveProperty("limits");
+    expect(buildNewAgentHirePayload({ ...base, limits: { dailyImageGenerations: 4 } })).toMatchObject({
+      limits: { dailyImageGenerations: 4 },
+    });
+    expect(buildNewAgentHirePayload({ ...base, limits: { notes: "Do not repeat mistakes you made before." } })).toMatchObject({
+      limits: { notes: "Do not repeat mistakes you made before." },
+    });
+  });
+});

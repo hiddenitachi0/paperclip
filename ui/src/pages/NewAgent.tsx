@@ -13,8 +13,10 @@ import { queryKeys } from "../lib/queryKeys";
 import { resolveSkillSummaryText } from "../lib/company-skill-summary";
 import {
   type AdapterEnvironmentTestResult,
+  type AgentLimits,
   type AgentPermissions,
 } from "@paperclipai/shared";
+import { AgentLimitsFields, PERSONA_VOICE_WINS_HINT, PersonaPicker } from "../components/AgentPersonaFields";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn, agentUrl } from "../lib/utils";
@@ -79,6 +81,9 @@ export function NewAgent() {
   const [title, setTitle] = useState("");
   const [tone, setTone] = useState("");
   const [personality, setPersonality] = useState("");
+  // DUR-4000: the person doing this job, and the job's own limits box.
+  const [personaId, setPersonaId] = useState<string | null>(null);
+  const [limits, setLimits] = useState<AgentLimits>({});
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
   const [workingStyle, setWorkingStyle] = useState<WorkingStyle>(DEFAULT_WORKING_STYLE);
@@ -220,6 +225,8 @@ export function NewAgent() {
         title,
         tone,
         personality,
+        personaId,
+        limits,
         reportsTo,
         selectedSkillKeys,
         configValues,
@@ -288,6 +295,17 @@ export function NewAgent() {
           />
         </div>
 
+        {/* Persona — who does this job (DUR-4000) */}
+        <div className="px-4 pb-2">
+          <label className="mb-1 block text-xs text-muted-foreground">Persona</label>
+          <PersonaPicker
+            companyId={selectedCompanyId}
+            value={personaId}
+            onChange={setPersonaId}
+            disabled={createAgent.isPending}
+          />
+        </div>
+
         {/* Tone — how this agent speaks */}
         <div className="px-4 pb-2">
           <textarea
@@ -299,32 +317,35 @@ export function NewAgent() {
           />
           <div
             className={cn(
-              "text-xs mt-1 text-right",
+              "text-xs mt-1 flex items-center justify-between gap-2",
               tone.length > 600 ? "text-destructive" : "text-muted-foreground",
             )}
           >
-            {tone.length}/600
+            <span>{personaId ? PERSONA_VOICE_WINS_HINT : ""}</span>
+            <span>{tone.length}/600</span>
           </div>
         </div>
 
-        {/* Personality — who this agent is, only for persona agents */}
-        <div className="px-4 pb-2">
-          <textarea
-            className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
-            placeholder="Personality — backstory, likes and dislikes, how she behaves. Only for persona agents."
-            value={personality}
-            onChange={(e) => setPersonality(e.target.value.slice(0, 20000))}
-            maxLength={20000}
-          />
-          <div
-            className={cn(
-              "text-xs mt-1 text-right",
-              personality.length > 20000 ? "text-destructive" : "text-muted-foreground",
-            )}
-          >
-            {personality.length}/20000
+        {/* Personality — who this agent is. Hidden while a persona is attached: the persona's backstory is used instead. */}
+        {!personaId && (
+          <div className="px-4 pb-2">
+            <textarea
+              className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40 border border-border rounded-md px-2 py-1.5 resize-y min-h-[44px]"
+              placeholder="Personality — backstory, likes and dislikes, how they behave. Leave blank unless this job should feel like someone, or attach a persona instead."
+              value={personality}
+              onChange={(e) => setPersonality(e.target.value.slice(0, 20000))}
+              maxLength={20000}
+            />
+            <div
+              className={cn(
+                "text-xs mt-1 text-right",
+                personality.length > 20000 ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {personality.length}/20000
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Property chips: Job + Reports To */}
         <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
@@ -367,6 +388,18 @@ export function NewAgent() {
             onNoLimitChange={setNoSpendingLimit}
             disabled={createAgent.isPending}
           />
+        </div>
+
+        <div className="border-t border-border px-4 py-4">
+          <div className="space-y-3">
+            <div>
+              <h2 className="text-sm font-medium">Limits</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                This job's own daily limits and standing rules. Leave blank for no limit.
+              </p>
+            </div>
+            <AgentLimitsFields value={limits} onChange={setLimits} disabled={createAgent.isPending} />
+          </div>
         </div>
 
         <div className="border-t border-border px-4 py-4">

@@ -27,7 +27,7 @@ import { DecisionReasonDialog, type DecisionReasonAction } from "../components/D
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
-import type { ApprovalComment } from "@paperclipai/shared";
+import { formatAgentDisplayName, type ApprovalComment } from "@paperclipai/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { ApprovalPreviewPanel } from "../components/ApprovalPreviewPanel";
 
@@ -76,7 +76,8 @@ export function ApprovalDetail() {
 
   const agentNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const agent of agents ?? []) map.set(agent.id, agent.name);
+    // DUR-4000: "Sales agent 1 (Maja)" wherever an agent is named.
+    for (const agent of agents ?? []) map.set(agent.id, formatAgentDisplayName(agent, agent.persona));
     return map;
   }, [agents]);
 

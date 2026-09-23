@@ -44,7 +44,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { Agent } from "@paperclipai/shared";
+import { formatAgentDisplayName, type Agent } from "@paperclipai/shared";
 
 /**
  * When no agent is running, the sidebar falls back to showing at most this many
@@ -144,7 +144,7 @@ function SidebarAgentItem({
       )}
     >
       <AgentAvatar agent={agent} size="xs" className="shrink-0" iconClassName="h-3 w-3 text-muted-foreground" />
-      <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : "flex-1 truncate"}>{agent.name}</span>
+      <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : "flex-1 truncate"}>{formatAgentDisplayName(agent, agent.persona)}</span>
       {!rail && hasInvalidOrgChain ? (
         <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="Invalid reporting chain" />
       ) : null}
@@ -181,7 +181,7 @@ function SidebarAgentItem({
           <TooltipTrigger asChild>
             <div className="min-w-0 flex-1">{link}</div>
           </TooltipTrigger>
-          <TooltipContent side="right">{agent.name}</TooltipContent>
+          <TooltipContent side="right">{formatAgentDisplayName(agent, agent.persona)}</TooltipContent>
         </Tooltip>
       ) : (
         link

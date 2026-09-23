@@ -24,7 +24,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 // DUR-134 (review follow-up): the operator's side of persona publishing --
-// the accounts she posts to, the per-account safety settings the 23 August
+// the accounts the persona posts to, the per-account safety settings the 23 August
 // decision made mandatory (disclosure, autonomy, daily cap, warm-up), the
 // one-click pause switches (persona-wide and per account), and the feed of
 // what actually went out. The server already enforced all of this; this
@@ -107,7 +107,7 @@ export function PersonaPublishingPanel({ persona }: { persona: Persona }) {
         title: publishingPaused ? "Publishing paused" : "Publishing resumed",
         body: publishingPaused
           ? `${persona.displayName} will not post anywhere until you switch this back on.`
-          : `${persona.displayName} can post again, within her limits.`,
+          : `${persona.displayName} can post again, within the limits you set.`,
         tone: "success",
       });
     },
@@ -135,7 +135,7 @@ export function PersonaPublishingPanel({ persona }: { persona: Persona }) {
           <div>
             <h2 className="text-sm font-semibold">Publishing</h2>
             <p className="text-sm text-muted-foreground">
-              Where she posts, how much, and whether she needs your OK first.
+              Where {persona.displayName} posts, how much, and whether each post needs your OK first.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -150,7 +150,7 @@ export function PersonaPublishingPanel({ persona }: { persona: Persona }) {
         </div>
         {persona.publishingPaused ? (
           <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
-            Everything is on hold. Nothing goes out on any of her accounts until you switch this back on.
+            Everything is on hold. Nothing goes out on any of {persona.displayName}'s accounts until you switch this back on.
           </p>
         ) : null}
 
@@ -158,7 +158,7 @@ export function PersonaPublishingPanel({ persona }: { persona: Persona }) {
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : accounts.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No accounts connected yet. She cannot post anywhere until you connect one.
+            No accounts connected yet. {persona.displayName} cannot post anywhere until you connect one.
           </p>
         ) : (
           <div className="space-y-2">
@@ -178,8 +178,8 @@ export function PersonaPublishingPanel({ persona }: { persona: Persona }) {
                         Up to {account.dailyPostCap} post{account.dailyPostCap === 1 ? "" : "s"} a day.{" "}
                         {account.autonomyMode === "autonomous"
                           ? warmingUp
-                            ? `Her first ${account.warmupPostsRequired} posts here need your OK (${remaining} to go), then she posts on her own.`
-                            : "Posts on her own."
+                            ? `The first ${account.warmupPostsRequired} posts here need your OK (${remaining} to go), then ${persona.displayName} posts without asking.`
+                            : `${persona.displayName} posts without asking.`
                           : "Every post needs your OK first."}{" "}
                         {account.aiDisclosureEnabled
                           ? "Each post says it was made with AI."
@@ -310,7 +310,7 @@ function ConnectAccountDialog({
       setDailyPostCap("");
       pushToast({
         title: "Account connected",
-        body: "Next, set its login key so she can actually post there.",
+        body: `Next, set its login key so ${persona.displayName} can actually post there.`,
         tone: "success",
       });
     },
@@ -324,8 +324,8 @@ function ConnectAccountDialog({
         <DialogHeader>
           <DialogTitle>Connect a Fanvue account</DialogTitle>
           <DialogDescription>
-            These settings are per account and there are no defaults: you decide the daily limit and whether she
-            needs your OK. Her first {DEFAULT_WARMUP_POSTS} posts on any new account always need your OK.
+            These settings are per account and there are no defaults: you decide the daily limit and whether each
+            post needs your OK. The first {DEFAULT_WARMUP_POSTS} posts on any new account always need your OK.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -358,7 +358,7 @@ function ConnectAccountDialog({
               onChange={(event) => setDailyPostCap(event.target.value)}
               placeholder="e.g. 3"
             />
-            <p className="text-xs text-muted-foreground">A hard limit. She can never post more than this in one day here.</p>
+            <p className="text-xs text-muted-foreground">A hard limit. Never more than this in one day on this account.</p>
           </div>
           <div className="space-y-1.5">
             <Label>Who decides each post</Label>
@@ -368,7 +368,7 @@ function ConnectAccountDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="requires_approval">Every post needs my OK</SelectItem>
-                <SelectItem value="autonomous">She posts on her own (after the first {DEFAULT_WARMUP_POSTS})</SelectItem>
+                <SelectItem value="autonomous">{persona.displayName} posts without asking (after the first {DEFAULT_WARMUP_POSTS})</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -421,7 +421,7 @@ function SetCredentialDialog({
       onDone();
       onOpenChange(false);
       setSecretId("");
-      pushToast({ title: "Login key set", body: "She can post to this account now, within its limits.", tone: "success" });
+      pushToast({ title: "Login key set", body: "Posts to this account can go out now, within its limits.", tone: "success" });
     },
     onError: (error) => pushToast({ title: "Could not set the login key", body: errorMessage(error, ""), tone: "error" }),
   });
@@ -434,8 +434,8 @@ function SetCredentialDialog({
         <DialogHeader>
           <DialogTitle>Login key for {account?.accountLabel ?? "this account"}</DialogTitle>
           <DialogDescription>
-            Pick the saved secret that holds the Fanvue access token. Only the publisher ever reads it; she never
-            sees it. Save the token under Secrets first if it is not in the list.
+            Pick the saved secret that holds the Fanvue access token. Only the publisher ever reads it; the persona
+            never sees it. Save the token under Secrets first if it is not in the list.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1.5">

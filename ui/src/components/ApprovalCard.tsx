@@ -19,7 +19,7 @@ import {
   typeLabel,
 } from "./ApprovalPayload";
 import { timeAgo } from "../lib/timeAgo";
-import type { Approval, Agent, Issue } from "@paperclipai/shared";
+import { formatAgentDisplayName, type Approval, type Agent, type Issue } from "@paperclipai/shared";
 import { cn } from "@/lib/utils";
 
 function statusIcon(status: string) {
@@ -112,7 +112,11 @@ export function ApprovalCard({
                 {requesterAgent && (
                   <div className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     <span>Requested by</span>
-                    <Identity name={requesterAgent.name} size="sm" className="inline-flex" />
+                    <Identity
+                      name={formatAgentDisplayName(requesterAgent, requesterAgent.persona)}
+                      size="sm"
+                      className="inline-flex"
+                    />
                   </div>
                 )}
               </div>
