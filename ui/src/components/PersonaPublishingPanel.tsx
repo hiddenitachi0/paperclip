@@ -5,7 +5,6 @@ import { useCompany } from "../context/CompanyContext";
 import { useToastActions } from "../context/ToastContext";
 import { personaAccountsApi, type PersonaAccount, type PersonaPost } from "../api/persona-accounts";
 import { personasApi, type Persona } from "../api/personas";
-import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SecretBindingPicker } from "./SecretBindingPicker";
 
 // DUR-134 (review follow-up): the operator's side of persona publishing --
 // the accounts the persona posts to, the per-account safety settings the 23 August
@@ -404,16 +404,9 @@ function SetCredentialDialog({
   onOpenChange: (open: boolean) => void;
   onDone: () => void;
 }) {
-  const { selectedCompanyId } = useCompany();
   const { pushToast } = useToastActions();
   const [secretId, setSecretId] = useState("");
   const open = account !== null;
-
-  const secretsQuery = useQuery({
-    queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "__none__"],
-    queryFn: () => secretsApi.list(selectedCompanyId!),
-    enabled: Boolean(selectedCompanyId) && open,
-  });
 
   const connect = useMutation({
     mutationFn: () => personaAccountsApi.connectCredential(account!.id, secretId),
@@ -426,36 +419,27 @@ function SetCredentialDialog({
     onError: (error) => pushToast({ title: "Could not set the login key", body: errorMessage(error, ""), tone: "error" }),
   });
 
-  const secrets = secretsQuery.data ?? [];
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Login key for {account?.accountLabel ?? "this account"}</DialogTitle>
           <DialogDescription>
-            Pick the saved secret that holds the Fanvue access token. Only the publisher ever reads it; the persona
-            never sees it. Save the token under Secrets first if it is not in the list.
+            Pick the saved secret that holds the Fanvue access token, or add it right here. Only the publisher ever
+            reads it; the persona never sees it.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-1.5">
-          <Label>Saved secret</Label>
-          <Select value={secretId} onValueChange={setSecretId}>
-            <SelectTrigger>
-              <SelectValue placeholder={secretsQuery.isLoading ? "Loading…" : "Choose a secret"} />
-            </SelectTrigger>
-            <SelectContent>
-              {secrets.map((secret) => (
-                <SelectItem key={secret.id} value={secret.id}>
-                  {secret.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {!secretsQuery.isLoading && secrets.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No saved secrets in this company yet.</p>
-          ) : null}
-        </div>
+        {/* DUR-3997: the shared picker, so a missing token is added here
+            (and lands in Secrets) instead of on another page. */}
+        <SecretBindingPicker
+          label="Saved secret"
+          placeholder="Choose a secret"
+          allowVersionSelector={false}
+          value={secretId ? { secretId, version: "latest" } : null}
+          onChange={(next) => setSecretId(next?.secretId ?? "")}
+          disabled={connect.isPending}
+          emptyHint='No saved secrets in this company yet. Pick "Add new secret…" to add the token here.'
+        />
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
