@@ -283,7 +283,7 @@ export function createShopifyClient(options: ShopifyClientOptions): ShopifyGraph
     if (isWriteLikeShopifyDocument(document)) {
       throw new ShopifyClientError(
         "mutation_refused",
-        "Paperclip leser bare fra Shopify. Forespørsler som kan endre noe blir aldri sendt.",
+        "Paperclip only reads from Shopify. Requests that could change anything are never sent.",
       );
     }
 
