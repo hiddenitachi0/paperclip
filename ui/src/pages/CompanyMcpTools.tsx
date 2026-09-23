@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, LogIn, MoreVertical, Pencil, Plug, Plus, Trash2, X } from "lucide-react";
+import { LogIn, MoreVertical, Pencil, Plug, Plus, Trash2, X } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -10,7 +10,6 @@ import {
   type McpToolConnection,
   type McpToolLibraryEntry,
 } from "../api/mcpToolLibrary";
-import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
@@ -40,9 +39,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { ADD_NEW_SECRET_LABEL, SecretBindingPicker } from "../components/SecretBindingPicker";
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) return error.message;
@@ -315,13 +314,6 @@ function ToolFormDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const secretsQuery = useQuery({
-    queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "__none__"],
-    queryFn: () => secretsApi.list(selectedCompanyId!),
-    enabled: Boolean(selectedCompanyId) && open,
-  });
-  const secrets = secretsQuery.data ?? [];
-
   // DUR-3909: run the OAuth handshake in a popup, then poll the session
   // until the operator finishes (or abandons) it in that window. Only
   // available once the tool has been saved (start() needs a real toolId to
@@ -400,7 +392,8 @@ function ToolFormDialog({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            Name, description, and connection — no JSON. Any key goes through a saved secret, picked below.
+            Name, description, and connection — no JSON. Any key goes through a saved secret: pick one below, or
+            add a new one right there.
           </DialogDescription>
         </DialogHeader>
 
@@ -496,7 +489,7 @@ function ToolFormDialog({
             ) : (
               <ul className="space-y-2">
                 {draft.credentialRows.map((row) => (
-                  <li key={row.id} className="flex items-center gap-1.5">
+                  <li key={row.id} className="flex items-start gap-1.5" data-testid="credential-row">
                     <Input
                       className="w-32 shrink-0"
                       placeholder="Authorization"
@@ -504,32 +497,23 @@ function ToolFormDialog({
                       onChange={(event) => updateCredentialRow(row.id, { key: event.target.value })}
                       disabled={isPending}
                     />
-                    <Select
-                      value={row.secretId}
-                      onValueChange={(secretId) => updateCredentialRow(row.id, { secretId })}
+                    {/* DUR-3997: the shared picker. Its last row is "Add new
+                        secret…", so a missing key is added here, not under
+                        Settings → Secrets. The OAuth path above fills a row
+                        of its own and is untouched. */}
+                    <SecretBindingPicker
+                      className="min-w-0 flex-1"
+                      label=""
+                      placeholder="Pick a saved secret"
+                      allowVersionSelector={false}
+                      value={row.secretId ? { secretId: row.secretId, version: "latest" } : null}
+                      onChange={(next) => updateCredentialRow(row.id, { secretId: next?.secretId ?? "" })}
                       disabled={isPending}
-                    >
-                      <SelectTrigger className="min-w-0 flex-1">
-                        <SelectValue placeholder="Pick a saved secret" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {secrets.length === 0 ? (
-                          <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                            No secrets yet — add one in Settings → Secrets first.
-                          </div>
-                        ) : (
-                          secrets.map((secret) => (
-                            <SelectItem key={secret.id} value={secret.id}>
-                              <KeyRound className="mr-1.5 inline h-3 w-3" />
-                              {secret.name}
-                            </SelectItem>
-                          ))
-                        )}
-                      </SelectContent>
-                    </Select>
+                      emptyHint={`No secrets yet. Pick "${ADD_NEW_SECRET_LABEL}" to add one without leaving this page.`}
+                    />
                     <button
                       type="button"
-                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                      className="mt-2.5 shrink-0 text-muted-foreground hover:text-foreground"
                       onClick={() => removeCredentialRow(row.id)}
                       disabled={isPending}
                       aria-label="Remove"
