@@ -115,6 +115,21 @@ describe("redactSensitive", () => {
     expect(out.authToken).toBe("[REDACTED]");
     expect(out.name).toBe("kept");
   });
+  // DUR-3996: the Telegram connect/rotate body carries the bot token as
+  // `botToken` now, precisely so this walker blanks it on a failed request.
+  it("redacts a Telegram bot token carried as `botToken`", () => {
+    const out = redactSensitive({
+      agentId: "agent-1",
+      name: "CEO",
+      botToken: "8100000001:AAH-CANARY-should-never-be-logged",
+      bot_token: "8100000001:AAH-CANARY-should-never-be-logged",
+    }) as Record<string, unknown>;
+
+    expect(JSON.stringify(out)).not.toContain("CANARY");
+    expect(out.botToken).toBe("[REDACTED]");
+    expect(out.bot_token).toBe("[REDACTED]");
+    expect(out.name).toBe("CEO");
+  });
   // DUR-3997: the data-source form's credential fields, in every spelling a
   // client might send, must never reach the log on a failed save.
   it("redacts every data-source credential field and the credential object itself", () => {

@@ -9,6 +9,7 @@ import {
 } from "@paperclipai/shared";
 import type { TelegramBridgeBot } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
+import { acceptLegacyBodyField } from "../middleware/legacy-body-field.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin } from "./authz.js";
 import { logActivity } from "../services/index.js";
@@ -78,6 +79,10 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
 
   router.post(
     "/companies/:companyId/telegram-bots",
+    // DUR-3996: first in the chain, before the board gate can refuse. The
+    // field is `botToken` so the HTTP log blanks it on a failed request;
+    // `token` is still accepted for one release. See legacy-body-field.ts.
+    acceptLegacyBodyField("token", "botToken"),
     boardScope(),
     validate(createTelegramBotSchema),
     async (req, res) => {
@@ -87,7 +92,7 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
         {
           agentId: req.body.agentId,
           name: req.body.name,
-          token: req.body.token,
+          token: req.body.botToken,
           uiBase: req.body.uiBase ?? null,
         },
         { userId: actorUserId(req) },
@@ -109,6 +114,7 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
 
   router.post(
     "/companies/:companyId/telegram-bots/:botId/token",
+    acceptLegacyBodyField("token", "botToken"),
     boardScope(),
     validate(rotateTelegramBotTokenSchema),
     async (req, res) => {
@@ -116,7 +122,7 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
       const updated = await svc.rotateToken(
         companyId,
         req.params.botId as string,
-        req.body.token,
+        req.body.botToken,
         { userId: actorUserId(req) },
       );
       await logActivity(db, {

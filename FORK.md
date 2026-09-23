@@ -463,6 +463,21 @@ only, groups refused, strangers ignored, and nothing in a chat message can appro
 bot's own allowlist now comes from the app; a bot with nobody added falls back to the
 instance-wide `TELEGRAM_ALLOWED_USER_IDS` list, and with neither set, nobody gets in.
 
+**Update (DUR-3996):** the two request bodies that carry a real credential — connecting or
+re-keying a Telegram bot, and approving or cancelling a CLI sign-in from the browser — used to call
+that field `token`. The HTTP logger writes the body of every failed request to `server.log` and
+blanks fields by *name*, and a bare `token` is deliberately left readable there (it is a paging
+cursor far more often than a credential), so a wrong role, a typo elsewhere in the form or a
+database hiccup wrote the bot token or the live sign-in secret to a file every agent on the box can
+read. The fields are now `botToken` (`POST /api/companies/:id/telegram-bots` and
+`POST …/telegram-bots/:botId/token`) and `authToken` (`POST /api/cli-auth/challenges/:id/approve`
+and `…/cancel`), both on the redaction list, and the app and the CLI send the new names (the CLI's
+`--token` / `--token-env` flags are unchanged). The server still accepts the old `token` spelling
+for one release: it is moved to the new name before the route's access check, validator or handler
+can fail, so the log line never sees it. Remove the alias (`acceptLegacyBodyField` in
+`server/src/routes/telegram-bots.ts` and `server/src/routes/access.ts`) in the release after the
+one that ships this.
+
 _Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
 external dependency (a productizable deliverable from another company's project) and was
 cancelled 2026-07-07 rather than left waiting; revisit if that dependency ever ships.
