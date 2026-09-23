@@ -8,7 +8,7 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { createRequestScopedDb, personas } from "@paperclipai/db";
+import { agents, createRequestScopedDb, personas } from "@paperclipai/db";
 import {
   createPersonaAccountSchema,
   updatePersonaAccountSchema,
@@ -71,17 +71,24 @@ export function personaAccountRoutes(rawDb: Db) {
     });
   }
 
-  // The one non-board caller: a persona's own agent enqueueing its own
-  // content. Board (an operator/CEO acting on the persona's behalf) may
-  // always do this too. No other agent may enqueue for a persona it doesn't
-  // own -- this is the "one persona, one set of accounts" scope isolation
-  // from item 5.
+  // The one non-board caller: an agent enqueueing content for the persona it
+  // is attached to. Board (an operator/CEO acting on the persona's behalf)
+  // may always do this too. No other agent may enqueue for a persona it is
+  // not doing a job for -- this is the "one persona, one set of accounts"
+  // scope isolation from item 5. DUR-4000: "own persona" now means the
+  // acting agent's agents.persona_id is this persona (a persona can hold
+  // several jobs; each of them may post as the persona).
   async function assertOwningAgentOrBoard(req: import("express").Request, companyId: string, personaId: string) {
     assertBoardOrAgent(req);
     assertCompanyAccess(req, companyId);
     if (req.actor.type !== "agent") return;
-    const [persona] = await rawDb.select({ agentId: personas.agentId }).from(personas).where(eq(personas.id, personaId));
-    if (!persona || persona.agentId !== req.actor.agentId) {
+    const actorAgentId = req.actor.agentId;
+    if (!actorAgentId) throw forbidden("Agent may only publish for its own persona");
+    const [actor] = await rawDb
+      .select({ personaId: agents.personaId })
+      .from(agents)
+      .where(eq(agents.id, actorAgentId));
+    if (!actor || actor.personaId !== personaId) {
       throw forbidden("Agent may only publish for its own persona");
     }
   }
@@ -203,7 +210,11 @@ export function personaAccountRoutes(rawDb: Db) {
         res.status(404).json({ error: "Persona account not found" });
         return;
       }
-      const post = await publisher.enqueuePost(account.companyId, account.id, req.body);
+      const post = await publisher.enqueuePost(account.companyId, account.id, req.body, {
+        // DUR-4000: remember which of the persona's agents queued it, so the
+        // approval is filed on (and the decision wakes) that agent.
+        agentId: req.actor.type === "agent" ? req.actor.agentId : null,
+      });
       res.status(201).json(post);
     },
   );

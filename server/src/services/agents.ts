@@ -17,6 +17,7 @@ import {
   issueExecutionDecisions,
   issues,
   issueComments,
+  personas,
   withCompanyScope,
 } from "@paperclipai/db";
 import {
@@ -27,6 +28,7 @@ import {
   normalizeAgentUrlKey,
   type AgentEligibilityAgent,
   type AgentApiKeyScope,
+  type AgentPersonaSummary,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import {
@@ -294,7 +296,9 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     };
   }
 
-  function normalizeAgentBaseRow(row: typeof agents.$inferSelect) {
+  // Generic over the row so hydrated extras (spend, the DUR-4000 persona
+  // summary) survive normalization with their types intact.
+  function normalizeAgentBaseRow<T extends typeof agents.$inferSelect>(row: T) {
     return withUrlKey({
       ...row,
       permissions: normalizeAgentPermissions(row.permissions, row.role),
@@ -311,7 +315,10 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     };
   }
 
-  function normalizeAgentRows(rows: (typeof agents.$inferSelect)[], allCompanyRows = rows) {
+  function normalizeAgentRows<T extends typeof agents.$inferSelect>(
+    rows: T[],
+    allCompanyRows: (typeof agents.$inferSelect)[] = rows,
+  ) {
     const eligibilityAgents = allCompanyRows.map(toEligibilityAgent);
     return rows.map((row) => {
       const base = normalizeAgentBaseRow(row);
@@ -325,7 +332,7 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     });
   }
 
-  function normalizeAgentRow(row: typeof agents.$inferSelect, allCompanyRows?: (typeof agents.$inferSelect)[]) {
+  function normalizeAgentRow<T extends typeof agents.$inferSelect>(row: T, allCompanyRows?: (typeof agents.$inferSelect)[]) {
     return normalizeAgentRows([row], allCompanyRows)[0]!;
   }
 
@@ -365,6 +372,53 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     }));
   }
 
+  // DUR-4000: the PERSON attached to each job, as a small summary the lists
+  // and the detail page render ("Sales agent 1 (Maja)" + picture). One query
+  // for the whole batch; `null` when the job is blank.
+  async function hydrateAgentPersona<T extends { personaId: string | null }>(
+    rows: T[],
+  ): Promise<Array<T & { persona: AgentPersonaSummary | null }>> {
+    const personaIds = [...new Set(rows.map((row) => row.personaId).filter((id): id is string => !!id))];
+    const byId = new Map<string, AgentPersonaSummary>();
+    if (personaIds.length > 0) {
+      const personaRows = await db
+        .select({
+          id: personas.id,
+          displayName: personas.displayName,
+          pronouns: personas.pronouns,
+          avatarAssetId: personas.avatarAssetId,
+        })
+        .from(personas)
+        .where(inArray(personas.id, personaIds));
+      for (const persona of personaRows) {
+        byId.set(persona.id, {
+          id: persona.id,
+          displayName: persona.displayName ?? "",
+          pronouns: persona.pronouns,
+          avatarAssetId: persona.avatarAssetId,
+        });
+      }
+    }
+    return rows.map((row) => ({
+      ...row,
+      persona: row.personaId ? (byId.get(row.personaId) ?? null) : null,
+    }));
+  }
+
+  // DUR-4000: a persona link must point at a person in the agent's own
+  // company. Checked in the service so every write path (create, hire,
+  // PATCH, the picker route) gets the same answer.
+  async function assertPersonaInCompany(companyId: string, personaId: string | null | undefined) {
+    if (!personaId) return;
+    const [persona] = await db
+      .select({ id: personas.id, companyId: personas.companyId })
+      .from(personas)
+      .where(eq(personas.id, personaId));
+    if (!persona || persona.companyId !== companyId) {
+      throw unprocessable("That persona does not exist in this company.");
+    }
+  }
+
   async function getById(id: string) {
     const row = await db
       .select()
@@ -374,7 +428,7 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
     if (!row) return null;
     const [companyRows, hydrated] = await Promise.all([
       listCompanyAgentRows(row.companyId),
-      hydrateAgentSpend([row]).then((rows) => rows[0]!),
+      hydrateAgentSpend([row]).then((rows) => hydrateAgentPersona(rows)).then((rows) => rows[0]!),
     ]);
     return normalizeAgentRow(hydrated, companyRows);
   }
@@ -601,6 +655,9 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
       }
       await assertNoCycle(id, data.reportsTo);
     }
+    if (data.personaId !== undefined) {
+      await assertPersonaInCompany(existing.companyId, data.personaId);
+    }
 
     if (data.name !== undefined) {
       const previousShortname = normalizeAgentUrlKey(existing.name);
@@ -705,7 +762,7 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
         db.select().from(agents).where(and(...conditions)),
         listCompanyAgentRows(companyId),
       ]);
-      const hydrated = await hydrateAgentSpend(rows);
+      const hydrated = await hydrateAgentPersona(await hydrateAgentSpend(rows));
       return normalizeAgentRows(hydrated, allCompanyRows);
     },
 
@@ -722,6 +779,7 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
+      await assertPersonaInCompany(companyId, data.personaId);
 
       const existingAgents = await db
         .select({ id: agents.id, name: agents.name, status: agents.status })

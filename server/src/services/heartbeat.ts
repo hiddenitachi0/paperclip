@@ -285,11 +285,15 @@ import {
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 import {
+  appendStandingRules,
   readPaperclipSkillSyncPreference,
   renderPaperclipBoardApprovalWaitLines,
+  renderPersonaIdentity,
   writePaperclipSkillSyncPreference,
   resolveCompanyInstructionsPath,
 } from "@paperclipai/adapter-utils/server-utils";
+import { parseAgentLimits } from "@paperclipai/shared";
+import { personaService } from "./personas.js";
 import { extractSkillMentionIds, isUuidLike, formatApprovalTitle } from "@paperclipai/shared";
 import {
   GITHUB_TOKEN_SECRET_NAMES,
@@ -2125,6 +2129,42 @@ function readAgentRuntimeModelProfile(
     enabled: profile.enabled !== false,
     adapterConfig: parseObject(profile.adapterConfig),
     configured: true,
+  };
+}
+
+/**
+ * DUR-4000: the agent row as the adapter should see it. When a PERSON is
+ * attached (agents.persona_id), the persona's voice replaces the agent's tone
+ * (when the persona has one) and a rendered identity block replaces the
+ * agent's personality text outright, so nothing is said twice. The agent's
+ * standing rules (agents.limits.notes) ride behind whatever fills the
+ * personality slot under their own heading, and composeAgentPersonaBlock
+ * renders them as a section the agent reads as operator instructions. Every
+ * adapter composes its voice block from exactly these two fields
+ * (composeVoiceText(agent.tone, agent.personality)), so substituting them
+ * here is the whole change — the adapters stay untouched. No persona and no
+ * rules = the very same row object, so nothing downstream can tell.
+ */
+export function resolveAgentForAdapter<
+  T extends { name: string; tone: string | null; personality: string | null; limits?: unknown },
+>(
+  agent: T,
+  persona: {
+    displayName: string | null;
+    pronouns?: string | null;
+    traits?: string | null;
+    backstory?: string | null;
+    voice?: string | null;
+  } | null | undefined,
+): T {
+  const identity = persona ? renderPersonaIdentity(persona, agent) : null;
+  const notes = parseAgentLimits(agent.limits).notes ?? null;
+  if (!identity && !notes) return agent;
+  const voice = identity ? persona?.voice?.trim() : null;
+  return {
+    ...agent,
+    tone: voice ? voice : agent.tone,
+    personality: appendStandingRules(identity ?? agent.personality, notes),
   };
 }
 
@@ -13392,11 +13432,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let turnCapContinuation: Awaited<ReturnType<typeof continueAfterTurnCapForRun>> | null = null;
 
+      // DUR-4000: if a person is attached to this job, the adapter sees the
+      // persona's voice and identity in the tone/personality slots, and the
+      // job's standing rules (limits.notes) ride behind them; the rest of the
+      // run (name, adapter, config, instructions) is the agent's own. With
+      // neither, this is the same row object.
+      const agentForAdapter = resolveAgentForAdapter(
+        agent,
+        agent.personaId ? await personaService(db).getPromptIdentityByAgentId(agent.id) : null,
+      );
+
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
         adapterResult = await adapter.execute({
           runId: run.id,
-          agent,
+          agent: agentForAdapter,
           runtime: runtimeForAdapter,
           config: configForAdapter,
           context,

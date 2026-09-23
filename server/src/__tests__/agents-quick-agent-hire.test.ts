@@ -1,7 +1,8 @@
+import { readFileSync } from "node:fs";
 import express from "express";
 import request from "supertest";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { QUICK_AGENT_FIELDS, type QuickAgentField } from "@paperclipai/shared";
+import { PERSONA_JOB_FIELDS, QUICK_AGENT_FIELDS, type PersonaJobField, type QuickAgentField } from "@paperclipai/shared";
 
 // DUR-3971: employing someone now includes the choice between "answers
 // straight away in chat" (a quick agent) and "goes away and works on tasks".
@@ -462,4 +463,154 @@ describe.sequential("every quick-agent field is handled on the employment path",
       expect(mockAgentService.create).not.toHaveBeenCalled();
     });
   }
+});
+
+// DUR-4000: the job side of a persona — which person does this job
+// (personaId) and the job's limits box — is board-only on every write path,
+// exactly like the quick-agent fields above (assertNoAgentPersonaJobFieldMutation
+// in routes/agents.ts reads PERSONA_JOB_FIELDS the same way).
+describe.sequential("personaId and limits are board-only on the employment and PATCH paths (DUR-4000)", () => {
+  const PERSONA_ID = "44444444-4444-4444-8444-444444444444";
+  const SAMPLE_VALUES: Record<PersonaJobField, unknown> = {
+    personaId: PERSONA_ID,
+    limits: { dailyImageGenerations: 3, notes: "Do not repeat mistakes you made before." },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
+    mockLogActivity.mockResolvedValue(undefined);
+    mockSecretService.normalizeAdapterConfigForPersistence.mockImplementation(
+      async (_companyId: string, config: Record<string, unknown>) => config,
+    );
+    mockCompanySkillService.listRuntimeSkillEntries.mockResolvedValue([]);
+    mockAdapter.listSkills.mockResolvedValue({
+      adapterType: "claude_local",
+      supported: false,
+      mode: "ephemeral",
+      desiredSkills: [],
+      entries: [],
+      warnings: [],
+    });
+    // The real service returns the created row with its persona summary
+    // joined in-company (agentService.getById -> hydrateAgentPersona); the
+    // hire card reads the display name off that, never off the request.
+    mockAgentService.create.mockImplementation(
+      async (_companyId: string, input: Record<string, unknown>) =>
+        makeAgent({
+          ...input,
+          persona: input.personaId === PERSONA_ID
+            ? { id: PERSONA_ID, displayName: "Maja", pronouns: "she/her", avatarAssetId: null }
+            : null,
+        }),
+    );
+    // Left unmocked (returns undefined) on purpose, like the describes above:
+    // materializeDefaultInstructionsBundleForNewAgent falls back to the
+    // created row when `update` returns nothing, and it is that row — with
+    // its persona summary — the hire card reads. The PATCH cases below only
+    // assert `update` is never reached.
+    mockAgentService.update.mockReset();
+    mockAgentService.getById.mockResolvedValue(makeAgent({ id: ACTOR_AGENT_ID }));
+    mockApprovalService.create.mockImplementation(
+      async (_companyId: string, input: Record<string, unknown>) => ({
+        id: "approval-1",
+        companyId: COMPANY_ID,
+        type: "hire_agent",
+        status: "pending",
+        payload: input.payload ?? {},
+      }),
+    );
+    mockAgentInstructionsService.materializeManagedBundle.mockImplementation(
+      async (agent: Record<string, unknown>) => ({
+        bundle: null,
+        adapterConfig: (agent.adapterConfig as Record<string, unknown> | undefined) ?? {},
+      }),
+    );
+    mockAccessService.decide.mockResolvedValue({
+      allowed: true,
+      reason: "allow_explicit_grant",
+      explanation: "Allowed by test grant",
+    });
+    mockAccessService.canUser.mockResolvedValue(true);
+    mockAccessService.hasPermission.mockResolvedValue(true);
+    mockAccessService.getMembership.mockResolvedValue(null);
+    mockAccessService.listPrincipalGrants.mockResolvedValue([]);
+  });
+
+  it("has a sample value for every field in PERSONA_JOB_FIELDS", () => {
+    expect(Object.keys(SAMPLE_VALUES).sort()).toEqual([...PERSONA_JOB_FIELDS].sort());
+  });
+
+  for (const field of PERSONA_JOB_FIELDS) {
+    it(`accepts and stores "${field}" when the board employs someone`, async () => {
+      const res = await postHire(await createApp("board"), {
+        ...baseHireBody(),
+        [field]: SAMPLE_VALUES[field],
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(createdAgentInput()).toMatchObject({ [field]: SAMPLE_VALUES[field] });
+    });
+
+    it(`puts "${field}" on the hire approval card, and the legacy approve branch reads it back`, async () => {
+      const res = await postHire(await createApp("board", createDb(true)), {
+        ...baseHireBody(),
+        [field]: SAMPLE_VALUES[field],
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(approvalPayload()).toMatchObject({ [field]: SAMPLE_VALUES[field] });
+      // Anti-drift for the approve side: approvals.ts still has a branch that
+      // rebuilds the agent from the card alone, so every field the card
+      // carries must be read back off `payload` there — otherwise approving
+      // a legacy card silently drops it.
+      const legacyRebuild = readFileSync(new URL("../services/approvals.ts", import.meta.url), "utf8");
+      expect(legacyRebuild).toContain(`payload.${field}`);
+    });
+
+    it(`refuses an agent-authenticated caller that sets "${field}" at hire`, async () => {
+      const res = await postHire(await createApp("agent", createDb(true)), {
+        ...baseHireBody(),
+        [field]: SAMPLE_VALUES[field],
+      });
+
+      expect(res.status).toBe(403);
+      expect(String(res.body.error)).toContain("cannot set a persona or limits");
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+    });
+
+    it(`refuses an agent that PATCHes "${field}" on its own record`, async () => {
+      const res = await request(await createApp("agent"))
+        .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+        .send({ [field]: SAMPLE_VALUES[field] });
+
+      expect(res.status).toBe(403);
+      expect(String(res.body.error)).toContain("cannot set a persona or limits");
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
+  }
+
+  it("names the person on the hire card from the created row's own persona summary, never from the request", async () => {
+    const res = await postHire(await createApp("board", createDb(true)), {
+      ...baseHireBody(),
+      personaId: PERSONA_ID,
+      // A caller cannot smuggle a display name; the create schema strips it
+      // and the card takes the name the service joined in-company.
+      personaDisplayName: "Not Maja",
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(approvalPayload()).toMatchObject({ personaId: PERSONA_ID, personaDisplayName: "Maja", limits: {} });
+  });
+
+  it("leaves a hire made without either field exactly as before (no key appears on the row; the card says none)", async () => {
+    const res = await postHire(await createApp("board", createDb(true)), baseHireBody());
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const input = createdAgentInput();
+    for (const field of PERSONA_JOB_FIELDS) {
+      expect(Object.hasOwn(input, field)).toBe(false);
+    }
+    expect(approvalPayload()).toMatchObject({ personaId: null, personaDisplayName: null, limits: {} });
+  });
 });

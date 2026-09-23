@@ -167,6 +167,7 @@ describeEmbeddedPostgres("migration 0164 against a database that holds another a
     `;
     const policed = new Set(rows.map((row) => row.tablename));
     for (const table of [
+      "agent_daily_counters",
       "company_mcp_oauth_connections",
       "lane_a_messages",
       "persona_accounts",

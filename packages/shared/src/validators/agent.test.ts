@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { createAgentSchema, mcpServerConfigSchema, updateAgentSchema } from "./agent.js";
+import {
+  PERSONA_JOB_FIELDS,
+  agentLimitsSchema,
+  createAgentSchema,
+  mcpServerConfigSchema,
+  parseAgentLimits,
+  updateAgentSchema,
+} from "./agent.js";
 
 function baseAgent(adapterConfig: Record<string, unknown>) {
   return {
@@ -197,5 +204,55 @@ describe("createAgentSchema tone/personality", () => {
     const result = createAgentSchema.safeParse({ ...baseAgent({}), personality: "   " });
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.personality).toBeNull();
+  });
+});
+
+describe("DUR-4000 personaId and limits (the job side of a persona)", () => {
+  it("names exactly the two board-only job fields the route guard reads", () => {
+    expect([...PERSONA_JOB_FIELDS]).toEqual(["personaId", "limits"]);
+  });
+
+  it("accepts a persona link and a limits box on create, and leaves both out when not sent", () => {
+    const personaId = "33333333-3333-4333-8333-333333333333";
+    const withPersona = createAgentSchema.safeParse({
+      ...baseAgent({}),
+      personaId,
+      limits: { dailyImageGenerations: 5, notes: "Do not repeat mistakes you made before." },
+    });
+    expect(withPersona.success).toBe(true);
+    if (withPersona.success) {
+      expect(withPersona.data.personaId).toBe(personaId);
+      expect(withPersona.data.limits).toEqual({ dailyImageGenerations: 5, notes: "Do not repeat mistakes you made before." });
+    }
+    const without = createAgentSchema.safeParse(baseAgent({}));
+    expect(without.success).toBe(true);
+    if (without.success) {
+      expect(without.data.personaId).toBeUndefined();
+      expect(without.data.limits).toBeUndefined();
+    }
+  });
+
+  it("lets a PATCH detach the persona with null", () => {
+    const result = updateAgentSchema.safeParse({ personaId: null });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.personaId).toBeNull();
+  });
+
+  it("refuses a personaId that is not a uuid", () => {
+    expect(updateAgentSchema.safeParse({ personaId: "maja" }).success).toBe(false);
+  });
+
+  it("refuses an unknown limits key instead of silently ignoring it, and a negative or fractional limit", () => {
+    expect(agentLimitsSchema.safeParse({ dailyImages: 3 }).success).toBe(false);
+    expect(agentLimitsSchema.safeParse({ dailyImageGenerations: -1 }).success).toBe(false);
+    expect(agentLimitsSchema.safeParse({ dailyImageGenerations: 1.5 }).success).toBe(false);
+    expect(agentLimitsSchema.safeParse({ dailyRuns: 0, dailyPosts: null }).success).toBe(true);
+  });
+
+  it("reads a stored limits box, and reads anything malformed as no limits", () => {
+    expect(parseAgentLimits({ dailyImageGenerations: 2, notes: " keep  " })).toEqual({ dailyImageGenerations: 2, notes: "keep" });
+    expect(parseAgentLimits(null)).toEqual({});
+    expect(parseAgentLimits({ dailyImageGenerations: "two" })).toEqual({});
+    expect(parseAgentLimits("nonsense")).toEqual({});
   });
 });

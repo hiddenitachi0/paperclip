@@ -40,6 +40,7 @@ import { approvalService } from "./approvals.js";
 import { getPlatformAdapter, PlatformPublishError } from "../platform-adapters/index.js";
 import { personaAccountsService } from "./persona-accounts.js";
 import { personaPublishingSettingsService } from "./persona-publishing-settings.js";
+import { personaService } from "./personas.js";
 
 export type PersonaPostRow = typeof personaPosts.$inferSelect;
 
@@ -59,11 +60,16 @@ export function personaPublisherService(db: Db) {
   const accounts = personaAccountsService(db);
   const publishingSettings = personaPublishingSettingsService(db);
   const approvals = approvalService(db);
+  const personasSvc = personaService(db);
 
   async function enqueuePost(
     companyId: string,
     personaAccountId: string,
     input: EnqueuePersonaPostInput,
+    // DUR-4000: which of the persona's agents is queueing this (null when the
+    // board queues it). The publisher files the approval on this agent's
+    // behalf, so a persona holding several jobs is woken on the right one.
+    options: { agentId?: string | null } = {},
   ): Promise<PersonaPostRow> {
     const account = await accounts.getAccountById(personaAccountId);
     if (!account || account.companyId !== companyId) throw notFound("Persona account not found");
@@ -74,11 +80,25 @@ export function personaPublisherService(db: Db) {
         companyId,
         personaId: account.personaId,
         personaAccountId: account.id,
+        agentId: options.agentId ?? null,
         caption: input.caption,
         mediaAssetId: input.mediaAssetId ?? null,
       })
       .returning();
     return created!;
+  }
+
+  /**
+   * DUR-4000: the agent a persona post acts through. The queuing agent when
+   * one was recorded; otherwise the first agent attached to the persona
+   * (agents.persona_id, with the pre-DUR-4000 personas.agent_id as a last
+   * resort). Null only for a persona that holds no job at all, in which case
+   * the approval is filed by the publisher with no requesting agent.
+   */
+  async function resolveActingAgentId(post: PersonaPostRow): Promise<string | null> {
+    if (post.agentId) return post.agentId;
+    const [first] = await personasSvc.listActingAgentIdsForPersona(post.personaId);
+    return first ?? null;
   }
 
   async function getPostById(postId: string): Promise<PersonaPostRow | null> {
@@ -97,8 +117,8 @@ export function personaPublisherService(db: Db) {
 
   /**
    * Atomically reserve one of today's `dailyPostCap` publish slots for this
-   * account. Same shape as personaGenerationCapService's reserveGeneration
-   * (DUR-177): `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE count < cap`,
+   * account. Same shape as agentDailyLimitService's reserve (DUR-177 /
+   * DUR-4000): `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE count < cap`,
    * so two concurrent publish attempts for the same account can never both
    * reserve slot N when only N-1 is left.
    */
@@ -130,6 +150,7 @@ export function personaPublisherService(db: Db) {
     if (!account) throw notFound("Persona account not found");
     const [persona] = await db.select().from(personas).where(eq(personas.id, post.personaId));
     if (!persona) throw notFound("Persona not found");
+    const actingAgentId = await resolveActingAgentId(post);
 
     // Kill switch, item 6: checked first, before any row is touched. A
     // paused post is left exactly as it was (queued/approved) so it resumes
@@ -158,16 +179,17 @@ export function personaPublisherService(db: Db) {
       // place a persona_publish approval is filed -- never by the persona's
       // own agent, mirroring how deploy/instructions_change approvals are
       // always filed by the acting service, not the requester.
-      // The card is filed on behalf of the persona's own agent
-      // (requestedByAgentId) so the approval UI treats it as a persona
-      // request (DUR-177: plain display name, no raw JSON/UUIDs by
-      // default) and the persona is woken with the decision, exactly like
-      // her picture/credential requests. The publisher, not the agent, is
-      // still the only thing that files it.
+      // The card is filed on behalf of the agent the persona acts through
+      // (requestedByAgentId: the agent that queued the post, else the first
+      // agent attached to the persona -- DUR-4000) so the approval UI treats
+      // it as a persona request (DUR-177: plain display name, no raw
+      // JSON/UUIDs by default) and that agent is woken with the decision,
+      // exactly like its picture/credential requests. The publisher, not the
+      // agent, is still the only thing that files it.
       const remaining = Math.max(0, account.warmupPostsRequired - account.publishedPostCount);
       const approval = await approvals.create(account.companyId, {
         type: "request_board_approval",
-        requestedByAgentId: persona.agentId,
+        requestedByAgentId: actingAgentId,
         payload: {
           kind: "persona_publish",
           personaId: persona.id,
@@ -179,8 +201,8 @@ export function personaPublisherService(db: Db) {
           disclosureText,
           title: `Post to ${account.accountLabel}`,
           summary: warmingUp
-            ? `This account is new, so her first ${account.warmupPostsRequired} posts need your OK before they go out. ` +
-              `This is post ${account.publishedPostCount + 1} of ${account.warmupPostsRequired}; after ${remaining === 1 ? "this one" : `${remaining} more`} she posts here on her own, up to ${account.dailyPostCap} a day.`
+            ? `This account is new, so the first ${account.warmupPostsRequired} posts need your OK before they go out. ` +
+              `This is post ${account.publishedPostCount + 1} of ${account.warmupPostsRequired}; after ${remaining === 1 ? "this one" : `${remaining} more`}, ${persona.displayName ?? "the persona"} posts here without asking, up to ${account.dailyPostCap} a day.`
             : `Posts to ${account.accountLabel} always need your OK before they go out. ` +
               `If you approve, it is posted at the next publishing pass (as long as publishing is not paused and today's limit of ${account.dailyPostCap} is not used up). If you reject, it is never posted.`,
         },
@@ -282,7 +304,7 @@ export function personaPublisherService(db: Db) {
         action: "persona_post.publish_failed",
         entityType: "persona_post",
         entityId: claimed.id,
-        agentId: persona.agentId,
+        agentId: actingAgentId,
         details: {
           personaId: persona.id,
           personaAccountId: account.id,
@@ -352,7 +374,7 @@ export function personaPublisherService(db: Db) {
       action: "persona_post.published",
       entityType: "persona_post",
       entityId: claimed.id,
-      agentId: persona.agentId,
+      agentId: actingAgentId,
       details: {
         personaId: persona.id,
         personaAccountId: account.id,
