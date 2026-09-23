@@ -8,9 +8,13 @@ export const personaStatusSchema = z.enum(PERSONA_STATUSES);
  * the personas table. Nothing here writes to an agent row any more.
  *
  * Lengths: `voice` fills the same prompt slot as an agent's `tone` (it wins
- * over the tone when attached) and is held to the same 600 characters — the
- * old 2000 let a persona smuggle a three-page "voice" into a slot the agent
- * form caps at a few sentences. `backstory` fills the slot agents.personality
+ * over the tone when attached), so its cap should be tone's 600. It stays at
+ * the old 2000 FOR NOW: migration 0175 copies agents.tone verbatim into it,
+ * a persona's tone could be up to 2000 (the old persona dialog wrote tone
+ * past the agent form's cap), and the untouched Personas dialog re-sends
+ * `voice` on every save — a live persona with a 601–2000 character voice
+ * could not be edited at all. Step 3 (the screens) truncates/warns in the
+ * form and drops this to 600. `backstory` fills the slot agents.personality
  * filled (20,000), and the 0175 backfill copies personality into it, so the
  * old 4000-character "bio" limit would have refused to re-save a persona
  * whose copied text was longer.
@@ -30,7 +34,8 @@ const personaFields = {
   pronouns: trimmedOrNull(40, "Pronouns are limited to 40 characters."),
   traits: trimmedOrNull(2000, "Traits are limited to 2,000 characters — a few words or lines on character."),
   backstory: trimmedOrNull(20000, "The backstory is limited to 20,000 characters."),
-  voice: trimmedOrNull(600, "Voice is limited to 600 characters — a few sentences on how this person writes, not who they are."),
+  // 2000 for now; 600 (tone's cap) once the step-3 form truncates/warns — see the header note.
+  voice: trimmedOrNull(2000, "Voice is limited to 2,000 characters — a few sentences on how this person writes, not who they are."),
   avatarAssetId: z.string().uuid().nullable().optional(),
   handle: z.string().trim().min(1).max(100).nullable().optional(),
   status: personaStatusSchema.optional(),

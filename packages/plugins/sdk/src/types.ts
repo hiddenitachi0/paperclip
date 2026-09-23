@@ -1793,19 +1793,21 @@ export interface PluginAuthorizationClient {
 export interface PluginPersonasClient {
   /**
    * Atomically check-and-reserve one image generation against the calling
-   * agent's persona daily cap (`personas.dailyGenerationCap`), if it has
-   * one. Call this *before* running the actual generation, so a capped-out
-   * persona never reaches the provider.
+   * agent's own daily image limit (`agents.limits.dailyImageGenerations`,
+   * DUR-4000 — the limit belongs to the job, not to the persona, so two jobs
+   * sharing one persona each have their own), if it has one. Call this
+   * *before* running the actual generation, so a capped-out agent never
+   * reaches the provider.
    *
    * Only callable from a tool handler: pass the invoking `ToolRunContext.runId`
    * as `options.runId` — the host resolves the calling agent from this run
    * (never from a plugin-supplied agent id), so a plugin cannot reserve or
-   * evade another persona's cap by claiming a different identity.
+   * evade another agent's limit by claiming a different identity.
    *
-   * Returns `{ allowed: false }` once the persona's cap is reached for the
+   * Returns `{ allowed: false }` once the agent's limit is reached for the
    * current UTC day, without granting a reservation. If the agent has no
-   * persona, or the persona has no cap set, always returns
-   * `{ allowed: true, cap: null }` (unlimited).
+   * limit set, always returns `{ allowed: true, cap: null }` (unlimited).
+   * The method keeps its pre-DUR-4000 name so existing plugins need no change.
    */
   reserveDailyGeneration(
     companyId: string,

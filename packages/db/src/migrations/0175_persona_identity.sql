@@ -22,11 +22,13 @@
 --     post, so the publisher can file the approval on that agent's behalf.
 --
 -- Strictly additive on data: no row is deleted, no column is dropped, and
--- every backfill only ever fills a NULL or a missing key. The two structural
--- relaxations (personas.agent_id loses NOT NULL and its unique index) are
--- what make "one persona, many agents" possible; the column itself stays and
--- keeps its old value so an older server build still reads it. The server
--- stops writing it. Every statement is guarded so a re-run is a no-op.
+-- every backfill only ever fills a NULL or a missing key. The structural
+-- relaxations (personas.agent_id loses NOT NULL and its unique index, and its
+-- ON DELETE CASCADE becomes SET NULL so deleting the old job can no longer
+-- delete the person) are what make "one persona, many agents" safe; the
+-- column itself stays and keeps its old value so an older server build still
+-- reads it. The server stops writing it. Every statement is guarded so a
+-- re-run is a no-op.
 --
 -- Numbered 0175: 0174 is reserved by another change in flight. Gaps are
 -- allowed; the migration runner applies by content hash, not position.
@@ -82,6 +84,23 @@ WHERE p."agent_id" = a."id"
 -- rows) so nothing that reads it breaks; the server stops writing it.
 ALTER TABLE "personas" ALTER COLUMN "agent_id" DROP NOT NULL;--> statement-breakpoint
 DROP INDEX IF EXISTS "personas_agent_id_uq";--> statement-breakpoint
+-- The legacy link was ON DELETE CASCADE (0142): deleting the one agent a
+-- persona used to sit on would delete the PERSON, its accounts and its posts,
+-- and silently detach every other job the person holds. Re-point it to SET
+-- NULL. Guarded on the current delete rule (confdeltype 'c' = cascade), so a
+-- re-run finds SET NULL ('n') and does nothing; the constraint is re-added
+-- only when it is absent, so this is the one DROP CONSTRAINT in the file and
+-- it is always followed by its own ADD.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'personas_agent_id_agents_id_fk' AND confdeltype = 'c'
+  ) THEN
+    ALTER TABLE "personas" DROP CONSTRAINT "personas_agent_id_agents_id_fk";
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'personas_agent_id_agents_id_fk') THEN
+    ALTER TABLE "personas" ADD CONSTRAINT "personas_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $$;--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "agent_daily_counters" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"company_id" uuid NOT NULL,

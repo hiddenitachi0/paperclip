@@ -100,6 +100,32 @@ describe("buildSystemPrompt", () => {
     expect(books).toContain("You are Maja, working as Accountant");
   });
 
+  it("drops ', working as' when the persona is named like the job", () => {
+    const prompt = buildSystemPrompt({ agentName: "Maja", hasMcpTools: false, hasBuiltinTools: false, persona: { displayName: "Maja", pronouns: "she/her" } });
+    expect(prompt.startsWith("You are Maja (she/her), a quick agent in Paperclip.")).toBe(true);
+    expect(prompt).not.toContain("working as");
+  });
+
+  it("renders the job's standing rules after the persona and before the operator instructions", () => {
+    const prompt = buildSystemPrompt({
+      agentName: "Accountant",
+      instructions: "Answer in Norwegian.",
+      hasMcpTools: false,
+      hasBuiltinTools: false,
+      persona: { displayName: "Maja", traits: "calm" },
+      standingRules: "Do not repeat mistakes you made before.",
+    });
+    const persona = prompt.indexOf("Who you are:");
+    const rules = prompt.indexOf("Standing rules from your operator:\nDo not repeat mistakes you made before.");
+    const instructions = prompt.indexOf("Your instructions from the operator:");
+    expect(persona).toBeGreaterThan(-1);
+    expect(rules).toBeGreaterThan(persona);
+    expect(instructions).toBeGreaterThan(rules);
+    // Blank rules leave the prompt untouched.
+    const base = { agentName: "Accountant", hasMcpTools: false, hasBuiltinTools: false };
+    expect(buildSystemPrompt({ ...base, standingRules: "   " })).toBe(buildSystemPrompt(base));
+  });
+
   it("is unchanged when no persona is attached", () => {
     const base = { agentName: "Ada", agentRole: "secretary", instructions: "Be brief.", hasMcpTools: false, hasBuiltinTools: true };
     expect(buildSystemPrompt({ ...base, persona: null })).toBe(buildSystemPrompt(base));

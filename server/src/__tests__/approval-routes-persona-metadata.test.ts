@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withFakeCompanyScopeReserve } from "./helpers/fake-scoped-db.js";
 
 // companyScope middleware (middleware/company-scope.ts) rejects non-UUID company ids with 400.
@@ -75,6 +75,15 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
   app.use(errorHandler);
   return app;
 }
+
+// routes/approvals.ts is a large module; the first dynamic import of it inside
+// a test can take longer than vitest's default 5s timeout on a cold transform
+// cache (the per-test vi.resetModules() below clears the module registry, not
+// the transform cache). Warm it once up front so a slow first import never
+// reads as a route hang — same as agents-quick-agent-hire.test.ts.
+beforeAll(async () => {
+  await vi.importActual<typeof import("../routes/approvals.js")>("../routes/approvals.js");
+}, 60_000);
 
 describe("approval routes persona metadata (DUR-177 items 16/17)", () => {
   beforeEach(() => {

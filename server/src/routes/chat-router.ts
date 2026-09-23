@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
+import { formatAgentDisplayName } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { forbidden } from "../errors.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
@@ -114,7 +115,8 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
     const companyAgents = await agents.list(companyId);
     const roster = companyAgents
       .filter((agent) => !SECRETARY_UNAVAILABLE_AGENT_STATUSES.has(agent.status))
-      .map((agent) => ({ id: agent.id, name: agent.name, role: agent.role }));
+      // DUR-4000: "Sales agent 1 (Maja)", so "hand this to Maja" routes to the job.
+      .map((agent) => ({ id: agent.id, name: formatAgentDisplayName(agent, agent.persona), role: agent.role }));
 
     const classification = await secretaryClassifier.classify({ message, roster });
     res.json(classification);

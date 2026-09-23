@@ -263,7 +263,17 @@ export function isAgentAvailableForRouting(agent: { status: string }): boolean {
   return !UNAVAILABLE_AGENT_STATUSES.has(agent.status);
 }
 
-/** Exact id match first, then case-insensitive name / url key. Returns all name matches so ambiguity can be reported. */
+/**
+ * Exact id match first, then case-insensitive name / url key / persona name /
+ * "job (person)" display name. Returns all name matches so ambiguity can be
+ * reported.
+ *
+ * DUR-4000: the colleague list the model reads says "Sales agent 1 (Maja)",
+ * so the model may hand work to exactly that string, to "Sales agent 1", or
+ * to "Maja"; all three resolve. A trailing " (…)" on the wanted name is also
+ * stripped, so "Sales agent 1 (Maja)" still resolves against a colleague whose
+ * persona was detached since the list was rendered.
+ */
 export function resolveColleague(
   colleagues: LaneAToolColleague[],
   wanted: string,
@@ -272,17 +282,22 @@ export function resolveColleague(
   const candidatesPool = colleagues.filter((c) => c.id !== excludeAgentId && isAgentAvailableForRouting(c));
   const byId = candidatesPool.find((c) => c.id === wanted);
   if (byId) return { match: byId, candidates: [byId] };
-  const needle = wanted.toLowerCase();
-  const byName = candidatesPool.filter(
-    (c) =>
-      c.name.toLowerCase() === needle ||
-      (c.urlKey ?? "").toLowerCase() === needle ||
-      // DUR-4000: the person's name works as well as the job's.
-      (c.personaDisplayName ?? "").toLowerCase() === needle,
-  );
+  const rawNeedle = wanted.trim().toLowerCase();
+  const strippedNeedle = rawNeedle.replace(/\s*\([^()]*\)\s*$/, "").trim();
+  const needles = new Set([rawNeedle, strippedNeedle].filter((value) => value.length > 0));
+  const namesOf = (c: LaneAToolColleague) =>
+    [c.name, c.urlKey, c.personaDisplayName, c.displayName]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .map((value) => value.trim().toLowerCase());
+  const byName = candidatesPool.filter((c) => namesOf(c).some((value) => needles.has(value)));
   if (byName.length === 1) return { match: byName[0]!, candidates: byName };
   if (byName.length > 1) return { match: null, candidates: byName };
-  const partial = candidatesPool.filter((c) => c.name.toLowerCase().includes(needle));
+  const partialNeedle = strippedNeedle || rawNeedle;
+  const partial = candidatesPool.filter((c) =>
+    [c.name, c.displayName]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .some((value) => value.toLowerCase().includes(partialNeedle)),
+  );
   if (partial.length === 1) return { match: partial[0]!, candidates: partial };
   return { match: null, candidates: partial };
 }

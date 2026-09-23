@@ -17,7 +17,9 @@ export const personas = pgTable(
     // nullable and no longer unique, so an older build still reads it and
     // the 0175 backfill into agents.persona_id can be checked against it.
     // The server does not write it any more; read agents.persona_id instead.
-    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    // ON DELETE SET NULL (re-pointed in 0175 from 0142's CASCADE): deleting
+    // the old job must never delete the person or their other jobs.
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     // The person's own identity (DUR-4000, migration 0175). display_name is
     // required by the API on create; the column is nullable only so the
     // migration could add it to existing rows before backfilling.

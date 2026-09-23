@@ -233,3 +233,48 @@ describe("lookup_issue", () => {
     expect(result.content).toBe('No task "DUR-12" in this company.');
   });
 });
+
+// DUR-4000: the colleague list advertises "Sales agent 1 (Maja)", so a
+// hand-over may name the job, the person, or exactly that display string.
+describe("resolveColleague with personas", () => {
+  const self = "00000000-0000-4000-8000-000000000000";
+  const pool = [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "Sales agent 1",
+      displayName: "Sales agent 1 (Maja)",
+      personaDisplayName: "Maja",
+      role: "sales",
+      status: "idle",
+      urlKey: "sales-agent-1",
+    },
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Accountant",
+      displayName: "Accountant",
+      personaDisplayName: null,
+      role: "finance",
+      status: "idle",
+      urlKey: "accountant",
+    },
+  ];
+
+  it("matches the full display name, case-insensitively, and the person's name alone", () => {
+    expect(resolveColleague(pool, "Sales agent 1 (Maja)", self).match?.id).toBe(pool[0]!.id);
+    expect(resolveColleague(pool, "sales agent 1 (maja)", self).match?.id).toBe(pool[0]!.id);
+    expect(resolveColleague(pool, "Maja", self).match?.id).toBe(pool[0]!.id);
+    expect(resolveColleague(pool, "Sales agent 1", self).match?.id).toBe(pool[0]!.id);
+  });
+
+  it("strips a trailing ' (…)' from the wanted name, so a stale display string still resolves", () => {
+    const detached = [{ ...pool[0]!, displayName: "Sales agent 1", personaDisplayName: null }, pool[1]!];
+    expect(resolveColleague(detached, "Sales agent 1 (Maja)", self).match?.id).toBe(pool[0]!.id);
+    expect(resolveColleague(pool, "Accountant (someone)", self).match?.id).toBe(pool[1]!.id);
+  });
+
+  it("still resolves colleagues that carry no display name at all (older callers)", () => {
+    const bare = pool.map(({ displayName: _d, personaDisplayName: _p, ...rest }) => rest);
+    expect(resolveColleague(bare, "Accountant", self).match?.id).toBe(pool[1]!.id);
+    expect(resolveColleague(bare, "Maja", self).match).toBeNull();
+  });
+});
