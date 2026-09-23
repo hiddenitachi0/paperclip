@@ -16,6 +16,17 @@ import { test, expect, request as pwRequest, type APIRequestContext } from "@pla
  * Agent auth flow:
  *   - Board request (local_trusted auto-auth) handles setup/teardown.
  *   - Agent-specific actions use API keys + heartbeat run IDs.
+ *   - The executor never starts runs of its own. Every time the issue lands
+ *     on it (creation, or a reviewer sending it back) the server wakes it,
+ *     exactly as for a real agent. The executor's stub process stays alive so
+ *     the test can act *inside* that wake run: wait for the run to be running,
+ *     make sure it owns the issue checkout (an "issue_assigned" wake checks
+ *     out by itself; an "execution_changes_requested" wake leaves that to the
+ *     agent), PATCH with its run id, then cancel it so the lock is released
+ *     before the next stage. The previous helper started a *second* run and
+ *     raced the server's own wake run for the same lock; whether it won
+ *     depended on how fast the stub process exited, which is what failed at
+ *     random on slow CI runners.
  *   - Reviewers/approvers invoke heartbeat runs (gets run IDs) then PATCH
  *     directly without checkout (checkout would force in_progress, breaking
  *     the in_review state the signoff policy requires).
@@ -24,6 +35,21 @@ import { test, expect, request as pwRequest, type APIRequestContext } from "@pla
 const PORT = Number(process.env.PAPERCLIP_E2E_PORT ?? 3199);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const COMPANY_NAME = `E2E-Signoff-${Date.now()}`;
+
+// How long to wait for the server to reach a specific run/lock state. A wake
+// run is claimed and checked out within a few hundred ms even on a loaded CI
+// runner; this only bounds a genuinely broken server.
+const RUN_STATE_TIMEOUT_MS = 20_000;
+const RUN_STATE_POLL_INTERVALS_MS = [100, 250, 500];
+
+// The executor's stub process stays alive until the test cancels its run, so
+// the run is still active while the test acts as it. The timer is only a leak
+// guard for a test that fails before it gets to cancel.
+const EXECUTOR_STUB_MAX_LIFETIME_MS = 60_000;
+const EXECUTOR_STUB_ARGS = ["-e", `setTimeout(() => process.stdout.write('done\\n'), ${EXECUTOR_STUB_MAX_LIFETIME_MS})`];
+// Reviewer/approver stubs exit at once: their in_review stages need no checkout,
+// so nothing waits on their runs.
+const INSTANT_STUB_ARGS = ["-e", "process.stdout.write('done\\n')"];
 
 interface AgentAuth {
   agentId: string;
@@ -75,6 +101,111 @@ async function getIssueRunLockState(board: APIRequestContext, issueId: string): 
   };
 }
 
+interface LiveRun {
+  id: string;
+  status: string;
+  issueId: string | null;
+}
+
+/** The executor's live (queued/running) runs that were woken for this issue. */
+async function listExecutorRunsForIssue(ctx: TestContext, issueId: string): Promise<LiveRun[]> {
+  const res = await ctx.boardRequest.get(`${BASE_URL}/api/companies/${ctx.companyId}/live-runs`);
+  expect(res.ok()).toBe(true);
+  const runs: Array<{ id: string; agentId: string; status: string; issueId?: string | null }> = await res.json();
+  return runs
+    .filter((run) => run.agentId === ctx.executor.agentId && run.issueId === issueId)
+    .map((run) => ({ id: run.id, status: run.status, issueId: run.issueId ?? null }));
+}
+
+/**
+ * Wait for the run the server woke the executor with for this issue, make
+ * sure it owns the issue checkout, and return its id.
+ *
+ * Handing the issue to the executor (creation, or a reviewer sending it
+ * back) queues a wake for it. Once that run is running it either already
+ * checked the issue out (an "issue_assigned" wake) or is expected to do so
+ * itself (an "execution_changes_requested" wake) -- the explicit checkout
+ * below covers the second case and is a no-op for the first.
+ */
+async function acquireExecutorRun(ctx: TestContext, issueId: string): Promise<string> {
+  let runId: string | null = null;
+  await expect
+    .poll(
+      async () => {
+        const lock = await getIssueRunLockState(ctx.boardRequest, issueId);
+        if (lock.assigneeAgentId !== ctx.executor.agentId) return `issue assigned to ${lock.assigneeAgentId}`;
+        const running = (await listExecutorRunsForIssue(ctx, issueId)).filter((run) => run.status === "running");
+        if (running.length === 0) return "no running executor run for this issue";
+        // Prefer the run that already holds the checkout so we never fight
+        // it for the lock.
+        runId = running.find((run) => run.id === lock.checkoutRunId)?.id ?? running[0].id;
+        return "running";
+      },
+      {
+        message: `the executor should be woken for issue ${issueId}`,
+        timeout: RUN_STATE_TIMEOUT_MS,
+        intervals: RUN_STATE_POLL_INTERVALS_MS,
+      },
+    )
+    .toBe("running");
+
+  const lock = await getIssueRunLockState(ctx.boardRequest, issueId);
+  if (lock.checkoutRunId !== runId) {
+    const checkoutRes = await ctx.executor.request.post(`${BASE_URL}/api/issues/${issueId}/checkout`, {
+      headers: { "X-Paperclip-Run-Id": runId! },
+      data: { agentId: ctx.executor.agentId, expectedStatuses: ["in_progress"] },
+    });
+    expect(checkoutRes.ok(), `executor run ${runId} could not check out issue ${issueId}: ${await checkoutRes.text()}`).toBe(true);
+  }
+  return runId!;
+}
+
+/**
+ * Cancel the executor's run and wait until the executor has no live run left
+ * for this issue and holds none of its locks. Cancelling releases the issue,
+ * which also promotes any wake that was parked behind the run (the reviewer's
+ * assignment wake, or a second executor wake coalesced onto the same issue);
+ * a promoted executor run is cancelled too, so every stage starts from an
+ * idle executor and a released issue.
+ */
+async function endExecutorRun(ctx: TestContext, issueId: string, runId: string) {
+  const res = await ctx.boardRequest.post(`${BASE_URL}/api/heartbeat-runs/${runId}/cancel`);
+  expect(res.ok()).toBe(true);
+  await expect
+    .poll(
+      async () => {
+        const live = await listExecutorRunsForIssue(ctx, issueId);
+        for (const run of live) {
+          await ctx.boardRequest.post(`${BASE_URL}/api/heartbeat-runs/${run.id}/cancel`);
+        }
+        if (live.length > 0) return `executor still has ${live.length} live run(s) for the issue`;
+        const lock = await getIssueRunLockState(ctx.boardRequest, issueId);
+        if (lock.checkoutRunId === runId || lock.executionRunId === runId) return `run ${runId} still holds a lock`;
+        return "released";
+      },
+      {
+        message: `executor run ${runId} should release issue ${issueId}`,
+        timeout: RUN_STATE_TIMEOUT_MS,
+        intervals: RUN_STATE_POLL_INTERVALS_MS,
+      },
+    )
+    .toBe("released");
+}
+
+/**
+ * Act as the executor from inside the run the server woke it with: wait for
+ * that run to own the issue, PATCH with its run id, then end the run.
+ */
+async function executorPatch(ctx: TestContext, issueId: string, data: Record<string, unknown>) {
+  const runId = await acquireExecutorRun(ctx, issueId);
+  const res = await ctx.executor.request.patch(`${BASE_URL}/api/issues/${issueId}`, {
+    headers: { "X-Paperclip-Run-Id": runId },
+    data,
+  });
+  await endExecutorRun(ctx, issueId, runId);
+  return res;
+}
+
 /** PATCH an issue as an agent with a fresh heartbeat run ID. */
 async function agentPatch(
   board: APIRequestContext,
@@ -86,54 +217,6 @@ async function agentPatch(
   const res = await agent.request.patch(`${BASE_URL}/api/issues/${issueId}`, {
     headers: { "X-Paperclip-Run-Id": runId },
     data,
-  });
-  return res;
-}
-
-/** Checkout an issue as an agent, then PATCH it. Used for executor mark-done. */
-async function agentCheckoutAndPatch(
-  board: APIRequestContext,
-  agent: AgentAuth,
-  issueId: string,
-  expectedStatuses: string[],
-  patchData: Record<string, unknown>,
-) {
-  const runId = await invokeHeartbeat(board, agent.agentId);
-  // Checkout (sets executionRunId so PATCH is allowed)
-  const checkoutRes = await agent.request.post(`${BASE_URL}/api/issues/${issueId}/checkout`, {
-    headers: { "X-Paperclip-Run-Id": runId },
-    data: { agentId: agent.agentId, expectedStatuses },
-  });
-  if (!checkoutRes.ok()) {
-    if (checkoutRes.status() === 409) {
-      const issueRunLock = await getIssueRunLockState(board, issueId);
-      const lockedRunId = issueRunLock.checkoutRunId ?? issueRunLock.executionRunId;
-      const res = await agent.request.patch(`${BASE_URL}/api/issues/${issueId}`, {
-        headers: { "X-Paperclip-Run-Id": lockedRunId ?? runId },
-        data: patchData,
-      });
-      if (res.ok() && issueRunLock.assigneeAgentId === agent.agentId) {
-        return res;
-      }
-    }
-    // If agent checkout fails (e.g. run expired), fall back to board checkout
-    // then PATCH with the agent's identity
-    const boardCheckout = await board.post(`${BASE_URL}/api/issues/${issueId}/checkout`, {
-      data: { agentId: agent.agentId, expectedStatuses },
-    });
-    if (!boardCheckout.ok()) {
-      throw new Error(`Board checkout failed: ${await boardCheckout.text()}`);
-    }
-    // Board PATCH (executor mark-done triggers signoff regardless of actor)
-    const res = await board.patch(`${BASE_URL}/api/issues/${issueId}`, {
-      data: patchData,
-    });
-    return res;
-  }
-  // PATCH with agent identity
-  const res = await agent.request.patch(`${BASE_URL}/api/issues/${issueId}`, {
-    headers: { "X-Paperclip-Run-Id": runId },
-    data: patchData,
   });
   return res;
 }
@@ -164,7 +247,7 @@ async function setupCompany(boardRequest: APIRequestContext): Promise<TestContex
   const companyPrefix = company.issuePrefix ?? company.prefix ?? company.urlKey ?? "E2E";
 
   // Helper: hire/approve agent + API key + request context
-  async function createAgent(name: string, role: string, title: string): Promise<AgentAuth> {
+  async function createAgent(name: string, role: string, title: string, stubArgs: string[]): Promise<AgentAuth> {
     const agentRes = await boardRequest.post(`${BASE_URL}/api/companies/${companyId}/agent-hires`, {
       data: {
         name,
@@ -173,7 +256,7 @@ async function setupCompany(boardRequest: APIRequestContext): Promise<TestContex
         adapterType: "process",
         adapterConfig: {
           command: process.execPath,
-          args: ["-e", "process.stdout.write('done\\n')"],
+          args: stubArgs,
         },
       },
     });
@@ -201,9 +284,9 @@ async function setupCompany(boardRequest: APIRequestContext): Promise<TestContex
     };
   }
 
-  const executor = await createAgent("Executor", "engineer", "Software Engineer");
-  const reviewer = await createAgent("Reviewer", "qa", "QA Engineer");
-  const approver = await createAgent("Approver", "cto", "CTO");
+  const executor = await createAgent("Executor", "engineer", "Software Engineer", EXECUTOR_STUB_ARGS);
+  const reviewer = await createAgent("Reviewer", "qa", "QA Engineer", INSTANT_STUB_ARGS);
+  const approver = await createAgent("Approver", "cto", "CTO", INSTANT_STUB_ARGS);
 
   return {
     companyId,
@@ -252,6 +335,13 @@ test.describe("Signoff execution policy", () => {
       await agent.request.dispose();
     }
 
+    // Stop any executor stub still alive (a test that failed before ending its run)
+    const liveRunsRes = await board.get(`${BASE_URL}/api/companies/${ctx.companyId}/live-runs`).catch(() => null);
+    const liveRuns: Array<{ id: string }> = liveRunsRes?.ok() ? await liveRunsRes.json() : [];
+    for (const run of liveRuns) {
+      await board.post(`${BASE_URL}/api/heartbeat-runs/${run.id}/cancel`).catch(() => {});
+    }
+
     // Clean up issues, keys, agents, company (best-effort)
     for (const issueId of ctx.issueIds) {
       await board.patch(`${BASE_URL}/api/issues/${issueId}`, {
@@ -277,10 +367,10 @@ test.describe("Signoff execution policy", () => {
     expect(issue.executionPolicy.stages[1].type).toBe("approval");
 
     // Step 1: Executor marks done → should route to reviewer
-    const step1Res = await agentCheckoutAndPatch(
-      ctx.boardRequest, ctx.executor, issueId, ["in_progress"],
-      { status: "done", comment: "Implemented the feature, ready for review." },
-    );
+    const step1Res = await executorPatch(ctx, issueId, {
+      status: "done",
+      comment: "Implemented the feature, ready for review.",
+    });
     expect(step1Res.ok()).toBe(true);
     const step1Issue = await step1Res.json();
 
@@ -335,10 +425,7 @@ test.describe("Signoff execution policy", () => {
     const issueId = issue.id;
 
     // Executor marks done → routes to reviewer
-    const doneRes = await agentCheckoutAndPatch(
-      ctx.boardRequest, ctx.executor, issueId, ["in_progress"],
-      { status: "done", comment: "Ready for review." },
-    );
+    const doneRes = await executorPatch(ctx, issueId, { status: "done", comment: "Ready for review." });
     expect(doneRes.ok()).toBe(true);
     expect((await doneRes.json()).status).toBe("in_review");
 
@@ -355,11 +442,8 @@ test.describe("Signoff execution policy", () => {
     expect(changesIssue.executionState.status).toBe("changes_requested");
     expect(changesIssue.executionState.lastDecisionOutcome).toBe("changes_requested");
 
-    // Executor re-submits → goes back to reviewer (same stage)
-    const resubmitRes = await agentCheckoutAndPatch(
-      ctx.boardRequest, ctx.executor, issueId, ["in_progress"],
-      { status: "done", comment: "Fixed the edge cases." },
-    );
+    // Executor re-submits (from the run the bounce-back woke it with) → goes back to reviewer (same stage)
+    const resubmitRes = await executorPatch(ctx, issueId, { status: "done", comment: "Fixed the edge cases." });
     expect(resubmitRes.ok()).toBe(true);
     const resubmitIssue = await resubmitRes.json();
 
@@ -374,10 +458,8 @@ test.describe("Signoff execution policy", () => {
     const issueId = issue.id;
 
     // Executor marks done → routes to reviewer
-    await agentCheckoutAndPatch(
-      ctx.boardRequest, ctx.executor, issueId, ["in_progress"],
-      { status: "done", comment: "Done." },
-    );
+    const doneRes = await executorPatch(ctx, issueId, { status: "done", comment: "Done." });
+    expect(doneRes.ok()).toBe(true);
 
     // Reviewer tries to approve without comment → should fail
     const noCommentRes = await agentPatch(
@@ -394,10 +476,7 @@ test.describe("Signoff execution policy", () => {
     const issueId = issue.id;
 
     // Executor marks done → routes to reviewer
-    const doneRes = await agentCheckoutAndPatch(
-      ctx.boardRequest, ctx.executor, issueId, ["in_progress"],
-      { status: "done", comment: "Done." },
-    );
+    const doneRes = await executorPatch(ctx, issueId, { status: "done", comment: "Done." });
     expect(doneRes.ok()).toBe(true);
 
     // Verify issue is in_review with reviewer
@@ -422,10 +501,7 @@ test.describe("Signoff execution policy", () => {
     ]);
 
     // Executor marks done → routes to reviewer
-    const doneRes = await agentCheckoutAndPatch(
-      ctx.boardRequest, ctx.executor, issue.id, ["in_progress"],
-      { status: "done", comment: "Ready for review." },
-    );
+    const doneRes = await executorPatch(ctx, issue.id, { status: "done", comment: "Ready for review." });
     expect(doneRes.ok()).toBe(true);
     expect((await doneRes.json()).status).toBe("in_review");
 
