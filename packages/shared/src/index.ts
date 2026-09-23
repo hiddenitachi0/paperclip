@@ -665,6 +665,8 @@ export type {
   AgentAccessState,
   AgentChainOfCommandEntry,
   AgentDetail,
+  AgentPersonaSummary,
+  AgentLimits,
   ClearAgentErrorResponse,
   AgentPermissions,
   AgentInstructionsBundleMode,
@@ -1453,7 +1455,14 @@ export {
   laneAProviderModelIssue,
   laneAAdapterConfigSchema,
   type QuickAgentField,
+  PERSONA_JOB_FIELDS,
+  AGENT_LIMITS_NOTES_MAX_LENGTH,
+  agentLimitsSchema,
+  parseAgentLimits,
+  type PersonaJobField,
+  type AgentLimitsInput,
 } from "./validators/index.js";
+export { formatAgentDisplayName } from "./agent-display-name.js";
 
 export {
   sendCrossCompanyInstructionSchema,

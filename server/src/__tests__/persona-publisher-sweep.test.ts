@@ -92,13 +92,14 @@ describeEmbeddedPostgres("persona-publisher-sweep tick", () => {
     return companyId;
   }
 
+  // DUR-4000: the person is its own row and the job points at it (agents.persona_id).
   async function seedPersona(companyId: string, overrides: Partial<typeof personas.$inferInsert> = {}) {
     const agentId = randomUUID();
-    await db.insert(agents).values({ id: agentId, companyId, name: "Maja", role: "persona" });
     const [persona] = await db
       .insert(personas)
-      .values({ id: randomUUID(), companyId, agentId, handle: `@maja-${agentId.slice(0, 6)}`, ...overrides })
+      .values({ id: randomUUID(), companyId, displayName: "Maja", handle: `@maja-${agentId.slice(0, 6)}`, ...overrides })
       .returning();
+    await db.insert(agents).values({ id: agentId, companyId, name: "Sales agent 1", role: "persona", personaId: persona!.id });
     return persona!;
   }
 

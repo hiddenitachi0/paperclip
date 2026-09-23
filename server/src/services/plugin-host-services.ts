@@ -39,7 +39,7 @@ import { documentService } from "./documents.js";
 import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
-import { personaGenerationCapService } from "./persona-generation-cap.js";
+import { agentDailyLimitService } from "./agent-daily-limits.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -343,7 +343,7 @@ export function buildHostServices(
   const authorization = authorizationService(db);
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
-  const personaGenerationCap = personaGenerationCapService(db);
+  const agentDailyLimits = agentDailyLimitService(db);
   const scopedBus = eventBus.forPlugin(pluginKey);
 
   // Track active session event subscriptions for cleanup
@@ -2440,7 +2440,7 @@ export function buildHostServices(
         // agent from the run itself, the same way issues.createAttachment
         // resolves which issue a plugin may attach to from the run's
         // checkout -- a plugin cannot reserve or evade a different
-        // persona's cap by claiming a different identity.
+        // agent's limit by claiming a different identity.
         if (!params.runId) {
           throw new Error("runId is required");
         }
@@ -2453,7 +2453,11 @@ export function buildHostServices(
           throw new Error("Run not found in this company");
         }
 
-        return personaGenerationCap.reserveGeneration(run.agentId);
+        // DUR-4000: the limit is the agent's own (agents.limits
+        // .dailyImageGenerations), counted in agent_daily_counters. The
+        // method keeps its name and result shape so plugins built against
+        // the SDK (media-studio) need no change.
+        return agentDailyLimits.reserve(run.agentId, "image_generation");
       },
     },
 

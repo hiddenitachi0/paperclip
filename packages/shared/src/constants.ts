@@ -27,10 +27,11 @@ export const AGENT_STATUSES = [
 ] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
-// DUR-133: a persona's own lifecycle, separate from the underlying agent's
-// runtime status (AGENT_STATUSES above). "draft" = being set up, not yet
-// posting-ready. "active" = live. "paused" = disconnected/deleted/paused
-// from the Personas page (item 14) — her routine stops and her queue blocks.
+// DUR-133: a persona's own lifecycle, separate from the runtime status of the
+// agents it is attached to (AGENT_STATUSES above). "draft" = being set up,
+// not yet posting-ready. "active" = live. "paused" = disconnected/deleted/
+// paused from the Personas page (item 14) — the persona's routine stops and
+// its publish queue blocks.
 export const PERSONA_STATUSES = ["draft", "active", "paused"] as const;
 export type PersonaStatus = (typeof PERSONA_STATUSES)[number];
 

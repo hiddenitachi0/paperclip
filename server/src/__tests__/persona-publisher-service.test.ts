@@ -91,14 +91,18 @@ describeEmbeddedPostgres("persona-publisher-service attemptPublish", () => {
     return companyId;
   }
 
+  // DUR-4000: the person is its own row and the job points at it
+  // (agents.persona_id). `agentId` is returned alongside so the assertions
+  // below can still say "the persona's agent"; the legacy personas.agent_id
+  // column is left null, exactly as a persona created after 0175 looks.
   async function seedPersona(companyId: string) {
     const agentId = randomUUID();
-    await db.insert(agents).values({ id: agentId, companyId, name: "Maja", role: "persona" });
     const [persona] = await db
       .insert(personas)
-      .values({ id: randomUUID(), companyId, agentId, handle: "@maja" })
+      .values({ id: randomUUID(), companyId, displayName: "Maja", handle: "@maja" })
       .returning();
-    return persona!;
+    await db.insert(agents).values({ id: agentId, companyId, name: "Sales agent 1", role: "persona", personaId: persona!.id });
+    return { ...persona!, agentId };
   }
 
   async function seedAccount(
@@ -413,6 +417,33 @@ describeEmbeddedPostgres("persona-publisher-service attemptPublish", () => {
     expect(String(payload.summary)).toContain("post 3 of 5");
     expect(String(payload.summary)).toContain("up to 3 a day");
     expect(String(payload.summary)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}/);
+    // DUR-4000: the card names the person, never a pronoun on their behalf.
+    expect(String(payload.summary)).toContain("Maja posts here without asking");
+    expect(String(payload.summary)).not.toMatch(/\b(she|her|he|him)\b/);
+  });
+
+  it("DUR-4000: a persona holding two jobs files the approval on the job that queued the post, and falls back to an attached job", async () => {
+    const companyId = await seedCompany();
+    const persona = await seedPersona(companyId);
+    const secondAgentId = randomUUID();
+    await db.insert(agents).values({ id: secondAgentId, companyId, name: "Accountant", role: "persona", personaId: persona.id });
+    const account = await seedAccount(companyId, persona.id, { autonomyMode: "requires_approval", warmupPostsRequired: 0 });
+
+    // Queued by the second job.
+    const queuedBySecond = await personaPublisherService(db).enqueuePost(companyId, account.id, { caption: "from books" }, { agentId: secondAgentId });
+    expect(queuedBySecond.agentId).toBe(secondAgentId);
+    await personaPublisherService(db).attemptPublish(queuedBySecond.id);
+    const [reloaded] = await db.select().from(personaPosts).where(eq(personaPosts.id, queuedBySecond.id));
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, reloaded!.approvalId!));
+    expect(approval!.requestedByAgentId).toBe(secondAgentId);
+
+    // Queued by the board (no agent recorded): the first attached job stands in.
+    const queuedByBoard = await personaPublisherService(db).enqueuePost(companyId, account.id, { caption: "from the board" });
+    expect(queuedByBoard.agentId).toBeNull();
+    await personaPublisherService(db).attemptPublish(queuedByBoard.id);
+    const [reloadedBoard] = await db.select().from(personaPosts).where(eq(personaPosts.id, queuedByBoard.id));
+    const [boardApproval] = await db.select().from(approvals).where(eq(approvals.id, reloadedBoard!.approvalId!));
+    expect([persona.agentId, secondAgentId]).toContain(boardApproval!.requestedByAgentId);
   });
 
   it("writes an operator notice with a plain message when the platform rejects the post", async () => {

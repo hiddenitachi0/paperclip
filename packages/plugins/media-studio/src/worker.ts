@@ -104,15 +104,16 @@ const plugin = definePlugin({
         const issueId = typeof rawParams.issueId === "string" ? rawParams.issueId : "";
         if (!issueId) return { error: "issueId is required" };
 
-        // DUR-177: enforce the persona's daily generation cap in code, at
-        // the moment of this action -- not as prompt guidance. Reserved
-        // *before* calling the provider so a capped-out persona never
-        // spends generation cost/quota on a call that would just be
-        // rejected afterward. No-ops (always allowed) for agents that
-        // aren't a persona, or a persona with no cap set.
+        // DUR-177 / DUR-4000: enforce the calling agent's own daily image
+        // limit (agents.limits.dailyImageGenerations) in code, at the moment
+        // of this action -- not as prompt guidance. Reserved *before* calling
+        // the provider so a capped-out agent never spends generation
+        // cost/quota on a call that would just be rejected afterward. No-op
+        // (always allowed) for an agent with no limit set. The host resolves
+        // the agent from the run id; the plugin cannot name a different one.
         const reservation = await ctx.personas.reserveDailyGeneration(runCtx.companyId, { runId: runCtx.runId });
         if (!reservation.allowed) {
-          return { error: `Daily image generation cap (${reservation.cap}) reached for this persona today.` };
+          return { error: `Daily image limit (${reservation.cap ?? 0}) reached for this agent today.` };
         }
 
         try {
