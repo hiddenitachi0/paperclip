@@ -26,7 +26,11 @@ export const help: Record<string, string> = {
   reportsTo: "The agent this one reports to in the org hierarchy.",
   capabilities: "Describes what this agent can do. Shown in the org chart and used for task routing.",
   tone: "How this agent speaks — a few sentences, no backstory needed. Changes only the wording of what this agent writes. It never changes what the agent decides, what it flags, or how it reports bad news. Approval requests to you always stay plain. Saving a new voice starts the agent's next run fresh, so it re-reads its instructions.",
-  personality: "Who this agent is — backstory, likes and dislikes, how they act and react. Only needed for a persona agent; most agents only need a tone. Composes with tone: personality defines the agent, tone shapes how they write. Same limits as tone: never changes what the agent decides, and approval requests to you always stay plain.",
+  personality: "Who this agent is — backstory, likes and dislikes, how they act and react. Most agents only need a tone. Composes with tone: personality defines the agent, tone shapes how they write. Ignored while a persona is attached: the persona's own backstory is used instead. Same limits as tone: never changes what the agent decides, and approval requests to you always stay plain.",
+  // DUR-4000: a persona is a person; an agent is a job. The picker says who
+  // does this job; the limits box is the job's own.
+  persona: "The person doing this job. Attach a persona and this agent works as that person: their name shows next to the job name everywhere, their backstory replaces the Personality field, and their voice replaces the tone when they have one. The same persona can hold several jobs.",
+  limits: "This job's own limits. Pictures per day is enforced by Paperclip in code. Posts per day, runs per day and the standing rules are guidance: the agent reads them and is expected to follow them, but nothing stops it in code yet.",
   adapterType: "How this agent runs: local CLI (Claude/Codex/OpenCode), OpenClaw Gateway, spawned process, or generic HTTP webhook.",
   cwd: "Deprecated legacy working directory fallback for local adapters. Existing agents may still carry this value, but new configurations should use project workspaces instead.",
   promptTemplate: "Sent on every heartbeat. Keep this small and dynamic. Use it for current-task framing, not large static instructions. Supports {{ agent.id }}, {{ agent.name }}, {{ agent.role }} and other template variables.",

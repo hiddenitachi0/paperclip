@@ -46,6 +46,16 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
     Object.assign(patch, overlay.identity);
   }
 
+  // DUR-4000: while a persona is attached (kept or newly picked), the
+  // persona's backstory fills the personality slot and the agent's own
+  // personality text is ignored at prompt time. Never send it in that case,
+  // matching what the New Agent page does on hire, so nothing is said twice
+  // and a hidden field cannot be written by accident.
+  const effectivePersonaId = "personaId" in overlay.identity ? overlay.identity.personaId : agent.personaId ?? null;
+  if (effectivePersonaId && "personality" in patch) {
+    delete patch.personality;
+  }
+
   if (overlay.adapterType !== undefined) {
     patch.adapterType = overlay.adapterType;
   }

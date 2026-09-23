@@ -766,4 +766,39 @@ describe("Agents", () => {
 
     expect(container.textContent).not.toContain("selected");
   });
+
+  // DUR-4000: "Sales agent 1 (Maja)" -- the job name with the person in
+  // brackets, and never "Maja (Maja)" for a job that was renamed to its
+  // persona before the split.
+  it("shows the job name with the persona in brackets, and only the job name when they match", async () => {
+    const maja = { id: "persona-1", displayName: "Maja", pronouns: "she/her", avatarAssetId: null };
+    mockAgentsApi.list.mockResolvedValue([
+      makeAgent({ id: "agent-1", name: "Sales agent 1", urlKey: "sales-agent-1", persona: maja, personaId: maja.id }),
+      makeAgent({ id: "agent-2", name: "Maja", urlKey: "maja", persona: maja, personaId: maja.id }),
+      makeAgent({ id: "agent-3", name: "Support agent", urlKey: "support-agent", persona: null, personaId: null }),
+    ]);
+    mockAgentsApi.org.mockResolvedValue([
+      { id: "agent-1", name: "Sales agent 1", role: "engineer", status: "active", reports: [] },
+      { id: "agent-2", name: "Maja", role: "engineer", status: "active", reports: [] },
+      { id: "agent-3", name: "Support agent", role: "engineer", status: "active", reports: [] },
+    ]);
+
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Agents />
+          </ToastProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Sales agent 1 (Maja)");
+    expect(text).not.toContain("Maja (Maja)");
+    expect(findAgentRow(container, "Support agent")?.textContent).not.toContain("(");
+  });
 });

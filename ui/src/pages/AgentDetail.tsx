@@ -93,11 +93,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
 import { AgentAvatar } from "../components/AgentAvatar";
+import { PersonaAvatar } from "../components/PersonaAvatar";
 import { agentAvatarUrl } from "../lib/agent-icons";
 import { describeAgentAvatarError } from "../lib/agent-avatar-errors";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
 import {
   isUuidLike,
+  formatAgentDisplayName,
   type Agent,
   type AgentSkillEntry,
   type AgentSkillSnapshot,
@@ -1086,11 +1088,23 @@ export function AgentDetail() {
             </button>
           </AgentIconPicker>
           <div className="min-w-0">
-            <h2 className="text-2xl font-bold truncate">{agent.name}</h2>
+            {/* DUR-4000: the job name with the person in brackets, plus a chip to the persona. */}
+            <h2 className="text-2xl font-bold truncate">{formatAgentDisplayName(agent, agent.persona)}</h2>
             <p className="text-sm text-muted-foreground truncate">
               {headerRoleState?.job?.name ?? roleLabels[agent.role] ?? agent.role}
               {agent.title ? ` - ${agent.title}` : ""}
             </p>
+            {agent.persona && (
+              <Link
+                to={`/personas/${agent.persona.id}`}
+                className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/40 py-0.5 pl-0.5 pr-2 text-xs text-foreground/80 no-underline transition-colors hover:bg-accent/50"
+                title={`Persona: ${agent.persona.displayName}`}
+              >
+                <PersonaAvatar persona={agent.persona} size="xs" />
+                <span className="truncate">{agent.persona.displayName}</span>
+                {agent.persona.pronouns ? <span className="text-muted-foreground">{agent.persona.pronouns}</span> : null}
+              </Link>
+            )}
           </div>
         </div>
         <AgentActionButtons
@@ -1209,7 +1223,11 @@ export function AgentDetail() {
       {activeView === "dashboard" && (
         <div className="space-y-8">
           {agent.laneAEnabled && resolvedCompanyId && (
-            <QuickAgentChatPanel agentId={agent.id} agentName={agent.name} companyId={resolvedCompanyId} />
+            <QuickAgentChatPanel
+              agentId={agent.id}
+              agentName={formatAgentDisplayName(agent, agent.persona)}
+              companyId={resolvedCompanyId}
+            />
           )}
           <AgentOverview
             agent={agent}

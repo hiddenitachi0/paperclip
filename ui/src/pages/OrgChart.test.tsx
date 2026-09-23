@@ -362,3 +362,47 @@ describe("OrgChart mobile tree view", () => {
     expect(navigateMock).toHaveBeenCalledWith("/agents/engineer");
   });
 });
+
+// DUR-4000: the org chart names a job with the person in brackets.
+describe("OrgChart persona display names", () => {
+  let container: HTMLDivElement;
+  let root: ReturnType<typeof createRoot>;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    isMobileMock.mockReturnValue(true);
+    orgMock.mockResolvedValue(orgTree);
+    listMock.mockResolvedValue([
+      agents[0],
+      { ...agents[1], personaId: "persona-1", persona: { id: "persona-1", displayName: "Maja", pronouns: null, avatarAssetId: null } },
+    ]);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.innerHTML = "";
+    vi.clearAllMocks();
+  });
+
+  it("renders 'Engineer (Maja)' for a job with a persona and the plain name otherwise", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OrgChart />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Engineer (Maja)");
+    expect(text).toContain("CEO");
+    expect(text).not.toContain("CEO (");
+  });
+});

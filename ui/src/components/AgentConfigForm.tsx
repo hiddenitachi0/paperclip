@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Agent,
+  AgentLimits,
   AdapterEnvironmentTestResult,
   CompanySecret,
   EnvBinding,
@@ -46,6 +47,7 @@ import {
   adapterLabels,
 } from "./agent-config-primitives";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { AgentLimitsFields, PERSONA_VOICE_WINS_HINT, PersonaPicker } from "./AgentPersonaFields";
 import { defaultCreateValues } from "./agent-config-defaults";
 import { getUIAdapter } from "../adapters";
 import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
@@ -370,6 +372,16 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const set = isCreate
     ? (patch: Partial<CreateConfigValues>) => props.onChange(patch)
     : null;
+  // DUR-4000: which person does this job (edit mode only; the New Agent page
+  // has its own picker). While a persona is attached the Personality field is
+  // hidden -- the persona's backstory is used instead -- and Tone says the
+  // persona's voice wins when it has one.
+  const effectivePersonaId = isCreate
+    ? null
+    : (eff("identity", "personaId", props.agent.personaId ?? null) as string | null);
+  const effectiveLimits = isCreate
+    ? ({} as AgentLimits)
+    : (eff("identity", "limits", props.agent.limits ?? {}) as AgentLimits);
   const rawCurrentDefaultEnvironmentId = isCreate
     ? val!.defaultEnvironmentId ?? ""
     : eff("identity", "defaultEnvironmentId", props.agent.defaultEnvironmentId ?? "");
@@ -935,6 +947,14 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 placeholder="e.g. VP of Engineering"
               />
             </Field>
+            <Field label="Persona" hint={help.persona}>
+              <PersonaPicker
+                companyId={selectedCompanyId ?? props.agent.companyId}
+                value={effectivePersonaId}
+                onChange={(personaId) => mark("identity", "personaId", personaId)}
+                className="font-mono"
+              />
+            </Field>
             <Field label="Reports to" hint={help.reportsTo}>
               <ReportsToPicker
                 agents={companyAgents}
@@ -972,39 +992,42 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     />
                     <div
                       className={cn(
-                        "text-xs mt-1 text-right",
+                        "text-xs mt-1 flex items-center justify-between gap-2",
                         toneValue.length > 600 ? "text-destructive" : "text-muted-foreground",
                       )}
                     >
-                      {toneValue.length}/600
+                      <span>{effectivePersonaId ? PERSONA_VOICE_WINS_HINT : ""}</span>
+                      <span>{toneValue.length}/600</span>
                     </div>
                   </>
                 );
               })()}
             </Field>
-            <Field label="Personality" hint={help.personality}>
-              {(() => {
-                const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
-                return (
-                  <>
-                    <MarkdownEditor
-                      value={personalityValue}
-                      onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 20000) || null)}
-                      placeholder="Backstory, likes and dislikes, how she looks, how she behaves. Only for persona agents — leave blank otherwise."
-                      contentClassName="min-h-[88px] text-sm"
-                    />
-                    <div
-                      className={cn(
-                        "text-xs mt-1 text-right",
-                        personalityValue.length > 20000 ? "text-destructive" : "text-muted-foreground",
-                      )}
-                    >
-                      {personalityValue.length}/20000
-                    </div>
-                  </>
-                );
-              })()}
-            </Field>
+            {!effectivePersonaId && (
+              <Field label="Personality" hint={help.personality}>
+                {(() => {
+                  const personalityValue = eff("identity", "personality", props.agent.personality ?? "") ?? "";
+                  return (
+                    <>
+                      <MarkdownEditor
+                        value={personalityValue}
+                        onChange={(v) => mark("identity", "personality", (v ?? "").slice(0, 20000) || null)}
+                        placeholder="Backstory, likes and dislikes, how they look, how they behave. Leave blank unless this job should feel like someone — or attach a persona instead."
+                        contentClassName="min-h-[88px] text-sm"
+                      />
+                      <div
+                        className={cn(
+                          "text-xs mt-1 text-right",
+                          personalityValue.length > 20000 ? "text-destructive" : "text-muted-foreground",
+                        )}
+                      >
+                        {personalityValue.length}/20000
+                      </div>
+                    </>
+                  );
+                })()}
+              </Field>
+            )}
             {isLocal && !props.hidePromptTemplate && (
               <>
                 <Field label="Prompt Template" hint={help.promptTemplate}>
@@ -1029,6 +1052,25 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ---- Limits (edit only; DUR-4000) ---- */}
+      {!isCreate && (
+        <div className={cn(!cards && "border-b border-border")}>
+          {cards
+            ? <h3 className="text-sm font-medium mb-3">Limits</h3>
+            : <div className="px-4 py-2 text-xs font-medium text-muted-foreground">Limits</div>
+          }
+          <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
+            <Field label="Daily limits and standing rules" hint={help.limits}>
+              <AgentLimitsFields
+                value={effectiveLimits}
+                onChange={(next) => mark("identity", "limits", next)}
+                inputClassName="font-mono"
+              />
+            </Field>
           </div>
         </div>
       )}
@@ -1072,6 +1114,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             <Field label="Environment override">
               <div className="space-y-2">
                 <select
+                  aria-label="Environment override"
                   className={inputClass}
                   value={currentDefaultEnvironmentId}
                   onChange={(event) => {

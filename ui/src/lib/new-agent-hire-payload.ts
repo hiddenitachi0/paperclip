@@ -1,6 +1,7 @@
 import type { CreateConfigValues } from "../components/AgentConfigForm";
 import { buildNewAgentRuntimeConfig } from "./new-agent-runtime-config";
-import type { AgentPermissions } from "@paperclipai/shared";
+import type { AgentLimits, AgentPermissions } from "@paperclipai/shared";
+import { hasAnyAgentLimit } from "./agent-limits";
 
 export function buildNewAgentHirePayload(input: {
   name: string;
@@ -8,6 +9,14 @@ export function buildNewAgentHirePayload(input: {
   title?: string;
   tone?: string;
   personality?: string;
+  /**
+   * DUR-4000: the person doing this job (personas.id). Only sent when picked;
+   * while a persona is attached the personality text is not sent at all, so
+   * nothing is said twice at prompt time.
+   */
+  personaId?: string | null;
+  /** DUR-4000: the job's own limits box. Only sent when at least one limit is set. */
+  limits?: AgentLimits | null;
   reportsTo?: string | null;
   selectedSkillKeys?: string[];
   configValues: CreateConfigValues;
@@ -34,6 +43,8 @@ export function buildNewAgentHirePayload(input: {
     title,
     tone,
     personality,
+    personaId,
+    limits,
     reportsTo,
     selectedSkillKeys = [],
     configValues,
@@ -48,7 +59,9 @@ export function buildNewAgentHirePayload(input: {
     role: effectiveRole,
     ...(title?.trim() ? { title: title.trim() } : {}),
     ...(tone?.trim() ? { tone: tone.trim() } : {}),
-    ...(personality?.trim() ? { personality: personality.trim() } : {}),
+    ...(!personaId && personality?.trim() ? { personality: personality.trim() } : {}),
+    ...(personaId ? { personaId } : {}),
+    ...(hasAnyAgentLimit(limits) ? { limits: limits! } : {}),
     ...(reportsTo ? { reportsTo } : {}),
     ...(selectedSkillKeys.length > 0 ? { desiredSkills: selectedSkillKeys } : {}),
     adapterType: configValues.adapterType,

@@ -1480,6 +1480,7 @@ export {
   parseAgentLimits,
   type PersonaJobField,
   type AgentLimitsInput,
+  PERSONA_FIELD_MAX_LENGTHS,
 } from "./validators/index.js";
 export { formatAgentDisplayName } from "./agent-display-name.js";
 

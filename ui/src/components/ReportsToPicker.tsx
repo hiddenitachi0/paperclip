@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Agent } from "@paperclipai/shared";
+import { formatAgentDisplayName, type Agent } from "@paperclipai/shared";
 import {
   Popover,
   PopoverContent,
@@ -68,7 +68,7 @@ export function ReportsToPicker({
                   terminatedManager && "text-amber-900 dark:text-amber-200",
                 )}
               >
-                {`${selectedLabel(current.name)}${terminatedManager ? " (terminated)" : ""}`}
+                {`${selectedLabel(formatAgentDisplayName(current, current.persona))}${terminatedManager ? " (terminated)" : ""}`}
               </span>
             </>
           ) : (
@@ -99,7 +99,7 @@ export function ReportsToPicker({
           <div className="flex min-w-0 items-center gap-2 overflow-hidden px-2 py-1.5 text-xs text-muted-foreground border-b border-border mb-0.5">
             <AgentIcon icon={current.icon} className="shrink-0 h-3 w-3" />
             <span className="min-w-0 truncate">
-              Current: {current.name} (terminated)
+              Current: {formatAgentDisplayName(current, current.persona)} (terminated)
             </span>
           </div>
         )}
@@ -122,7 +122,7 @@ export function ReportsToPicker({
             }}
           >
             <AgentIcon icon={a.icon} className="shrink-0 h-3 w-3 text-muted-foreground" />
-            <span className="min-w-0 truncate">{a.name}</span>
+            <span className="min-w-0 truncate">{formatAgentDisplayName(a, a.persona)}</span>
             <span className="text-muted-foreground ml-auto shrink-0">{roleLabels[a.role] ?? a.role}</span>
           </button>
         ))}
