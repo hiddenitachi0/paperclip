@@ -82,6 +82,19 @@ describe("the Docker image starts the server hardened", () => {
     const cmd = production.split("\n").find((line) => line.startsWith("CMD "));
     expect(JSON.parse(cmd!.slice(4)).slice(0, 2)).toEqual(["/usr/local/lib/paperclip/node", "--disable-sigusr1"]);
   });
+
+  // Node as PID 1 does not reap orphaned grandchildren: every CLI run's tsx
+  // loader leaves an `esbuild` helper behind, which stayed a zombie until the
+  // container hit its process limit (~16 hours, "Cannot fork"). `init: true`
+  // makes Docker's init PID 1 (it reaps), with the server as its child. Set in
+  // the base compose file so every overlay (prod, secrets, CI) inherits it.
+  it("runs the server container under Docker's init so orphans are reaped", () => {
+    const compose = fs.readFileSync(path.join(REPO_ROOT, "docker/docker-compose.yml"), "utf8");
+    // One block per top-level key or service (lines indented by 0 or 2 spaces).
+    const serverBlock = compose.split(/\n(?=\S|  \S)/).find((block) => block.startsWith("  server:"));
+    expect(serverBlock, "docker/docker-compose.yml has a `server` service").toBeDefined();
+    expect(serverBlock).toMatch(/^    init: true$/m);
+  });
 });
 
 describe.skipIf(!isLinux || !hasDisableSigusr1)("kill -USR1 with --disable-sigusr1", () => {

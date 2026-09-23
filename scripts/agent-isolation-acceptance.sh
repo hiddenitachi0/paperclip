@@ -20,14 +20,25 @@
 # (default "0 1 2"). Checks for later stages are printed as KNOWN_GAP and do not
 # fail the run; each later stage adds its number here when it ships.
 #
+# The server is NOT the container's PID 1: docker/docker-compose.yml starts
+# the container with `init: true`, so Docker's init is PID 1 (it reaps the
+# helper processes agent runs leave behind) and the server is its child. The
+# probe and this script both find the server by its command line
+# (server_pid below) and fail loudly when they cannot.
+#
 # Stage 1 (the server keeps its keys out of reach) adds:
-#   - the probe's server checks: /proc/1/environ, every other readable
-#     /proc/*/environ and /proc/*/cmdline, /proc/1/fd must be closed to
-#     agents (the server runs non-dumpable from an unreadable copy of Node;
-#     reading its pipes through /proc/1/fd once froze it), /proc/1/mem, yama
-#     ptrace_scope, and `kill -USR1 1` must not open a debugger on
-#     127.0.0.1:9229; the script then checks the server still answers
-#     /api/health after the probe and after its own `kill -USR1 1` as node;
+#   - the probe's server checks: /proc/<server>/environ, every other readable
+#     /proc/*/environ and /proc/*/cmdline, /proc/<server>/fd must be closed
+#     to agents (the server runs non-dumpable from an unreadable copy of
+#     Node; reading its pipes through its /proc/<server>/fd once froze it),
+#     /proc/<server>/mem, yama ptrace_scope, and `kill -USR1 <server>` must
+#     not open a debugger on 127.0.0.1:9229; the script then checks the
+#     server still answers /api/health after the probe and after its own
+#     `kill -USR1 <server>` as node;
+#   - no zombie processes after the CLI has run a few times (the heartbeat
+#     runs above start the CLI, whose tsx loader leaves an `esbuild` helper
+#     behind each time): with Node as PID 1 those were never reaped and the
+#     container ran out of processes after ~16 hours ("Cannot fork");
 #   - a real backup through the server while a spy in front of pg_dump
 #     records whether its command line or environment carries a canary; the
 #     backup must still be a pg_dump backup with today's file name, in
@@ -148,6 +159,80 @@ canary() { # [hex-bytes] -> a fresh decoy value carrying the marker
 
 server_container() { tcompose 30 ps -q server; }
 
+# The server's pid inside the container (empty when there is not exactly one
+# match). Never 1: the container runs under Docker's init (`init: true`), so
+# the server is found by its command line -- /proc/<pid>/cmdline is readable
+# by everyone, even for a non-dumpable process. The init process carries the
+# same command as its own arguments, after the entrypoint's name, so that
+# name tells the two apart. Same lookup as find_server_pid in
+# scripts/isolation-probe.sh; keep the two in step.
+server_pid() { # container -> pid, or "" (with the reason on stderr)
+  local pids
+  pids="$(tdocker 15 exec "$1" sh -c '
+    for f in /proc/[0-9]*/cmdline; do
+      pid="${f#/proc/}"; pid="${pid%/cmdline}"
+      [ "$pid" = "$$" ] && continue
+      args=" $(tr "\0" " " <"$f" 2>/dev/null) "
+      case "$args" in
+        *" server/dist/index.js "*|*" /app/server/dist/index.js "*) ;;
+        *) continue ;;
+      esac
+      case "$args" in *"docker-entrypoint.sh "*) continue ;; esac
+      printf "%s " "$pid"
+    done' 2>/dev/null | tr -d '\n' | sed 's/ *$//')"
+  case "$pids" in
+    "") log "  no process in the container runs server/dist/index.js" ;;
+    *" "*) log "  several processes run server/dist/index.js: $pids" ;;
+    *) printf '%s' "$pids"; return 0 ;;
+  esac
+  return 1
+}
+
+# The number of zombie processes in the container ("State: Z" in
+# /proc/<pid>/status, which everyone can read). Their pids and names go to
+# zombies.txt in the log folder.
+count_zombies() { # container -> count (empty when the container could not be asked)
+  local out
+  out="$(tdocker 15 exec "$1" sh -c '
+    n=0
+    for d in /proc/[0-9]*; do
+      case "$(sed -n "s/^State:[[:space:]]*\([A-Za-z]\).*/\1/p" "$d/status" 2>/dev/null)" in
+        Z) n=$((n + 1)); printf "zombie %s %s\n" "${d#/proc/}" "$(cat "$d/comm" 2>/dev/null)" ;;
+      esac
+    done
+    echo "$n"' 2>/dev/null)" || return 1
+  printf '%s\n' "$out" | grep '^zombie ' >>"$LOG_DIR/zombies.txt" || true
+  printf '%s\n' "$out" | tail -1
+}
+
+# Stage 1: after the CLI has run a few times (each heartbeat run above starts
+# it), the container must hold no zombie processes. tsx, the CLI's TypeScript
+# loader, starts an `esbuild` helper and leaves it behind; when the CLI exits
+# the helper is handed to PID 1. With Node as PID 1 they were never reaped:
+# about 19 a minute, 18,641 after ~16 hours, and then "Cannot fork" -- every
+# CLI call aborted and no agent could start. `init: true` in
+# docker/docker-compose.yml puts Docker's init (which reaps) at PID 1. A
+# helper that has only just exited may not be collected yet, so this waits a
+# few seconds for the count to reach 0 before calling it a failure; a zombie
+# that PID 1 never collects stays whatever the wait.
+check_no_zombies() { # container
+  local container="$1" zombies="" i pid1
+  pid1="$(tdocker 15 exec "$container" cat /proc/1/comm 2>/dev/null | tr -d '[:space:]')"
+  : >"$LOG_DIR/zombies.txt"
+  for i in 1 2 3 4 5; do
+    zombies="$(count_zombies "$container")"
+    [ "$zombies" = 0 ] && break
+    sleep 2
+  done
+  if [ "$zombies" = 0 ]; then
+    log "PASS 1 no-zombies: 0 zombie processes after the CLI runs (PID 1 is ${pid1:-unknown})"
+  else
+    log "  zombies seen (pid name), last count first:"
+    tail -20 "$LOG_DIR/zombies.txt" | sed 's/^/    /' >&2
+    fail "LEAK 1 no-zombies: ${zombies:-an unknown number of} zombie process(es) left in the container after the CLI runs (PID 1 is ${pid1:-unknown}; a proper init must reap them -- docker-compose.yml init: true)"
+  fi
+}
+
 API_TIMEOUT=120 # seconds for one API call
 
 api_call() { # method, path, [json] -> response body
@@ -181,12 +266,18 @@ server_diagnostics() { # reason
     return 0
   fi
   log "  container: $(tdocker 15 inspect --format '{{.State.Status}} running={{.State.Running}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' "$container" 2>&1 | head -1)"
-  tdocker 15 exec -u 0 "$container" sh -c '
-    grep -E "^(Name|State|Uid|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt):" /proc/1/status
-    printf "wchan:\t%s\n" "$(cat /proc/1/wchan 2>/dev/null)"
-    printf "exe:\t%s\n" "$(readlink /proc/1/exe 2>/dev/null)"
-    printf "threads:\t"; for t in /proc/1/task/*; do printf "%s " "$(cat "$t/wchan" 2>/dev/null)"; done; echo
-  ' 2>&1 | head -20 | redact | sed 's/^/    pid1 /' >&2 || log "  (could not read /proc/1/status within 15s)"
+  local pid
+  log "  PID 1: $(tdocker 15 exec "$container" cat /proc/1/comm 2>/dev/null | tr -d '[:space:]')"
+  if pid="$(server_pid "$container")"; then
+    tdocker 15 exec -u 0 -e "PID=$pid" "$container" sh -c '
+      grep -E "^(Name|State|Uid|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt):" "/proc/$PID/status"
+      printf "wchan:\t%s\n" "$(cat "/proc/$PID/wchan" 2>/dev/null)"
+      printf "exe:\t%s\n" "$(readlink "/proc/$PID/exe" 2>/dev/null)"
+      printf "threads:\t"; for t in "/proc/$PID/task"/*; do printf "%s " "$(cat "$t/wchan" 2>/dev/null)"; done; echo
+    ' 2>&1 | head -20 | redact | sed "s/^/    server(pid $pid) /" >&2 || log "  (could not read /proc/$pid/status within 15s)"
+  else
+    log "  no server process found (see above)"
+  fi
   if tdocker 15 exec "$container" timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3100' >/dev/null 2>&1; then
     log "  port 3100 accepts connections"
   else
@@ -352,33 +443,41 @@ check_root_run_files() {
 # carried a canary. Then the backup must be today's kind of backup and
 # restore into a fresh database with psql.
 stage1_server_checks() {
-  local container="$1" spy_report backup_json engine backup_file exe
+  local container="$1" spy_report backup_json engine backup_file exe pid
+  # The server is not PID 1 (Docker's init is; see server_pid). Without
+  # exactly one server process none of the checks on it can run.
+  if ! pid="$(server_pid "$container")"; then
+    fail "server-pid: could not find the one server process by its command line (the server checks below cannot run)"
+    return
+  fi
+  log "PASS 1 server-pid: the server is pid $pid (PID 1 is $(tdocker 15 exec "$container" cat /proc/1/comm 2>/dev/null | tr -d '[:space:]'))"
   # The server must run from the unreadable copy of Node, so it is not
-  # dumpable and agents cannot open its /proc/1/fd (see Dockerfile). Docker
-  # gives the container's root no CAP_SYS_PTRACE, so even root cannot follow
-  # /proc/1/exe of a non-dumpable process: read argv[0] from /proc/1/cmdline
-  # (world-readable) and the owner of /proc/1/environ instead -- the kernel
-  # shows root as the owner of a non-dumpable process's private /proc files.
-  exe="$(tdocker 15 exec "$container" sh -c 'tr "\0" "\n" </proc/1/cmdline | head -1' 2>/dev/null)"
+  # dumpable and agents cannot open its /proc/<pid>/fd (see Dockerfile).
+  # Docker gives the container's root no CAP_SYS_PTRACE, so even root cannot
+  # follow /proc/<pid>/exe of a non-dumpable process: read argv[0] from
+  # /proc/<pid>/cmdline (world-readable) and the owner of /proc/<pid>/environ
+  # instead -- the kernel shows root as the owner of a non-dumpable process's
+  # private /proc files.
+  exe="$(tdocker 15 exec "$container" sh -c "tr '\\0' '\\n' </proc/$pid/cmdline | head -1" 2>/dev/null)"
   if [ "$exe" = /usr/local/lib/paperclip/node ]; then
     log "PASS 1 server-binary: the server runs from /usr/local/lib/paperclip/node"
   else
     fail "the server runs from ${exe:-an unknown program}, not /usr/local/lib/paperclip/node"
   fi
   local proc_owner server_uid
-  proc_owner="$(tdocker 15 exec "$container" stat -c %u /proc/1/environ 2>/dev/null)"
-  server_uid="$(tdocker 15 exec "$container" sh -c 'sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" /proc/1/status' 2>/dev/null)"
+  proc_owner="$(tdocker 15 exec "$container" stat -c %u "/proc/$pid/environ" 2>/dev/null)"
+  server_uid="$(tdocker 15 exec "$container" sh -c "sed -n 's/^Uid:[[:space:]]*\\([0-9]*\\).*/\\1/p' /proc/$pid/status" 2>/dev/null)"
   if [ "$proc_owner" = 0 ] && [ -n "$server_uid" ] && [ "$server_uid" != 0 ]; then
     log "PASS 1 server-nondumpable: the server runs as uid $server_uid but its private /proc files are root-only"
   else
-    fail "the server is dumpable (/proc/1/environ owner ${proc_owner:-?}, server uid ${server_uid:-?})"
+    fail "the server is dumpable (/proc/$pid/environ owner ${proc_owner:-?}, server uid ${server_uid:-?})"
   fi
 
   # kill -USR1 from an agent (the node user) must neither open the debugger
   # nor stop or freeze the server. The probe already sent one; send another
   # directly and check the server still answers.
-  log "stage 1: kill -USR1 1 as the node user, then the server must still answer"
-  if ! tdocker 15 exec -u node "$container" sh -c 'kill -USR1 1' >/dev/null 2>&1; then
+  log "stage 1: kill -USR1 $pid (the server) as the node user, then the server must still answer"
+  if ! tdocker 15 exec -u node "$container" sh -c "kill -USR1 $pid" >/dev/null 2>&1; then
     fail "could not send kill -USR1 to the server as the node user (the check below would prove nothing)"
   fi
   sleep 2
@@ -387,7 +486,7 @@ stage1_server_checks() {
   else
     log "PASS 1 debug-port (harness): no debugger after kill -USR1"
   fi
-  log "  server signal state after kill -USR1: $(tdocker 15 exec -u 0 "$container" sh -c 'grep -E "^(State|ShdPnd|SigBlk):" /proc/1/status' 2>/dev/null | tr '\n\t' '  ')"
+  log "  server signal state after kill -USR1: $(tdocker 15 exec -u 0 "$container" sh -c "grep -E '^(State|ShdPnd|SigBlk):' /proc/$pid/status" 2>/dev/null | tr '\n\t' '  ')"
   if require_health "after kill -USR1 from the node user"; then
     log "PASS 1 sigusr1-survives: the server still answers after kill -USR1 from an agent"
   else
@@ -791,6 +890,9 @@ main() {
     if [ "$(count_lines LEAK "$report")" -ne 0 ]; then
       fail "the agent can reach something a switched-on stage should have closed (LEAK lines above)"
     fi
+    if [ "$(count_lines FAIL "$report")" -ne 0 ]; then
+      fail "the probe could not do one of its checks (FAIL lines above, e.g. it did not find the server process)"
+    fi
     if [ "$(count_lines PASS "$report")" -eq 0 ] || ! printf '%s\n' "$report" | grep -q '^SUMMARY '; then
       fail "the probe report is incomplete"
     fi
@@ -807,7 +909,7 @@ main() {
       done
     fi
     if stage_enforced 1; then
-      for check in proc-environ proc-other server-fd server-mem ptrace-scope debug-port; do
+      for check in server-pid proc-environ proc-other server-fd server-mem ptrace-scope debug-port; do
         if ! printf '%s\n' "$report" | grep -q "^PASS 1 $check "; then
           fail "stage 1 check '$check' did not pass"
         fi
@@ -875,6 +977,13 @@ main() {
     else
       fail "negative control (a, file mode): the secrets file was not mounted with the canary keys"
     fi
+  fi
+
+  # By now the CLI has run at least twice (the two heartbeat runs), each
+  # leaving an `esbuild` helper for PID 1 to reap. Before stage 2's restarts,
+  # which would clear the evidence: nothing may be left as a zombie.
+  if stage_enforced 1; then
+    check_no_zombies "$container"
   fi
 
   if stage_enforced 2; then
