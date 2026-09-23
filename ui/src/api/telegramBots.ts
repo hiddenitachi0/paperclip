@@ -11,12 +11,14 @@ import { api } from "./client";
 export const telegramBotsApi = {
   list: (companyId: string) =>
     api.get<TelegramBotSummary[]>(`/companies/${companyId}/telegram-bots`),
-  create: (companyId: string, data: { agentId: string; name: string; token: string }) =>
+  // DUR-3996: the field is `botToken`, not `token`, so the server's HTTP log
+  // blanks it when a request fails (redaction is by field name).
+  create: (companyId: string, data: { agentId: string; name: string; botToken: string }) =>
     api.post<TelegramBotSummary>(`/companies/${companyId}/telegram-bots`, data),
-  rotateToken: (companyId: string, botId: string, token: string) =>
+  rotateToken: (companyId: string, botId: string, botToken: string) =>
     api.post<TelegramBotSummary>(
       `/companies/${companyId}/telegram-bots/${encodeURIComponent(botId)}/token`,
-      { token },
+      { botToken },
     ),
   test: (companyId: string, botId: string) =>
     api.post<TelegramBotCheckResult>(
