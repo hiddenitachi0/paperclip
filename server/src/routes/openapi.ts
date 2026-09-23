@@ -1048,6 +1048,8 @@ registry.registerPath({
               name: z.string(),
               companyId: z.string(),
               errorAt: z.string().datetime().nullable(),
+              urlKey: z.string(),
+              reasonText: z.string(),
             })),
           }),
           scheduler: z.object({
@@ -1114,6 +1116,8 @@ registry.registerPath({
               companyId: z.string(),
               tasks: z.number().int().positive(),
               reason: z.enum(ASSIGNEE_UNAVAILABLE_REASONS),
+              urlKey: z.string(),
+              reasonText: z.string(),
             })),
           }),
           summary: z.object({

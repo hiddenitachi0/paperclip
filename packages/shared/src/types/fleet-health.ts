@@ -55,11 +55,22 @@ export interface FleetAgentInErrorSample {
   name: string;
   companyId: string;
   errorAt: string | null;
+  /**
+   * DUR-4001: the agent page's short route key (the same one the agents
+   * list uses), so the Now page can link the name instead of only naming it.
+   */
+  urlKey: string;
+  /**
+   * DUR-4001: one plain sentence for this agent ("Stopped with an error 2
+   * hours ago and will not take work until someone clears it."). Written by
+   * the server so every surface says the same thing; carries no error text.
+   */
+  reasonText: string;
 }
 
 export interface FleetAgentCounts {
   inError: number;
-  /** Up to a handful of the agents in error, oldest episode first. */
+  /** Up to ten of the agents in error, oldest episode first. */
   inErrorSample: FleetAgentInErrorSample[];
 }
 
@@ -226,6 +237,14 @@ export interface FleetUnavailableAgentSample {
   /** Open (todo / in progress) tasks assigned to it. */
   tasks: number;
   reason: AssigneeUnavailableReason;
+  /** DUR-4001: the agent page's short route key, so the Now page can link the name. */
+  urlKey: string;
+  /**
+   * DUR-4001: one plain sentence for this agent -- why it is off, how much
+   * waits on it, and the one thing to do ("Paused, with 3 tasks waiting.
+   * Resume Sales agent 1, or give the tasks to another agent.").
+   */
+  reasonText: string;
 }
 
 /**
@@ -239,7 +258,7 @@ export interface FleetWaitingOnUnavailableAgents {
   tasks: number;
   /** Agents that cannot pick up work AND have at least one open task. */
   agents: number;
-  /** The agents with the most waiting tasks first, a handful at most. */
+  /** The agents with the most waiting tasks first, ten at most. */
   sample: FleetUnavailableAgentSample[];
 }
 

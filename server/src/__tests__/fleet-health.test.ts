@@ -7,7 +7,7 @@ import {
   type FleetSchedulerStatus,
   type FleetDatabaseLoad,
 } from "@paperclipai/shared";
-import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -20,6 +20,7 @@ import {
   quietModeThresholdMs,
   FLEET_HEALTH_WINDOW_MS,
   FLEET_ZOMBIE_SILENCE_MS,
+  loadFleetWaitingOnUnavailableAgents,
   resolveQuietModeStuckMs,
   summarizeFleetHealth,
 } from "../services/fleet-health.js";
@@ -86,6 +87,19 @@ const quietModeOff = {
   stuck: false,
   activatedForDeploy: false,
 } as const;
+
+// DUR-4001: one agent in error, shaped as the server sends it (link key and
+// plain sentence included); the wording tests only read the name.
+function inErrorAgent(id: string, name: string) {
+  return {
+    id,
+    name,
+    companyId: "c",
+    errorAt: null,
+    urlKey: name.toLowerCase().replace(/\s+/g, "-"),
+    reasonText: "Stopped with an error and will not take work until someone clears it.",
+  };
+}
 
 function summarize(input: Partial<Parameters<typeof summarizeFleetHealth>[0]> = {}) {
   const runCounts = input.runs ?? runs();
@@ -433,10 +447,10 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
       agents: {
         inError: 5,
         inErrorSample: [
-          { id: "a", name: "Reviewer", companyId: "c", errorAt: null },
-          { id: "b", name: "Backend Engineer", companyId: "c", errorAt: null },
-          { id: "c", name: "Fork Lead", companyId: "c", errorAt: null },
-          { id: "d", name: "Writer", companyId: "c", errorAt: null },
+          inErrorAgent("a", "Reviewer"),
+          inErrorAgent("b", "Backend Engineer"),
+          inErrorAgent("c", "Fork Lead"),
+          inErrorAgent("d", "Writer"),
         ],
       },
     });
@@ -444,7 +458,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
     expect(summary.headline).toBe(
       "5 agents have stopped with an error and will not take work until someone clears it: Reviewer, Backend Engineer, Fork Lead and 2 more.",
     );
-    expect(summarize({ agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] } }).headline).toBe(
+    expect(summarize({ agents: { inError: 1, inErrorSample: [inErrorAgent("a", "Reviewer")] } }).headline).toBe(
       "1 agent has stopped with an error and will not take work until someone clears it: Reviewer.",
     );
   });
@@ -477,7 +491,7 @@ describe("summarizeFleetHealth (DUR-3939/DUR-3940/DUR-272/DUR-98)", () => {
       runs: runs({ zombieCandidates: 1, running: 4, queued: 2, oldestQueuedWaitMs: 60_000 }),
       slots: computeFleetSlotUsage(4, 4),
       scheduler: { ...healthyScheduler, stale: true, sinceLastTickMs: 10 * 60_000 },
-      agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] },
+      agents: { inError: 1, inErrorSample: [inErrorAgent("a", "Reviewer")] },
     });
     expect(summary.level).toBe("critical");
     expect(summary.headline).toContain("The scheduler has not completed a tick for 10 minutes");
@@ -582,7 +596,7 @@ describe("quiet mode as a fleet-health finding (DUR-3965)", () => {
       slots: computeFleetSlotUsage(4, 0),
       // Something else is wrong too: the paused-fleet line still has to win,
       // because everything else is downstream of it.
-      agents: { inError: 1, inErrorSample: [{ id: "a", name: "Reviewer", companyId: "c", errorAt: null }] },
+      agents: { inError: 1, inErrorSample: [inErrorAgent("a", "Reviewer")] },
       quietMode: computeFleetQuietMode(deployQuietMode(), { now, deployStuckAfterMs: 20 * 60_000 }),
     });
     expect(summary.level).toBe("critical");
@@ -672,6 +686,7 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -802,11 +817,20 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
     expect(snapshot.runs.oldestQueuedWaitMs).toBeLessThanOrEqual(20 * 60_000 + 5_000);
     expect(snapshot.slots).toEqual({ max: 3, used: 3, available: 0, saturated: true });
     expect(snapshot.agents.inError).toBe(1);
-    // Name and time only: the error text ("Adapter crashed") is never
-    // carried on this instance-wide signal.
+    // Name, time, link key and a plain sentence: the error text ("Adapter
+    // crashed") is never carried on this instance-wide signal (DUR-4001 keeps
+    // that rule; the Now page adds the company's own error text client-side).
     expect(snapshot.agents.inErrorSample).toEqual([
-      { id: broken, name: "Broken", companyId, errorAt: expect.any(String) },
+      {
+        id: broken,
+        name: "Broken",
+        companyId,
+        errorAt: expect.any(String),
+        urlKey: "broken",
+        reasonText: "Stopped with an error 1 hour 30 minutes ago and will not take work until someone clears it.",
+      },
     ]);
+    expect(JSON.stringify(snapshot.agents.inErrorSample)).not.toContain("Adapter crashed");
     expect(snapshot.database.available).toBe(true);
     expect(snapshot.database.connections).toBeGreaterThanOrEqual(1);
     expect(snapshot.database.poolMax).toBeGreaterThan(0);
@@ -840,5 +864,53 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
     expect(snapshot.agents).toEqual({ inError: 0, inErrorSample: [] });
     expect(snapshot.summary.level).toBe("ok");
     expect(snapshot.summary.headline).toContain("Quiet:");
+  });
+
+  // DUR-4001: the Now page used to say "3 tasks waiting on agents that are
+  // off" and nothing else. Each waiting agent now carries the key its page is
+  // linked with and one plain line, so the page can name it and say what to do.
+  it("DUR-4001 names each agent whose tasks are waiting, with its link key and one plain line", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Fleet Co",
+      status: "active",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const sleeping = await seedAgent(companyId, "Sales agent 1", "paused");
+    const awake = await seedAgent(companyId, "Worker", "idle");
+    const seedIssue = async (assigneeAgentId: string, title: string) => {
+      await db.insert(issues).values({
+        id: randomUUID(),
+        companyId,
+        title,
+        status: "todo",
+        assigneeAgentId,
+        originFingerprint: randomUUID(),
+      });
+    };
+    await seedIssue(sleeping, "Call the supplier");
+    await seedIssue(sleeping, "Write the offer");
+    // Its agent can pick this one up, so it is not waiting on anyone.
+    await seedIssue(awake, "Ship the fix");
+
+    const waiting = await loadFleetWaitingOnUnavailableAgents(db, { active: false, snapshot: null });
+
+    expect(waiting).toEqual({
+      tasks: 2,
+      agents: 1,
+      sample: [
+        {
+          id: sleeping,
+          name: "Sales agent 1",
+          companyId,
+          tasks: 2,
+          reason: "paused",
+          urlKey: "sales-agent-1",
+          reasonText: "Paused, with 2 tasks waiting. Resume Sales agent 1, or give the tasks to another agent.",
+        },
+      ],
+    });
   });
 });

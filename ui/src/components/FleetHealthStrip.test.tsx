@@ -1,11 +1,18 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FleetHealthSnapshot } from "@paperclipai/shared";
-import { FleetHealthStrip, FleetHealthStripView, fleetHealthFacts, formatFleetDuration } from "./FleetHealthStrip";
+import type { Agent, FleetHealthSnapshot } from "@paperclipai/shared";
+import {
+  FleetHealthStrip,
+  FleetHealthStripView,
+  fleetHealthFacts,
+  formatFleetDuration,
+  renderWithAgentLinks,
+  resolveFleetAgentLink,
+} from "./FleetHealthStrip";
 
 const mockHealthApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -13,6 +20,12 @@ const mockHealthApi = vi.hoisted(() => ({
 
 vi.mock("../api/health", () => ({
   healthApi: mockHealthApi,
+}));
+
+vi.mock("@/lib/router", () => ({
+  Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => (
+    <a href={to} {...props}>{children}</a>
+  ),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,8 +100,22 @@ const starvedFleet: FleetHealthSnapshot = {
   agents: {
     inError: 2,
     inErrorSample: [
-      { id: "a", name: "Reviewer", companyId: "c", errorAt: "2026-09-06T08:00:00.000Z" },
-      { id: "b", name: "Writer", companyId: "c", errorAt: null },
+      {
+        id: "a",
+        name: "Reviewer",
+        companyId: "c",
+        errorAt: "2026-09-06T08:00:00.000Z",
+        urlKey: "reviewer",
+        reasonText: "Stopped with an error 2 hours ago and will not take work until someone clears it.",
+      },
+      {
+        id: "b",
+        name: "Writer",
+        companyId: "c",
+        errorAt: null,
+        urlKey: "writer",
+        reasonText: "Stopped with an error and will not take work until someone clears it.",
+      },
     ],
   },
   summary: {
@@ -102,6 +129,50 @@ const starvedFleet: FleetHealthSnapshot = {
     ],
   },
 };
+
+const ceoOff = {
+  id: "a",
+  name: "CEO",
+  companyId: "c",
+  tasks: 5,
+  reason: "paused" as const,
+  urlKey: "ceo",
+  reasonText: "Paused, with 5 tasks waiting. Resume CEO, or give the tasks to another agent.",
+};
+
+// The selected company's agent list, as the Now page already holds it: the
+// persona and the error text come from here, never from an extra request.
+function companyAgent(overrides: Partial<Agent>): Agent {
+  return {
+    id: "a",
+    companyId: "c",
+    name: "Reviewer",
+    urlKey: "reviewer",
+    role: "engineer",
+    title: null,
+    icon: null,
+    avatarAssetId: null,
+    status: "error",
+    reportsTo: null,
+    capabilities: null,
+    adapterType: "codex_local",
+    adapterConfig: {},
+    runtimeConfig: {},
+    budgetMonthlyCents: 0,
+    spentMonthlyCents: 0,
+    pauseReason: null,
+    pausedAt: null,
+    permissions: { canCreateAgents: false },
+    lastHeartbeatAt: null,
+    metadata: null,
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    updatedAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
+const nordstrand = { id: "c", name: "Nordstrand", issuePrefix: "NOR" };
+const mobler = { id: "m", name: "Møbler AS", issuePrefix: "MOB" };
 
 function render(node: React.ReactNode) {
   container = document.createElement("div");
@@ -192,7 +263,7 @@ describe("fleetHealthFacts", () => {
       waitingOnUnavailableAgents: {
         tasks: 12,
         agents: 6,
-        sample: [{ id: "a", name: "CEO", companyId: "c", tasks: 5, reason: "paused" }],
+        sample: [ceoOff],
       },
     });
     expect(waiting.find((fact) => fact.key === "waiting-on-unavailable")).toEqual({
@@ -300,6 +371,122 @@ describe("FleetHealthStripView", () => {
     expect(strip?.getAttribute("data-level")).toBe("unavailable");
     expect(strip?.textContent).toContain("Fleet health could not be checked right now.");
     expect(strip?.textContent).toContain("database_unreachable");
+  });
+});
+
+// DUR-4001: on his phone the operator read "1 agent has stopped with an
+// error ...: Salgsanalytikeren" and, lower down, "1 agent needs attention",
+// and could not find which agent was meant. Every agent the strip is about
+// is now a link, with one plain line and the thing to do.
+describe("FleetHealthStripView names and links the agents concerned (DUR-4001)", () => {
+  it("links every agent in error in the banner, and lists each with its reason and the way to clear it", () => {
+    const maja = { id: "persona-1", displayName: "Maja", pronouns: "she/her", avatarAssetId: null };
+    render(
+      <FleetHealthStripView
+        fleet={starvedFleet}
+        agents={[companyAgent({ persona: maja, personaId: maja.id, errorReason: "Adapter crashed:  exit code 1" })]}
+        companies={[nordstrand]}
+        selectedCompanyId="c"
+      />,
+    );
+
+    // The banner note still reads as one sentence, but the names in it are links.
+    const note = container!.querySelectorAll('[data-testid="fleet-health-note"]')[1];
+    expect(note?.textContent).toContain("2 agents have stopped with an error and will not take work until someone clears it: Reviewer, Writer.");
+    expect(note?.querySelector('a[href="/agents/reviewer"]')?.textContent).toBe("Reviewer");
+    expect(note?.querySelector('a[href="/agents/writer"]')?.textContent).toBe("Writer");
+
+    // The count under it is expanded into one line per agent.
+    expect(container!.querySelector('[data-testid="fleet-health-fact-agents"]')?.textContent).toContain("2 agents need attention");
+    const rows = container!.querySelectorAll('[data-testid="fleet-health-agent-in-error"]');
+    expect(rows).toHaveLength(2);
+    // The company's own list knows the persona and the error text; the
+    // instance-wide signal itself never carries the error text.
+    expect(rows[0]?.querySelector('a[href="/agents/reviewer"]')?.textContent).toBe("Reviewer (Maja)");
+    expect(rows[0]?.textContent).toContain("Stopped with an error 2 hours ago and will not take work until someone clears it.");
+    expect(rows[0]?.textContent).toContain("Last error: Adapter crashed: exit code 1");
+    const clear = rows[0]?.querySelector('[data-testid="fleet-health-clear-error-link"]');
+    expect(clear?.textContent).toContain("Clear the error on the agent page");
+    expect(clear?.getAttribute("href")).toBe("/agents/reviewer");
+    expect(rows[1]?.querySelector('a[href="/agents/writer"]')?.textContent).toBe("Writer");
+    expect(rows[1]?.textContent).not.toContain("Last error");
+    expect(container!.querySelector('[data-testid="fleet-health-agents-in-error"]')?.textContent).not.toContain("more");
+  });
+
+  it("links an agent in another company through that company's prefix, and only names one this board cannot open", () => {
+    const fleet: FleetHealthSnapshot = {
+      ...healthyFleet,
+      agents: {
+        inError: 3,
+        inErrorSample: [
+          { ...starvedFleet.agents.inErrorSample[0]!, companyId: "m" },
+          { ...starvedFleet.agents.inErrorSample[1]!, companyId: "ghost" },
+        ],
+      },
+      summary: { level: "warning", headline: "3 agents have stopped with an error and will not take work until someone clears it: Reviewer, Writer and 1 more.", notes: [] },
+    };
+    render(<FleetHealthStripView fleet={fleet} agents={[]} companies={[nordstrand, mobler]} selectedCompanyId="c" />);
+
+    const rows = container!.querySelectorAll('[data-testid="fleet-health-agent-in-error"]');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.querySelector('a[href="/MOB/agents/reviewer"]')?.textContent).toBe("Reviewer");
+    expect(rows[0]?.textContent).toContain("(in Møbler AS)");
+    expect(rows[0]?.querySelector('[data-testid="fleet-health-clear-error-link"]')?.getAttribute("href")).toBe("/MOB/agents/reviewer");
+    // No company to open it in: a name, but no link and no action.
+    expect(rows[1]?.querySelector("a")).toBeNull();
+    expect(rows[1]?.textContent).toContain("Writer (in another company)");
+    expect(rows[1]?.querySelector('[data-testid="fleet-health-clear-error-link"]')).toBeNull();
+    // The headline links the reachable one only, and says the sample is short.
+    const headline = container!.querySelector('[data-testid="fleet-health-headline"]');
+    expect(headline?.querySelector('a[href="/MOB/agents/reviewer"]')).not.toBeNull();
+    expect(headline?.querySelectorAll("a")).toHaveLength(1);
+    expect(container!.querySelector('[data-testid="fleet-health-agents-in-error"]')?.textContent).toContain("and 1 more");
+  });
+
+  it("names and links the agents that are off, with the tasks waiting on them", () => {
+    const fleet: FleetHealthSnapshot = {
+      ...healthyFleet,
+      waitingOnUnavailableAgents: { tasks: 12, agents: 2, sample: [ceoOff] },
+      summary: {
+        level: "ok",
+        headline: healthyFleet.summary.headline,
+        notes: ["12 open tasks are assigned to agents that cannot pick them up, so nobody will start them: CEO (paused, 5 tasks) and 1 more agent. They wait until the agent is switched back on or the task is given to another agent."],
+      },
+    };
+    render(<FleetHealthStripView fleet={fleet} agents={[]} companies={[nordstrand]} selectedCompanyId="c" />);
+
+    expect(container!.querySelector('[data-testid="fleet-health-note"] a[href="/agents/ceo"]')?.textContent).toBe("CEO");
+    expect(container!.querySelector('[data-testid="fleet-health-fact-waiting-on-unavailable"]')?.textContent).toContain("12 tasks waiting on agents that are off");
+    const rows = container!.querySelectorAll('[data-testid="fleet-health-waiting-agent"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.querySelector('a[href="/agents/ceo"]')?.textContent).toBe("CEO");
+    expect(rows[0]?.textContent).toContain("Paused, with 5 tasks waiting. Resume CEO, or give the tasks to another agent.");
+    const tasks = rows[0]?.querySelector('[data-testid="fleet-health-waiting-tasks-link"]');
+    expect(tasks?.textContent).toContain("See the 5 tasks");
+    expect(tasks?.getAttribute("href")).toBe("/issues?assignee=a");
+    expect(container!.querySelector('[data-testid="fleet-health-waiting-agents"]')?.textContent).toContain("and 1 more agent");
+  });
+
+  it("adds nothing when no agent is concerned", () => {
+    render(<FleetHealthStripView fleet={healthyFleet} agents={[]} companies={[nordstrand]} selectedCompanyId="c" />);
+    expect(container!.querySelector('[data-testid="fleet-health-agent-details"]')).toBeNull();
+    expect(container!.querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("links a name only where it stands on its own, longest names first", () => {
+    const targets = [
+      resolveFleetAgentLink({ id: "1", name: "Bot", urlKey: "bot", companyId: "c" }, { selectedCompanyId: "c" }),
+      resolveFleetAgentLink({ id: "2", name: "Sales agent 1", urlKey: "sales-agent-1", companyId: "c" }, { selectedCompanyId: "c" }),
+      resolveFleetAgentLink({ id: "3", name: "Sales agent 10", urlKey: "sales-agent-10", companyId: "c" }, { selectedCompanyId: "c" }),
+    ];
+    render(<p>{renderWithAgentLinks("Robot, Bot, Sales agent 10 and Sales agent 1 are stuck.", targets)}</p>);
+    const links = [...container!.querySelectorAll("a")].map((a) => [a.getAttribute("href"), a.textContent]);
+    expect(links).toEqual([
+      ["/agents/bot", "Bot"],
+      ["/agents/sales-agent-10", "Sales agent 10"],
+      ["/agents/sales-agent-1", "Sales agent 1"],
+    ]);
+    expect(container!.textContent).toBe("Robot, Bot, Sales agent 10 and Sales agent 1 are stuck.");
   });
 });
 

@@ -11,7 +11,8 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useSidebar } from "../context/SidebarContext";
 import { queryKeys } from "../lib/queryKeys";
 import { AgentStatusBadge, AgentStatusCapsule } from "../components/StatusBadge";
-import { AgentActionButtons } from "../components/AgentActionButtons";
+import { AgentActionButtons, AgentActionMenuItem } from "../components/AgentActionButtons";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { MembershipAction } from "../components/MembershipAction";
 import { EntityRow } from "../components/EntityRow";
 import { EmptyState } from "../components/EmptyState";
@@ -21,7 +22,7 @@ import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { AlertTriangle, Bot, Plus, List, GitBranch, Pencil, X } from "lucide-react";
+import { AlertTriangle, Bot, Plus, List, GitBranch, LogIn, LogOut, Pencil, X } from "lucide-react";
 import { BulkAgentEditDialog } from "../components/BulkAgentEditDialog";
 import {
   AGENT_ROLE_LABELS,
@@ -292,6 +293,38 @@ export function Agents() {
 
   const renderAgentRow = (agent: Agent) => {
     const hasInvalidOrgChain = agent.orgChainHealth?.status === "invalid_org_chain";
+    const membershipPending =
+      membershipMutation.isPending &&
+      membershipMutation.variables?.resourceType === "agent" &&
+      membershipMutation.variables.resourceId === agent.id;
+    if (isMobile) {
+      return (
+        <NarrowAgentRow
+          key={agent.id}
+          agent={agent}
+          tab={tab}
+          companyId={selectedCompanyId}
+          selected={selectedIds.has(agent.id)}
+          onToggleSelected={() => toggleSelected(agent.id)}
+          liveRun={liveRunByAgent.get(agent.id)}
+          membershipState={resourceMembershipState(membershipsQuery.data, "agent", agent.id)}
+          membershipPending={membershipPending}
+          membershipPendingState={membershipPending ? membershipMutation.variables?.state ?? null : null}
+          onJoin={() => membershipMutation.mutate({
+            resourceType: "agent",
+            resourceId: agent.id,
+            resourceName: agent.name,
+            state: "joined",
+          })}
+          onLeave={() => membershipMutation.mutate({
+            resourceType: "agent",
+            resourceId: agent.id,
+            resourceName: agent.name,
+            state: "left",
+          })}
+        />
+      );
+    }
     return (
       <EntityRow
         key={agent.id}
@@ -680,6 +713,103 @@ function OrgTreeNode({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * DUR-4001: the list row on a phone. The desktop row (EntityRow with a fixed
+ * 14rem title, meta columns and five inline buttons) has no room at 360px:
+ * the name cell shrank to nothing and every row was six identical buttons
+ * with no name, no title and no avatar. Here the name owns the width, the
+ * status pill stays, and every action lives in the one "..." menu. The row
+ * links to the agent page; the checkbox and the menu sit outside that link.
+ */
+function NarrowAgentRow({
+  agent,
+  tab,
+  companyId,
+  selected,
+  onToggleSelected,
+  liveRun,
+  membershipState,
+  membershipPending,
+  membershipPendingState,
+  onJoin,
+  onLeave,
+}: {
+  agent: Agent;
+  tab: FilterTab;
+  companyId: string;
+  selected: boolean;
+  onToggleSelected: () => void;
+  liveRun: { runId: string; liveCount: number } | undefined;
+  membershipState: ReturnType<typeof resourceMembershipState>;
+  membershipPending: boolean;
+  membershipPendingState: ReturnType<typeof resourceMembershipState> | null;
+  onJoin: () => void;
+  onLeave: () => void;
+}) {
+  const hasInvalidOrgChain = agent.orgChainHealth?.status === "invalid_org_chain";
+  // "Sales agent 1 (Maja)": the job name with the person in brackets (DUR-4000).
+  const displayName = formatAgentDisplayName(agent, agent.persona);
+  const subtitle = `${roleLabels[agent.role] ?? agent.role}${agent.title ? ` - ${agent.title}` : ""}`;
+  const isLeft = membershipState === "left";
+  const membershipLabel = membershipPending
+    ? membershipPendingState === "left" ? "Leaving..." : "Joining..."
+    : isLeft ? "Join" : "Leave";
+
+  return (
+    <div
+      data-testid="agent-row-narrow"
+      className={cn(
+        "flex items-center gap-2.5 border-b border-border px-3 py-2.5 last:border-b-0",
+        agent.pausedAt && tab !== "paused" ? "opacity-50" : "",
+        isLeft ? "text-foreground/55" : "",
+      )}
+    >
+      <Checkbox
+        checked={selected}
+        onCheckedChange={onToggleSelected}
+        aria-label={`Select ${agent.name}`}
+        className="shrink-0"
+      />
+      <Link
+        to={agentUrl(agent)}
+        className="flex min-w-0 flex-1 items-center gap-2.5 no-underline text-inherit"
+        title={displayName}
+      >
+        <AgentAvatar agent={agent} size="sm" className="shrink-0" iconClassName="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            {hasInvalidOrgChain ? (
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="Invalid reporting chain" />
+            ) : null}
+            <span className="truncate text-sm font-medium">{displayName}</span>
+          </span>
+          <span className="block truncate text-xs text-muted-foreground">{subtitle}</span>
+        </span>
+      </Link>
+      {liveRun ? (
+        <LiveRunIndicator agentRef={agentRouteRef(agent)} runId={liveRun.runId} liveCount={liveRun.liveCount} />
+      ) : (
+        <AgentStatusBadge status={agent.status} />
+      )}
+      <AgentActionButtons
+        variant="menu"
+        agent={agent}
+        companyId={companyId}
+        runLabel="Run Heartbeat"
+        showStatus={false}
+        menuExtra={
+          <AgentActionMenuItem
+            icon={isLeft ? LogIn : LogOut}
+            label={membershipLabel}
+            busy={membershipPending}
+            onClick={isLeft ? onJoin : onLeave}
+          />
+        }
+      />
     </div>
   );
 }

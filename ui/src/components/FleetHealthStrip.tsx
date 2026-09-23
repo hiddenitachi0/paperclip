@@ -1,7 +1,18 @@
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { FleetHealth, FleetHealthLevel, FleetHealthSnapshot } from "@paperclipai/shared";
-import { Activity, AlertTriangle, CircleCheck, CircleHelp, OctagonAlert } from "lucide-react";
+import {
+  formatAgentDisplayName,
+  type Agent,
+  type FleetAgentInErrorSample,
+  type FleetHealth,
+  type FleetHealthLevel,
+  type FleetHealthSnapshot,
+  type FleetUnavailableAgentSample,
+} from "@paperclipai/shared";
+import { Activity, AlertTriangle, ArrowRight, CircleCheck, CircleHelp, OctagonAlert } from "lucide-react";
+import { Link } from "@/lib/router";
 import { healthApi } from "../api/health";
+import { normalizeCompanyPrefix } from "../lib/company-routes";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 
@@ -155,7 +166,212 @@ export function fleetHealthFacts(fleet: FleetHealthSnapshot): Array<{ key: strin
   return facts;
 }
 
-export function FleetHealthStripView({ fleet }: { fleet: FleetHealth | undefined }) {
+/** What the strip needs to know about a company to link into it. */
+export interface FleetHealthCompanyRef {
+  id: string;
+  name: string;
+  issuePrefix: string;
+}
+
+/**
+ * DUR-4001: the Now page's own data, handed down so the strip can name and
+ * link the agents concerned without a request of its own (the page polls
+ * every 5 seconds). `agents` is the selected company's list: persona names
+ * ("Sales agent 1 (Maja)") and the company-scoped error text come from it.
+ * Agents in other companies get a name and, when this board can open that
+ * company, a link through its prefix.
+ */
+export interface FleetHealthContext {
+  agents?: Agent[];
+  companies?: FleetHealthCompanyRef[];
+  selectedCompanyId?: string | null;
+}
+
+/** One agent the strip names, and where its page (and its tasks) can be found. */
+export interface FleetAgentLinkTarget {
+  id: string;
+  /** The raw agent name, as the server's sentences spell it. */
+  name: string;
+  /** What to show: the persona in brackets when the company list knows it. */
+  label: string;
+  /** The agent page, or null when the agent is in a company this board cannot open. */
+  href: string | null;
+  /** Its open tasks on the issues board; null on the same rule as `href`. */
+  tasksHref: string | null;
+  /** Set when the agent is in another company than the selected one and that company is known. */
+  companyName: string | null;
+  inOtherCompany: boolean;
+  /** The company-scoped error text, known only for the selected company's agents. */
+  errorReason: string | null;
+}
+
+export function resolveFleetAgentLink(
+  sample: Pick<FleetAgentInErrorSample | FleetUnavailableAgentSample, "id" | "name" | "urlKey" | "companyId">,
+  context: FleetHealthContext,
+): FleetAgentLinkTarget {
+  const inOtherCompany = Boolean(context.selectedCompanyId) && sample.companyId !== context.selectedCompanyId;
+  const known = inOtherCompany ? undefined : context.agents?.find((agent) => agent.id === sample.id);
+  const company = inOtherCompany ? context.companies?.find((entry) => entry.id === sample.companyId) : undefined;
+  // Same company: a company-relative path, which Link prefixes for the board
+  // in view. Another company: its own prefix, which Link leaves alone.
+  const base = inOtherCompany ? (company ? `/${normalizeCompanyPrefix(company.issuePrefix)}` : null) : "";
+  const errorReason = known?.errorReason?.trim();
+  return {
+    id: sample.id,
+    name: sample.name,
+    label: formatAgentDisplayName(sample, known?.persona),
+    href: base === null ? null : `${base}/agents/${sample.urlKey}`,
+    tasksHref: base === null ? null : `${base}/issues?assignee=${encodeURIComponent(sample.id)}`,
+    companyName: company?.name ?? null,
+    inOtherCompany,
+    errorReason: errorReason ? errorReason : null,
+  };
+}
+
+const WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const AGENT_LINK_CLASS = "font-medium text-foreground underline underline-offset-2 hover:text-foreground/80";
+
+/**
+ * The server's sentences name agents in plain text ("...: Reviewer, Writer.").
+ * Wrap every name that has a page in a link -- longest names first, so
+ * "Sales agent 10" never links as "Sales agent 1" plus a stray "0", and only
+ * where the name stands on its own rather than inside another word.
+ */
+export function renderWithAgentLinks(text: string, targets: FleetAgentLinkTarget[]): ReactNode {
+  const linkable = targets
+    .filter((target) => target.href !== null && target.name.trim().length > 0)
+    .sort((left, right) => right.name.length - left.name.length);
+  if (linkable.length === 0) return text;
+  const pattern = new RegExp(linkable.map((target) => escapeRegExp(target.name)).join("|"), "g");
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const matched = match[0];
+    const start = match.index;
+    const end = start + matched.length;
+    const before = start > 0 ? text[start - 1] : "";
+    const after = end < text.length ? text[end] : "";
+    if ((before && WORD_CHAR_RE.test(before)) || (after && WORD_CHAR_RE.test(after))) continue;
+    const target = linkable.find((entry) => entry.name === matched);
+    if (!target?.href) continue;
+    if (start > last) nodes.push(text.slice(last, start));
+    nodes.push(
+      <Link key={`${target.id}-${start}`} to={target.href} className={AGENT_LINK_CLASS} data-testid="fleet-health-agent-link">
+        {matched}
+      </Link>,
+    );
+    last = end;
+  }
+  if (nodes.length === 0) return text;
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+function AgentNameLink({ target }: { target: FleetAgentLinkTarget }) {
+  return (
+    <>
+      {target.href ? (
+        <Link to={target.href} className={AGENT_LINK_CLASS} data-testid="fleet-health-agent-link">
+          {target.label}
+        </Link>
+      ) : (
+        <span className="font-medium text-foreground">{target.label}</span>
+      )}
+      {target.inOtherCompany ? ` (in ${target.companyName ?? "another company"})` : ""}
+    </>
+  );
+}
+
+const ERROR_TEXT_MAX_CHARS = 160;
+
+function shortErrorText(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > ERROR_TEXT_MAX_CHARS ? `${oneLine.slice(0, ERROR_TEXT_MAX_CHARS - 1).trimEnd()}…` : oneLine;
+}
+
+const DETAIL_ACTION_CLASS = "inline-flex items-center gap-0.5 font-medium text-foreground/80 hover:text-foreground";
+
+/**
+ * DUR-4001: under the facts row, one line per agent the counts are about --
+ * its linked name, one plain sentence, and the one thing to do. Before this,
+ * "1 agent needs attention" was a bare count and the operator, on his phone,
+ * could not find which agent was meant.
+ */
+function FleetAgentDetails({ fleet, context }: { fleet: FleetHealthSnapshot; context: FleetHealthContext }) {
+  const inError = fleet.agents.inErrorSample.map((sample) => ({ sample, target: resolveFleetAgentLink(sample, context) }));
+  const waiting = fleet.waitingOnUnavailableAgents;
+  const off = (waiting?.sample ?? []).map((sample) => ({ sample, target: resolveFleetAgentLink(sample, context) }));
+  if (inError.length === 0 && off.length === 0) return null;
+  const moreInError = fleet.agents.inError - inError.length;
+  const moreOff = (waiting?.agents ?? 0) - off.length;
+
+  return (
+    <div className="mt-2 space-y-2 text-xs" data-testid="fleet-health-agent-details">
+      {inError.length > 0 ? (
+        <div data-testid="fleet-health-agents-in-error">
+          <p className="font-medium text-amber-700 dark:text-amber-300">
+            {fleet.agents.inError === 1 ? "The agent that needs attention" : "The agents that need attention"}
+          </p>
+          <ul className="mt-0.5 space-y-1 text-muted-foreground">
+            {inError.map(({ sample, target }) => (
+              <li key={sample.id} data-testid="fleet-health-agent-in-error">
+                <AgentNameLink target={target} /> — {sample.reasonText}
+                {target.errorReason ? ` Last error: ${shortErrorText(target.errorReason)}` : ""}
+                {target.href ? (
+                  <>
+                    {" "}
+                    <Link to={target.href} className={DETAIL_ACTION_CLASS} data-testid="fleet-health-clear-error-link">
+                      Clear the error on the agent page
+                      <ArrowRight className="h-3 w-3" aria-hidden />
+                    </Link>
+                  </>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {moreInError > 0 ? <p className="mt-0.5 text-muted-foreground">and {moreInError} more</p> : null}
+        </div>
+      ) : null}
+      {off.length > 0 ? (
+        <div data-testid="fleet-health-waiting-agents">
+          <p className="font-medium text-foreground/80">Agents that are off, with tasks waiting on them</p>
+          <ul className="mt-0.5 space-y-1 text-muted-foreground">
+            {off.map(({ sample, target }) => (
+              <li key={sample.id} data-testid="fleet-health-waiting-agent">
+                <AgentNameLink target={target} /> — {sample.reasonText}
+                {target.tasksHref ? (
+                  <>
+                    {" "}
+                    <Link to={target.tasksHref} className={DETAIL_ACTION_CLASS} data-testid="fleet-health-waiting-tasks-link">
+                      See {sample.tasks === 1 ? "the task" : `the ${sample.tasks} tasks`}
+                      <ArrowRight className="h-3 w-3" aria-hidden />
+                    </Link>
+                  </>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {moreOff > 0 ? (
+            <p className="mt-0.5 text-muted-foreground">and {moreOff} more {moreOff === 1 ? "agent" : "agents"}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function FleetHealthStripView({
+  fleet,
+  agents,
+  companies,
+  selectedCompanyId,
+}: { fleet: FleetHealth | undefined } & FleetHealthContext) {
   if (!fleet) return null;
 
   if (!fleet.available) {
@@ -179,6 +395,13 @@ export function FleetHealthStripView({ fleet }: { fleet: FleetHealth | undefined
   const style = LEVEL_STYLE[fleet.summary.level];
   const Icon = style.icon;
   const facts = fleetHealthFacts(fleet);
+  const context: FleetHealthContext = { agents, companies, selectedCompanyId };
+  // Every agent the server named, so the headline and the notes can link
+  // the names they already contain.
+  const linkTargets = [
+    ...fleet.agents.inErrorSample,
+    ...(fleet.waitingOnUnavailableAgents?.sample ?? []),
+  ].map((sample) => resolveFleetAgentLink(sample, context));
 
   return (
     <section
@@ -192,13 +415,13 @@ export function FleetHealthStripView({ fleet }: { fleet: FleetHealth | undefined
         <div className="min-w-0 flex-1">
           <p className="text-sm text-foreground">
             <span className={cn("font-medium", style.dot)}>{style.label}.</span>{" "}
-            <span data-testid="fleet-health-headline">{fleet.summary.headline}</span>
+            <span data-testid="fleet-health-headline">{renderWithAgentLinks(fleet.summary.headline, linkTargets)}</span>
           </p>
           {fleet.summary.notes.length > 0 && (
             <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
               {fleet.summary.notes.map((note, index) => (
                 <li key={index} data-testid="fleet-health-note">
-                  {note}
+                  {renderWithAgentLinks(note, linkTargets)}
                 </li>
               ))}
             </ul>
@@ -215,13 +438,14 @@ export function FleetHealthStripView({ fleet }: { fleet: FleetHealth | undefined
               </span>
             ))}
           </div>
+          <FleetAgentDetails fleet={fleet} context={context} />
         </div>
       </div>
     </section>
   );
 }
 
-export function FleetHealthStrip() {
+export function FleetHealthStrip({ agents, companies, selectedCompanyId }: FleetHealthContext = {}) {
   const healthQuery = useQuery({
     // Shares Layout's key so there is one /api/health poll; the interval
     // here keeps it fresh while the Now page is open.
@@ -238,5 +462,12 @@ export function FleetHealthStrip() {
       />
     );
   }
-  return <FleetHealthStripView fleet={healthQuery.data?.fleet} />;
+  return (
+    <FleetHealthStripView
+      fleet={healthQuery.data?.fleet}
+      agents={agents}
+      companies={companies}
+      selectedCompanyId={selectedCompanyId}
+    />
+  );
 }

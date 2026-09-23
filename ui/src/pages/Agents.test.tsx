@@ -35,6 +35,8 @@ const mockResourceMembershipsApi = vi.hoisted(() => ({
 
 const mockOpenNewAgent = vi.hoisted(() => vi.fn());
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
+// Mutable so the narrow-screen cases (DUR-4001) can flip it.
+const sidebarState = vi.hoisted(() => ({ isMobile: false }));
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => (
@@ -49,7 +51,7 @@ vi.mock("../context/CompanyContext", () => ({
 }));
 
 vi.mock("../context/DialogContext", () => ({
-  useDialogActions: () => ({ openNewAgent: mockOpenNewAgent }),
+  useDialogActions: () => ({ openNewAgent: mockOpenNewAgent, openNewIssue: vi.fn() }),
 }));
 
 vi.mock("../context/BreadcrumbContext", () => ({
@@ -57,7 +59,7 @@ vi.mock("../context/BreadcrumbContext", () => ({
 }));
 
 vi.mock("../context/SidebarContext", () => ({
-  useSidebar: () => ({ isMobile: false }),
+  useSidebar: () => sidebarState,
 }));
 
 vi.mock("../api/agents", () => ({
@@ -800,5 +802,108 @@ describe("Agents", () => {
     expect(text).toContain("Sales agent 1 (Maja)");
     expect(text).not.toContain("Maja (Maja)");
     expect(findAgentRow(container, "Support agent")?.textContent).not.toContain("(");
+  });
+
+  // DUR-4001: on a phone the list row was six identical rows of a checkbox, a
+  // colour bar, a "paused" pill and four icon buttons plus "Leave" -- no name,
+  // no title, no avatar, because the fixed-width name cell was squeezed to
+  // nothing by the inline buttons. The narrow row keeps the name and puts
+  // every action in the one "..." menu.
+  describe("on a narrow screen", () => {
+    const maja = { id: "persona-1", displayName: "Maja", pronouns: "she/her", avatarAssetId: null };
+
+    beforeEach(() => {
+      sidebarState.isMobile = true;
+      mockAgentsApi.list.mockResolvedValue([
+        makeAgent({
+          id: "agent-1",
+          name: "Sales agent 1",
+          urlKey: "sales-agent-1",
+          title: "Closer",
+          status: "paused",
+          pausedAt: new Date("2026-09-20T00:00:00Z"),
+          persona: maja,
+          personaId: maja.id,
+        }),
+        makeAgent({ id: "agent-2", name: "Support agent", urlKey: "support-agent", status: "error" }),
+      ]);
+    });
+
+    afterEach(() => {
+      sidebarState.isMobile = false;
+    });
+
+    async function renderNarrow() {
+      root = createRoot(container);
+      await act(async () => {
+        root!.render(
+          <QueryClientProvider client={queryClient}>
+            <ToastProvider>
+              <Agents />
+            </ToastProvider>
+          </QueryClientProvider>,
+        );
+      });
+      await flushReact();
+      await flushReact();
+    }
+
+    it("shows each agent's avatar, name with persona, role and title, and status, and links the row to the agent page", async () => {
+      await renderNarrow();
+
+      const rows = container.querySelectorAll('[data-testid="agent-row-narrow"]');
+      expect(rows).toHaveLength(2);
+      const row = rows[0] as HTMLElement;
+      expect(row.querySelector('[data-slot="avatar"]')).not.toBeNull();
+      expect(row.textContent).toContain("Sales agent 1 (Maja)");
+      expect(row.textContent).toContain("Engineer - Closer");
+      expect(row.textContent).toContain("paused");
+      expect(row.querySelector('a[href="/agents/sales-agent-1"]')).not.toBeNull();
+      expect(row.querySelector('[aria-label="Select Sales agent 1"]')).not.toBeNull();
+
+      // No desktop title cell, and no row of inline buttons: one menu per row.
+      expect(container.querySelector(".w-56")).toBeNull();
+      expect(row.querySelectorAll("button[aria-label^='Open actions for']")).toHaveLength(1);
+      expect(row.textContent).not.toContain("Run Heartbeat");
+      expect(row.textContent).not.toContain("Assign Task");
+      expect(row.textContent).not.toContain("Leave");
+      const errorRow = rows[1] as HTMLElement;
+      expect(errorRow.textContent).toContain("Support agent");
+      expect(errorRow.querySelector('[aria-label="Clear error and return agent to idle"]')).toBeNull();
+    });
+
+    it("keeps every action in the one menu, including Join/Leave", async () => {
+      await renderNarrow();
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('button[aria-label="Open actions for Sales agent 1"]')?.click();
+      });
+      await flushReact();
+
+      const menu = document.body.querySelector('[data-testid="agent-actions-menu"]');
+      expect(menu).not.toBeNull();
+      for (const label of ["Assign Task", "Run Heartbeat", "Resume", "Duplicate Agent", "Copy Agent ID", "Reset Sessions", "Terminate", "Leave"]) {
+        expect(menu?.textContent).toContain(label);
+      }
+      expect(menu?.textContent).not.toContain("Pause");
+
+      const leave = Array.from(menu!.querySelectorAll("button")).find((btn) => btn.textContent?.trim() === "Leave");
+      await act(async () => {
+        leave!.click();
+      });
+      await flushReact();
+      expect(mockResourceMembershipsApi.updateAgent).toHaveBeenCalled();
+    });
+
+    it("shows the live-run pill in place of the status pill while a run is live", async () => {
+      mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([
+        { id: "run-1", agentId: "agent-1", status: "running" },
+      ]);
+      await renderNarrow();
+
+      const row = container.querySelector('[data-testid="agent-row-narrow"]') as HTMLElement;
+      expect(row.querySelector('a[href="/agents/sales-agent-1/runs/run-1"]')?.textContent).toContain("Live");
+      expect(row.textContent).not.toContain("paused");
+    });
   });
 });
