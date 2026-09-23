@@ -230,7 +230,7 @@ describe("the ledger places every movement in the month it happened", () => {
     expect(january!.total).toEqual(lines(2 + 0, 0, 0, 0));
     expect(december!.total).toEqual(lines(0, 1, 1, 0));
     expect(december!.total!.net).toBe(-1);
-    expect(december!.status).toBe("avsluttet");
+    expect(december!.status).toBe("closed");
     expect(outcome.audit.warnings).toEqual([]);
   });
 
@@ -383,8 +383,8 @@ describe("no data is never zero", () => {
     if (outcome.ok) return;
     expect(outcome.refusal.code).toBe("before_visible_window");
     expect(outcome.refusal.message).toContain("26.07.2026");
-    expect(outcome.refusal.message).toContain("juli 2026");
-    expect(outcome.refusal.message).toContain("ikke at salget var null");
+    expect(outcome.refusal.message).toContain("July 2026");
+    expect(outcome.refusal.message).toContain("does not mean sales were zero");
     expect(fake.requests.map((request) => request.operation)).toEqual(["PaperclipShopWindow"]);
   });
 
@@ -421,8 +421,8 @@ describe("no data is never zero", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.refusal.code).toBe("missing_order_history_access");
-    expect(outcome.refusal.message).toContain("mangler tilgang til eldre ordre");
-    expect(outcome.refusal.message).toContain("ikke at salget var null");
+    expect(outcome.refusal.message).toContain("lacks access to older orders");
+    expect(outcome.refusal.message).toContain("does not mean sales were zero");
     expect(outcome.audit.refusalCode).toBe("missing_order_history_access");
     expect(fake.requests.map((request) => request.operation)).toEqual(["PaperclipShopWindow"]);
   });
@@ -450,12 +450,12 @@ describe("no data is never zero", () => {
     });
     const outcome = await salesOk(adapter, { periods: ["this_month_to_date", "2026-10"] });
     const [september, october] = outcome.result.periods;
-    expect(september!.status).toBe("pågår");
-    expect(september!.statusText).toBe("pågår, per 21.09.2026 kl. 10:14");
+    expect(september!.status).toBe("running");
+    expect(september!.statusText).toBe("running, as of 21.09.2026 at 10:14");
     expect(september!.total).toEqual(lines(1, 0, 0, 0));
     expect(october!.dataState).toBe("no_data");
     expect(october!.total).toBeNull();
-    expect(october!.noDataReason).toBe("Perioden har ikke startet ennå.");
+    expect(october!.noDataReason).toBe("The period has not started yet.");
     expect(outcome.result.comparison).toBeNull();
   });
 
@@ -513,7 +513,7 @@ describe("complete or nothing", () => {
     const outcome = await adapter.sales({ periods: ["2026-08"] });
     expect(outcome.ok ? null : outcome.refusal.code).toBe("request_budget_exceeded");
     expect(fake.requests.length).toBe(3);
-    if (!outcome.ok) expect(outcome.refusal.message).toContain("delvis tall");
+    if (!outcome.ok) expect(outcome.refusal.message).toContain("partial figure");
   });
 
   it("the default budget is 60 requests and 25 seconds", async () => {
@@ -547,7 +547,7 @@ describe("requests the engine refuses", () => {
       const { adapter, fake } = setup({ products: PRODUCTS, orders: [anchorOrder()] });
       const outcome = await adapter.sales({ periods: ["last_month"], measure });
       expect(outcome.ok ? null : outcome.refusal.code).toBe("kroner_not_enabled");
-      if (!outcome.ok) expect(outcome.refusal.message).toMatch(/^Kronebeløp er ikke slått på ennå/);
+      if (!outcome.ok) expect(outcome.refusal.message).toMatch(/^Amounts in kroner are not switched on yet/);
       expect(fake.requests).toHaveLength(0);
     }
   });
@@ -556,7 +556,7 @@ describe("requests the engine refuses", () => {
     const { adapter } = setup({ products: PRODUCTS, orders: [anchorOrder()] });
     const outcome = await adapter.sales({ periods: ["last_month"], productTypes: ["Sofaa"] });
     expect(outcome.ok ? null : outcome.refusal.code).toBe("unknown_product_type");
-    if (!outcome.ok) expect(outcome.refusal.message).toContain("Nærmeste: Sofa");
+    if (!outcome.ok) expect(outcome.refusal.message).toContain("Nearest: Sofa");
     expect(nearestValues("hjornesofa", ["Hjørnesofa", "Sofa", "Lenestol"], 1)).toEqual(["Hjørnesofa"]);
   });
 
@@ -671,7 +671,7 @@ describe("catalog", () => {
     expect(outcome.result.untypedProductCount).toBe(2);
     expect(outcome.result.untypedUnitsSoldLast12Months).toBe(1);
     expect(outcome.result.deletedProductUnitsSoldLast12Months).toBe(2);
-    expect(outcome.result.unitsSoldStatus).toBe("beregnet");
+    expect(outcome.result.unitsSoldStatus).toBe("calculated");
     expect(outcome.result.earliestVisibleOrderAt).toBe("2024-11-02T10:00:00Z".replace("Z", ".000Z"));
   });
 
@@ -690,7 +690,7 @@ describe("catalog", () => {
     const outcome = await adapter.catalog({ includeUnitsSold: true });
     if (!outcome.ok) throw new Error(outcome.refusal.message);
     expect(outcome.result.productTypes.every((entry) => entry.unitsSoldLast12Months === null)).toBe(true);
-    expect(outcome.result.unitsSoldStatus).toBe("ikke beregnet: Shopify-tilkoblingen mangler tilgang til eldre ordre");
+    expect(outcome.result.unitsSoldStatus).toBe("not calculated: the Shopify connection lacks access to older orders");
     expect(fake.requests.map((request) => request.operation)).not.toContain("PaperclipOrdersScan");
   });
 
@@ -713,7 +713,7 @@ describe("catalog", () => {
     const outcome = await adapter.catalog({ includeUnitsSold: true });
     if (!outcome.ok) throw new Error(outcome.refusal.message);
     expect(outcome.result.productTypes.every((entry) => entry.unitsSoldLast12Months === null)).toBe(true);
-    expect(outcome.result.unitsSoldStatus).toMatch(/^ikke beregnet/);
+    expect(outcome.result.unitsSoldStatus).toMatch(/^not calculated/);
     expect(outcome.result.productTypes.find((entry) => entry.productType === "Sofa")!.productCount).toBe(1);
   });
 });

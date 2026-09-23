@@ -6,7 +6,7 @@ import {
   emptyLines,
   isKronerOnlyRefusal,
   KRONER_NOT_ENABLED_MESSAGE,
-  SALES_DEFINITIONS_NB,
+  SALES_DEFINITIONS,
   salesRequestSchema,
   salesResultSchema,
   catalogResultSchema,
@@ -36,7 +36,7 @@ import {
   formatZonedDate,
   formatZonedDateTime,
   monthKey,
-  NORWEGIAN_MONTHS,
+  MONTH_NAMES,
   parseMonthKey,
   zonedMonthKey,
   zonedMonthStart,
@@ -58,7 +58,7 @@ import { redactKnownLeakedSecretPatterns } from "../../redaction.js";
  *     returns/edits on older orders.
  *  3. Every PRODUCT sale is placed in the month of its agreement's
  *     `happenedAt`: ORDER = sold, RETURN = returns, UPDATE = edits. A return
- *     whose order was created in an earlier month is "fra tidligere måneder".
+ *     whose order was created in an earlier month is "from earlier months".
  *     Nested `agreements` and `sales` lists are paged with follow-up queries.
  *  4. Complete or nothing: at most `maxRequests` upstream requests and
  *     `maxDurationMs` per lookup. Hitting either is a refusal, never a partial
@@ -353,16 +353,16 @@ class LookupRefusal extends Error {
 }
 
 const TOO_BIG_MESSAGE =
-  "Oppslaget ble for stort til å fullføres trygt (for mange ordre å gå gjennom), så jeg gir ikke et delvis tall. Prøv én måned om gangen, eller be en styrebruker om hjelp.";
+  "The lookup became too big to finish safely (too many orders to go through), so I am not giving a partial figure. Try one month at a time, or ask a board user for help.";
 const THROTTLED_MESSAGE =
-  "Shopify ba oss vente fordi det kom for mange forespørsler, så jeg gir ikke et delvis tall. Prøv igjen om et minutt.";
+  "Shopify asked us to wait because too many requests came in, so I am not giving a partial figure. Try again in a minute.";
 const MISSING_ORDER_HISTORY_MESSAGE =
-  "Shopify-tilkoblingen mangler tilgang til eldre ordre (tillatelsen read_all_orders), så returer og endringer på eldre ordre ville mangle. Jeg gir derfor ingen tall. Det betyr ikke at salget var null.";
-const UPSTREAM_MESSAGE = "Shopify svarte med en feil, så jeg har ingen tall å gi. Prøv igjen senere.";
+  "The Shopify connection lacks access to older orders (the read_all_orders permission), so returns and edits on older orders would be missing. I am therefore giving no figures. That does not mean sales were zero.";
+const UPSTREAM_MESSAGE = "Shopify answered with an error, so I have no figures to give. Try again later.";
 const SHAPE_MESSAGE =
-  "Shopify sendte data i et format jeg ikke kjenner igjen, så jeg gir ikke noe svar. Feilen er logget.";
+  "Shopify sent data in a format I do not recognise, so I am not giving an answer. The error has been logged.";
 const INVARIANT_MESSAGE =
-  "Tallene fra Shopify gikk ikke opp da jeg kontrollerte dem, så jeg gir ikke noe svar. Feilen er logget.";
+  "The figures from Shopify did not add up when I checked them, so I am not giving an answer. The error has been logged.";
 
 // ---------------------------------------------------------------------------
 // One lookup's request runner: budget, deadline, pacing, THROTTLED retries.
@@ -909,7 +909,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
       else if (token === "this_month_to_date") ym = { year: today.year, month: today.month };
       else ym = parseMonthKey(token);
       if (!ym) {
-        throw new LookupRefusal("invalid_period", `Jeg forstår ikke perioden «${token}». Bruk en måned, for eksempel 2026-07.`);
+        throw new LookupRefusal("invalid_period", `I do not understand the period "${token}". Use a month, for example 2026-07.`);
       }
       const next = addMonths(ym.year, ym.month, 1);
       const start = zonedMonthStart(ym.year, ym.month, timezone);
@@ -927,13 +927,13 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
     });
     const keys = new Set(resolved.map((period) => period.key));
     if (keys.size !== resolved.length) {
-      throw new LookupRefusal("invalid_request", "De to periodene er samme måned. Velg to forskjellige måneder.");
+      throw new LookupRefusal("invalid_request", "The two periods are the same month. Choose two different months.");
     }
     return resolved.sort((a, b) => a.start.getTime() - b.start.getTime());
   }
 
   function periodLabel(period: ResolvedPeriod): string {
-    return `${NORWEGIAN_MONTHS[period.month - 1]} ${period.year}`;
+    return `${MONTH_NAMES[period.month - 1]} ${period.year}`;
   }
 
   async function sales(request: SalesRequest): Promise<DataLookupOutcome<SalesResult>> {
@@ -946,7 +946,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         }
         throw new LookupRefusal(
           "invalid_request",
-          "Spørsmålet kunne ikke gjøres om til et gyldig oppslag (maks to måneder, oppgitt som måned).",
+          "The question could not be turned into a valid lookup (at most two months, given as months).",
           parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
         );
       }
@@ -959,7 +959,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         ? [...new Set(input.productTypes.map((type) => type.trim()).filter(Boolean))]
         : null;
       if (requestedTypes && requestedTypes.length === 0) {
-        throw new LookupRefusal("invalid_request", "Ingen produkttype ble oppgitt.");
+        throw new LookupRefusal("invalid_request", "No product type was given.");
       }
 
       const shop = await readShopWindow(runner);
@@ -978,14 +978,14 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         if (!shop.earliestVisibleOrderAt) {
           throw new LookupRefusal(
             "no_visible_orders",
-            `Shopify viser ingen ordre for nettbutikken ${shop.domain}, så jeg har ingen tall å gi. Det betyr ikke at salget var null.`,
+            `Shopify shows no orders for the online store ${shop.domain}, so I have no figures to give. That does not mean sales were zero.`,
           );
         }
         const tooEarly = scanned.find((period) => period.start.getTime() < shop.earliestVisibleOrderAt!.getTime());
         if (tooEarly) {
           throw new LookupRefusal(
             "before_visible_window",
-            `Shopify lar meg bare se ordre fra og med ${formatZonedDate(shop.earliestVisibleOrderAt, shop.timezone)}, så jeg kan ikke gi tall for ${periodLabel(tooEarly)}. Det betyr ikke at salget var null.`,
+            `Shopify only lets me see orders from ${formatZonedDate(shop.earliestVisibleOrderAt, shop.timezone)}, so I cannot give figures for ${periodLabel(tooEarly)}. That does not mean sales were zero.`,
             [`period ${tooEarly.key} starts ${tooEarly.start.toISOString()}, earliest visible order ${shop.earliestVisibleOrderAt.toISOString()}`],
           );
         }
@@ -998,7 +998,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
           const nearest = nearestValues(unknown[0]!, [...catalogTypes], 3);
           throw new LookupRefusal(
             "unknown_product_type",
-            `Produkttypen «${unknown[0]}» finnes ikke i Shopify-katalogen.${nearest.length > 0 ? ` Nærmeste: ${nearest.join(", ")}.` : ""}`,
+            `The product type "${unknown[0]}" does not exist in the Shopify catalog.${nearest.length > 0 ? ` Nearest: ${nearest.join(", ")}.` : ""}`,
             unknown.map((type) => `unknown product type ${type}`),
           );
         }
@@ -1010,7 +1010,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
       const aggregate = aggregateLedger(ledger, scanned, shop.timezone, asOf, runner.warnings);
 
       const resultPeriods: SalesPeriod[] = periods.map((period) => {
-        const statusText = period.running ? `pågår, per ${formatZonedDateTime(asOf, shop.timezone)}` : "avsluttet";
+        const statusText = period.running ? `running, as of ${formatZonedDateTime(asOf, shop.timezone)}` : "closed";
         const end = period.running || period.future ? asOf : period.nextStart;
         const base = {
           key: period.key,
@@ -1018,14 +1018,14 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
           label: periodLabel(period),
           start: period.start.toISOString(),
           end: (period.future ? period.start : end).toISOString(),
-          status: (period.running || period.future ? "pågår" : "avsluttet") as SalesPeriod["status"],
-          statusText: period.future ? "ikke startet" : statusText,
+          status: (period.running || period.future ? "running" : "closed") as SalesPeriod["status"],
+          statusText: period.future ? "not started" : statusText,
         };
         if (period.future) {
           return {
             ...base,
             dataState: "no_data" as const,
-            noDataReason: "Perioden har ikke startet ennå.",
+            noDataReason: "The period has not started yet.",
             total: null,
             selection: null,
             byProductType: [],
@@ -1049,7 +1049,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
         measure: "units",
         groupBy: input.groupBy,
         productTypesCounted: requestedTypes,
-        definitions: [...SALES_DEFINITIONS_NB],
+        definitions: [...SALES_DEFINITIONS],
         periods: resultPeriods,
         comparison,
       };
@@ -1086,18 +1086,18 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
       }
 
       const asOf = clock.now();
-      let unitsStatus = "ikke beregnet (ikke bedt om)";
+      let unitsStatus = "not calculated (not requested)";
       let unitsByType: Map<string, number> | null = null;
       let untypedUnits: number | null = null;
       let deletedUnits: number | null = null;
       if (catalogOptions.includeUnitsSold) {
         const from = new Date(asOf.getTime() - 365 * 24 * 60 * 60 * 1000);
         if (!shop.hasAllOrdersAccess) {
-          unitsStatus = "ikke beregnet: Shopify-tilkoblingen mangler tilgang til eldre ordre";
+          unitsStatus = "not calculated: the Shopify connection lacks access to older orders";
         } else if (!shop.earliestVisibleOrderAt || shop.earliestVisibleOrderAt.getTime() > from.getTime()) {
           unitsStatus = shop.earliestVisibleOrderAt
-            ? `ikke beregnet: Shopify viser bare ordre fra og med ${formatZonedDate(shop.earliestVisibleOrderAt, shop.timezone)}`
-            : "ikke beregnet: Shopify viser ingen ordre";
+            ? `not calculated: Shopify only shows orders from ${formatZonedDate(shop.earliestVisibleOrderAt, shop.timezone)}`
+            : "not calculated: Shopify shows no orders";
         } else {
           try {
             const ledger = await scanLedger(runner, limits, from);
@@ -1120,7 +1120,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
                 }
               }
             }
-            unitsStatus = "beregnet";
+            unitsStatus = "calculated";
           } catch (error) {
             if (
               error instanceof LookupRefusal &&
@@ -1130,7 +1130,7 @@ export function createShopifySalesAdapter(options: ShopifyAdapterOptions): Shopi
               unitsByType = null;
               untypedUnits = null;
               deletedUnits = null;
-              unitsStatus = "ikke beregnet: for mange ordre å gå gjennom i ett oppslag";
+              unitsStatus = "not calculated: too many orders to go through in one lookup";
               runner.warnings.push(`catalog units sold skipped: ${error.refusal.detail?.join("; ") ?? error.refusal.code}`);
             } else {
               throw error;

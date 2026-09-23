@@ -302,14 +302,14 @@ d("DUR-3972 S4: business data for quick agents", () => {
     expect(res.status).toBe(200);
     expect(res.body.lane).toBe("a");
     const answer: string = res.body.result.response;
-    expect(answer).toContain("Salg i antall enheter for produkttype: Sofa");
-    expect(answer).toContain("Juli 2026 (1.–31. juli 2026, avsluttet)");
-    expect(answer).toContain("August 2026 (1.–31. august 2026, avsluttet)");
-    expect(answer.match(/^Solgt: /gm)).toHaveLength(2);
-    expect(answer.match(/^Returer i måneden: /gm)).toHaveLength(2);
-    expect(answer.match(/^Netto: /gm)).toHaveLength(2);
-    expect(answer).toContain("Returer i måneden: 1 stk (herav 1 fra tidligere måneder)");
-    expect(answer).toContain(`Kilde: Shopify (nettbutikken ${SHOP_A}), ikke regnskap · Europe/Oslo`);
+    expect(answer).toContain("Sales in units for product type: Sofa");
+    expect(answer).toContain("July 2026 (1–31 July 2026, closed)");
+    expect(answer).toContain("August 2026 (1–31 August 2026, closed)");
+    expect(answer.match(/^Sold: /gm)).toHaveLength(2);
+    expect(answer.match(/^Returns in the month: /gm)).toHaveLength(2);
+    expect(answer.match(/^Net: /gm)).toHaveLength(2);
+    expect(answer).toContain("Returns in the month: 1 unit (of which 1 from earlier months)");
+    expect(answer).toContain(`Source: Shopify (online store ${SHOP_A}), not the accounts · Europe/Oslo`);
     expect(answer).not.toContain(NUMBER_CHECK_REPLACEMENT_NOTE);
 
     // The tool was offered, and the prompt carries the data rules.
@@ -328,7 +328,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
       runId: null,
       laneAConversationId: res.body.result.conversationId,
     });
-    expect(answer).toContain(`oppslag ${rows[0]!.id}`);
+    expect(answer).toContain(`lookup ${rows[0]!.id}`);
     expect((rows[0]!.facts as { answer: string }).answer).toBe(answer);
 
     // Isolation: B's shop was never called; A's key went in the header only.
@@ -368,7 +368,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
       .send({ companyId: companyA, message: "og måneden før det?", laneHint: "a", conversationId: first.body.result.conversationId });
     expect(second.status).toBe(200);
     expect(second.body.result.conversationId).toBe(first.body.result.conversationId);
-    expect(second.body.result.response).toContain("Juli 2026 (1.–31. juli 2026, avsluttet)");
+    expect(second.body.result.response).toContain("July 2026 (1–31 July 2026, closed)");
     expect(await auditRows(companyA)).toHaveLength(2);
   });
 
@@ -467,7 +467,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
       .send({ companyId: companyA, message: "Hvor mange returer i august?", laneHint: "a" });
     expect(res.status).toBe(200);
     expect(res.body.result.response).toContain(NUMBER_CHECK_REPLACEMENT_NOTE);
-    expect(res.body.result.response).toContain("Returer i måneden: 1 stk (herav 1 fra tidligere måneder)");
+    expect(res.body.result.response).toContain("Returns in the month: 1 unit (of which 1 from earlier months)");
     expect(res.body.result.response).not.toContain("5 returer");
   });
 
@@ -483,14 +483,15 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const answer: string = res.body.result.response;
     expect(answer.startsWith(text)).toBe(true);
     expect(answer).not.toContain(NUMBER_CHECK_REPLACEMENT_NOTE);
-    expect(answer).toContain("Tallene er antall enheter (stk), ikke kroner. Perioder: Juli 2026 (1.–31. juli 2026, avsluttet); August 2026 (1.–31. august 2026, avsluttet).");
+    // The sentence before the periods belongs to business-data.ts; the periods are the card's.
+    expect(answer).toContain(": July 2026 (1–31 July 2026, closed); August 2026 (1–31 August 2026, closed).");
     const [row] = await auditRows(companyA);
-    expect(answer).toContain(`Kilde: Shopify (nettbutikken ${SHOP_A}), ikke regnskap · Europe/Oslo · hentet 21.09.2026 kl. 10:14 · oppslag ${row!.id}`);
+    expect(answer).toContain(`Source: Shopify (online store ${SHOP_A}), not the accounts · Europe/Oslo · fetched 21.09.2026 at 10:14 · lookup ${row!.id}`);
   });
 
   // ─── Isolation ───────────────────────────────────────────────────────────
 
-  it("the Durkan quick agent is told 'ikke koblet til', is not offered the tool, and the refusal is audited under Durkan", async () => {
+  it("the Durkan quick agent is told 'has not connected', is not offered the tool, and the refusal is audited under Durkan", async () => {
     const nordstrand = await seedCompany("Nordstrand Konsernet");
     await connectShop(nordstrand, SHOP_A, KEY_A);
     const durkan = await seedCompany("Durkan Agency");
@@ -502,7 +503,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
       .post(`/api/chat/${durkanAgent.id}/messages`)
       .send({ companyId: durkan, message: "Hvor mye solgte vi forrige måned?", laneHint: "a" });
     expect(res.status).toBe(200);
-    const sentence = "Durkan Agency har ikke koblet til salgsdata. En styrebruker kan gjøre det under Innstillinger → Datakilder.";
+    const sentence = "Durkan Agency has not connected its sales data. A board user can do that under Settings → Data sources.";
     expect(res.body.result.response).toBe(sentence);
     expect(model.calls[0]!.tools).not.toContain("read_business_data");
     expect(model.calls[0]!.system).toContain(sentence);
@@ -531,8 +532,8 @@ d("DUR-3972 S4: business data for quick agents", () => {
 
     const b = await svc.read(caller(companyB, agentB.id), { action: "sales", periods: ["last_month"] });
     expect(b.ok).toBe(true);
-    expect(b.text).toContain(`nettbutikken ${SHOP_B}`);
-    expect(b.text).toContain("Solgt: 4 stk");
+    expect(b.text).toContain(`online store ${SHOP_B}`);
+    expect(b.text).toContain("Sold: 4 units");
     const bKroner = await svc.read(caller(companyB, agentB.id), { action: "sales", periods: ["last_month"], measure: ["kroner"] });
     expect(bKroner.ok).toBe(false);
 
@@ -568,7 +569,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     for (const extra of [{ shop_domain: SHOP_B }, { connection_id: connectionB }, { company_id: companyB }]) {
       const answer = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"], ...extra });
       expect(answer).toMatchObject({ ok: false, outcome: "refused", refusalCode: "invalid_request" });
-      expect(answer.text).toContain("felter verktøyet ikke tar imot");
+      expect(answer.text).toContain("fields the tool does not accept");
     }
     expect(shopA.requests).toHaveLength(0);
     expect(shopB.requests).toHaveLength(0);
@@ -599,8 +600,8 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const seventh = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"] });
     expect(seventh).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "agent_minute_limit" });
     expect(seventh.text).toBe(
-      "Jeg har gjort 6 oppslag i salgsdata det siste minuttet, som er grensen per agent. Vent et minutt og spør igjen. " +
-        "Grensen er fast i Paperclip og kan bare endres av den som drifter Paperclip.",
+      "I have made 6 sales-data lookups in the last minute, which is the limit per agent. Wait a minute and ask again. " +
+        "The limit is fixed in Paperclip and can only be changed by whoever operates Paperclip.",
     );
     expect(shopA.requests).toHaveLength(requestsBefore);
 
@@ -626,7 +627,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const fresh = await seedQuickAgent(companyA, "Ny agent");
     const answer = await businessDataService(db, deps()).read(caller(companyA, fresh.id), { action: "sales", periods: ["last_month"] });
     expect(answer).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "company_minute_limit" });
-    expect(answer.text).toContain("Nordstrand Konsernet har gjort 20 oppslag i salgsdata det siste minuttet");
+    expect(answer.text).toContain("Nordstrand Konsernet has made 20 sales-data lookups in the last minute");
     expect(shopA.requests).toHaveLength(0);
   });
 
@@ -649,8 +650,8 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const answer = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"] });
     expect(answer).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "daily_cap" });
     expect(answer.text).toBe(
-      "Nordstrand Konsernet har brukt alle 300 oppslag i salgsdata for i dag, som er den daglige grensen. " +
-        "Grensen nullstilles ved midnatt (norsk tid). En styrebruker kan heve den under Innstillinger → Datakilder.",
+      "Nordstrand Konsernet has used all 300 sales-data lookups for today, which is the daily limit. " +
+        "The limit resets at midnight (Norwegian time). A board user can raise it under Settings → Data sources.",
     );
 
     // The cap is the company's own setting.
@@ -692,7 +693,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const svc = businessDataService(db, deps());
     const refused = await svc.read(caller(companyA, analyst.id, { runId }), { action: "sales", periods: ["last_month"] });
     expect(refused).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "run_limit" });
-    expect(refused.text).toContain("Denne kjøringen har allerede gjort 15 oppslag i salgsdata");
+    expect(refused.text).toContain("This run has already made 15 sales-data lookups");
     // Another run is not affected.
     expect((await svc.read(caller(companyA, analyst.id, { runId: randomUUID() }), { action: "sales", periods: ["last_month"] })).ok).toBe(true);
   });
@@ -707,13 +708,13 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const answer = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"], product_type_query: "sofa" });
     expect(answer).toMatchObject({ ok: false, outcome: "ambiguous", refusalCode: "ambiguous_product_type" });
     expect(answer.text).toContain("Hjørnesofa, Sofa, Sofabord, Sovesofa");
-    expect(answer.text).toContain("Spør personen");
+    expect(answer.text).toContain("Ask the person");
     expect(shopA.requests.map((entry) => entry.operation)).toEqual(["PaperclipProductTypes"]);
 
     const one = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["month_before_last"], product_type_query: "hjornesofa" });
     expect(one.ok).toBe(true);
-    expect(one.text).toContain("Salg i antall enheter for produkttype: Hjørnesofa");
-    expect(one.text).toContain("Solgt: 1 stk");
+    expect(one.text).toContain("Sales in units for product type: Hjørnesofa");
+    expect(one.text).toContain("Sold: 1 unit");
   });
 
   it("adds up an explicit list of product types on the server", async () => {
@@ -724,9 +725,9 @@ d("DUR-3972 S4: business data for quick agents", () => {
       action: "sales", periods: ["month_before_last"], product_types: ["Sofa", "Hjørnesofa"],
     });
     expect(answer.ok).toBe(true);
-    expect(answer.text).toContain("Solgt: 4 stk");
-    expect(answer.text).toContain("  Sofa: solgt 3, returer 0, netto 3");
-    expect(answer.text).toContain("  Hjørnesofa: solgt 1, returer 0, netto 1");
+    expect(answer.text).toContain("Sold: 4 units");
+    expect(answer.text).toContain("  Sofa: sold 3, returns 0, net 3");
+    expect(answer.text).toContain("  Hjørnesofa: sold 1, returns 0, net 1");
   });
 
   it("refuses kroner with a plain sentence, before any request", async () => {
@@ -740,14 +741,14 @@ d("DUR-3972 S4: business data for quick agents", () => {
     expect(shopA.requests).toHaveLength(0);
   });
 
-  it("says 'ingen data' for a month that has not started, which is not zero", async () => {
+  it("says 'no data' for a month that has not started, which is not zero", async () => {
     const companyA = await seedCompany("Nordstrand Konsernet");
     const agentA = await seedQuickAgent(companyA);
     await connectShop(companyA, SHOP_A, KEY_A);
     const answer = await businessDataService(db, deps()).read(caller(companyA, agentA.id), { action: "sales", periods: ["2026-12"] });
     expect(answer).toMatchObject({ ok: true, outcome: "no_data" });
-    expect(answer.text).toContain("Ingen data: Perioden har ikke startet ennå. (ikke det samme som null salg)");
-    expect(answer.text).not.toContain("Solgt:");
+    expect(answer.text).toContain("No data: The period has not started yet. (not the same as nothing sold)");
+    expect(answer.text).not.toContain("Sold:");
     const [row] = await auditRows(companyA);
     expect(row!.outcome).toBe("no_data");
   });
@@ -762,7 +763,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     });
     expect(answer.ok).toBe(false);
     expect(answer.outcome).toBe("upstream_error");
-    expect(answer.text).not.toMatch(/Solgt|Netto/);
+    expect(answer.text).not.toMatch(/Sold:|Net:/);
     const [row] = await auditRows(companyA);
     expect(row!.outcome).toBe("upstream_error");
   });
@@ -817,7 +818,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
       .send(trialBody);
     expect(res.status).toBe(200);
     expect(res.body.ok, JSON.stringify(res.body)).toBe(true);
-    expect(res.body.card).toContain("Sofa: solgt 3, returer 1, netto 2");
+    expect(res.body.card).toContain("Sofa: sold 3, returns 1, net 2");
     expect(JSON.stringify(res.body)).not.toContain(KEY_A);
     const [row] = await auditRows(companyA);
     expect(row).toMatchObject({ channel: "settings_test", outcome: "ok", userId: "filip", agentId: null, id: res.body.lookupId });

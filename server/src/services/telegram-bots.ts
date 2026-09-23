@@ -79,7 +79,7 @@ export async function checkTelegramBotToken(
     return {
       ok: false,
       username: null,
-      message: "Fikk ikke kontakt med Telegram. Prøv igjen om litt — det er som regel nettet, ikke boten.",
+      message: "Could not reach Telegram. Try again in a moment — it is usually the network, not the bot.",
     };
   }
   if (response.status === 401 || response.status === 404) {
@@ -87,30 +87,30 @@ export async function checkTelegramBotToken(
       ok: false,
       username: null,
       message:
-        "Telegram kjenner ikke igjen dette tokenet. Hent et nytt fra BotFather (/token) og lim det inn på nytt.",
+        "Telegram does not recognise this token. Get a new one from BotFather (/token) and paste it in again.",
     };
   }
   if (!response.ok) {
     return {
       ok: false,
       username: null,
-      message: "Telegram svarte ikke som forventet. Prøv igjen om litt.",
+      message: "Telegram did not respond as expected. Try again in a moment.",
     };
   }
   let username: string | null = null;
   try {
     const body = (await response.json()) as { ok?: boolean; result?: { username?: string } };
     if (body?.ok !== true) {
-      return { ok: false, username: null, message: "Telegram svarte, men godtok ikke tokenet." };
+      return { ok: false, username: null, message: "Telegram responded, but did not accept the token." };
     }
     username = typeof body.result?.username === "string" ? body.result.username : null;
   } catch {
-    return { ok: false, username: null, message: "Telegram svarte ikke som forventet. Prøv igjen om litt." };
+    return { ok: false, username: null, message: "Telegram did not respond as expected. Try again in a moment." };
   }
   return {
     ok: true,
     username,
-    message: username ? `Boten svarer som @${username}.` : "Boten svarer.",
+    message: username ? `The bot answers as @${username}.` : "The bot answers.",
   };
 }
 
@@ -181,7 +181,7 @@ export function telegramBotService(db: Db, deps: { fetchImpl?: typeof fetch } = 
           name,
           provider: "local_encrypted",
           value: token,
-          description: "Bot-token fra BotFather. Brukes bare av Telegram-koblingen.",
+          description: "Bot token from BotFather. Used only by the Telegram connection.",
           kind: "telegram_bot_token",
         },
         // agentId is null on purpose: this secret is created by the operator,

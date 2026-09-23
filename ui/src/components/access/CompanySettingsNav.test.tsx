@@ -73,6 +73,8 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/company/settings/access")).toBe("members");
     expect(getCompanySettingsTab("/PAP/company/settings/access")).toBe("members");
     expect(getCompanySettingsTab("/company/settings/invites")).toBe("invites");
+    expect(getCompanySettingsTab("/company/settings/connections")).toBe("connections");
+    expect(getCompanySettingsTab("/PAP/company/settings/connections")).toBe("connections");
     expect(getCompanySettingsTab("/PAP/company/settings/secrets")).toBe("secrets");
     expect(getCompanySettingsTab("/company/settings/instance/profile")).toBe("instance-profile");
     expect(getCompanySettingsTab("/PAP/company/settings/instance/general")).toBe("instance-general");
@@ -102,6 +104,7 @@ describe("CompanySettingsNav", () => {
           { value: "cloud-upstream", label: "Cloud upstream" },
           { value: "members", label: "Members" },
           { value: "invites", label: "Invites" },
+          { value: "connections", label: "Connections" },
           { value: "secrets", label: "Secrets" },
           { value: "instance-profile", label: "Instance profile" },
           { value: "instance-general", label: "Instance general" },

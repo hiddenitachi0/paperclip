@@ -127,7 +127,7 @@ describe("createDataConnectionSchema", () => {
     });
     expect(withPassword).toEqual({
       kind: "sftp_file",
-      name: "Filer (SFTP)",
+      name: "Files (SFTP)",
       host: "filer.butikken.no",
       port: 22,
       username: "paperclip",

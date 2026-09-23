@@ -15,22 +15,25 @@ import { Input } from "@/components/ui/input";
  *
  * Before this, connecting a bot meant someone editing a root-only JSON file on
  * the server with the token in plain text and restarting a service. Everything
- * on this card is written for the person doing that job, in Norwegian, like the
- * card next to it: no ids, no jargon, and nothing offered that he cannot do.
+ * on this card is written for the person doing that job: no ids, no jargon,
+ * and nothing offered that he cannot do.
  *
  * The token field is never pre-filled and the token is never shown again — the
  * server stores it in the saved-password store and answers with a masked hint.
+ *
+ * DUR-3997: lives on the Connections page. `readOnly` hides every write action
+ * for operators and viewers; the server routes keep their own checks.
  */
 
 function statusText(bot: TelegramBotSummary): string {
-  if (bot.lastCheckAt === null) return "Ikke testet ennå";
+  if (bot.lastCheckAt === null) return "Not tested yet";
   if (bot.lastCheckOk) {
-    return bot.lastCheckUsername ? `Svarer som @${bot.lastCheckUsername}` : "Svarer";
+    return bot.lastCheckUsername ? `Answers as @${bot.lastCheckUsername}` : "Answers";
   }
-  return bot.lastCheckError ?? "Svarte ikke";
+  return bot.lastCheckError ?? "Did not answer";
 }
 
-export function TelegramBotsSection({ companyId }: { companyId: string }) {
+export function TelegramBotsSection({ companyId, readOnly = false }: { companyId: string; readOnly?: boolean }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const [agentId, setAgentId] = useState("");
@@ -68,9 +71,9 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
       setAgentId("");
       setError(null);
       invalidate();
-      pushToast({ title: "Boten er koblet til", tone: "success" });
+      pushToast({ title: "Bot connected", tone: "success" });
     },
-    onError: fail("Kunne ikke koble til boten"),
+    onError: fail("Could not connect the bot"),
   });
 
   const rotateMutation = useMutation({
@@ -81,9 +84,9 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
       setRotatingId(null);
       setError(null);
       invalidate();
-      pushToast({ title: "Nytt token lagret", tone: "success" });
+      pushToast({ title: "New token saved", tone: "success" });
     },
-    onError: fail("Kunne ikke lagre det nye tokenet"),
+    onError: fail("Could not save the new token"),
   });
 
   const testMutation = useMutation({
@@ -93,7 +96,7 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
       invalidate();
       pushToast({ title: result.message, tone: result.ok ? "success" : "warn" });
     },
-    onError: fail("Kunne ikke teste boten"),
+    onError: fail("Could not test the bot"),
   });
 
   const allowedUsersMutation = useMutation({
@@ -103,7 +106,7 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
       setError(null);
       invalidate();
     },
-    onError: fail("Kunne ikke endre hvem som får bruke boten"),
+    onError: fail("Could not change who may use the bot"),
   });
 
   const removeMutation = useMutation({
@@ -112,9 +115,9 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
       setConfirmRemoveId(null);
       setError(null);
       invalidate();
-      pushToast({ title: "Boten er fjernet", tone: "success" });
+      pushToast({ title: "Bot removed", tone: "success" });
     },
-    onError: fail("Kunne ikke fjerne boten"),
+    onError: fail("Could not remove the bot"),
   });
 
   const bots = botsQuery.data ?? [];
@@ -125,80 +128,88 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Telegram-boter</CardTitle>
+        <CardTitle>Telegram bots</CardTitle>
         <CardDescription>
-          En Telegram-bot lar deg snakke med én av de ansatte rett i Telegram: du får varsler der, og
-          det du skriver går til den ansatte. Du lager boten i Telegram hos @BotFather, og limer inn
-          tokenet den gir deg her. Tokenet lagres som et passord og vises aldri igjen — men du kan
-          bytte det når som helst. Bare personene du legger inn nedenfor kan bruke boten, og bare i
-          vanlig én-til-én-chat; grupper blir alltid avvist.
+          A Telegram bot lets you talk to one of your agents straight from Telegram: you get notifications
+          there, and what you write goes to the agent. Create the bot in Telegram with @BotFather and paste
+          the token it gives you here. The token is stored as a secret and never shown again — but you can
+          replace it at any time. Only the people you add below can use the bot, and only in ordinary
+          one-to-one chat; groups are always refused.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="space-y-2 rounded-md border p-3">
-          <p className="text-sm font-medium">Koble til en ny bot</p>
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="min-w-[12rem] flex-1 space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="telegram-bot-agent">
-                Hvem skal svare?
-              </label>
-              <select
-                id="telegram-bot-agent"
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
-                value={agentId}
-                onChange={(event) => setAgentId(event.target.value)}
+        {readOnly ? (
+          <p className="text-xs text-muted-foreground">Only the company owner or an admin can connect or change bots.</p>
+        ) : (
+          <div className="space-y-2 rounded-md border p-3">
+            <p className="text-sm font-medium">Connect a new bot</p>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-[12rem] flex-1 space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="telegram-bot-agent">
+                  Who should answer?
+                </label>
+                <select
+                  id="telegram-bot-agent"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+                  value={agentId}
+                  onChange={(event) => setAgentId(event.target.value)}
+                >
+                  <option value="">Choose an agent…</option>
+                  {availableAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="min-w-[10rem] flex-1 space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="telegram-bot-name">
+                  What should the bot be called?
+                </label>
+                <Input
+                  id="telegram-bot-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Managing director"
+                  maxLength={80}
+                />
+              </div>
+              <div className="min-w-[14rem] flex-1 space-y-1.5">
+                <label className="text-sm font-medium" htmlFor="telegram-bot-token">
+                  Token from BotFather
+                </label>
+                <Input
+                  id="telegram-bot-token"
+                  type="password"
+                  autoComplete="off"
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                  placeholder="8123456789:AAH…"
+                />
+              </div>
+              <Button
+                onClick={() => createMutation.mutate()}
+                disabled={!agentId || !name.trim() || !token.trim() || createMutation.isPending}
               >
-                <option value="">Velg en ansatt…</option>
-                {availableAgents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
-                  </option>
-                ))}
-              </select>
+                {createMutation.isPending ? "Connecting…" : "Connect"}
+              </Button>
             </div>
-            <div className="min-w-[10rem] flex-1 space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="telegram-bot-name">
-                Hva skal boten hete?
-              </label>
-              <Input
-                id="telegram-bot-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="Daglig leder"
-                maxLength={80}
-              />
-            </div>
-            <div className="min-w-[14rem] flex-1 space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="telegram-bot-token">
-                Token fra BotFather
-              </label>
-              <Input
-                id="telegram-bot-token"
-                type="password"
-                autoComplete="off"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder="8123456789:AAH…"
-              />
-            </div>
-            <Button
-              onClick={() => createMutation.mutate()}
-              disabled={!agentId || !name.trim() || !token.trim() || createMutation.isPending}
-            >
-              {createMutation.isPending ? "Kobler til…" : "Koble til"}
-            </Button>
+            {availableAgents.length === 0 && agents.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Every agent already has a bot.
+              </p>
+            )}
           </div>
-          {availableAgents.length === 0 && agents.length > 0 && (
-            <p className="text-xs text-muted-foreground">
-              Alle de ansatte har allerede hver sin bot.
-            </p>
-          )}
-        </div>
+        )}
 
         {botsQuery.isLoading ? (
-          <p className="text-sm text-muted-foreground">Henter…</p>
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : botsQuery.isError ? (
+          <p className="text-sm text-destructive" data-testid="telegram-bots-error">
+            Could not load the bots: {botsQuery.error instanceof Error ? botsQuery.error.message : "unknown error"}
+          </p>
         ) : bots.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Ingen boter er koblet til ennå.</p>
+          <p className="text-sm text-muted-foreground">No bots connected yet.</p>
         ) : (
           <ul className="divide-y rounded-md border">
             {bots.map((bot) => (
@@ -207,65 +218,67 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">
                       {bot.name}
-                      {bot.agentName ? ` — svarer som ${bot.agentName}` : ""}
+                      {bot.agentName ? ` — answers as ${bot.agentName}` : ""}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       Token {bot.tokenHint} · {statusText(bot)}
                     </p>
                   </div>
-                  <div className="flex shrink-0 gap-2">
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => testMutation.mutate(bot.id)}
-                      disabled={testMutation.isPending}
-                    >
-                      Test
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setRotateToken("");
-                        setRotatingId(rotatingId === bot.id ? null : bot.id);
-                      }}
-                    >
-                      Bytt token
-                    </Button>
-                    {confirmRemoveId === bot.id ? (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={() => removeMutation.mutate(bot.id)}
-                          disabled={removeMutation.isPending}
-                        >
-                          Ja, fjern boten
-                        </Button>
-                        <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveId(null)}>
-                          Avbryt
-                        </Button>
-                      </>
-                    ) : (
-                      <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveId(bot.id)}>
-                        Fjern
+                  {!readOnly && (
+                    <div className="flex shrink-0 gap-2">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => testMutation.mutate(bot.id)}
+                        disabled={testMutation.isPending}
+                      >
+                        Test
                       </Button>
-                    )}
-                  </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setRotateToken("");
+                          setRotatingId(rotatingId === bot.id ? null : bot.id);
+                        }}
+                      >
+                        Replace token
+                      </Button>
+                      {confirmRemoveId === bot.id ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => removeMutation.mutate(bot.id)}
+                            disabled={removeMutation.isPending}
+                          >
+                            Yes, remove the bot
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveId(null)}>
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveId(bot.id)}>
+                          Remove
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {confirmRemoveId === bot.id && (
                   <p className="text-xs text-destructive">
-                    Boten slutter å svare, og det lagrede tokenet slettes. Du kan koble den til igjen
-                    senere med et nytt token fra BotFather.
+                    The bot stops answering and the stored token is deleted. You can connect it again later
+                    with a new token from BotFather.
                   </p>
                 )}
 
-                {rotatingId === bot.id && (
+                {rotatingId === bot.id && !readOnly && (
                   <div className="flex items-end gap-2">
                     <div className="flex-1 space-y-1.5">
                       <label className="text-sm font-medium" htmlFor={`telegram-rotate-${bot.id}`}>
-                        Nytt token fra BotFather
+                        New token from BotFather
                       </label>
                       <Input
                         id={`telegram-rotate-${bot.id}`}
@@ -281,17 +294,17 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
                       onClick={() => rotateMutation.mutate({ botId: bot.id, token: rotateToken.trim() })}
                       disabled={!rotateToken.trim() || rotateMutation.isPending}
                     >
-                      Lagre
+                      Save
                     </Button>
                   </div>
                 )}
 
                 <div className="space-y-1.5">
-                  <p className="text-xs font-medium">Hvem får bruke denne boten</p>
+                  <p className="text-xs font-medium">Who may use this bot</p>
                   {bot.allowedTelegramUserIds.length === 0 ? (
                     <p className="text-xs text-muted-foreground">
-                      Ingen lagt til ennå — da gjelder den vanlige listen over hvem som får bruke
-                      botene. Legg inn din egen Telegram-ID for å bestemme det her.
+                      Nobody added yet — so the usual list of who may use the bots applies. Add your own
+                      Telegram ID to decide it here.
                     </p>
                   ) : (
                     <ul className="flex flex-wrap gap-2">
@@ -301,50 +314,54 @@ export function TelegramBotsSection({ companyId }: { companyId: string }) {
                           className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs"
                         >
                           <span>{userId}</span>
-                          <button
-                            type="button"
-                            className="text-muted-foreground hover:text-destructive"
-                            aria-label={`Fjern ${userId}`}
-                            onClick={() =>
-                              allowedUsersMutation.mutate({
-                                botId: bot.id,
-                                telegramUserIds: bot.allowedTelegramUserIds.filter((id) => id !== userId),
-                              })
-                            }
-                          >
-                            ×
-                          </button>
+                          {!readOnly && (
+                            <button
+                              type="button"
+                              className="text-muted-foreground hover:text-destructive"
+                              aria-label={`Remove ${userId}`}
+                              onClick={() =>
+                                allowedUsersMutation.mutate({
+                                  botId: bot.id,
+                                  telegramUserIds: bot.allowedTelegramUserIds.filter((id) => id !== userId),
+                                })
+                              }
+                            >
+                              ×
+                            </button>
+                          )}
                         </li>
                       ))}
                     </ul>
                   )}
-                  <div className="flex items-end gap-2">
-                    <Input
-                      aria-label={`Telegram-ID som får bruke ${bot.name}`}
-                      value={newUserId[bot.id] ?? ""}
-                      onChange={(event) =>
-                        setNewUserId((current) => ({ ...current, [bot.id]: event.target.value }))
-                      }
-                      placeholder="123456789"
-                      className="max-w-[12rem]"
-                    />
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={!(newUserId[bot.id] ?? "").trim() || allowedUsersMutation.isPending}
-                      onClick={() => {
-                        const value = (newUserId[bot.id] ?? "").trim();
-                        if (!value) return;
-                        allowedUsersMutation.mutate({
-                          botId: bot.id,
-                          telegramUserIds: [...bot.allowedTelegramUserIds, value],
-                        });
-                        setNewUserId((current) => ({ ...current, [bot.id]: "" }));
-                      }}
-                    >
-                      Legg til
-                    </Button>
-                  </div>
+                  {!readOnly && (
+                    <div className="flex items-end gap-2">
+                      <Input
+                        aria-label={`Telegram ID allowed to use ${bot.name}`}
+                        value={newUserId[bot.id] ?? ""}
+                        onChange={(event) =>
+                          setNewUserId((current) => ({ ...current, [bot.id]: event.target.value }))
+                        }
+                        placeholder="123456789"
+                        className="max-w-[12rem]"
+                      />
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={!(newUserId[bot.id] ?? "").trim() || allowedUsersMutation.isPending}
+                        onClick={() => {
+                          const value = (newUserId[bot.id] ?? "").trim();
+                          if (!value) return;
+                          allowedUsersMutation.mutate({
+                            botId: bot.id,
+                            telegramUserIds: [...bot.allowedTelegramUserIds, value],
+                          });
+                          setNewUserId((current) => ({ ...current, [bot.id]: "" }));
+                        }}
+                      >
+                        Add
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </li>
             ))}
