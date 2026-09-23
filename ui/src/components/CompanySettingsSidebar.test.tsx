@@ -160,6 +160,7 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).toContain("Members");
     expect(container.textContent).not.toContain("Cloud upstream");
     expect(container.textContent).toContain("Invites");
+    expect(container.textContent).toContain("Connections");
     expect(container.textContent).toContain("Secrets");
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -187,6 +188,13 @@ describe("CompanySettingsSidebar", () => {
       expect.objectContaining({
         to: "/company/settings/invites",
         label: "Invites",
+        end: true,
+      }),
+    );
+    expect(sidebarNavItemMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "/company/settings/connections",
+        label: "Connections",
         end: true,
       }),
     );

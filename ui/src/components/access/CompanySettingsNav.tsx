@@ -8,6 +8,7 @@ const items = [
   { value: "cloud-upstream", label: "Cloud upstream", href: "/company/settings/cloud-upstream" },
   { value: "members", label: "Members", href: "/company/settings/members" },
   { value: "invites", label: "Invites", href: "/company/settings/invites" },
+  { value: "connections", label: "Connections", href: "/company/settings/connections" },
   { value: "secrets", label: "Secrets", href: "/company/settings/secrets" },
   { value: "instance-profile", label: "Instance profile", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/profile` },
   { value: "instance-general", label: "Instance general", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/general` },
@@ -73,6 +74,10 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
 
   if (pathname.includes("/company/settings/invites")) {
     return "invites";
+  }
+
+  if (pathname.includes("/company/settings/connections")) {
+    return "connections";
   }
 
   if (pathname.includes("/company/settings/secrets")) {

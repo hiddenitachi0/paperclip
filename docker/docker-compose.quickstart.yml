@@ -3,6 +3,9 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+    # Same reason as docker-compose.yml: an init as PID 1 reaps the helper
+    # processes every CLI run leaves behind, so they cannot pile up as zombies.
+    init: true
     ports:
       - "${PAPERCLIP_PORT:-3100}:3100"
     environment:

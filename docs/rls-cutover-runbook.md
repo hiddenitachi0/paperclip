@@ -150,6 +150,39 @@ The four settings this runbook uses —
   `docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml exec server sh -c 'env | grep -E "^(DATABASE_|PAPERCLIP_SERVER_ANTHROPIC_|ANTHROPIC_)" | cut -d= -f1'`
   lists which of the settings are set.
 
+### Why the server container runs under Docker's init (`init: true`)
+
+`docker/docker-compose.yml` starts the `server` container with `init: true`.
+That makes Docker's tiny init program the container's first process (PID 1),
+with the Paperclip server as its child, instead of the server itself being
+PID 1. Plain language for why:
+
+- On Linux, when a process ends, its parent has to collect it. A process that
+  has ended but not been collected stays behind as a dead "zombie" entry.
+  When a parent goes away first, its children are handed to PID 1 — so PID 1
+  must collect anything handed to it. Node, which the server runs on, does
+  not do that.
+- Every agent run starts the Paperclip command-line tool. That tool's
+  TypeScript loader starts a small helper program (`esbuild`) and leaves it
+  behind when it finishes; the helper ends a moment later. With the server as
+  PID 1, each of those helpers stayed a zombie forever — about 19 a minute.
+- After roughly 16 hours the container had 18,641 of them and hit its process
+  limit. Nothing new could start: `sh: Cannot fork`, every command-line call
+  ended with `Aborted (core dumped)`, and no agent could run until the
+  container was restarted. Without the fix it would happen again the next day.
+- `init: true` puts a proper init in front of the server. It collects the
+  leftovers as they appear, passes the stop signal on to the server (so the
+  drain-on-stop behaviour is unchanged) and does nothing else.
+
+Two consequences worth knowing: the server is no longer PID 1, so anything
+that needs its process id has to look it up by its command line (the
+isolation acceptance harness does); and the setting only takes effect when
+the container is created, so it needs a deploy (`up -d`), not a plain
+`restart`. A quick way to see the state on the box, without printing anything
+private: `docker compose ... exec server sh -c 'grep -l "^State:[[:space:]]*Z" /proc/[0-9]*/status 2>/dev/null | wc -l'`
+prints the number of zombies (0 is right), and
+`docker compose ... exec server cat /proc/1/comm` should print `docker-init`.
+
 ### The one ordering rule: migration login before step 4
 
 Before step 4 of the cutover, add `DATABASE_MIGRATION_URL` to `docker/.env`

@@ -1,4 +1,5 @@
 import type { DataConnectionObservedSummary } from "@paperclipai/shared";
+import { UNTYPED_BUCKET_LABEL } from "./contract.js";
 import { ShopifyClientError, type ShopifyGraphQLClient } from "./shopify-client.js";
 
 /**
@@ -19,9 +20,9 @@ import { ShopifyClientError, type ShopifyGraphQLClient } from "./shopify-client.
 export const SHOPIFY_REQUIRED_SCOPES = ["read_orders", "read_all_orders", "read_products"] as const;
 
 const SCOPE_EXPLANATIONS: Record<(typeof SHOPIFY_REQUIRED_SCOPES)[number], string> = {
-  read_orders: "lese ordre",
-  read_all_orders: "lese alle ordre, ikke bare de siste 60 dagene",
-  read_products: "lese produkter",
+  read_orders: "read orders",
+  read_all_orders: "read all orders, not only the last 60 days",
+  read_products: "read products",
 };
 
 /** Kept small on purpose: product types are the only product field read. */
@@ -67,14 +68,14 @@ export function evaluateShopifyScopes(granted: string[]): ScopeEvaluation {
   const problems: string[] = [];
   if (writeScopes.length > 0) {
     problems.push(
-      `Nøkkelen har skrivetilgang (${writeScopes.join(", ")}). Paperclip skal bare kunne lese. ` +
-        `Fjern alle write-tilganger fra appen i Shopify, og trykk Test igjen.`,
+      `The key has write access (${writeScopes.join(", ")}). Paperclip must only be able to read. ` +
+        `Remove all write permissions from the app in Shopify, and press Test again.`,
     );
   }
   for (const scope of missingScopes) {
     problems.push(
-      `Appen mangler tilgangen ${scope} (${SCOPE_EXPLANATIONS[scope]}). ` +
-        `Legg den til på appen i Shopify, og trykk Test igjen.`,
+      `The app is missing the ${scope} permission (${SCOPE_EXPLANATIONS[scope]}). ` +
+        `Add it to the app in Shopify, and press Test again.`,
     );
   }
   return { canActivate: problems.length === 0, writeScopes, missingScopes, problems };
@@ -91,7 +92,7 @@ export interface ShopifyCheckOutcome {
 
 function describeError(error: unknown): string {
   if (error instanceof ShopifyClientError) return error.message;
-  return "Noe uventet gikk galt under testen. Prøv igjen om litt.";
+  return "Something unexpected went wrong during the test. Try again in a moment.";
 }
 
 export async function runShopifyConnectionCheck(
@@ -114,7 +115,7 @@ export async function runShopifyConnectionCheck(
   const problems = [...scopes.problems];
   if (grantedScopes.some((scope) => /customer/.test(scope))) {
     notes.push(
-      "Appen har tilgang til kundedata. Paperclip bruker den aldri, og du kan fjerne den i Shopify uten at noe slutter å virke.",
+      "The app has access to customer data. Paperclip never uses it, and you can remove it in Shopify without anything breaking.",
     );
   }
 
@@ -138,10 +139,10 @@ export async function runShopifyConnectionCheck(
     const earliest = await client.query<EarliestOrder>(EARLIEST_ORDER_QUERY);
     observed.earliestVisibleOrderAt = earliest.orders.nodes[0]?.createdAt ?? null;
     if (!observed.earliestVisibleOrderAt) {
-      notes.push("Nøkkelen ser ingen ordre i butikken.");
+      notes.push("The key sees no orders in the shop.");
     }
   } catch (error) {
-    problems.push(`Kunne ikke lese ordre: ${describeError(error)}`);
+    problems.push(`Could not read orders: ${describeError(error)}`);
     return { ok: true, canActivate: false, problems, notes, observed };
   }
 
@@ -171,7 +172,7 @@ export async function runShopifyConnectionCheck(
       }
     } catch (error) {
       if (!(error instanceof ShopifyClientError) || !["budget_exhausted", "deadline_exceeded", "throttled"].includes(error.code)) {
-        problems.push(`Kunne ikke lese produkter: ${describeError(error)}`);
+        problems.push(`Could not read products: ${describeError(error)}`);
         return { ok: true, canActivate: false, problems, notes, observed };
       }
     }
@@ -185,11 +186,11 @@ export async function runShopifyConnectionCheck(
     };
     if (!complete) {
       notes.push(
-        `Produkttypene er talt for de første ${productsScanned} produktene. Butikken har flere; listen er derfor ikke komplett.`,
+        `Product types were counted for the first ${productsScanned} products. The shop has more, so the list is not complete.`,
       );
     }
     if (productsWithoutType > 0) {
-      notes.push(`${productsWithoutType} produkter har ingen produkttype. De blir vist som «(uten produkttype)» i svar.`);
+      notes.push(`${productsWithoutType} products have no product type. They are shown as ${UNTYPED_BUCKET_LABEL} in answers.`);
     }
   }
 

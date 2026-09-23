@@ -81,9 +81,9 @@ type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type SecretBindingDb = Pick<Db | DbTransaction, "select" | "delete" | "insert">;
 
 const DEDICATED_TARGET_LABELS: Record<(typeof DEDICATED_SECRET_BINDING_TARGET_TYPES)[number], string> = {
-  data_connection: "en datakobling (Datakilder)",
-  telegram_bot: "en Telegram-bot",
-  persona_account: "en persona-konto",
+  data_connection: "a data connection (Data sources)",
+  telegram_bot: "a Telegram bot",
+  persona_account: "a persona account",
 };
 
 /**
@@ -135,9 +135,9 @@ export async function assertSecretsNotDedicatedElsewhere(
   const owner =
     DEDICATED_TARGET_LABELS[conflictRow.targetType as keyof typeof DEDICATED_TARGET_LABELS] ?? conflictRow.targetType;
   throw unprocessable(
-    `Dette lagrede passordet hører til ${owner} og kan bare brukes der. ` +
-      `Det kan ikke kobles til noe annet, heller ikke av en styrebruker. ` +
-      `Trenger du den samme tilgangen et annet sted, lag et eget passord for det.`,
+    `This saved secret belongs to ${owner} and can only be used there. ` +
+      `It cannot be attached to anything else, not even by a board user. ` +
+      `If you need the same access somewhere else, create a separate secret for it.`,
     { code: "secret_dedicated_to_other_target", dedicatedTo: conflictRow.targetType },
   );
 }

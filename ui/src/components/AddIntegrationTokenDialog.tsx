@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   KNOWN_INTEGRATION_ENV_KEYS,
   getIntegrationKey,
+  getSecretKind,
   isTestableSecretKind,
   secretKindForEnvKey,
   secretValueLooksWrongForKind,
@@ -79,6 +80,12 @@ interface AddIntegrationTokenDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   companyId: string;
+  /**
+   * DUR-3997: Connections opens this dialog with the kind already chosen
+   * ("Add key" on the OpenAI card). The matching env key is pre-selected so
+   * the operator only has to paste the value.
+   */
+  initialKind?: SecretKind | null;
 }
 
 /**
@@ -93,6 +100,7 @@ export function AddIntegrationTokenDialog({
   open,
   onOpenChange,
   companyId,
+  initialKind = null,
 }: AddIntegrationTokenDialogProps) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
@@ -105,6 +113,19 @@ export function AddIntegrationTokenDialog({
   // key"; the operator can override it (or say "Not sure").
   const [kindOverride, setKindOverride] = useState<SecretKind | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !initialKind) return;
+    const envKey = getSecretKind(initialKind)?.envKey ?? initialKind.toUpperCase();
+    if (KNOWN_INTEGRATION_ENV_KEYS.some((entry) => entry.key === envKey)) {
+      setKeyChoice(envKey);
+      setCustomKey("");
+    } else {
+      setKeyChoice(CUSTOM_KEY);
+      setCustomKey(envKey);
+    }
+    setKindOverride(initialKind);
+  }, [open, initialKind]);
 
   const agentsQuery = useQuery({
     queryKey: queryKeys.agents.list(companyId),

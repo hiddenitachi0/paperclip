@@ -158,7 +158,7 @@ describe("DUR-3997 data-source registry", () => {
       const check = await entry.check(input);
       expect(check).toMatchObject({ ok: false, canActivate: false, observed: null, notes: [], stats: { requests: 0, costPoints: 0 } });
       expect(check.problems).toHaveLength(1);
-      expect(check.problems[0]).toContain("kan ikke leses ennå");
+      expect(check.problems[0]).toContain("cannot be read yet");
       expect(check.problems[0]).toContain(entry.label);
       expect(entry.canActivate(null)).toMatchObject({ ok: false });
     }
@@ -291,8 +291,8 @@ describe("DUR-3997 per-connection secret name", () => {
     const shopify = getDataSourceKind("shopify");
     const a = dataConnectionSecretName(shopify, "Nettbutikken", "3f2a9c1d-0000-4000-8000-000000000001");
     const b = dataConnectionSecretName(shopify, "Nettbutikken", "7b81e0aa-0000-4000-8000-000000000002");
-    expect(a).toBe("Shopify-nøkkel: Nettbutikken (3f2a9c1d)");
-    expect(b).toBe("Shopify-nøkkel: Nettbutikken (7b81e0aa)");
+    expect(a).toBe("Shopify key: Nettbutikken (3f2a9c1d)");
+    expect(b).toBe("Shopify key: Nettbutikken (7b81e0aa)");
     expect(a).not.toBe(b);
     // The derived secret key (lower-cased, non [a-z0-9_.-] runs collapsed) differs too.
     const key = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120);
@@ -300,6 +300,6 @@ describe("DUR-3997 per-connection secret name", () => {
     // A long connection name is clipped so the id part always survives the 120-char key limit.
     const long = dataConnectionSecretName(getDataSourceKind("woocommerce"), "x".repeat(200), "7b81e0aa-0000-4000-8000-000000000002");
     expect(key(long)).toContain("7b81e0aa");
-    expect(dataConnectionSecretName(getDataSourceKind("fiken"), "   ", "7b81e0aa-0000-4000-8000-000000000002")).toBe("Fiken-nøkkel: Fiken (7b81e0aa)");
+    expect(dataConnectionSecretName(getDataSourceKind("fiken"), "   ", "7b81e0aa-0000-4000-8000-000000000002")).toBe("Fiken key: Fiken (7b81e0aa)");
   });
 });

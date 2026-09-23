@@ -102,27 +102,27 @@ export function addMonths(year: number, month: number, delta: number): { year: n
   return { year: Math.floor(index / 12), month: (index % 12) + 1 };
 }
 
-export const NORWEGIAN_MONTHS = [
-  "januar",
-  "februar",
-  "mars",
-  "april",
-  "mai",
-  "juni",
-  "juli",
-  "august",
-  "september",
-  "oktober",
-  "november",
-  "desember",
+export const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
 ] as const;
 
 const pad2 = (value: number) => String(value).padStart(2, "0");
 
-/** "21.09.2026 kl. 10:14" in the shop's zone. */
+/** "21.09.2026 at 10:14" in the shop's zone. */
 export function formatZonedDateTime(instant: Date, timeZone: string): string {
   const p = zonedParts(instant, timeZone);
-  return `${pad2(p.day)}.${pad2(p.month)}.${p.year} kl. ${pad2(p.hour)}:${pad2(p.minute)}`;
+  return `${pad2(p.day)}.${pad2(p.month)}.${p.year} at ${pad2(p.hour)}:${pad2(p.minute)}`;
 }
 
 /** "21.09.2026" in the shop's zone. */

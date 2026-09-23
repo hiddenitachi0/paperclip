@@ -59,7 +59,7 @@ export type DataConnectionSummary = {
   kind: DataConnectionKind;
   /** Plain name of the kind, e.g. "Shopify". */
   kindLabel: string;
-  /** False for a kind that is saved but cannot be read through yet ("kommer snart"). */
+  /** False for a kind that is saved but cannot be read through yet ("coming soon"). */
   supported: boolean;
   name: string;
   /**
@@ -128,8 +128,8 @@ export type DataReadEventSummary = {
 };
 
 /**
- * DUR-3972 slice S2: the answer to "Prøveberegning". `card` is the same fixed
- * Norwegian answer card an agent would relay; `reconciliationNotes` are plain
+ * DUR-3972 slice S2: the answer to "Trial calculation". `card` is the same
+ * fixed answer card an agent would relay; `reconciliationNotes` are plain
  * sentences about differences Paperclip itself noticed (for example between
  * Shopify's sales record and its refunds), to explain before going live.
  */
