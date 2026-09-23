@@ -215,6 +215,21 @@ describeEmbeddedPostgres("personaService (DUR-4000): a person, attached to jobs"
     expect(agent).toMatchObject({ name: "Sales agent 1", personaId: null });
   });
 
+  it("does not count a terminated job among the persona's jobs, but still lists it with its status", async () => {
+    const companyId = await seedCompany();
+    const svc = personaService(db);
+    const maja = await svc.createPersonaForCompany(companyId, { displayName: "Maja" });
+    const liveId = await seedAgent(companyId, "Sales agent 1", { personaId: maja.id });
+    const goneId = await seedAgent(companyId, "Old job", { personaId: maja.id, status: "terminated" });
+
+    expect((await svc.getPersonaById(maja.id))!.agentIds).toEqual([liveId]);
+    expect((await svc.listPersonasForCompany(companyId))[0]!.agentIds).toEqual([liveId]);
+    expect((await svc.listAgentsForPersona(maja.id)).map((a) => [a.id, a.status])).toEqual([
+      [goneId, "terminated"],
+      [liveId, "idle"],
+    ]);
+  });
+
   it("refuses to attach a persona from another company", async () => {
     const companyA = await seedCompany();
     const companyB = await seedCompany();

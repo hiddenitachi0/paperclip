@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import express from "express";
 import request from "supertest";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -491,12 +492,24 @@ describe.sequential("personaId and limits are board-only on the employment and P
       entries: [],
       warnings: [],
     });
+    // The real service returns the created row with its persona summary
+    // joined in-company (agentService.getById -> hydrateAgentPersona); the
+    // hire card reads the display name off that, never off the request.
     mockAgentService.create.mockImplementation(
-      async (_companyId: string, input: Record<string, unknown>) => makeAgent(input),
+      async (_companyId: string, input: Record<string, unknown>) =>
+        makeAgent({
+          ...input,
+          persona: input.personaId === PERSONA_ID
+            ? { id: PERSONA_ID, displayName: "Maja", pronouns: "she/her", avatarAssetId: null }
+            : null,
+        }),
     );
-    mockAgentService.update.mockImplementation(
-      async (_id: string, input: Record<string, unknown>) => makeAgent({ id: ACTOR_AGENT_ID, ...input }),
-    );
+    // Left unmocked (returns undefined) on purpose, like the describes above:
+    // materializeDefaultInstructionsBundleForNewAgent falls back to the
+    // created row when `update` returns nothing, and it is that row — with
+    // its persona summary — the hire card reads. The PATCH cases below only
+    // assert `update` is never reached.
+    mockAgentService.update.mockReset();
     mockAgentService.getById.mockResolvedValue(makeAgent({ id: ACTOR_AGENT_ID }));
     mockApprovalService.create.mockImplementation(
       async (_companyId: string, input: Record<string, unknown>) => ({
@@ -539,6 +552,22 @@ describe.sequential("personaId and limits are board-only on the employment and P
       expect(createdAgentInput()).toMatchObject({ [field]: SAMPLE_VALUES[field] });
     });
 
+    it(`puts "${field}" on the hire approval card, and the legacy approve branch reads it back`, async () => {
+      const res = await postHire(await createApp("board", createDb(true)), {
+        ...baseHireBody(),
+        [field]: SAMPLE_VALUES[field],
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(approvalPayload()).toMatchObject({ [field]: SAMPLE_VALUES[field] });
+      // Anti-drift for the approve side: approvals.ts still has a branch that
+      // rebuilds the agent from the card alone, so every field the card
+      // carries must be read back off `payload` there — otherwise approving
+      // a legacy card silently drops it.
+      const legacyRebuild = readFileSync(new URL("../services/approvals.ts", import.meta.url), "utf8");
+      expect(legacyRebuild).toContain(`payload.${field}`);
+    });
+
     it(`refuses an agent-authenticated caller that sets "${field}" at hire`, async () => {
       const res = await postHire(await createApp("agent", createDb(true)), {
         ...baseHireBody(),
@@ -561,13 +590,27 @@ describe.sequential("personaId and limits are board-only on the employment and P
     });
   }
 
-  it("leaves a hire made without either field exactly as before (no key appears)", async () => {
-    const res = await postHire(await createApp("board"), baseHireBody());
+  it("names the person on the hire card from the created row's own persona summary, never from the request", async () => {
+    const res = await postHire(await createApp("board", createDb(true)), {
+      ...baseHireBody(),
+      personaId: PERSONA_ID,
+      // A caller cannot smuggle a display name; the create schema strips it
+      // and the card takes the name the service joined in-company.
+      personaDisplayName: "Not Maja",
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(approvalPayload()).toMatchObject({ personaId: PERSONA_ID, personaDisplayName: "Maja", limits: {} });
+  });
+
+  it("leaves a hire made without either field exactly as before (no key appears on the row; the card says none)", async () => {
+    const res = await postHire(await createApp("board", createDb(true)), baseHireBody());
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const input = createdAgentInput();
     for (const field of PERSONA_JOB_FIELDS) {
       expect(Object.hasOwn(input, field)).toBe(false);
     }
+    expect(approvalPayload()).toMatchObject({ personaId: null, personaDisplayName: null, limits: {} });
   });
 });
