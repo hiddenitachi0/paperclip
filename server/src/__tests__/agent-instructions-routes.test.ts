@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // This file fully mocks the service layer (mockAgentService,
 // mockAgentInstructionsService, etc. below) -- it exercises route wiring,
@@ -192,6 +192,20 @@ function makeAgent() {
     updatedAt: new Date(),
   };
 }
+
+// routes/agents.ts is a large module; the first dynamic import of it inside a
+// test can take longer than vitest's default 5s timeout on a cold transform
+// cache (the per-test vi.resetModules() below clears the module registry, not
+// the transform cache), which made "returns bundle metadata" -- simply the
+// first test in the file -- time out under CI load. Warm it once up front so
+// a slow first import never reads as a route hang. Same pattern as
+// agents-quick-agent-hire.test.ts and approval-routes-persona-metadata.test.ts.
+beforeAll(async () => {
+  await Promise.all([
+    vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
+    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+  ]);
+}, 60_000);
 
 describe("agent instructions bundle routes", () => {
   beforeEach(() => {
