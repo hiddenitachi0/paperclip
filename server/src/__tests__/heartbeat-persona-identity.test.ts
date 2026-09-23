@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, personas } from "@paperclipai/db";
 import {
@@ -164,7 +164,7 @@ describeEmbeddedPostgres("heartbeat hands the adapter the persona's voice and id
     expect(sales.name).toBe("Sales agent 1");
     expect(sales.tone).toBe("Short sentences. Warm.");
     expect(sales.personality).toBe(
-      "You are Maja (she/her), working as Sales agent 1.\n\nTraits: curious, dry humour\n\nBackstory: Grew up by the sea.",
+      "Persona attached to this job:\nYou are Maja (she/her), working as Sales agent 1.\n\nTraits: curious, dry humour\n\nBackstory: Grew up by the sea.",
     );
 
     const books = await runAndCapture(booksId);
@@ -189,6 +189,29 @@ describeEmbeddedPostgres("heartbeat hands the adapter the persona's voice and id
     }
   });
 
+  it("hands the adapter the job's standing rules behind the persona, or behind the agent's own text when there is no persona", async () => {
+    const companyId = await seedCompany();
+    const [persona] = await db
+      .insert(personas)
+      .values({ companyId, displayName: "Maja", voice: "Warm.", status: "active" })
+      .returning();
+    const withPersonaId = await seedAgent(companyId, "Sales agent 1", persona!.id);
+    const blankId = await seedAgent(companyId, "Blank job", null);
+    const notes = "Do not repeat mistakes you made before.\nAlways answer in Norwegian.";
+    await db.update(agents).set({ limits: { dailyImageGenerations: 2, notes } }).where(eq(agents.id, withPersonaId));
+    await db.update(agents).set({ limits: { notes } }).where(eq(agents.id, blankId));
+
+    const withPersona = await runAndCapture(withPersonaId);
+    expect(withPersona.tone).toBe("Warm.");
+    expect(withPersona.personality).toBe(
+      `Persona attached to this job:\nYou are Maja, working as Sales agent 1.\n\nStanding rules from your operator:\n${notes}`,
+    );
+
+    const blank = await runAndCapture(blankId);
+    expect(blank.tone).toBe("Plain and brief.");
+    expect(blank.personality).toBe(`The job's own personality text.\n\nStanding rules from your operator:\n${notes}`);
+  });
+
   it("a persona without a voice leaves the agent's own tone in place", async () => {
     const companyId = await seedCompany();
     const [persona] = await db
@@ -199,6 +222,6 @@ describeEmbeddedPostgres("heartbeat hands the adapter the persona's voice and id
 
     const entry = await runAndCapture(agentId);
     expect(entry.tone).toBe("Plain and brief.");
-    expect(entry.personality).toBe("You are Maja, working as Sales agent 1.");
+    expect(entry.personality).toBe("Persona attached to this job:\nYou are Maja, working as Sales agent 1.");
   });
 });

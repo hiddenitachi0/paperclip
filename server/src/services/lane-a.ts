@@ -50,6 +50,7 @@ import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { secretService } from "./secrets.js";
 import { personaService } from "./personas.js";
+import { parseAgentLimits } from "@paperclipai/shared";
 import {
   buildLaneABuiltinToolDefinitions,
   createDbLaneAToolDeps,
@@ -203,6 +204,12 @@ export interface LaneASystemPromptInput {
     backstory?: string | null;
     voice?: string | null;
   } | null;
+  /**
+   * DUR-4000: the job's standing rules (agents.limits.notes), rendered as a
+   * paragraph after the persona and before the operator instructions. Absent
+   * or blank leaves the prompt exactly as before.
+   */
+  standingRules?: string | null;
 }
 
 /** DUR-4000: the persona paragraph for a quick agent, or null when there is nothing to say. */
@@ -249,8 +256,11 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   const roleClause = input.agentRole ? ` Your role is ${input.agentRole}.` : "";
   const personaName = input.persona?.displayName?.trim();
   const pronouns = input.persona?.pronouns?.trim();
+  // An agent renamed to its persona before DUR-4000 is "Maja" working as
+  // "Maja"; saying so reads as a mistake, so the clause is dropped.
+  const sameName = !!personaName && personaName.toLowerCase() === input.agentName.trim().toLowerCase();
   const opening = personaName
-    ? `You are ${personaName}${pronouns ? ` (${pronouns})` : ""}, working as ${input.agentName}, a quick agent in Paperclip.`
+    ? `You are ${personaName}${pronouns ? ` (${pronouns})` : ""}${sameName ? "" : `, working as ${input.agentName}`}, a quick agent in Paperclip.`
     : `You are ${input.agentName}, a quick agent in Paperclip.`;
   const parts: string[] = [
     `${opening}${roleClause} ` +
@@ -299,6 +309,13 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   if (input.persona && personaName) {
     const personaParagraph = buildPersonaParagraph(input.persona);
     if (personaParagraph) parts.push(personaParagraph);
+  }
+
+  // DUR-4000: the job's standing rules (agents.limits.notes), after the
+  // persona and before the operator instructions; they apply in full.
+  const standingRules = input.standingRules?.trim();
+  if (standingRules) {
+    parts.push(`Standing rules from your operator:\n${standingRules}`);
   }
 
   const instructions = input.instructions?.trim();
@@ -970,8 +987,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAProvider: agents.laneAProvider,
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
-        // DUR-4000: which person does this job, so the prompt can say so.
+        // DUR-4000: which person does this job, so the prompt can say so,
+        // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
+        limits: agents.limits,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
@@ -1360,6 +1379,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const personaIdentity = agentRow?.personaId
       ? await personaService(db).getPromptIdentityByAgentId(params.targetAgent.id)
       : null;
+    // DUR-4000: the job's standing rules, read off the same row.
+    const standingRules = parseAgentLimits(agentRow?.limits).notes ?? null;
     const chatSettings = resolveLaneASettings({
       ...params.targetAgent,
       laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
@@ -1426,6 +1447,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         hasBuiltinTools: builtinToolDefinitions.length > 0,
         colleagues: colleagues.map((c) => ({ name: c.displayName ?? c.name, role: c.role })),
         persona: personaIdentity,
+        standingRules,
         businessData: businessDataPrompt,
       });
       const result = await callModel({

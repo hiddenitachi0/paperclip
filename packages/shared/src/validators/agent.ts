@@ -77,10 +77,13 @@ const dailyLimit = z.number().int().min(0).max(100_000).nullable().optional();
  * screens can say so too:
  *   dailyImageGenerations — ENFORCED (server/src/services/agent-daily-limits.ts,
  *                           at the media-studio generate-image call).
- *   dailyPosts            — stored; guidance until the publisher reads it.
- *   dailyRuns             — stored; guidance until the scheduler reads it.
- *   notes                 — guidance: free text such as "do not repeat
- *                           mistakes you made before".
+ *   dailyPosts            — STORED ONLY; nothing reads it yet.
+ *   dailyRuns             — STORED ONLY; nothing reads it yet.
+ *   notes                 — GUIDANCE the agent reads: rendered into the prompt
+ *                           as "Standing rules from your operator" (full
+ *                           agents via heartbeat.ts, quick agents via
+ *                           lane-a.ts), e.g. "do not repeat mistakes you
+ *                           made before".
  * Strict so a typo ("dailyImages") is refused instead of silently ignored.
  * A key set to null means "no limit", the same as leaving it out.
  */

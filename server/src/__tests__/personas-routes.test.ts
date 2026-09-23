@@ -196,11 +196,11 @@ describe("persona routes — board-only, match the UI's api client", () => {
     expect(res.body.voice).toBe("Playful");
   });
 
-  it("refuses a voice longer than an agent's tone (600 characters): it fills the same prompt slot", async () => {
+  it("refuses a voice over 2,000 characters (600, tone's cap, once the step-3 form truncates)", async () => {
     mockPersonaService.getPersonaById.mockResolvedValue(basePersona);
     const app = await buildApp();
 
-    const res = await request(app).patch(`/api/personas/${personaId}`).send({ voice: "x".repeat(601) });
+    const res = await request(app).patch(`/api/personas/${personaId}`).send({ voice: "x".repeat(2001) });
 
     expect(res.status).toBe(400);
     expect(mockPersonaService.updatePersonaById).not.toHaveBeenCalled();

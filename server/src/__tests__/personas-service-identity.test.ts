@@ -138,7 +138,7 @@ describeEmbeddedPostgres("personaService (DUR-4000): a person, attached to jobs"
     expect(salesForAdapter.name).toBe("Sales agent 1");
     expect(salesForAdapter.tone).toBe("Short and warm.");
     expect(salesForAdapter.personality).toBe(
-      "You are Maja (she/her), working as Sales agent 1.\n\nTraits: curious\n\nBackstory: Grew up by the sea.",
+      "Persona attached to this job:\nYou are Maja (she/her), working as Sales agent 1.\n\nTraits: curious\n\nBackstory: Grew up by the sea.",
     );
     expect(salesForAdapter.personality).not.toContain("The job's own text.");
 
@@ -170,7 +170,34 @@ describeEmbeddedPostgres("personaService (DUR-4000): a person, attached to jobs"
     const agent = { name: "Sales agent 1", tone: "Plain.", personality: "Old text" };
     expect(resolveAgentForAdapter(agent, { displayName: "Maja", voice: "  " }).tone).toBe("Plain.");
     expect(resolveAgentForAdapter(agent, { displayName: "Maja", voice: "Warm" }).tone).toBe("Warm");
-    expect(resolveAgentForAdapter(agent, { displayName: "Maja" }).personality).toBe("You are Maja, working as Sales agent 1.");
+    expect(resolveAgentForAdapter(agent, { displayName: "Maja" }).personality).toBe("Persona attached to this job:\nYou are Maja, working as Sales agent 1.");
+  });
+
+  it("never says 'Maja, working as Maja' for an agent that was renamed to its persona before DUR-4000", async () => {
+    const agent = { name: "Maja", tone: null, personality: null };
+    expect(resolveAgentForAdapter(agent, { displayName: "Maja", pronouns: "she/her" }).personality).toBe(
+      "Persona attached to this job:\nYou are Maja (she/her).",
+    );
+    expect(renderPersonaIdentity({ displayName: "maja" }, { name: "Maja " })).toBe("Persona attached to this job:\nYou are maja.");
+    const prompt = buildSystemPrompt({ agentName: "Maja", hasMcpTools: false, hasBuiltinTools: false, persona: { displayName: "Maja" } });
+    expect(prompt.startsWith("You are Maja, a quick agent in Paperclip.")).toBe(true);
+    expect(prompt).not.toContain("working as");
+  });
+
+  it("appends the job's standing rules behind the persona, or behind the agent's own text, and nothing else changes without them", async () => {
+    const notes = "Do not repeat mistakes you made before.";
+    const withPersona = resolveAgentForAdapter(
+      { name: "Sales agent 1", tone: "Plain.", personality: "Old text", limits: { notes } },
+      { displayName: "Maja" },
+    );
+    expect(withPersona.personality).toBe(
+      `Persona attached to this job:\nYou are Maja, working as Sales agent 1.\n\nStanding rules from your operator:\n${notes}`,
+    );
+    const blank = { name: "Blank job", tone: "Plain.", personality: "Old text", limits: { notes } };
+    expect(resolveAgentForAdapter(blank, null).personality).toBe(`Old text\n\nStanding rules from your operator:\n${notes}`);
+    expect(resolveAgentForAdapter(blank, null).tone).toBe("Plain.");
+    const nothing = { name: "Blank job", tone: "Plain.", personality: "Old text", limits: { dailyImageGenerations: 3 } };
+    expect(resolveAgentForAdapter(nothing, null)).toBe(nothing);
   });
 
   it("detaching or deleting the person leaves the job in place", async () => {

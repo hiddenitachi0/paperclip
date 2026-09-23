@@ -8,7 +8,7 @@
 // The persona reaches the model at prompt time instead — see
 // resolveAgentForAdapter in heartbeat.ts (full agents) and buildSystemPrompt
 // in lane-a.ts (quick agents).
-import { asc, desc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, personas } from "@paperclipai/db";
 import type { CreatePersonaInput, UpdatePersonaInput } from "@paperclipai/shared/validators/persona";
@@ -280,9 +280,12 @@ export function personaService(db: Db) {
   }
 
   /**
-   * The agents a persona may act through, for the publisher: everything
-   * attached via agents.persona_id, plus (for rows queued before DUR-4000 or
-   * a persona whose jobs were all detached) the legacy personas.agent_id.
+   * The agents a persona may act through, for the publisher: exactly the
+   * jobs attached via agents.persona_id, in this persona's company. The
+   * legacy personas.agent_id is deliberately NOT a fallback: an agent whose
+   * persona_id no longer points here has been detached and must not be woken
+   * or named on a card (migration 0175 backfilled persona_id for every old
+   * row, so nothing legitimate is lost).
    */
   async function listActingAgentIdsForPersona(personaId: string): Promise<string[]> {
     const persona = await loadPersonaRow(personaId);
@@ -290,11 +293,7 @@ export function personaService(db: Db) {
     const rows = await db
       .select({ id: agents.id })
       .from(agents)
-      .where(
-        persona.agentId
-          ? or(eq(agents.personaId, personaId), eq(agents.id, persona.agentId))
-          : eq(agents.personaId, personaId),
-      )
+      .where(and(eq(agents.companyId, persona.companyId), eq(agents.personaId, personaId)))
       .orderBy(asc(agents.createdAt));
     return rows.map((row) => row.id);
   }

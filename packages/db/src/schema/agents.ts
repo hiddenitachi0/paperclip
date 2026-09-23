@@ -67,9 +67,11 @@ export const agents = pgTable(
     //     dailyRuns?: number|null, notes?: string|null }
     // (agentLimitsSchema in packages/shared). dailyImageGenerations is
     // enforced in code (server/src/services/agent-daily-limits.ts, counted
-    // in agent_daily_counters). dailyPosts, dailyRuns and notes are stored
-    // for the operator and rendered as guidance until code enforces them.
-    // Board-settable only, never agent-writable.
+    // in agent_daily_counters). notes is rendered into the prompt as
+    // "Standing rules from your operator" (heartbeat.ts for full agents,
+    // lane-a.ts for quick agents). dailyPosts and dailyRuns are STORED ONLY:
+    // nothing reads them yet, not even the prompt. Board-settable only,
+    // never agent-writable.
     limits: jsonb("limits").$type<Record<string, unknown>>().notNull().default({}),
     // Lane A (DUR-217): direct-model-call text endpoint, no agent runtime. Off
     // by default and board-settable only — see assertCanManageLaneAFlag in

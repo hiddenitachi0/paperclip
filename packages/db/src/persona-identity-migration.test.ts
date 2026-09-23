@@ -103,15 +103,44 @@ d("DUR-4000 migration 0175_persona_identity", () => {
 
     const fks = (await db.execute(sql`
       SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
-      WHERE conname IN ('agents_persona_id_personas_id_fk', 'personas_avatar_asset_id_assets_id_fk', 'persona_posts_agent_id_agents_id_fk', 'agent_daily_counters_agent_id_agents_id_fk')
+      WHERE conname IN ('agents_persona_id_personas_id_fk', 'personas_avatar_asset_id_assets_id_fk', 'persona_posts_agent_id_agents_id_fk', 'agent_daily_counters_agent_id_agents_id_fk', 'personas_agent_id_agents_id_fk')
       ORDER BY conname
     `)) as unknown as Row[];
     expect(fks.map((row) => [row.conname, row.def])).toEqual([
       ["agent_daily_counters_agent_id_agents_id_fk", "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"],
       ["agents_persona_id_personas_id_fk", "FOREIGN KEY (persona_id) REFERENCES personas(id) ON DELETE SET NULL"],
       ["persona_posts_agent_id_agents_id_fk", "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE SET NULL"],
+      // Re-pointed from 0142's CASCADE: deleting the old job never deletes the person.
+      ["personas_agent_id_agents_id_fk", "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE SET NULL"],
       ["personas_avatar_asset_id_assets_id_fk", "FOREIGN KEY (avatar_asset_id) REFERENCES assets(id) ON DELETE SET NULL"],
     ]);
+  });
+
+  it("deleting the agent a persona used to sit on leaves the person, and every other job keeps the person", async () => {
+    const seeded = await seedOldShape({ name: "Sales agent 1", personality: null, tone: null, cap: 2 });
+    await rerunMigration();
+    const second = randomUUID();
+    await db.execute(sql`INSERT INTO agents (id, company_id, name, persona_id) VALUES (${second}, ${seeded.companyId}, 'Accountant', ${seeded.personaId})`);
+    const accountId = randomUUID();
+    await db.execute(sql`
+      INSERT INTO persona_accounts (id, company_id, persona_id, platform, account_label, external_account_id, ai_disclosure_enabled, autonomy_mode, daily_post_cap, warmup_posts_required)
+      VALUES (${accountId}, ${seeded.companyId}, ${seeded.personaId}, 'fanvue', 'Maja — Fanvue', 'ext-1', true, 'requires_approval', 3, 0)
+    `);
+
+    // The seed's avatar asset records the agent as its uploader; that FK
+    // (assets_created_by_agent_id_agents_id_fk, no delete rule, pre-existing)
+    // would refuse the delete before the persona link is ever consulted.
+    await db.execute(sql`UPDATE assets SET created_by_agent_id = NULL WHERE created_by_agent_id = ${seeded.agentId}`);
+    await db.execute(sql`DELETE FROM agents WHERE id = ${seeded.agentId}`);
+
+    const [persona] = (await db.execute(
+      sql`SELECT display_name, agent_id, avatar_asset_id FROM personas WHERE id = ${seeded.personaId}`,
+    )) as unknown as Row[];
+    expect(persona).toEqual({ display_name: "Sales agent 1", agent_id: null, avatar_asset_id: seeded.assetId });
+    const accounts = (await db.execute(sql`SELECT id FROM persona_accounts WHERE persona_id = ${seeded.personaId}`)) as unknown as Row[];
+    expect(accounts.map((row) => row.id)).toEqual([accountId]);
+    const [other] = (await db.execute(sql`SELECT name, persona_id FROM agents WHERE id = ${second}`)) as unknown as Row[];
+    expect(other).toEqual({ name: "Accountant", persona_id: seeded.personaId });
   });
 
   it("agent_daily_counters is granted and policed like every other tenant table", async () => {
@@ -216,10 +245,14 @@ d("DUR-4000 migration 0175_persona_identity", () => {
     expect(await columns("personas")).toEqual(before);
     const counts = (await db.execute(sql`
       SELECT conname, count(*)::int AS n FROM pg_constraint
-      WHERE conname IN ('agents_persona_id_personas_id_fk', 'personas_avatar_asset_id_assets_id_fk', 'persona_posts_agent_id_agents_id_fk')
+      WHERE conname IN ('agents_persona_id_personas_id_fk', 'personas_avatar_asset_id_assets_id_fk', 'persona_posts_agent_id_agents_id_fk', 'personas_agent_id_agents_id_fk')
       GROUP BY conname
     `)) as unknown as Row[];
-    expect(counts.map((row) => row.n)).toEqual([1, 1, 1]);
+    expect(counts.map((row) => row.n)).toEqual([1, 1, 1, 1]);
+    const [legacy] = (await db.execute(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'personas_agent_id_agents_id_fk'`,
+    )) as unknown as Row[];
+    expect(legacy!.def).toBe("FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE SET NULL");
   });
 
   it("the file never deletes data, never drops a column or table, and only fills NULLs", () => {
@@ -227,8 +260,14 @@ d("DUR-4000 migration 0175_persona_identity", () => {
       .split("\n")
       .map((line) => line.replace(/^\s*--.*$/, ""))
       .join("\n");
-    expect(text).not.toMatch(/\bDROP\s+(TABLE|COLUMN|POLICY|ROLE|CONSTRAINT)\b|\bTRUNCATE\b|\bREVOKE\b|\bDELETE\s+FROM\b/i);
+    expect(text).not.toMatch(/\bDROP\s+(TABLE|COLUMN|POLICY|ROLE)\b|\bTRUNCATE\b|\bREVOKE\b|\bDELETE\s+FROM\b/i);
     expect(text).not.toMatch(/information_schema\.(tables|columns)/);
+    // The one DROP CONSTRAINT re-points the legacy cascade and is followed by its own ADD.
+    const dropped = [...text.matchAll(/DROP CONSTRAINT "([^"]+)"/g)].map((match) => match[1]);
+    expect(dropped).toEqual(["personas_agent_id_agents_id_fk"]);
+    const added = [...text.matchAll(/ADD CONSTRAINT "([^"]+)"/g)].map((match) => match[1]);
+    expect(added).toContain("personas_agent_id_agents_id_fk");
+    expect(text).toMatch(/confdeltype = 'c'/);
     // The only structural relaxations, by name.
     expect(text).toContain('ALTER COLUMN "agent_id" DROP NOT NULL');
     expect(text).toContain('DROP INDEX IF EXISTS "personas_agent_id_uq"');
