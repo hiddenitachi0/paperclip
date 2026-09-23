@@ -397,7 +397,7 @@ describe("ApprovalPayloadRenderer", () => {
             caption: "Golden hour on the pier tonight.",
             disclosureText: "This content was created with AI assistance.",
             title: "Post to Maja — Fanvue",
-            summary: "This account is new, so her first 5 posts need your OK before they go out.",
+            summary: "This account is new, so the first 5 posts need your OK before they go out.",
             isPersonaRequest: true,
             personaDisplayName: "Maja",
           }}
@@ -410,8 +410,10 @@ describe("ApprovalPayloadRenderer", () => {
     expect(text).toContain("What Maja wants to post");
     expect(text).toContain("Golden hour on the pier tonight.");
     expect(text).toContain("This content was created with AI assistance.");
-    expect(text).toContain("New account: her first posts need your OK");
-    expect(text).toContain("her first 5 posts need your OK");
+    expect(text).toContain("New account: the first posts need your OK");
+    expect(text).toContain("the first 5 posts need your OK");
+    // DUR-4000: never she/her by default.
+    expect(text).not.toMatch(/\b(she|her)\b/i);
     expect(text).toContain("If you approve");
     expect(text).toContain("If you reject, it is never posted.");
     // No plumbing on the card: no UUIDs, no raw JSON keys.

@@ -607,7 +607,7 @@ function PersonaPublishPayloadContent({ payload }: { payload: Record<string, unk
   const reason = firstNonEmptyString(payload.reason);
   const reasonLabel =
     reason === "warmup"
-      ? "New account: her first posts need your OK"
+      ? "New account: the first posts need your OK"
       : reason === "requires_approval_channel"
         ? "This account always needs your OK"
         : null;
@@ -623,7 +623,7 @@ function PersonaPublishPayloadContent({ payload }: { payload: Record<string, unk
       {caption && (
         <div className="space-y-1">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-            {personaDisplayName ? `What ${personaDisplayName} wants to post` : "What she wants to post"}
+            {personaDisplayName ? `What ${personaDisplayName} wants to post` : "What the persona wants to post"}
           </p>
           <p className="whitespace-pre-wrap rounded-md bg-muted/40 px-3 py-2 leading-6 text-foreground">{caption}</p>
         </div>

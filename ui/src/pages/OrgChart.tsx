@@ -12,7 +12,7 @@ import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { ChevronRight, Download, Maximize2, Minus, Network, Plus, Upload } from "lucide-react";
-import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
+import { AGENT_ROLE_LABELS, formatAgentDisplayName, type Agent } from "@paperclipai/shared";
 
 // Layout constants
 const CARD_W = 200;
@@ -223,7 +223,9 @@ function OrgTreeMobileNode({
           />
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-sm font-medium leading-tight text-foreground">{node.name}</span>
+          <span className="truncate text-sm font-medium leading-tight text-foreground">
+            {formatAgentDisplayName(node, agent?.persona)}
+          </span>
           <span className="truncate text-xs leading-tight text-muted-foreground">
             {agent?.title ?? roleLabel(node.role)}
           </span>
@@ -701,7 +703,7 @@ export function OrgChart() {
                   {/* Name + role + adapter type */}
                   <div className="flex flex-col items-start min-w-0 flex-1">
                     <span className="text-sm font-semibold text-foreground leading-tight">
-                      {node.name}
+                      {formatAgentDisplayName(node, agent?.persona)}
                     </span>
                     <span className="text-[11px] text-muted-foreground leading-tight mt-0.5">
                       {agent?.title ?? roleLabel(node.role)}

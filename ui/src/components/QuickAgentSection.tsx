@@ -14,6 +14,7 @@ import {
   laneAModelsForProvider,
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
+  formatAgentDisplayName,
   type CompanySecret,
   type LaneAProvider,
 } from "@paperclipai/shared";
@@ -49,6 +50,8 @@ export function QuickAgentSection({
     urlKey: string;
     companyId: string;
     name: string;
+    /** DUR-4000: the person doing this job, for "Sales agent 1 (Maja)" in what this card says. */
+    persona?: { displayName: string | null } | null;
     adapterConfig?: Record<string, unknown>;
     laneAEnabled?: boolean;
     laneAInstructions?: string | null;
@@ -64,6 +67,7 @@ export function QuickAgentSection({
   const { pushToast } = useToastActions();
   const savedEnabled = Boolean(agent.laneAEnabled);
   const savedInstructions = agent.laneAInstructions ?? "";
+  const displayName = formatAgentDisplayName(agent, agent.persona);
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const effectiveCompanyId = companyId ?? agent.companyId;
@@ -87,7 +91,7 @@ export function QuickAgentSection({
     onSuccess: (_result, laneAEnabled) => {
       invalidate();
       pushToast({
-        title: laneAEnabled ? `${agent.name} is now a quick agent` : `${agent.name} is no longer a quick agent`,
+        title: laneAEnabled ? `${displayName} is now a quick agent` : `${displayName} is no longer a quick agent`,
         tone: "success",
       });
     },
@@ -167,6 +171,7 @@ export function QuickAgentSection({
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
             <CardTitle>Quick agent</CardTitle>
+            <p className="text-xs text-muted-foreground">{displayName}</p>
             <CardDescription>
               A quick agent answers you directly in chat instead of running as a full agent. It remembers the
               conversation and can do three things: hand work to a colleague, look up the weather, and read a task

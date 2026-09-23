@@ -1,27 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@/lib/router";
-import { MoreVertical, Pause, Pencil, Play, Plus, Trash2, Upload, UserRound } from "lucide-react";
+import { MoreVertical, Pause, Pencil, Play, Plus, Trash2, UserRound } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { personasApi, type Persona } from "../api/personas";
-import { agentsApi } from "../api/agents";
-import { assetsApi } from "../api/assets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,11 +26,17 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PersonaAvatar } from "../components/PersonaAvatar";
-import { PersonaMcpToolsPanel } from "../components/PersonaMcpToolsPanel";
+import {
+  PersonaFormDialog,
+  createInputFromDraft,
+  draftFromPersona,
+  emptyPersonaDraft,
+  updateInputFromDraft,
+  type PersonaDraft,
+} from "../components/PersonaFormDialog";
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) return error.message;
@@ -50,48 +44,20 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-type PersonaDraft = {
-  agentId: string;
-  displayName: string;
-  handle: string;
-  bio: string;
-  voice: string;
-  avatarAssetId: string;
-  dailyGenerationCap: string;
-};
-
-function emptyDraft(): PersonaDraft {
-  return { agentId: "", displayName: "", handle: "", bio: "", voice: "", avatarAssetId: "", dailyGenerationCap: "" };
+/** "No job yet" / "1 job" / "3 jobs" -- how many agents this persona works as. */
+export function describePersonaJobs(agentIds: string[]): string {
+  if (agentIds.length === 0) return "No job yet";
+  return agentIds.length === 1 ? "1 job" : `${agentIds.length} jobs`;
 }
 
-function draftFromPersona(persona: Persona): PersonaDraft {
-  return {
-    agentId: persona.agentId,
-    displayName: persona.displayName,
-    handle: persona.handle ?? "",
-    bio: persona.bio ?? "",
-    voice: persona.voice ?? "",
-    avatarAssetId: persona.avatarAssetId ?? "",
-    dailyGenerationCap: persona.dailyGenerationCap != null ? String(persona.dailyGenerationCap) : "",
-  };
-}
-
-// Empty string means "no cap set" (unlimited) -- distinct from 0, which
-// isn't a valid cap (createPersonaSchema/updatePersonaSchema require a
-// positive integer).
-function parseDailyGenerationCap(value: string): number | null | undefined {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return null;
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-// DUR-184 item 14: the Personas page -- list, create, edit. Deliberately does
-// NOT include a global posting-mode toggle: per-account disclosure/autonomy
-// settings attach later per DUR-134, once a persona actually has a connected
-// account/channel to post through. Pausing here (item 14's "disconnect/
-// delete/pause") stops her generation queue without touching her identity or
-// her underlying agent's run history.
+// DUR-184 item 14 / DUR-4000: the Personas page -- list, create, edit. A
+// persona is a person and is created on its own; the jobs it holds are
+// attached from its page (PersonaDetail) or from an agent's settings.
+// Deliberately does NOT include a global posting-mode toggle: per-account
+// disclosure/autonomy settings attach per DUR-134 on the persona page once a
+// persona has a connected account to post through. Pausing here stops the
+// persona's publish queue without touching its identity or the run history
+// of the jobs it holds.
 export function Personas() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -113,30 +79,16 @@ export function Personas() {
   });
   const personas = personasQuery.data ?? [];
 
-  const agentsQuery = useQuery({
-    queryKey: selectedCompanyId ? queryKeys.agents.list(selectedCompanyId) : ["agents", "__none__"],
-    queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: Boolean(selectedCompanyId) && formOpen,
-  });
-
   const invalidatePersonas = () => {
     if (selectedCompanyId) {
       queryClient.invalidateQueries({ queryKey: queryKeys.personas.list(selectedCompanyId) });
+      // Agent rows carry a persona summary; a rename or new picture shows there too.
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
     }
   };
 
   const createPersona = useMutation({
-    mutationFn: (draft: PersonaDraft) =>
-      personasApi.create({
-        agentId: draft.agentId,
-        displayName: draft.displayName.trim(),
-        handle: draft.handle.trim() || undefined,
-        bio: draft.bio.trim() || undefined,
-        voice: draft.voice.trim() || undefined,
-        avatarAssetId: draft.avatarAssetId || undefined,
-        status: "active",
-        dailyGenerationCap: parseDailyGenerationCap(draft.dailyGenerationCap),
-      }),
+    mutationFn: (draft: PersonaDraft) => personasApi.create(selectedCompanyId!, createInputFromDraft(draft)),
     onSuccess: () => {
       invalidatePersonas();
       setFormOpen(false);
@@ -147,14 +99,7 @@ export function Personas() {
 
   const updatePersona = useMutation({
     mutationFn: ({ id, draft }: { id: string; draft: PersonaDraft }) =>
-      personasApi.update(id, {
-        displayName: draft.displayName.trim(),
-        handle: draft.handle.trim() || null,
-        bio: draft.bio.trim() || null,
-        voice: draft.voice.trim() || null,
-        avatarAssetId: draft.avatarAssetId || null,
-        dailyGenerationCap: parseDailyGenerationCap(draft.dailyGenerationCap),
-      }),
+      personasApi.update(id, updateInputFromDraft(draft)),
     onSuccess: () => {
       invalidatePersonas();
       setFormOpen(false);
@@ -185,9 +130,6 @@ export function Personas() {
   });
 
   const editingPersona = personas.find((persona) => persona.id === editingPersonaId) ?? null;
-  const availableAgents = (agentsQuery.data ?? []).filter(
-    (agent) => !personas.some((persona) => persona.agentId === agent.id && persona.id !== editingPersonaId),
-  );
 
   function openCreate() {
     setEditingPersonaId(null);
@@ -213,8 +155,8 @@ export function Personas() {
         <div>
           <h1 className="text-lg font-semibold">Personas</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            A persona is who an agent is to the outside world -- her name, her face, how she writes. Give an
-            agent a persona to have her make and share her own pictures.
+            A persona is a person: a name, a face, a backstory and a way of writing. An agent is a job. Attach a
+            persona to a job and that agent works as that person -- the same persona can hold several jobs.
           </p>
         </div>
         <Button onClick={openCreate}>
@@ -230,7 +172,7 @@ export function Personas() {
       ) : personas.length === 0 ? (
         <EmptyState
           icon={UserRound}
-          message="No personas yet. Create one to give an agent a name, a face, and her own picture tools."
+          message="No personas yet. Create one to give a job a name, a face and a voice of its own."
           action="New persona"
           onAction={openCreate}
         />
@@ -241,16 +183,22 @@ export function Personas() {
               <Link to={`/personas/${persona.id}`} className="flex min-w-0 items-start gap-3 text-inherit no-underline">
                 <PersonaAvatar persona={persona} size="sm" />
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{persona.displayName}</span>
+                    {persona.pronouns ? (
+                      <span className="text-xs text-muted-foreground">{persona.pronouns}</span>
+                    ) : null}
                     {persona.status === "paused" ? <Badge variant="secondary">Paused</Badge> : null}
                   </div>
-                  {persona.handle ? <p className="text-sm text-muted-foreground">@{persona.handle}</p> : null}
+                  <p className="text-xs text-muted-foreground">
+                    {persona.handle ? `@${persona.handle} · ` : ""}
+                    {describePersonaJobs(persona.agentIds)}
+                  </p>
                 </div>
               </Link>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon-sm">
+                  <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${persona.displayName}`}>
                     <MoreVertical className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>
@@ -293,11 +241,9 @@ export function Personas() {
           setFormOpen(open);
           if (!open) setEditingPersonaId(null);
         }}
-        initialDraft={editingPersona ? draftFromPersona(editingPersona) : emptyDraft()}
+        initialDraft={editingPersona ? draftFromPersona(editingPersona) : emptyPersonaDraft()}
         title={editingPersona ? "Edit persona" : "New persona"}
         isEditing={Boolean(editingPersona)}
-        availableAgents={availableAgents}
-        agentsLoading={agentsQuery.isLoading}
         onSubmit={handleSubmit}
         isPending={createPersona.isPending || updatePersona.isPending}
       />
@@ -307,8 +253,8 @@ export function Personas() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete "{deletingPersona?.displayName}"?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes her identity -- name, face, bio, voice. It never touches her underlying agent, its run
-              history, or its budget.
+              This removes the person -- name, face, backstory, voice. The jobs {deletingPersona?.displayName ?? "this persona"}{" "}
+              holds are kept, with their run history and budget; they simply no longer have a persona attached.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -323,195 +269,5 @@ export function Personas() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  );
-}
-
-function PersonaFormDialog({
-  open,
-  onOpenChange,
-  initialDraft,
-  title,
-  isEditing,
-  availableAgents,
-  agentsLoading,
-  onSubmit,
-  isPending,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  initialDraft: PersonaDraft;
-  title: string;
-  isEditing: boolean;
-  availableAgents: { id: string; name: string }[];
-  agentsLoading: boolean;
-  onSubmit: (draft: PersonaDraft) => void;
-  isPending: boolean;
-}) {
-  const { selectedCompanyId } = useCompany();
-  const { pushToast } = useToastActions();
-  const [draft, setDraft] = useState<PersonaDraft>(initialDraft);
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (open) setDraft(initialDraft);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  const canSubmit =
-    draft.displayName.trim().length > 0 &&
-    (isEditing || draft.agentId.length > 0) &&
-    parseDailyGenerationCap(draft.dailyGenerationCap) !== undefined;
-
-  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || !selectedCompanyId) return;
-    setUploading(true);
-    try {
-      const asset = await assetsApi.uploadImage(selectedCompanyId, file, "personas");
-      setDraft((prev) => ({ ...prev, avatarAssetId: asset.assetId }));
-    } catch (error) {
-      pushToast({ title: "Could not upload picture", body: errorMessage(error, ""), tone: "error" });
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
-            {isEditing
-              ? "Her name, face, bio, and voice -- the things that make her recognizable."
-              : "Pick an existing agent to give a persona to. Her identity lives here; her budget and adapter stay on the agent."}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          <div className="flex items-center gap-3">
-            <PersonaAvatar persona={draft} size="lg" />
-            <div className="space-y-1">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isPending || uploading}
-              >
-                <Upload className="mr-1.5 h-3.5 w-3.5" />
-                {uploading ? "Uploading…" : "Upload picture"}
-              </Button>
-              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
-              <p className="text-xs text-muted-foreground">Optional. Shown wherever she's mentioned.</p>
-            </div>
-          </div>
-
-          {!isEditing && (
-            <div className="space-y-1.5">
-              <label className="text-xs text-muted-foreground">Agent</label>
-              <Select
-                value={draft.agentId}
-                onValueChange={(agentId) => setDraft((prev) => ({ ...prev, agentId }))}
-                disabled={isPending || agentsLoading}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder={agentsLoading ? "Loading agents…" : "Pick an agent"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableAgents.length === 0 ? (
-                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                      No agents without a persona yet. Every agent already has one, or there are no agents.
-                    </div>
-                  ) : (
-                    availableAgents.map((agent) => (
-                      <SelectItem key={agent.id} value={agent.id}>
-                        {agent.name}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">Name</label>
-            <Input
-              placeholder="e.g. Maja"
-              value={draft.displayName}
-              onChange={(event) => setDraft((prev) => ({ ...prev, displayName: event.target.value }))}
-              disabled={isPending}
-              autoFocus={isEditing}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">Handle (optional)</label>
-            <Input
-              placeholder="e.g. maja"
-              value={draft.handle}
-              onChange={(event) => setDraft((prev) => ({ ...prev, handle: event.target.value }))}
-              disabled={isPending}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">Who she is (optional)</label>
-            <Textarea
-              placeholder="Backstory, age, interests -- whatever makes her feel like someone."
-              value={draft.bio}
-              onChange={(event) => setDraft((prev) => ({ ...prev, bio: event.target.value }))}
-              rows={3}
-              disabled={isPending}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">How she writes (optional)</label>
-            <Textarea
-              placeholder="Tone, vocabulary, things she'd never say."
-              value={draft.voice}
-              onChange={(event) => setDraft((prev) => ({ ...prev, voice: event.target.value }))}
-              rows={3}
-              disabled={isPending}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">Daily picture limit (optional)</label>
-            <Input
-              type="number"
-              min={1}
-              placeholder="No limit"
-              value={draft.dailyGenerationCap}
-              onChange={(event) => setDraft((prev) => ({ ...prev, dailyGenerationCap: event.target.value }))}
-              disabled={isPending}
-            />
-            <p className="text-xs text-muted-foreground">
-              How many pictures she can make in a day. Leave blank for no limit.
-            </p>
-          </div>
-
-          {draft.agentId && (
-            <div className="space-y-1.5">
-              <label className="text-xs text-muted-foreground">Picture tools</label>
-              <PersonaMcpToolsPanel agentId={draft.agentId} />
-            </div>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isPending}>
-            Cancel
-          </Button>
-          <Button onClick={() => onSubmit(draft)} disabled={!canSubmit || isPending}>
-            {isPending ? "Saving…" : "Save"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
