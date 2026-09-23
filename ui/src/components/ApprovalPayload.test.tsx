@@ -683,6 +683,58 @@ describe("ApprovalPayloadRenderer", () => {
     expect(renderHireCard({ name: "Analyst", budgetMonthlyCents: 30000 })).toContain("Up to $300.00 a month");
   });
 
+  // DUR-4000: a hire card says which person the job will work as and what
+  // the job's own limits box holds, in the Limits box's words.
+  function renderHireCardText(payload: Record<string, unknown>) {
+    const root = createRoot(container);
+    act(() => {
+      root.render(<ApprovalPayloadRenderer type="hire_agent" payload={payload} />);
+    });
+    const text = container.textContent ?? "";
+    const worksAs = container.querySelector("[data-testid='hire-works-as']")?.textContent ?? null;
+    const limits = container.querySelector("[data-testid='hire-limits']")?.textContent ?? null;
+    act(() => {
+      root.unmount();
+    });
+    return { text, worksAs, limits };
+  }
+
+  it("shows 'Works as' and the Limits row when the hire carries a persona and limits", () => {
+    const { text, worksAs, limits } = renderHireCardText({
+      name: "Sales agent 1",
+      role: "general",
+      personaId: "11111111-1111-4111-8111-111111111111",
+      personaDisplayName: "Maja",
+      limits: { dailyImageGenerations: 3, dailyPosts: 1, notes: "Do not repeat mistakes you made before." },
+    });
+
+    expect(worksAs).toContain("Works as");
+    expect(worksAs).toContain("Maja");
+    expect(limits).toContain("Up to 3 pictures a day");
+    expect(limits).toContain("enforced by Paperclip");
+    expect(limits).toContain("Up to 1 post a day");
+    expect(limits).toContain("guidance the agent reads");
+    expect(limits).toContain("Do not repeat mistakes you made before.");
+    expect(limits).not.toContain("run");
+    // No plumbing: the persona id never shows.
+    expect(text).not.toContain("11111111-1111-4111-8111-111111111111");
+  });
+
+  it("never shows the persona id when the card carries only personaId", () => {
+    const { worksAs } = renderHireCardText({
+      name: "Sales agent 1",
+      personaId: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(worksAs).toContain("A persona (name not on this card)");
+    expect(worksAs).not.toContain("11111111");
+  });
+
+  it("shows neither row for a blank job with no limits", () => {
+    const { worksAs, limits } = renderHireCardText({ name: "Analyst", role: "general", limits: {} });
+    expect(worksAs).toBeNull();
+    expect(limits).toBeNull();
+  });
+
   it("warns plainly when the hire has no monthly limit", () => {
     const text = renderHireCard({ name: "Analyst", budgetMonthlyCents: 0 });
 

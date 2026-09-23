@@ -237,6 +237,36 @@ describe("PersonaDetail (DUR-4000)", () => {
     expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Job detached" }));
   });
 
+  it("badges terminated jobs and still lets you detach them", async () => {
+    mockPersonasApi.get.mockResolvedValue({ ...persona, agentIds: ["agent-1", "agent-gone", "agent-4"] });
+    mockAgentsApi.list.mockResolvedValue([
+      ...agents,
+      // Robust to a server that starts returning terminated agents too.
+      makeAgent({ id: "agent-4", name: "Old job", urlKey: "old-job", status: "terminated", personaId: "persona-1" }),
+    ]);
+    await render();
+
+    const rows = Array.from(container.querySelectorAll("li"));
+    const gone = rows.find((row) => row.textContent?.includes("Terminated job"));
+    expect(gone).toBeDefined();
+    expect(gone?.textContent).toContain("Terminated");
+    expect(gone?.querySelector('button[aria-label="Detach Terminated job"]')).not.toBeNull();
+
+    const old = rows.find((row) => row.textContent?.includes("Old job"));
+    expect(old?.textContent).toContain("Terminated");
+
+    const live = rows.find((row) => row.textContent?.includes("Sales agent 1"));
+    expect(live?.textContent).not.toContain("Terminated");
+
+    await act(async () => {
+      gone!.querySelector<HTMLButtonElement>('button[aria-label="Detach Terminated job"]')!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    await flushReact();
+    expect(mockPersonasApi.attachToAgent).toHaveBeenCalledWith("agent-gone", null);
+  });
+
   it("shows only approvals filed by the persona's attached jobs", async () => {
     mockApprovalsApi.list.mockResolvedValue([
       { id: "approval-mine", status: "pending", requestedByAgentId: "agent-1", createdAt: "2026-01-02T00:00:00.000Z" },

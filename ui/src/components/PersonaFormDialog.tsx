@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Upload } from "lucide-react";
+import { PERSONA_FIELD_MAX_LENGTHS } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useToastActions } from "../context/ToastContext";
 import type { CreatePersonaInput, Persona, UpdatePersonaInput } from "../api/personas";
@@ -80,6 +81,17 @@ function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return fallback;
+}
+
+const MAX = PERSONA_FIELD_MAX_LENGTHS;
+
+/** "12/200" under a field, red once the cap is reached -- the same caps the server enforces. */
+function FieldCounter({ length, max }: { length: number; max: number }) {
+  return (
+    <div className={`text-right text-xs ${length >= max ? "text-destructive" : "text-muted-foreground"}`}>
+      {length}/{max}
+    </div>
+  );
 }
 
 export function PersonaFormDialog({
@@ -171,7 +183,9 @@ export function PersonaFormDialog({
                 onChange={(event) => setDraft((prev) => ({ ...prev, displayName: event.target.value }))}
                 disabled={isPending}
                 autoFocus
+                maxLength={MAX.displayName}
               />
+              <FieldCounter length={draft.displayName.length} max={MAX.displayName} />
             </div>
             <div className="space-y-1.5">
               <label htmlFor="persona-pronouns" className="text-xs text-muted-foreground">
@@ -183,7 +197,7 @@ export function PersonaFormDialog({
                 value={draft.pronouns}
                 onChange={(event) => setDraft((prev) => ({ ...prev, pronouns: event.target.value }))}
                 disabled={isPending}
-                maxLength={40}
+                maxLength={MAX.pronouns}
               />
             </div>
           </div>
@@ -201,7 +215,9 @@ export function PersonaFormDialog({
               value={draft.handle}
               onChange={(event) => setDraft((prev) => ({ ...prev, handle: event.target.value }))}
               disabled={isPending}
+              maxLength={MAX.handle}
             />
+            <FieldCounter length={draft.handle.length} max={MAX.handle} />
           </div>
 
           <div className="space-y-1.5">
@@ -215,7 +231,9 @@ export function PersonaFormDialog({
               onChange={(event) => setDraft((prev) => ({ ...prev, traits: event.target.value }))}
               rows={2}
               disabled={isPending}
+              maxLength={MAX.traits}
             />
+            <FieldCounter length={draft.traits.length} max={MAX.traits} />
           </div>
 
           <div className="space-y-1.5">
@@ -229,7 +247,9 @@ export function PersonaFormDialog({
               onChange={(event) => setDraft((prev) => ({ ...prev, backstory: event.target.value }))}
               rows={3}
               disabled={isPending}
+              maxLength={MAX.backstory}
             />
+            <FieldCounter length={draft.backstory.length} max={MAX.backstory} />
           </div>
 
           <div className="space-y-1.5">
@@ -243,8 +263,9 @@ export function PersonaFormDialog({
               onChange={(event) => setDraft((prev) => ({ ...prev, voice: event.target.value }))}
               rows={3}
               disabled={isPending}
-              maxLength={600}
+              maxLength={MAX.voice}
             />
+            <FieldCounter length={draft.voice.length} max={MAX.voice} />
             <p className="text-xs text-muted-foreground">
               A few sentences. On every job this persona holds, this replaces the agent's own tone.
             </p>

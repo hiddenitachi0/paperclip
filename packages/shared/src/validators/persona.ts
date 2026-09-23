@@ -28,16 +28,37 @@ const trimmedOrNull = (max: number, message: string) =>
     .nullable()
     .optional();
 
+/**
+ * DUR-4000: the persona fields' character caps, shared by this validator and
+ * the persona form (ui PersonaFormDialog) so the form's maxLength and counter
+ * can never disagree with what the server accepts. `voice` is 2000 for now
+ * (see the header note); when it drops to 600 it drops here, in one place.
+ */
+export const PERSONA_FIELD_MAX_LENGTHS = {
+  displayName: 200,
+  pronouns: 40,
+  handle: 100,
+  traits: 2000,
+  backstory: 20000,
+  voice: 2000,
+} as const;
+
 const personaFields = {
-  displayName: z.string().trim().min(1, "The persona needs a name.").max(200),
+  displayName: z.string().trim().min(1, "The persona needs a name.").max(PERSONA_FIELD_MAX_LENGTHS.displayName),
   // Free text: "she/her", "he/him", "they/them", "hen". Never assumed.
-  pronouns: trimmedOrNull(40, "Pronouns are limited to 40 characters."),
-  traits: trimmedOrNull(2000, "Traits are limited to 2,000 characters — a few words or lines on character."),
-  backstory: trimmedOrNull(20000, "The backstory is limited to 20,000 characters."),
+  pronouns: trimmedOrNull(PERSONA_FIELD_MAX_LENGTHS.pronouns, "Pronouns are limited to 40 characters."),
+  traits: trimmedOrNull(
+    PERSONA_FIELD_MAX_LENGTHS.traits,
+    "Traits are limited to 2,000 characters — a few words or lines on character.",
+  ),
+  backstory: trimmedOrNull(PERSONA_FIELD_MAX_LENGTHS.backstory, "The backstory is limited to 20,000 characters."),
   // 2000 for now; 600 (tone's cap) once the step-3 form truncates/warns — see the header note.
-  voice: trimmedOrNull(2000, "Voice is limited to 2,000 characters — a few sentences on how this person writes, not who they are."),
+  voice: trimmedOrNull(
+    PERSONA_FIELD_MAX_LENGTHS.voice,
+    "Voice is limited to 2,000 characters — a few sentences on how this person writes, not who they are.",
+  ),
   avatarAssetId: z.string().uuid().nullable().optional(),
-  handle: z.string().trim().min(1).max(100).nullable().optional(),
+  handle: z.string().trim().min(1).max(PERSONA_FIELD_MAX_LENGTHS.handle).nullable().optional(),
   status: personaStatusSchema.optional(),
   // DUR-134: the per-persona half of the publishing kill switch. Defaults to
   // false (not paused) at the DB level; settable here so an operator can

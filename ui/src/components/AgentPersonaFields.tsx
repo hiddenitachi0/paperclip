@@ -52,7 +52,12 @@ export function PersonaPicker({
         disabled={disabled}
       >
         <option value="">None - a blank job</option>
-        {value && !knownIds.has(value) ? <option value={value}>{personasQuery.isLoading ? "Loading..." : value}</option> : null}
+        {value && !knownIds.has(value) ? (
+          // The saved id is not in the company's list: still loading, or the
+          // persona was deleted (ON DELETE SET NULL catches up on the next
+          // save). Never show the raw uuid.
+          <option value={value}>{personasQuery.isLoading ? "Loading..." : "Unknown persona (removed)"}</option>
+        ) : null}
         {personas.map((persona) => (
           <option key={persona.id} value={persona.id}>
             {persona.displayName}
@@ -71,11 +76,14 @@ export function PersonaPicker({
   );
 }
 
+/** The validator's ceiling for a daily limit (agentLimitsSchema: 0..100 000). */
+const DAILY_LIMIT_MAX = 100_000;
+
 function parseDailyLimit(raw: string): number | null | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
   const parsed = Number.parseInt(trimmed, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > DAILY_LIMIT_MAX) return undefined;
   return parsed;
 }
 
@@ -110,6 +118,7 @@ function LimitNumberField({
         id={id}
         type="number"
         min={0}
+        max={DAILY_LIMIT_MAX}
         inputMode="numeric"
         className={cn(fieldClass, className)}
         placeholder="No limit"

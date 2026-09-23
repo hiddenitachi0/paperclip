@@ -235,3 +235,38 @@ describe("buildAgentUpdatePatch", () => {
     });
   });
 });
+
+// DUR-4000: while a persona is attached the persona's backstory fills the
+// personality slot, so the agent's own personality text is never sent --
+// the same rule the New Agent page applies on hire.
+describe("buildAgentUpdatePatch and personas (DUR-4000)", () => {
+  const personaId = "11111111-1111-4111-8111-111111111111";
+
+  it("drops personality when the agent already has a persona and the overlay leaves it attached", () => {
+    const patch = buildAgentUpdatePatch(
+      { ...makeAgent(), personaId },
+      makeOverlay({ identity: { personality: "Typed into a hidden field", tone: "Plain." } }),
+    );
+    expect(patch).toEqual({ tone: "Plain." });
+  });
+
+  it("drops personality when the overlay attaches a persona in the same save", () => {
+    const patch = buildAgentUpdatePatch(
+      makeAgent(),
+      makeOverlay({ identity: { personaId, personality: "Old text" } }),
+    );
+    expect(patch).toEqual({ personaId });
+  });
+
+  it("keeps personality for a blank job, and when the overlay detaches the persona", () => {
+    expect(buildAgentUpdatePatch(makeAgent(), makeOverlay({ identity: { personality: "Who this agent is" } }))).toEqual({
+      personality: "Who this agent is",
+    });
+    expect(
+      buildAgentUpdatePatch(
+        { ...makeAgent(), personaId },
+        makeOverlay({ identity: { personaId: null, personality: "Back to its own text" } }),
+      ),
+    ).toEqual({ personaId: null, personality: "Back to its own text" });
+  });
+});

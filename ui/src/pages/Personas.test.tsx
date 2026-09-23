@@ -41,6 +41,9 @@ vi.mock("../api/personas", () => ({
   personasApi: mockPersonasApi,
 }));
 
+const mockAgentsApi = vi.hoisted(() => ({ list: vi.fn() }));
+vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
+
 vi.mock("../api/assets", () => ({
   assetsApi: { uploadImage: vi.fn() },
 }));
@@ -108,6 +111,10 @@ describe("Personas page (DUR-4000)", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mockPersonasApi.create.mockResolvedValue(makePersona());
+    mockAgentsApi.list.mockResolvedValue([
+      { id: "a-1", status: "active" },
+      { id: "a-2", status: "active" },
+    ]);
   });
 
   afterEach(async () => {
@@ -202,5 +209,24 @@ describe("Personas page (DUR-4000)", () => {
     expect(describePersonaJobs([])).toBe("No job yet");
     expect(describePersonaJobs(["a"])).toBe("1 job");
     expect(describePersonaJobs(["a", "b", "c"])).toBe("3 jobs");
+  });
+
+  it("describePersonaJobs leaves terminated jobs out once the agents list is known", () => {
+    const agentById = new Map([
+      ["a", { status: "active" }],
+      ["b", { status: "terminated" }],
+      // "c" is absent: the company list never carries terminated agents.
+    ]);
+    expect(describePersonaJobs(["a", "b", "c"], agentById)).toBe("1 job");
+    expect(describePersonaJobs(["b", "c"], agentById)).toBe("No job yet");
+    // Before the list has loaded every id counts.
+    expect(describePersonaJobs(["a", "b", "c"], null)).toBe("3 jobs");
+  });
+
+  it("counts only live jobs in the list rows", async () => {
+    mockPersonasApi.list.mockResolvedValue([makePersona({ id: "p-1", displayName: "Maja", agentIds: ["a-1", "a-gone"] })]);
+    await render();
+    expect(container.textContent).toContain("1 job");
+    expect(container.textContent).not.toContain("2 jobs");
   });
 });

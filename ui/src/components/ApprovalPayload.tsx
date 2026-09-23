@@ -6,6 +6,7 @@ import {
   formatBoostDuration,
   formatBoostMoney,
   hireMonthlySpendingLimitCentsFromPayload,
+  parseAgentLimits,
   prettyBoostEffort,
   prettyBoostModel,
   type ModelBoostBossReview,
@@ -332,6 +333,76 @@ function HireSpendingLimitRow({ payload }: { payload: Record<string, unknown> })
   );
 }
 
+/**
+ * DUR-4000: the person this hire will work as, when the card carries one.
+ * The server puts `personaDisplayName` beside `personaId`; a card with only
+ * the id (older shape) still says a persona is attached, never the uuid.
+ */
+function HireWorksAsRow({ payload }: { payload: Record<string, unknown> }) {
+  const personaId = firstNonEmptyString(payload.personaId);
+  const personaDisplayName = firstNonEmptyString(payload.personaDisplayName);
+  if (!personaId && !personaDisplayName) return null;
+  return (
+    <div className="flex items-start gap-2" data-testid="hire-works-as">
+      <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs pt-0.5">Works as</span>
+      <span className="min-w-0">
+        <span className="block font-medium">{personaDisplayName ?? "A persona (name not on this card)"}</span>
+        <span className="block text-xs text-muted-foreground">
+          Their name, backstory and voice; the job keeps its own instructions, tools and limits.
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/** "Up to 3 pictures a day" -- one line per limit the hire sets, in the Limits box's own words. */
+function describeDailyLimit(count: number, noun: string): string {
+  return `Up to ${count} ${count === 1 ? noun : `${noun}s`} a day`;
+}
+
+/**
+ * DUR-4000: the job's limits box on the hire card, saying which ones
+ * Paperclip enforces in code and which are guidance the agent reads. Only
+ * rendered when the card carries at least one limit.
+ */
+function HireLimitsRow({ payload }: { payload: Record<string, unknown> }) {
+  if (!payload.limits || typeof payload.limits !== "object") return null;
+  const limits = parseAgentLimits(payload.limits);
+  const lines: Array<{ key: string; text: string; enforced: boolean }> = [];
+  if (limits.dailyImageGenerations != null) {
+    lines.push({ key: "images", text: describeDailyLimit(limits.dailyImageGenerations, "picture"), enforced: true });
+  }
+  if (limits.dailyPosts != null) {
+    lines.push({ key: "posts", text: describeDailyLimit(limits.dailyPosts, "post"), enforced: false });
+  }
+  if (limits.dailyRuns != null) {
+    lines.push({ key: "runs", text: describeDailyLimit(limits.dailyRuns, "run"), enforced: false });
+  }
+  const notes = limits.notes?.trim() || null;
+  if (lines.length === 0 && !notes) return null;
+  return (
+    <div className="flex items-start gap-2" data-testid="hire-limits">
+      <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs pt-0.5">Limits</span>
+      <span className="min-w-0 space-y-0.5">
+        {lines.map((line) => (
+          <span key={line.key} className="block">
+            {line.text}{" "}
+            <span className="text-xs text-muted-foreground">
+              {line.enforced ? "(enforced by Paperclip)" : "(guidance the agent reads)"}
+            </span>
+          </span>
+        ))}
+        {notes ? (
+          <span className="block">
+            <span className="text-xs text-muted-foreground">Standing rules (guidance): </span>
+            <span className="whitespace-pre-wrap">{notes}</span>
+          </span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
 export function HireAgentPayload({ payload }: { payload: Record<string, unknown> }) {
   return (
     <div className="mt-3 space-y-1.5 text-sm">
@@ -339,6 +410,7 @@ export function HireAgentPayload({ payload }: { payload: Record<string, unknown>
         <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs">Name</span>
         <span className="font-medium">{String(payload.name ?? "—")}</span>
       </div>
+      <HireWorksAsRow payload={payload} />
       <PayloadField label="Role" value={payload.role} />
       <PayloadField label="Title" value={payload.title} />
       <PayloadField label="Icon" value={payload.icon} />
@@ -366,6 +438,7 @@ export function HireAgentPayload({ payload }: { payload: Record<string, unknown>
           employment form used. Approving this card applies exactly this
           number: the server reads the payload with the same shared function. */}
       <HireSpendingLimitRow payload={payload} />
+      <HireLimitsRow payload={payload} />
       <SkillList values={payload.desiredSkills} />
     </div>
   );

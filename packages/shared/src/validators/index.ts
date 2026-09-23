@@ -287,6 +287,7 @@ export {
 
 export {
   personaStatusSchema,
+  PERSONA_FIELD_MAX_LENGTHS,
   createPersonaSchema,
   updatePersonaSchema,
   type CreatePersonaInput,

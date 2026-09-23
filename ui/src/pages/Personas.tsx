@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@/lib/router";
 import { MoreVertical, Pause, Pencil, Play, Plus, Trash2, UserRound } from "lucide-react";
@@ -6,6 +6,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { personasApi, type Persona } from "../api/personas";
+import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
@@ -44,10 +45,32 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-/** "No job yet" / "1 job" / "3 jobs" -- how many agents this persona works as. */
-export function describePersonaJobs(agentIds: string[]): string {
-  if (agentIds.length === 0) return "No job yet";
-  return agentIds.length === 1 ? "1 job" : `${agentIds.length} jobs`;
+/**
+ * The attached agents that still count as jobs. The company agents list
+ * never carries terminated agents (the server leaves them out), so an
+ * attached id missing from a loaded list is a terminated job; an agent that
+ * does come back as terminated is skipped too. Before the list has loaded
+ * (or when the caller has none) every id counts.
+ */
+function liveJobIds(
+  agentIds: string[],
+  agentById: ReadonlyMap<string, { status: string }> | null | undefined,
+): string[] {
+  if (!agentById) return agentIds;
+  return agentIds.filter((id) => {
+    const agent = agentById.get(id);
+    return agent !== undefined && agent.status !== "terminated";
+  });
+}
+
+/** "No job yet" / "1 job" / "3 jobs" -- how many agents this persona works as, terminated ones left out. */
+export function describePersonaJobs(
+  agentIds: string[],
+  agentById?: ReadonlyMap<string, { status: string }> | null,
+): string {
+  const count = liveJobIds(agentIds, agentById).length;
+  if (count === 0) return "No job yet";
+  return count === 1 ? "1 job" : `${count} jobs`;
 }
 
 // DUR-184 item 14 / DUR-4000: the Personas page -- list, create, edit. A
@@ -78,6 +101,17 @@ export function Personas() {
     enabled: Boolean(selectedCompanyId),
   });
   const personas = personasQuery.data ?? [];
+
+  // Only for the job count per row: terminated jobs must not count.
+  const agentsQuery = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.agents.list(selectedCompanyId) : ["agents", "__none__"],
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const agentById = useMemo(() => {
+    if (!agentsQuery.data) return null;
+    return new Map(agentsQuery.data.map((agent) => [agent.id, agent] as const));
+  }, [agentsQuery.data]);
 
   const invalidatePersonas = () => {
     if (selectedCompanyId) {
@@ -192,7 +226,7 @@ export function Personas() {
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {persona.handle ? `@${persona.handle} · ` : ""}
-                    {describePersonaJobs(persona.agentIds)}
+                    {describePersonaJobs(persona.agentIds, agentById)}
                   </p>
                 </div>
               </Link>

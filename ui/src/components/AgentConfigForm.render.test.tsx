@@ -671,6 +671,21 @@ describe("AgentConfigForm persona and limits (DUR-4000)", () => {
     expect(container.textContent).toContain("Tone");
   });
 
+  it("names a removed persona 'Unknown persona (removed)' instead of showing the uuid", async () => {
+    const goneId = "22222222-2222-4222-8222-222222222222";
+    const { container } = await renderEditForm({ personaId: goneId });
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Persona"]');
+    expect(picker?.value).toBe(goneId);
+    expect(picker?.selectedOptions[0]?.textContent).toBe("Unknown persona (removed)");
+    expect(container.textContent).not.toContain(goneId);
+  });
+
+  it("caps the daily limit inputs at the validator's ceiling", async () => {
+    const { container } = await renderEditForm({});
+    const pictures = inputForLabel(container, "Pictures per day") as HTMLInputElement | null;
+    expect(pictures?.max).toBe("100000");
+  });
+
   it("attaching a persona from the picker hides Personality and saves personaId", async () => {
     const { container, onSave, save } = await renderEditForm({});
     const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Persona"]');

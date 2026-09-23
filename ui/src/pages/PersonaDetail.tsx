@@ -75,10 +75,19 @@ export function PersonaDetail() {
     return map;
   }, [agentsQuery.data]);
   const attachedIds = useMemo(() => new Set(persona?.agentIds ?? []), [persona?.agentIds]);
-  const attachedAgents = useMemo(
-    () => (persona?.agentIds ?? []).map((id) => agentById.get(id)).filter((agent): agent is Agent => Boolean(agent)),
+  // One row per attached id. The company list never carries terminated
+  // agents, so an id it cannot resolve is a terminated job (kept visible so
+  // the operator can detach it); an agent that does come back as terminated
+  // is badged the same way.
+  const attachedJobs = useMemo(
+    () =>
+      (persona?.agentIds ?? []).map((id) => {
+        const agent = agentById.get(id) ?? null;
+        return { id, agent, terminated: agent === null || agent.status === "terminated" };
+      }),
     [persona?.agentIds, agentById],
   );
+  const liveJobCount = attachedJobs.filter((job) => !job.terminated).length;
   const attachableAgents = useMemo(
     () =>
       (agentsQuery.data ?? []).filter(
@@ -234,42 +243,64 @@ export function PersonaDetail() {
         </p>
         {agentsQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : attachedAgents.length === 0 ? (
+        ) : attachedJobs.length === 0 ? (
           <p className="text-sm text-muted-foreground">No job yet. Attach one below and {name} starts working as it.</p>
         ) : (
           <ul className="divide-y divide-border rounded-lg border border-border">
-            {attachedAgents.map((agent) => (
-              <li key={agent.id} className="flex items-center justify-between gap-3 px-4 py-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  <AgentAvatar agent={agent} size="sm" />
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Link to={agentUrl(agent)} className="font-medium text-inherit no-underline hover:underline">
-                        {agent.name}
-                      </Link>
-                      {agent.laneAEnabled ? <Badge variant="outline">Quick agent</Badge> : null}
-                      {agent.status === "paused" ? <Badge variant="secondary">Paused</Badge> : null}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {agent.title ?? roleLabels[agent.role] ?? agent.role} · {describePictureLimit(agent)} ·{" "}
-                      <Link to={`${agentUrl(agent)}/tools`} className="underline underline-offset-2">
-                        Tools
-                      </Link>
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => detachMutation.mutate(agent.id)}
-                  disabled={detachMutation.isPending && detachMutation.variables === agent.id}
-                  aria-label={`Detach ${agent.name}`}
-                >
-                  Detach
-                </Button>
+            {liveJobCount === 0 ? (
+              <li className="px-4 py-2 text-xs text-muted-foreground">
+                No live job: every job {name} held has been terminated.
               </li>
-            ))}
+            ) : null}
+            {attachedJobs.map(({ id, agent, terminated }) => {
+              const label = agent?.name ?? "Terminated job";
+              return (
+                <li
+                  key={id}
+                  className={`flex items-center justify-between gap-3 px-4 py-3 ${terminated ? "text-muted-foreground" : ""}`}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <AgentAvatar agent={agent} size="sm" />
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {agent ? (
+                          <Link to={agentUrl(agent)} className="font-medium text-inherit no-underline hover:underline">
+                            {agent.name}
+                          </Link>
+                        ) : (
+                          <span className="font-medium">{label}</span>
+                        )}
+                        {terminated ? <Badge variant="outline">Terminated</Badge> : null}
+                        {agent?.laneAEnabled ? <Badge variant="outline">Quick agent</Badge> : null}
+                        {agent?.status === "paused" ? <Badge variant="secondary">Paused</Badge> : null}
+                      </div>
+                      {agent ? (
+                        <p className="text-xs text-muted-foreground">
+                          {agent.title ?? roleLabels[agent.role] ?? agent.role} · {describePictureLimit(agent)} ·{" "}
+                          <Link to={`${agentUrl(agent)}/tools`} className="underline underline-offset-2">
+                            Tools
+                          </Link>
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          This job no longer runs. Detach it to tidy up; nothing else changes.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => detachMutation.mutate(id)}
+                    disabled={detachMutation.isPending && detachMutation.variables === id}
+                    aria-label={`Detach ${label}`}
+                  >
+                    Detach
+                  </Button>
+                </li>
+              );
+            })}
           </ul>
         )}
         <div className="flex flex-wrap items-center gap-2">
