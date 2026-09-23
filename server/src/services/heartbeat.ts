@@ -10519,22 +10519,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       error: staleness.reason,
     });
 
-    await db
-      .update(issues)
-      .set({
-        executionRunId: null,
-        executionAgentNameKey: null,
-        executionLockedAt: null,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(issues.companyId, run.companyId),
-          eq(issues.id, issueId),
-          eq(issues.executionRunId, run.id),
-        ),
-      );
-
     await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
       eventType: "lifecycle",
       stream: "system",
@@ -10542,6 +10526,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       message: staleness.reason,
       payload: staleness.details,
     });
+
+    // A queued run can hold the issue's execution lock (promotion and the
+    // retry paths stamp `executionRunId` at queue time), and any wake that
+    // arrived for the issue while it did was parked as
+    // `deferred_issue_execution` behind it. Clearing the lock here used to be
+    // a bare column reset, so those parked wakes -- typically the *new*
+    // assignee's own wake, queued by the very reassignment that made this run
+    // stale -- were not promoted until the periodic recovery sweep found
+    // them. Release through the same path every other cancellation uses so
+    // the parked wake is promoted at once. Immediate recovery is suppressed
+    // for the same reason the daily-cap cancel suppresses it: this run's
+    // agent is not the one the issue is waiting on any more.
+    await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
 
     return cancelled;
   }

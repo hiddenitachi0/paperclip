@@ -3101,7 +3101,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         adapterType: "claude_local",
         agentName: "Reviewer 2",
       });
-      mockAdapterExecute.mockImplementationOnce(async () => ({
+      // Persistent, not `mockImplementationOnce`: the failed run leaves a todo
+      // issue assigned to the agent, so the server queues an immediate
+      // recovery wake for it. That recovery run must hit the same missing
+      // sign-in, otherwise it succeeds and clears the very error marker this
+      // test is about (afterEach restores the default success mock).
+      mockAdapterExecute.mockImplementation(async () => ({
         exitCode: 1,
         signal: null,
         timedOut: false,
@@ -3128,13 +3133,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(settled?.error).not.toMatch(/\/login/);
       expect(settled?.error).not.toContain("subtype=");
 
-      // The agent page's own red-marker reason says the same thing.
-      const agentRow = await waitForValue(async () =>
-        db
-          .select()
-          .from(agents)
-          .where(eq(agents.id, agentId))
-          .then((rows) => (rows[0]?.errorReason ? rows[0] : null)),
+      // The agent page's own red-marker reason says the same thing. Wait for
+      // the marker *and* the error status together: between the failed run's
+      // finalisation and the immediate recovery run it queues being claimed,
+      // the agent briefly reads `running` with the reason already set, and a
+      // read that lands in that window used to fail the status assertion
+      // below under CI load. The state converges once the recovery run has
+      // failed the same way, so give it the run's worth of time.
+      const agentRow = await waitForValue(
+        async () =>
+          db
+            .select()
+            .from(agents)
+            .where(eq(agents.id, agentId))
+            .then((rows) => (rows[0]?.status === "error" && rows[0]?.errorReason ? rows[0] : null)),
+        10_000,
       );
       expect(agentRow?.errorReason).toContain("There is no Claude sign-in for Reviewer 2 to use");
       expect(agentRow?.errorReason).not.toMatch(/\/login/);
