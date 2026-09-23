@@ -491,7 +491,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
 
   // ─── Isolation ───────────────────────────────────────────────────────────
 
-  it("the Durkan quick agent is told 'ikke koblet til', is not offered the tool, and the refusal is audited under Durkan", async () => {
+  it("the Durkan quick agent is told 'has not connected', is not offered the tool, and the refusal is audited under Durkan", async () => {
     const nordstrand = await seedCompany("Nordstrand Konsernet");
     await connectShop(nordstrand, SHOP_A, KEY_A);
     const durkan = await seedCompany("Durkan Agency");
@@ -503,7 +503,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
       .post(`/api/chat/${durkanAgent.id}/messages`)
       .send({ companyId: durkan, message: "Hvor mye solgte vi forrige måned?", laneHint: "a" });
     expect(res.status).toBe(200);
-    const sentence = "Durkan Agency har ikke koblet til salgsdata. En styrebruker kan gjøre det under Innstillinger → Datakilder.";
+    const sentence = "Durkan Agency has not connected its sales data. A board user can do that under Settings → Data sources.";
     expect(res.body.result.response).toBe(sentence);
     expect(model.calls[0]!.tools).not.toContain("read_business_data");
     expect(model.calls[0]!.system).toContain(sentence);
@@ -569,7 +569,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     for (const extra of [{ shop_domain: SHOP_B }, { connection_id: connectionB }, { company_id: companyB }]) {
       const answer = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"], ...extra });
       expect(answer).toMatchObject({ ok: false, outcome: "refused", refusalCode: "invalid_request" });
-      expect(answer.text).toContain("felter verktøyet ikke tar imot");
+      expect(answer.text).toContain("fields the tool does not accept");
     }
     expect(shopA.requests).toHaveLength(0);
     expect(shopB.requests).toHaveLength(0);
@@ -600,8 +600,8 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const seventh = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"] });
     expect(seventh).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "agent_minute_limit" });
     expect(seventh.text).toBe(
-      "Jeg har gjort 6 oppslag i salgsdata det siste minuttet, som er grensen per agent. Vent et minutt og spør igjen. " +
-        "Grensen er fast i Paperclip og kan bare endres av den som drifter Paperclip.",
+      "I have made 6 sales-data lookups in the last minute, which is the limit per agent. Wait a minute and ask again. " +
+        "The limit is fixed in Paperclip and can only be changed by whoever operates Paperclip.",
     );
     expect(shopA.requests).toHaveLength(requestsBefore);
 
@@ -627,7 +627,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const fresh = await seedQuickAgent(companyA, "Ny agent");
     const answer = await businessDataService(db, deps()).read(caller(companyA, fresh.id), { action: "sales", periods: ["last_month"] });
     expect(answer).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "company_minute_limit" });
-    expect(answer.text).toContain("Nordstrand Konsernet har gjort 20 oppslag i salgsdata det siste minuttet");
+    expect(answer.text).toContain("Nordstrand Konsernet has made 20 sales-data lookups in the last minute");
     expect(shopA.requests).toHaveLength(0);
   });
 
@@ -650,8 +650,8 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const answer = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"] });
     expect(answer).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "daily_cap" });
     expect(answer.text).toBe(
-      "Nordstrand Konsernet har brukt alle 300 oppslag i salgsdata for i dag, som er den daglige grensen. " +
-        "Grensen nullstilles ved midnatt (norsk tid). En styrebruker kan heve den under Innstillinger → Datakilder.",
+      "Nordstrand Konsernet has used all 300 sales-data lookups for today, which is the daily limit. " +
+        "The limit resets at midnight (Norwegian time). A board user can raise it under Settings → Data sources.",
     );
 
     // The cap is the company's own setting.
@@ -693,7 +693,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const svc = businessDataService(db, deps());
     const refused = await svc.read(caller(companyA, analyst.id, { runId }), { action: "sales", periods: ["last_month"] });
     expect(refused).toMatchObject({ ok: false, outcome: "rate_limited", refusalCode: "run_limit" });
-    expect(refused.text).toContain("Denne kjøringen har allerede gjort 15 oppslag i salgsdata");
+    expect(refused.text).toContain("This run has already made 15 sales-data lookups");
     // Another run is not affected.
     expect((await svc.read(caller(companyA, analyst.id, { runId: randomUUID() }), { action: "sales", periods: ["last_month"] })).ok).toBe(true);
   });
@@ -708,7 +708,7 @@ d("DUR-3972 S4: business data for quick agents", () => {
     const answer = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["last_month"], product_type_query: "sofa" });
     expect(answer).toMatchObject({ ok: false, outcome: "ambiguous", refusalCode: "ambiguous_product_type" });
     expect(answer.text).toContain("Hjørnesofa, Sofa, Sofabord, Sovesofa");
-    expect(answer.text).toContain("Spør personen");
+    expect(answer.text).toContain("Ask the person");
     expect(shopA.requests.map((entry) => entry.operation)).toEqual(["PaperclipProductTypes"]);
 
     const one = await svc.read(caller(companyA, agentA.id), { action: "sales", periods: ["month_before_last"], product_type_query: "hjornesofa" });

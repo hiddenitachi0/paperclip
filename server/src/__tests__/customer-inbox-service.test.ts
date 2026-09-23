@@ -327,7 +327,7 @@ describeEmbeddedPostgres("customer-inbox door: conversation threading + unreadab
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, afterSecond[0].id));
     expect(comments).toHaveLength(1);
-    expect(comments[0].body).toContain("Enda en melding");
+    expect(comments[0].body).toContain("Another message we could not read");
   });
 
   it("does not escalate rejected_signature deliveries (ledger only)", async () => {

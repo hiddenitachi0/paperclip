@@ -199,7 +199,7 @@ export function buildBusinessDataPromptParagraph(input: { available: boolean; co
   }
   return [
     `Sales data (read_business_data):`,
-    `- Use only numbers the tool returned in this turn. Never calculate, round, estimate or reuse a number from earlier in the conversation; call the tool again for every new question, including follow-ups like "og måneden før det?".`,
+    `- Use only numbers the tool returned in this turn. Never calculate, round, estimate or reuse a number from earlier in the conversation; call the tool again for every new question, including follow-ups like "and the month before that?".`,
     `- Always state the period with its exact dates, the source, and that the figures are units (stk), not kroner.`,
     `- Give the three lines for each month (sold, returns in the month with how many are from earlier months, net), never one net figure alone.`,
     `- "No data" is not 0: if the tool says there is no data, say that, never zero.`,
@@ -1172,7 +1172,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 ok: false,
                 content:
                   block.name === READ_BUSINESS_DATA_TOOL
-                    ? "Jeg fikk ikke hentet tallene på grunn av en feil, så jeg gir ingen tall."
+                    ? "I could not fetch the figures because of an error, so I am not giving any figures."
                     : `That did not work: ${err instanceof Error ? err.message : String(err)}`,
                 summary: `${block.name} failed.`,
               };

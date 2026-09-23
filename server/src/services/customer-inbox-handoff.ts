@@ -224,7 +224,7 @@ export async function tickCustomerInboxHandoff(
           issueId: candidate.id,
           authorType: "system",
           body:
-            "Denne kundehenvendelsen ble ikke behandlet av sekretæren innen fristen, så den er sendt videre til deg.",
+            "This customer request was not handled by the secretary within the deadline, so it has been passed on to you.",
         });
         await touchIssueForCompanyInboxes(db, { companyId: candidate.companyId, issueId: candidate.id, touchedAt: now });
         await queueIssueAssignmentWakeup({

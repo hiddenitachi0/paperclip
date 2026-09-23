@@ -477,32 +477,32 @@ export function createSafeOutboundFetch(
     if (typeof input !== "string" && !(input instanceof URL)) {
       // A Request object carries its own headers/body/redirect mode; refuse it
       // rather than half-honour it.
-      throw new SafeOutboundFetchError("invalid_url", "Adressen er ikke gyldig.");
+      throw new SafeOutboundFetchError("invalid_url", "The address is not valid.");
     }
     const url = input.toString();
     let parsed: URL;
     try {
       parsed = new URL(url);
     } catch {
-      throw new SafeOutboundFetchError("invalid_url", "Adressen er ikke gyldig.");
+      throw new SafeOutboundFetchError("invalid_url", "The address is not valid.");
     }
     const host = parsed.hostname.toLowerCase();
     if (!(policy.protocols as ReadonlyArray<string>).includes(parsed.protocol)) {
       throw new SafeOutboundFetchError(
         "protocol_not_allowed",
-        `Bare https er tillatt for ${policy.sourceKind} (fikk ${parsed.protocol.replace(/:$/, "")}).`,
+        `Only https is allowed for ${policy.sourceKind} (got ${parsed.protocol.replace(/:$/, "")}).`,
       );
     }
     if (parsed.username || parsed.password) {
-      throw new SafeOutboundFetchError("credentials_in_url", "Adressen kan ikke inneholde brukernavn eller passord.");
+      throw new SafeOutboundFetchError("credentials_in_url", "The address cannot contain a username or password.");
     }
     if (parsed.port && parsed.port !== "443") {
-      throw new SafeOutboundFetchError("port_not_allowed", `Bare standardporten er tillatt for ${policy.sourceKind}.`);
+      throw new SafeOutboundFetchError("port_not_allowed", `Only the default port is allowed for ${policy.sourceKind}.`);
     }
     if (!policy.hostPattern.test(host)) {
       throw new SafeOutboundFetchError(
         "host_not_allowed",
-        `${host} er ikke en tillatt adresse for ${policy.sourceKind}.`,
+        `${host} is not an allowed address for ${policy.sourceKind}.`,
       );
     }
 
@@ -521,9 +521,9 @@ export function createSafeOutboundFetch(
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message.startsWith("All resolved IPs")) {
-        throw new SafeOutboundFetchError("address_not_public", `${host} peker til en intern adresse og blir ikke kontaktet.`);
+        throw new SafeOutboundFetchError("address_not_public", `${host} points to an internal address and will not be contacted.`);
       }
-      throw new SafeOutboundFetchError("dns_failed", `Fant ikke adressen ${host}.`);
+      throw new SafeOutboundFetchError("dns_failed", `Could not find the address ${host}.`);
     }
 
     let response: PinnedHttpResponse;
@@ -535,18 +535,18 @@ export function createSafeOutboundFetch(
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message.startsWith("Response body exceeded")) {
-        throw new SafeOutboundFetchError("response_too_large", `Svaret fra ${host} var for stort.`);
+        throw new SafeOutboundFetchError("response_too_large", `The response from ${host} was too large.`);
       }
       if (signal.aborted) {
-        throw new SafeOutboundFetchError("timeout", `${host} svarte ikke innen ${Math.round(policy.timeoutMs / 1000)} sekunder.`);
+        throw new SafeOutboundFetchError("timeout", `${host} did not respond within ${Math.round(policy.timeoutMs / 1000)} seconds.`);
       }
-      throw new SafeOutboundFetchError("network_error", `Fikk ikke kontakt med ${hostOf(url)}.`);
+      throw new SafeOutboundFetchError("network_error", `Could not reach ${hostOf(url)}.`);
     }
 
     if (response.status >= 300 && response.status < 400) {
       throw new SafeOutboundFetchError(
         "redirect_refused",
-        `${host} prøvde å sende forespørselen videre til en annen adresse. Det er ikke tillatt.`,
+        `${host} tried to redirect the request to another address. That is not allowed.`,
       );
     }
 

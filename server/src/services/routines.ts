@@ -1896,7 +1896,7 @@ export function routineService(
       await issueSvc.addComment(
         existing.id,
         [
-          `Enda en melding vi ikke klarte å lese kom inn${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          `Another message we could not read has come in${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
           "",
           excerptBlock,
         ].join("\n"),
@@ -1912,9 +1912,9 @@ export function routineService(
     try {
       escalation = await issueSvc.create(trigger.companyId, {
         projectId: routine.projectId,
-        title: "Vi klarte ikke å lese en innkommende kundemelding",
+        title: "We could not read an incoming customer message",
         description: [
-          `En melding til rutinen "${routine.title}" kunne ikke leses${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          `A message to the routine "${routine.title}" could not be read${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
           "",
           excerptBlock,
         ].join("\n"),
@@ -1938,7 +1938,7 @@ export function routineService(
       await issueSvc.addComment(
         raced.id,
         [
-          `Enda en melding vi ikke klarte å lese kom inn${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
+          `Another message we could not read has come in${input.outcomeDetail ? ` (${input.outcomeDetail})` : ""}.`,
           "",
           excerptBlock,
         ].join("\n"),
@@ -3172,9 +3172,9 @@ export function routineService(
         channel: trigger.customerInboxChannel,
         messageId,
         fromAddress: "test@paperclip.local",
-        fromName: "Testmelding",
-        subject: "Dette er en testmelding",
-        body: "Sendt fra Paperclip for å bekrefte at inboksen fungerer.",
+        fromName: "Test message",
+        subject: "This is a test message",
+        body: "Sent from Paperclip to confirm that the inbox works.",
         receivedAt: new Date().toISOString(),
       };
       return receiveCustomerInboxMessage(trigger.publicId as string, {

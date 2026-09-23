@@ -130,13 +130,13 @@ export function signedRunIdFromActor(actor: AuthorizationActor | undefined | nul
 }
 
 export function notConnectedMessage(companyName: string): string {
-  return `${companyName} har ikke koblet til salgsdata. En styrebruker kan gjøre det under Innstillinger → Datakilder.`;
+  return `${companyName} has not connected its sales data. A board user can do that under Settings → Data sources.`;
 }
 
 const FEATURE_OFF_MESSAGE =
-  "Datakilder er slått av for denne Paperclip-installasjonen, så jeg kan ikke lese salgsdata nå. En administrator kan slå det på.";
+  "Data sources are switched off for this Paperclip installation, so I cannot read sales data right now. An administrator can switch them on.";
 const UNEXPECTED_MESSAGE =
-  "Jeg fikk ikke hentet tallene på grunn av en feil, så jeg gir ingen tall. Feilen er logget.";
+  "I could not fetch the figures because of an error, so I am not giving any figures. The error has been logged.";
 
 function upstreamLike(code: DataRefusalCode): boolean {
   return (
@@ -171,11 +171,11 @@ function auditParams(raw: unknown): Record<string, unknown> {
   return out;
 }
 
-/** "Enhet: antall (stk) ... Perioder: ..." plus the source line. Appended by the platform. */
+/** "The figures are units (stk) ... Periods: ..." plus the source line. Appended by the platform. */
 export function renderSalesFooter(result: SalesResult, lookupId: string): string {
   const periods = result.periods.map((period) => periodRange(period, result.timezone)).join("; ");
   return [
-    `Tallene er antall enheter (stk), ikke kroner. Perioder: ${periods}.`,
+    `The figures are units (stk), not kroner. Periods: ${periods}.`,
     renderSourceFooter(result, lookupId),
   ].join("\n");
 }
@@ -320,8 +320,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         return {
           code: "run_limit",
           message:
-            `Denne kjøringen har allerede gjort ${BUSINESS_DATA_LIMITS.perRun} oppslag i salgsdata, som er grensen per kjøring. ` +
-            "Jeg gjør ikke flere oppslag nå. Grensen er fast i Paperclip og kan bare endres av den som drifter Paperclip.",
+            `This run has already made ${BUSINESS_DATA_LIMITS.perRun} sales-data lookups, which is the limit per run. ` +
+            "I am not making any more lookups now. The limit is fixed in Paperclip and can only be changed by whoever operates Paperclip.",
         };
       }
     }
@@ -331,8 +331,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         return {
           code: "agent_minute_limit",
           message:
-            `Jeg har gjort ${BUSINESS_DATA_LIMITS.perAgentPerMinute} oppslag i salgsdata det siste minuttet, som er grensen per agent. ` +
-            "Vent et minutt og spør igjen. Grensen er fast i Paperclip og kan bare endres av den som drifter Paperclip.",
+            `I have made ${BUSINESS_DATA_LIMITS.perAgentPerMinute} sales-data lookups in the last minute, which is the limit per agent. ` +
+            "Wait a minute and ask again. The limit is fixed in Paperclip and can only be changed by whoever operates Paperclip.",
         };
       }
     }
@@ -341,8 +341,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       return {
         code: "company_minute_limit",
         message:
-          `${name} har gjort ${BUSINESS_DATA_LIMITS.perCompanyPerMinute} oppslag i salgsdata det siste minuttet, som er grensen per selskap. ` +
-          "Vent et minutt og spør igjen. Grensen er fast i Paperclip og kan bare endres av den som drifter Paperclip.",
+          `${name} has made ${BUSINESS_DATA_LIMITS.perCompanyPerMinute} sales-data lookups in the last minute, which is the limit per company. ` +
+          "Wait a minute and ask again. The limit is fixed in Paperclip and can only be changed by whoever operates Paperclip.",
       };
     }
     const today = zonedParts(now, LIMIT_DAY_TIMEZONE);
@@ -352,8 +352,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       return {
         code: "daily_cap",
         message:
-          `${name} har brukt alle ${dailyCap} oppslag i salgsdata for i dag, som er den daglige grensen. ` +
-          "Grensen nullstilles ved midnatt (norsk tid). En styrebruker kan heve den under Innstillinger → Datakilder.",
+          `${name} has used all ${dailyCap} sales-data lookups for today, which is the daily limit. ` +
+          "The limit resets at midnight (Norwegian time). A board user can raise it under Settings → Data sources.",
       };
     }
     return null;
@@ -390,7 +390,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         if (row.status !== "active") {
           return refuse(caller, {
             connectionId: row.id, params, outcome: "refused", code: "data_connection_not_active",
-            message: "Datakoblingen er ikke slått på. Trykk Test først.", startedAt,
+            message: "The data connection is not switched on. Press Test first.", startedAt,
           });
         }
       } else {
@@ -423,10 +423,10 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         return refuse(caller, {
           connectionId, params, outcome: "refused", code: "invalid_request",
           message: unknownKeys
-            ? "Oppslaget hadde felter verktøyet ikke tar imot. Bruk bare action, periods, measure, product_type_query, product_types og group_by."
+            ? "The lookup had fields the tool does not accept. Use only action, periods, measure, product_type_query, product_types and group_by."
             : badPeriod
-              ? "Perioden må være last_month, month_before_last, this_month_to_date eller en måned som 2026-07, og høyst to perioder."
-              : "Spørsmålet kunne ikke gjøres om til et gyldig oppslag.",
+              ? "The period must be last_month, month_before_last, this_month_to_date or a month like 2026-07, and at most two periods."
+              : "The question could not be turned into a valid lookup.",
           detail: { issues: parsed.error.issues.slice(0, 5).map((issue) => `${issue.path.join(".")}: ${issue.message}`) },
           startedAt,
         });
@@ -435,13 +435,13 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       if (input.action === "sales" && !input.periods) {
         return refuse(caller, {
           connectionId, params, outcome: "refused", code: "invalid_request",
-          message: "Et salgsoppslag trenger en eller to perioder, for eksempel last_month.", startedAt,
+          message: "A sales lookup needs one or two periods, for example last_month.", startedAt,
         });
       }
       if (input.product_type_query && input.product_types) {
         return refuse(caller, {
           connectionId, params, outcome: "refused", code: "invalid_request",
-          message: "Bruk enten product_type_query eller product_types, ikke begge.", startedAt,
+          message: "Use either product_type_query or product_types, not both.", startedAt,
         });
       }
 
@@ -477,7 +477,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       if (!source.adapters.sales) {
         return refuse(caller, {
           connectionId, params, outcome: "refused", code: "data_source_kind_unsupported",
-          message: `${source.label}-koblinger kan ikke svare på salgsdata ennå.`, startedAt,
+          message: `${source.label} connections cannot answer sales-data questions yet.`, startedAt,
         });
       }
 
@@ -487,7 +487,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         if (!source.adapters.productTypes) {
           return refuse(caller, {
             connectionId, params, outcome: "refused", code: "invalid_request",
-            message: `${source.label} har ingen liste over produkttyper å slå opp i. Bruk product_types med nøyaktige navn.`,
+            message: `${source.label} does not have a list of product types to look up. Use product_types with exact names.`,
             startedAt,
           });
         }
@@ -497,8 +497,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         } catch (error) {
           const message =
             error instanceof DataSourceUpstreamError
-              ? `${error.message} Jeg gir derfor ingen tall.`
-              : `${source.label} svarte med en feil, så jeg har ingen tall å gi. Prøv igjen senere.`;
+              ? `${error.message} So I am not giving any figures.`
+              : `${source.label} answered with an error, so I am not giving any figures. Try again later.`;
           return refuse(caller, {
             connectionId, params, outcome: "upstream_error", code: "upstream_error", message, startedAt,
             audit: { upstreamRequests: context.stats().requests, costPoints: context.stats().costPoints },
@@ -510,8 +510,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
           return refuse(caller, {
             connectionId, params, outcome: "ambiguous", code: "ambiguous_product_type",
             message:
-              `«${input.product_type_query}» passer med flere produkttyper i ${source.label}: ${match.candidates.join(", ")}. ` +
-              "Spør personen hvilke av disse som skal telles med, og kall verktøyet igjen med product_types. Ikke gjett.",
+              `"${input.product_type_query}" matches several product types in ${source.label}: ${match.candidates.join(", ")}. ` +
+              "Ask the person which of these to count, and call the tool again with product_types. Do not guess.",
             detail: { candidates: match.candidates },
             audit: { upstreamRequests: context.stats().requests },
             startedAt,
@@ -522,8 +522,8 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
           return refuse(caller, {
             connectionId, params, outcome: "refused", code: "unknown_product_type",
             message:
-              `Fant ingen produkttype som passer med «${input.product_type_query}» i ${source.label}.` +
-              (match.nearest.length > 0 ? ` Nærmeste: ${match.nearest.join(", ")}.` : ""),
+              `Could not find a product type matching "${input.product_type_query}" in ${source.label}.` +
+              (match.nearest.length > 0 ? ` Closest: ${match.nearest.join(", ")}.` : ""),
             audit: { upstreamRequests: context.stats().requests },
             startedAt,
             scrubValues: knownSecrets(),
@@ -587,7 +587,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
       if (!checked.success || violations.length > 0) {
         return refuse(caller, {
           connectionId, params, outcome: "refused", code: "invariant_failed",
-          message: `Tallene fra ${source.label} gikk ikke opp da jeg kontrollerte dem, så jeg gir ikke noe svar. Feilen er logget.`,
+          message: `The figures from ${source.label} did not add up when I checked them, so I am not giving an answer. The error has been logged.`,
           detail: { invariantViolations: violations.slice(0, 20) }, audit, startedAt, scrubValues: knownSecrets(),
         });
       }
@@ -639,7 +639,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
     if (byteLength(facts) > ANSWER_MAX_BYTES && !input.allowLargeAnswer) {
       return refuse(caller, {
         connectionId: input.connectionId, params: input.params, outcome: "refused", code: "answer_too_large",
-        message: "Svaret ble for stort til å gis på en gang (for mange produkttyper). Spør om færre produkttyper eller uten gruppering.",
+        message: "The answer was too large to give in one go (too many product types). Ask for fewer product types or without grouping.",
         audit: input.audit, startedAt: input.startedAt, scrubValues: input.scrubValues,
       });
     }
@@ -666,7 +666,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
         outcome: "refused",
         refusalCode: "audit_failed",
         lookupId: null,
-        text: "Oppslaget kunne ikke logges, så jeg gir ingen tall. Prøv igjen om litt.",
+        text: "The lookup could not be logged, so I am not giving any figures. Try again in a moment.",
         footer: null,
       };
     }
@@ -680,7 +680,7 @@ export function businessDataService(db: Db, deps: BusinessDataServiceDeps = {}) 
     };
   }
 
-  // The board's "Prøveberegning" is served by services/data-trial.ts (slice S2),
+  // The board's trial calculation is served by services/data-trial.ts (slice S2),
   // which runs the same S3 sales engine as read() above with the operator's own
   // choice of months. Moving it onto read() itself, so trial and agent answers
   // share one path end to end, is a tracked follow-up.

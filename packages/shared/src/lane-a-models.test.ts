@@ -23,9 +23,9 @@ import { QUICK_AGENT_FIELDS, createAgentSchema, laneAProviderModelIssue } from "
 describe("lane A provider catalogue", () => {
   it("keeps the three Claude entries and their prices exactly", () => {
     expect(LANE_A_MODEL_CATALOGUE).toEqual({
-      "claude-haiku-4-5": { label: "Rask og billig", inputUsdPerMillion: 1.0, outputUsdPerMillion: 5.0 },
+      "claude-haiku-4-5": { label: "Fast and cheap", inputUsdPerMillion: 1.0, outputUsdPerMillion: 5.0 },
       "claude-sonnet-5": { label: "Standard", inputUsdPerMillion: 2.0, outputUsdPerMillion: 10.0 },
-      "claude-opus-5": { label: "Best kvalitet", inputUsdPerMillion: 5.0, outputUsdPerMillion: 25.0 },
+      "claude-opus-5": { label: "Best quality", inputUsdPerMillion: 5.0, outputUsdPerMillion: 25.0 },
     });
     expect(LANE_A_PROVIDER_CATALOGUE.anthropic.models).toBe(LANE_A_MODEL_CATALOGUE);
     expect(LANE_A_MODELS).toEqual(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]);

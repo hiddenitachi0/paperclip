@@ -1059,7 +1059,7 @@ export function agentRoutes(
     for (const { ruleIndex, name } of parseSorteringsreglerRuleTargetNames(block)) {
       if (liveNames.has(name)) continue;
       throw unprocessable(
-        `Regel ${ruleIndex} peker på «${name}», som ikke finnes lenger. Rett navnet eller velg en annen.`,
+        `Rule ${ruleIndex} points to "${name}", which no longer exists. Correct the name or pick another agent.`,
       );
     }
   }
