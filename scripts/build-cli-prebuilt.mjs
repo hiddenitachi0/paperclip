@@ -57,6 +57,18 @@ const tsxDir = path.join(cliDir, "node_modules", "tsx");
 const realTsxCliName = "tsx-cli.mjs";
 const installShim = process.argv.includes("--install-shim");
 
+// The shim is for the image only. A checkout (anything with a .git entry at
+// the root -- a folder, or the file a git worktree has) must keep running the
+// CLI through tsx, so its source stays live for development; the image build
+// copies the tree without .git (.dockerignore).
+if (installShim && fs.existsSync(path.join(repoRoot, ".git"))) {
+  console.error(
+    `[build-cli-prebuilt] ERROR: --install-shim refused: ${repoRoot} is a git checkout (.git exists). ` +
+      "The shim replaces cli/node_modules/tsx and is only for the Docker image build.",
+  );
+  process.exit(1);
+}
+
 function log(message) {
   console.log(`[build-cli-prebuilt] ${message}`);
 }
@@ -152,6 +164,18 @@ function run(label, args, extraEnv = {}) {
   return result.stdout.trim();
 }
 
+function runExpectingFailure(label, args, extraEnv = {}) {
+  const result = spawnSync(process.execPath, args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, ...extraEnv },
+    timeout: 120_000,
+  });
+  if (result.error) fail(`${label}: ${result.error.message}`);
+  if (result.status === 0) fail(`${label}: succeeded (exit 0), but it must fail:\n${result.stdout}${result.stderr}`);
+  return result.status;
+}
+
 const expectedVersion = JSON.parse(fs.readFileSync(path.join(cliDir, "package.json"), "utf8")).version;
 const direct = run("node cli/dist/index.js --version", [bundle, "--version"]);
 if (direct !== expectedVersion) fail(`node cli/dist/index.js --version printed "${direct}", expected "${expectedVersion}"`);
@@ -161,8 +185,16 @@ log(`cli/dist/index.js runs (version ${direct})`);
 if (installShim) {
   // With ESBUILD_BINARY_PATH pointing at a program that is not esbuild, any
   // attempt to compile TypeScript fails outright ("The service was stopped").
-  // The shim must never get there for the CLI entry...
+  // First the negative control, so the proof below cannot go silent if some
+  // future tsx or esbuild stopped honouring the variable: compiling the CLI
+  // with the real tsx must FAIL this way...
   const noEsbuild = { ESBUILD_BINARY_PATH: "/bin/false" };
+  const realTsxExit = runExpectingFailure(
+    "negative control: the real tsx compiling cli/src/index.ts with esbuild unusable",
+    [`cli/node_modules/tsx/dist/${realTsxCliName}`, "cli/src/index.ts", "--version"],
+    noEsbuild,
+  );
+  // ...while the shim must never get there for the CLI entry...
   const entry = ["cli/node_modules/tsx/dist/cli.mjs", "cli/src/index.ts"];
   const viaShim = run("the CLI command line with esbuild unusable", [...entry, "--version"], noEsbuild);
   if (viaShim !== expectedVersion) fail(`the CLI command line printed "${viaShim}", expected "${expectedVersion}"`);
@@ -170,5 +202,8 @@ if (installShim) {
   // ...and must still be tsx for anything else.
   const tsxVersion = run("tsx's own --version through the shim", ["cli/node_modules/tsx/dist/cli.mjs", "--version"]);
   if (!/^tsx v\d/.test(tsxVersion)) fail(`the shim did not hand "--version" to the real tsx (got "${tsxVersion}")`);
-  log(`the CLI command line runs the bundle without esbuild; other scripts still get ${tsxVersion}`);
+  log(
+    `the CLI command line runs the bundle without esbuild (the real tsx fails with exit ${realTsxExit} in the same conditions); ` +
+      `other scripts still get ${tsxVersion}`,
+  );
 }

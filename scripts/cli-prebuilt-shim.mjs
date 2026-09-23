@@ -29,8 +29,15 @@
  *
  * Paths are worked out from this file's own location, so the same file works
  * in the image (/app/cli/...) and in a test layout.
+ *
+ * In the image the prebuilt CLI also loads the server's module guard first
+ * (DUR-3994 Stage 2, /usr/local/lib/paperclip/node-module-guard.cjs, root-owned
+ * outside /app): it refuses modules from folders agents can write, so the CLI
+ * -- which the deploy runner runs as root -- gets the same protection as the
+ * server. Where that file does not exist (a test layout) nothing is loaded.
  */
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -39,6 +46,7 @@ const cliDir = path.resolve(here, "..", "..", ".."); // <root>/cli
 const CLI_ENTRY = path.join(cliDir, "src", "index.ts");
 const PREBUILT = path.join(cliDir, "dist", "index.js");
 const REAL_TSX = path.join(here, "tsx-cli.mjs");
+const MODULE_GUARD = "/usr/local/lib/paperclip/node-module-guard.cjs";
 
 function realOrSelf(p) {
   try {
@@ -54,6 +62,7 @@ function isCliEntry(arg) {
 }
 
 if (isCliEntry(process.argv[2]) && fs.existsSync(PREBUILT)) {
+  if (fs.existsSync(MODULE_GUARD)) createRequire(import.meta.url)(MODULE_GUARD);
   // What Node gives a program it starts directly: [node, program, ...args].
   // The CLI (commander) reads its command from process.argv.slice(2), the same
   // as it did in the child process tsx used to start.

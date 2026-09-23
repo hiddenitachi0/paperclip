@@ -65,6 +65,44 @@ describe("the Docker image builds the CLI once and runs it prebuilt", () => {
     expect(fs.readFileSync(SHIM_SOURCE, "utf8")).toContain("DUR-3998");
   });
 
+  it("the build script refuses to install the shim in a git checkout, and proves its esbuild block with the real tsx", () => {
+    const script = fs.readFileSync(BUILD_SCRIPT, "utf8");
+    expect(script).toMatch(/installShim && fs\.existsSync\(path\.join\(repoRoot, "\.git"\)\)/);
+    // The negative control at build time: the real tsx must FAIL with
+    // ESBUILD_BINARY_PATH unusable, or the shim's pass would prove nothing.
+    expect(script).toMatch(/runExpectingFailure\(\s*"negative control: the real tsx compiling cli\/src\/index\.ts with esbuild unusable"/);
+    expect(script).toMatch(/ESBUILD_BINARY_PATH: "\/bin\/false"/);
+  });
+
+  it("refuses --install-shim here (this is a git checkout) before touching anything", () => {
+    const result = spawnSync(process.execPath, [BUILD_SCRIPT, "--install-shim"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--install-shim refused");
+    expect(result.stderr).toContain(".git exists");
+    // Refused before the bundle step: pnpm's tsx link is untouched.
+    expect(fs.lstatSync(path.join(REPO_ROOT, "cli/node_modules/tsx")).isSymbolicLink()).toBe(true);
+  });
+
+  it("the shim loads the server's module guard when the image has it, and nothing otherwise", () => {
+    const shim = fs.readFileSync(SHIM_SOURCE, "utf8");
+    expect(shim).toContain('const MODULE_GUARD = "/usr/local/lib/paperclip/node-module-guard.cjs";');
+    expect(shim).toMatch(/if \(fs\.existsSync\(MODULE_GUARD\)\) createRequire\(import\.meta\.url\)\(MODULE_GUARD\);/);
+  });
+
+  it("the acceptance harness fails the esbuild watch when the watcher recorded nothing or stopped early", () => {
+    const harness = fs.readFileSync(path.join(REPO_ROOT, "scripts/agent-isolation-acceptance.sh"), "utf8");
+    expect(harness).toContain('date +%s >"$stamp.tmp" && mv -f "$stamp.tmp" "$stamp"');
+    expect(harness).toMatch(/fail "cli-no-esbuild: the esbuild watcher recorded no scan at all/);
+    expect(harness).toMatch(/fail "cli-no-esbuild: the esbuild watcher's last scan is \$stamp_age s old/);
+    expect(harness).toMatch(/fail "cli-no-esbuild: the esbuild watcher recorded nothing/);
+    // Negative control (g) first checks the real tsx is actually there to run.
+    expect(harness).toMatch(/if ! tdocker 15 exec "\$container" test -f "\$REAL_TSX_CLI"; then/);
+  });
+
   it("the isolation probe checks the bundle and the shim are read-only for agents", () => {
     const probe = fs.readFileSync(path.join(REPO_ROOT, "scripts/isolation-probe.sh"), "utf8");
     const targets = probe.split("\n").find((line) => line.startsWith("for target in /app/server/dist/index.js"));
