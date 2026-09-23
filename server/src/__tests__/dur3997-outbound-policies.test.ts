@@ -162,7 +162,7 @@ describe("DUR-3997 outbound policies per source kind", () => {
 
   it("SFTP files have no HTTP policy in this slice: nothing opens a socket for them", () => {
     expect(
-      getDataSourceKind("sftp_file").outboundPolicy({ kind: "sftp_file", host: "filer.butikken.no", port: 22, username: "u", remotePath: "/" }),
+      getDataSourceKind("sftp_file").outboundPolicy({ kind: "sftp_file", host: "files.example.com", port: 22, username: "u", remotePath: "/" }),
     ).toBeNull();
   });
 });

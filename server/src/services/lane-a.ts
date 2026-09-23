@@ -56,6 +56,7 @@ import {
   isAgentAvailableForRouting,
   isLaneABuiltinTool,
   READ_BUSINESS_DATA_TOOL,
+  READ_COMPANY_FILE_TOOL,
   type LaneAToolColleague,
   type LaneAToolContext,
   type LaneAToolDeps,
@@ -67,6 +68,7 @@ import {
   signedRunIdFromActor,
   type BusinessDataServiceDeps,
 } from "./business-data.js";
+import { companyFileService, type CompanyFileServerSummary } from "./company-files.js";
 import {
   applyBusinessDataNumberCheck,
   applyNoLookupGuard,
@@ -187,6 +189,23 @@ export interface LaneASystemPromptInput {
    * model to say so instead of guessing a number.
    */
   businessData?: { available: boolean; companyName: string };
+  /** DUR-3997: the company's active file servers this turn; absent or empty leaves the prompt as it was. */
+  companyFiles?: { servers: CompanyFileServerSummary[] };
+}
+
+/** DUR-3997: the rules a quick agent reads company files under. */
+export function buildCompanyFilesPromptParagraph(servers: CompanyFileServerSummary[]): string {
+  const list = servers
+    .map((server) => `"${server.name}" (${server.kindLabel}, ${server.access === "read_write" ? "read and write" : "read-only"}, base folder ${server.basePath})`)
+    .join("; ");
+  return [
+    `Company files (read_company_file):`,
+    `- Connected server${servers.length === 1 ? "" : "s"}: ${list}.${servers.length > 1 ? " Pass the server's name in the server field." : ""}`,
+    `- Use it to list a folder or read a .csv, .txt, .md or .json file. Spreadsheets (.xlsx) cannot be read yet: say so and suggest a CSV export.`,
+    `- Quote only what the tool returned in this turn. If it says the file was cut, say so. Never guess or remember a file's contents.`,
+    `- You can only read. You cannot write, move or delete files, even on a read-and-write server.`,
+    `- If the tool refuses, pass the refusal on word for word.`,
+  ].join("\n");
 }
 
 /** DUR-3972: the rules a quick agent answers business-data questions under. */
@@ -229,6 +248,11 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
     if (input.businessData?.available) {
       capabilities.push(`You can also read this company's sales figures (read_business_data).`);
     }
+    if (input.companyFiles && input.companyFiles.servers.length > 0) {
+      capabilities.push(
+        `You can also list folders and read files on this company's connected file server${input.companyFiles.servers.length === 1 ? "" : "s"} (read_company_file).`,
+      );
+    }
   }
   if (input.hasMcpTools) {
     capabilities.push(`You also have the tools granted to you in the Tools library.`);
@@ -245,6 +269,9 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
 
   if (input.businessData) {
     parts.push(buildBusinessDataPromptParagraph(input.businessData));
+  }
+  if (input.companyFiles && input.companyFiles.servers.length > 0) {
+    parts.push(buildCompanyFilesPromptParagraph(input.companyFiles.servers));
   }
 
   if (input.colleagues && input.colleagues.length > 0) {
@@ -698,6 +725,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     ...options.toolDeps,
   };
   const businessData = businessDataService(db, options.businessData);
+  const companyFiles = companyFileService(db, options.businessData);
   const executeBuiltinTool = createLaneABuiltinToolExecutor(toolDeps);
   const builtinToolDefinitions = buildLaneABuiltinToolDefinitions();
   const budgets = budgetService(db);
@@ -1087,6 +1115,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     maxOutputTokens?: number;
     /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
     offerBusinessData?: boolean;
+    /** DUR-3997: offer read_company_file this turn (the company has an active file-server connection). */
+    offerCompanyFiles?: boolean;
   }): Promise<{
     text: string;
     inputTokens: number;
@@ -1096,9 +1126,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     businessDataOutputs: BusinessDataTurnOutput[];
   }> {
     const { systemPrompt, history, message, toolset, ctx, client } = params;
-    const builtins = params.offerBusinessData
-      ? builtinToolDefinitions
-      : builtinToolDefinitions.filter((tool) => tool.name !== READ_BUSINESS_DATA_TOOL);
+    const builtins = builtinToolDefinitions.filter(
+      (tool) =>
+        (tool.name !== READ_BUSINESS_DATA_TOOL || params.offerBusinessData === true) &&
+        (tool.name !== READ_COMPANY_FILE_TOOL || params.offerCompanyFiles === true),
+    );
     const tools: LaneATool[] = [...builtins, ...toolset.anthropicTools].map(fromAnthropicTool);
     const businessDataOutputs: BusinessDataTurnOutput[] = [];
     const messages: LaneAChatMessage[] = [...history, { role: "user", content: message }];
@@ -1356,6 +1388,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       logger.warn({ err, companyId: params.companyId }, "lane A: business-data availability check failed");
       businessDataPrompt = undefined;
     }
+    // DUR-3997: offer the file tool only when this company has at least one
+    // active file-server connection (and the same instance switch is on).
+    // Fails open to "not offered", like the sales tool.
+    let companyFilesPrompt: { servers: CompanyFileServerSummary[] } | undefined;
+    try {
+      const servers = await companyFiles.listAvailable(params.companyId);
+      if (servers.length > 0) companyFilesPrompt = { servers };
+    } catch (err) {
+      logger.warn({ err, companyId: params.companyId }, "lane A: company-files availability check failed");
+      companyFilesPrompt = undefined;
+    }
 
     let text: string;
     let inputTokens: number;
@@ -1373,6 +1416,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         hasBuiltinTools: builtinToolDefinitions.length > 0,
         colleagues: colleagues.map((c) => ({ name: c.name, role: c.role })),
         businessData: businessDataPrompt,
+        companyFiles: companyFilesPrompt,
       });
       const result = await callModel({
         systemPrompt,
@@ -1384,6 +1428,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
         offerBusinessData: businessDataPrompt?.available === true,
+        offerCompanyFiles: companyFilesPrompt !== undefined,
       });
       text = result.text;
       businessDataOutputs = result.businessDataOutputs;

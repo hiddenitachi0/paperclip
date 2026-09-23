@@ -1,14 +1,18 @@
 import { z } from "zod";
 
 /**
- * DUR-3972 slice S1 / DUR-3997 slice 3: connecting a company to an outside
- * business-data source.
+ * DUR-3972 slice S1 / DUR-3997 slice 3 + file servers: connecting a company
+ * to an outside business-data source.
  *
- * Four kinds are accepted and stored: Shopify (the only one Paperclip can
- * read through today), WooCommerce, Fiken and files on an SFTP server. The
- * last three are "saved, not yet connected" until their adapters ship. Read is
- * the only access level there is -- there is deliberately no way to express
- * "write" in any input below, and the database refuses it too
+ * Six kinds are accepted and stored: Shopify, WooCommerce, Fiken, and files on
+ * a server over FTP, FTPS or SFTP. Shopify and the three file-server kinds can
+ * be read through today; WooCommerce and Fiken are "saved, not yet connected"
+ * until their adapters ship.
+ *
+ * Access: every kind is read-only except the file-server kinds, where a
+ * connection may be `read_write` (the company's own server, where agents
+ * later push reports) or `read` (a partner's server). Nothing else can express
+ * write, and the database refuses any value but these two
  * (data_connections_access_check).
  *
  * The create input is a discriminated union on `kind`. The Shopify shape is
@@ -16,35 +20,71 @@ import { z } from "zod";
  * unchanged.
  */
 
-export const DATA_CONNECTION_KINDS = ["shopify", "woocommerce", "fiken", "sftp_file"] as const;
+export const DATA_CONNECTION_KINDS = ["shopify", "woocommerce", "fiken", "ftp_file", "ftps_file", "sftp_file"] as const;
 export type DataConnectionKind = (typeof DATA_CONNECTION_KINDS)[number];
+
+/**
+ * The three "files on a server" kinds. One kind per protocol, not one kind
+ * with a protocol field: the database ties the credential kind to the kind
+ * (a private key is SFTP-only), the registry, the outbound rules and the
+ * settings dropdown are all keyed by kind, and `sftp_file` was already an
+ * accepted kind value before FTP and FTPS were added -- a saved SFTP
+ * connection keeps loading without a rename.
+ */
+export const FILE_SERVER_KINDS = ["ftp_file", "ftps_file", "sftp_file"] as const;
+export type FileServerKind = (typeof FILE_SERVER_KINDS)[number];
+
+export function isFileServerKind(kind: string): kind is FileServerKind {
+  return (FILE_SERVER_KINDS as readonly string[]).includes(kind);
+}
+
+/** The protocol behind each file-server kind, for messages and the transport. */
+export const FILE_SERVER_PROTOCOLS: Record<FileServerKind, "ftp" | "ftps" | "sftp"> = {
+  ftp_file: "ftp",
+  ftps_file: "ftps",
+  sftp_file: "sftp",
+};
+
+export const FILE_SERVER_DEFAULT_PORTS: Record<FileServerKind, number> = {
+  ftp_file: 21,
+  ftps_file: 21,
+  sftp_file: 22,
+};
 
 /** Plain names for the settings screen. */
 export const DATA_CONNECTION_KIND_LABELS: Record<DataConnectionKind, string> = {
   shopify: "Shopify",
   woocommerce: "WooCommerce",
   fiken: "Fiken",
-  sftp_file: "Filer (SFTP)",
+  ftp_file: "FTP server",
+  ftps_file: "FTPS server (encrypted)",
+  sftp_file: "SFTP server (encrypted)",
 };
 
 /**
  * Kinds Paperclip can actually read through today. The other kinds are
  * accepted by validation and stored (with their credential locked to the
- * connection), and answer "kommer snart" everywhere a read would happen. The
+ * connection), and answer "coming soon" everywhere a read would happen. The
  * server-side registry is the source of truth for behaviour; this list is
  * what the settings screen shows before anything is saved, and a test keeps
  * the two in step.
  */
-export const SUPPORTED_DATA_CONNECTION_KINDS: readonly DataConnectionKind[] = ["shopify"];
+export const SUPPORTED_DATA_CONNECTION_KINDS: readonly DataConnectionKind[] = ["shopify", "ftp_file", "ftps_file", "sftp_file"];
 
-export const DATA_CONNECTION_ACCESS_LEVELS = ["read"] as const;
+/**
+ * `read_write` exists for file-server connections only (the company's own
+ * server). Every other kind is stored with `read`, and the server refuses a
+ * write through a `read` connection before any command is sent.
+ */
+export const DATA_CONNECTION_ACCESS_LEVELS = ["read", "read_write"] as const;
 export type DataConnectionAccessLevel = (typeof DATA_CONNECTION_ACCESS_LEVELS)[number];
 
 /**
  * Every credential shape any kind can hold. A credential kind belongs to
- * exactly one source kind (see DATA_CONNECTION_CREDENTIAL_KINDS_BY_KIND), and
- * the database refuses a pair that does not belong together
- * (data_connections_credential_kind_check).
+ * exactly one source kind -- or, for the three file-server kinds, to that one
+ * family (`password` for all three, `private_key` for SFTP only) -- see
+ * DATA_CONNECTION_CREDENTIAL_KINDS_BY_KIND. The database refuses a pair that
+ * does not belong together (data_connections_credential_kind_check).
  */
 export const DATA_CONNECTION_CREDENTIAL_KINDS = [
   "admin_access_token",
@@ -60,6 +100,8 @@ export const DATA_CONNECTION_CREDENTIAL_KINDS_BY_KIND: Record<DataConnectionKind
   shopify: ["admin_access_token", "client_credentials"],
   woocommerce: ["consumer_key_secret"],
   fiken: ["api_token"],
+  ftp_file: ["password"],
+  ftps_file: ["password"],
   sftp_file: ["password", "private_key"],
 };
 
@@ -189,14 +231,15 @@ const fikenCompanySlugSchema = z
     message: "Bruk selskapets Fiken-slug, for eksempel fiken-demo-firma-as. Du finner den i adressen når du er inne i selskapet i Fiken.",
   });
 
-const sftpHostSchema = z
+export const FILE_SERVER_HOST_MESSAGE =
+  "Use the server's public name, for example files.example.com. Not an IP address, and not a name that only works on an internal network.";
+
+const fileServerHostSchema = z
   .string()
   .trim()
   .toLowerCase()
   .max(253)
-  .refine((value) => isPublicLookingHostName(value), {
-    message: "Bruk serverens offentlige navn, for eksempel filer.butikken.no. Ikke en IP-adresse, og ikke et navn som bare virker på et internt nett.",
-  });
+  .refine((value) => isPublicLookingHostName(value), { message: FILE_SERVER_HOST_MESSAGE });
 
 const noWhitespace = (value: string) => !/\s/.test(value);
 
@@ -259,26 +302,33 @@ export const fikenCredentialSchema = z.object({
 }).strict();
 export type FikenCredentialInput = z.infer<typeof fikenCredentialSchema>;
 
-/** SFTP: a password, or a private key (PEM/OpenSSH) with an optional passphrase. */
+/** FTP, FTPS and SFTP: a password. */
+export const fileServerPasswordCredentialSchema = z.object({
+  kind: z.literal("password"),
+  password: z.string().min(1, "Enter the password.").max(1024),
+}).strict();
+
+/** SFTP only: a private key (PEM/OpenSSH) with an optional passphrase. */
+export const sftpPrivateKeyCredentialSchema = z.object({
+  kind: z.literal("private_key"),
+  privateKey: z
+    .string()
+    .trim()
+    .min(64, "Paste the whole private key, from -----BEGIN to -----END.")
+    .max(16_384)
+    .refine((value) => /^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value), {
+      message: "The private key must start with -----BEGIN … PRIVATE KEY-----.",
+    }),
+  passphrase: z.string().max(1024).optional(),
+}).strict();
+
+/** SFTP: a password, or a private key with an optional passphrase. */
 export const sftpCredentialSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("password"),
-    password: z.string().min(1, "Skriv inn passordet.").max(1024),
-  }).strict(),
-  z.object({
-    kind: z.literal("private_key"),
-    privateKey: z
-      .string()
-      .trim()
-      .min(64, "Lim inn hele den private nøkkelen, fra -----BEGIN til -----END.")
-      .max(16_384)
-      .refine((value) => /^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value), {
-        message: "Den private nøkkelen skal starte med -----BEGIN … PRIVATE KEY-----.",
-      }),
-    passphrase: z.string().max(1024).optional(),
-  }).strict(),
+  fileServerPasswordCredentialSchema,
+  sftpPrivateKeyCredentialSchema,
 ]);
 export type SftpCredentialInput = z.infer<typeof sftpCredentialSchema>;
+export type FileServerCredentialInput = SftpCredentialInput;
 
 /**
  * Every credential shape, in one union. Which of them a connection may hold
@@ -323,33 +373,85 @@ export const createFikenConnectionSchema = z.object({
   dailyLookupCap: dailyLookupCapSchema.optional(),
 }).strict();
 
+/**
+ * The base folder on the server. Always an absolute path; `..` is refused
+ * here and again on every request. A trailing slash is dropped (except for
+ * the root itself) so paths join predictably.
+ */
+export const FILE_SERVER_BASE_PATH_MESSAGE =
+  "The base folder must be a full path starting with /, for example /reports.";
+
+export function normalizeRemotePathInput(raw: string): string {
+  const value = raw.trim().replace(/\\/g, "/");
+  if (value.length > 1 && value.endsWith("/")) return value.replace(/\/+$/, "") || "/";
+  return value;
+}
+
+const fileServerBasePathSchema = z
+  .string()
+  .trim()
+  .min(1, "Enter the folder the files are in, for example /reports.")
+  .max(512)
+  .transform(normalizeRemotePathInput)
+  .refine((value) => value.startsWith("/"), { message: FILE_SERVER_BASE_PATH_MESSAGE })
+  .refine((value) => !value.split("/").includes(".."), { message: "The base folder cannot contain «..»." })
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), { message: "The base folder cannot contain control characters." });
+
+const fileServerUsernameSchema = z
+  .string()
+  .trim()
+  .min(1, "Enter the user name on the server.")
+  .max(128)
+  .refine(noWhitespace, { message: "The user name cannot contain spaces." })
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), { message: "The user name cannot contain control characters." });
+
+const fileServerAccessSchema = z.enum(DATA_CONNECTION_ACCESS_LEVELS).default("read");
+
+export const FILE_SERVER_UNENCRYPTED_MESSAGE =
+  "Plain FTP sends the password and every file unencrypted. Tick the box to confirm you understand, or choose FTPS or SFTP.";
+
+/** The one field that differs per protocol: plain FTP must be acknowledged as unencrypted. */
+const acknowledgedUnencryptedSchema = z.literal(true, {
+  errorMap: () => ({ message: FILE_SERVER_UNENCRYPTED_MESSAGE }),
+});
+
+function fileServerFields<K extends FileServerKind>(kind: K) {
+  return {
+    kind: z.literal(kind),
+    name: connectionNameSchema(DATA_CONNECTION_KIND_LABELS[kind]),
+    host: fileServerHostSchema,
+    port: z.number().int().min(1).max(65_535).default(FILE_SERVER_DEFAULT_PORTS[kind]),
+    username: fileServerUsernameSchema,
+    /** Absolute base folder on the server. Every path an agent asks for is confined under it. */
+    remotePath: fileServerBasePathSchema,
+    /** `read` for a partner's server; `read_write` for the company's own. */
+    access: fileServerAccessSchema,
+    dailyLookupCap: dailyLookupCapSchema.optional(),
+  };
+}
+
+export const createFtpFileConnectionSchema = z.object({
+  ...fileServerFields("ftp_file"),
+  credential: fileServerPasswordCredentialSchema,
+  acknowledgedUnencrypted: acknowledgedUnencryptedSchema,
+}).strict();
+
+export const createFtpsFileConnectionSchema = z.object({
+  ...fileServerFields("ftps_file"),
+  credential: fileServerPasswordCredentialSchema,
+}).strict();
+
 export const createSftpFileConnectionSchema = z.object({
-  kind: z.literal("sftp_file"),
-  name: connectionNameSchema("Filer (SFTP)"),
-  host: sftpHostSchema,
-  port: z.number().int().min(1).max(65_535).default(22),
-  username: z
-    .string()
-    .trim()
-    .min(1, "Skriv inn brukernavnet på serveren.")
-    .max(128)
-    .refine(noWhitespace, { message: "Brukernavnet kan ikke inneholde mellomrom." }),
-  /** Absolute path on the server to read files from. Never written to. */
-  remotePath: z
-    .string()
-    .trim()
-    .min(1, "Skriv inn mappen filene ligger i, for eksempel /rapporter.")
-    .max(512)
-    .refine((value) => value.startsWith("/"), { message: "Mappen skal være en full sti som starter med /, for eksempel /rapporter." })
-    .refine((value) => !value.split("/").includes(".."), { message: "Mappen kan ikke inneholde «..»." }),
+  ...fileServerFields("sftp_file"),
   credential: sftpCredentialSchema,
-  dailyLookupCap: dailyLookupCapSchema.optional(),
 }).strict();
 
 export const createDataConnectionSchema = z.discriminatedUnion("kind", [
   createShopifyConnectionSchema,
   createWooCommerceConnectionSchema,
   createFikenConnectionSchema,
+  createFtpFileConnectionSchema,
+  createFtpsFileConnectionSchema,
   createSftpFileConnectionSchema,
 ]);
 export type CreateDataConnectionInput = z.infer<typeof createDataConnectionSchema>;
@@ -362,17 +464,36 @@ export type CreateDataConnectionInput = z.infer<typeof createDataConnectionSchem
 export const shopifyConnectionConfigSchema = z.object({}).strip();
 export const wooCommerceConnectionConfigSchema = z.object({ storeUrl: storeUrlSchema }).strip();
 export const fikenConnectionConfigSchema = z.object({ companySlug: fikenCompanySlugSchema }).strip();
-export const sftpFileConnectionConfigSchema = z.object({
-  host: sftpHostSchema,
-  port: z.number().int().min(1).max(65_535).default(22),
-  username: z.string().trim().min(1).max(128),
-  remotePath: z.string().trim().min(1).max(512),
+function fileServerConfigFields<K extends FileServerKind>(kind: K) {
+  return {
+    host: fileServerHostSchema,
+    port: z.number().int().min(1).max(65_535).default(FILE_SERVER_DEFAULT_PORTS[kind]),
+    username: z.string().trim().min(1).max(128),
+    remotePath: z.string().trim().min(1).max(512).transform(normalizeRemotePathInput),
+  };
+}
+export const ftpFileConnectionConfigSchema = z.object({
+  ...fileServerConfigFields("ftp_file"),
+  acknowledgedUnencrypted: z.literal(true).default(true),
 }).strip();
+export const ftpsFileConnectionConfigSchema = z.object(fileServerConfigFields("ftps_file")).strip();
+export const sftpFileConnectionConfigSchema = z.object(fileServerConfigFields("sftp_file")).strip();
+
+export const FILE_SERVER_CONFIG_SCHEMAS: Record<FileServerKind, z.ZodTypeAny> = {
+  ftp_file: ftpFileConnectionConfigSchema,
+  ftps_file: ftpsFileConnectionConfigSchema,
+  sftp_file: sftpFileConnectionConfigSchema,
+};
+
+/** The non-secret settings every file-server kind shares. */
+export type FileServerConnectionConfig = z.infer<typeof sftpFileConnectionConfigSchema>;
 
 export type DataConnectionConfig =
   | ({ kind: "shopify" } & z.infer<typeof shopifyConnectionConfigSchema>)
   | ({ kind: "woocommerce" } & z.infer<typeof wooCommerceConnectionConfigSchema>)
   | ({ kind: "fiken" } & z.infer<typeof fikenConnectionConfigSchema>)
+  | ({ kind: "ftp_file" } & z.infer<typeof ftpFileConnectionConfigSchema>)
+  | ({ kind: "ftps_file" } & z.infer<typeof ftpsFileConnectionConfigSchema>)
   | ({ kind: "sftp_file" } & z.infer<typeof sftpFileConnectionConfigSchema>);
 
 /**

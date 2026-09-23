@@ -120,7 +120,7 @@ export const shopifyDataSource: DataSourceKindDefinition = {
   configSchema: shopifyConnectionConfigSchema,
   storedShape(input) {
     if (input.kind !== "shopify") throw unprocessable("Feil type kobling for Shopify.");
-    return { shopDomain: input.shopDomain, apiVersion: SHOPIFY_API_VERSION, config: {} };
+    return { shopDomain: input.shopDomain, apiVersion: SHOPIFY_API_VERSION, config: {}, access: "read" };
   },
   describeTarget(connection) {
     return connection.shopDomain ?? "";

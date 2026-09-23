@@ -17,6 +17,24 @@ import type {
  * routes answer with simply have no room for it. `credentialHint` is the last
  * four characters only.
  */
+/**
+ * What "Test" saw on a file server: the base folder's contents, whether the
+ * write check passed (null for a read-only connection, which never tries),
+ * and for SFTP the server's host-key fingerprint, pinned from then on.
+ */
+export type FileServerObservedSummary = {
+  protocol: "ftp" | "ftps" | "sftp";
+  /** Files (not folders) directly in the base folder. */
+  fileCount: number;
+  directoryCount: number;
+  /** True when a zero-byte write and delete succeeded; false when refused; null when not attempted (read-only). */
+  writable: boolean | null;
+  /** SHA-256 of the SSH host key, base64; SFTP only. */
+  hostKeyFingerprint: string | null;
+  /** The server's greeting or software name, if it said one. Never a credential. */
+  serverSoftware: string | null;
+};
+
 export type DataConnectionObservedSummary = {
   shopName: string | null;
   shopDomain: string | null;
@@ -30,6 +48,8 @@ export type DataConnectionObservedSummary = {
     productsWithoutType: number;
     types: Array<{ productType: string; products: number }>;
   } | null;
+  /** File-server kinds only; null for every other kind. */
+  fileServer: FileServerObservedSummary | null;
   checkedAt: string | null;
 };
 

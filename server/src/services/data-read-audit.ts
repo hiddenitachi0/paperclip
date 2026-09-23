@@ -128,6 +128,8 @@ export async function countDataReadEvents(
     since: Date;
     agentId?: string;
     runId?: string;
+    /** Only rows through this connection (the per-connection daily cap of file servers). */
+    connectionId?: string;
     channel?: DataReadChannel;
     /** Only rows for this dataset (the settings Test writes "connection_check" rows). */
     dataset?: string;
@@ -141,6 +143,7 @@ export async function countDataReadEvents(
   ];
   if (filter.agentId) conditions.push(eq(dataReadEvents.agentId, filter.agentId));
   if (filter.runId) conditions.push(eq(dataReadEvents.runId, filter.runId));
+  if (filter.connectionId) conditions.push(eq(dataReadEvents.connectionId, filter.connectionId));
   if (filter.channel) conditions.push(eq(dataReadEvents.channel, filter.channel));
   if (filter.dataset) conditions.push(eq(dataReadEvents.dataset, filter.dataset));
   if (filter.excludeOutcomes && filter.excludeOutcomes.length > 0) {

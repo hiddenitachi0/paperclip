@@ -4,22 +4,26 @@ import {
   DATA_CONNECTION_KINDS,
   DATA_CONNECTION_KIND_LABELS,
   fikenConnectionConfigSchema,
-  sftpFileConnectionConfigSchema,
   wooCommerceConnectionConfigSchema,
   type CreateDataConnectionInput,
+  type DataConnectionAccessLevel,
   type DataConnectionConfig,
   type DataConnectionCredentialKind,
   type DataConnectionKind,
   type DataConnectionObservedSummary,
   type DataDataset,
+  type FileServerKind,
 } from "@paperclipai/shared";
 import { unprocessable } from "../../errors.js";
 import {
   createWooCommerceOutboundPolicy,
   FIKEN_OUTBOUND_POLICY,
+  type DnsLookupAll,
   type OutboundFetch,
   type OutboundHostPolicy,
 } from "../safe-outbound-fetch.js";
+import { fileServerDataSource } from "./file-server-source.js";
+import type { FileServerTestOnlyDeps } from "./file-server/session.js";
 import type {
   CredentialLoader,
   DataSourceCallBudget,
@@ -39,11 +43,20 @@ import { shopifyDataSource } from "./shopify-source.js";
  * Fiken means writing one entry (its transport, its Test, its adapters) and
  * nothing else changes.
  *
- * Shopify is the only kind with `supported: true` today. The other three are
- * registered so that a connection of that kind can be validated, stored and
- * shown, and so that every path that would read through it answers with the
- * same plain sentence instead of crashing.
+ * Shopify and the three file-server kinds (FTP, FTPS, SFTP; file-server-
+ * source.ts) are `supported: true`. WooCommerce and Fiken are registered so
+ * that a connection of that kind can be validated, stored and shown, and so
+ * that every path that would read through it answers with the same plain
+ * sentence instead of crashing.
  */
+
+/** What a file-server transport can be given from outside; tests only, apart from the timeouts. */
+export interface FileServerDeps {
+  lookup?: DnsLookupAll;
+  testOnly?: FileServerTestOnlyDeps;
+  connectTimeoutMs?: number;
+  operationTimeoutMs?: number;
+}
 
 /** Everything a kind gets when it opens a read context or runs its Test. No credential value. */
 export interface OpenReadContextInput {
@@ -62,6 +75,8 @@ export interface OpenReadContextInput {
     sleep?: (ms: number) => Promise<void>;
     /** Product pages the Shopify Test reads at most (250 products each). */
     maxProductPages?: number;
+    /** File-server transports: resolver, test-only dial and timeouts. */
+    fileServer?: FileServerDeps;
   };
 }
 
@@ -70,11 +85,13 @@ export interface SalesAdapterOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** What a create input becomes in the row: Shopify's own columns, or `config` for every other kind. */
+/** What a create input becomes in the row: Shopify's own columns, or `config` for every other kind, plus the access mode. */
 export interface StoredConnectionShape {
   shopDomain: string | null;
   apiVersion: string | null;
   config: Record<string, unknown>;
+  /** `read` for every kind but a file server the operator marked read-write. */
+  access: DataConnectionAccessLevel;
 }
 
 export interface DataSourceKindDefinition {
@@ -120,7 +137,7 @@ export function unsupportedKindError(kind: DataConnectionKind) {
  * path answers with one plain sentence; nothing is contacted.
  */
 function pendingKind(input: {
-  kind: Exclude<DataConnectionKind, "shopify">;
+  kind: Exclude<DataConnectionKind, "shopify" | FileServerKind>;
   datasets: readonly DataDataset[];
   configSchema: z.ZodTypeAny;
   describeTarget: (config: DataConnectionConfig) => string;
@@ -138,7 +155,7 @@ function pendingKind(input: {
       if (create.kind !== kind) throw unprocessable(`Feil type kobling for ${DATA_CONNECTION_KIND_LABELS[kind]}.`);
       // The config schema keeps only its own fields: the credential, the name
       // and the cap are stripped, so no secret can land in `config`.
-      return { shopDomain: null, apiVersion: null, config: input.configSchema.parse(create) as Record<string, unknown> };
+      return { shopDomain: null, apiVersion: null, config: input.configSchema.parse(create) as Record<string, unknown>, access: "read" };
     },
     describeTarget(connection) {
       return input.describeTarget(connection.config);
@@ -188,18 +205,9 @@ const REGISTRY: Record<DataConnectionKind, DataSourceKindDefinition> = {
     describeTarget: (config) => (config.kind === "fiken" ? config.companySlug : ""),
     outboundPolicy: () => FIKEN_OUTBOUND_POLICY,
   }),
-  sftp_file: pendingKind({
-    kind: "sftp_file",
-    datasets: ["custom"],
-    configSchema: sftpFileConnectionConfigSchema,
-    describeTarget: (config) =>
-      config.kind === "sftp_file"
-        ? `${config.host}${config.port === 22 ? "" : `:${config.port}`}${config.remotePath}`
-        : "",
-    // No HTTP transport: the SFTP transport is a pending decision, and nothing
-    // in this slice opens a socket to an SFTP host.
-    outboundPolicy: () => null,
-  }),
+  ftp_file: fileServerDataSource("ftp_file"),
+  ftps_file: fileServerDataSource("ftps_file"),
+  sftp_file: fileServerDataSource("sftp_file"),
 };
 
 export function isDataSourceKind(kind: string): kind is DataConnectionKind {

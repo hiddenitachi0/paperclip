@@ -1212,6 +1212,13 @@
       "when": 1787160440000,
       "tag": "0173_data_connection_kinds",
       "breakpoints": true
+    },
+    {
+      "idx": 174,
+      "version": "7",
+      "when": 1787160450000,
+      "tag": "0174_file_server_connections",
+      "breakpoints": true
     }
   ]
 }

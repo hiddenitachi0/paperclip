@@ -5,6 +5,7 @@ import { agents, companySecretBindings, dataConnections, dataDatasetSources, dat
 import {
   DEFAULT_DATA_CONNECTION_DAILY_LOOKUP_CAP,
   type CreateDataConnectionInput,
+  type DataConnectionAccessLevel,
   type DataConnectionCheckResult,
   type DataConnectionConfig,
   type DataConnectionCredentialInput,
@@ -32,7 +33,12 @@ import {
   type DataSourceReadContext,
 } from "./data-sources/connection-kind.js";
 import { credentialHint, credentialSecretValues, decodeCredential, encodeCredential } from "./data-sources/credential-codec.js";
-import { getDataSourceKind, type DataSourceKindDefinition, type OpenReadContextInput } from "./data-sources/registry.js";
+import {
+  getDataSourceKind,
+  type DataSourceKindDefinition,
+  type FileServerDeps,
+  type OpenReadContextInput,
+} from "./data-sources/registry.js";
 import { scrubSecrets } from "./data-sources/shopify-client.js";
 import { tryRecordDataReadEvent } from "./data-read-audit.js";
 
@@ -114,8 +120,13 @@ function normalizeObserved(raw: DataConnectionRow["observed"]): DataConnectionOb
     grantedScopes: Array.isArray(raw.grantedScopes) ? raw.grantedScopes : [],
     earliestVisibleOrderAt: raw.earliestVisibleOrderAt ?? null,
     productTypeCoverage: raw.productTypeCoverage ?? null,
+    fileServer: raw.fileServer ?? null,
     checkedAt: raw.checkedAt ?? null,
   };
+}
+
+function accessOf(row: DataConnectionRow): DataConnectionAccessLevel {
+  return row.access === "read_write" ? "read_write" : "read";
 }
 
 /** The row's `config` as the kind's typed shape; an unreadable config is treated as empty, never thrown at a reader. */
@@ -135,6 +146,8 @@ function connectionInfo(row: DataConnectionRow, definition: DataSourceKindDefini
     shopDomain: row.shopDomain,
     apiVersion: row.apiVersion,
     config: typedConfig(definition, row.config),
+    access: accessOf(row),
+    hostKeyFingerprint: observed?.fileServer?.hostKeyFingerprint ?? null,
     ianaTimezone: observed?.ianaTimezone ?? null,
     currencyCode: observed?.currencyCode ?? null,
     earliestVisibleOrderAt: observed?.earliestVisibleOrderAt ?? null,
@@ -157,7 +170,7 @@ function toSummary(row: DataConnectionRow, datasets: DataDataset[]): DataConnect
     config,
     credentialKind: row.credentialKind as DataConnectionSummary["credentialKind"],
     credentialHint: row.credentialHint,
-    access: "read",
+    access: accessOf(row),
     status: row.status as DataConnectionStatus,
     dailyLookupCap: row.dailyLookupCap,
     observed: normalizeObserved(row.observed),
@@ -178,6 +191,8 @@ export interface DataConnectionServiceDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Product pages the Shopify Test reads at most (250 products each). */
   maxProductPages?: number;
+  /** File-server transports: resolver, test-only dial and timeouts. */
+  fileServer?: FileServerDeps;
 }
 
 export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = {}) {
@@ -299,7 +314,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
           credentialKind: input.credential.kind,
           credentialSecretId: secret.id,
           credentialHint: credentialHint(input.credential),
-          access: "read",
+          access: stored.access,
           status: "draft",
           dailyLookupCap: input.dailyLookupCap ?? DEFAULT_DATA_CONNECTION_DAILY_LOOKUP_CAP,
           createdByUserId: actor.userId,
@@ -497,7 +512,7 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
         budget,
         knownSecrets,
         registerSecret,
-        deps: { fetchImpl: deps.fetchImpl, now, sleep: deps.sleep, maxProductPages: deps.maxProductPages },
+        deps: { fetchImpl: deps.fetchImpl, now, sleep: deps.sleep, maxProductPages: deps.maxProductPages, fileServer: deps.fileServer },
       },
       knownSecrets,
     };
@@ -606,11 +621,17 @@ export function dataConnectionService(db: Db, deps: DataConnectionServiceDeps = 
       outcome: outcomeCode,
       refusalCode: outcome.canActivate ? null : outcome.ok ? "check_failed" : "upstream_unreachable",
       facts: outcome.observed
-        ? {
-            grantedScopes: outcome.observed.grantedScopes,
-            earliestVisibleOrderAt: outcome.observed.earliestVisibleOrderAt,
-            productsScanned: outcome.observed.productTypeCoverage?.productsScanned ?? null,
-          }
+        ? outcome.observed.fileServer
+          ? {
+              fileCount: outcome.observed.fileServer.fileCount,
+              directoryCount: outcome.observed.fileServer.directoryCount,
+              writable: outcome.observed.fileServer.writable,
+            }
+          : {
+              grantedScopes: outcome.observed.grantedScopes,
+              earliestVisibleOrderAt: outcome.observed.earliestVisibleOrderAt,
+              productsScanned: outcome.observed.productTypeCoverage?.productsScanned ?? null,
+            }
         : null,
       upstreamRequests: outcome.stats.requests,
       costPoints: outcome.stats.costPoints,
