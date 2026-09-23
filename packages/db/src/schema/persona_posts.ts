@@ -1,5 +1,6 @@
 import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
+import { agents } from "./agents.js";
 import { personas } from "./personas.js";
 import { personaAccounts } from "./persona_accounts.js";
 import { assets } from "./assets.js";
@@ -19,6 +20,11 @@ export const personaPosts = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     personaId: uuid("persona_id").notNull().references(() => personas.id, { onDelete: "cascade" }),
     personaAccountId: uuid("persona_account_id").notNull().references(() => personaAccounts.id, { onDelete: "cascade" }),
+    // DUR-4000 (migration 0175): which of the persona's agents queued this
+    // post. One persona can hold many jobs, so the publisher files the
+    // approval on this agent's behalf (falling back to any attached agent
+    // for rows queued before the column existed). Null for board-queued posts.
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     status: text("status").notNull().default("queued"),
     caption: text("caption").notNull(),
     // The exact disclosure text appended to the caption at publish time, or

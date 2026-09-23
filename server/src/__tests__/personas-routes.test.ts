@@ -1,7 +1,6 @@
-// DUR-133/DUR-185 follow-up: the Personas page (PR #116) called endpoints
-// that never existed on the backend (GET /companies/:id/personas,
-// GET|PATCH|DELETE /personas/:id) -- every page load 404'd. These tests
-// pin the actual route surface the UI (ui/src/api/personas.ts) depends on.
+// DUR-133/DUR-185 follow-up, revised for DUR-4000: these tests pin the route
+// surface the persona screens (ui/src/api/personas.ts) depend on. A persona
+// is a person with its own fields; the routes never touch an agent's name.
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,26 +15,33 @@ const personaId = "33333333-3333-4333-8333-333333333333";
 const basePersona = {
   id: personaId,
   companyId,
-  agentId,
   displayName: "Maja",
-  handle: "maja",
+  pronouns: "she/her",
+  traits: "curious",
+  backstory: "A photographer.",
   bio: "A photographer.",
   voice: "Warm, direct.",
   avatarAssetId: null,
+  handle: "maja",
   status: "active",
-  dailyGenerationCap: 5,
+  publishingPaused: false,
+  agentIds: [agentId],
+  agentId,
   createdAt: new Date(),
   updatedAt: new Date(),
 };
 
 const mockPersonaService = vi.hoisted(() => ({
   createPersona: vi.fn(),
-  getPersonaByAgentId: vi.fn(),
-  getPersonaWithAgentById: vi.fn(),
+  createPersonaForCompany: vi.fn(),
+  getPersonaViewByAgentId: vi.fn(),
+  getPersonaById: vi.fn(),
   listPersonasForCompany: vi.fn(),
+  listAgentsForPersona: vi.fn(),
   updatePersona: vi.fn(),
   updatePersonaById: vi.fn(),
   deletePersonaById: vi.fn(),
+  attachPersonaToAgent: vi.fn(),
 }));
 
 vi.mock("../services/personas.js", () => ({
@@ -78,17 +84,19 @@ describe("persona routes — board-only, match the UI's api client", () => {
     const app = await buildApp();
 
     const list = await request(app).get(`/api/companies/${companyId}/personas`);
+    const create = await request(app).post(`/api/companies/${companyId}/personas`).send({ displayName: "Maja" });
     const get = await request(app).get(`/api/personas/${personaId}`);
     const patch = await request(app).patch(`/api/personas/${personaId}`).send({ handle: "x" });
     const del = await request(app).delete(`/api/personas/${personaId}`);
+    const attach = await request(app).put(`/api/agents/${agentId}/persona`).send({ personaId });
+    const jobs = await request(app).get(`/api/companies/${companyId}/personas/${personaId}/agents`);
 
-    expect(list.status).toBe(403);
-    expect(get.status).toBe(403);
-    expect(patch.status).toBe(403);
-    expect(del.status).toBe(403);
+    for (const res of [list, create, get, patch, del, attach, jobs]) {
+      expect(res.status).toBe(403);
+    }
   });
 
-  it("GET /companies/:id/personas returns the joined list the Personas page renders", async () => {
+  it("GET /companies/:id/personas returns the list the Personas page renders", async () => {
     mockPersonaService.listPersonasForCompany.mockResolvedValue([basePersona]);
     const app = await buildApp();
 
@@ -96,36 +104,79 @@ describe("persona routes — board-only, match the UI's api client", () => {
 
     expect(res.status).toBe(200);
     expect(mockPersonaService.listPersonasForCompany).toHaveBeenCalledWith(companyId);
-    expect(res.body).toEqual([expect.objectContaining({ id: personaId, displayName: "Maja", dailyGenerationCap: 5 })]);
+    expect(res.body).toEqual([expect.objectContaining({ id: personaId, displayName: "Maja", pronouns: "she/her", agentIds: [agentId] })]);
   });
 
-  it("POST /agents/:agentId/persona creates against the agent-scoped route the create form calls", async () => {
+  it("POST /agents/:agentId/persona creates a person and attaches it to that job (the create form's route)", async () => {
     mockPersonaService.createPersona.mockResolvedValue(basePersona);
     const app = await buildApp(dbWithAgent);
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/persona`)
-      .send({ displayName: "Maja", handle: "maja", status: "active", dailyGenerationCap: 5 });
+      .send({ displayName: "Maja", pronouns: "she/her", handle: "maja", status: "active", traits: "curious" });
 
     expect(res.status).toBe(201);
     expect(mockPersonaService.createPersona).toHaveBeenCalledWith(
       agentId,
-      expect.objectContaining({ displayName: "Maja", dailyGenerationCap: 5 }),
+      expect.objectContaining({ displayName: "Maja", pronouns: "she/her", traits: "curious" }),
     );
   });
 
+  it("POST /companies/:id/personas creates a person without a job", async () => {
+    mockPersonaService.createPersonaForCompany.mockResolvedValue({ ...basePersona, agentIds: [], agentId: null });
+    const app = await buildApp();
+
+    const res = await request(app).post(`/api/companies/${companyId}/personas`).send({ displayName: "Maja" });
+
+    expect(res.status).toBe(201);
+    expect(mockPersonaService.createPersonaForCompany).toHaveBeenCalledWith(companyId, expect.objectContaining({ displayName: "Maja" }));
+    expect(res.body.agentIds).toEqual([]);
+  });
+
+  it("requires a name to create a person", async () => {
+    const app = await buildApp(dbWithAgent);
+
+    const res = await request(app).post(`/api/agents/${agentId}/persona`).send({ handle: "maja" });
+
+    expect(res.status).toBe(400);
+    expect(mockPersonaService.createPersona).not.toHaveBeenCalled();
+  });
+
+  it("still accepts the old `bio` field name and folds it into `backstory`", async () => {
+    mockPersonaService.createPersona.mockResolvedValue(basePersona);
+    const app = await buildApp(dbWithAgent);
+
+    const res = await request(app).post(`/api/agents/${agentId}/persona`).send({ displayName: "Maja", bio: "A photographer." });
+
+    expect(res.status).toBe(201);
+    const input = mockPersonaService.createPersona.mock.calls[0]![1] as Record<string, unknown>;
+    expect(input.backstory).toBe("A photographer.");
+    expect(input).not.toHaveProperty("bio");
+  });
+
+  it("silently drops the retired dailyGenerationCap field instead of failing the old form", async () => {
+    mockPersonaService.createPersona.mockResolvedValue(basePersona);
+    const app = await buildApp(dbWithAgent);
+
+    const res = await request(app).post(`/api/agents/${agentId}/persona`).send({ displayName: "Maja", dailyGenerationCap: 5 });
+
+    expect(res.status).toBe(201);
+    const input = mockPersonaService.createPersona.mock.calls[0]![1] as Record<string, unknown>;
+    expect(input).not.toHaveProperty("dailyGenerationCap");
+  });
+
   it("GET /personas/:id returns the persona the detail page loads", async () => {
-    mockPersonaService.getPersonaWithAgentById.mockResolvedValue(basePersona);
+    mockPersonaService.getPersonaById.mockResolvedValue(basePersona);
     const app = await buildApp();
 
     const res = await request(app).get(`/api/personas/${personaId}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual(expect.objectContaining({ id: personaId }));
+    expect(res.body).toEqual(expect.objectContaining({ id: personaId, backstory: "A photographer.", bio: "A photographer." }));
   });
 
   it("GET /personas/:id 404s when the persona does not exist", async () => {
-    mockPersonaService.getPersonaWithAgentById.mockResolvedValue(null);
+    mockPersonaService.getPersonaById.mockResolvedValue(null);
     const app = await buildApp();
 
     const res = await request(app).get(`/api/personas/${personaId}`);
@@ -133,23 +184,30 @@ describe("persona routes — board-only, match the UI's api client", () => {
     expect(res.status).toBe(404);
   });
 
-  it("PATCH /personas/:id updates via the id-scoped route the edit form calls", async () => {
-    mockPersonaService.getPersonaWithAgentById.mockResolvedValue(basePersona);
-    mockPersonaService.updatePersonaById.mockResolvedValue({ ...basePersona, dailyGenerationCap: 10 });
+  it("PATCH /personas/:id updates the person's own fields via the id-scoped route", async () => {
+    mockPersonaService.getPersonaById.mockResolvedValue(basePersona);
+    mockPersonaService.updatePersonaById.mockResolvedValue({ ...basePersona, voice: "Playful" });
     const app = await buildApp();
 
-    const res = await request(app).patch(`/api/personas/${personaId}`).send({ dailyGenerationCap: 10 });
+    const res = await request(app).patch(`/api/personas/${personaId}`).send({ voice: "Playful" });
 
     expect(res.status).toBe(200);
-    expect(mockPersonaService.updatePersonaById).toHaveBeenCalledWith(
-      personaId,
-      expect.objectContaining({ dailyGenerationCap: 10 }),
-    );
-    expect(res.body.dailyGenerationCap).toBe(10);
+    expect(mockPersonaService.updatePersonaById).toHaveBeenCalledWith(personaId, expect.objectContaining({ voice: "Playful" }));
+    expect(res.body.voice).toBe("Playful");
+  });
+
+  it("refuses a voice longer than an agent's tone (600 characters): it fills the same prompt slot", async () => {
+    mockPersonaService.getPersonaById.mockResolvedValue(basePersona);
+    const app = await buildApp();
+
+    const res = await request(app).patch(`/api/personas/${personaId}`).send({ voice: "x".repeat(601) });
+
+    expect(res.status).toBe(400);
+    expect(mockPersonaService.updatePersonaById).not.toHaveBeenCalled();
   });
 
   it("DELETE /personas/:id deletes via the id-scoped route the delete dialog calls", async () => {
-    mockPersonaService.getPersonaWithAgentById.mockResolvedValue(basePersona);
+    mockPersonaService.getPersonaById.mockResolvedValue(basePersona);
     mockPersonaService.deletePersonaById.mockResolvedValue(undefined);
     const app = await buildApp();
 
@@ -159,14 +217,40 @@ describe("persona routes — board-only, match the UI's api client", () => {
     expect(mockPersonaService.deletePersonaById).toHaveBeenCalledWith(personaId);
   });
 
-  it("rejects a cap of 0 as invalid (must be a positive integer, per DUR-63)", async () => {
+  it("PUT /agents/:agentId/persona attaches an existing person to a job, and detaches with null", async () => {
+    mockPersonaService.attachPersonaToAgent.mockResolvedValueOnce(basePersona).mockResolvedValueOnce(null);
     const app = await buildApp(dbWithAgent);
 
-    const res = await request(app)
-      .post(`/api/agents/${agentId}/persona`)
-      .send({ displayName: "Maja", dailyGenerationCap: 0 });
+    const attach = await request(app).put(`/api/agents/${agentId}/persona`).send({ personaId });
+    expect(attach.status).toBe(200);
+    expect(mockPersonaService.attachPersonaToAgent).toHaveBeenCalledWith(agentId, personaId);
+    expect(attach.body.id).toBe(personaId);
 
-    expect(res.status).toBe(400);
-    expect(mockPersonaService.createPersona).not.toHaveBeenCalled();
+    const detach = await request(app).put(`/api/agents/${agentId}/persona`).send({ personaId: null });
+    expect(detach.status).toBe(204);
+    expect(mockPersonaService.attachPersonaToAgent).toHaveBeenLastCalledWith(agentId, null);
+  });
+
+  it("GET /companies/:id/personas/:personaId/agents lists the jobs the person holds", async () => {
+    mockPersonaService.getPersonaById.mockResolvedValue(basePersona);
+    mockPersonaService.listAgentsForPersona.mockResolvedValue([
+      { id: agentId, name: "Sales agent 1", role: "sales", title: null, status: "idle", laneAEnabled: false },
+    ]);
+    const app = await buildApp();
+
+    const res = await request(app).get(`/api/companies/${companyId}/personas/${personaId}/agents`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([expect.objectContaining({ id: agentId, name: "Sales agent 1" })]);
+  });
+
+  it("GET /companies/:id/personas/:personaId/agents 404s for a persona of another company", async () => {
+    mockPersonaService.getPersonaById.mockResolvedValue({ ...basePersona, companyId: "44444444-4444-4444-8444-444444444444" });
+    const app = await buildApp();
+
+    const res = await request(app).get(`/api/companies/${companyId}/personas/${personaId}/agents`);
+
+    expect(res.status).toBe(404);
+    expect(mockPersonaService.listAgentsForPersona).not.toHaveBeenCalled();
   });
 });

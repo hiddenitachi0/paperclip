@@ -129,6 +129,9 @@ DECLARE
     'activity_log',
     'agent_api_keys',
     'agent_config_revisions',
+    -- DUR-4000. Created, granted on and policed in 0175_persona_identity.sql;
+    -- company-scoped, so it is in both lists.
+    'agent_daily_counters',
     'agent_instructions_revisions',
     'agent_memberships',
     'agent_runtime_state',
@@ -291,6 +294,9 @@ DECLARE
     'activity_log',
     'agent_api_keys',
     'agent_config_revisions',
+    -- DUR-4000. Created, granted on and policed in 0175_persona_identity.sql;
+    -- company-scoped, so it is in both lists.
+    'agent_daily_counters',
     'agent_instructions_revisions',
     'agent_memberships',
     'agent_runtime_state',

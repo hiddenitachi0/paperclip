@@ -108,16 +108,21 @@ describeEmbeddedPostgres("personaRoutes company-scope wiring (DUR-373)", () => {
     const agentIds: string[] = [];
     for (const handle of personaHandles) {
       const agentId = randomUUID();
+      const [persona] = await db
+        .insert(personas)
+        .values({
+          companyId,
+          displayName: `Person ${handle}`,
+          handle,
+          status: "draft",
+        })
+        .returning();
+      // DUR-4000: the link runs agent -> persona (agents.persona_id).
       await db.insert(agents).values({
         id: agentId,
         companyId,
         name: `Agent ${handle}`,
-      });
-      await db.insert(personas).values({
-        companyId,
-        agentId,
-        handle,
-        status: "draft",
+        personaId: persona!.id,
       });
       agentIds.push(agentId);
     }
@@ -143,13 +148,20 @@ describeEmbeddedPostgres("personaRoutes company-scope wiring (DUR-373)", () => {
 
     const res = await request(app)
       .post(`/api/agents/${agentId}/persona`)
-      .send({ handle: "@fresh", status: "draft" });
+      .send({ displayName: "Maja", pronouns: "she/her", handle: "@fresh", status: "draft" });
 
     expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ companyId, agentId, handle: "@fresh" });
+    expect(res.body).toMatchObject({ companyId, agentId, agentIds: [agentId], displayName: "Maja", handle: "@fresh" });
 
-    const rows = await db.select().from(personas).where(eq(personas.agentId, agentId));
+    // DUR-4000: the person is its own row, the job points at it, and the
+    // job keeps its own name (creating a persona used to rename the agent).
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    expect(agent!.personaId).toBe(res.body.id);
+    expect(agent!.name).toBe("Fresh Agent");
+    const rows = await db.select().from(personas).where(eq(personas.id, res.body.id));
     expect(rows).toHaveLength(1);
+    expect(rows[0]!.displayName).toBe("Maja");
+    expect(rows[0]!.agentId).toBeNull();
     expect(agentIds).toHaveLength(0);
   });
 

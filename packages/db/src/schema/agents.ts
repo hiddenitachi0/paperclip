@@ -54,6 +54,23 @@ export const agents = pgTable(
     // The FK constraint (assets(id) ON DELETE SET NULL) is declared by hand
     // in the migration SQL instead (see 0132_agent_avatar.sql).
     avatarAssetId: uuid("avatar_asset_id"),
+    // DUR-4000 (migration 0175): which PERSON is doing this job, if any. A
+    // persona can be attached to many agents; the agent keeps its own name.
+    // Plain uuid, no `.references()` — personas.ts imports this file, so a
+    // typed reference would be an import cycle. The FK (personas(id) ON
+    // DELETE SET NULL) and the (company_id, persona_id) index are declared
+    // by hand in 0175_persona_identity.sql. Board-settable only (same guard
+    // style as the quick-agent fields in server/src/routes/agents.ts).
+    personaId: uuid("persona_id"),
+    // DUR-4000: the agent's own limits box, shape
+    //   { dailyImageGenerations?: number|null, dailyPosts?: number|null,
+    //     dailyRuns?: number|null, notes?: string|null }
+    // (agentLimitsSchema in packages/shared). dailyImageGenerations is
+    // enforced in code (server/src/services/agent-daily-limits.ts, counted
+    // in agent_daily_counters). dailyPosts, dailyRuns and notes are stored
+    // for the operator and rendered as guidance until code enforces them.
+    // Board-settable only, never agent-writable.
+    limits: jsonb("limits").$type<Record<string, unknown>>().notNull().default({}),
     // Lane A (DUR-217): direct-model-call text endpoint, no agent runtime. Off
     // by default and board-settable only — see assertCanManageLaneAFlag in
     // server/src/routes/agents.ts, which mirrors the instructions-path guard.

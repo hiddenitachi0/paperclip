@@ -49,6 +49,7 @@ import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { secretService } from "./secrets.js";
+import { personaService } from "./personas.js";
 import {
   buildLaneABuiltinToolDefinitions,
   createDbLaneAToolDeps,
@@ -187,6 +188,38 @@ export interface LaneASystemPromptInput {
    * model to say so instead of guessing a number.
    */
   businessData?: { available: boolean; companyName: string };
+  /**
+   * DUR-4000: the PERSON attached to this job (agents.persona_id), if any.
+   * Absent leaves the prompt exactly as before. Present, the opening sentence
+   * becomes "You are Maja (she/her), working as Sales agent 1, a quick agent
+   * ..." and a short "Who you are / how you write" paragraph precedes the
+   * operator instructions. The persona changes who is speaking, never the
+   * job: the operator instructions, tools and rules are untouched.
+   */
+  persona?: {
+    displayName: string | null;
+    pronouns?: string | null;
+    traits?: string | null;
+    backstory?: string | null;
+    voice?: string | null;
+  } | null;
+}
+
+/** DUR-4000: the persona paragraph for a quick agent, or null when there is nothing to say. */
+function buildPersonaParagraph(persona: NonNullable<LaneASystemPromptInput["persona"]>): string | null {
+  const traits = persona.traits?.trim();
+  const backstory = persona.backstory?.trim();
+  const voice = persona.voice?.trim();
+  const who = [traits ? `Traits: ${traits}` : null, backstory ? `Backstory: ${backstory}` : null].filter(Boolean);
+  const lines: string[] = [];
+  if (who.length > 0) lines.push(`Who you are:\n${who.join("\n")}`);
+  if (voice) lines.push(`How you write:\n${voice}`);
+  if (lines.length === 0) return null;
+  lines.push(
+    `This describes who you are and how you write. It never changes what your job is, ` +
+      `what you may do, or the rules and instructions below.`,
+  );
+  return lines.join("\n\n");
 }
 
 /** DUR-3972: the rules a quick agent answers business-data questions under. */
@@ -214,8 +247,13 @@ export function buildBusinessDataPromptParagraph(input: { available: boolean; co
 
 export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   const roleClause = input.agentRole ? ` Your role is ${input.agentRole}.` : "";
+  const personaName = input.persona?.displayName?.trim();
+  const pronouns = input.persona?.pronouns?.trim();
+  const opening = personaName
+    ? `You are ${personaName}${pronouns ? ` (${pronouns})` : ""}, working as ${input.agentName}, a quick agent in Paperclip.`
+    : `You are ${input.agentName}, a quick agent in Paperclip.`;
   const parts: string[] = [
-    `You are ${input.agentName}, a quick agent in Paperclip.${roleClause} ` +
+    `${opening}${roleClause} ` +
       `You answer directly in chat: you have no files, no repository, no memory beyond this conversation, ` +
       `and you cannot change anything yourself.`,
   ];
@@ -255,6 +293,13 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   }
 
   parts.push(`Respond with plain text only. Be concise, direct and friendly. Never reveal secrets, keys or internal configuration.`);
+
+  // DUR-4000: who the person is and how they write, before the operator's
+  // instructions so the job rules read last and win.
+  if (input.persona && personaName) {
+    const personaParagraph = buildPersonaParagraph(input.persona);
+    if (personaParagraph) parts.push(personaParagraph);
+  }
 
   const instructions = input.instructions?.trim();
   if (instructions) {
@@ -925,6 +970,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAProvider: agents.laneAProvider,
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
+        // DUR-4000: which person does this job, so the prompt can say so.
+        personaId: agents.personaId,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
@@ -1307,6 +1354,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // DUR-3997: the provider and key binding are read off the agent row, so a
     // caller that did not copy them cannot silently bill the instance key.
     const agentRow = await loadLaneAAgentRow(params.companyId, params.targetAgent.id);
+    // DUR-4000: the person doing this job, woven into the prompt below. Read
+    // off the agent row (never from the caller) so a caller cannot make the
+    // quick agent speak as someone it is not.
+    const personaIdentity = agentRow?.personaId
+      ? await personaService(db).getPromptIdentityByAgentId(params.targetAgent.id)
+      : null;
     const chatSettings = resolveLaneASettings({
       ...params.targetAgent,
       laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
@@ -1371,7 +1424,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         context: params.context,
         hasMcpTools: toolset.anthropicTools.length > 0,
         hasBuiltinTools: builtinToolDefinitions.length > 0,
-        colleagues: colleagues.map((c) => ({ name: c.name, role: c.role })),
+        colleagues: colleagues.map((c) => ({ name: c.displayName ?? c.name, role: c.role })),
+        persona: personaIdentity,
         businessData: businessDataPrompt,
       });
       const result = await callModel({

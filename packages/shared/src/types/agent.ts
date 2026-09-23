@@ -83,6 +83,30 @@ export interface AgentChainOfCommandEntry {
   title: string | null;
 }
 
+/**
+ * DUR-4000: the person attached to a job, as the agent API carries it. Just
+ * enough to render "Sales agent 1 (Maja)" and the picture; the full persona
+ * lives at /personas/:id.
+ */
+export interface AgentPersonaSummary {
+  id: string;
+  displayName: string;
+  pronouns: string | null;
+  avatarAssetId: string | null;
+}
+
+/**
+ * DUR-4000: agents.limits. `dailyImageGenerations` is enforced in code;
+ * `dailyPosts`, `dailyRuns` and `notes` are stored and shown as guidance
+ * until code enforces them (see agentLimitsSchema in validators/agent.ts).
+ */
+export interface AgentLimits {
+  dailyImageGenerations?: number | null;
+  dailyPosts?: number | null;
+  dailyRuns?: number | null;
+  notes?: string | null;
+}
+
 export interface Agent {
   id: string;
   companyId: string;
@@ -93,9 +117,15 @@ export interface Agent {
   icon: string | null;
   /** DUR-61 addendum: operator-authored short tone-of-voice text, board-only, never agent-writable. */
   tone?: string | null;
-  /** DUR-61 addendum: operator-authored long backstory/persona text, board-only, never agent-writable. */
+  /** DUR-61 addendum: operator-authored long backstory/persona text, board-only, never agent-writable. Ignored at prompt time while a persona is attached. */
   personality?: string | null;
   avatarAssetId: string | null;
+  /** DUR-4000: which person does this job (personas.id), or null for a blank job. Board-only. */
+  personaId?: string | null;
+  /** DUR-4000: the attached person, joined in by the server for list/detail; null when none, absent on lighter shapes. */
+  persona?: AgentPersonaSummary | null;
+  /** DUR-4000: the job's own limits box. Board-only. */
+  limits?: AgentLimits;
   status: AgentStatus;
   reportsTo: string | null;
   capabilities: string | null;

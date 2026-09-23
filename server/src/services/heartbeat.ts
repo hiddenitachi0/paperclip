@@ -287,9 +287,11 @@ import {
 import {
   readPaperclipSkillSyncPreference,
   renderPaperclipBoardApprovalWaitLines,
+  renderPersonaIdentity,
   writePaperclipSkillSyncPreference,
   resolveCompanyInstructionsPath,
 } from "@paperclipai/adapter-utils/server-utils";
+import { personaService } from "./personas.js";
 import { extractSkillMentionIds, isUuidLike, formatApprovalTitle } from "@paperclipai/shared";
 import {
   GITHUB_TOKEN_SECRET_NAMES,
@@ -2125,6 +2127,37 @@ function readAgentRuntimeModelProfile(
     enabled: profile.enabled !== false,
     adapterConfig: parseObject(profile.adapterConfig),
     configured: true,
+  };
+}
+
+/**
+ * DUR-4000: the agent row as the adapter should see it. When a PERSON is
+ * attached (agents.persona_id), the persona's voice replaces the agent's tone
+ * (when the persona has one) and a rendered identity block replaces the
+ * agent's personality text outright, so nothing is said twice. Every adapter
+ * composes its voice block from exactly these two fields
+ * (composeVoiceText(agent.tone, agent.personality)), so substituting them
+ * here is the whole change — the adapters stay untouched. No persona = the
+ * row exactly as stored.
+ */
+export function resolveAgentForAdapter<T extends { name: string; tone: string | null; personality: string | null }>(
+  agent: T,
+  persona: {
+    displayName: string | null;
+    pronouns?: string | null;
+    traits?: string | null;
+    backstory?: string | null;
+    voice?: string | null;
+  } | null | undefined,
+): T {
+  if (!persona) return agent;
+  const identity = renderPersonaIdentity(persona, agent);
+  if (!identity) return agent;
+  const voice = persona.voice?.trim();
+  return {
+    ...agent,
+    tone: voice ? voice : agent.tone,
+    personality: identity,
   };
 }
 
@@ -13392,11 +13425,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let turnCapContinuation: Awaited<ReturnType<typeof continueAfterTurnCapForRun>> | null = null;
 
+      // DUR-4000: if a person is attached to this job, the adapter sees the
+      // persona's voice and identity in the tone/personality slots; the rest
+      // of the run (name, adapter, config, instructions) is the agent's own.
+      const agentForAdapter = agent.personaId
+        ? resolveAgentForAdapter(agent, await personaService(db).getPromptIdentityByAgentId(agent.id))
+        : agent;
+
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
         adapterResult = await adapter.execute({
           runId: run.id,
-          agent,
+          agent: agentForAdapter,
           runtime: runtimeForAdapter,
           config: configForAdapter,
           context,

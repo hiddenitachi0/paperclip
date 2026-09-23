@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Db } from "@paperclipai/db";
+import { formatAgentDisplayName } from "@paperclipai/shared";
 import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
 import type { AuthorizationActor } from "./authorization.js";
@@ -70,6 +71,10 @@ export interface LaneAToolResult {
 export interface LaneAToolColleague {
   id: string;
   name: string;
+  /** DUR-4000: "Sales agent 1 (Maja)" when a persona is attached; the job name otherwise. Absent on older callers. */
+  displayName?: string | null;
+  /** DUR-4000: the attached person's name alone, so "hand this to Maja" resolves. */
+  personaDisplayName?: string | null;
   role: string;
   status: string;
   urlKey?: string | null;
@@ -269,7 +274,11 @@ export function resolveColleague(
   if (byId) return { match: byId, candidates: [byId] };
   const needle = wanted.toLowerCase();
   const byName = candidatesPool.filter(
-    (c) => c.name.toLowerCase() === needle || (c.urlKey ?? "").toLowerCase() === needle,
+    (c) =>
+      c.name.toLowerCase() === needle ||
+      (c.urlKey ?? "").toLowerCase() === needle ||
+      // DUR-4000: the person's name works as well as the job's.
+      (c.personaDisplayName ?? "").toLowerCase() === needle,
   );
   if (byName.length === 1) return { match: byName[0]!, candidates: byName };
   if (byName.length > 1) return { match: null, candidates: byName };
@@ -533,6 +542,10 @@ export function createDbLaneAToolDeps(
       return rows.map((agent) => ({
         id: agent.id,
         name: agent.name,
+        // DUR-4000: "Sales agent 1 (Maja)" in the secretary roster and the
+        // colleague list, so a hand-over can name either the job or the person.
+        displayName: formatAgentDisplayName(agent, agent.persona),
+        personaDisplayName: agent.persona?.displayName ?? null,
         role: agent.role,
         status: agent.status,
         urlKey: agent.urlKey,

@@ -32,6 +32,7 @@ import {
   parseSorteringsreglerRuleTargetNames,
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   QUICK_AGENT_FIELDS,
+  PERSONA_JOB_FIELDS,
   laneAProviderModelIssue,
 } from "@paperclipai/shared";
 import {
@@ -1611,6 +1612,22 @@ export function agentRoutes(
     throw forbidden(`Agent-authenticated callers cannot modify quick-agent settings (${QUICK_AGENT_FIELDS.join(", ")})`);
   }
 
+  // DUR-4000: which person does this job (personaId) and the job's own limits
+  // box are board-only on every write path, same shape as the quick-agent
+  // guard above. An agent that could pick its own persona could speak as
+  // someone it is not; one that could raise its own daily image limit has no
+  // limit. The list lives in @paperclipai/shared (PERSONA_JOB_FIELDS).
+  function patchTouchesPersonaJobFields(patchData: Record<string, unknown>) {
+    return PERSONA_JOB_FIELDS.some((key) => hasOwn(patchData, key));
+  }
+
+  function assertNoAgentPersonaJobFieldMutation(req: Request, patchData: Record<string, unknown>) {
+    if (req.actor.type !== "agent" || !patchTouchesPersonaJobFields(patchData)) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot set a persona or limits on an agent (${PERSONA_JOB_FIELDS.join(", ")}). Only board-authenticated callers can.`,
+    );
+  }
+
   function assertNoAgentInstructionsConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown> | null | undefined,
@@ -2741,6 +2758,8 @@ export function agentRoutes(
     // otherwise an agent-authenticated hire could hand itself the direct
     // model-call lane that a human is supposed to switch on.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
+    // DUR-4000: same for the persona link and the limits box.
+    assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -2989,6 +3008,8 @@ export function agentRoutes(
     // the quick-agent choice is board-only on every write path and should not
     // depend on that one earlier check staying where it is.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
+    // DUR-4000: same for the persona link and the limits box.
+    assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -3449,6 +3470,9 @@ export function agentRoutes(
 
     const patchData = { ...(req.body as Record<string, unknown>) };
     assertNoAgentLaneAFlagMutation(req, patchData);
+    // DUR-4000: personaId / limits are board-only; an agent cannot pick its
+    // own persona or raise its own limits, even on its own record.
+    assertNoAgentPersonaJobFieldMutation(req, patchData);
     if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
       // DUR-3997: the model must fit the provider. A patch may carry one

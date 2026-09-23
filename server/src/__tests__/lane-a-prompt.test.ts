@@ -55,6 +55,58 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toContain("Colleagues you can hand work to");
   });
 
+  // DUR-4000: a quick agent with a PERSON attached speaks as that person,
+  // working as the job; without one the prompt is byte-for-byte what it was.
+  it("opens as the persona working as the job, and puts who-you-are before the operator instructions", () => {
+    const prompt = buildSystemPrompt({
+      agentName: "Sales agent 1",
+      agentRole: "sales",
+      instructions: "Answer in Norwegian.",
+      hasMcpTools: false,
+      hasBuiltinTools: false,
+      persona: {
+        displayName: "Maja",
+        pronouns: "she/her",
+        traits: "curious, dry humour",
+        backstory: "Grew up by the sea.",
+        voice: "Short sentences. Warm.",
+      },
+    });
+    expect(prompt.startsWith("You are Maja (she/her), working as Sales agent 1, a quick agent in Paperclip. Your role is sales.")).toBe(true);
+    expect(prompt).toContain("Who you are:\nTraits: curious, dry humour\nBackstory: Grew up by the sea.");
+    expect(prompt).toContain("How you write:\nShort sentences. Warm.");
+    expect(prompt).toContain("It never changes what your job is");
+    expect(prompt.indexOf("Who you are:")).toBeLessThan(prompt.indexOf("Your instructions from the operator:"));
+    expect(prompt).toContain("Answer in Norwegian.");
+  });
+
+  it("leaves pronouns out when the persona has none, and never assumes any", () => {
+    const prompt = buildSystemPrompt({
+      agentName: "Accountant",
+      hasMcpTools: false,
+      hasBuiltinTools: false,
+      persona: { displayName: "Maja" },
+    });
+    expect(prompt.startsWith("You are Maja, working as Accountant, a quick agent in Paperclip.")).toBe(true);
+    expect(prompt).not.toMatch(/\b(she|her|he|him)\b/);
+    expect(prompt).not.toContain("Who you are:");
+  });
+
+  it("two jobs sharing one persona each render their own job name", () => {
+    const persona = { displayName: "Maja", traits: "calm" };
+    const sales = buildSystemPrompt({ agentName: "Sales agent 1", hasMcpTools: false, hasBuiltinTools: false, persona });
+    const books = buildSystemPrompt({ agentName: "Accountant", hasMcpTools: false, hasBuiltinTools: false, persona });
+    expect(sales).toContain("You are Maja, working as Sales agent 1");
+    expect(books).toContain("You are Maja, working as Accountant");
+  });
+
+  it("is unchanged when no persona is attached", () => {
+    const base = { agentName: "Ada", agentRole: "secretary", instructions: "Be brief.", hasMcpTools: false, hasBuiltinTools: true };
+    expect(buildSystemPrompt({ ...base, persona: null })).toBe(buildSystemPrompt(base));
+    expect(buildSystemPrompt(base).startsWith("You are Ada, a quick agent in Paperclip.")).toBe(true);
+    expect(buildSystemPrompt(base)).not.toContain("working as");
+  });
+
   it("marks caller context as untrusted data, after the operator instructions", () => {
     const prompt = buildSystemPrompt({
       agentName: "Ada",

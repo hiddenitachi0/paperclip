@@ -55,6 +55,58 @@ export const QUICK_AGENT_FIELDS = [
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
 /**
+ * DUR-4000: the job-side persona fields, named once. `personaId` says which
+ * PERSON (personas row) is doing this job; `limits` is the agent's own limits
+ * box. Both are board-only on every write path (create, hire, PATCH) — an
+ * agent that could pick its own persona could speak as someone it is not,
+ * and one that could raise its own daily image limit has no limit. The guard
+ * in server/src/routes/agents.ts reads this list, the same way it reads
+ * QUICK_AGENT_FIELDS.
+ */
+export const PERSONA_JOB_FIELDS = ["personaId", "limits"] as const;
+export type PersonaJobField = (typeof PERSONA_JOB_FIELDS)[number];
+
+/** Upper bound for agents.limits.notes, the free-text standing rules an agent reads. */
+export const AGENT_LIMITS_NOTES_MAX_LENGTH = 4000;
+
+const dailyLimit = z.number().int().min(0).max(100_000).nullable().optional();
+
+/**
+ * DUR-4000: agents.limits. Which of these Paperclip enforces in code, and
+ * which are guidance the agent reads, is stated next to each key so the
+ * screens can say so too:
+ *   dailyImageGenerations — ENFORCED (server/src/services/agent-daily-limits.ts,
+ *                           at the media-studio generate-image call).
+ *   dailyPosts            — stored; guidance until the publisher reads it.
+ *   dailyRuns             — stored; guidance until the scheduler reads it.
+ *   notes                 — guidance: free text such as "do not repeat
+ *                           mistakes you made before".
+ * Strict so a typo ("dailyImages") is refused instead of silently ignored.
+ * A key set to null means "no limit", the same as leaving it out.
+ */
+export const agentLimitsSchema = z
+  .object({
+    dailyImageGenerations: dailyLimit,
+    dailyPosts: dailyLimit,
+    dailyRuns: dailyLimit,
+    notes: z
+      .string()
+      .trim()
+      .max(AGENT_LIMITS_NOTES_MAX_LENGTH, `Limit notes are limited to ${AGENT_LIMITS_NOTES_MAX_LENGTH} characters.`)
+      .transform((v) => (v && v.trim() ? v.trim() : null))
+      .nullable()
+      .optional(),
+  })
+  .strict();
+export type AgentLimitsInput = z.infer<typeof agentLimitsSchema>;
+
+/** Read agents.limits (an open jsonb column) into the typed shape; anything malformed reads as "no limits". */
+export function parseAgentLimits(value: unknown): AgentLimitsInput {
+  const parsed = agentLimitsSchema.safeParse(value ?? {});
+  return parsed.success ? parsed.data : {};
+}
+
+/**
  * DUR-3997: the shape of adapterConfig.laneA. The key may only ever be a
  * reference to a saved company secret — a literal string is refused, so a
  * provider key can never sit readable in adapter_config, and the binding
@@ -409,6 +461,12 @@ const createAgentObjectSchema = z.object({
     .max(LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP)
     .nullable()
     .optional(),
+  // DUR-4000 (PERSONA_JOB_FIELDS): which person does this job, and the
+  // job's own limits. Board-only on create, hire and PATCH — enforced in
+  // server/src/routes/agents.ts (assertNoAgentPersonaJobFieldMutation), not
+  // here. The persona must belong to the same company; the service checks.
+  personaId: z.string().uuid().nullable().optional(),
+  limits: agentLimitsSchema.optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);
