@@ -33,10 +33,12 @@ import {
   dataLine,
   instructionsLine,
   modelAndKeyLine,
+  readinessBlocksSwitchOn,
   toolsLine,
   type DataSourceCheck,
   type ReadinessLine,
 } from "../lib/quick-agent-readiness";
+import { useCompanyRole } from "../hooks/useCompanyRole";
 import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -184,12 +186,14 @@ export function QuickAgentSection({
     });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
-  // Paperclip's own key is only readable by an instance admin; anyone else
-  // gets a 403, which the checklist treats as "cannot see, assume it is there".
+  // Paperclip's own key is only readable by an instance admin (the route is
+  // assertInstanceAdmin), so it is only asked for as one; everyone else gets
+  // "cannot see, assume it is there".
+  const { isInstanceAdmin } = useCompanyRole(effectiveCompanyId);
   const instanceKeyQuery = useQuery({
     queryKey: queryKeys.instance.serverAnthropicKey,
     queryFn: () => instanceServerAnthropicKeyApi.get(),
-    enabled: provider === "anthropic" && !keyBinding,
+    enabled: provider === "anthropic" && !keyBinding && isInstanceAdmin,
     retry: false,
   });
   const agentToolsQuery = useQuery({
@@ -213,12 +217,18 @@ export function QuickAgentSection({
     const model = modelAndKeyLine({
       provider,
       providerLabel: providerDescriptor.label,
+      model: agent.laneAModel ?? null,
       bindingSecretId: keyBinding?.secretId ?? null,
       boundSecret: keyBinding ? (secretsQuery.data ? boundSecret : undefined) : null,
-      instanceKeyConfigured: instanceKeyQuery.isError
+      secretsFailed: secretsQuery.isError,
+      instanceKey: !isInstanceAdmin || instanceKeyQuery.isError
         ? null
         : instanceKeyQuery.data
-          ? instanceKeyQuery.data.configured
+          ? {
+              configured: instanceKeyQuery.data.configured,
+              lastTestOk: instanceKeyQuery.data.lastTestOk,
+              lastTestMessage: instanceKeyQuery.data.lastTestMessage,
+            }
           : undefined,
       baseUrl: agent.laneABaseUrl ?? null,
     });
@@ -246,7 +256,9 @@ export function QuickAgentSection({
     providerDescriptor.label,
     keyBinding,
     secretsQuery.data,
+    secretsQuery.isError,
     boundSecret,
+    isInstanceAdmin,
     instanceKeyQuery.isError,
     instanceKeyQuery.data,
     agent,
@@ -261,9 +273,11 @@ export function QuickAgentSection({
     savedInstructions,
   ]);
   const modelLine = readiness[0];
-  // Switching ON needs a usable model and key. Switching OFF is always allowed,
-  // so a key that stops working can never trap an agent in the "on" state.
-  const cannotSwitchOn = !savedEnabled && modelLine.state !== "ok";
+  // Switching ON needs a usable model and key (a "todo" — say, a key whose last
+  // test hit a rate limit — is a warning, not a block). Switching OFF is always
+  // allowed, so a key that stops working can never trap an agent in the "on"
+  // state.
+  const cannotSwitchOn = !savedEnabled && readinessBlocksSwitchOn(modelLine.state);
 
   return (
     <Card>
@@ -402,7 +416,7 @@ export function QuickAgentSection({
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Model and limits</p>
             <p className="text-xs text-muted-foreground">
-              Used both in chat and when another system asks for a text rewrite. Everything here can stay
+              Used both in chat and when another system asks for a text to be rewritten. Everything here can be left
               empty — then the defaults apply.
             </p>
           </div>
@@ -457,8 +471,8 @@ export function QuickAgentSection({
           />
 
           <NumberSetting
-            label="Rewrites per day"
-            hint={`Empty = ${LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP}. Only applies to rewrites asked for by other systems, not chat. When the limit is reached it stops until midnight.`}
+            label="How many texts per day"
+            hint={`Empty = ${LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP}. Only applies to rewrites from other systems, not chat. When the limit is reached it stops until midnight.`}
             value={agent.laneATransformDailyCallCap ?? null}
             min={LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP}
             max={LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP}
@@ -496,7 +510,7 @@ function ReadinessChecklist({ lines }: { lines: ReadinessLine[] }) {
           <li key={line.id} className="flex items-start gap-2 text-xs" data-testid={`readiness-${line.id}`} data-state={line.state}>
             {line.state === "ok" ? (
               <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-label="Ready" />
-            ) : line.state === "blocked" ? (
+            ) : line.state === "blocked" || line.state === "error" ? (
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" aria-label="Needs attention" />
             ) : line.state === "checking" ? (
               <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" aria-label="Checking" />
@@ -505,7 +519,7 @@ function ReadinessChecklist({ lines }: { lines: ReadinessLine[] }) {
             )}
             <span className="min-w-0">
               <span className="font-medium">{line.label}: </span>
-              <span className={line.state === "blocked" ? "text-destructive" : "text-muted-foreground"}>{line.text}</span>
+              <span className={line.state === "blocked" || line.state === "error" ? "text-destructive" : "text-muted-foreground"}>{line.text}</span>
               {line.link && (
                 <>
                   {" "}
@@ -736,7 +750,7 @@ function MonthlyTransformBudget({
   return (
     <label className="block space-y-1">
       <span className="text-xs text-muted-foreground">
-        Maximum monthly cost for rewrites (dollars)
+        Maximum cost per month for rewriting (dollars)
       </span>
       <div className="flex items-center gap-2">
         <Input
@@ -764,11 +778,11 @@ function MonthlyTransformBudget({
             ? // "Empty = no limit" is true but useless as a default on the
               // first thing that can spend Paperclip's money from outside
               // Paperclip. Say what no-limit actually means, in money.
-              `Empty = no limit. Without a limit this quick agent could in the worst case spend around $${centsToDollarString(worstCaseDailyCents)} in one day, at the daily cap and model set above. Enter a number if you want to be sure.`
-            : `Empty = no limit. Paperclip knows no price for this model, so its cost is recorded as 0 — set a limit with the provider if you want to be sure.`}
+              `Empty = no limit. Without a limit this quick agent could in the worst case spend around $${centsToDollarString(worstCaseDailyCents)} in one day, with the daily cap and model set above. Set a number if you want to be sure.`
+            : `Empty = no limit. Paperclip has no price for this model, so its cost is recorded as 0 — set a limit with the provider if you want to be sure.`}
       </span>
       <span className="block text-xs text-muted-foreground">
-        The amount is in dollars because model calls are billed in dollars — the same unit as the other
+        The amount is in dollars because model runs are billed in dollars — the same unit as the other
         budgets in Paperclip.
       </span>
       {error && <span className="block text-xs text-destructive">{error}</span>}

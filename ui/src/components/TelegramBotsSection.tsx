@@ -204,6 +204,10 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
 
         {botsQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : botsQuery.isError ? (
+          <p className="text-sm text-destructive" data-testid="telegram-bots-error">
+            Could not load the bots: {botsQuery.error instanceof Error ? botsQuery.error.message : "unknown error"}
+          </p>
         ) : bots.length === 0 ? (
           <p className="text-sm text-muted-foreground">No bots connected yet.</p>
         ) : (

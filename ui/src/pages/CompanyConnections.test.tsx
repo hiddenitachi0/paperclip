@@ -306,6 +306,58 @@ describe("CompanyConnections", () => {
     });
   });
 
+  it("never asks for Paperclip's own key unless the viewer is an instance admin, and shows its status when they are", async () => {
+    const viewer = await render();
+    expect(mockServerKeyApi.get).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="paperclip-own-claude-key"]')?.textContent).toContain(
+      "Managed by an instance admin",
+    );
+    await act(async () => {
+      viewer.unmount();
+    });
+
+    mockUseCompanyRole.mockReturnValue({ ...role(true), isInstanceAdmin: true });
+    mockServerKeyApi.get.mockResolvedValue({
+      configured: true,
+      source: "stored",
+      headline: "A key is saved and Claude answered when it was last tested.",
+      hint: "…8Xa2",
+      lastTestOk: true,
+      lastTestMessage: "Claude answered.",
+    });
+    const admin = await render();
+    expect(mockServerKeyApi.get).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="paperclip-own-claude-key"]')?.textContent).toContain(
+      "A key is saved and Claude answered",
+    );
+    await act(async () => {
+      admin.unmount();
+    });
+  });
+
+  it("shows only the error when the secrets list fails: no empty provider cards, no '0 secrets'", async () => {
+    mockSecretsApi.list.mockRejectedValue(new ApiError("Vault unavailable", 503, null));
+    const root = await render();
+    const text = container.textContent ?? "";
+
+    expect(container.querySelector('[data-testid="connections-secrets-error"]')?.textContent).toContain(
+      "Could not load the company's keys: Vault unavailable",
+    );
+    expect(container.querySelector('[data-testid="provider-card-anthropic"]')).toBeNull();
+    expect(container.querySelector('[data-testid="provider-card-openai"]')).toBeNull();
+    expect(text).not.toContain("No Claude key saved");
+    expect(text).not.toContain("0 secrets");
+    expect(text).toContain("Could not load the secrets.");
+    expect(buttons("Add key")).toHaveLength(0);
+    // The rest of the page still stands.
+    expect(text).toContain("Telegram bots card");
+    expect(container.querySelector('a[href="/company/settings/secrets"]')).not.toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("explains where to switch business data on when the feature is off", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableBusinessData: false });
     const root = await render();

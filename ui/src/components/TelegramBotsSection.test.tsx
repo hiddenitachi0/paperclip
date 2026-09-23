@@ -86,13 +86,13 @@ describe("TelegramBotsSection", () => {
     vi.clearAllMocks();
   });
 
-  async function render() {
+  async function render(props: { readOnly?: boolean } = {}) {
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
-          <TelegramBotsSection companyId={COMPANY} />
+          <TelegramBotsSection companyId={COMPANY} {...props} />
         </QueryClientProvider>,
       );
     });
@@ -197,6 +197,41 @@ describe("TelegramBotsSection", () => {
     await flushReact();
 
     expect(mockTelegramBotsApi.setAllowedUsers).toHaveBeenCalledWith(COMPANY, BOT, []);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("read-only (operator/viewer): shows the bots and their status, but no way to change anything", async () => {
+    const root = await render({ readOnly: true });
+    const text = container.textContent ?? "";
+
+    expect(text).toContain("Telegram bots");
+    expect(text).toContain("8100000001:••••ng01");
+    expect(text).toContain("Answers as @durkan_ceo_bot");
+    expect(text).toContain("111111");
+    expect(text).toContain("Only the company owner or an admin can connect or change bots.");
+    expect(container.querySelector("#telegram-bot-token")).toBeNull();
+    expect(container.querySelector("#telegram-bot-agent")).toBeNull();
+    for (const label of ["Remove", "Replace token", "Test", "Connect", "Add"]) {
+      expect(button(label), label).toBeUndefined();
+    }
+    expect(container.querySelector('button[aria-label="Remove 111111"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("says the list could not be loaded instead of pretending there are no bots", async () => {
+    mockTelegramBotsApi.list.mockRejectedValue(new Error("Database unavailable"));
+    const root = await render();
+
+    expect(container.querySelector('[data-testid="telegram-bots-error"]')?.textContent).toContain(
+      "Could not load the bots: Database unavailable",
+    );
+    expect(container.textContent).not.toContain("No bots connected yet.");
 
     await act(async () => {
       root.unmount();

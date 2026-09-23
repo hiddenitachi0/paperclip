@@ -150,6 +150,10 @@ export function ServiceTokensSection({ companyId, readOnly = false }: { companyI
 
         {tokensQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : tokensQuery.isError ? (
+          <p className="text-sm text-destructive" data-testid="service-tokens-error">
+            Could not load the keys: {tokensQuery.error instanceof Error ? tokensQuery.error.message : "unknown error"}
+          </p>
         ) : tokens.length === 0 ? (
           <p className="text-sm text-muted-foreground">No keys created yet.</p>
         ) : (

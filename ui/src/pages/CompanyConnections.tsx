@@ -194,18 +194,26 @@ function ProviderCard({
 }
 
 /**
- * Paperclip's own Claude key lives under Instance settings and is only
- * readable by an instance admin. Everyone else gets the line and the link;
- * an instance admin also sees whether it is set.
+ * Paperclip's own Claude key lives under Instance settings and its route is
+ * instance-admin only (assertInstanceAdmin), so it is only asked for as one.
+ * Everyone else gets the line and the link; an instance admin also sees
+ * whether it is set and what Claude said the last time it was tested.
  */
-function PaperclipOwnClaudeKeyLine() {
+function PaperclipOwnClaudeKeyLine({ canSee }: { canSee: boolean }) {
   const statusQuery = useQuery({
     queryKey: queryKeys.instance.serverAnthropicKey,
     queryFn: () => instanceServerAnthropicKeyApi.get(),
+    enabled: canSee,
     retry: false,
   });
   const status = statusQuery.data ?? null;
-  const cannotSee = statusQuery.isError;
+  const text = !canSee
+    ? "Managed by an instance admin. Used by quick agents on Claude that have no company key."
+    : status
+      ? status.headline
+      : statusQuery.isError
+        ? "Could not check Paperclip's own key right now. Used by quick agents on Claude that have no company key."
+        : "Checking…";
   return (
     <div
       className="flex items-center justify-between gap-3 rounded-md border border-dashed px-3 py-2"
@@ -213,15 +221,7 @@ function PaperclipOwnClaudeKeyLine() {
     >
       <div className="min-w-0 space-y-0.5">
         <p className="text-sm font-medium">Paperclip's own Claude key</p>
-        <p className="text-xs text-muted-foreground">
-          {status
-            ? status.headline
-            : cannotSee
-              ? "Managed by an instance admin. Used by quick agents on Claude that have no company key."
-              : statusQuery.isPending
-                ? "Checking…"
-                : "Used by quick agents on Claude that have no company key."}
-        </p>
+        <p className="text-xs text-muted-foreground">{text}</p>
       </div>
       <Button size="sm" variant="ghost" asChild>
         <Link to={`${INSTANCE_SETTINGS_PATH_PREFIX}/claude`}>Open Claude sign-in</Link>
@@ -313,23 +313,31 @@ export function CompanyConnections() {
           A quick agent picks one of these keys. The company's own key wins over Paperclip's own key.
         </p>
         {secretsQuery.isError ? (
-          <p className="flex items-center gap-2 text-sm text-destructive">
+          // A failed list must not read as "no keys saved": show the error and
+          // nothing else, so an outage never looks like an empty company.
+          <p className="flex items-center gap-2 text-sm text-destructive" data-testid="connections-secrets-error">
             <AlertCircle className="h-4 w-4" />
             Could not load the company's keys: {(secretsQuery.error as Error).message}
+            <Button variant="ghost" size="sm" onClick={() => secretsQuery.refetch()}>
+              Retry
+            </Button>
           </p>
-        ) : null}
-        {AI_PROVIDER_CARDS.map((card) => (
-          <ProviderCard
-            key={card.provider}
-            card={card}
-            secrets={secretsForProvider(secrets, card.provider)}
-            canManage={canManage}
-            onAddKey={setAddKind}
-            onTest={(secret) => testMutation.mutate(secret)}
-            testingId={testingId}
-            extra={card.provider === "anthropic" ? <PaperclipOwnClaudeKeyLine /> : undefined}
-          />
-        ))}
+        ) : (
+          AI_PROVIDER_CARDS.map((card) => (
+            <ProviderCard
+              key={card.provider}
+              card={card}
+              secrets={secretsForProvider(secrets, card.provider)}
+              canManage={canManage}
+              onAddKey={setAddKind}
+              onTest={(secret) => testMutation.mutate(secret)}
+              testingId={testingId}
+              extra={
+                card.provider === "anthropic" ? <PaperclipOwnClaudeKeyLine canSee={role.isInstanceAdmin} /> : undefined
+              }
+            />
+          ))
+        )}
       </div>
 
       {/* Data sources */}
@@ -366,11 +374,13 @@ export function CompanyConnections() {
               <p className="text-sm font-medium">
                 {secretsQuery.isPending
                   ? "Loading…"
-                  : `${secrets.length} secret${secrets.length === 1 ? "" : "s"} in this company`}
+                  : secretsQuery.isError
+                    ? "Could not load the secrets."
+                    : `${secrets.length} secret${secrets.length === 1 ? "" : "s"} in this company`}
               </p>
               <p className="text-xs text-muted-foreground">
                 The full list, including keys that do not belong to a provider above.
-                {untaggedCount > 0
+                {!secretsQuery.isError && untaggedCount > 0
                   ? ` ${untaggedCount} of them ${untaggedCount === 1 ? "has" : "have"} no kind yet, so ${untaggedCount === 1 ? "it does" : "they do"} not show under a provider — open ${untaggedCount === 1 ? "it" : "them"} in Secrets and choose what kind of key ${untaggedCount === 1 ? "it is" : "they are"}.`
                   : ""}
               </p>

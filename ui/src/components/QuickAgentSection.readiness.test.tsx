@@ -25,6 +25,7 @@ const mockDataApi = vi.hoisted(() => ({ listDatasetSources: vi.fn() }));
 const mockServerKeyApi = vi.hoisted(() => ({ get: vi.fn() }));
 const mockInstanceSettingsApi = vi.hoisted(() => ({ getExperimental: vi.fn() }));
 const mockPushToast = vi.hoisted(() => vi.fn());
+const mockUseCompanyRole = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; className?: string }) => (
@@ -47,6 +48,11 @@ vi.mock("../context/ToastContext", () => ({
 vi.mock("./SecretBindingPicker", () => ({
   SecretBindingPicker: () => <div>key picker</div>,
 }));
+vi.mock("../hooks/useCompanyRole", () => ({ useCompanyRole: mockUseCompanyRole }));
+
+function roleInfo(isInstanceAdmin: boolean) {
+  return { role: "owner", isInstanceAdmin, localBoard: false, canManageConnections: true, isLoading: false };
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -129,6 +135,7 @@ describe("QuickAgentSection readiness", () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableBusinessData: false });
     mockServerKeyApi.get.mockRejectedValue(new ApiError("Instance admin access required", 403, null));
     mockDataApi.listDatasetSources.mockResolvedValue([]);
+    mockUseCompanyRole.mockReturnValue(roleInfo(false));
   });
 
   afterEach(() => {
@@ -205,7 +212,7 @@ describe("QuickAgentSection readiness", () => {
   });
 
   it("blocks when the bound key was refused, but an agent that is already on can still be switched off", async () => {
-    mockSecretsApi.list.mockResolvedValue([secret({ lastTestOk: false })]);
+    mockSecretsApi.list.mockResolvedValue([secret({ lastTestOk: false, lastTestMessage: "OpenAI did not accept this key (invalid_api_key)." })]);
     const off = await render(agent({ laneAProvider: "openai", adapterConfig: boundToSecret }));
     expect(line("model")?.dataset.state).toBe("blocked");
     expect(line("model")?.textContent).toContain("refused the key");
@@ -243,12 +250,87 @@ describe("QuickAgentSection readiness", () => {
     });
   });
 
-  it("blocks on Claude when an instance admin can see that Paperclip has no key of its own", async () => {
-    mockServerKeyApi.get.mockResolvedValue({ configured: false, source: null, headline: "No key", hint: null });
+  it("never asks for Paperclip's own key unless the viewer is an instance admin (the route is admin-only)", async () => {
     const root = await render(agent());
+
+    expect(mockServerKeyApi.get).not.toHaveBeenCalled();
+    expect(line("model")?.dataset.state).toBe("ok");
+    expect(line("model")?.textContent).toContain("Paperclip's own key");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("blocks on Claude when an instance admin can see that Paperclip has no key of its own", async () => {
+    mockUseCompanyRole.mockReturnValue(roleInfo(true));
+    mockServerKeyApi.get.mockResolvedValue({ configured: false, source: null, headline: "No key", hint: null, lastTestOk: null, lastTestMessage: null });
+    const root = await render(agent());
+
+    expect(mockServerKeyApi.get).toHaveBeenCalledTimes(1);
 
     expect(line("model")?.dataset.state).toBe("blocked");
     expect(line("model")?.textContent).toContain("no key of its own");
+    expect(toggle()?.disabled).toBe(true);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows an explicit error (not 'Checking…' forever) when the keys cannot be loaded, and keeps the switch off", async () => {
+    mockSecretsApi.list.mockRejectedValue(new ApiError("Vault unavailable", 503, null));
+    const root = await render(agent({ laneAProvider: "openai", adapterConfig: boundToSecret }));
+
+    expect(line("model")?.dataset.state).toBe("error");
+    expect(line("model")?.textContent).toContain("Could not load the company's keys");
+    expect(line("model")?.textContent).toContain("Reload the page");
+    expect(line("model")?.textContent).not.toContain("Checking");
+    expect(toggle()?.disabled).toBe(true);
+    expect(container.querySelector('[data-testid="quick-agent-switch-reason"]')?.textContent).toContain(
+      "Could not load the company's keys",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("treats a rate-limited last test as a warning: the line says why and the switch stays usable", async () => {
+    mockSecretsApi.list.mockResolvedValue([
+      secret({ lastTestOk: false, lastTestMessage: "OpenAI is rate limiting this key right now. The key itself may still be fine." }),
+    ]);
+    const root = await render(agent({ laneAProvider: "openai", adapterConfig: boundToSecret }));
+
+    expect(line("model")?.dataset.state).toBe("todo");
+    expect(line("model")?.textContent).toContain("Last test failed: OpenAI is rate limiting this key right now.");
+    expect(toggle()?.disabled).toBe(false);
+    expect(container.querySelector('[data-testid="quick-agent-switch-reason"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("blocks OpenRouter until a model id is typed, even with a key bound", async () => {
+    mockSecretsApi.list.mockResolvedValue([secret({ kind: "openrouter_api_key", name: "OpenRouter key" })]);
+    const root = await render(agent({ laneAProvider: "openrouter", adapterConfig: boundToSecret }));
+
+    expect(line("model")?.dataset.state).toBe("blocked");
+    expect(line("model")?.textContent).toContain("Type the model id below");
+    expect(toggle()?.disabled).toBe(true);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("blocks a bound Claude sign-in token, which is not an API key", async () => {
+    mockSecretsApi.list.mockResolvedValue([secret({ kind: "claude_subscription_token", name: "Claude sign-in" })]);
+    const root = await render(agent({ laneAProvider: "anthropic", adapterConfig: boundToSecret }));
+
+    expect(line("model")?.dataset.state).toBe("blocked");
+    expect(line("model")?.textContent).toContain("Claude sign-in token, not an API key");
     expect(toggle()?.disabled).toBe(true);
 
     await act(async () => {
