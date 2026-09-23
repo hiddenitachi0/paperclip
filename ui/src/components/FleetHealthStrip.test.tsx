@@ -488,6 +488,41 @@ describe("FleetHealthStripView names and links the agents concerned (DUR-4001)",
     ]);
     expect(container!.textContent).toBe("Robot, Bot, Sales agent 10 and Sales agent 1 are stuck.");
   });
+
+  it("leaves a name two sampled agents share as plain text in the sentence, and tells them apart in the rows", () => {
+    const context = { selectedCompanyId: "c", companies: [nordstrand, mobler] };
+    const targets = [
+      resolveFleetAgentLink({ id: "1", name: "CEO", urlKey: "ceo", companyId: "c" }, context),
+      resolveFleetAgentLink({ id: "2", name: "CEO", urlKey: "ceo", companyId: "m" }, context),
+      resolveFleetAgentLink({ id: "3", name: "Writer", urlKey: "writer", companyId: "c" }, context),
+    ];
+    render(<p>{renderWithAgentLinks("Stopped: CEO, CEO, Writer.", targets)}</p>);
+    const links = [...container!.querySelectorAll("a")].map((a) => [a.getAttribute("href"), a.textContent]);
+    expect(links).toEqual([["/agents/writer", "Writer"]]);
+    expect(container!.textContent).toBe("Stopped: CEO, CEO, Writer.");
+
+    // The per-agent rows still link each one, through its own company.
+    const fleet: FleetHealthSnapshot = {
+      ...healthyFleet,
+      agents: {
+        inError: 2,
+        inErrorSample: [
+          { ...starvedFleet.agents.inErrorSample[0]!, id: "1", name: "CEO", urlKey: "ceo", companyId: "c" },
+          { ...starvedFleet.agents.inErrorSample[1]!, id: "2", name: "CEO", urlKey: "ceo", companyId: "m" },
+        ],
+      },
+      summary: { level: "warning", headline: "2 agents have stopped with an error and will not take work until someone clears it: CEO, CEO.", notes: [] },
+    };
+    act(() => {
+      root?.unmount();
+    });
+    render(<FleetHealthStripView fleet={fleet} agents={[]} companies={[nordstrand, mobler]} selectedCompanyId="c" />);
+    expect(container!.querySelector('[data-testid="fleet-health-headline"] a')).toBeNull();
+    const rows = container!.querySelectorAll('[data-testid="fleet-health-agent-in-error"]');
+    expect(rows[0]?.querySelector('a[href="/agents/ceo"]')?.textContent).toBe("CEO");
+    expect(rows[1]?.querySelector('a[href="/MOB/agents/ceo"]')?.textContent).toBe("CEO");
+    expect(rows[1]?.textContent).toContain("(in Møbler AS)");
+  });
 });
 
 describe("FleetHealthStrip", () => {

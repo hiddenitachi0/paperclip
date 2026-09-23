@@ -240,11 +240,16 @@ const AGENT_LINK_CLASS = "font-medium text-foreground underline underline-offset
  * The server's sentences name agents in plain text ("...: Reviewer, Writer.").
  * Wrap every name that has a page in a link -- longest names first, so
  * "Sales agent 10" never links as "Sales agent 1" plus a stray "0", and only
- * where the name stands on its own rather than inside another word.
+ * where the name stands on its own rather than inside another word. A name
+ * two sampled agents share (a "CEO" in two companies) is left as plain
+ * text: the sentence cannot say which one it means, and the per-agent rows
+ * under the facts are the place where each is told apart.
  */
 export function renderWithAgentLinks(text: string, targets: FleetAgentLinkTarget[]): ReactNode {
+  const nameCounts = new Map<string, number>();
+  for (const target of targets) nameCounts.set(target.name, (nameCounts.get(target.name) ?? 0) + 1);
   const linkable = targets
-    .filter((target) => target.href !== null && target.name.trim().length > 0)
+    .filter((target) => target.href !== null && target.name.trim().length > 0 && nameCounts.get(target.name) === 1)
     .sort((left, right) => right.name.length - left.name.length);
   if (linkable.length === 0) return text;
   const pattern = new RegExp(linkable.map((target) => escapeRegExp(target.name)).join("|"), "g");

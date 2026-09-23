@@ -343,7 +343,9 @@ export function AgentActionButtons({
   const pauseResumeDisabled = disabled || isPendingApproval || (isPaused && workActionsDisabled);
   const clearErrorDisabled = disabled;
 
-  // The rows every "..." menu has, whichever variant is rendered.
+  // The rows every "..." menu has, whichever variant is rendered. Reset and
+  // Terminate ask first (DUR-4001): on a phone the menu is the only way to
+  // act, and Terminate sits one tap below Copy Agent ID.
   const secondaryMenuItems = (
     <>
       <AgentActionMenuItem
@@ -364,8 +366,9 @@ export function AgentActionButtons({
         icon={RotateCcw}
         label="Reset Sessions"
         onClick={() => {
-          resetTaskSession.mutate();
           setMoreOpen(false);
+          if (!window.confirm(`Reset the sessions of ${agent.name}? Its next run starts without the memory of earlier runs.`)) return;
+          resetTaskSession.mutate();
         }}
       />
       <AgentActionMenuItem
@@ -373,16 +376,23 @@ export function AgentActionButtons({
         label="Terminate"
         destructive
         onClick={() => {
-          agentAction.mutate("terminate");
           setMoreOpen(false);
+          if (!window.confirm(`Terminate ${agent.name}? This cannot be undone.`)) return;
+          agentAction.mutate("terminate");
         }}
       />
     </>
   );
 
+  // The narrow row's trigger is the only control on it, so it gets a
+  // finger-sized target rather than the 24px one the desktop cluster uses.
   const moreMenuTrigger = (
     <PopoverTrigger asChild>
-      <Button variant="ghost" size="icon-xs" aria-label={`Open actions for ${agent.name}`}>
+      <Button
+        variant="ghost"
+        size={variant === "menu" ? "icon-sm" : "icon-xs"}
+        aria-label={`Open actions for ${agent.name}`}
+      >
         <MoreHorizontal className="h-4 w-4" />
       </Button>
     </PopoverTrigger>

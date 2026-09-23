@@ -230,4 +230,62 @@ describe("AgentActionButtons", () => {
     // Choosing an item closes the menu.
     expect(document.body.querySelector('[data-testid="agent-actions-menu"]')).toBeNull();
   });
+
+  // DUR-4001: Terminate and Reset Sessions ask first, in both layouts. On a
+  // phone the menu is the only way to act and Terminate sits one tap below
+  // Copy Agent ID.
+  it("asks before terminating or resetting sessions, and does nothing when the answer is no", async () => {
+    const confirm = vi.spyOn(window, "confirm");
+    mockAgentsApi.terminate.mockResolvedValue(makeAgent({ status: "terminated" }));
+
+    for (const variant of ["buttons", "menu"] as const) {
+      root = createRoot(container);
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <AgentActionButtons agent={makeAgent()} companyId="company-1" variant={variant} />
+        </QueryClientProvider>,
+      );
+      await flushReact();
+
+      const openMenu = async () => {
+        await act(async () => {
+          container.querySelector<HTMLButtonElement>('[aria-label="Open actions for Alpha Agent"]')?.click();
+        });
+        await flushReact();
+      };
+      const pick = async (label: string) => {
+        await openMenu();
+        const item = Array.from(document.body.querySelectorAll("button")).find((btn) => btn.textContent?.trim() === label);
+        expect(item, `${label} in ${variant}`).toBeDefined();
+        await act(async () => {
+          item!.click();
+        });
+        await flushReact();
+      };
+
+      confirm.mockReturnValue(false);
+      await pick("Terminate");
+      expect(confirm).toHaveBeenLastCalledWith("Terminate Alpha Agent? This cannot be undone.");
+      expect(mockAgentsApi.terminate).not.toHaveBeenCalled();
+      await pick("Reset Sessions");
+      expect(confirm).toHaveBeenLastCalledWith(
+        "Reset the sessions of Alpha Agent? Its next run starts without the memory of earlier runs.",
+      );
+      expect(mockAgentsApi.resetSession).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      await pick("Terminate");
+      expect(mockAgentsApi.terminate).toHaveBeenCalledWith("agent-1", "company-1");
+      await pick("Reset Sessions");
+      expect(mockAgentsApi.resetSession).toHaveBeenCalledWith("agent-1", null, "company-1");
+
+      await act(async () => {
+        root!.unmount();
+      });
+      root = null;
+      mockAgentsApi.terminate.mockClear();
+      mockAgentsApi.resetSession.mockClear();
+    }
+    confirm.mockRestore();
+  });
 });

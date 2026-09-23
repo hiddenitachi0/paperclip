@@ -71,9 +71,13 @@ export const FLEET_AGENTS_IN_ERROR_SAMPLE_LIMIT = 10;
 /**
  * DUR-4001: the same route key the agents list and org chart link with
  * (services/agents.ts withUrlKey), so a link built from the fleet signal lands
- * on the same page as one built from the agents list.
+ * on the same page as one built from the agents list. A terminated agent
+ * gets its id instead: the agent route resolves short names through
+ * resolveByReference, which skips terminated agents, so its name would land
+ * on "Agent not found".
  */
-function fleetAgentUrlKey(row: { id: string; name: string }): string {
+function fleetAgentUrlKey(row: { id: string; name: string; status?: string | null }): string {
+  if (row.status === "terminated") return row.id;
   return normalizeAgentUrlKey(row.name) ?? row.id;
 }
 /** How far back the window query looks so long runs that finish inside the window are still counted. */

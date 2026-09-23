@@ -879,6 +879,7 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
       requireBoardApprovalForNewAgents: false,
     });
     const sleeping = await seedAgent(companyId, "Sales agent 1", "paused");
+    const gone = await seedAgent(companyId, "Old CEO", "terminated");
     const awake = await seedAgent(companyId, "Worker", "idle");
     const seedIssue = async (assigneeAgentId: string, title: string) => {
       await db.insert(issues).values({
@@ -892,14 +893,15 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
     };
     await seedIssue(sleeping, "Call the supplier");
     await seedIssue(sleeping, "Write the offer");
+    await seedIssue(gone, "Sign the lease");
     // Its agent can pick this one up, so it is not waiting on anyone.
     await seedIssue(awake, "Ship the fix");
 
     const waiting = await loadFleetWaitingOnUnavailableAgents(db, { active: false, snapshot: null });
 
     expect(waiting).toEqual({
-      tasks: 2,
-      agents: 1,
+      tasks: 3,
+      agents: 2,
       sample: [
         {
           id: sleeping,
@@ -909,6 +911,17 @@ describeEmbeddedPostgres("computeFleetHealth against live rows", () => {
           reason: "paused",
           urlKey: "sales-agent-1",
           reasonText: "Paused, with 2 tasks waiting. Resume Sales agent 1, or give the tasks to another agent.",
+        },
+        // A terminated agent's page is only reachable by id: the short-name
+        // route skips terminated agents, so "old-ceo" would be "Agent not found".
+        {
+          id: gone,
+          name: "Old CEO",
+          companyId,
+          tasks: 1,
+          reason: "terminated",
+          urlKey: gone,
+          reasonText: "Terminated, with 1 task waiting. Give the task to another agent.",
         },
       ],
     });
