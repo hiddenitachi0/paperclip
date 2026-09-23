@@ -8,14 +8,14 @@ import { ApiError } from "../api/client";
 import { DataSourcesSection, describeReadEvent, lastTwoClosedMonths } from "./DataSourcesSection";
 
 /**
- * DUR-3972 slice S2, the "Datakilder" screen. What it must not get wrong:
+ * DUR-3972 slice S2, the "Data sources" screen. What it must not get wrong:
  *  - the key is typed once and never shown again, only its last four characters;
  *  - Test shows the shop, currency, time zone, "no write access", how far back
  *    orders go, and the product types with how many products have none;
- *  - a missing read_all_orders is explained in plain Norwegian with what to add;
+ *  - a missing read_all_orders is explained in plain English with what to add;
  *  - no Shopify permission name appears without its meaning next to it, and no
  *    internal id appears anywhere;
- *  - the trial calculation, the "Salg" tick and the lookup log work.
+ *  - the trial calculation, the "Sales" tick and the lookup log work.
  */
 
 const mockApi = vi.hoisted(() => ({
@@ -177,7 +177,7 @@ describe("DataSourcesSection", () => {
     mockApi.create.mockResolvedValue(connection({ status: "draft", observed: null, lastCheckAt: null, lastCheckOk: null }));
     const root = await render();
 
-    expect(container.textContent).toContain("Koble til Shopify");
+    expect(container.textContent).toContain("Connect Shopify");
     const kind = container.querySelector<HTMLSelectElement>("#data-new-kind")!;
     // Client credentials is the default (new Dev Dashboard apps); both key fields are password fields.
     expect(kind.value).toBe("client_credentials");
@@ -193,7 +193,7 @@ describe("DataSourcesSection", () => {
     expect(tokenField.value).toBe("");
     await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-shop-domain")!, "nordstrand"));
     await act(async () => setInput(tokenField, KEY));
-    await act(async () => button("Koble til")?.click());
+    await act(async () => button("Connect")?.click());
     await flushReact();
 
     expect(mockApi.create).toHaveBeenCalledWith(COMPANY, {
@@ -214,28 +214,28 @@ describe("DataSourcesSection", () => {
     const root = await render();
     const text = container.textContent ?? "";
 
-    expect(text).toContain("Datakilder");
-    expect(text).toContain("Nøkkel ••••abcd");
+    expect(text).toContain("Data sources");
+    expect(text).toContain("Key ••••abcd");
     expect(text).toContain("Nordstrand Møbler");
     expect(text).toContain("NOK");
     expect(text).toContain("Europe/Oslo");
-    expect(text).toContain("Ingen skrivetilgang");
-    expect(text).toContain("Kan se ordre tilbake til 02.03.2024");
-    expect(text).toContain("Produkttyper i butikken (2)");
+    expect(text).toContain("No write access");
+    expect(text).toContain("Can see orders back to 02.03.2024");
+    expect(text).toContain("Product types in the shop (2)");
     expect(text).toContain("Sofa");
     expect(text).toContain("Hjørnesofa");
-    expect(text).toContain("1 av 4 produkter har ingen produkttype");
-    expect(text).not.toContain("kan ikke regnes ut");
+    expect(text).toContain("1 of 4 products have no product type");
+    expect(text).not.toContain("cannot be calculated");
 
     await act(async () => root.unmount());
   });
 
-  it("explains a missing read_all_orders in plain Norwegian, and flags a key that can write", async () => {
+  it("explains a missing read_all_orders in plain English, and flags a key that can write", async () => {
     mockApi.list.mockResolvedValue([
       connection({
         status: "error",
         lastCheckOk: false,
-        lastCheckError: "Appen mangler tilgangen read_all_orders (lese alle ordre, ikke bare de siste 60 dagene).",
+        lastCheckError: "The app is missing the read_all_orders permission (read all orders, not only the last 60 days).",
         observed: {
           ...connection().observed!,
           grantedScopes: ["read_orders", "read_products", "write_products"],
@@ -245,10 +245,10 @@ describe("DataSourcesSection", () => {
     const root = await render();
     const text = container.textContent ?? "";
 
-    expect(text).toContain("Shopify viser bare ordre fra de siste 60 dagene");
-    expect(text).toContain("«lese alle ordre, ikke bare de siste 60 dagene» (read_all_orders)");
-    expect(text).toContain("Nøkkelen kan endre ting i butikken");
-    expect(text).toContain("Testen fant problemer");
+    expect(text).toContain("Shopify only shows this key orders from the last 60 days");
+    expect(text).toContain("“read all orders, not only the last 60 days” (read_all_orders)");
+    expect(text).toContain("The key can change things in the shop");
+    expect(text).toContain("The test found problems");
 
     await act(async () => root.unmount());
   });
@@ -265,9 +265,9 @@ describe("DataSourcesSection", () => {
     const settingsText = container.textContent ?? "";
 
     const meanings: Record<string, string> = {
-      read_orders: "lese ordre",
-      read_all_orders: "lese alle ordre, ikke bare de siste 60 dagene",
-      read_products: "lese produkter",
+      read_orders: "read orders",
+      read_all_orders: "read all orders, not only the last 60 days",
+      read_products: "read products",
     };
     for (const text of [connectText, settingsText]) {
       for (const [scope, meaning] of Object.entries(meanings)) {
@@ -288,20 +288,20 @@ describe("DataSourcesSection", () => {
     mockApi.trial.mockResolvedValue({
       ok: true,
       lookupId: "66666666-6666-4666-8666-666666666666",
-      card: "Salg i antall enheter, alle produkter\n\nJuli 2026 (1.–31. juli 2026, avsluttet)\nSolgt: 4 stk",
-      reconciliationNotes: ["august 2026, produkttypen Sofa: Shopifys salgslogg viser 2 returnerte stk, men refusjonene viser 1 stk."],
+      card: "Sales in units, all products\n\nJuly 2026 (1–31 July 2026, closed)\nSold: 4 units",
+      reconciliationNotes: ["August 2026, product type Sofa: Shopify's sales record shows 2 returned units, but the refunds show 1 unit."],
     });
     const root = await render();
 
     expect(container.querySelector<HTMLInputElement>(`#data-trial-first-${CONNECTION}`)!.value).toBe("2026-07");
     expect(container.querySelector<HTMLInputElement>(`#data-trial-second-${CONNECTION}`)!.value).toBe("2026-08");
-    await act(async () => button("Regn ut")?.click());
+    await act(async () => button("Calculate")?.click());
     await flushReact();
 
     expect(mockApi.trial).toHaveBeenCalledWith(COMPANY, CONNECTION, { periods: ["2026-07", "2026-08"], groupBy: "product_type" });
     const card = container.querySelector('[data-testid="data-trial-card"]');
-    expect(card?.textContent).toContain("Solgt: 4 stk");
-    expect(container.textContent).toContain("Merknader til sammenligningen");
+    expect(card?.textContent).toContain("Sold: 4 units");
+    expect(container.textContent).toContain("Notes on the comparison");
     expect(container.textContent).toContain("Net items sold by product type");
 
     await act(async () => root.unmount());
@@ -312,12 +312,12 @@ describe("DataSourcesSection", () => {
       ok: false,
       lookupId: null,
       code: "before_visible_window",
-      message: "Shopify viser bare ordre fra og med 1. juli 2026, så mai 2026 kan ikke regnes ut.",
+      message: "Shopify only lets me see orders from 01.07.2026, so I cannot give figures for May 2026. That does not mean sales were zero.",
     });
     const root = await render();
-    await act(async () => button("Regn ut")?.click());
+    await act(async () => button("Calculate")?.click());
     await flushReact();
-    expect(container.textContent).toContain("så mai 2026 kan ikke regnes ut");
+    expect(container.textContent).toContain("so I cannot give figures for May 2026");
     expect(container.querySelector('[data-testid="data-trial-card"]')).toBeNull();
     await act(async () => root.unmount());
   });
@@ -325,33 +325,33 @@ describe("DataSourcesSection", () => {
   it("does not offer the trial calculation before the connection has passed Test", async () => {
     mockApi.list.mockResolvedValue([connection({ status: "draft", observed: null, lastCheckAt: null, lastCheckOk: null })]);
     const root = await render();
-    expect(button("Regn ut")?.disabled).toBe(true);
-    expect(container.textContent).toContain("Trykk Test for å se hvilken butikk nøkkelen hører til");
-    // Salg cannot be ticked either.
-    expect(container.querySelector<HTMLInputElement>('input[aria-label="Salg"]')!.disabled).toBe(true);
+    expect(button("Calculate")?.disabled).toBe(true);
+    expect(container.textContent).toContain("Press Test to see which shop the key belongs to");
+    // Sales cannot be ticked either.
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="Sales"]')!.disabled).toBe(true);
     await act(async () => root.unmount());
   });
 
-  it("ticks Salg for this shop, and shows Lager as coming later", async () => {
+  it("ticks Sales for this shop, and shows Inventory as coming later", async () => {
     mockApi.setDatasetSource.mockResolvedValue({ dataset: "sales", source: { dataset: "sales", connectionId: CONNECTION } });
     const root = await render();
-    const sales = container.querySelector<HTMLInputElement>('input[aria-label="Salg"]')!;
+    const sales = container.querySelector<HTMLInputElement>('input[aria-label="Sales"]')!;
     expect(sales.checked).toBe(false);
     await act(async () => sales.click());
     await flushReact();
     expect(mockApi.setDatasetSource).toHaveBeenCalledWith(COMPANY, "sales", CONNECTION);
 
-    const stock = container.querySelector<HTMLInputElement>('input[aria-label="Lager"]')!;
+    const stock = container.querySelector<HTMLInputElement>('input[aria-label="Inventory"]')!;
     expect(stock.disabled).toBe(true);
-    expect(container.textContent).toContain("Kommer senere");
+    expect(container.textContent).toContain("Coming later");
     await act(async () => root.unmount());
   });
 
-  it("unticking Salg removes the source", async () => {
+  it("unticking Sales removes the source", async () => {
     mockApi.list.mockResolvedValue([connection({ datasets: ["sales"] })]);
     mockApi.setDatasetSource.mockResolvedValue({ dataset: "sales", source: null });
     const root = await render();
-    const sales = container.querySelector<HTMLInputElement>('input[aria-label="Salg"]')!;
+    const sales = container.querySelector<HTMLInputElement>('input[aria-label="Sales"]')!;
     expect(sales.checked).toBe(true);
     await act(async () => sales.click());
     await flushReact();
@@ -363,7 +363,7 @@ describe("DataSourcesSection", () => {
     const root = await render();
     const reads = container.querySelector('[data-testid="data-reads"]')?.textContent ?? "";
     expect(reads).toContain(
-      `Salgsanalytikeren leste Salg (Sofa, aug 2026 og jul 2026) via Telegram, ${localShort("2026-09-21T08:14:00.000Z")}`,
+      `Salgsanalytikeren read Sales (Sofa, Aug 2026 and Jul 2026) via Telegram, ${localShort("2026-09-21T08:14:00.000Z")}`,
     );
     expect(reads).not.toMatch(UUID_PATTERN);
     await act(async () => root.unmount());
@@ -374,24 +374,24 @@ describe("DataSourcesSection", () => {
       describeReadEvent(
         readEvent({ channel: "settings_test", agentId: null, agentName: null, userId: "user-1", params: { action: "sales", periods: ["2026-07"] } }),
       ),
-    ).toMatch(/^Prøveberegning av Salg \(jul 2026\) fra innstillingene, /);
+    ).toMatch(/^Trial calculation of Sales \(Jul 2026\) from settings, /);
     expect(
       describeReadEvent(readEvent({ dataset: "connection_check", channel: "settings_test", agentId: null, agentName: null })),
-    ).toMatch(/^Test av koblingen fra innstillingene, /);
+    ).toMatch(/^Connection test from settings, /);
     expect(
       describeReadEvent(readEvent({ channel: "quick_chat", outcome: "rate_limited", params: { periods: ["last_month"] } })),
-    ).toMatch(/^Salgsanalytikeren leste Salg \(forrige måned\) i chatten – stoppet av en grense for antall oppslag, /);
-    expect(describeReadEvent(readEvent({ agentName: null }))).toMatch(/^En ansatt som ikke finnes lenger leste Salg/);
+    ).toMatch(/^Salgsanalytikeren read Sales \(last month\) in chat – stopped by a lookup limit, /);
+    expect(describeReadEvent(readEvent({ agentName: null }))).toMatch(/^An employee who no longer exists read Sales/);
   });
 
   it("asks before disconnecting, and only removes after the owner says yes", async () => {
     mockApi.remove.mockResolvedValue({ ok: true });
     const root = await render();
-    await act(async () => button("Fjern")?.click());
+    await act(async () => button("Remove")?.click());
     await flushReact();
     expect(mockApi.remove).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("den lagrede nøkkelen slettes");
-    await act(async () => button("Ja, fjern koblingen")?.click());
+    expect(container.textContent).toContain("the stored key will be deleted");
+    await act(async () => button("Yes, remove the connection")?.click());
     await flushReact();
     expect(mockApi.remove).toHaveBeenCalledWith(COMPANY, CONNECTION);
     await act(async () => root.unmount());
@@ -400,20 +400,20 @@ describe("DataSourcesSection", () => {
   it("replaces the key through a write-only field and asks for a new Test", async () => {
     mockApi.update.mockResolvedValue(connection({ status: "draft" }));
     const root = await render();
-    await act(async () => button("Bytt nøkkel")?.click());
+    await act(async () => button("Replace key")?.click());
     const kind = container.querySelector<HTMLSelectElement>(`#data-rotate-${CONNECTION}-kind`)!;
     await act(async () => setInput(kind, "admin_access_token"));
     const field = container.querySelector<HTMLInputElement>(`#data-rotate-${CONNECTION}-token`)!;
     expect(field.type).toBe("password");
     expect(field.value).toBe("");
     await act(async () => setInput(field, KEY));
-    await act(async () => button("Lagre ny nøkkel")?.click());
+    await act(async () => button("Save new key")?.click());
     await flushReact();
     expect(mockApi.update).toHaveBeenCalledWith(COMPANY, CONNECTION, {
       credential: { kind: "admin_access_token", accessToken: KEY },
     });
     expect(container.innerHTML).not.toContain(KEY);
-    expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Ny nøkkel lagret. Trykk Test før den tas i bruk." }));
+    expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "New key saved. Press Test before it is used." }));
     await act(async () => root.unmount());
   });
 
@@ -440,21 +440,21 @@ describe("DataSourcesSection", () => {
     const kind = container.querySelector<HTMLSelectElement>("#data-source-kind")!;
     expect(kind.value).toBe("shopify");
     const labels = Array.from(kind.options).map((option) => option.textContent);
-    expect(labels).toEqual(["Shopify", "WooCommerce (kommer snart)", "Fiken (kommer snart)", "Filer (SFTP) (kommer snart)"]);
+    expect(labels).toEqual(["Shopify", "WooCommerce (coming soon)", "Fiken (coming soon)", "Files (SFTP) (coming soon)"]);
     // Shopify fields are there by default, nothing else.
     expect(container.querySelector("#data-shop-domain")).not.toBeNull();
     expect(container.querySelector("#data-store-url")).toBeNull();
 
     await act(async () => setInput(kind, "woocommerce"));
     expect(container.querySelector("#data-shop-domain")).toBeNull();
-    expect(container.querySelector('[data-testid="data-kind-coming-soon"]')?.textContent).toContain("kan ikke lese fra den ennå");
+    expect(container.querySelector('[data-testid="data-kind-coming-soon"]')?.textContent).toContain("cannot read from it yet");
     for (const id of ["#data-new-consumer-key", "#data-new-consumer-secret"]) {
       expect(container.querySelector<HTMLInputElement>(id)!.type).toBe("password");
     }
     await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-store-url")!, "https://butikken.no"));
     await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-new-consumer-key")!, woo));
     await act(async () => setInput(container.querySelector<HTMLInputElement>("#data-new-consumer-secret")!, wooSecret));
-    await act(async () => button("Lagre")?.click());
+    await act(async () => button("Save")?.click());
     await flushReact();
 
     expect(mockApi.create).toHaveBeenCalledWith(COMPANY, {
@@ -466,7 +466,7 @@ describe("DataSourcesSection", () => {
     expect(container.innerHTML).not.toContain(wooSecret);
     expect(container.innerHTML).not.toContain(woo);
     expect(mockPushToast).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "WooCommerce er lagret. Kommer snart – lagret, ikke koblet til ennå." }),
+      expect.objectContaining({ title: "WooCommerce is saved. Coming soon – saved, not connected yet." }),
     );
     await act(async () => root.unmount());
   });
@@ -494,17 +494,17 @@ describe("DataSourcesSection", () => {
     const root = await render();
     const pending = container.querySelector('[data-testid="data-connection-pending"]')!;
     expect(pending.textContent).toContain("Regnskapet – fiken-demo-firma-as");
-    expect(pending.textContent).toContain("Fiken · Nøkkel ••••zz99");
-    expect(pending.textContent).toContain("Kommer snart – lagret, ikke koblet til ennå.");
+    expect(pending.textContent).toContain("Fiken · Key ••••zz99");
+    expect(pending.textContent).toContain("Coming soon – saved, not connected yet.");
     const pendingButtons = Array.from(pending.querySelectorAll("button")).map((element) => element.textContent?.trim());
-    expect(pendingButtons).toEqual(["Fjern"]);
+    expect(pendingButtons).toEqual(["Remove"]);
     // The Shopify connection next to it still has its full panel.
     expect(container.querySelectorAll('[data-testid="data-trial"]')).toHaveLength(1);
-    // The Salg tick can only point at the Shopify connection.
-    expect(container.querySelector('select[aria-label="Hvilken butikk skal salgstallene komme fra?"]')).toBeNull();
+    // The Sales tick can only point at the Shopify connection.
+    expect(container.querySelector('select[aria-label="Which shop should the sales figures come from?"]')).toBeNull();
     // With connections present the form is behind a button.
     expect(container.querySelector('[data-testid="data-new-connection"]')).toBeNull();
-    await act(async () => button("Legg til datakilde")?.click());
+    await act(async () => button("Add data source")?.click());
     expect(container.querySelector('[data-testid="data-new-connection"]')).not.toBeNull();
     await act(async () => root.unmount());
   });
@@ -513,7 +513,7 @@ describe("DataSourcesSection", () => {
     mockApi.list.mockRejectedValue(new ApiError("Forbidden", 403, { error: "Forbidden" }));
     const root = await render();
     expect(container.textContent).toContain(
-      "Bare eieren av selskapet eller en administrator for hele Paperclip kan se og endre datakilder.",
+      "Only the company's owner or an administrator for the whole Paperclip instance can view and change data sources.",
     );
     expect(container.querySelector("#data-shop-domain")).toBeNull();
     await act(async () => root.unmount());

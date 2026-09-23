@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkSalesInvariants,
   salesResultSchema,
-  SALES_DEFINITIONS_NB,
+  SALES_DEFINITIONS,
   type SalesLines,
   type SalesResult,
 } from "../services/data-sources/contract.js";
@@ -34,16 +34,16 @@ function validResult(): SalesResult {
     measure: "units",
     groupBy: "none",
     productTypesCounted: ["Sofa", "Hjørnesofa"],
-    definitions: [...SALES_DEFINITIONS_NB],
+    definitions: [...SALES_DEFINITIONS],
     periods: [
       {
         key: "2026-07",
         token: "month_before_last",
-        label: "juli 2026",
+        label: "July 2026",
         start: "2026-06-30T22:00:00.000Z",
         end: "2026-07-31T22:00:00.000Z",
-        status: "avsluttet",
-        statusText: "avsluttet",
+        status: "closed",
+        statusText: "closed",
         dataState: "data",
         noDataReason: null,
         total: lines(1250, 40, 12, 0),
@@ -59,11 +59,11 @@ function validResult(): SalesResult {
       {
         key: "2026-08",
         token: "last_month",
-        label: "august 2026",
+        label: "August 2026",
         start: "2026-07-31T22:00:00.000Z",
         end: "2026-08-31T22:00:00.000Z",
-        status: "avsluttet",
-        statusText: "avsluttet",
+        status: "closed",
+        statusText: "closed",
         dataState: "data",
         noDataReason: null,
         total: lines(1300, 50, 20, 2),
@@ -115,7 +115,7 @@ describe("sales contract", () => {
 
   it("refuses a no_data period that carries numbers, and a wrong comparison", () => {
     const result = validResult();
-    result.periods[1] = { ...result.periods[1]!, dataState: "no_data", noDataReason: "Perioden har ikke startet ennå." };
+    result.periods[1] = { ...result.periods[1]!, dataState: "no_data", noDataReason: "The period has not started yet." };
     expect(checkSalesInvariants(result).join("\n")).toMatch(/no_data period carries numbers/);
     const wrongChange = validResult();
     wrongChange.comparison = { ...wrongChange.comparison!, netChange: 6 };
@@ -126,36 +126,36 @@ describe("sales contract", () => {
 describe("answer card", () => {
   it("prints three lines per month, the change, the types counted and the source footer", () => {
     const card = renderSalesAnswerCard(validResult(), { lookupId: "a1b2c3" });
-    expect(card).toContain("Juli 2026 (1.–31. juli 2026, avsluttet)");
-    expect(card).toContain("August 2026 (1.–31. august 2026, avsluttet)");
-    expect(card).toContain("Solgt: 40 stk");
-    expect(card).toContain("Returer i måneden: 4 stk (herav 1 fra tidligere måneder)");
-    expect(card).toContain("Netto: 36 stk");
+    expect(card).toContain("July 2026 (1–31 July 2026, closed)");
+    expect(card).toContain("August 2026 (1–31 August 2026, closed)");
+    expect(card).toContain("Sold: 40 units");
+    expect(card).toContain("Returns in the month: 4 units (of which 1 from earlier months)");
+    expect(card).toContain("Net: 36 units");
     // Edits only when not zero: July has none, August has +1.
-    expect(card.split("August 2026")[0]).not.toContain("Endringer:");
-    expect(card).toContain("Endringer: +1 stk");
-    expect(card).toContain("Endring netto fra juli 2026 til august 2026: +5 stk (+13,9 %)");
-    expect(card).toContain("Produkttyper talt med (etter dagens produkttype): Sofa, Hjørnesofa");
-    expect(card).toContain("(uten produkttype), ikke talt med: solgt 15, returer 1, netto 14");
-    expect(card).toContain("(slettet produkt), ikke talt med: solgt 5, returer 0, netto 5");
-    expect(card).toContain("Testordre er holdt utenfor.");
+    expect(card.split("August 2026")[0]).not.toContain("Edits:");
+    expect(card).toContain("Edits: +1 unit");
+    expect(card).toContain("Net change from July 2026 to August 2026: +5 units (+13.9 %)");
+    expect(card).toContain("Product types counted (by today's product type): Sofa, Hjørnesofa");
+    expect(card).toContain("(without product type), not counted: sold 15, returns 1, net 14");
+    expect(card).toContain("(deleted product), not counted: sold 5, returns 0, net 5");
+    expect(card).toContain("Test orders are left out.");
     expect(card.trim().split("\n").at(-1)).toBe(
-      "Kilde: Shopify (nettbutikken nordstrand-demo.myshopify.com), ikke regnskap · Europe/Oslo · hentet 21.09.2026 kl. 10:14 · oppslag a1b2c3",
+      "Source: Shopify (online store nordstrand-demo.myshopify.com), not the accounts · Europe/Oslo · fetched 21.09.2026 at 10:14 · lookup a1b2c3",
     );
   });
 
-  it("says 'ingen data' for a month with no data, never 0", () => {
+  it("says 'no data' for a month with no data, never 0", () => {
     const result = validResult();
     result.periods[1] = {
       ...result.periods[1]!,
       key: "2026-10",
-      label: "oktober 2026",
+      label: "October 2026",
       start: "2026-09-30T22:00:00.000Z",
       end: "2026-09-30T22:00:00.000Z",
-      status: "pågår",
-      statusText: "ikke startet",
+      status: "running",
+      statusText: "not started",
       dataState: "no_data",
-      noDataReason: "Perioden har ikke startet ennå.",
+      noDataReason: "The period has not started yet.",
       total: null,
       selection: null,
       byProductType: [],
@@ -166,16 +166,16 @@ describe("answer card", () => {
     result.comparison = null;
     expect(checkSalesInvariants(result)).toEqual([]);
     const card = renderSalesAnswerCard(result, { lookupId: "x" });
-    const october = card.split("Oktober 2026")[1]!.split("\n\n")[0]!;
-    expect(october).toContain("Ingen data: Perioden har ikke startet ennå. (ikke det samme som null salg)");
-    expect(october).not.toMatch(/Solgt/);
+    const october = card.split("October 2026")[1]!.split("\n\n")[0]!;
+    expect(october).toContain("No data: The period has not started yet. (not the same as nothing sold)");
+    expect(october).not.toMatch(/Sold/);
   });
 
   it("formats numbers so the provenance check can match them", () => {
     expect(formatCount(1234567)).toBe("1 234 567");
     expect(formatCount(-1234)).toBe("-1 234");
-    expect(formatPercent(12.5)).toBe("+12,5 %");
-    expect(formatPercent(-3)).toBe("-3,0 %");
+    expect(formatPercent(12.5)).toBe("+12.5 %");
+    expect(formatPercent(-3)).toBe("-3.0 %");
   });
 
   it("renders the catalog with untyped products stated", () => {
@@ -191,14 +191,15 @@ describe("answer card", () => {
         untypedProductCount: 7,
         untypedUnitsSoldLast12Months: 20,
         deletedProductUnitsSoldLast12Months: 3,
-        unitsSoldStatus: "beregnet",
+        unitsSoldStatus: "calculated",
         earliestVisibleOrderAt: "2019-03-01T09:00:00.000Z",
       },
       { lookupId: "c1" },
     );
-    expect(card).toContain("- Sofa: 12 produkter, 340 stk solgt siste 12 måneder");
-    expect(card).toContain("- (uten produkttype): 7 produkter, 20 stk solgt siste 12 måneder");
-    expect(card).toContain("Shopify viser ordre tilbake til 01.03.2019.");
+    expect(card).toContain("- Sofa: 12 products, 340 units sold in the last 12 months");
+    expect(card).toContain("- (without product type): 7 products, 20 units sold in the last 12 months");
+    expect(card).toContain("- (deleted product): 3 units sold in the last 12 months");
+    expect(card).toContain("Shopify shows orders back to 01.03.2019.");
   });
 });
 

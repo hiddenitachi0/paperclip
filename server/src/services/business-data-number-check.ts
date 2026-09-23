@@ -7,19 +7,19 @@
  * card itself. A wrong number is worse than no number.
  *
  * Before comparing, both sides are normalised the same way:
- *   - Norwegian formats: "1 234", "1.234" and "1 234" are 1234; "12,5 %" is 12.5
- *   - a sign does not matter ("-3" and "ned 3" are the same claim about 3)
+ *   - number formats in both languages: "1 234", "1.234", "1 234" and "1,234"
+ *     are 1234; "12,5 %" and "12.5 %" are 12.5
+ *   - a sign does not matter ("-3" and "down 3" are the same claim about 3)
  *   - lookup ids (UUIDs), shop addresses, dates, times and years next to a
  *     month name are not numbers about sales and are removed first
- *   - a day-and-month date ("31. juli") only counts as a date when the month
- *     is written in lowercase, as Norwegian dates are; in the REPLY it is only
- *     set aside when the tool output names that same day, so "netto 13. Juli:"
- *     or "netto 13. juli" cannot hide a wrong 13 behind a month name
- *   - the card's "Ingen data" lines give no allowed numbers: "no data" must
+ *   - a day-and-month date ("31 July", "31. juli") is set aside in the REPLY
+ *     only when the tool output names that same day, so "net 13 July:" or
+ *     "netto 13. juli" cannot hide a wrong 13 behind a month name
+ *   - the card's "No data" lines give no allowed numbers: "no data" must
  *     never make a "0" in the reply look grounded
- *   - number words ("fem returer") are checked when they sit next to a count
- *     word, so a model cannot slip an invented figure past the check by
- *     spelling it out
+ *   - number words ("five returns", "fem returer") are checked when they sit
+ *     next to a count word, so a model cannot slip an invented figure past
+ *     the check by spelling it out
  */
 
 const MONTHS =
@@ -27,16 +27,20 @@ const MONTHS =
   "jan|feb|mar|apr|jun|jul|aug|sep|sept|okt|nov|des|" +
   "january|february|march|may|june|july|october|december|oct|dec";
 
-/** Norwegian day-and-month dates: lowercase month only (no "i" flag). */
-const LOWER_MONTHS = `(?:${MONTHS})`;
+/**
+ * Day-and-month dates as the card writes them ("1–31 July 2026") and as
+ * Norwegian writes them ("1.–31. juli 2026"): the day is followed by a dot
+ * or by a space, then a month name in either case.
+ */
+const MONTH_NAME = `(?:${MONTHS})`;
 const DAY_MONTH_RANGE_RE = new RegExp(
-  `\\b(\\d{1,2})\\.?\\s*[–-]\\s*(\\d{1,2})\\.\\s*(${LOWER_MONTHS})\\b\\.?(?:\\s+\\d{4})?`,
-  "g",
+  `\\b(\\d{1,2})\\.?\\s*[–-]\\s*(\\d{1,2})(?:\\.\\s*|\\s+)(${MONTH_NAME})\\b\\.?(?:\\s+\\d{4})?`,
+  "gi",
 );
-const DAY_MONTH_RE = new RegExp(`\\b(\\d{1,2})\\.\\s*(${LOWER_MONTHS})\\b\\.?(?:\\s+\\d{4})?`, "g");
+const DAY_MONTH_RE = new RegExp(`\\b(\\d{1,2})(?:\\.\\s*|\\s+)(${MONTH_NAME})\\b\\.?(?:\\s+\\d{4})?`, "gi");
 
 function dayKey(day: string, month: string): string {
-  return `${Number(day)}.${month.slice(0, 3)}`;
+  return `${Number(day)}.${month.slice(0, 3).toLowerCase()}`;
 }
 
 /** Every "day. month" the text names, ranges expanded to both end days. */
@@ -61,7 +65,8 @@ const NUMBER_WORDS: Record<string, number> = {
 // A number word is only a claim when a count word follows within two words.
 const COUNT_WORDS =
   "stk|stykker|enhet|enheter|retur|returer|returnert|returnerte|solgt|solgte|salg|ordre|ordrer|" +
-  "produkt|produkter|varer|sofa|sofaer|units|items|returns|sold|orders|prosent|percent";
+  "produkt|produkter|varer|sofa|sofaer|" +
+  "unit|units|item|items|return|returns|sold|sale|sales|order|orders|product|products|sofas|prosent|percent";
 
 /**
  * Removes everything that carries digits but is not a claim about quantities.
@@ -85,12 +90,12 @@ function stripNonQuantities(text: string, knownDates?: Set<string>): string {
       .replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, " ")
       // times 10:14
       .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ")
-      // "1.–31. juli 2026", "31. juli", "1.-31. aug."
+      // "1–31 July 2026", "31 July", "1.–31. juli 2026", "31. juli", "1.-31. aug."
       .replace(DAY_MONTH_RANGE_RE, (whole, from: string, to: string, month: string) =>
         isKnown(dayKey(from, month), dayKey(to, month)) ? " " : whole,
       )
       .replace(DAY_MONTH_RE, (whole, day: string, month: string) => (isKnown(dayKey(day, month)) ? " " : whole))
-      // "juli 2026", "aug. 2025"
+      // "July 2026", "juli 2026", "aug. 2025"
       .replace(new RegExp(`\\b(?:${MONTHS})\\.?\\s+\\d{4}\\b`, "gi"), " ")
   );
 }
@@ -99,13 +104,21 @@ function canonical(value: number): string {
   return String(Math.abs(Math.round(value * 1000) / 1000));
 }
 
-const NUMBER_RE = /\d{1,3}(?:(?: |\.)\d{3})+(?:,\d+)?(?!\d)|\d+(?:[.,]\d+)?/g;
+// Three shapes, tried in this order: Norwegian grouping ("1 234", "1.234",
+// optionally ",5"), English grouping ("1,234", optionally ".5"), then a plain
+// number with either decimal separator.
+const NUMBER_PATTERN = "\\d{1,3}(?:(?: |\\.)\\d{3})+(?:,\\d+)?(?!\\d)|\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?(?![\\d,])|\\d+(?:[.,]\\d+)?";
+const NUMBER_RE = new RegExp(NUMBER_PATTERN, "g");
 
 function parseNumberToken(token: string): number | null {
-  // Thousands grouping: "1 234" / "1.234" (groups of exactly three digits).
+  // Norwegian thousands grouping: "1 234" / "1.234" (groups of exactly three digits).
   if (/^\d{1,3}(?:(?: |\.)\d{3})+(?:,\d+)?$/.test(token)) {
     const [whole, fraction] = token.split(",");
     return Number(`${whole!.replace(/[ .]/g, "")}${fraction ? `.${fraction}` : ""}`);
+  }
+  // English thousands grouping: "1,234" / "1,234.5".
+  if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(token)) {
+    return Number(token.replace(/,/g, ""));
   }
   const value = Number(token.replace(",", "."));
   return Number.isFinite(value) ? value : null;
@@ -135,12 +148,13 @@ export function extractQuantities(text: string, knownDates?: Set<string>): strin
 
 /** The quantities in `reply` that no business-data output of this turn contains. */
 export function findUngroundedNumbers(reply: string, toolOutputs: string[]): string[] {
-  // "Ingen data" lines state that a period has NO numbers; nothing on them
-  // may ground a number in the reply.
+  // "No data" lines (the card's marker; "Ingen data" on older cards) state
+  // that a period has NO numbers; nothing on them may ground a number in the
+  // reply.
   const grounding = toolOutputs.map((output) =>
     output
       .split("\n")
-      .filter((line) => !/^\s*ingen data\b/i.test(line))
+      .filter((line) => !/^\s*(?:no data|ingen data)\b/i.test(line))
       .join("\n"),
   );
   const allowed = new Set(grounding.flatMap((output) => extractQuantities(output)));
@@ -152,9 +166,9 @@ export function findUngroundedNumbers(reply: string, toolOutputs: string[]): str
   return missing;
 }
 
-export const NUMBER_CHECK_REPLACEMENT_NOTE = "(Tallene er hentet direkte fra datakilden.)";
+export const NUMBER_CHECK_REPLACEMENT_NOTE = "(The figures come straight from the data source.)";
 /** When a lookup was asked for but nothing came back to relay (e.g. the per-message tool cap). */
-export const NO_NUMBERS_SENTENCE = "Jeg fikk ikke hentet tall fra datakilden for dette spørsmålet, så jeg gir ingen tall. Spør gjerne igjen.";
+export const NO_NUMBERS_SENTENCE = "I could not fetch figures from the data source for this question, so I am not giving any figures. Please ask again.";
 
 export interface BusinessDataTurnOutput {
   /** Exactly what the model was shown. */
@@ -209,8 +223,8 @@ export function applyBusinessDataNumberCheck(reply: string, outputs: BusinessDat
 
 /** Sent instead of a reply that states sales figures without a lookup in this turn. */
 export const NO_LOOKUP_SENTENCE =
-  "Jeg har ikke hentet tallene på nytt for dette svaret, så jeg gir ingen tall her. " +
-  "Spør meg om tallene igjen, så slår jeg dem opp i datakilden.";
+  "I have not fetched the figures afresh for this answer, so I am not giving any figures here. " +
+  "Ask me for the figures again and I will look them up in the data source.";
 
 // Words that make a nearby number a claim about sales, for the no-lookup guard.
 const SALES_WORDS = `${COUNT_WORDS}|netto|net|totalt|total|sum|returnerte|endring`;
@@ -222,7 +236,7 @@ const SALES_WORDS = `${COUNT_WORDS}|netto|net|totalt|total|sum|returnerte|endrin
  */
 export function findSalesQuantityClaims(reply: string): string[] {
   const cleaned = stripNonQuantities(reply);
-  const digits = `(?:\\d{1,3}(?:[ .]\\d{3})+(?:,\\d+)?(?!\\d)|\\d+(?:[.,]\\d+)?)`;
+  const digits = `(?:${NUMBER_PATTERN})`;
   const number = `(?:${digits}|${Object.keys(NUMBER_WORDS).join("|")})`;
   // Spelled-out numbers only count BEFORE a sales word ("fem returer"):
   // after one, "to" is as often the English preposition as the number two.

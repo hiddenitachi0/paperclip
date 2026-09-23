@@ -61,7 +61,7 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsBundle(agentId) });
     },
     onError: (err) => {
-      setError(err instanceof ApiError ? err.message : "Kunne ikke lagre reglene");
+      setError(err instanceof ApiError ? err.message : "Could not save the rules");
     },
   });
 
@@ -74,10 +74,10 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Sorteringsregler — hvem får hva</CardTitle>
+        <CardTitle>Sorting rules — who gets what</CardTitle>
         <CardDescription>
-          Én regel per linje, avsluttet med navnet på agenten regelen sender til (etter siste kolon).
-          Avslutt med en catch-all-linje så det alltid finnes et standardvalg.
+          One rule per line, ending with the name of the agent the rule sends to (after the last colon).
+          Finish with a catch-all line so there is always a default.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -86,14 +86,14 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
           onChange={(event) => setDraft(event.target.value)}
           disabled={isLoading}
           rows={8}
-          placeholder={"Skadet bord ved levering: Claims Rep\nKan dere sende tilbud på stoler?: Sales Rep\nEllers: Claims Rep"}
+          placeholder={"Table damaged on delivery: Claims Rep\nCan you send a quote for chairs?: Sales Rep\nOtherwise: Claims Rep"}
           className="font-mono text-sm"
         />
         {error && <p className="text-sm text-destructive">{error}</p>}
         <div className="flex items-center justify-end gap-2">
           {dirty && (
             <Button variant="ghost" size="sm" onClick={() => { setDraft(null); setError(null); }}>
-              Avbryt
+              Cancel
             </Button>
           )}
           <Button
@@ -101,7 +101,7 @@ export function SorteringsreglerCard({ agentId, companyId }: { agentId: string; 
             onClick={() => saveMutation.mutate()}
             disabled={!dirty || saveMutation.isPending}
           >
-            {saveMutation.isPending ? "Lagrer…" : "Lagre regler"}
+            {saveMutation.isPending ? "Saving…" : "Save rules"}
           </Button>
         </div>
       </CardContent>

@@ -201,7 +201,7 @@ export function assertCompanyAccess(req: Request, companyId: string) {
 
 /**
  * DUR-3972 slice S2: settings that hand out a company's business data (the
- * "Datakilder" screen) are for the people who own the company, not for every
+ * "Data sources" screen) are for the people who own the company, not for every
  * member. Allowed: the local single-user board, an instance admin, and a board
  * user whose ACTIVE membership in this company has the owner role. Refused:
  * agents, service and delegate tokens, and company members with any other role
@@ -211,7 +211,7 @@ export function assertCompanyAccess(req: Request, companyId: string) {
  * loads for every board session and board key; never from anything in the
  * request.
  */
-export function assertCompanyOwnerOrInstanceAdmin(req: Request, companyId: string, what = "dette") {
+export function assertCompanyOwnerOrInstanceAdmin(req: Request, companyId: string, what = "this") {
   assertBoard(req);
   // The role check comes first so every refused member gets the same plain
   // sentence; the ordinary company check (other company, inactive access)
@@ -220,7 +220,7 @@ export function assertCompanyOwnerOrInstanceAdmin(req: Request, companyId: strin
     const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
     const role = membership?.status === "active" ? membership.membershipRole : null;
     if (role !== "owner") {
-      throw forbidden(`Bare eieren av selskapet eller en administrator for hele Paperclip kan se og endre ${what}.`);
+      throw forbidden(`Only the company's owner or an administrator for the whole Paperclip instance can view and change ${what}.`);
     }
   }
   assertCompanyAccess(req, companyId);
