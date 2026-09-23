@@ -4,6 +4,7 @@ import {
   ASSIGNEE_PICKUP_WAITING_ISSUE_STATUSES,
   type AssigneeUnavailableReason,
   type FleetWaitingOnUnavailableAgents,
+  normalizeAgentUrlKey,
   QUIET_MODE_REASON_DEPLOY,
   QUIET_MODE_STALE_AFTER_MS,
   QUIET_MODE_STUCK_AFTER_MS,
@@ -23,8 +24,10 @@ import {
 } from "@paperclipai/shared";
 import { instanceSettingsService } from "./instance-settings.js";
 import {
+  buildAgentInErrorReasonText,
   buildFleetWaitingOnUnavailableAgentsNote,
   buildQuietModeNotice,
+  buildUnavailableAgentReasonText,
   formatOperatorDuration,
 } from "./operator-notices.js";
 import { classifyAssigneePickup } from "./assignee-pickup.js";
@@ -62,7 +65,21 @@ export function resolveQuietModeStuckMs(env: NodeJS.ProcessEnv = process.env): n
 }
 /** Queued runs waiting longer than this behind a full cap are called out more loudly. */
 export const FLEET_QUEUE_WAIT_WARN_MS = 15 * 60 * 1000;
-export const FLEET_AGENTS_IN_ERROR_SAMPLE_LIMIT = 5;
+/** DUR-4001: the Now page lists every sampled agent by name, so the bound is what fits on a phone screen. */
+export const FLEET_AGENTS_IN_ERROR_SAMPLE_LIMIT = 10;
+
+/**
+ * DUR-4001: the same route key the agents list and org chart link with
+ * (services/agents.ts withUrlKey), so a link built from the fleet signal lands
+ * on the same page as one built from the agents list. A terminated agent
+ * gets its id instead: the agent route resolves short names through
+ * resolveByReference, which skips terminated agents, so its name would land
+ * on "Agent not found".
+ */
+function fleetAgentUrlKey(row: { id: string; name: string; status?: string | null }): string {
+  if (row.status === "terminated") return row.id;
+  return normalizeAgentUrlKey(row.name) ?? row.id;
+}
 /** How far back the window query looks so long runs that finish inside the window are still counted. */
 const FLEET_WINDOW_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
@@ -177,7 +194,7 @@ export async function loadFleetRunCounts(
   };
 }
 
-export async function loadFleetAgentCounts(db: Db): Promise<FleetAgentCounts> {
+export async function loadFleetAgentCounts(db: Db, now: Date = new Date()): Promise<FleetAgentCounts> {
   const errorFilter = and(eq(agents.status, "error"), eq(companies.status, "active"));
   const [countRow] = await db
     .select({ count: sql<number>`count(*)`.mapWith(Number) })
@@ -206,11 +223,14 @@ export async function loadFleetAgentCounts(db: Db): Promise<FleetAgentCounts> {
       name: row.name,
       companyId: row.companyId,
       errorAt: row.errorAt ? new Date(row.errorAt).toISOString() : null,
+      urlKey: fleetAgentUrlKey(row),
+      reasonText: buildAgentInErrorReasonText({ errorAt: row.errorAt, now }),
     })),
   };
 }
 
-export const FLEET_WAITING_AGENTS_SAMPLE_LIMIT = 5;
+/** DUR-4001: same bound as the agents-in-error sample, for the same reason. */
+export const FLEET_WAITING_AGENTS_SAMPLE_LIMIT = 10;
 
 /**
  * DUR-3973: open tasks assigned to agents that cannot pick them up, right
@@ -275,7 +295,15 @@ export async function loadFleetWaitingOnUnavailableAgents(
       const entry = row.agentId ? unavailable.get(row.agentId) : undefined;
       const tasks = asCount(row.count);
       return entry && tasks > 0
-        ? { id: entry.row.id, name: entry.row.name, companyId: entry.row.companyId, tasks, reason: entry.reason }
+        ? {
+            id: entry.row.id,
+            name: entry.row.name,
+            companyId: entry.row.companyId,
+            tasks,
+            reason: entry.reason,
+            urlKey: fleetAgentUrlKey(entry.row),
+            reasonText: buildUnavailableAgentReasonText({ agentName: entry.row.name, reason: entry.reason, tasks }),
+          }
         : null;
     })
     .filter((row): row is NonNullable<typeof row> => row !== null)
@@ -757,7 +785,7 @@ export async function computeFleetHealth(db: Db, options: ComputeFleetHealthOpti
 
   const [runs, agentCounts, database, waitingOnUnavailableAgents] = await Promise.all([
     loadFleetRunCounts(db, { now, windowMs, zombieSilenceMs }),
-    loadFleetAgentCounts(db),
+    loadFleetAgentCounts(db, now),
     options.includeDatabaseLoad === false
       ? Promise.resolve<FleetDatabaseLoad>({
           available: false,

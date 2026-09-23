@@ -412,8 +412,11 @@ export function DashboardNow() {
 
       {/* DUR-3939/DUR-3940: whole-instance signal (every company shares the
           scheduler and the run slots), so an operator can tell "the scheduler
-          is stuck" from "every slot is taken" before reading the lanes. */}
-      <FleetHealthStrip />
+          is stuck" from "every slot is taken" before reading the lanes.
+          DUR-4001: it names and links the agents concerned; the persona names
+          and error text come from this page's own agents query, so the strip
+          never adds a request of its own. */}
+      <FleetHealthStrip agents={agents} companies={companies} selectedCompanyId={selectedCompanyId} />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {LANES.map((lane) => {

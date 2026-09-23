@@ -26,9 +26,11 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   buildAgentEnteredErrorNotice,
+  buildAgentInErrorReasonText,
   buildFrozenRunErrorMessage,
   buildReapedRunOperatorNotice,
   buildStoppedRunOperatorNotice,
+  buildUnavailableAgentReasonText,
   formatOperatorDuration,
 } from "../services/operator-notices.js";
 
@@ -118,6 +120,41 @@ describe("operator notice wording (DUR-98)", () => {
     );
     expect(buildAgentEnteredErrorNotice({ agentName: "  ", reason: null })).toBe(
       'An agent stopped taking work after a failed run and needs attention. Open the agent and use "Clear error" once the cause is fixed.',
+    );
+  });
+
+  // DUR-4001: the per-agent line on the Now page sits next to the agent's
+  // linked name, so it starts with the state and never repeats the name
+  // except in the thing to do. It carries no error text.
+  it("writes one plain line per agent in error for the Now page, without the error text", () => {
+    const now = new Date("2026-09-22T10:00:00.000Z");
+    expect(buildAgentInErrorReasonText({ errorAt: "2026-09-22T07:55:00.000Z", now })).toBe(
+      "Stopped with an error 2 hours 5 minutes ago and will not take work until someone clears it.",
+    );
+    expect(buildAgentInErrorReasonText({ errorAt: new Date("2026-09-22T09:59:30.000Z"), now })).toBe(
+      "Stopped with an error under a minute ago and will not take work until someone clears it.",
+    );
+    expect(buildAgentInErrorReasonText({ errorAt: null, now })).toBe(
+      "Stopped with an error and will not take work until someone clears it.",
+    );
+    expect(buildAgentInErrorReasonText({ errorAt: "not a date", now })).toBe(
+      "Stopped with an error and will not take work until someone clears it.",
+    );
+  });
+
+  it("writes one plain line per agent that cannot pick up its tasks, ending in the one thing to do", () => {
+    expect(buildUnavailableAgentReasonText({ agentName: "Sales agent 1", reason: "paused", tasks: 3 })).toBe(
+      "Paused, with 3 tasks waiting. Resume Sales agent 1, or give the tasks to another agent.",
+    );
+    expect(buildUnavailableAgentReasonText({ agentName: "Sales agent 1", reason: "paused_for_budget", tasks: 1 })).toBe(
+      "Paused, budget limit reached, with 1 task waiting. Raise the budget for Sales agent 1, or give the task to another agent.",
+    );
+    expect(buildUnavailableAgentReasonText({ agentName: "Writer", reason: "switched_off", tasks: 2 })).toBe(
+      'Switched off, with 2 tasks waiting. Switch Writer back on (turn on "Wake on demand" in its settings), or give the tasks to another agent.',
+    );
+    // A terminated agent is never told to be "switched back on".
+    expect(buildUnavailableAgentReasonText({ agentName: "Old CEO", reason: "terminated", tasks: 4 })).toBe(
+      "Terminated, with 4 tasks waiting. Give the tasks to another agent.",
     );
   });
 });

@@ -491,3 +491,37 @@ export function buildFleetWaitingOnUnavailableAgentsNote(input: {
     `They wait until the agent is switched back on or the task is given to another agent.`
   );
 }
+
+/**
+ * DUR-4001: the one-line entry for one agent that cannot pick up its work,
+ * shown on the Now page next to the agent's linked name -- so it starts with
+ * the state, not the name, and names the agent only in the thing to do:
+ * "Paused, with 3 tasks waiting. Resume Sales agent 1, or give the tasks to
+ * another agent."
+ */
+export function buildUnavailableAgentReasonText(input: {
+  agentName: string | null | undefined;
+  reason: AssigneeUnavailableReason;
+  tasks: number;
+}): string {
+  const state = describeAssigneeUnavailableShort(input.reason);
+  const opening = state.charAt(0).toUpperCase() + state.slice(1);
+  return `${opening}, with ${pluralTasks(input.tasks)} waiting. ${describeAssigneeUnavailableFix(input.agentName, input.reason, input.tasks)}`;
+}
+
+/**
+ * DUR-4001: the one-line entry for one agent that has stopped with an error,
+ * shown on the Now page next to the agent's linked name. Says how long it has
+ * been stuck and what unblocks it. Carries no error text on purpose: the
+ * fleet signal is instance-wide, and the free-text reason stays on the
+ * agent's own (company-scoped) page.
+ */
+export function buildAgentInErrorReasonText(input: {
+  errorAt: string | Date | null | undefined;
+  now?: Date;
+}): string {
+  const when = input.errorAt instanceof Date ? input.errorAt : input.errorAt ? new Date(input.errorAt) : null;
+  const sinceMs = when && !Number.isNaN(when.getTime()) ? (input.now ?? new Date()).getTime() - when.getTime() : null;
+  const since = sinceMs === null ? "" : ` ${formatOperatorDuration(Math.max(0, sinceMs))} ago`;
+  return `Stopped with an error${since} and will not take work until someone clears it.`;
+}

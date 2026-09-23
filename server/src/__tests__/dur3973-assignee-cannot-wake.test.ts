@@ -290,8 +290,8 @@ describe("waiting-task wording (DUR-3973)", () => {
         tasks: 12,
         agents: 6,
         sample: [
-          { id: "1", name: "CEO", companyId: "d", tasks: 5, reason: "paused" },
-          { id: "2", name: "CTO", companyId: "d", tasks: 3, reason: "paused" },
+          { id: "1", name: "CEO", companyId: "d", tasks: 5, reason: "paused", urlKey: "ceo", reasonText: "Paused, with 5 tasks waiting. Resume CEO, or give the tasks to another agent." },
+          { id: "2", name: "CTO", companyId: "d", tasks: 3, reason: "paused", urlKey: "cto", reasonText: "Paused, with 3 tasks waiting. Resume CTO, or give the tasks to another agent." },
         ],
       },
     });
@@ -611,12 +611,30 @@ describeEmbeddedPostgres("recovery sweep with an assignee that cannot be woken (
 
     // The at-a-glance count reads the same classifier and agrees.
     const fleet = await loadFleetWaitingOnUnavailableAgents(db, (await instanceSettingsService(db).getGeneral()).quietMode);
+    // DUR-4001: each row also carries the key its page is linked with and one
+    // plain line, so the Now page can name the agent and say what to do.
     expect(fleet).toEqual({
       tasks: 6,
       agents: 2,
       sample: [
-        { id: ceo, name: "CEO", companyId: durkan.companyId, tasks: 4, reason: "paused" },
-        { id: cto, name: "CTO", companyId: durkan.companyId, tasks: 2, reason: "paused" },
+        {
+          id: ceo,
+          name: "CEO",
+          companyId: durkan.companyId,
+          tasks: 4,
+          reason: "paused",
+          urlKey: "ceo",
+          reasonText: "Paused, with 4 tasks waiting. Resume CEO, or give the tasks to another agent.",
+        },
+        {
+          id: cto,
+          name: "CTO",
+          companyId: durkan.companyId,
+          tasks: 2,
+          reason: "paused",
+          urlKey: "cto",
+          reasonText: "Paused, with 2 tasks waiting. Resume CTO, or give the tasks to another agent.",
+        },
       ],
     });
   });

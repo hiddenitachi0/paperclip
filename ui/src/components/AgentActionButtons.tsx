@@ -110,6 +110,44 @@ export function ClearErrorButton({
   );
 }
 
+/**
+ * One row of the agent's "..." menu. Exported so a caller that collapses
+ * every action into that menu on a narrow screen (DUR-4001, the agents list
+ * on a phone) can add its own rows in the same style.
+ */
+export function AgentActionMenuItem({
+  icon: Icon,
+  label,
+  onClick,
+  disabled = false,
+  busy = false,
+  destructive = false,
+  title,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  /** Shows a spinner in place of the icon while the action is in flight. */
+  busy?: boolean;
+  destructive?: boolean;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 disabled:opacity-50 disabled:pointer-events-none${destructive ? " text-destructive" : ""}`}
+      disabled={disabled || busy}
+      aria-busy={busy ? "true" : undefined}
+      onClick={onClick}
+      title={title}
+    >
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}
+      {label}
+    </button>
+  );
+}
+
 function duplicateInstructionFilePath(
   _bundle: AgentInstructionsBundle,
   summary: AgentInstructionsFileSummary,
@@ -157,6 +195,8 @@ export function AgentActionButtons({
   onActionError,
   children,
   className,
+  variant = "buttons",
+  menuExtra,
 }: {
   agent: Agent;
   companyId?: string | null;
@@ -177,6 +217,15 @@ export function AgentActionButtons({
   /** Extra content rendered just before the overflow menu (e.g. live-run link). */
   children?: React.ReactNode;
   className?: string;
+  /**
+   * DUR-4001: "buttons" (default) is the inline cluster -- assign, run,
+   * pause/resume or clear error, then the "..." menu. "menu" puts every one of
+   * those inside the single "..." menu, for rows with no room for buttons
+   * (the agents list on a phone). Same mutations either way.
+   */
+  variant?: "buttons" | "menu";
+  /** Extra rows for the "..." menu, after the built-in ones (e.g. Join/Leave). */
+  menuExtra?: React.ReactNode;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -294,6 +343,122 @@ export function AgentActionButtons({
   const pauseResumeDisabled = disabled || isPendingApproval || (isPaused && workActionsDisabled);
   const clearErrorDisabled = disabled;
 
+  // The rows every "..." menu has, whichever variant is rendered. Reset and
+  // Terminate ask first (DUR-4001): on a phone the menu is the only way to
+  // act, and Terminate sits one tap below Copy Agent ID.
+  const secondaryMenuItems = (
+    <>
+      <AgentActionMenuItem
+        icon={Copy}
+        label="Duplicate Agent"
+        busy={duplicateAgent.isPending}
+        onClick={handleDuplicateAgent}
+      />
+      <AgentActionMenuItem
+        icon={Copy}
+        label="Copy Agent ID"
+        onClick={() => {
+          navigator.clipboard.writeText(agent.id);
+          setMoreOpen(false);
+        }}
+      />
+      <AgentActionMenuItem
+        icon={RotateCcw}
+        label="Reset Sessions"
+        onClick={() => {
+          setMoreOpen(false);
+          if (!window.confirm(`Reset the sessions of ${agent.name}? Its next run starts without the memory of earlier runs.`)) return;
+          resetTaskSession.mutate();
+        }}
+      />
+      <AgentActionMenuItem
+        icon={Trash2}
+        label="Terminate"
+        destructive
+        onClick={() => {
+          setMoreOpen(false);
+          if (!window.confirm(`Terminate ${agent.name}? This cannot be undone.`)) return;
+          agentAction.mutate("terminate");
+        }}
+      />
+    </>
+  );
+
+  // The narrow row's trigger is the only control on it, so it gets a
+  // finger-sized target rather than the 24px one the desktop cluster uses.
+  const moreMenuTrigger = (
+    <PopoverTrigger asChild>
+      <Button
+        variant="ghost"
+        size={variant === "menu" ? "icon-sm" : "icon-xs"}
+        aria-label={`Open actions for ${agent.name}`}
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </Button>
+    </PopoverTrigger>
+  );
+
+  if (variant === "menu") {
+    return (
+      <div className={className ?? "flex items-center shrink-0"}>
+        {children}
+        <Popover open={moreOpen} onOpenChange={setMoreOpen}>
+          {moreMenuTrigger}
+          <PopoverContent className="w-52 p-1" align="end" data-testid="agent-actions-menu">
+            <AgentActionMenuItem
+              icon={Plus}
+              label={assignLabel}
+              disabled={assignAndRunDisabled}
+              title={workActionsDisabled ? workActionsDisabledReason : undefined}
+              onClick={() => {
+                setMoreOpen(false);
+                openNewIssue({ assigneeAgentId: agent.id });
+              }}
+            />
+            <AgentActionMenuItem
+              icon={Play}
+              label={runLabel}
+              disabled={assignAndRunDisabled}
+              onClick={() => {
+                agentAction.mutate("invoke");
+                setMoreOpen(false);
+              }}
+            />
+            {isError ? (
+              <AgentActionMenuItem
+                icon={CheckCircle2}
+                label="Clear error"
+                disabled={clearErrorDisabled}
+                onClick={() => {
+                  agentAction.mutate("clear_error");
+                  setMoreOpen(false);
+                }}
+              />
+            ) : (
+              <AgentActionMenuItem
+                icon={isPaused ? Play : Pause}
+                label={isPaused ? "Resume" : "Pause"}
+                disabled={pauseResumeDisabled}
+                onClick={() => {
+                  agentAction.mutate(isPaused ? "resume" : "pause");
+                  setMoreOpen(false);
+                }}
+              />
+            )}
+            <div className="my-1 border-t border-border/60" role="separator" />
+            {secondaryMenuItems}
+            {menuExtra ? (
+              <>
+                <div className="my-1 border-t border-border/60" role="separator" />
+                {menuExtra}
+              </>
+            ) : null}
+          </PopoverContent>
+        </Popover>
+      </div>
+    );
+  }
+
   return (
     <div className={className ?? "flex items-center gap-1 sm:gap-2 shrink-0"}>
       <Button
@@ -334,54 +499,10 @@ export function AgentActionButtons({
       )}
       {children}
       <Popover open={moreOpen} onOpenChange={setMoreOpen}>
-        <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon-xs" aria-label={`Open actions for ${agent.name}`}>
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
-        </PopoverTrigger>
+        {moreMenuTrigger}
         <PopoverContent className="w-44 p-1" align="end">
-          <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
-            disabled={duplicateAgent.isPending}
-            onClick={handleDuplicateAgent}
-          >
-            {duplicateAgent.isPending ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Copy className="h-3 w-3" />
-            )}
-            Duplicate Agent
-          </button>
-          <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
-            onClick={() => {
-              navigator.clipboard.writeText(agent.id);
-              setMoreOpen(false);
-            }}
-          >
-            <Copy className="h-3 w-3" />
-            Copy Agent ID
-          </button>
-          <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50"
-            onClick={() => {
-              resetTaskSession.mutate();
-              setMoreOpen(false);
-            }}
-          >
-            <RotateCcw className="h-3 w-3" />
-            Reset Sessions
-          </button>
-          <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-destructive"
-            onClick={() => {
-              agentAction.mutate("terminate");
-              setMoreOpen(false);
-            }}
-          >
-            <Trash2 className="h-3 w-3" />
-            Terminate
-          </button>
+          {secondaryMenuItems}
+          {menuExtra}
         </PopoverContent>
       </Popover>
     </div>

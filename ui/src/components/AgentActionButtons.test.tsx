@@ -176,4 +176,116 @@ describe("AgentActionButtons", () => {
     expect(container.textContent).toContain("Pause");
     expect(container.textContent).not.toContain("Clear error");
   });
+
+  // DUR-4001: on a phone the agents list has no room for a row of buttons,
+  // so the whole cluster collapses into the one "..." menu -- same actions,
+  // same mutations, plus whatever the caller appends (Join/Leave).
+  it("puts every action in the one menu in the menu variant, and runs the same mutations from there", async () => {
+    root = createRoot(container);
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <AgentActionButtons
+          agent={makeAgent({ status: "error" })}
+          companyId="company-1"
+          runLabel="Run Heartbeat"
+          variant="menu"
+          menuExtra={<button type="button">Leave</button>}
+        />
+      </QueryClientProvider>,
+    );
+    await flushReact();
+
+    // Nothing inline but the trigger.
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector('[aria-label="Open actions for Alpha Agent"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Clear error and return agent to idle"]')).toBeNull();
+    expect(container.textContent).not.toContain("Run Heartbeat");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Open actions for Alpha Agent"]')?.click();
+    });
+    await flushReact();
+
+    const menu = document.body.querySelector('[data-testid="agent-actions-menu"]');
+    expect(menu).not.toBeNull();
+    const labels = Array.from(menu!.querySelectorAll("button")).map((btn) => btn.textContent?.trim());
+    expect(labels).toEqual([
+      "Assign Task",
+      "Run Heartbeat",
+      "Clear error",
+      "Duplicate Agent",
+      "Copy Agent ID",
+      "Reset Sessions",
+      "Terminate",
+      "Leave",
+    ]);
+
+    const clear = Array.from(menu!.querySelectorAll("button")).find((btn) => btn.textContent?.trim() === "Clear error");
+    await act(async () => {
+      clear!.click();
+    });
+    await flushReact();
+
+    expect(mockAgentsApi.clearError).toHaveBeenCalledWith("agent-1", "company-1");
+    // Choosing an item closes the menu.
+    expect(document.body.querySelector('[data-testid="agent-actions-menu"]')).toBeNull();
+  });
+
+  // DUR-4001: Terminate and Reset Sessions ask first, in both layouts. On a
+  // phone the menu is the only way to act and Terminate sits one tap below
+  // Copy Agent ID.
+  it("asks before terminating or resetting sessions, and does nothing when the answer is no", async () => {
+    const confirm = vi.spyOn(window, "confirm");
+    mockAgentsApi.terminate.mockResolvedValue(makeAgent({ status: "terminated" }));
+
+    for (const variant of ["buttons", "menu"] as const) {
+      root = createRoot(container);
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <AgentActionButtons agent={makeAgent()} companyId="company-1" variant={variant} />
+        </QueryClientProvider>,
+      );
+      await flushReact();
+
+      const openMenu = async () => {
+        await act(async () => {
+          container.querySelector<HTMLButtonElement>('[aria-label="Open actions for Alpha Agent"]')?.click();
+        });
+        await flushReact();
+      };
+      const pick = async (label: string) => {
+        await openMenu();
+        const item = Array.from(document.body.querySelectorAll("button")).find((btn) => btn.textContent?.trim() === label);
+        expect(item, `${label} in ${variant}`).toBeDefined();
+        await act(async () => {
+          item!.click();
+        });
+        await flushReact();
+      };
+
+      confirm.mockReturnValue(false);
+      await pick("Terminate");
+      expect(confirm).toHaveBeenLastCalledWith("Terminate Alpha Agent? This cannot be undone.");
+      expect(mockAgentsApi.terminate).not.toHaveBeenCalled();
+      await pick("Reset Sessions");
+      expect(confirm).toHaveBeenLastCalledWith(
+        "Reset the sessions of Alpha Agent? Its next run starts without the memory of earlier runs.",
+      );
+      expect(mockAgentsApi.resetSession).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      await pick("Terminate");
+      expect(mockAgentsApi.terminate).toHaveBeenCalledWith("agent-1", "company-1");
+      await pick("Reset Sessions");
+      expect(mockAgentsApi.resetSession).toHaveBeenCalledWith("agent-1", null, "company-1");
+
+      await act(async () => {
+        root!.unmount();
+      });
+      root = null;
+      mockAgentsApi.terminate.mockClear();
+      mockAgentsApi.resetSession.mockClear();
+    }
+    confirm.mockRestore();
+  });
 });
