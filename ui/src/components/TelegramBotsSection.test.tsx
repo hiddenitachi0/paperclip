@@ -9,7 +9,7 @@ import { TelegramBotsSection } from "./TelegramBotsSection";
 /**
  * DUR-3978 slice 2. Three things this screen must not get wrong:
  * the token field is never pre-filled, the operator only ever sees the masked
- * hint, and "Fjern" asks before it removes a bot.
+ * hint, and "Remove" asks before it removes a bot.
  */
 
 const mockTelegramBotsApi = vi.hoisted(() => ({
@@ -109,9 +109,9 @@ describe("TelegramBotsSection", () => {
   it("shows the masked hint and never a token, and leaves the token field empty", async () => {
     const root = await render();
 
-    expect(container.textContent).toContain("Telegram-boter");
+    expect(container.textContent).toContain("Telegram bots");
     expect(container.textContent).toContain("8100000001:••••ng01");
-    expect(container.textContent).toContain("Svarer som @durkan_ceo_bot");
+    expect(container.textContent).toContain("Answers as @durkan_ceo_bot");
     expect(container.textContent).not.toContain("AAH");
 
     const tokenField = container.querySelector<HTMLInputElement>("#telegram-bot-token");
@@ -130,15 +130,15 @@ describe("TelegramBotsSection", () => {
     const root = await render();
 
     await act(async () => {
-      button("Fjern")?.click();
+      button("Remove")?.click();
     });
     await flushReact();
 
     expect(mockTelegramBotsApi.remove).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Boten slutter å svare");
+    expect(container.textContent).toContain("The bot stops answering");
 
     await act(async () => {
-      button("Ja, fjern boten")?.click();
+      button("Yes, remove the bot")?.click();
     });
     await flushReact();
 
@@ -149,20 +149,20 @@ describe("TelegramBotsSection", () => {
     });
   });
 
-  it("can be stepped back from: Avbryt removes nothing", async () => {
+  it("can be stepped back from: Cancel removes nothing", async () => {
     const root = await render();
 
     await act(async () => {
-      button("Fjern")?.click();
+      button("Remove")?.click();
     });
     await flushReact();
     await act(async () => {
-      button("Avbryt")?.click();
+      button("Cancel")?.click();
     });
     await flushReact();
 
     expect(mockTelegramBotsApi.remove).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("Boten slutter å svare");
+    expect(container.textContent).not.toContain("The bot stops answering");
 
     await act(async () => {
       root.unmount();
@@ -176,7 +176,7 @@ describe("TelegramBotsSection", () => {
       container.querySelectorAll<HTMLOptionElement>("#telegram-bot-agent option"),
     ).map((option) => option.textContent);
 
-    expect(options).toEqual(["Velg en ansatt…", "Fork Lead"]);
+    expect(options).toEqual(["Choose an agent…", "Fork Lead"]);
 
     await act(async () => {
       root.unmount();
@@ -187,10 +187,10 @@ describe("TelegramBotsSection", () => {
     mockTelegramBotsApi.setAllowedUsers.mockResolvedValue({ ...bot, allowedTelegramUserIds: [] });
     const root = await render();
 
-    expect(container.textContent).toContain("Hvem får bruke denne boten");
+    expect(container.textContent).toContain("Who may use this bot");
     expect(container.textContent).toContain("111111");
 
-    const removeUser = container.querySelector<HTMLButtonElement>('button[aria-label="Fjern 111111"]');
+    const removeUser = container.querySelector<HTMLButtonElement>('button[aria-label="Remove 111111"]');
     await act(async () => {
       removeUser?.click();
     });

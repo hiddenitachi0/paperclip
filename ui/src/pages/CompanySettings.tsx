@@ -11,11 +11,8 @@ import { assetsApi } from "../api/assets";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Settings, CloudUpload, Download, Upload } from "lucide-react";
+import { Settings, CloudUpload, Download, Plug, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
-import { ServiceTokensSection } from "../components/ServiceTokensSection";
-import { TelegramBotsSection } from "../components/TelegramBotsSection";
-import { DataSourcesSection } from "../components/DataSourcesSection";
 import { isDefaultSkin, setDefaultSkin } from "../lib/company-branding";
 import {
   Field,
@@ -64,7 +61,6 @@ export function CompanySettings() {
     && attachmentMaxBytes >= BYTES_PER_MIB
     && attachmentMaxBytes <= MAX_COMPANY_ATTACHMENT_MAX_BYTES;
   const cloudSyncEnabled = experimentalSettings?.enableCloudSync === true;
-  const businessDataEnabled = experimentalSettings?.enableBusinessData === true;
 
   const generalDirty =
     !!selectedCompany &&
@@ -417,19 +413,26 @@ export function CompanySettings() {
         </div>
       </div>
 
-      {/* Service tokens (DUR-3977) */}
-      {selectedCompanyId ? (
-        <div className="space-y-4">
-          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Other systems
-          </div>
-          <ServiceTokensSection companyId={selectedCompanyId} />
-          {/* Telegram bots (DUR-3978) */}
-          <TelegramBotsSection companyId={selectedCompanyId} />
-          {/* Datakilder: the company's own sales data (DUR-3972), behind the instance switch */}
-          {businessDataEnabled ? <DataSourcesSection companyId={selectedCompanyId} /> : null}
+      {/* DUR-3997: AI-provider keys, data sources, Telegram bots and service
+          tokens all live on the Connections page now. */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Connections
         </div>
-      ) : null}
+        <div className="rounded-md border border-border px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            AI-provider keys, data sources, Telegram bots and keys for other systems have their own page.
+          </p>
+          <div className="mt-3">
+            <Button size="sm" variant="outline" asChild>
+              <a href="/company/settings/connections">
+                <Plug className="mr-1.5 h-3.5 w-3.5" />
+                Open Connections
+              </a>
+            </Button>
+          </div>
+        </div>
+      </div>
 
       {/* Danger Zone */}
       <div className="space-y-4">

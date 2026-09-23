@@ -17,8 +17,12 @@ import { Input } from "@/components/ui/input";
  *
  * The one thing this card must get right in the UI is that the key is shown
  * once. The server stores only a hash, so "show it again" is not a feature
- * that can be added later — the copy says so plainly, in Norwegian, before
- * the operator navigates away and loses it.
+ * that can be added later — the copy says so plainly before the operator
+ * navigates away and loses it.
+ *
+ * DUR-3997: lives on the Connections page. `readOnly` hides the create form
+ * and the Revoke button for operators and viewers; the server routes keep
+ * their own checks regardless.
  */
 /**
  * Scopes exist so a key's reach is a stored fact rather than an assumption.
@@ -26,11 +30,11 @@ import { Input } from "@/components/ui/input";
  * knowing what a scope string is, so each one gets a plain sentence.
  */
 function describeScope(scope: string): string {
-  if (scope === "lane_a:transform") return "be hurtigansatte om å skrive om tekst";
+  if (scope === "lane_a:transform") return "ask quick agents to rewrite text";
   return scope;
 }
 
-export function ServiceTokensSection({ companyId }: { companyId: string }) {
+export function ServiceTokensSection({ companyId, readOnly = false }: { companyId: string; readOnly?: boolean }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
   const [name, setName] = useState("");
@@ -62,7 +66,7 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
       invalidate();
     },
     onError: (err) => {
-      setError(err instanceof ApiError ? err.message : "Kunne ikke lage nøkkelen");
+      setError(err instanceof ApiError ? err.message : "Could not create the key");
     },
   });
 
@@ -70,10 +74,10 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
     mutationFn: (tokenId: string) => serviceTokensApi.revoke(companyId, tokenId),
     onSuccess: () => {
       invalidate();
-      pushToast({ title: "Nøkkelen er sperret", tone: "success" });
+      pushToast({ title: "Key revoked", tone: "success" });
     },
     onError: (err) => {
-      setError(err instanceof ApiError ? err.message : "Kunne ikke sperre nøkkelen");
+      setError(err instanceof ApiError ? err.message : "Could not revoke the key");
     },
   });
 
@@ -82,21 +86,21 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Nøkler for andre systemer</CardTitle>
+        <CardTitle>Keys for other systems</CardTitle>
         <CardDescription>
-          En nøkkel lar et annet system — for eksempel dashbordet — be en hurtigansatt om å skrive om tekst,
-          uten at noen må logge inn. Nøkkelen gjelder bare dette selskapet, og den kan bare gjøre det som
-          står under hver nøkkel i listen: den når verken oversikter, saker, vedlegg eller noe annet i
-          Paperclip, og kan ikke godkjenne eller endre noe. Du kan sperre den når som helst.
+          A key lets another system — for example the dashboard — ask a quick agent to rewrite text, without
+          anyone signing in. The key only works for this company, and it can only do what is listed under each
+          key below: it reaches no overviews, tasks, attachments or anything else in Paperclip, and cannot
+          approve or change anything. You can revoke it at any time.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {justCreated && (
           <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 space-y-2">
-            <p className="text-sm font-medium">Kopier nøkkelen nå</p>
+            <p className="text-sm font-medium">Copy the key now</p>
             <p className="text-xs text-muted-foreground">
-              Dette er eneste gang du får se den. Vi lagrer den ikke i lesbar form, så hvis du mister den må du
-              lage en ny og sperre denne.
+              This is the only time you will see it. It is not stored in readable form, so if you lose it you
+              must create a new one and revoke this one.
             </p>
             <code className="block break-all rounded bg-background px-2 py-1.5 font-mono text-xs">
               {justCreated.token}
@@ -107,43 +111,47 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
                 variant="secondary"
                 onClick={() => {
                   void navigator.clipboard?.writeText(justCreated.token);
-                  pushToast({ title: "Nøkkelen er kopiert", tone: "success" });
+                  pushToast({ title: "Key copied", tone: "success" });
                 }}
               >
-                Kopier
+                Copy
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setJustCreated(null)}>
-                Jeg har lagret den
+                I have saved it
               </Button>
             </div>
           </div>
         )}
 
-        <div className="flex items-end gap-2">
-          <div className="flex-1 space-y-1.5">
-            <label className="text-sm font-medium" htmlFor="service-token-name">
-              Hva skal nøkkelen brukes til?
-            </label>
-            <Input
-              id="service-token-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Dashbordet"
-              maxLength={120}
-            />
+        {readOnly ? (
+          <p className="text-xs text-muted-foreground">Only the company owner or an admin can create or revoke keys.</p>
+        ) : (
+          <div className="flex items-end gap-2">
+            <div className="flex-1 space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="service-token-name">
+                What will the key be used for?
+              </label>
+              <Input
+                id="service-token-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="The dashboard"
+                maxLength={120}
+              />
+            </div>
+            <Button
+              onClick={() => createMutation.mutate()}
+              disabled={!name.trim() || createMutation.isPending}
+            >
+              {createMutation.isPending ? "Creating…" : "Create key"}
+            </Button>
           </div>
-          <Button
-            onClick={() => createMutation.mutate()}
-            disabled={!name.trim() || createMutation.isPending}
-          >
-            {createMutation.isPending ? "Lager…" : "Lag nøkkel"}
-          </Button>
-        </div>
+        )}
 
         {tokensQuery.isLoading ? (
-          <p className="text-sm text-muted-foreground">Henter…</p>
+          <p className="text-sm text-muted-foreground">Loading…</p>
         ) : tokens.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Ingen nøkler er laget ennå.</p>
+          <p className="text-sm text-muted-foreground">No keys created yet.</p>
         ) : (
           <ul className="divide-y rounded-md border">
             {tokens.map((token) => (
@@ -152,22 +160,24 @@ export function ServiceTokensSection({ companyId }: { companyId: string }) {
                   <p className="truncate text-sm font-medium">{token.name}</p>
                   <p className="text-xs text-muted-foreground">
                     {token.lastUsedAt
-                      ? `Sist brukt ${new Date(token.lastUsedAt).toLocaleString("nb-NO")}`
-                      : "Aldri brukt"}
+                      ? `Last used ${new Date(token.lastUsedAt).toLocaleString()}`
+                      : "Never used"}
                     {" · "}
                     {token.scopes.length > 0
-                      ? `Kan bare: ${token.scopes.map(describeScope).join(", ")}`
-                      : "Kan ingenting (ingen tilganger)"}
+                      ? `Can only: ${token.scopes.map(describeScope).join(", ")}`
+                      : "Can do nothing (no permissions)"}
                   </p>
                 </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => revokeMutation.mutate(token.id)}
-                  disabled={revokeMutation.isPending}
-                >
-                  Sperr
-                </Button>
+                {!readOnly && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => revokeMutation.mutate(token.id)}
+                    disabled={revokeMutation.isPending}
+                  >
+                    Revoke
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
