@@ -9,6 +9,7 @@ import {
   DEFAULT_MAX_RUN_DURATION_MINUTES,
   DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
   DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+  DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS,
   DEFAULT_MAX_TURNS_PER_RUN,
   DEFAULT_SESSION_RESET_AFTER_RUNS,
   DEFAULT_SESSION_RESET_AFTER_HOURS,
@@ -87,6 +88,8 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
       silentRunTimeoutMinutes: parsed.data.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
       needsYouStalledAfterHours:
         parsed.data.needsYouStalledAfterHours ?? DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+      agentCardExpiresAfterHours:
+        parsed.data.agentCardExpiresAfterHours ?? DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS,
       maxTurnsPerRun: parsed.data.maxTurnsPerRun ?? DEFAULT_MAX_TURNS_PER_RUN,
       sessionResetAfterRuns: parsed.data.sessionResetAfterRuns ?? DEFAULT_SESSION_RESET_AFTER_RUNS,
       sessionResetAfterHours: parsed.data.sessionResetAfterHours ?? DEFAULT_SESSION_RESET_AFTER_HOURS,
@@ -112,6 +115,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     maxRunDurationMinutes: DEFAULT_MAX_RUN_DURATION_MINUTES,
     silentRunTimeoutMinutes: DEFAULT_SILENT_RUN_TIMEOUT_MINUTES,
     needsYouStalledAfterHours: DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+    agentCardExpiresAfterHours: DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS,
     maxTurnsPerRun: DEFAULT_MAX_TURNS_PER_RUN,
     sessionResetAfterRuns: DEFAULT_SESSION_RESET_AFTER_RUNS,
     sessionResetAfterHours: DEFAULT_SESSION_RESET_AFTER_HOURS,

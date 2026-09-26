@@ -13,6 +13,7 @@ import {
   withCompanyScope,
 } from "@paperclipai/db";
 import { trackInteractionResolved } from "@paperclipai/shared/telemetry";
+import { DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS } from "@paperclipai/shared";
 import type {
   AcceptIssueThreadInteraction,
   AskUserQuestionsAnswer,
@@ -45,6 +46,7 @@ import {
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { approvalService } from "./approvals.js";
+import { instanceSettingsService } from "./instance-settings.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
 import {
   decideConfirmationCreate,
@@ -64,15 +66,129 @@ type InteractionActor = {
 const ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT =
   "issue_thread_interactions_company_issue_idempotency_uq";
 
+const HOUR_MS = 60 * 60 * 1000;
+
 /**
- * DUR-162: how long a pending card sits in the operator's live decision queue
- * unanswered before it closes itself. Two placeholder cards sat for about an
- * hour and a third sat overnight before a human noticed and cancelled them by
- * hand — this bounds that window instead of leaving abandoned cards to pile up
- * forever. 24h gives an operator a normal working day to get to it before the
- * platform assumes nobody is coming.
+ * DUR-162: how long a pending card an AGENT filed sits in the operator's live
+ * decision queue unanswered before it closes itself, when the instance
+ * setting has not been changed. Two placeholder cards sat for about an hour
+ * and a third sat overnight before a human noticed and cancelled them by
+ * hand — this bounds that window instead of leaving abandoned cards to pile
+ * up forever. 24h gives an operator a normal working day to get to it before
+ * the platform assumes nobody is coming.
+ *
+ * This is the agent default only. The live rule is per card, see
+ * resolveInteractionExpiryRule: a card a board user filed never closes by
+ * itself unless the card carries its own limit. The operator's own checklist
+ * cards (filed from the board as a to-do list) were swept away by the old
+ * flat 24h rule, and an agent then treated one of those tasks as done
+ * because its card was gone.
  */
-export const ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS = DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS * HOUR_MS;
+
+export type InteractionExpiryRule =
+  | { kind: "never" }
+  | { kind: "explicit"; hours: number }
+  | { kind: "agent_default"; hours: number };
+
+type InteractionExpiryInput = {
+  createdByAgentId?: string | null;
+  createdByUserId?: string | null;
+  expiresAfterHours?: number | null;
+  neverExpires?: boolean | null;
+};
+
+/**
+ * The effective limit for one card, in this order:
+ *   1. neverExpires            -> never closes by itself
+ *   2. expiresAfterHours (> 0) -> that many hours, whoever filed it
+ *   3. filed by a board user    -> never (created_by_user_id set, no agent)
+ *   4. otherwise (an agent, or no recorded creator) -> the instance default
+ *
+ * Rows written before migration 0176 have NULL / false in the two new
+ * columns, so existing cards get rule 3 or 4 with no data migration.
+ */
+export function resolveInteractionExpiryRule(
+  row: InteractionExpiryInput,
+  agentDefaultHours: number,
+): InteractionExpiryRule {
+  if (row.neverExpires === true) return { kind: "never" };
+  if (typeof row.expiresAfterHours === "number" && Number.isFinite(row.expiresAfterHours) && row.expiresAfterHours > 0) {
+    return { kind: "explicit", hours: row.expiresAfterHours };
+  }
+  if (resolveCreatorKind(row) === "user") return { kind: "never" };
+  return { kind: "agent_default", hours: agentDefaultHours };
+}
+
+/**
+ * The SQL half of resolveInteractionExpiryRule, so the scheduler only ever
+ * loads rows that are actually due (bounded by .limit(50) by the caller)
+ * instead of one flat cutoff that would also pick up board users' cards.
+ */
+export function buildAbandonedPendingWhere(now: Date, agentDefaultHours: number) {
+  const agentCutoff = new Date(now.getTime() - agentDefaultHours * HOUR_MS);
+  const nowIso = now.toISOString();
+  return and(
+    eq(issueThreadInteractions.status, "pending"),
+    eq(issueThreadInteractions.neverExpires, false),
+    or(
+      // Rule 2: the card carries its own limit and created_at + limit has passed.
+      and(
+        isNotNull(issueThreadInteractions.expiresAfterHours),
+        sql`${issueThreadInteractions.createdAt} + make_interval(hours => ${issueThreadInteractions.expiresAfterHours}) <= ${nowIso}::timestamptz`,
+      ),
+      // Rule 4: no limit of its own, and NOT filed by a board user (rule 3),
+      // i.e. an agent's card or one with no recorded creator.
+      and(
+        isNull(issueThreadInteractions.expiresAfterHours),
+        or(
+          isNotNull(issueThreadInteractions.createdByAgentId),
+          isNull(issueThreadInteractions.createdByUserId),
+        ),
+        lte(issueThreadInteractions.createdAt, agentCutoff),
+      ),
+    ),
+  );
+}
+
+function formatHours(hours: number) {
+  return hours === 1 ? "1 hour" : `${hours} hours`;
+}
+
+/**
+ * Plain words for the card's own result and for the note on the task. A card
+ * the board user filed with their own limit must not read "nobody needs to
+ * act": they filed it for themselves, so the note says their limit ran out.
+ */
+export function abandonedInteractionWording(
+  row: InteractionExpiryInput & { kind: string; title?: string | null },
+  rule: Exclude<InteractionExpiryRule, { kind: "never" }>,
+): { reason: string; comment: string } {
+  const label = row.title?.trim() || row.kind;
+  const span = formatHours(rule.hours);
+  if (rule.kind === "explicit") {
+    if (resolveCreatorKind(row) === "user") {
+      return {
+        reason: `Closed automatically: the time limit you set on this card (${span}) ran out before it was answered.`,
+        comment:
+          `Your "${label}" card was closed automatically because the time limit you set on it (${span}) ` +
+          `ran out before it was answered. File it again if you still need it.`,
+      };
+    }
+    return {
+      reason: `Closed automatically: the time limit the agent set on this card (${span}) ran out before it was answered.`,
+      comment:
+        `A pending "${label}" request to the operator was closed automatically because the time limit the agent ` +
+        `set on it (${span}) ran out before it was answered. Nobody needs to act on it.`,
+    };
+  }
+  return {
+    reason: `Automatically closed: nobody answered this in the operator queue within ${span}.`,
+    comment:
+      `A pending "${label}" request to the operator went unanswered for over ${span} and was closed automatically. ` +
+      `Nobody needs to act on it.`,
+  };
+}
 
 type IssueWakeTarget = {
   id: string;
@@ -152,6 +268,8 @@ function isEquivalentCreateRequest(
     && (row.linkedApprovalId ?? null) === (("linkedApprovalId" in input ? input.linkedApprovalId : null) ?? null)
     && (row.title ?? null) === (input.title ?? null)
     && (row.summary ?? null) === (input.summary ?? null)
+    && (row.expiresAfterHours ?? null) === (input.expiresAfterHours ?? null)
+    && (row.neverExpires ?? false) === (input.neverExpires ?? false)
     && (row.createdByAgentId ?? null) === (actor.agentId ?? null)
     && (row.createdByUserId ?? null) === (actor.userId ?? null)
     && isDeepStrictEqual(row.payload, input.payload)
@@ -231,14 +349,45 @@ function shouldSupersedeInteractionOnUserComment(interaction: UserCommentSuperse
   return interaction.payload.supersedeOnUserComment === true;
 }
 
-function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
+/**
+ * Whether a board user's comment on the issue may close this pending card.
+ * The stored payload flag is only half of it:
+ *   * a card with never_expires set is never closed by a comment, whatever
+ *     the flag says;
+ *   * a card a board user filed for themselves (created_by_user_id set, no
+ *     agent) is never closed by their own comment. The flag used to default
+ *     to true for those cards too, and a stored true cannot be told apart
+ *     from one the user typed, so user-filed cards are skipped outright
+ *     rather than trusting the stored flag. That covers the operator's
+ *     re-posted checklist cards already on the box.
+ */
+function isSupersedableByUserComment(row: IssueThreadInteractionRow): boolean {
+  if (!isUserCommentSupersedableKind(row.kind)) return false;
+  if (row.neverExpires === true) return false;
+  if (resolveCreatorKind(row) === "user") return false;
+  return shouldSupersedeInteractionOnUserComment(hydrateInteraction(row) as UserCommentSupersedableInteraction);
+}
+
+/**
+ * Fills in supersedeOnUserComment when the caller left it out. An agent's
+ * card defaults to true (a later board comment means "revise and ask
+ * again"); a card a board user files for themselves defaults to false (their
+ * own comments on the task are not an answer to their own checklist). An
+ * explicit value in the payload always wins.
+ */
+function normalizeCreateInteractionInput(
+  input: CreateIssueThreadInteraction,
+  actor: InteractionActor,
+): CreateIssueThreadInteraction {
+  const filedByBoardUser = Boolean(actor.userId) && !actor.agentId;
+  const defaultSupersede = !filedByBoardUser;
   switch (input.kind) {
     case "ask_user_questions":
       return {
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? defaultSupersede,
         },
       };
     case "request_confirmation":
@@ -246,7 +395,7 @@ function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): C
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? defaultSupersede,
         },
       };
     case "request_checkbox_confirmation":
@@ -254,7 +403,7 @@ function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): C
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? defaultSupersede,
         },
       };
     default:
@@ -1149,7 +1298,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
       input: CreateIssueThreadInteraction,
       actor: InteractionActor,
     ) => {
-      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input), actor);
 
       if (data.idempotencyKey) {
         const existing = await getIdempotentInteraction({
@@ -1233,6 +1382,8 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
             linkedApprovalId,
             title: data.title ?? null,
             summary: data.summary ?? null,
+            expiresAfterHours: data.expiresAfterHours ?? null,
+            neverExpires: data.neverExpires ?? false,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
             payload: data.payload,
@@ -1268,7 +1419,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
       input: CreateIssueThreadInteraction,
       actor: InteractionActor,
     ): Promise<void> => {
-      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input), actor);
       await enforceAgentConfirmationReferences(issue, data, actor);
     },
 
@@ -1557,17 +1708,13 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
           eq(issueThreadInteractions.status, "pending"),
         ));
 
-      const superseded = rows.filter((row) => {
-        if (!isUserCommentSupersedableKind(row.kind)) return false;
-        const interaction = hydrateInteraction(row) as UserCommentSupersedableInteraction;
-        return (
-          shouldSupersedeInteractionOnUserComment(interaction)
-          && isCommentAtOrAfterInteraction({
-            commentCreatedAt: comment.createdAt,
-            interactionCreatedAt: row.createdAt,
-          })
-        );
-      });
+      const superseded = rows.filter((row) => (
+        isSupersedableByUserComment(row)
+        && isCommentAtOrAfterInteraction({
+          commentCreatedAt: comment.createdAt,
+          interactionCreatedAt: row.createdAt,
+        })
+      ));
 
       if (superseded.length === 0) return [];
 
@@ -1635,9 +1782,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         }
       >();
       for (const row of rows) {
-        if (!isUserCommentSupersedableKind(row.kind)) continue;
-        const interaction = hydrateInteraction(row) as UserCommentSupersedableInteraction;
-        if (!shouldSupersedeInteractionOnUserComment(interaction)) continue;
+        if (!isSupersedableByUserComment(row)) continue;
 
         const supersedingComment = comments.find((comment) => isCommentAtOrAfterInteraction({
           commentCreatedAt: comment.createdAt,
@@ -2062,33 +2207,41 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
     },
 
     // DUR-162: a card nobody answers should not sit in the operator's live
-    // decision queue forever — close it after ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS
-    // and say why, both on the interaction's own result (same per-kind shape
+    // decision queue forever — close it once its own limit has passed and say
+    // why, both on the interaction's own result (same per-kind shape
     // resolveAllPendingForIssueClosed above already uses) and as a comment on
     // the issue, so the closure is visible where a human would actually look.
+    // The limit is per card (resolveInteractionExpiryRule): the card's own
+    // expiresAfterHours if set, else never for a card a board user filed,
+    // else the instance setting for a card an agent filed.
     // Company-agnostic periodic tick, called from the same setInterval loop as
     // mergeDeployVisibility.tick / heartbeat.tickTimers in server/src/index.ts.
     expireAbandonedPending: async (
       now: Date = new Date(),
     ): Promise<IssueThreadInteraction[]> => {
-      const cutoff = new Date(now.getTime() - ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS);
+      const general = await instanceSettingsService(db).getGeneral();
+      const agentDefaultHours = general.agentCardExpiresAfterHours ?? DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS;
       const rows: IssueThreadInteractionRow[] = await db
         .select()
         .from(issueThreadInteractions)
-        .where(and(
-          eq(issueThreadInteractions.status, "pending"),
-          lte(issueThreadInteractions.createdAt, cutoff),
-        ))
+        .where(buildAbandonedPendingWhere(now, agentDefaultHours))
         .limit(50);
       if (rows.length === 0) return [];
 
-      const hours = Math.round(ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS / (60 * 60 * 1000));
-      const reason = `Automatically closed: nobody answered this in the operator queue within ${hours} hours.`;
       const resolvedAt = new Date();
       const issuesSvc = issueService(db);
       const resolved: IssueThreadInteraction[] = [];
 
       for (const row of rows) {
+        // The query above already applied the per-card rule; apply it again
+        // here so a card can never close before its own limit whatever the
+        // query returned.
+        const rule = resolveInteractionExpiryRule(row, agentDefaultHours);
+        if (rule.kind === "never") continue;
+        const createdAtMs = new Date(row.createdAt).getTime();
+        if (!Number.isFinite(createdAtMs) || createdAtMs + rule.hours * HOUR_MS > now.getTime()) continue;
+        const { reason, comment } = abandonedInteractionWording(row, rule);
+
         let patch: { status: string; result: unknown } | null = null;
         if (row.kind === "suggest_tasks") {
           patch = { status: "rejected", result: { version: 1, rejectionReason: reason } };
@@ -2113,13 +2266,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         if (!updated) continue;
 
         await touchIssue(db, row.issueId);
-        await issuesSvc.addComment(
-          row.issueId,
-          `A pending "${row.title?.trim() || row.kind}" request to the operator went unanswered for over ` +
-            `${hours} hours and was closed automatically. Nobody needs to act on it.`,
-          {},
-          { authorType: "system" },
-        );
+        await issuesSvc.addComment(row.issueId, comment, {}, { authorType: "system" });
         resolved.push(hydrateInteraction(updated));
       }
 

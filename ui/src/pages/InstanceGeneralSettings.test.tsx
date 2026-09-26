@@ -56,6 +56,7 @@ function defaultGeneralSettings(): InstanceGeneralSettingsPayload {
     maxRunDurationMinutes: 60,
     silentRunTimeoutMinutes: 20,
     needsYouStalledAfterHours: 12,
+    agentCardExpiresAfterHours: 24,
     maxTurnsPerRun: 100,
     sessionResetAfterRuns: 20,
     sessionResetAfterHours: 12,

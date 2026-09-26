@@ -3,7 +3,7 @@ import type {
   IssueThreadInteractionResult,
 } from "@paperclipai/shared";
 import { sql } from "drizzle-orm";
-import { pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { approvals } from "./approvals.js";
 import { companies } from "./companies.js";
@@ -33,6 +33,14 @@ export const issueThreadInteractions = pgTable(
     createdByUserId: text("created_by_user_id"),
     resolvedByAgentId: uuid("resolved_by_agent_id").references(() => agents.id),
     resolvedByUserId: text("resolved_by_user_id"),
+    // Migration 0176: how long this card may sit unanswered before it closes
+    // itself. NULL = the default for whoever created it (a board user's card
+    // never closes by itself; an agent's card closes after the instance
+    // setting, 24 hours unless changed). A CHECK refuses 0 and negatives.
+    expiresAfterHours: integer("expires_after_hours"),
+    // The explicit "never" for any card, kept as its own flag so no reader
+    // has to know a sentinel number.
+    neverExpires: boolean("never_expires").notNull().default(false),
     payload: jsonb("payload").$type<IssueThreadInteractionPayload>().notNull(),
     result: jsonb("result").$type<IssueThreadInteractionResult>(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),

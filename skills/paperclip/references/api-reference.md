@@ -715,7 +715,7 @@ Rules:
 - `continuationPolicy: "wake_assignee"` wakes the assignee only after a `request_confirmation` is accepted.
 - Rejection does not wake the assignee by default. The board/user can add a normal comment when revisions are needed.
 - Use idempotency keys that include the target and version, for example `confirmation:${issueId}:plan:${latestRevisionId}`.
-- Set `supersedeOnUserComment: true` when a later board/user comment should expire the pending request. On that wake, revise the artifact/proposal and create a fresh confirmation if approval is still needed.
+- Set `supersedeOnUserComment: true` when a later board/user comment should expire the pending request (the default for a card an agent files). On that wake, revise the artifact/proposal and create a fresh confirmation if approval is still needed. A card a board user files for themselves defaults to `false` and is never closed by their own comment.
 - A pending interaction is an explicit waiting path. Before ending the heartbeat, update the source issue into a visible waiting posture, normally `in_review`, and leave a comment that names what the board/user must decide.
 - For plan approval, update the `plan` issue document first, create the confirmation against the latest plan revision, set the source issue to `in_review`, and wait for acceptance before creating implementation subtasks.
 
@@ -784,12 +784,18 @@ Payload field reference (`RequestCheckboxConfirmationPayload`):
 | `rejectReasonLabel`         | string (1–160) \| `null`                   | `null`                           | Field label for the reject reason.                                                                                                          |
 | `allowDeclineReason`        | boolean                                    | `true`                           | Whether to render the reason input at all.                                                                                                  |
 | `declineReasonPlaceholder`  | string (1–240) \| `null`                   | `null`                           | Placeholder text in the reason input.                                                                                                       |
-| `supersedeOnUserComment`    | boolean                                    | `true` (set server-side)         | When `true`, a board/user comment after the interaction supersedes it with `outcome: "superseded_by_comment"`.                              |
+| `supersedeOnUserComment`    | boolean                                    | `true` for an agent's card, `false` for a board user's own card (set server-side) | When `true`, a board/user comment after the interaction supersedes it with `outcome: "superseded_by_comment"`. A card a board user filed is never closed by that user's own comment, and a card with `neverExpires: true` is never closed by a comment. |
 | `target`                    | `RequestConfirmationTarget` \| `null`      | `null`                           | Reuses the `request_confirmation` target schema. Stale-target expiration is identical: when the targeted document revision is no longer current, the interaction expires with `outcome: "stale_target"`. |
 
 Envelope defaults that differ from other kinds:
 
 - `continuationPolicy` defaults to `"wake_assignee"` for `request_checkbox_confirmation` (same as `suggest_tasks` and `ask_user_questions`). Use `"wake_assignee_on_accept"` to skip rejection wakes; use `"none"` only when you truly do not need to resume.
+
+Envelope fields shared by every interaction kind (optional):
+
+- `expiresAfterHours` (integer, 1 or more) — close this card by itself after that many hours if nobody answers it. Omit it to get the default for whoever filed the card: a card an agent filed closes after the instance setting "Close unanswered agent cards after" (24 hours unless the operator changed it); a card a board user filed never closes by itself. `0` is not a value.
+- `neverExpires` (boolean) — never close this card by itself, whoever filed it. Cannot be combined with `expiresAfterHours`.
+- A card that closes by itself ends as `expired` with `outcome: "auto_resolved"` (confirmations), `cancelled` (questions) or `rejected` (task proposals), and a system comment on the issue says why. If you still need the decision, file a fresh card.
 
 Accept (board action, requires board/user role; agents creating the interaction cannot accept):
 

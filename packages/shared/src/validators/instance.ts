@@ -23,6 +23,9 @@ import {
   DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
   MIN_NEEDS_YOU_STALLED_AFTER_HOURS,
   MAX_NEEDS_YOU_STALLED_AFTER_HOURS,
+  DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS,
+  MIN_AGENT_CARD_EXPIRES_AFTER_HOURS,
+  MAX_AGENT_CARD_EXPIRES_AFTER_HOURS,
   DEFAULT_MAX_TURNS_PER_RUN,
   MIN_MAX_TURNS_PER_RUN,
   MAX_MAX_TURNS_PER_RUN,
@@ -174,6 +177,16 @@ export const instanceGeneralSettingsSchema = z.object({
     .min(MIN_NEEDS_YOU_STALLED_AFTER_HOURS)
     .max(MAX_NEEDS_YOU_STALLED_AFTER_HOURS)
     .default(DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS),
+  // Hours an unanswered card an agent filed for the operator may sit before
+  // it closes itself. Cards a board user filed never close by themselves
+  // unless the card carries its own limit; see
+  // issueThreadInteractionService.expireAbandonedPending.
+  agentCardExpiresAfterHours: z
+    .number()
+    .int()
+    .min(MIN_AGENT_CARD_EXPIRES_AFTER_HOURS)
+    .max(MAX_AGENT_CARD_EXPIRES_AFTER_HOURS)
+    .default(DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS),
   // DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
   // An agent's own adapterConfig.maxTurnsPerRun (> 0) takes precedence.
   maxTurnsPerRun: z

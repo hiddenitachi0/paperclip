@@ -22,6 +22,9 @@ import {
   DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
   MIN_NEEDS_YOU_STALLED_AFTER_HOURS,
   MAX_NEEDS_YOU_STALLED_AFTER_HOURS,
+  DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS,
+  MIN_AGENT_CARD_EXPIRES_AFTER_HOURS,
+  MAX_AGENT_CARD_EXPIRES_AFTER_HOURS,
   DEFAULT_MAX_TURNS_PER_RUN,
   MIN_MAX_TURNS_PER_RUN,
   MAX_MAX_TURNS_PER_RUN,
@@ -272,6 +275,8 @@ export function InstanceGeneralSettings() {
   const silentRunTimeoutMinutes = generalQuery.data?.silentRunTimeoutMinutes ?? DEFAULT_SILENT_RUN_TIMEOUT_MINUTES;
   const needsYouStalledAfterHours =
     generalQuery.data?.needsYouStalledAfterHours ?? DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS;
+  const agentCardExpiresAfterHours =
+    generalQuery.data?.agentCardExpiresAfterHours ?? DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS;
   const maxTurnsPerRun = generalQuery.data?.maxTurnsPerRun ?? DEFAULT_MAX_TURNS_PER_RUN;
   const sessionResetAfterRuns = generalQuery.data?.sessionResetAfterRuns ?? DEFAULT_SESSION_RESET_AFTER_RUNS;
   const sessionResetAfterHours = generalQuery.data?.sessionResetAfterHours ?? DEFAULT_SESSION_RESET_AFTER_HOURS;
@@ -492,6 +497,31 @@ export function InstanceGeneralSettings() {
             max={MAX_NEEDS_YOU_STALLED_AFTER_HOURS}
             pending={updateGeneralMutation.isPending}
             onSave={(hours) => updateGeneralMutation.mutate({ needsYouStalledAfterHours: hours })}
+          />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Cards nobody answers</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              An agent can put a card in your queue: a yes/no question, a checklist, a short form or a list of
+              proposed tasks. A card an agent filed that nobody answers within this many hours is closed by itself,
+              with a note on the task saying so, so abandoned cards do not pile up. Cards you file yourself from the
+              board (for example a checklist you keep as your own to-do list) are never closed by themselves: they
+              stay until you answer or cancel them, unless you gave the card its own time limit when you filed it.
+              Default {DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS} hours.
+            </p>
+          </div>
+          <MinutesLimitField
+            label="Close unanswered agent cards after"
+            unit="hours"
+            saved={agentCardExpiresAfterHours}
+            min={MIN_AGENT_CARD_EXPIRES_AFTER_HOURS}
+            max={MAX_AGENT_CARD_EXPIRES_AFTER_HOURS}
+            pending={updateGeneralMutation.isPending}
+            onSave={(hours) => updateGeneralMutation.mutate({ agentCardExpiresAfterHours: hours })}
           />
         </div>
       </section>

@@ -115,6 +115,11 @@ interface JsonPayloadOptions extends BaseClientOptions {
   payloadJson: string;
 }
 
+interface InteractionCreateOptions extends JsonPayloadOptions {
+  expiresAfterHours?: string;
+  neverExpires?: boolean;
+}
+
 interface IssueDocumentPutOptions extends BaseClientOptions {
   title?: string;
   format?: string;
@@ -750,10 +755,21 @@ export function registerIssueCommands(program: Command): void {
       .description("Create an issue thread interaction from JSON")
       .argument("<issueId>", "Issue ID")
       .requiredOption("--payload-json <json>", "CreateIssueThreadInteraction JSON payload")
-      .action(async (issueId: string, opts: JsonPayloadOptions) => {
+      .option(
+        "--expires-after-hours <hours>",
+        "Close this card by itself after this many whole hours if nobody answers it (1 or more). "
+          + "Without it, a card you file from the board never closes by itself; a card an agent files closes after the instance setting.",
+      )
+      .option("--never-expires", "Never close this card by itself, whoever filed it")
+      .action(async (issueId: string, opts: InteractionCreateOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
-          const payload = createIssueThreadInteractionSchema.parse(parseJson(opts.payloadJson));
+          const raw = parseJson(opts.payloadJson);
+          const body: Record<string, unknown> =
+            raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : {};
+          if (opts.expiresAfterHours !== undefined) body.expiresAfterHours = Number(opts.expiresAfterHours);
+          if (opts.neverExpires) body.neverExpires = true;
+          const payload = createIssueThreadInteractionSchema.parse(body);
           const interaction = await ctx.api.post(apiPath`/api/issues/${issueId}/interactions`, payload);
           printOutput(interaction, { json: ctx.json });
         } catch (err) {
