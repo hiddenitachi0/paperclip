@@ -65,6 +65,21 @@ export const DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS = 12;
 export const MIN_NEEDS_YOU_STALLED_AFTER_HOURS = 1;
 export const MAX_NEEDS_YOU_STALLED_AFTER_HOURS = 24 * 30;
 
+// How long a card an AGENT filed for the operator (a confirmation, a checkbox
+// list, a question form, a task proposal) may sit unanswered before it closes
+// itself. Written for cards an agent raises and then abandons; a card a board
+// user filed never closes by itself unless the card carries its own limit.
+// 24 hours by default: a normal working day to get to it.
+export const DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS = 24;
+export const MIN_AGENT_CARD_EXPIRES_AFTER_HOURS = 1;
+export const MAX_AGENT_CARD_EXPIRES_AFTER_HOURS = 24 * 30;
+
+// Per-card limit an agent or a board user may put on one card
+// (expiresAfterHours on create). Whole hours; 0 is not a value, "never" is
+// its own flag (neverExpires).
+export const MIN_INTERACTION_EXPIRES_AFTER_HOURS = 1;
+export const MAX_INTERACTION_EXPIRES_AFTER_HOURS = 24 * 365;
+
 // DUR-3943 item 4: every turn of a run re-sends the whole standing context,
 // so the turn ceiling is the single biggest multiplier on what a run can
 // cost. Instance-wide default for Claude-style local agents; an agent's own
@@ -303,6 +318,10 @@ export interface InstanceGeneralSettings {
    * task whose assignee cannot run at all -- that is reported immediately.
    */
   needsYouStalledAfterHours: number;
+  // Hours an unanswered card an agent filed for the operator may sit before
+  // it closes itself; a board user's card never does unless it carries its
+  // own limit. See DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS.
+  agentCardExpiresAfterHours: number;
   /**
    * DUR-3943 item 4: turn ceiling for one run of a Claude-style local agent.
    * Per-agent override: adapterConfig.maxTurnsPerRun (> 0 wins).

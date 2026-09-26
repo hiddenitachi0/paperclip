@@ -305,6 +305,7 @@ Key shared semantics:
 - **Idempotency.** Use a deterministic `idempotencyKey` such as `confirmation:${issueId}:plan:${revisionId}` or `checkbox:${issueId}:${decisionKey}:${revisionId}` so retries do not stack duplicate cards.
 - **Never double-ask.** Don't raise a `request_confirmation`/`request_checkbox_confirmation` for a decision that already has (or will get) a `request_board_approval` — see "One request per decision" above. If you closed the issue while a `request_confirmation` was still pending, Paperclip resolves it automatically with `outcome: "auto_resolved"`; you don't need to clean it up by hand.
 - **Source issue posture.** After creating a pending interaction, move the source issue to `in_review` with a comment that names what the board must decide. The pending interaction is the explicit waiting path.
+- **Cards close by themselves.** A card you file that nobody answers closes by itself after the instance setting (24 hours unless the operator changed it), with a system comment on the issue; the interaction ends `expired`/`auto_resolved` (confirmations), `cancelled` (questions) or `rejected` (task proposals). Set `expiresAfterHours` on the envelope for a different limit, or `neverExpires: true` to keep it open. Cards a board user files never close by themselves unless they carry their own limit, so a checklist the operator keeps for themselves is not yours to consider done when it is still pending.
 
 Create a `request_checkbox_confirmation` (board selects any subset, then confirms):
 

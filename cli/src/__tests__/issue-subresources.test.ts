@@ -224,6 +224,35 @@ describe("issue subresource commands", () => {
     });
   });
 
+  it("interaction:create passes a per-card time limit or an explicit never-expires from flags", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+    const checklist = {
+      kind: "request_checkbox_confirmation",
+      payload: { version: 1, prompt: "Tick what you have finished today", options: [{ id: "a", label: "Call the accountant" }] },
+    };
+
+    await run(["issue", "interaction:create", ISSUE_ID, "--payload-json", JSON.stringify(checklist)]);
+    await run(["issue", "interaction:create", ISSUE_ID, "--payload-json", JSON.stringify(checklist), "--expires-after-hours", "2"]);
+    await run(["issue", "interaction:create", ISSUE_ID, "--payload-json", JSON.stringify(checklist), "--never-expires"]);
+    // 0 is not a value: the shared validator refuses it before any request is sent.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    await expect(
+      run(["issue", "interaction:create", ISSUE_ID, "--payload-json", JSON.stringify(checklist), "--expires-after-hours", "0"]),
+    ).rejects.toThrow("exit 1");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1]?.body)) as Record<string, unknown>);
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0]).not.toHaveProperty("expiresAfterHours");
+    expect(bodies[0]).not.toHaveProperty("neverExpires");
+    expect(bodies[1]?.expiresAfterHours).toBe(2);
+    expect(bodies[2]?.neverExpires).toBe(true);
+  });
+
   it("forwards the agent run-id header and inferred content-type on attachment:upload", async () => {
     // Regression: the multipart upload uses a hand-rolled fetch (not the JSON
     // client), so it must forward X-Paperclip-Run-Id itself — otherwise an

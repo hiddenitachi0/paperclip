@@ -8,6 +8,7 @@ import {
 import {
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   DEFAULT_NEEDS_YOU_STALLED_AFTER_HOURS,
+  DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS,
 } from "../types/instance.js";
 
 describe("instance experimental settings validators", () => {
@@ -53,6 +54,28 @@ describe("instructionsStalenessThresholdDays", () => {
 });
 
 // The time-based half of the Now page's "nobody is moving this" source.
+describe("agentCardExpiresAfterHours (close unanswered agent cards after)", () => {
+  it("defaults to 24 hours", () => {
+    const settings = instanceGeneralSettingsSchema.parse({});
+    expect(settings.agentCardExpiresAfterHours).toBe(24);
+    expect(DEFAULT_AGENT_CARD_EXPIRES_AFTER_HOURS).toBe(24);
+  });
+
+  it("accepts a patch overriding the agent default", () => {
+    expect(
+      patchInstanceGeneralSettingsSchema.parse({ agentCardExpiresAfterHours: 48 }),
+    ).toEqual({ agentCardExpiresAfterHours: 48 });
+  });
+
+  it("rejects 0 (there is no 'close at once'; 'never' is per card via neverExpires)", () => {
+    expect(() => instanceGeneralSettingsSchema.parse({ agentCardExpiresAfterHours: 0 })).toThrow();
+  });
+
+  it("rejects a non-integer number of hours", () => {
+    expect(() => instanceGeneralSettingsSchema.parse({ agentCardExpiresAfterHours: 1.5 })).toThrow();
+  });
+});
+
 describe("needsYouStalledAfterHours", () => {
   it("defaults to 12 hours", () => {
     const settings = instanceGeneralSettingsSchema.parse({});

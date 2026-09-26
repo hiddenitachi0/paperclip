@@ -4,6 +4,7 @@ import {
   addIssueCommentSchema,
   askUserQuestionsPayloadSchema,
   createIssueSchema,
+  createIssueThreadInteractionSchema,
   issueBlockedInboxAttentionSchema,
   requestCheckboxConfirmationPayloadSchema,
   requestConfirmationPayloadSchema,
@@ -486,5 +487,76 @@ describe("issue validators", () => {
     });
 
     expect(parsed.success).toBe(true);
+  });
+});
+
+// Per-card expiry on the create envelope (migration 0176): a whole number of
+// hours, or an explicit "never"; omitted means the default for whoever files
+// the card (never for a board user, the instance setting for an agent).
+describe("createIssueThreadInteractionSchema expiry fields", () => {
+  const checklist = {
+    kind: "request_checkbox_confirmation" as const,
+    payload: {
+      version: 1 as const,
+      prompt: "Tick what you have finished today",
+      options: [{ id: "a", label: "Call the accountant" }],
+    },
+  };
+
+  it("leaves both fields unset when omitted, so the creator-kind default applies", () => {
+    const parsed = createIssueThreadInteractionSchema.parse(checklist);
+    expect(parsed.expiresAfterHours).toBeUndefined();
+    expect(parsed.neverExpires).toBeUndefined();
+  });
+
+  it("accepts a whole number of hours on every kind", () => {
+    expect(createIssueThreadInteractionSchema.parse({ ...checklist, expiresAfterHours: 2 }).expiresAfterHours).toBe(2);
+    expect(
+      createIssueThreadInteractionSchema.parse({
+        kind: "request_confirmation",
+        payload: { version: 1, prompt: "Deploy the fixed build now?" },
+        expiresAfterHours: 48,
+      }).expiresAfterHours,
+    ).toBe(48);
+    expect(
+      createIssueThreadInteractionSchema.parse({
+        kind: "ask_user_questions",
+        payload: {
+          version: 1,
+          questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "a", label: "A" }] }],
+        },
+        expiresAfterHours: 12,
+      }).expiresAfterHours,
+    ).toBe(12);
+    expect(
+      createIssueThreadInteractionSchema.parse({
+        kind: "suggest_tasks",
+        payload: { version: 1, tasks: [{ clientKey: "t1", title: "Write the report" }] },
+        expiresAfterHours: 1,
+      }).expiresAfterHours,
+    ).toBe(1);
+  });
+
+  it("accepts null hours (same as omitted) and an explicit neverExpires", () => {
+    expect(createIssueThreadInteractionSchema.parse({ ...checklist, expiresAfterHours: null }).expiresAfterHours).toBeNull();
+    expect(createIssueThreadInteractionSchema.parse({ ...checklist, neverExpires: true }).neverExpires).toBe(true);
+    expect(createIssueThreadInteractionSchema.parse({ ...checklist, neverExpires: false, expiresAfterHours: 3 })).toMatchObject({
+      neverExpires: false,
+      expiresAfterHours: 3,
+    });
+  });
+
+  it("rejects 0, negative and fractional hours", () => {
+    expect(() => createIssueThreadInteractionSchema.parse({ ...checklist, expiresAfterHours: 0 })).toThrow();
+    expect(() => createIssueThreadInteractionSchema.parse({ ...checklist, expiresAfterHours: -1 })).toThrow();
+    expect(() => createIssueThreadInteractionSchema.parse({ ...checklist, expiresAfterHours: 1.5 })).toThrow();
+  });
+
+  it("rejects a number of hours together with neverExpires", () => {
+    const result = createIssueThreadInteractionSchema.safeParse({ ...checklist, expiresAfterHours: 2, neverExpires: true });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message)).toContain("Set either expiresAfterHours or neverExpires, not both");
+    }
   });
 });

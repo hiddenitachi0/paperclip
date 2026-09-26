@@ -1226,6 +1226,13 @@
       "when": 1787160450000,
       "tag": "0175_persona_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1787160455000,
+      "tag": "0176_issue_thread_interaction_expiry",
+      "breakpoints": true
     }
   ]
 }

@@ -967,6 +967,15 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   summary?: string | null;
   status: IssueThreadInteractionStatus;
   continuationPolicy: IssueThreadInteractionContinuationPolicy;
+  /**
+   * Optional per-card limit in whole hours before an unanswered card closes
+   * itself. Null/absent = the default for whoever created it: a board user's
+   * card never closes by itself, an agent's card closes after the instance
+   * setting (24 hours unless changed).
+   */
+  expiresAfterHours?: number | null;
+  /** Explicit "never close this card by itself", for any creator. */
+  neverExpires?: boolean;
   createdAt: Date | string;
   updatedAt: Date | string;
   resolvedAt?: Date | string | null;

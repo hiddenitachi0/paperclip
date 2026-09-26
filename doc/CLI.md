@@ -205,7 +205,7 @@ pnpm paperclipai issue work-product:create <issue-id> --payload-json '{"type":"p
 pnpm paperclipai issue work-product:update <work-product-id> --payload-json '{"status":"archived"}'
 pnpm paperclipai issue work-product:delete <work-product-id>
 pnpm paperclipai issue interactions <issue-id>
-pnpm paperclipai issue interaction:create <issue-id> --payload-json '{"kind":"request_confirmation","payload":{"version":1,"prompt":"Continue?"}}'
+pnpm paperclipai issue interaction:create <issue-id> --payload-json '{"kind":"request_confirmation","payload":{"version":1,"prompt":"Continue?"}}' [--expires-after-hours 2 | --never-expires]
 pnpm paperclipai issue interaction:accept <issue-id> <interaction-id> [--selected-client-keys key1,key2]
 pnpm paperclipai issue interaction:reject <issue-id> <interaction-id> [--reason "..."]
 pnpm paperclipai issue interaction:respond <issue-id> <interaction-id> --answers-json '[{"questionId":"q1","optionIds":["yes"]}]'

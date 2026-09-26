@@ -791,6 +791,12 @@ Envelope defaults that differ from other kinds:
 
 - `continuationPolicy` defaults to `"wake_assignee"` for `request_checkbox_confirmation` (same as `suggest_tasks` and `ask_user_questions`). Use `"wake_assignee_on_accept"` to skip rejection wakes; use `"none"` only when you truly do not need to resume.
 
+Envelope fields shared by every interaction kind (optional):
+
+- `expiresAfterHours` (integer, 1 or more) — close this card by itself after that many hours if nobody answers it. Omit it to get the default for whoever filed the card: a card an agent filed closes after the instance setting "Close unanswered agent cards after" (24 hours unless the operator changed it); a card a board user filed never closes by itself. `0` is not a value.
+- `neverExpires` (boolean) — never close this card by itself, whoever filed it. Cannot be combined with `expiresAfterHours`.
+- A card that closes by itself ends as `expired` with `outcome: "auto_resolved"` (confirmations), `cancelled` (questions) or `rejected` (task proposals), and a system comment on the issue says why. If you still need the decision, file a fresh card.
+
 Accept (board action, requires board/user role; agents creating the interaction cannot accept):
 
 ```json

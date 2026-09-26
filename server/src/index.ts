@@ -1421,9 +1421,11 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
-      // DUR-162: close pending operator-queue cards nobody has answered within
-      // ISSUE_THREAD_INTERACTION_ABANDONMENT_TIMEOUT_MS instead of leaving them
-      // to pile up in the live decision queue forever.
+      // DUR-162: close pending operator-queue cards nobody has answered in time
+      // instead of leaving them to pile up in the live decision queue forever.
+      // The limit is per card: its own expiresAfterHours if set, otherwise never
+      // for a card a board user filed and the instance setting (24h by default)
+      // for a card an agent filed. See resolveInteractionExpiryRule.
       void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.issueThreadInteractionsAbandonment, () =>
         runInCompanyScopeBypass(
           bypassDb,

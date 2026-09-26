@@ -30,6 +30,7 @@ import {
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
   GOAL_CONDITION_VERDICTS,
 } from "../constants.js";
+import { MAX_INTERACTION_EXPIRES_AFTER_HOURS, MIN_INTERACTION_EXPIRES_AFTER_HOURS } from "../types/instance.js";
 import { isPlaceholderPromptText } from "./placeholder-prompt.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
@@ -978,6 +979,35 @@ export const requestCheckboxConfirmationResultSchema = requestConfirmationResult
   }
 });
 
+// Per-card expiry (migration 0176). Whole hours, 1..MAX; 0 is not a value.
+// Omitted/null = the default for whoever creates the card: a board user's
+// card never closes by itself, an agent's card closes after the instance
+// setting "Close unanswered agent cards after". neverExpires is the explicit
+// "never" for any card; it cannot be combined with a number of hours.
+export const issueThreadInteractionExpiresAfterHoursSchema = z
+  .number()
+  .int()
+  .min(MIN_INTERACTION_EXPIRES_AFTER_HOURS)
+  .max(MAX_INTERACTION_EXPIRES_AFTER_HOURS);
+
+const issueThreadInteractionExpiryFields = {
+  expiresAfterHours: issueThreadInteractionExpiresAfterHoursSchema.nullable().optional(),
+  neverExpires: z.boolean().optional(),
+} as const;
+
+function refineIssueThreadInteractionExpiry(
+  value: { expiresAfterHours?: number | null; neverExpires?: boolean },
+  ctx: z.RefinementCtx,
+) {
+  if (value.neverExpires === true && value.expiresAfterHours !== null && value.expiresAfterHours !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Set either expiresAfterHours or neverExpires, not both",
+      path: ["expiresAfterHours"],
+    });
+  }
+}
+
 export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("suggest_tasks"),
@@ -989,6 +1019,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    ...issueThreadInteractionExpiryFields,
     payload: suggestTasksPayloadSchema,
   }),
   z.object({
@@ -1000,6 +1031,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    ...issueThreadInteractionExpiryFields,
     payload: askUserQuestionsPayloadSchema,
   }),
   z.object({
@@ -1011,6 +1043,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("none"),
+    ...issueThreadInteractionExpiryFields,
     // Only set this when a request_board_approval already covers the same decision and the
     // agent genuinely needs both surfaces (DUR-29) — deciding either one then resolves both.
     // The common case is to raise only one request; do not set this "just in case".
@@ -1026,10 +1059,11 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    ...issueThreadInteractionExpiryFields,
     linkedApprovalId: z.string().uuid().nullable().optional(),
     payload: requestCheckboxConfirmationPayloadSchema,
   }),
-]);
+]).superRefine(refineIssueThreadInteractionExpiry);
 
 export type CreateIssueThreadInteraction = z.infer<typeof createIssueThreadInteractionSchema>;
 
