@@ -349,14 +349,45 @@ function shouldSupersedeInteractionOnUserComment(interaction: UserCommentSuperse
   return interaction.payload.supersedeOnUserComment === true;
 }
 
-function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
+/**
+ * Whether a board user's comment on the issue may close this pending card.
+ * The stored payload flag is only half of it:
+ *   * a card with never_expires set is never closed by a comment, whatever
+ *     the flag says;
+ *   * a card a board user filed for themselves (created_by_user_id set, no
+ *     agent) is never closed by their own comment. The flag used to default
+ *     to true for those cards too, and a stored true cannot be told apart
+ *     from one the user typed, so user-filed cards are skipped outright
+ *     rather than trusting the stored flag. That covers the operator's
+ *     re-posted checklist cards already on the box.
+ */
+function isSupersedableByUserComment(row: IssueThreadInteractionRow): boolean {
+  if (!isUserCommentSupersedableKind(row.kind)) return false;
+  if (row.neverExpires === true) return false;
+  if (resolveCreatorKind(row) === "user") return false;
+  return shouldSupersedeInteractionOnUserComment(hydrateInteraction(row) as UserCommentSupersedableInteraction);
+}
+
+/**
+ * Fills in supersedeOnUserComment when the caller left it out. An agent's
+ * card defaults to true (a later board comment means "revise and ask
+ * again"); a card a board user files for themselves defaults to false (their
+ * own comments on the task are not an answer to their own checklist). An
+ * explicit value in the payload always wins.
+ */
+function normalizeCreateInteractionInput(
+  input: CreateIssueThreadInteraction,
+  actor: InteractionActor,
+): CreateIssueThreadInteraction {
+  const filedByBoardUser = Boolean(actor.userId) && !actor.agentId;
+  const defaultSupersede = !filedByBoardUser;
   switch (input.kind) {
     case "ask_user_questions":
       return {
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? defaultSupersede,
         },
       };
     case "request_confirmation":
@@ -364,7 +395,7 @@ function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): C
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? defaultSupersede,
         },
       };
     case "request_checkbox_confirmation":
@@ -372,7 +403,7 @@ function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): C
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? defaultSupersede,
         },
       };
     default:
@@ -1267,7 +1298,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
       input: CreateIssueThreadInteraction,
       actor: InteractionActor,
     ) => {
-      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input), actor);
 
       if (data.idempotencyKey) {
         const existing = await getIdempotentInteraction({
@@ -1388,7 +1419,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
       input: CreateIssueThreadInteraction,
       actor: InteractionActor,
     ): Promise<void> => {
-      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input), actor);
       await enforceAgentConfirmationReferences(issue, data, actor);
     },
 
@@ -1677,17 +1708,13 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
           eq(issueThreadInteractions.status, "pending"),
         ));
 
-      const superseded = rows.filter((row) => {
-        if (!isUserCommentSupersedableKind(row.kind)) return false;
-        const interaction = hydrateInteraction(row) as UserCommentSupersedableInteraction;
-        return (
-          shouldSupersedeInteractionOnUserComment(interaction)
-          && isCommentAtOrAfterInteraction({
-            commentCreatedAt: comment.createdAt,
-            interactionCreatedAt: row.createdAt,
-          })
-        );
-      });
+      const superseded = rows.filter((row) => (
+        isSupersedableByUserComment(row)
+        && isCommentAtOrAfterInteraction({
+          commentCreatedAt: comment.createdAt,
+          interactionCreatedAt: row.createdAt,
+        })
+      ));
 
       if (superseded.length === 0) return [];
 
@@ -1755,9 +1782,7 @@ export function issueThreadInteractionService(db: Db, options: { rawDb?: Db } = 
         }
       >();
       for (const row of rows) {
-        if (!isUserCommentSupersedableKind(row.kind)) continue;
-        const interaction = hydrateInteraction(row) as UserCommentSupersedableInteraction;
-        if (!shouldSupersedeInteractionOnUserComment(interaction)) continue;
+        if (!isSupersedableByUserComment(row)) continue;
 
         const supersedingComment = comments.find((comment) => isCommentAtOrAfterInteraction({
           commentCreatedAt: comment.createdAt,

@@ -338,6 +338,8 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
 
   it("emits expired question telemetry with zero answered question count", async () => {
     const { companyId, issueId } = await seedIssue("Expired question telemetry");
+    // A board comment only supersedes an AGENT's card; a board user's own card is never closed by their comment.
+    const creatorAgentId = await seedAgent(companyId, "Planner");
     const commentId = randomUUID();
 
     const created = await interactionsSvc.create({
@@ -359,7 +361,7 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
         ],
       },
     }, {
-      userId: "local-board",
+      agentId: creatorAgentId,
     });
 
     const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
@@ -380,7 +382,8 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
       status: "expired",
       resolved_by_kind: "user",
       resolution_reason: "superseded_by_comment",
-      created_by_kind: "user",
+      created_by_kind: "agent",
+      creator_agent_role: "Planner",
       continuation_policy: "wake_assignee",
       target_type: "none",
       question_count: 1,
@@ -463,6 +466,8 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
 
   it("emits superseded expiration telemetry without comment identifiers", async () => {
     const { companyId, issueId } = await seedIssue("Superseded telemetry");
+    // A board comment only supersedes an AGENT's card; a board user's own card is never closed by their comment.
+    const creatorAgentId = await seedAgent(companyId, "Planner");
     const commentId = randomUUID();
 
     const created = await interactionsSvc.create({
@@ -475,7 +480,7 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
         prompt: "Approve this plan?",
       },
     }, {
-      userId: "local-board",
+      agentId: creatorAgentId,
     });
 
     const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
@@ -496,7 +501,8 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
       status: "expired",
       resolved_by_kind: "user",
       resolution_reason: "superseded_by_comment",
-      created_by_kind: "user",
+      created_by_kind: "agent",
+      creator_agent_role: "Planner",
       target_type: "none",
     });
     expect(dimensions).not.toHaveProperty("commentId");

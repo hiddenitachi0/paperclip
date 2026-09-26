@@ -101,6 +101,22 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     return { companyId, goalId, issueId };
   }
 
+  async function seedAgent(companyId: string) {
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Worker",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    return agentId;
+  }
+
   it("accepts suggested tasks by creating a rooted issue tree under the current issue", async () => {
     const companyId = randomUUID();
     const goalId = randomUUID();
@@ -571,6 +587,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   it("expires ask_user_questions interactions by default when a user comments after creation", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Question supersede");
+    const agentId = await seedAgent(companyId);
     const commentId = randomUUID();
 
     const created = await interactionsSvc.create({
@@ -588,7 +605,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         }],
       },
     }, {
-      userId: "local-board",
+      agentId,
     });
 
     expect(created).toMatchObject({
@@ -724,6 +741,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   it("repairs historical ask_user_questions superseded by later user comments idempotently", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Historical question supersede");
+    const agentId = await seedAgent(companyId);
     const commentId = randomUUID();
     const createdAt = new Date("2026-05-18T12:00:00.000Z");
 
@@ -742,7 +760,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         }],
       },
     }, {
-      userId: "local-board",
+      agentId,
     });
     await db
       .update(issueThreadInteractions)
@@ -794,6 +812,132 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       id: issueId,
       companyId,
     })).resolves.toEqual([]);
+  });
+
+  // A card a board user files for themselves is a to-do list, not an agent's
+  // ask: the user's own comments on the task must not close it. The operator's
+  // eleven re-posted checklist cards on the live box were filed this way with
+  // the flag defaulted to true in their stored payload.
+  describe("user-filed cards and comment supersede", () => {
+    const checklist = {
+      kind: "request_checkbox_confirmation" as const,
+      payload: {
+        version: 1 as const,
+        prompt: "Tick what you have finished today",
+        options: [{ id: "a", label: "Call the accountant" }],
+      },
+    };
+
+    async function commentAfter(issue: { id: string; companyId: string }, createdAt: Date | string) {
+      return interactionsSvc.expireRequestConfirmationsSupersededByComment(issue, {
+        id: randomUUID(),
+        createdAt: new Date(new Date(createdAt).getTime() + 1_000),
+        authorUserId: "local-board",
+      }, {
+        userId: "local-board",
+      });
+    }
+
+    it("a checklist card a board user filed survives the user's own comment on its issue, and stores supersedeOnUserComment false", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Operator checklist");
+      const created = await interactionsSvc.create({ id: issueId, companyId }, checklist, { userId: "local-board" });
+      expect(created.payload).toMatchObject({ supersedeOnUserComment: false });
+
+      const expired = await commentAfter({ id: issueId, companyId }, created.createdAt);
+
+      expect(expired).toHaveLength(0);
+      const [row] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, created.id));
+      expect(row?.status).toBe("pending");
+    });
+
+    it("an agent-filed checklist card is still superseded by a board user's later comment", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Agent checklist");
+      const agentId = await seedAgent(companyId);
+      const created = await interactionsSvc.create({ id: issueId, companyId }, checklist, { agentId });
+      expect(created.payload).toMatchObject({ supersedeOnUserComment: true });
+
+      const expired = await commentAfter({ id: issueId, companyId }, created.createdAt);
+
+      expect(expired).toHaveLength(1);
+      expect(expired[0]).toMatchObject({ id: created.id, status: "expired", result: { outcome: "superseded_by_comment" } });
+    });
+
+    it("a board user's card filed with supersedeOnUserComment: true keeps that flag but is still not closed by the user's comment (a stored true cannot be told apart from the old default)", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Operator checklist, explicit flag");
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        ...checklist,
+        payload: { ...checklist.payload, supersedeOnUserComment: true },
+      }, { userId: "local-board" });
+      expect(created.payload).toMatchObject({ supersedeOnUserComment: true });
+
+      const expired = await commentAfter({ id: issueId, companyId }, created.createdAt);
+
+      expect(expired).toHaveLength(0);
+      const [row] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, created.id));
+      expect(row?.status).toBe("pending");
+    });
+
+    it("a card filed before this change by a board user, with supersedeOnUserComment true stored (the live -r2 cards), survives the user's comment in both sweeps", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Live operator card");
+      const id = randomUUID();
+      const createdAt = new Date("2026-09-24T08:00:00.000Z");
+      await db.insert(issueThreadInteractions).values({
+        id,
+        companyId,
+        issueId,
+        kind: "request_checkbox_confirmation",
+        status: "pending",
+        continuationPolicy: "wake_assignee",
+        idempotencyKey: "operator-todo-3-r2",
+        title: "Today's to-do list",
+        payload: { ...checklist.payload, supersedeOnUserComment: true },
+        createdByUserId: "local-board",
+        createdByAgentId: null,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      await db.insert(issueComments).values({
+        id: randomUUID(),
+        companyId,
+        issueId,
+        authorUserId: "local-board",
+        authorType: "user",
+        body: "Done with the first two.",
+        createdAt: new Date("2026-09-24T09:00:00.000Z"),
+        updatedAt: new Date("2026-09-24T09:00:00.000Z"),
+      });
+
+      await expect(commentAfter({ id: issueId, companyId }, createdAt)).resolves.toHaveLength(0);
+      await expect(interactionsSvc.expireRequestConfirmationsSupersededByHistoricalComments({ id: issueId, companyId })).resolves.toEqual([]);
+      const [row] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, id));
+      expect(row?.status).toBe("pending");
+    });
+
+    it("a card with neverExpires is never closed by a comment, whatever its flag says and whoever filed it", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Never-expiring agent card");
+      const agentId = await seedAgent(companyId);
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        ...checklist,
+        neverExpires: true,
+        payload: { ...checklist.payload, supersedeOnUserComment: true },
+      }, { agentId });
+      expect(created).toMatchObject({ neverExpires: true, payload: { supersedeOnUserComment: true } });
+
+      await expect(commentAfter({ id: issueId, companyId }, created.createdAt)).resolves.toHaveLength(0);
+      await db.insert(issueComments).values({
+        id: randomUUID(),
+        companyId,
+        issueId,
+        authorUserId: "local-board",
+        authorType: "user",
+        body: "Looks fine.",
+        createdAt: new Date(new Date(created.createdAt).getTime() + 2_000),
+        updatedAt: new Date(new Date(created.createdAt).getTime() + 2_000),
+      });
+      await expect(interactionsSvc.expireRequestConfirmationsSupersededByHistoricalComments({ id: issueId, companyId })).resolves.toEqual([]);
+      const [row] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, created.id));
+      expect(row?.status).toBe("pending");
+    });
   });
 
   it("reuses the existing interaction when the same idempotency key is submitted twice", async () => {
@@ -1005,7 +1149,8 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       status: "pending",
       continuationPolicy: "wake_assignee",
       payload: {
-        supersedeOnUserComment: true,
+        // Filed by a board user: their own comments do not close their own card.
+        supersedeOnUserComment: false,
         allowDeclineReason: true,
       },
     });
@@ -1094,6 +1239,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   it("expires request_checkbox_confirmation interactions when a user comments after creation", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Checkbox confirmation supersede");
+    const agentId = await seedAgent(companyId);
     const commentId = randomUUID();
 
     const created = await interactionsSvc.create({
@@ -1107,7 +1253,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         options: [{ id: "file-a", label: "a.txt" }],
       },
     }, {
-      userId: "local-board",
+      agentId,
     });
 
     const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
@@ -1218,6 +1364,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   it("expires request confirmations by default when a user comments after creation", async () => {
     const { companyId, issueId } = await seedConfirmationIssue();
+    const agentId = await seedAgent(companyId);
     const commentId = randomUUID();
 
     const created = await interactionsSvc.create({
@@ -1230,7 +1377,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         prompt: "Proceed with the current draft?",
       },
     }, {
-      userId: "local-board",
+      agentId,
     });
 
     expect(created).toMatchObject({
@@ -1386,6 +1533,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
 
   it("repairs historical request confirmations superseded by later user comments idempotently", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Historical comment supersede");
+    const agentId = await seedAgent(companyId);
     const commentId = randomUUID();
     const createdAt = new Date("2026-05-18T12:00:00.000Z");
 
@@ -1399,7 +1547,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         prompt: "Proceed with the current draft?",
       },
     }, {
-      userId: "local-board",
+      agentId,
     });
     await db
       .update(issueThreadInteractions)
