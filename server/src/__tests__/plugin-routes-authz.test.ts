@@ -340,6 +340,75 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
   }, 20_000);
 
+  // The save path follows the same allow-list as secret resolution
+  // (SECRET_REF_ENABLED_PLUGIN_KEYS): Media Studio may store a reference to
+  // a saved key, every other add-on is still refused.
+  function secretRowsDb(rows: Array<{ id: string; status: string }>) {
+    // The first select is the key check; any later read in the route (the
+    // activity fan-out, for example) sees no rows.
+    let served = false;
+    const empty = () => {
+      const result: Promise<never[]> & { where?: unknown; limit?: unknown } = Promise.resolve([]);
+      result.where = vi.fn(() => empty());
+      result.limit = vi.fn(() => Promise.resolve([]));
+      return result;
+    };
+    return {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          if (served) return empty();
+          served = true;
+          return { where: vi.fn(() => Promise.resolve(rows)) };
+        }),
+      })),
+    };
+  }
+
+  function mediaStudioPlugin() {
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey: "paperclip.media-studio",
+      version: "1.0.0",
+      status: "ready",
+    });
+    mockRegistry.upsertConfig.mockResolvedValue({ pluginId, configJson: {} });
+  }
+
+  it("lets an instance admin save Media Studio's key reference when the saved key exists", async () => {
+    mediaStudioPlugin();
+    const secretId = "77777777-7777-4777-8777-777777777777";
+    const { app } = await createApp(
+      { type: "board", userId: "admin-1", source: "session", isInstanceAdmin: true, companyIds: [companyA] },
+      {},
+      { db: secretRowsDb([{ id: secretId, status: "active" }]) },
+    );
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/config`)
+      .send({ configJson: { provider: "fal", falKeySecretRef: secretId } });
+
+    expect(res.status).toBe(200);
+    expect(mockRegistry.upsertConfig).toHaveBeenCalledTimes(1);
+  }, 20_000);
+
+  it("refuses Media Studio's key reference when the saved key is gone or switched off", async () => {
+    mediaStudioPlugin();
+    const secretId = "77777777-7777-4777-8777-777777777777";
+    const { app } = await createApp(
+      { type: "board", userId: "admin-1", source: "session", isInstanceAdmin: true, companyIds: [companyA] },
+      {},
+      { db: secretRowsDb([{ id: secretId, status: "disabled" }]) },
+    );
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/config`)
+      .send({ configJson: { provider: "fal", falKeySecretRef: secretId } });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/no longer exists or is switched off/);
+    expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
+  }, 20_000);
+
   it("allows instance admins to upgrade plugins", async () => {
     const pluginId = "11111111-1111-4111-8111-111111111111";
     mockRegistry.getById.mockResolvedValue({
