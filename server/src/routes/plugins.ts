@@ -25,11 +25,12 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
   companies,
+  companySecrets,
   heartbeatRuns,
   pluginLogs,
   pluginWebhookDeliveries,
@@ -87,6 +88,7 @@ import {
 import {
   extractSecretRefPathsFromConfig,
   PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
+  SECRET_REF_ENABLED_PLUGIN_KEYS,
 } from "../services/plugin-secrets-handler.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 
@@ -2400,8 +2402,31 @@ export function pluginRoutes(
     try {
       const secretRefsByPath = extractSecretRefPathsFromConfig(body.configJson, schema);
       if (secretRefsByPath.size > 0) {
-        res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
-        return;
+        // Resolving a saved key is already allowed for the add-ons on
+        // SECRET_REF_ENABLED_PLUGIN_KEYS (plugin-secrets-handler.ts, where the
+        // secret's own company must match the calling agent's company at use
+        // time). Saving the reference has to follow the same list, or the
+        // add-on is allowed to use a key nobody can point it at. Every other
+        // add-on keeps the fail-closed refusal.
+        if (!SECRET_REF_ENABLED_PLUGIN_KEYS.has(plugin.pluginKey)) {
+          res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
+          return;
+        }
+        const refIds = [...secretRefsByPath.keys()];
+        const found = refIds.length > 0
+          ? await db
+              .select({ id: companySecrets.id, status: companySecrets.status })
+              .from(companySecrets)
+              .where(inArray(companySecrets.id, refIds))
+          : [];
+        const activeIds = new Set(found.filter((row) => row.status === "active").map((row) => row.id));
+        const missing = refIds.filter((id) => !activeIds.has(id));
+        if (missing.length > 0) {
+          res.status(422).json({
+            error: "One of the saved keys picked here no longer exists or is switched off. Pick the key again in the list.",
+          });
+          return;
+        }
       }
 
       const result = await registry.upsertConfig(plugin.id, {
