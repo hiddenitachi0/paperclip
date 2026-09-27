@@ -25,6 +25,7 @@ BRIDGE_PATH = os.environ.get("TELEGRAM_BRIDGE_UNDER_TEST") or os.path.join(HERE,
 spec = importlib.util.spec_from_file_location("telegram_bridge_chat", BRIDGE_PATH)
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
+BRIDGE_WAIT = bridge.wait_for_paperclip
 
 OPERATOR = 111111
 OPERATOR2 = 222222
@@ -87,8 +88,11 @@ class BridgeChatTestCase(unittest.TestCase):
             mock.patch.object(bridge, "cli", return_value=None),
             mock.patch.object(bridge, "cli_env", return_value=None),
             mock.patch.object(bridge, "save_state"),
+            mock.patch.object(bridge, "paperclip_ready", return_value=True),
+            mock.patch.object(bridge, "container_started_at", return_value="2026-09-27T12:00:00Z"),
+            mock.patch.object(bridge, "wait_for_paperclip", return_value=True),
         ]
-        self.tg, self.cli, self.cli_env, _ = [p.start() for p in self.patches]
+        self.tg, self.cli, self.cli_env, _, self.ready, self.started_at, self.wait = [p.start() for p in self.patches]
 
     def tearDown(self):
         for p in self.patches:
@@ -460,6 +464,73 @@ class SharedContractTests(unittest.TestCase):
         statuses = set(re.findall(r'"([a-z_]+)"', block))
         for status in bridge.ANSWER_FINISHED_STATUSES + bridge.ANSWER_WAITING_STATUSES:
             self.assertIn(status, statuses)
+
+
+class PaperclipRestartTests(BridgeChatTestCase):
+    """27 Sep: a message sent while Paperclip restarted for a deploy failed at
+    once with "I didn't hear back from Paperclip"."""
+
+    def test_a_message_during_a_restart_waits_for_paperclip_then_is_answered(self):
+        self.ready.return_value = False
+        self.cli_env.return_value = quick(CONV1, "Here you go.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "make a picture of a beach"))
+
+        self.wait.assert_called_once()
+        self.assertEqual(len(self.cli_env.call_args_list), 1)
+        texts = self.texts(OPERATOR)
+        self.assertIn("Paperclip is restarting", texts[0])
+        self.assertEqual(texts[-1], "Here you go.")
+
+    def test_when_paperclip_does_not_come_back_the_message_is_not_sent(self):
+        self.ready.return_value = False
+        self.wait.return_value = False
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "make a picture of a beach"))
+
+        self.cli_env.assert_not_called()
+        self.assertIn("still not back", self.texts(OPERATOR)[-1])
+        self.assertIn("did not get your message", self.texts(OPERATOR)[-1])
+
+    def test_a_restart_during_the_answer_is_named_and_nothing_is_resent(self):
+        self.started_at.side_effect = ["2026-09-27T12:00:00Z", "2026-09-27T12:47:07Z"]
+        self.cli_env.return_value = None
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "make a picture of a beach"))
+
+        self.assertEqual(len(self.cli_env.call_args_list), 1)
+        self.assertIn("Paperclip restarted while", self.texts(OPERATOR)[-1])
+
+    def test_no_answer_without_a_restart_keeps_the_careful_message(self):
+        self.cli_env.return_value = None
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "how many agents are working?"))
+
+        self.assertIn("I didn't hear back from Paperclip", self.texts(OPERATOR)[-1])
+
+    def test_wait_for_paperclip_polls_until_ready(self):
+        clock = [0.0]
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        self.ready.side_effect = [False, False, True]
+        mock.patch.object(bridge, "RESTART_WAIT_SECONDS", 150).start()
+        self.addCleanup(mock.patch.stopall)
+        self.assertTrue(BRIDGE_WAIT(sleep=fake_sleep, now=lambda: clock[0]))
+        self.assertEqual(len(sleeps), 3)
+
+    def test_wait_for_paperclip_gives_up_at_the_deadline(self):
+        clock = [0.0]
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+
+        self.ready.return_value = False
+        self.assertFalse(BRIDGE_WAIT(sleep=fake_sleep, now=lambda: clock[0]))
+        self.assertGreaterEqual(clock[0], bridge.RESTART_WAIT_SECONDS)
 
 
 if __name__ == "__main__":
