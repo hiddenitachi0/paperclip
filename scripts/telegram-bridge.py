@@ -75,6 +75,10 @@ CONVERSATION_ENDED_CODES = ("LANE_A_CONVERSATION_EXPIRED", "LANE_A_TURN_CAP_REAC
 # as a task instead, which is what every message did before, so this is never
 # worse than before (fail-open to the old behaviour, not to silence).
 QUICK_UNAVAILABLE_STATUSES = (429, 502, 503, 504)
+# The quick-answer model is set up wrong (wrong model name or address, a key
+# the service refuses, no key): handing the message over as a full task would
+# only hide the mistake and cost a Claude run, so say what is wrong instead.
+QUICK_SETUP_ERROR_CODES = ("LANE_A_SETUP_REFUSED", "LANE_A_KEY_REFUSED", "LANE_A_KEY_MISSING", "LANE_A_KEY_UNRESOLVED")
 ANSWER_FINISHED_STATUSES = ("done", "cancelled")
 ANSWER_WAITING_STATUSES = ("in_review", "blocked")
 # A task that has not finished after this long stops being watched.
@@ -997,6 +1001,13 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
         set_conversation(state, token, chat_id, None)
         notes.append("(The earlier conversation had ended, so this starts a fresh one.)")
         res = chat_send(bot, text)
+    if _refused(res) and not force_task and res.get("code") in QUICK_SETUP_ERROR_CODES:
+        reason = str(res.get("error") or "").strip()[:400]
+        send_plain(token, chat_id, (
+            f"{agent_name}'s quick answers are set up wrong, so nothing was sent and no task was made. "
+            + (f"{reason} " if reason else "")
+            + f"Fix it on {agent_name}'s page in Paperclip, then send your message again."))
+        return
     if _refused(res) and not force_task and res.get("status") in QUICK_UNAVAILABLE_STATUSES:
         notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
         res = chat_send(bot, text, lane="b")
