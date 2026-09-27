@@ -12,6 +12,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { buildHostServices } from "../services/plugin-host-services.js";
+import { openLaneAPluginRun } from "../services/lane-a-plugin-runs.js";
 import type { StorageService } from "../storage/types.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -223,5 +224,62 @@ describeEmbeddedPostgres("plugin-host-services issues.createAttachment", () => {
         runId,
       }),
     ).rejects.toThrow(/exceeds/);
+  });
+  it("lets a quick agent's plugin tool run attach to a task in its own company, which has no checkout", async () => {
+    const { companyId, otherCompanyId, agentId, issueId, otherCompanyIssueId } = await seed();
+    const storage = createStorageServiceStub();
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
+      storage,
+    });
+    const { run, close } = openLaneAPluginRun({
+      agentId,
+      companyId,
+      conversationId: randomUUID(),
+      requestedByUserId: "user-1",
+      requestedByAgentId: null,
+    });
+    try {
+      const result = await services.issues.createAttachment({
+        issueId,
+        companyId,
+        contentBase64: Buffer.from("fake-png-bytes").toString("base64"),
+        contentType: "image/png",
+        filename: "generated.png",
+        runId: run.runId,
+        authorAgentId: agentId,
+      });
+      expect(result.issueId).toBe(issueId);
+      const rows = await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, issueId));
+      expect(rows).toHaveLength(1);
+      // Logged against the quick agent and its chat, with no heartbeat run to point at.
+      const logged = await db.select().from(activityLog).where(eq(activityLog.action, "issue.attachment.created"));
+      expect(logged).toHaveLength(1);
+      expect(logged[0]?.runId).toBeNull();
+      expect(logged[0]?.agentId).toBe(agentId);
+      expect(logged[0]?.details).toMatchObject({ initiatingRunId: run.runId, initiatingQuickAgentId: agentId });
+
+      // Still bounded by the quick agent's company.
+      await expect(
+        services.issues.createAttachment({
+          issueId: otherCompanyIssueId,
+          companyId: otherCompanyId,
+          contentBase64: Buffer.from("x").toString("base64"),
+          contentType: "image/png",
+          runId: run.runId,
+        }),
+      ).rejects.toThrow("not currently checked out by the invoking run");
+    } finally {
+      close();
+    }
+    // Once the tool call is over the id no longer opens the door.
+    await expect(
+      services.issues.createAttachment({
+        issueId,
+        companyId,
+        contentBase64: Buffer.from("x").toString("base64"),
+        contentType: "image/png",
+        runId: run.runId,
+      }),
+    ).rejects.toThrow("not currently checked out by the invoking run");
   });
 });

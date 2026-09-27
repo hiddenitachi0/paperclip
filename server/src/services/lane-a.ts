@@ -47,6 +47,10 @@ import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import { getPluginToolDispatcher, type PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
+import { pluginToolExecutionService, type PluginToolExecutionService } from "./plugin-tool-execution.js";
+import { openLaneAPluginRun } from "./lane-a-plugin-runs.js";
+import type { ToolResult as PluginToolResult } from "@paperclipai/plugin-sdk";
 import type { AuthorizationActor } from "./authorization.js";
 import { secretService } from "./secrets.js";
 import { personaService } from "./personas.js";
@@ -181,6 +185,8 @@ export interface LaneASystemPromptInput {
   context?: string;
   /** Whether Tools-library (MCP) tools are attached this turn. */
   hasMcpTools: boolean;
+  /** Whether add-on (plugin) tools ticked for this agent are attached this turn. Absent leaves the prompt as it was. */
+  hasPluginTools?: boolean;
   /** Whether the built-in actions (hand over work, weather, task lookup) are attached. */
   hasBuiltinTools: boolean;
   /** Colleagues the quick agent may hand work to (name + role), already filtered to available ones. */
@@ -304,6 +310,12 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   }
   if (input.hasMcpTools) {
     capabilities.push(`You also have the tools granted to you in the Tools library.`);
+  }
+  if (input.hasPluginTools) {
+    capabilities.push(
+      `You also have the add-on tools ticked for you; each one's description says what it does. ` +
+        `An add-on tool answers in words — pass on what it says, and never invent a link or a file it did not name.`,
+    );
   }
   if (capabilities.length > 0) {
     capabilities.push(
@@ -596,13 +608,117 @@ interface LaneALoadedTool {
   toolName: string;
 }
 
+/** One add-on (plugin) tool ticked for this quick agent, keyed by the name the model sees. */
+interface LaneAPluginTool {
+  /** The registry name the shared execute path takes, e.g. `paperclip.media-studio:generate-image`. */
+  namespacedName: string;
+  /** For the operator: "Generate image" and "Media Studio". */
+  displayName: string;
+  pluginDisplayName: string;
+}
+
 interface LaneAToolset {
   anthropicTools: Anthropic.Tool[];
   toolIndex: Map<string, LaneALoadedTool>;
+  /** Add-on tools, by the name the model sees (`<pluginKey>__<toolName>`, sanitized). */
+  pluginTools: Map<string, LaneAPluginTool>;
   clients: McpClient[];
 }
 
-const EMPTY_TOOLSET: LaneAToolset = { anthropicTools: [], toolIndex: new Map(), clients: [] };
+const EMPTY_TOOLSET: LaneAToolset = { anthropicTools: [], toolIndex: new Map(), pluginTools: new Map(), clients: [] };
+
+/** Upper bound on the text an add-on tool hands back to the model (same as the built-ins'). */
+const PLUGIN_TOOL_RESULT_MAX_CHARS = 4_000;
+/** A string field longer than this is described, not repeated (an image as a data: URL would be megabytes). */
+const PLUGIN_TOOL_DATA_STRING_MAX_CHARS = 300;
+
+/**
+ * What the model sees after an add-on tool ran. Add-ons answer with a
+ * sentence (`content`), sometimes with structured `data` too, sometimes with
+ * `error`. The model gets the sentence; when there is none, the scalar
+ * fields of `data` in words — a file or an image is described ("[file data
+ * omitted]"), never pasted, so a generated picture cannot blow the turn up
+ * and nothing bulky reaches the transcript.
+ */
+export function describePluginToolResultForModel(result: PluginToolResult): { ok: boolean; content: string } {
+  if (typeof result.error === "string" && result.error.trim().length > 0) {
+    return { ok: false, content: `That did not work: ${result.error.trim().slice(0, PLUGIN_TOOL_RESULT_MAX_CHARS)}` };
+  }
+  const content = typeof result.content === "string" ? result.content.trim() : "";
+  if (content.length > 0) {
+    return { ok: true, content: content.slice(0, PLUGIN_TOOL_RESULT_MAX_CHARS) };
+  }
+  const data = result.data;
+  if (typeof data === "string" || typeof data === "number" || typeof data === "boolean") {
+    return { ok: true, content: String(data).slice(0, PLUGIN_TOOL_RESULT_MAX_CHARS) };
+  }
+  if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+    const lines: string[] = [];
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        if (/^data:/i.test(value)) lines.push(`${key}: [file data omitted]`);
+        else if (value.length > PLUGIN_TOOL_DATA_STRING_MAX_CHARS) lines.push(`${key}: [long text omitted]`);
+        else lines.push(`${key}: ${value}`);
+      } else if (typeof value === "number" || typeof value === "boolean") {
+        lines.push(`${key}: ${String(value)}`);
+      } else if (value === null) {
+        lines.push(`${key}: none`);
+      }
+    }
+    if (lines.length > 0) {
+      return { ok: true, content: lines.join("\n").slice(0, PLUGIN_TOOL_RESULT_MAX_CHARS) };
+    }
+  }
+  return { ok: true, content: "The tool finished but gave nothing back to show." };
+}
+
+/**
+ * The add-on (plugin) tools this quick agent may call this turn.
+ *
+ * Grants are read as `ticked_only`: a quick agent gets exactly the tools
+ * ticked under "Tools from add-ons" on its Tools tab, and nothing when none
+ * are — unlike a full agent, for which an empty list means every tool
+ * (services/plugin-tool-execution.ts explains why both rules exist). A tool
+ * is offered only while its plugin is `ready` instance-wide and switched on
+ * for this company, and it never shadows a built-in or a Tools-library tool
+ * of the same name.
+ */
+async function loadLaneAPluginTools(
+  execution: PluginToolExecutionService | null,
+  companyId: string,
+  pluginToolGrants: string[],
+  taken: ReadonlySet<string>,
+): Promise<Pick<LaneAToolset, "anthropicTools" | "pluginTools">> {
+  const empty = { anthropicTools: [] as Anthropic.Tool[], pluginTools: new Map<string, LaneAPluginTool>() };
+  if (!execution || pluginToolGrants.length === 0) return empty;
+  let available;
+  try {
+    available = await execution.listToolsForCompany(companyId);
+  } catch (err) {
+    // A plugin listing that fails must not turn a chat message into an
+    // error; the quick agent answers without add-on tools this turn.
+    logger.warn({ err, companyId }, "lane A: could not list add-on tools; answering without them");
+    return empty;
+  }
+  const anthropicTools: Anthropic.Tool[] = [];
+  const pluginTools = new Map<string, LaneAPluginTool>();
+  for (const tool of available) {
+    if (!pluginToolGrants.includes(tool.name)) continue;
+    const modelName = `${sanitizeToolNamePart(tool.pluginKey)}__${sanitizeToolNamePart(tool.toolName)}`.slice(0, 128);
+    if (isLaneABuiltinTool(modelName) || taken.has(modelName) || pluginTools.has(modelName)) continue;
+    anthropicTools.push({
+      name: modelName,
+      description: `${tool.displayName} (from the ${tool.pluginDisplayName} add-on): ${tool.description}`,
+      input_schema: tool.parametersSchema as Anthropic.Tool["input_schema"],
+    });
+    pluginTools.set(modelName, {
+      namespacedName: tool.name,
+      displayName: tool.displayName,
+      pluginDisplayName: tool.pluginDisplayName,
+    });
+  }
+  return { anthropicTools, pluginTools };
+}
 
 async function connectMcpServer(entry: ResolvedMcpServer): Promise<McpClient> {
   const client = new McpClient({ name: "paperclip-lane-a", version: "1.0.0" });
@@ -679,7 +795,7 @@ async function loadLaneATools(
     }
   }
 
-  return { anthropicTools, toolIndex, clients };
+  return { anthropicTools, toolIndex, pluginTools: new Map(), clients };
 }
 
 async function closeLaneATools(toolset: LaneAToolset): Promise<void> {
@@ -770,6 +886,12 @@ export interface LaneAServiceOptions {
    * (OpenAI, Google, OpenRouter, local) call /chat/completions with.
    */
   providerFetch?: typeof fetch;
+  /**
+   * The plugin (add-on) tool dispatcher. Production leaves it unset and the
+   * one wired at startup (setPluginToolDispatcher in app.ts) is read at call
+   * time; tests pass their own, or null for "no add-on tools".
+   */
+  pluginToolDispatcher?: PluginToolDispatcher | null;
 }
 
 /** Where a quick agent's key came from — shown to the operator, never the value. */
@@ -791,6 +913,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
   const executeBuiltinTool = createLaneABuiltinToolExecutor(toolDeps);
   const builtinToolDefinitions = buildLaneABuiltinToolDefinitions();
   const budgets = budgetService(db);
+
+  /**
+   * The shared plugin-tool execute path, over the dispatcher wired at
+   * startup (or the one a test passed). Resolved per call because the
+   * routes build this service before app.ts creates the dispatcher.
+   */
+  function pluginToolExecution(): PluginToolExecutionService | null {
+    const dispatcher =
+      options.pluginToolDispatcher === undefined ? getPluginToolDispatcher() : options.pluginToolDispatcher;
+    return dispatcher ? pluginToolExecutionService(db, dispatcher) : null;
+  }
 
   /**
    * DUR-3989: the ordinary spending limits (agent and company `billed_cents` /
@@ -1019,6 +1152,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
         limits: agents.limits,
+        // Add-on tool ticks, read off the row (never from the caller) so no
+        // route can widen what a quick agent may call.
+        pluginToolGrants: agents.pluginToolGrants,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
@@ -1293,11 +1429,67 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             continue;
           }
 
+          const pluginTool = toolset.pluginTools.get(block.name);
+          if (pluginTool) {
+            // An add-on tool, through the same execute path a full agent's
+            // HTTP call takes, as this quick agent. It already counted
+            // against the cap above, like every other call.
+            const execution = pluginToolExecution();
+            const label = `${pluginTool.displayName} (${pluginTool.pluginDisplayName})`;
+            let outcome: { ok: boolean; content: string };
+            if (!execution) {
+              outcome = { ok: false, content: "Add-on tools are not available right now." };
+            } else {
+              const pluginRun = openLaneAPluginRun({
+                agentId: ctx.agent.id,
+                companyId: ctx.companyId,
+                conversationId: ctx.conversationId,
+                requestedByUserId: ctx.requester.userId,
+                requestedByAgentId: ctx.requester.agentId,
+              });
+              try {
+                const executed = await execution.execute({
+                  tool: pluginTool.namespacedName,
+                  parameters: input,
+                  runContext: {
+                    agentId: ctx.agent.id,
+                    runId: pluginRun.run.runId,
+                    companyId: ctx.companyId,
+                    // A quick agent works in no project; the field is
+                    // required by the SDK type, so it is sent empty.
+                    projectId: "",
+                  },
+                  pluginToolGrants: ctx.pluginToolGrants ?? [],
+                  grantPolicy: "ticked_only",
+                });
+                outcome = executed.ok
+                  ? describePluginToolResultForModel(executed.result.result)
+                  : { ok: false, content: `That did not work: ${executed.error}` };
+              } catch (err) {
+                outcome = { ok: false, content: `That did not work: ${err instanceof Error ? err.message : String(err)}` };
+              } finally {
+                pluginRun.close();
+              }
+            }
+            const summary = outcome.ok
+              ? `Used the ${label} add-on tool.`
+              : `The ${label} add-on tool did not work.`;
+            actions.push({ tool: block.name, summary, ok: outcome.ok });
+            await recordToolCall(ctx, block.name, input, { ok: outcome.ok, summary });
+            toolResults.push({
+              toolCallId: block.id,
+              name: block.name,
+              content: outcome.content,
+              isError: !outcome.ok,
+            });
+            continue;
+          }
+
           const loaded = toolset.toolIndex.get(block.name);
           if (!loaded) {
             // Allow-list refusal: not a built-in, not a granted Tools-library
-            // tool. Logged like any other call so the operator can see the
-            // attempt.
+            // tool, not a ticked add-on tool. Logged like any other call so
+            // the operator can see the attempt.
             const refusal = await executeBuiltinTool(block.name, input, ctx);
             actions.push({ tool: block.name, summary: refusal.summary, ok: false });
             await recordToolCall(ctx, block.name, input, refusal);
@@ -1434,11 +1626,26 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       credential,
     });
 
-    const [toolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
+    const pluginToolGrants = (agentRow?.pluginToolGrants as string[] | null) ?? [];
+    const [mcpToolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
       loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? []),
       loadReplayHistory(conversation.id),
       listColleagues(params.companyId, params.targetAgent.id),
     ]);
+    // Add-on tools go after the Tools-library ones so a name clash is
+    // settled the same way every time: built-ins first, then the library.
+    const pluginToolset = await loadLaneAPluginTools(
+      pluginToolExecution(),
+      params.companyId,
+      pluginToolGrants,
+      new Set(mcpToolset.toolIndex.keys()),
+    );
+    const toolset: LaneAToolset = {
+      anthropicTools: [...mcpToolset.anthropicTools, ...pluginToolset.anthropicTools],
+      toolIndex: mcpToolset.toolIndex,
+      pluginTools: pluginToolset.pluginTools,
+      clients: mcpToolset.clients,
+    };
     const ctx: LaneAToolContext = {
       companyId: params.companyId,
       agent: { id: params.targetAgent.id, name: params.targetAgent.name },
@@ -1446,6 +1653,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       actor: params.actor ?? { type: "none" },
       conversationId: conversation.id,
       runId: signedRunIdFromActor(params.actor),
+      pluginToolGrants,
     };
 
     // DUR-3972: offer the sales tool only when this company has an active
@@ -1486,7 +1694,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         agentRole: params.targetAgent.role ?? null,
         instructions: params.targetAgent.laneAInstructions ?? null,
         context: params.context,
-        hasMcpTools: toolset.anthropicTools.length > 0,
+        hasMcpTools: toolset.toolIndex.size > 0,
+        hasPluginTools: toolset.pluginTools.size > 0,
         hasBuiltinTools: builtinToolDefinitions.length > 0,
         colleagues: colleagues.map((c) => ({ name: c.displayName ?? c.name, role: c.role })),
         persona: personaIdentity,

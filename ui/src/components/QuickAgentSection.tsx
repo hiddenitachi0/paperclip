@@ -26,6 +26,7 @@ import { dataConnectionsApi } from "../api/dataConnections";
 import { instanceServerAnthropicKeyApi } from "../api/instanceServerAnthropicKey";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { mcpToolLibraryApi } from "../api/mcpToolLibrary";
+import { pluginsApi } from "../api/plugins";
 import { secretsApi } from "../api/secrets";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
@@ -204,6 +205,13 @@ export function QuickAgentSection({
     queryKey: queryKeys.mcpTools.forAgent(agent.id),
     queryFn: () => mcpToolLibraryApi.listForAgent(agent.id),
   });
+  // Add-on (plugin) tools ticked for this agent. A failure here must not hide
+  // the Tools-library count, so it only ever adds to the line.
+  const addOnToolsQuery = useQuery({
+    queryKey: queryKeys.plugins.agentToolGrants(agent.id),
+    queryFn: () => pluginsApi.agentToolGrants(agent.id),
+    retry: false,
+  });
   const experimentalQuery = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
@@ -236,8 +244,13 @@ export function QuickAgentSection({
           : undefined,
       baseUrl: agent.laneABaseUrl ?? null,
     });
+    const addOnSettled = addOnToolsQuery.data !== undefined || addOnToolsQuery.isError;
+    const addOnAvailable = new Set((addOnToolsQuery.data?.availableTools ?? []).map((tool) => tool.name));
     const tools = toolsLine({
-      enabledCount: agentToolsQuery.data ? agentToolsQuery.data.filter((tool) => tool.enabled).length : undefined,
+      enabledCount:
+        agentToolsQuery.data && addOnSettled ? agentToolsQuery.data.filter((tool) => tool.enabled).length : undefined,
+      // Only ticks that still point at an installed, switched-on add-on tool count.
+      addOnCount: (addOnToolsQuery.data?.grantedToolNames ?? []).filter((name) => addOnAvailable.has(name)).length,
       failed: agentToolsQuery.isError,
       toolsTabPath: `/agents/${agentRouteRef(agent)}/tools`,
     });
@@ -268,6 +281,8 @@ export function QuickAgentSection({
     agent,
     agentToolsQuery.data,
     agentToolsQuery.isError,
+    addOnToolsQuery.data,
+    addOnToolsQuery.isError,
     experimentalQuery.isPending,
     businessDataEnabled,
     datasetSourcesQuery.isPending,

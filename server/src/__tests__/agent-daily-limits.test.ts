@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/db";
 import { buildHostServices } from "../services/plugin-host-services.js";
 import { agentDailyLimitService, dailyLimitReachedMessage } from "../services/agent-daily-limits.js";
+import { openLaneAPluginRun } from "../services/lane-a-plugin-runs.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -173,5 +174,38 @@ describeEmbeddedPostgres("agent daily limits (plugin-host personas.reserveDailyG
     const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub());
 
     expect(await services.personas.reserveDailyGeneration({ companyId, runId })).toEqual({ allowed: true, cap: null, usedToday: 0 });
+  });
+  it("resolves a quick agent's plugin tool run (no heartbeat run) to that agent's own limit", async () => {
+    const { companyId, otherCompanyId, agentId } = await seed({ dailyImageGenerations: 1 });
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub());
+    const { run, close } = openLaneAPluginRun({
+      agentId,
+      companyId,
+      conversationId: randomUUID(),
+      requestedByUserId: "user-1",
+      requestedByAgentId: null,
+    });
+    try {
+      expect(await services.personas.reserveDailyGeneration({ companyId, runId: run.runId })).toEqual({
+        allowed: true,
+        cap: 1,
+        usedToday: 0,
+      });
+      expect(await services.personas.reserveDailyGeneration({ companyId, runId: run.runId })).toEqual({
+        allowed: false,
+        cap: 1,
+        usedToday: 1,
+      });
+      // The run is the quick agent's own company's; another company cannot use it.
+      await expect(
+        services.personas.reserveDailyGeneration({ companyId: otherCompanyId, runId: run.runId }),
+      ).rejects.toThrow("Run not found in this company");
+    } finally {
+      close();
+    }
+    // Once the tool call is over the id stops resolving.
+    await expect(services.personas.reserveDailyGeneration({ companyId, runId: run.runId })).rejects.toThrow(
+      "Run not found in this company",
+    );
   });
 });

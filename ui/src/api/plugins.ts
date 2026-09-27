@@ -206,7 +206,49 @@ export interface PluginLocalFolderSaveInput {
  * });
  * ```
  */
+/**
+ * One tool an installed add-on (plugin) offers, as `GET /api/agents/:agentId/plugin-tool-grants`
+ * lists it: only tools of plugins that are `ready` and switched on for the
+ * agent's company, each with its plugin's name for the screen.
+ */
+export interface AgentPluginToolOption {
+  /** The registry name stored in `agents.plugin_tool_grants`, e.g. `paperclip.media-studio:generate-image`. */
+  name: string;
+  toolName: string;
+  displayName: string;
+  description: string;
+  parametersSchema: Record<string, unknown>;
+  pluginId: string;
+  pluginKey: string;
+  pluginDisplayName: string;
+}
+
+export interface AgentPluginToolGrants {
+  grantedToolNames: string[];
+  /**
+   * True when nothing is ticked. For a FULL agent that means every add-on
+   * tool is allowed; a quick agent only ever gets the ticked ones.
+   */
+  unrestricted: boolean;
+  availableTools: AgentPluginToolOption[];
+}
+
 export const pluginsApi = {
+  /**
+   * The add-on tools this agent may call, and which of them are ticked.
+   */
+  agentToolGrants: (agentId: string) =>
+    api.get<AgentPluginToolGrants>(`/agents/${agentId}/plugin-tool-grants`),
+
+  /**
+   * Replace the agent's ticked add-on tools wholesale (same contract as the
+   * Tools-library sync).
+   */
+  syncAgentToolGrants: (agentId: string, desiredToolNames: string[]) =>
+    api.post<{ id: string; pluginToolGrants: string[] }>(`/agents/${agentId}/plugin-tool-grants/sync`, {
+      desiredToolNames,
+    }),
+
   /**
    * List all installed plugins, optionally filtered by lifecycle status.
    *

@@ -125,6 +125,12 @@ export interface LaneAToolContext {
    * (signedRunIdFromActor). Null for people, API keys and anything else.
    */
   runId?: string | null;
+  /**
+   * The add-on (plugin) tools ticked for this quick agent
+   * (agents.plugin_tool_grants, read off the agent row by lane-a.ts). Read as
+   * "ticked only": absent or empty means no add-on tools.
+   */
+  pluginToolGrants?: string[];
 }
 
 /**
