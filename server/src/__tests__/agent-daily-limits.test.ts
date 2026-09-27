@@ -184,6 +184,7 @@ describeEmbeddedPostgres("agent daily limits (plugin-host personas.reserveDailyG
       conversationId: randomUUID(),
       requestedByUserId: "user-1",
       requestedByAgentId: null,
+      requesterMessage: "make me a picture",
     });
     try {
       expect(await services.personas.reserveDailyGeneration({ companyId, runId: run.runId })).toEqual({

@@ -705,7 +705,13 @@ async function loadLaneAPluginTools(
   for (const tool of available) {
     if (!pluginToolGrants.includes(tool.name)) continue;
     const modelName = `${sanitizeToolNamePart(tool.pluginKey)}__${sanitizeToolNamePart(tool.toolName)}`.slice(0, 128);
-    if (isLaneABuiltinTool(modelName) || taken.has(modelName) || pluginTools.has(modelName)) continue;
+    if (isLaneABuiltinTool(modelName) || taken.has(modelName) || pluginTools.has(modelName)) {
+      logger.warn(
+        { companyId, tool: tool.name, modelName },
+        "lane A: add-on tool left out because its name clashes with a built-in or Tools-library tool",
+      );
+      continue;
+    }
     anthropicTools.push({
       name: modelName,
       description: `${tool.displayName} (from the ${tool.pluginDisplayName} add-on): ${tool.description}`,
@@ -1152,9 +1158,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
         limits: agents.limits,
-        // Add-on tool ticks, read off the row (never from the caller) so no
-        // route can widen what a quick agent may call.
+        // Add-on tool ticks and the quick-agent switch, read off the row
+        // (never from the caller) so no route can widen what a quick agent
+        // may call; the shared execute service picks the grant rule from them.
         pluginToolGrants: agents.pluginToolGrants,
+        laneAEnabled: agents.laneAEnabled,
       })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
@@ -1446,6 +1454,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 conversationId: ctx.conversationId,
                 requestedByUserId: ctx.requester.userId,
                 requestedByAgentId: ctx.requester.agentId,
+                // The person's own words this turn, so the host can tell a
+                // task they named from one a file or a lookup mentioned.
+                requesterMessage: message,
               });
               try {
                 const executed = await execution.execute({
@@ -1459,8 +1470,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                     // required by the SDK type, so it is sent empty.
                     projectId: "",
                   },
-                  pluginToolGrants: ctx.pluginToolGrants ?? [],
-                  grantPolicy: "ticked_only",
+                  agent: { laneAEnabled: ctx.laneAEnabled ?? true, pluginToolGrants: ctx.pluginToolGrants ?? [] },
                 });
                 outcome = executed.ok
                   ? describePluginToolResultForModel(executed.result.result)
@@ -1654,6 +1664,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       conversationId: conversation.id,
       runId: signedRunIdFromActor(params.actor),
       pluginToolGrants,
+      laneAEnabled: agentRow?.laneAEnabled ?? true,
     };
 
     // DUR-3972: offer the sales tool only when this company has an active

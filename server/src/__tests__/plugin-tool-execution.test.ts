@@ -20,7 +20,9 @@ vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
 }));
 
-const { checkPluginToolGrant, pluginToolExecutionService } = await import("../services/plugin-tool-execution.js");
+const { checkPluginToolGrant, grantPolicyForAgent, pluginToolExecutionService } = await import(
+  "../services/plugin-tool-execution.js",
+);
 
 const PLUGIN_DB_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_PLUGIN_DB_ID = "22222222-2222-4222-8222-222222222222";
@@ -72,6 +74,15 @@ describe("checkPluginToolGrant", () => {
   });
 });
 
+describe("grantPolicyForAgent", () => {
+  it("is decided by the agent row alone: a quick agent (lane_a_enabled) is ticked-only, anything else empty-means-all", () => {
+    expect(grantPolicyForAgent({ laneAEnabled: true })).toBe("ticked_only");
+    expect(grantPolicyForAgent({ laneAEnabled: false })).toBe("empty_means_all");
+    expect(grantPolicyForAgent({ laneAEnabled: null })).toBe("empty_means_all");
+    expect(grantPolicyForAgent({})).toBe("empty_means_all");
+  });
+});
+
 describe("pluginToolExecutionService.execute", () => {
   beforeEach(() => {
     mockRegistry.getById.mockReset();
@@ -85,8 +96,7 @@ describe("pluginToolExecutionService.execute", () => {
       tool: "nope:missing",
       parameters: {},
       runContext,
-      pluginToolGrants: [],
-      grantPolicy: "empty_means_all",
+      agent: { laneAEnabled: false, pluginToolGrants: [] },
     });
     expect(outcome).toEqual({ ok: false, status: 404, error: 'Tool "nope:missing" not found' });
     expect(mockRegistry.getCompanySettings).not.toHaveBeenCalled();
@@ -100,8 +110,7 @@ describe("pluginToolExecutionService.execute", () => {
       tool: TOOL,
       parameters: {},
       runContext,
-      pluginToolGrants: [],
-      grantPolicy: "empty_means_all",
+      agent: { laneAEnabled: false, pluginToolGrants: [] },
     });
     expect(outcome).toMatchObject({ ok: false, status: 403, error: expect.stringContaining("disabled for this company") });
     expect(mockRegistry.getCompanySettings).toHaveBeenCalledWith(PLUGIN_DB_ID, COMPANY);
@@ -114,22 +123,20 @@ describe("pluginToolExecutionService.execute", () => {
       tool: TOOL,
       parameters: { prompt: "a cat" },
       runContext,
-      pluginToolGrants: [],
-      grantPolicy: "empty_means_all",
+      agent: { laneAEnabled: false, pluginToolGrants: [] },
     });
     expect(outcome).toMatchObject({ ok: true, result: { result: { content: "ok" } } });
     expect(dispatcher.executeTool).toHaveBeenCalledWith(TOOL, { prompt: "a cat" }, runContext);
   });
 
-  it("refuses a quick agent's call when the tool is not ticked (empty grants = none), and runs it when it is", async () => {
+  it("refuses a quick agent's call when the tool is not ticked (empty grants = none), and runs it when it is — on every path, since the rule comes from the row", async () => {
     const dispatcher = dispatcherStub();
     const service = pluginToolExecutionService({} as never, dispatcher);
     const refused = await service.execute({
       tool: TOOL,
       parameters: {},
       runContext,
-      pluginToolGrants: [],
-      grantPolicy: "ticked_only",
+      agent: { laneAEnabled: true, pluginToolGrants: [] },
     });
     expect(refused).toMatchObject({ ok: false, status: 403, error: expect.stringContaining("not granted") });
     expect(dispatcher.executeTool).not.toHaveBeenCalled();
@@ -138,8 +145,7 @@ describe("pluginToolExecutionService.execute", () => {
       tool: TOOL,
       parameters: {},
       runContext,
-      pluginToolGrants: [TOOL],
-      grantPolicy: "ticked_only",
+      agent: { laneAEnabled: true, pluginToolGrants: [TOOL] },
     });
     expect(ran.ok).toBe(true);
     expect(dispatcher.executeTool).toHaveBeenCalledTimes(1);
@@ -156,8 +162,7 @@ describe("pluginToolExecutionService.execute", () => {
         tool: TOOL,
         parameters: {},
         runContext,
-        pluginToolGrants: [],
-        grantPolicy: "empty_means_all",
+        agent: { laneAEnabled: false, pluginToolGrants: [] },
       }),
     ).toMatchObject({ ok: false, status: 502 });
 
@@ -171,8 +176,7 @@ describe("pluginToolExecutionService.execute", () => {
         tool: TOOL,
         parameters: {},
         runContext,
-        pluginToolGrants: [],
-        grantPolicy: "empty_means_all",
+        agent: { laneAEnabled: false, pluginToolGrants: [] },
       }),
     ).toMatchObject({ ok: false, status: 500, error: "schema validation failed" });
   });

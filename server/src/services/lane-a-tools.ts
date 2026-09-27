@@ -131,6 +131,8 @@ export interface LaneAToolContext {
    * "ticked only": absent or empty means no add-on tools.
    */
   pluginToolGrants?: string[];
+  /** agents.lane_a_enabled off the same row; the plugin execute service picks its grant rule from it. */
+  laneAEnabled?: boolean;
 }
 
 /**

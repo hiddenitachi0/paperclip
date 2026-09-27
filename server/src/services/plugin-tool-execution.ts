@@ -19,17 +19,30 @@ import { pluginRegistryService } from "./plugin-registry.js";
  */
 
 /**
- * How `agents.plugin_tool_grants` is read.
+ * How `agents.plugin_tool_grants` is read. Decided here, from the agent row,
+ * never by the caller — so an agent that is both a quick agent and runs
+ * heartbeats gets one rule on every path, and the Tools tab text stays true.
  *
- * - `empty_means_all`: a full agent. An empty list means unrestricted, which
- *   is what every agent had before the column existed (DUR-189), so treating
- *   "nothing set" as "no restriction" was not a regression there.
- * - `ticked_only`: a quick agent. It only gets the tools that are explicitly
- *   ticked on its Tools tab; an empty list means none. A quick agent runs
- *   with no approval card and no workspace, so it never inherits a tool by
- *   accident.
+ * - `empty_means_all`: a full agent (`agents.lane_a_enabled` false). An
+ *   empty list means unrestricted, which is what every agent had before the
+ *   column existed (DUR-189), so treating "nothing set" as "no restriction"
+ *   was not a regression there.
+ * - `ticked_only`: a quick agent (`agents.lane_a_enabled` true). It only
+ *   gets the tools that are explicitly ticked on its Tools tab; an empty
+ *   list means none. A quick agent runs with no approval card and no
+ *   workspace, so it never inherits a tool by accident.
  */
 export type PluginToolGrantPolicy = "empty_means_all" | "ticked_only";
+
+/** The fields of the agent row the grant decision needs. */
+export interface PluginToolGrantAgent {
+  laneAEnabled?: boolean | null;
+  pluginToolGrants?: string[] | null;
+}
+
+export function grantPolicyForAgent(agent: PluginToolGrantAgent): PluginToolGrantPolicy {
+  return agent.laneAEnabled === true ? "ticked_only" : "empty_means_all";
+}
 
 export interface PluginToolExecutionRefusal {
   ok: false;
@@ -47,9 +60,8 @@ export interface ExecutePluginToolInput {
   tool: string;
   parameters: unknown;
   runContext: ToolRunContext;
-  /** `agents.plugin_tool_grants` for `runContext.agentId`. */
-  pluginToolGrants: string[];
-  grantPolicy: PluginToolGrantPolicy;
+  /** The agent row of `runContext.agentId`: `lane_a_enabled` picks the grant rule, `plugin_tool_grants` is the list. */
+  agent: PluginToolGrantAgent;
 }
 
 /** A tool a company can tick for an agent: the registry entry plus the plugin it belongs to, in words. */
@@ -147,7 +159,11 @@ export function pluginToolExecutionService(db: Db, toolDispatcher: PluginToolDis
       return { ok: false, status: 403, error: `Plugin "${registeredTool.pluginId}" is disabled for this company` };
     }
 
-    const grantError = checkPluginToolGrant(input.pluginToolGrants, input.tool, input.grantPolicy);
+    const grantError = checkPluginToolGrant(
+      input.agent.pluginToolGrants ?? [],
+      input.tool,
+      grantPolicyForAgent(input.agent),
+    );
     if (grantError) {
       return { ok: false, status: 403, error: grantError };
     }

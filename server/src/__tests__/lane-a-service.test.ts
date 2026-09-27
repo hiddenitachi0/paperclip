@@ -501,11 +501,13 @@ describeEmbeddedPostgres("lane A service", () => {
     // While the worker is answering, the host must be able to resolve the
     // run to the quick agent (that is what the daily image limit and the
     // attachment step do).
-    let resolvedDuringCall: { agentId: string; companyId: string } | null = null;
+    let resolvedDuringCall: { agentId: string; companyId: string; requesterMessage: string; requestedByUserId: string | null } | null = null;
     call.mockImplementation(async (_id, _method, params) => {
       const runId = (params as { runContext: { runId: string } }).runContext.runId;
       const run = findLaneAPluginRun(runId);
-      resolvedDuringCall = run ? { agentId: run.agentId, companyId: run.companyId } : null;
+      resolvedDuringCall = run
+        ? { agentId: run.agentId, companyId: run.companyId, requesterMessage: run.requesterMessage, requestedByUserId: run.requestedByUserId }
+        : null;
       return { content: "Made a picture of a cat." };
     });
 
@@ -536,7 +538,13 @@ describeEmbeddedPostgres("lane A service", () => {
       parameters: { prompt: "a cat" },
       runContext: expect.objectContaining({ agentId: target.id, companyId, projectId: "", runId: expect.any(String) }),
     });
-    expect(resolvedDuringCall).toEqual({ agentId: target.id, companyId });
+    // The host sees the quick agent, the person who asked, and their own words.
+    expect(resolvedDuringCall).toEqual({
+      agentId: target.id,
+      companyId,
+      requesterMessage: "make me a picture of a cat",
+      requestedByUserId: "user-1",
+    });
     expect(activeLaneAPluginRunCount()).toBe(0);
     // The plugin's sentence is what the model got back.
     const toolResultTurn = mockCreate.mock.calls[1][0].messages.at(-1);

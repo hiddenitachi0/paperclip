@@ -21,6 +21,12 @@ export interface LaneAPluginRun {
   /** The person (or agent) talking to the quick agent. */
   requestedByUserId: string | null;
   requestedByAgentId: string | null;
+  /**
+   * The requester's own message for this turn, verbatim. Host services use
+   * it to tell "the person named this task" from "a file or a data lookup
+   * the agent read this turn named it" (see laneAPluginRunNamesIssue).
+   */
+  requesterMessage: string;
   startedAt: Date;
 }
 
@@ -74,4 +80,30 @@ export function findLaneAPluginRun(runId: string): LaneAPluginRun | null {
 /** Exported for tests: no call may leave a run behind. */
 export function activeLaneAPluginRunCount(): number {
   return activeRuns.size;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Did the person talking to the quick agent name this task themselves, in
+ * this turn's message — by its id or by its reference (for example DUR-12)?
+ *
+ * Only the requester's message counts. Text the quick agent read through a
+ * tool this turn (a company file, a sales lookup, an earlier tool result) is
+ * not the requester's, so a task reference planted there cannot make the
+ * agent attach to that task. The reference must stand on its own:
+ * "DUR-12" matches, "DUR-123" does not.
+ */
+export function laneAPluginRunNamesIssue(
+  run: Pick<LaneAPluginRun, "requesterMessage">,
+  issue: { id: string; identifier: string | null },
+): boolean {
+  const message = run.requesterMessage ?? "";
+  if (message.length === 0) return false;
+  if (message.toLowerCase().includes(issue.id.toLowerCase())) return true;
+  const identifier = issue.identifier?.trim();
+  if (!identifier) return false;
+  return new RegExp(`(^|[^A-Za-z0-9])${escapeRegExp(identifier)}(?![A-Za-z0-9])`, "i").test(message);
 }

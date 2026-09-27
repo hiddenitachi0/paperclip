@@ -788,15 +788,18 @@ export function pluginRoutes(
     error: string | null;
     // DUR-189: piggybacked off the same agent-row select this function
     // already does for the companyId check, so adding grant enforcement
-    // doesn't cost an extra DB round trip. Absent/empty means unrestricted.
+    // doesn't cost an extra DB round trip. Absent/empty means unrestricted
+    // for a full agent; the shared execute service reads lane_a_enabled off
+    // the same row to decide (services/plugin-tool-execution.ts).
     pluginToolGrants: string[];
+    laneAEnabled: boolean;
   }
 
   async function validateToolRunContextScope(
     runContext: ToolRunContext,
     actor: Request["actor"],
   ): Promise<ToolRunContextScopeResult> {
-    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [] };
+    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [], laneAEnabled: false };
 
     // DUR-174: an agent-authenticated caller must be the same agent named in
     // runContext.agentId, so two agents (e.g. two personas) in one company
@@ -809,7 +812,11 @@ export function pluginRoutes(
     }
 
     const [agent] = await db
-      .select({ companyId: agents.companyId, pluginToolGrants: agents.pluginToolGrants })
+      .select({
+        companyId: agents.companyId,
+        pluginToolGrants: agents.pluginToolGrants,
+        laneAEnabled: agents.laneAEnabled,
+      })
       .from(agents)
       .where(eq(agents.id, runContext.agentId))
       .limit(1);
@@ -817,6 +824,7 @@ export function pluginRoutes(
       return { ...noGrants, error: '"runContext.agentId" does not belong to "runContext.companyId"' };
     }
     const pluginToolGrants = (agent.pluginToolGrants as string[] | null) ?? [];
+    const laneAEnabled = agent.laneAEnabled === true;
 
     const [run] = await db
       .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
@@ -824,10 +832,10 @@ export function pluginRoutes(
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
     if (!run || run.companyId !== runContext.companyId) {
-      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants };
+      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
     }
     if (run.agentId !== runContext.agentId) {
-      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants };
+      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants, laneAEnabled };
     }
 
     const [project] = await db
@@ -836,16 +844,17 @@ export function pluginRoutes(
       .where(eq(projects.id, runContext.projectId))
       .limit(1);
     if (!project || project.companyId !== runContext.companyId) {
-      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants };
+      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
     }
 
-    return { error: null, pluginToolGrants };
+    return { error: null, pluginToolGrants, laneAEnabled };
   }
 
   // DUR-189: for a full agent an empty/absent grants list means unrestricted
   // (`empty_means_all` in services/plugin-tool-execution.ts) — this matches
   // every agent's behavior before agents.pluginToolGrants existed. A quick
-  // agent reads the same column as `ticked_only` (services/lane-a.ts).
+  // agent (lane_a_enabled) reads the same column as `ticked_only`; the
+  // service decides from the row, so this route and lane-a.ts cannot differ.
 
   /**
    * DUR-195: a company can disable a plugin for itself via
@@ -1102,8 +1111,7 @@ export function pluginRoutes(
       tool,
       parameters,
       runContext,
-      pluginToolGrants: scope.pluginToolGrants,
-      grantPolicy: "empty_means_all",
+      agent: { laneAEnabled: scope.laneAEnabled, pluginToolGrants: scope.pluginToolGrants },
     });
     if (!outcome.ok) {
       res.status(outcome.status).json({ error: outcome.error });
