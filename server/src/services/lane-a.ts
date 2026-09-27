@@ -1004,6 +1004,47 @@ export interface LaneACredential {
  * code LANE_A_SETUP_REFUSED and the service's own words, so callers can tell a
  * setup mistake from an outage. Everything else stays a 502.
  */
+/** Told to a model that cannot use tools, so it does not pretend it can. */
+export const LANE_A_NO_TOOLS_NOTE =
+  "Your current model cannot use tools, so in this conversation you cannot make pictures, hand work to a colleague, " +
+  "look up tasks, weather or company data. If the person asks for any of that, say so plainly in one sentence and " +
+  "suggest they switch your quick-answer model to one that supports tools. Never pretend you did it.";
+
+/** How long a "this model refuses tools" answer is remembered before trying tools again. */
+export const LANE_A_TOOLS_REFUSED_TTL_MS = 60 * 60 * 1000;
+const modelsRefusingTools = new Map<string, number>();
+
+export function laneAModelRefusesTools(model: string, now: number = Date.now()): boolean {
+  const until = modelsRefusingTools.get(model);
+  if (until === undefined) return false;
+  if (until <= now) {
+    modelsRefusingTools.delete(model);
+    return false;
+  }
+  return true;
+}
+
+export function rememberLaneAModelRefusesTools(model: string, now: number = Date.now()): void {
+  modelsRefusingTools.set(model, now + LANE_A_TOOLS_REFUSED_TTL_MS);
+}
+
+/** Test seam: forget every remembered model. */
+export function resetLaneAModelsRefusingTools(): void {
+  modelsRefusingTools.clear();
+}
+
+/**
+ * The provider refused the request only because tools were offered, e.g.
+ * Novita via Hugging Face: 400 "model features function calling not support".
+ */
+export function isLaneAToolsUnsupportedError(err: unknown): boolean {
+  if (!(err instanceof LaneAProviderError)) return false;
+  if (err.kind !== "upstream" || err.status === null || err.status < 400 || err.status >= 500) return false;
+  return /(function[ _-]?call(ing)?|tool[ _-]?(use|calling|call|choice)?s?)[^.]{0,40}(not|n't)[ _-]?support|not[ _-]?support(ed)?[^.]{0,40}(function[ _-]?call(ing)?|tools?)\b|no endpoints found that support tool/i.test(
+    err.message,
+  );
+}
+
 export function laneAProviderErrorToHttp(err: unknown, kind: LaneAWorkKind): unknown {
   if (!(err instanceof LaneAProviderError)) return err;
   const label = laneAProviderLabel(err.provider);
@@ -1534,15 +1575,34 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let finalRound = false;
     let response: Awaited<ReturnType<LaneAProviderClient["complete"]>> | undefined;
 
+    const modelId = params.model ?? LANE_A_MODEL;
+    // Some hosted models answer "function calling not supported" whenever tools
+    // are offered. For those the quick agent still chats, without tools, and
+    // says so plainly when asked for something only a tool can do.
+    let toolsOff = tools.length === 0 || laneAModelRefusesTools(modelId);
+    const completeRound = async () => {
+      const request = (withTools: boolean) =>
+        client.complete({
+          model: modelId,
+          maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
+          system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${LANE_A_NO_TOOLS_NOTE}`,
+          messages,
+          ...(withTools ? { tools } : {}),
+        });
+      if (toolsOff) return request(false);
+      try {
+        return await request(true);
+      } catch (err) {
+        if (!isLaneAToolsUnsupportedError(err)) throw err;
+        rememberLaneAModelRefusesTools(modelId);
+        toolsOff = true;
+        return request(false);
+      }
+    };
+
     try {
       for (let round = 0; round < LANE_A_MAX_MODEL_ROUNDS; round++) {
-        response = await client.complete({
-          model: params.model ?? LANE_A_MODEL,
-          maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
-          system: systemPrompt,
-          messages,
-          ...(tools.length > 0 ? { tools } : {}),
-        });
+        response = await completeRound();
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
 
