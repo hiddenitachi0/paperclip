@@ -18,7 +18,10 @@ approvals/tasks still live in Paperclip and the web UI.
   goes through the same chat router the web chat uses (DUR-3978): a quick
   question is answered in the same chat when that bot's agent has quick answers
   switched on, and the chat keeps one conversation so follow-ups have context
-  (`/new` starts over). Anything else becomes a task for that bot's agent in
+  (`/new` starts over). A picture the quick answer made (Media Studio) is
+  uploaded into the chat as a photo: the bridge fetches its bytes from
+  Paperclip (`chat image`), so Telegram never gets a Paperclip address.
+  Anything else becomes a task for that bot's agent in
   that bot's company, and the agent's answer is posted back into the chat the
   task came from once it is done or waiting.
 
@@ -41,9 +44,11 @@ import os
 import re
 import subprocess
 import threading
+import base64
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from collections import defaultdict
 
 DEFAULT_COMPANY_ID = os.environ.get("PAPERCLIP_COMPANY_ID", "7600f03c-c836-4326-8d48-c801813c3a87")
@@ -74,6 +79,13 @@ ANSWER_WAITING_STATUSES = ("in_review", "blocked")
 # A task that has not finished after this long stops being watched.
 TASK_ANSWER_MAX_AGE_SECONDS = 30 * 24 * 3600
 TASK_ANSWERS_PER_CALL = 50  # the server's limit per call
+# Pictures a quick answer carried (Media Studio's "Generate image"): at most
+# this many are sent per answer, each as an upload of the bytes the bridge
+# fetched from Paperclip (the Paperclip address is private, so Telegram never
+# gets it). Telegram's photo limit is 10 MB; bigger ones and SVGs go as files.
+QUICK_ANSWER_MAX_IMAGES = 4
+TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+TG_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 LOCK = threading.Lock()
@@ -797,6 +809,94 @@ def send_plain(token, chat_id, text):
         tg(token, "sendMessage", chat_id=chat_id, text=part, disable_web_page_preview=True)
 
 
+def tg_upload(token, method, field, filename, content_type, data, http_timeout=60, **params):
+    """A Telegram call that uploads one file (multipart/form-data), e.g.
+    sendPhoto. Same result shape as tg(): the result, or None on failure."""
+    boundary = "paperclip-" + uuid.uuid4().hex
+    body = bytearray()
+    for key, value in params.items():
+        if value is None:
+            continue
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n"
+                 f"{value}\r\n").encode()
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "picture"
+    body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{safe_name}\"\r\n"
+             f"Content-Type: {content_type}\r\n\r\n").encode()
+    body += data
+    body += f"\r\n--{boundary}--\r\n".encode()
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/{method}", data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(request, timeout=http_timeout) as r:
+            return json.load(r).get("result")
+    except Exception as e:
+        print(f"tg {method} error: {e}", flush=True)
+        return None
+
+
+def reply_images(result):
+    """The pictures a quick answer carried, from its actions: file id, type and
+    seed. Only well-formed file ids; the server already checked each one is a
+    picture in this bot's company."""
+    images = []
+    for action in (result or {}).get("actions") or []:
+        image = action.get("image") if isinstance(action, dict) else None
+        if not isinstance(image, dict):
+            continue
+        file_id = image.get("fileId")
+        if not isinstance(file_id, str) or not UUID_RE.match(file_id):
+            continue
+        if any(i["fileId"] == file_id for i in images):
+            continue
+        seed = image.get("seed")
+        images.append({
+            "fileId": file_id,
+            "seed": seed if isinstance(seed, int) and not isinstance(seed, bool) else None,
+            "hasTask": bool(image.get("issueId")),
+        })
+    return images[:QUICK_ANSWER_MAX_IMAGES]
+
+
+def image_caption(image):
+    where = "Attached to its task in Paperclip." if image["hasTask"] else "Saved in Paperclip's Files."
+    return f"{where} Seed {image['seed']}." if image["seed"] is not None else where
+
+
+def send_reply_images(bot, chat_id, images):
+    """Upload each picture into the chat. The bytes come from Paperclip through
+    the CLI, with the bridge's own sign-in and the bot's own company; a picture
+    that cannot be fetched or sent gets one plain line instead of silence."""
+    token = bot["token"]
+    for image in images:
+        data = cli("chat", "image", image["fileId"], "-C", bot["companyId"])
+        payload = None
+        content_type = ""
+        if isinstance(data, dict) and data.get("ok") is True and isinstance(data.get("contentBase64"), str):
+            try:
+                payload = base64.b64decode(data["contentBase64"], validate=True)
+            except Exception:
+                payload = None
+            content_type = str(data.get("contentType") or "").lower()
+        if not payload or not content_type.startswith("image/"):
+            send_plain(token, chat_id, "I made a picture but could not send it here. It is in Paperclip's Files.")
+            continue
+        extension = content_type.split("/", 1)[1].split("+", 1)[0] or "img"
+        filename = f"picture-{image['fileId'][:8]}.{extension}"
+        caption = image_caption(image)
+        sent = None
+        if content_type in TG_PHOTO_TYPES and len(payload) <= TG_PHOTO_MAX_BYTES:
+            sent = tg_upload(token, "sendPhoto", "photo", filename, content_type, payload,
+                             chat_id=chat_id, caption=caption)
+        if sent is None:
+            # Not a type Telegram shows as a photo (an SVG), too big, or the
+            # photo upload was refused: send it as a file instead.
+            sent = tg_upload(token, "sendDocument", "document", filename, content_type, payload,
+                             chat_id=chat_id, caption=caption)
+        if sent is None:
+            send_plain(token, chat_id, "I made a picture but could not send it here. It is in Paperclip's Files.")
+
+
 def chat_send(bot, text, conversation_id=None, lane=None):
     """One message through the chat router. The agent and the company are always
     the bot's own from its config; the message only ever travels as data in an
@@ -846,8 +946,13 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
         conversation = result.get("conversationId")
         if isinstance(conversation, str) and UUID_RE.match(conversation):
             set_conversation(state, token, chat_id, conversation)
-        answer = str(result.get("response") or "").strip() or f"{agent_name} had nothing to add."
-        send_plain(token, chat_id, "\n\n".join(notes + [answer]))
+        images = reply_images(result)
+        answer = str(result.get("response") or "").strip() or (
+            "" if images else f"{agent_name} had nothing to add.")
+        if notes or answer:
+            send_plain(token, chat_id, "\n\n".join(notes + ([answer] if answer else [])))
+        if images:
+            send_reply_images(bot, chat_id, images)
         return
     task_ref = res.get("taskRef") if isinstance(res, dict) else None
     if lane == "b" and isinstance(task_ref, dict) and isinstance(task_ref.get("issueId"), str) \

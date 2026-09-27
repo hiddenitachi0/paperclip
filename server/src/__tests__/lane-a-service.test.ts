@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import {
   activityLog,
   agents,
+  assets,
   companies,
   companyMcpTools,
   companyMemberships,
@@ -13,6 +14,7 @@ import {
   companySecrets,
   costEvents,
   createDb,
+  issueAttachments,
   laneAConversations,
   laneAMessages,
   pluginCompanySettings,
@@ -67,6 +69,8 @@ describeEmbeddedPostgres("lane A service", () => {
     await db.delete(companySecrets);
     await db.delete(companySecretProviderConfigs);
     await db.delete(companyMcpTools);
+    await db.delete(issueAttachments);
+    await db.delete(assets);
     await db.delete(agents);
     await db.delete(companyMemberships);
     await db.delete(pluginCompanySettings);
@@ -559,6 +563,99 @@ describeEmbeddedPostgres("lane A service", () => {
     const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
     expect(logged).toHaveLength(1);
     expect(logged[0]?.details).toMatchObject({ tool: PLUGIN_TOOL_MODEL_NAME, ok: true, input: { prompt: "a cat" } });
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  async function seedCompanyPicture(companyId: string, contentType = "image/jpeg") {
+    const [asset] = await db
+      .insert(assets)
+      .values({ companyId, provider: "local_disk", objectKey: `files/${randomUUID()}`, contentType, byteSize: 10, sha256: "x" })
+      .returning();
+    const [file] = await db.insert(issueAttachments).values({ companyId, issueId: null, assetId: asset!.id }).returning();
+    return file!.id;
+  }
+
+  it("shows a picture an add-on tool made (a file in this company) with the reply, and remembers its seed for the next turn", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany("OtherCo");
+    const target = await seedAgent(companyId, true, "Maja");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const pictureId = await seedCompanyPicture(companyId);
+    const foreignPictureId = await seedCompanyPicture(otherCompanyId);
+    const textFileId = await seedCompanyPicture(companyId, "text/html");
+    const { dispatcher, call } = await seedPluginTool();
+    call
+      .mockResolvedValueOnce({ content: "Made the picture.", data: { fileId: pictureId, seed: 4242, contentPath: "https://evil.example/x.jpg" } })
+      .mockResolvedValueOnce({ content: "Made another.", data: { fileId: foreignPictureId, seed: 1 } })
+      .mockResolvedValueOnce({ content: "Made a page.", data: { fileId: textFileId } });
+
+    const toolTurn = (id: string) => ({
+      content: [{ type: "tool_use", id, name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "a sofa" } }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "tool_use",
+    });
+    const textTurn = (text: string) => ({
+      content: [{ type: "text", text }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "end_turn",
+    });
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce(toolTurn("call_1"))
+      .mockResolvedValueOnce(textTurn("Here is your sofa."))
+      .mockResolvedValueOnce(toolTurn("call_2"))
+      .mockResolvedValueOnce(toolTurn("call_3"))
+      .mockResolvedValueOnce(textTurn("Done."));
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db, { pluginToolDispatcher: dispatcher });
+
+    const first = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "make a picture of a sofa",
+    });
+    expect(first.actions).toEqual([
+      {
+        tool: PLUGIN_TOOL_MODEL_NAME,
+        summary: "Made a picture with the Make picture (Acme Pictures) add-on tool and saved it to Files.",
+        ok: true,
+        // The address is built by the server, never taken from the add-on.
+        image: { fileId: pictureId, contentPath: `/api/attachments/${pictureId}/content`, contentType: "image/jpeg", seed: 4242, issueId: null },
+      },
+    ]);
+
+    // Next turn: another company's file and a file that is not a picture show nothing.
+    const second = await svc.sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "same as the last one but with a blue sofa, same seed",
+      conversationId: first.conversationId,
+    });
+    expect(second.actions.map((action) => action.image)).toEqual([undefined, undefined]);
+    expect(second.actions.map((action) => action.summary)).toEqual([
+      "Used the Make picture (Acme Pictures) add-on tool.",
+      "Used the Make picture (Acme Pictures) add-on tool.",
+    ]);
+    // The replayed history carried the first picture's seed to the model.
+    const replayed = JSON.stringify(mockCreate.mock.calls[2][0].messages);
+    expect(replayed).toContain(`[Picture made in this turn: file id ${pictureId}, seed 4242]`);
+
+    // The stored transcript keeps the picture for the chat panel after a reload.
+    const transcript = await svc.getConversation({
+      companyId,
+      targetAgentId: target.id,
+      conversationId: first.conversationId,
+      requester: { userId: "user-1", agentId: null },
+    });
+    expect(transcript.messages[1]?.content).toBe("Here is your sofa.");
+    expect(transcript.messages[1]?.actions[0]?.image?.fileId).toBe(pictureId);
 
     vi.doUnmock("@anthropic-ai/sdk");
     vi.resetModules();

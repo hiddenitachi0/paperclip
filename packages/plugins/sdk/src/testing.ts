@@ -69,6 +69,7 @@ import type {
   PluginEnvironmentDeleteTemplateResult,
   PluginPerformActionActorContext,
   PluginPerformActionContext,
+  PluginCompanyFileContent,
 } from "./protocol.js";
 
 export interface TestHarnessOptions {
@@ -115,6 +116,8 @@ export interface TestHarness {
     executionWorkspaces?: PluginExecutionWorkspaceMetadata[];
     accessMembers?: PluginAccessMember[];
     principalGrants?: PrincipalPermissionGrant[];
+    /** Company files for `ctx.files.get/readContent` (tied to a task or not). */
+    companyFiles?: PluginCompanyFileContent[];
   }): void;
   setConfig(config: Record<string, unknown>): void;
   /** Dispatch a host or plugin event to registered handlers. */
@@ -498,6 +501,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const agents = new Map<string, Agent>();
   const goals = new Map<string, Goal>();
   const accessMembers = new Map<string, PluginAccessMember>();
+  const companyFiles = new Map<string, PluginCompanyFileContent>();
   const principalGrants = new Map<string, PrincipalPermissionGrant[]>();
 
   function principalGrantsKey(companyId: string, principalType: PrincipalType, principalId: string) {
@@ -576,6 +580,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       agentId: stringOrNull(actorInput?.agentId),
       runId: stringOrNull(actorInput?.runId),
       companyId,
+      canManageCompany: actorInput?.canManageCompany === true,
     });
     return Object.freeze({ actor, companyId });
   }
@@ -2355,6 +2360,51 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return { allowed: true, cap: null, usedToday: 0 };
       },
     },
+    files: {
+      async createCompanyFile(input, companyId, options) {
+        requireCapability(manifest, capabilitySet, "company.files.create");
+        requireCompanyId(companyId);
+        if (!options?.runId) throw new Error("createCompanyFile requires options.runId");
+        const buffer = Buffer.from(input.contentBase64, "base64");
+        const id = randomUUID();
+        const contentPath = `/api/attachments/${id}/content`;
+        const file: PluginCompanyFileContent = {
+          id,
+          companyId,
+          issueId: null,
+          contentType: input.contentType,
+          byteSize: buffer.length,
+          originalFilename: input.filename ?? null,
+          createdByAgentId: null,
+          contentPath,
+          openPath: contentPath,
+          downloadPath: `${contentPath}?download=1`,
+          createdAt: new Date(),
+          contentBase64: input.contentBase64,
+        };
+        companyFiles.set(id, file);
+        const { contentBase64: _bytes, ...meta } = file;
+        return meta;
+      },
+      async get(fileId, companyId) {
+        requireCapability(manifest, capabilitySet, "company.files.read");
+        requireCompanyId(companyId);
+        const file = companyFiles.get(fileId);
+        if (!file || file.companyId !== companyId) return null;
+        const { contentBase64: _bytes, ...meta } = file;
+        return meta;
+      },
+      async readContent(fileId, companyId) {
+        requireCapability(manifest, capabilitySet, "company.files.read");
+        requireCompanyId(companyId);
+        const file = companyFiles.get(fileId);
+        if (!file || file.companyId !== companyId) throw new Error("That file is not in this company's Files.");
+        if (!file.contentType.toLowerCase().startsWith("image/")) {
+          throw new Error("Only pictures can be read here, and that file is not a picture.");
+        }
+        return file;
+      },
+    },
     data: {
       register(key, handler) {
         dataHandlers.set(key, handler);
@@ -2438,6 +2488,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       }
       for (const row of input.executionWorkspaces ?? []) executionWorkspaces.set(row.id, row);
       for (const row of input.accessMembers ?? []) accessMembers.set(row.id, row);
+      for (const row of input.companyFiles ?? []) companyFiles.set(row.id, row);
       for (const row of input.principalGrants ?? []) {
         const list = principalGrants.get(principalGrantsKey(row.companyId, row.principalType, row.principalId)) ?? [];
         list.push(row);

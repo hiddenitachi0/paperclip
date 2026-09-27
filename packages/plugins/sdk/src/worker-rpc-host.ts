@@ -1237,6 +1237,31 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      files: {
+        async createCompanyFile(
+          input: { contentBase64: string; contentType: string; filename?: string | null },
+          companyId: string,
+          options: { runId: string },
+        ) {
+          if (!options?.runId) {
+            throw new Error("createCompanyFile requires options.runId (the invoking tool call's run id)");
+          }
+          return callHost("files.createCompanyFile", {
+            companyId,
+            contentBase64: input.contentBase64,
+            contentType: input.contentType,
+            filename: input.filename,
+            runId: options.runId,
+          });
+        },
+        async get(fileId: string, companyId: string) {
+          return callHost("files.get", { fileId, companyId });
+        },
+        async readContent(fileId: string, companyId: string) {
+          return callHost("files.readContent", { fileId, companyId });
+        },
+      },
+
       data: {
         register(key: string, handler: (params: Record<string, unknown>) => Promise<unknown>): void {
           dataHandlers.set(key, handler);
@@ -1624,6 +1649,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       agentId: stringOrNull(rawActor?.agentId),
       runId: stringOrNull(rawActor?.runId),
       companyId: stringOrNull(rawActor?.companyId),
+      // Only a literal `true` from the host counts; anything else is "no".
+      canManageCompany: rawActor?.canManageCompany === true,
     });
     return Object.freeze({
       actor,

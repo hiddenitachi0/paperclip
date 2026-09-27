@@ -1106,6 +1106,9 @@ export const PLUGIN_CAPABILITIES = [
   "issue.interactions.create",
   "issue.documents.write",
   "issue.attachments.create",
+  // Company files not tied to a task (the Files page's "No task" group).
+  "company.files.create",
+  "company.files.read",
   "projects.managed",
   "routines.managed",
   "skills.managed",

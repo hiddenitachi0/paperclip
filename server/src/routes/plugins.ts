@@ -743,6 +743,22 @@ export function pluginRoutes(
     return companyId;
   }
 
+  /**
+   * Whether this board user may manage the company's settings: the local
+   * single-user board, an instance admin, or an ACTIVE owner/admin
+   * membership in this company -- the same rule as
+   * assertCompanyOwnerAdminOrInstanceAdmin (routes/authz.ts), without the
+   * throw. Handed to the plugin so it can keep company settings (Media
+   * Studio's saved looks) to the people who manage the company.
+   */
+  function boardUserCanManageCompany(req: Request, companyId: string): boolean {
+    if (req.actor.type !== "board") return false;
+    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
+    const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+    const role = membership?.status === "active" ? membership.membershipRole : null;
+    return role === "owner" || role === "admin";
+  }
+
   function performActionActorContext(req: Request, companyId: string | undefined): PluginPerformActionActorContext {
     const scopedCompanyId = companyId ?? null;
     if (req.actor.type === "agent") {
@@ -752,6 +768,7 @@ export function pluginRoutes(
         agentId: req.actor.agentId ?? null,
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
+        canManageCompany: false,
       };
     }
     if (req.actor.type === "board") {
@@ -761,6 +778,7 @@ export function pluginRoutes(
         agentId: null,
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
+        canManageCompany: scopedCompanyId ? boardUserCanManageCompany(req, scopedCompanyId) : false,
       };
     }
     // DUR-3977: everything else is refused, explicitly.

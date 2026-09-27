@@ -7153,6 +7153,69 @@ export function issueService(db: Db, options: IssueServiceOptions = {}) {
       });
     },
 
+    /**
+     * A company file that is not tied to a task: an asset plus an
+     * issue_attachments row with no issue, the same shape a file takes when
+     * its task is deleted (DUR-206), so it shows in the Files page's "No task"
+     * group and is served by GET /api/attachments/:id/content like any other.
+     * The company is the caller's to verify; this only writes it.
+     */
+    createCompanyFile: async (input: {
+      companyId: string;
+      provider: string;
+      objectKey: string;
+      contentType: string;
+      byteSize: number;
+      sha256: string;
+      originalFilename?: string | null;
+      createdByAgentId?: string | null;
+      createdByUserId?: string | null;
+    }) =>
+      withCompanyScope(rawDb, input.companyId, async (tx) => {
+        const [asset] = await tx
+          .insert(assets)
+          .values({
+            companyId: input.companyId,
+            provider: input.provider,
+            objectKey: input.objectKey,
+            contentType: input.contentType,
+            byteSize: input.byteSize,
+            sha256: input.sha256,
+            originalFilename: input.originalFilename ?? null,
+            createdByAgentId: input.createdByAgentId ?? null,
+            createdByUserId: input.createdByUserId ?? null,
+          })
+          .returning();
+
+        const [attachment] = await tx
+          .insert(issueAttachments)
+          .values({
+            companyId: input.companyId,
+            issueId: null,
+            assetId: asset.id,
+            issueCommentId: null,
+          })
+          .returning();
+
+        return {
+          id: attachment.id,
+          companyId: attachment.companyId,
+          issueId: attachment.issueId,
+          issueCommentId: attachment.issueCommentId,
+          assetId: attachment.assetId,
+          provider: asset.provider,
+          objectKey: asset.objectKey,
+          contentType: asset.contentType,
+          byteSize: asset.byteSize,
+          sha256: asset.sha256,
+          originalFilename: asset.originalFilename,
+          createdByAgentId: asset.createdByAgentId,
+          createdByUserId: asset.createdByUserId,
+          createdAt: attachment.createdAt,
+          updatedAt: attachment.updatedAt,
+        };
+      }),
+
     listAttachments: async (issueId: string) =>
       db
         .select({
