@@ -17,6 +17,8 @@ export { personaPosts } from "./persona_posts.js";
 export { personaAccountPublishCounters } from "./persona_account_publish_counters.js";
 export { personaPublishingCompanySettings } from "./persona_publishing_company_settings.js";
 export { companyMcpTools } from "./company_mcp_tools.js";
+export { companyApiTools } from "./company_api_tools.js";
+export { companyApiToolCalls } from "./company_api_tool_calls.js";
 export { companyMcpOAuthConnections } from "./company_mcp_oauth_connections.js";
 export { agents } from "./agents.js";
 export { agentDailyCounters } from "./agent_daily_counters.js";

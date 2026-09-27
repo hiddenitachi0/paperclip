@@ -133,6 +133,8 @@ export function buildClaudePromptForAttempt(input: {
   taskContextFingerprint: string | null;
   sessionTaskContextFingerprint: string;
   personaChars: number;
+  /** DUR-4004: the "Tools with a key" section the heartbeat put in context.paperclipApiToolsMarkdown; empty when the agent has none. */
+  apiToolsNote?: string;
 }) {
   const resumed = Boolean(input.resumeSessionId);
   const renderedBootstrapPrompt =
@@ -152,11 +154,13 @@ export function buildClaudePromptForAttempt(input: {
     input.sessionTaskContextFingerprint === input.taskContextFingerprint &&
     input.taskContextResumeNote.length > 0;
   const taskContextNote = taskContextUnchanged ? input.taskContextResumeNote : input.taskContextNote;
+  const apiToolsNote = (input.apiToolsNote ?? "").trim();
   const prompt = joinPromptSections([
     renderedBootstrapPrompt,
     wakePrompt,
     input.sessionHandoffNote,
     taskContextNote,
+    apiToolsNote,
     renderedPrompt,
   ]);
   const promptMetrics = {
@@ -165,6 +169,7 @@ export function buildClaudePromptForAttempt(input: {
     wakePromptChars: wakePrompt.length,
     sessionHandoffChars: input.sessionHandoffNote.length,
     taskContextChars: taskContextNote.length,
+    apiToolsChars: apiToolsNote.length,
     taskContextFullChars: input.taskContextNote.length,
     taskContextUnchanged: taskContextUnchanged ? 1 : 0,
     heartbeatPromptChars: renderedPrompt.length,
@@ -1202,6 +1207,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       taskContextFingerprint,
       sessionTaskContextFingerprint: runtimeTaskContextFingerprint,
       personaChars,
+      apiToolsNote: asString(context.paperclipApiToolsMarkdown, "").trim(),
     });
 
   const buildClaudeArgs = (

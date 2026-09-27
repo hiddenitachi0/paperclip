@@ -9,6 +9,7 @@ import {
 } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
 import { mcpToolLibraryApi, type AgentMcpToolListItem } from "../api/mcpToolLibrary";
+import { AgentApiToolsSection } from "../components/AgentApiToolsSection";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -3232,6 +3233,9 @@ export function AgentToolsTab({
           {syncTools.error instanceof Error ? syncTools.error.message : "Failed to update tools"}
         </p>
       )}
+
+      {/* DUR-4004: "API with a key" tools, ticked on the same way. */}
+      <AgentApiToolsSection agentId={agent.id} companyId={companyId} />
     </div>
   );
 }
