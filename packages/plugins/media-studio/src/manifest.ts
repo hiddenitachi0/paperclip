@@ -9,6 +9,10 @@ export const ACTION_GENERATE = "generate";
 export const ACTION_LOOKS_LIST = "looks.list";
 export const ACTION_LOOKS_SAVE = "looks.save";
 export const ACTION_LOOKS_DELETE = "looks.delete";
+/** Sogni's live list of picture models, for the looks page's model picker. */
+export const ACTION_SOGNI_MODELS = "sogni.models";
+/** The LoRAs that work with one Sogni model, for the looks page. */
+export const ACTION_SOGNI_LORAS = "sogni.loras";
 export const ISSUE_TAB_SLOT = "media-studio-issue-tab";
 export const ISSUE_TAB_EXPORT = "MediaStudioIssueTab";
 export const LOOKS_PAGE_SLOT = "media-studio-looks";
@@ -40,7 +44,8 @@ export const GENERATE_IMAGE_PARAMETERS = {
     },
     look: {
       type: "string",
-      description: "Optional. The name of a saved look to use (its style, model, seed and reference pictures). Use list-looks to see the names.",
+      description:
+        "Optional. The name of a saved look to use (its style, model, LoRAs, seed and reference pictures). Use list-looks to see the names.",
     },
     seed: {
       type: "integer",
@@ -62,7 +67,7 @@ export const GENERATE_IMAGE_PARAMETERS = {
     model: {
       type: "string",
       description:
-        "Optional. A specific model, only when the person names one. Fal models look like fal-ai/flux/schnell; Sogni models look like z-turbo. A model picks its own service.",
+        "Optional. A specific model, only when the person names one. Fal models look like fal-ai/flux/schnell; Sogni models look like z-turbo or dark_beast_z_image_turbo_v9_bf16 (any model in Sogni's model list). A model picks its own service. Better: use a saved look, which can also carry the model's LoRAs.",
     },
     provider: {
       type: "string",
@@ -74,7 +79,7 @@ export const GENERATE_IMAGE_PARAMETERS = {
 } as const;
 
 export const LIST_LOOKS_DESCRIPTION =
-  "List the company's saved picture looks (name, style, and whether each has a fixed seed or reference pictures). Use it when the person asks which looks exist, or before using a look you are unsure of.";
+  "List the company's saved picture looks (name, style, picture service, model name, LoRAs, and whether each has a fixed seed, reference pictures or the content filter off). Use it when the person asks which looks exist, or before using a look you are unsure of.";
 
 /**
  * Media Studio — generate an image, preview it, gate it behind a board
@@ -174,7 +179,7 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "string",
         title: "Sogni model",
         description:
-          "The Sogni model for normal pictures. z-turbo is fast and good for everyday pictures. Others: qwen-2512-lightning, krea-2-turbo, chroma-v46-flash, z-image, qwen-2512, chroma1-hd, and the paid gpt-image-2 models (need Premium Spark). Pictures made from reference pictures use Sogni's picture-editing model qwen-lightning.",
+          "The Sogni model for normal pictures. z-turbo is fast and good for everyday pictures. Others: qwen-2512-lightning, krea-2-turbo, chroma-v46-flash, z-image, qwen-2512, chroma1-hd, and the paid gpt-image-2 models (need Premium Spark). For a specific model with its LoRAs, save a look instead (Company settings, Media Studio looks): its model list comes live from Sogni. Pictures made from reference pictures use Sogni's picture-editing model qwen-lightning.",
         default: "z-turbo",
       },
       sogniTokenType: {

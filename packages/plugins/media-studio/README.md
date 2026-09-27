@@ -39,6 +39,47 @@ Generation runs behind a `GenerationProvider` interface, selected in the plugin'
    Fal.ai or Sogni, and a model name picks its own service (`fal-ai/...` is Fal, `z-turbo`, `krea-2-turbo`,
    `qwen-2512-lightning`, ... are Sogni).
 
+### Looks with a Sogni model and LoRAs
+
+Under **Company settings → Media Studio looks**, an owner or admin can make a look for one specific Sogni model:
+
+- **Picture service: Sogni** opens a searchable list of Sogni's picture models, read live from Sogni's public
+  catalog (`GET https://api.sogni.ai/v1/model-catalog?mediaType=image&include=parameters`, no key, kept for 10
+  minutes). Each model shows how many of Sogni's workers are online for it, whether it has LoRAs, and its tags; the
+  chosen model shows its picture size, steps and guidance ranges. Mac and smaller builds of a model are hidden unless
+  asked for. For example "Dark Beast Z-Image Turbo v9" is `dark_beast_z_image_turbo_v9_bf16`.
+- **LoRAs**: the LoRAs Sogni has for the chosen model (`GET /v1/loras/comfy`, public), plus the account's own
+  imported LoRAs when the Sogni account has an Unlimited plan (`GET /v1/loras/personal/catalog` with the key). Add up
+  to 8; they are used in the listed order. Each has a strength slider bounded by that LoRA's own range, starting at its
+  default, with the maker's recommended range and a link to the LoRA's page. **Sogni does not add a LoRA's trigger
+  words**: if the LoRA's page names one, put it in the look's style words. Not every model has LoRAs (in September
+  2026 only the Krea 2 family had public ones; Dark Beast Z-Image Turbo v9 had none).
+- **Model settings** the model allows: guidance (only where the model lets it change), "things to keep out of the
+  picture" (only models that use it), and the picture size (inside the model's width and height range). Steps cannot
+  be set: Sogni's workflow step has no steps setting.
+- **Sensitive content filter**: on by default. Some models, for example the Dark Beast models, only work with it off,
+  and the page says so when such a model is picked. Pictures made with the filter off can be explicit. Only an owner
+  or admin can save a look with it off (the look records who did), agents cannot turn it off in any way, and Sogni
+  also checks that the account may make such pictures (a subscription, Premium Spark, or paying with SOGNI).
+
+Everything in a look is checked again in the worker when it is saved and before every picture: the model must be in
+Sogni's catalog, each LoRA must work with that model at a strength inside its range, at most 8, and a LoRA Sogni marks
+as needing the filter off needs a look with the filter off. A problem is reported in a plain sentence before the
+agent's daily picture limit is touched. When Sogni's catalog cannot be reached, a look keeps working with the model and
+LoRAs it was saved with, but new models cannot be picked.
+
+Agents: an agent can ask for any model in Sogni's catalog by id (`model`), but LoRAs, model settings and the filter
+only come from a saved look. The **List saved looks** tool says each look's model name, LoRAs with strengths, and
+whether its filter is off. A look's LoRAs and settings are left out (and the agent is told) when the agent asks for a
+different model, or when reference pictures are used with a model that cannot edit pictures (then Sogni's
+picture-editing model `qwen-lightning` makes the picture). Pick an editing model, for example Krea 2 Identity Edit,
+to use LoRAs with reference pictures.
+
+On the wire: a known model is sent by its tool key (`dark-beast-z-turbo`) and any other catalog model by its id; LoRAs
+go in the step's `loras` and `loraStrengths` arguments (paired lists, on `generate_image` and `edit_image`), guidance
+and things-to-avoid in `guidance` and `negativePrompt` (`generate_image` only), and the filter is the workflow's
+`safe_content_filter` (always sent: `true` unless the look turned it off).
+
 How it works: the picture is one `generate_image` step of a Sogni creative workflow (with the seed, so every picture's
 seed is known and reusable), polled every 2 seconds; after 120 seconds it is cancelled on Sogni. The finished picture is
 downloaded from Sogni's storage (only `https://<bucket>.s3-accelerate.amazonaws.com` addresses are fetched) and saved

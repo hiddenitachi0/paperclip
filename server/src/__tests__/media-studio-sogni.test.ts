@@ -1,8 +1,18 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
 import plugin from "../../../packages/plugins/media-studio/src/worker.js";
 import manifest, { TOOL_GENERATE } from "../../../packages/plugins/media-studio/src/manifest.js";
-import { SogniProvider, assertSogniStorageUrl } from "../../../packages/plugins/media-studio/src/sogni.js";
+import { SogniProvider, assertSogniStorageUrl, sogniWorkflowModel } from "../../../packages/plugins/media-studio/src/sogni.js";
+import {
+  SOGNI_OFFLINE_MODELS,
+  SogniCatalog,
+  checkSogniLoras,
+  checkSogniOverrides,
+  lorasForModel,
+  parseSogniLoraCatalog,
+  parseSogniModelCatalog,
+} from "../../../packages/plugins/media-studio/src/sogni-catalog.js";
 
 /**
  * Media Studio's Sogni provider, against a fake Sogni (no real API is ever
@@ -27,6 +37,51 @@ const ARTIFACT_URL = "https://complete-images.s3-accelerate.amazonaws.com/2026-0
 const UPLOAD_URL = "https://uploads.s3-accelerate.amazonaws.com/";
 const WORKFLOW_ID = "wf_durable_workflow_1";
 
+/**
+ * Trimmed copies of Sogni's real public answers (read 2026-09-27 without a
+ * key): GET /v1/model-catalog?mediaType=image&include=parameters and
+ * GET /v1/loras/comfy (examples and file names left out).
+ */
+const MODEL_CATALOG = JSON.parse(readFileSync(new URL("./fixtures/sogni/model-catalog-image.json", import.meta.url), "utf8"));
+const LORA_CATALOG = JSON.parse(readFileSync(new URL("./fixtures/sogni/loras-comfy.json", import.meta.url), "utf8"));
+/** The id Sogni's catalog gives "Dark Beast Z-Image Turbo v9" (sogni.ai/models/dark-beast-z-image-turbo). */
+const DARK_BEAST_V9 = "dark_beast_z_image_turbo_v9_bf16";
+/** A personal LoRA row in the shape the personal-loras docs show. */
+const PERSONAL_LORA_CATALOG = {
+  status: "success",
+  data: {
+    loras: [
+      {
+        loraId: "personal-3f0c2b1a-0000-4000-8000-000000000001",
+        slug: "personal-3f0c2b1a-0000-4000-8000-000000000001",
+        name: "Our sofa range",
+        description: "Your imported LoRA.",
+        relatedLoraIds: [],
+        modelIds: ["krea2_turbo_fp8_scaled", "krea2_identity_edit_v1_2"],
+        ui: { category: "personal", label: "Our sofa range", min: 0, max: 1, default: 1, step: 0.05, recommendedMin: 0.5, recommendedMax: 1, nsfw: false, sexual: false, creator: "Imported by you", sourceUrl: "https://huggingface.co/example/sofa/resolve/main/sofa.safetensors" },
+      },
+    ],
+  },
+};
+
+/**
+ * The argument names Sogni's published tool schemas allow (both schemas say
+ * additionalProperties: false, so any other name is a 400):
+ * @sogni-ai/sogni-intelligence-client 4.6.2, schemas/tools/generate_image.schema.json
+ * and edit_image.schema.json (creative-agent schema 2026-07-18.1).
+ */
+const GENERATE_IMAGE_ARGUMENTS = [
+  "prompt", "model", "width", "height", "numberOfVariations", "negativePrompt", "starting_image_strength",
+  "sourceImageIndex", "seed", "guidance", "gptImageQuality", "outputFormat", "aspectRatio", "gptImageBackground",
+  "gptImageOutputCompression", "loras", "loraStrengths",
+];
+const EDIT_IMAGE_ARGUMENTS = [
+  "prompt", "model", "sourceImageIndex", "numberOfVariations", "width", "height", "aspectRatio", "gptImageQuality",
+  "outputFormat", "personaName", "gptImageBackground", "gptImageOutputCompression", "mask_image_url", "loras", "loraStrengths",
+];
+/** Start-body fields the workflows reference documents (snake_case wire names). */
+const WORKFLOW_START_FIELDS = ["input", "token_type", "billing_mode", "app_source", "media_references", "safe_content_filter", "max_estimated_capacity_units", "confirm_cost"];
+
 type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
 interface FakeSogniOptions {
@@ -37,6 +92,10 @@ interface FakeSogniOptions {
   artifact?: Record<string, unknown>;
   waitingReason?: string;
   stepError?: string;
+  /** Sogni's public model and LoRA lists: served (default) or unreachable. */
+  catalog?: "ok" | "down";
+  /** The answer to GET /v1/loras/personal/catalog (default: 403, no Unlimited plan). */
+  personal?: { status: number; body?: unknown };
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -77,6 +136,16 @@ function fakeSogni(options: FakeSogniOptions = {}) {
       if (answer === "waiting_for_user") workflow.waitingReason = options.waitingReason ?? "other";
       if (answer === "failed") workflow.steps = [{ id: "picture", error: { message: options.stepError ?? "worker failed" } }];
       return json(200, { status: "success", data: { workflow } });
+    }
+    if (method === "GET" && path === "/v1/model-catalog") {
+      return options.catalog === "down" ? json(503, { status: "error", message: "catalog unavailable" }) : json(200, MODEL_CATALOG);
+    }
+    if (method === "GET" && path === "/v1/loras/comfy") {
+      return options.catalog === "down" ? json(503, { status: "error", message: "catalog unavailable" }) : json(200, LORA_CATALOG);
+    }
+    if (method === "GET" && path === "/v1/loras/personal/catalog") {
+      const answer = options.personal ?? { status: 403, body: { status: "error", errorCode: 179, message: "Unlimited plan required" } };
+      return json(answer.status, answer.body ?? {});
     }
     if (method === "GET" && path === "/v2/image/uploadUrl") {
       return json(200, {
@@ -159,6 +228,7 @@ describe("Sogni provider", () => {
       },
       token_type: "auto",
       app_source: "paperclip-media-studio",
+      safe_content_filter: true,
     });
     const polls = fake.api.filter((call) => call.method === "GET");
     expect(polls).toHaveLength(3);
@@ -564,8 +634,525 @@ describe("media-studio worker with Sogni", () => {
       { name: "A", style: "", provider: "sogni", model: "z-turbo", seed: null, referenceFileIds: [] },
       owner,
     );
-    expect(saved.looks[0]).toMatchObject({ name: "A", provider: "sogni", model: "z-turbo" });
+    // A tool key is saved as the catalog model it names.
+    expect(saved.looks[0]).toMatchObject({ name: "A", provider: "sogni", model: "z_image_turbo_bf16", modelName: "Z-Image Turbo" });
     const listed = await harness.executeTool<any>("list-looks", {}, runCtx);
-    expect(listed.content).toContain("- A (made with Sogni; model z-turbo)");
+    expect(listed.content).toContain("- A (made with Sogni; model Z-Image Turbo (z_image_turbo_bf16))");
+  });
+});
+
+// ─── Models and LoRAs from Sogni's catalog ───────────────────────────────────
+
+describe("Sogni's model and LoRA catalog", () => {
+  function catalogFetch(answers: { models?: () => Response; loras?: () => Response } = {}) {
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      calls.push(url);
+      const path = new URL(url).pathname;
+      if (path === "/v1/model-catalog") return answers.models ? answers.models() : json(200, MODEL_CATALOG);
+      if (path === "/v1/loras/comfy") return answers.loras ? answers.loras() : json(200, LORA_CATALOG);
+      return json(404, {});
+    });
+    return { calls, fetchImpl };
+  }
+
+  it("reads the image models: names, tags, workers online, parameter ranges, and leaves out one-job tools", () => {
+    const parsed = parseSogniModelCatalog(MODEL_CATALOG)!;
+    const ids = parsed.models.map((m) => m.id);
+    expect(ids).not.toContain("birefnet_image_background_removal_fp16");
+    const darkBeast = parsed.models.find((m) => m.id === DARK_BEAST_V9)!;
+    expect(darkBeast).toMatchObject({
+      name: "Dark Beast Z-Image Turbo v9",
+      tags: ["fast", "new", "spicy", "standard", "uncensored"],
+      generates: true,
+      takesReferences: false,
+      workersOnline: 85,
+      contentFilter: "off-required",
+      width: { min: 512, max: 2048, default: 1024, step: 16 },
+      steps: { min: 4, max: 12, default: 8 },
+      // Guidance is fixed at 1 for this model, so it cannot be changed.
+      guidance: null,
+      creator: "AiMetatron",
+      variant: false,
+    });
+    expect(parsed.models.find((m) => m.id === "qwen_image_edit_2511_fp8_lightning")).toMatchObject({ generates: false, takesReferences: true });
+    expect(parsed.models.find((m) => m.id === "chroma1-hd_fp8_scaled")).toMatchObject({
+      guidance: { min: 1, max: 8, default: 3.8 },
+      negativePrompt: { default: expect.stringContaining("low quality") },
+    });
+    // Untagged builds of other models sort last and are marked, so the picker can hide them.
+    expect(parsed.models.find((m) => m.id === "z_image_turbo_4bit")).toMatchObject({ variant: true, workersOnline: 0 });
+    expect(ids.indexOf("z_image_turbo_4bit")).toBe(ids.length - 1);
+    expect(parseSogniModelCatalog({ status: "error" })).toBeNull();
+  });
+
+  it("keeps the list for 10 minutes, keeps using the last list when Sogni cannot be reached, and waits 30 s before asking again", async () => {
+    let now = 0;
+    let down = false;
+    const { calls, fetchImpl } = catalogFetch({ models: () => (down ? json(503, {}) : json(200, MODEL_CATALOG)) });
+    const catalog = new SogniCatalog(fetchImpl, { now: () => now });
+
+    expect((await catalog.models()).live).toBe(true);
+    now += 9 * 60 * 1000;
+    await catalog.models();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBe("https://api.sogni.ai/v1/model-catalog?mediaType=image&include=parameters");
+
+    now += 2 * 60 * 1000;
+    down = true;
+    const stale = await catalog.models();
+    expect(calls).toHaveLength(2);
+    expect(stale.live).toBe(true);
+    expect(stale.models.some((m) => m.id === DARK_BEAST_V9)).toBe(true);
+    now += 10 * 1000;
+    await catalog.models();
+    expect(calls).toHaveLength(2);
+    now += 30 * 1000;
+    await catalog.models();
+    expect(calls).toHaveLength(3);
+  });
+
+  it("offers the built-in list when Sogni's catalog was never read, and then knows nothing for sure", async () => {
+    const { fetchImpl } = catalogFetch({ models: () => { throw new Error("network down"); } });
+    const catalog = new SogniCatalog(fetchImpl);
+    const list = await catalog.models();
+    expect(list.live).toBe(false);
+    expect(list.models).toBe(SOGNI_OFFLINE_MODELS);
+    expect(list.models.map((m) => m.id)).toContain(DARK_BEAST_V9);
+    expect(await catalog.model(DARK_BEAST_V9)).toEqual({ model: null, live: false });
+  });
+
+  it("finds a model by its catalog id or by its tool key", async () => {
+    const catalog = new SogniCatalog(catalogFetch().fetchImpl);
+    expect((await catalog.model("dark-beast-z-turbo")).model?.id).toBe(DARK_BEAST_V9);
+    expect((await catalog.model(DARK_BEAST_V9)).model?.name).toBe("Dark Beast Z-Image Turbo v9");
+    expect(await catalog.model("no-such-model")).toEqual({ model: null, live: true });
+    expect(catalog.knows("krea-2-turbo")).toBe(true);
+  });
+
+  it("reads LoRAs with their strength ranges, and knows which models take them", () => {
+    const parsed = parseSogniLoraCatalog(LORA_CATALOG)!;
+    expect(parsed.maxPerRequest).toBe(8);
+    const detail = parsed.loras.find((l) => l.id === "krea2-detail-enhancer")!;
+    expect(detail).toMatchObject({
+      name: "Detail Enhancer",
+      min: -5,
+      max: 5,
+      default: 1,
+      recommendedMin: -2,
+      recommendedMax: 5,
+      needsFilterOff: false,
+      creator: "alcaitiff",
+      sourceUrl: "https://civitai.com/models/2729908?modelVersionId=3068874",
+    });
+    expect(parsed.loras.find((l) => l.id === "krea2-realism-engine")!.needsFilterOff).toBe(true);
+    expect(lorasForModel(parsed, "krea-2-turbo").map((l) => l.id)).toEqual([
+      "krea2-detail-enhancer",
+      "krea2-warm-light",
+      "krea2-candid",
+      "krea2-realism-engine",
+    ]);
+    // Sogni has no public LoRAs for Dark Beast Z-Image Turbo v9 (read 2026-09-27).
+    expect(lorasForModel(parsed, DARK_BEAST_V9)).toEqual([]);
+    expect(parsed.models).toContain("dark_beast_krea2_fp8");
+    expect(parsed.models).not.toContain(DARK_BEAST_V9);
+    const personal = parseSogniLoraCatalog(PERSONAL_LORA_CATALOG, true)!;
+    expect(personal.loras[0]).toMatchObject({ personal: true, min: 0, max: 1 });
+  });
+
+  it("refuses LoRAs that do not fit: too many, the wrong model, strength out of range, filter needed off, twice", () => {
+    const known = [...parseSogniLoraCatalog(LORA_CATALOG)!.loras, ...parseSogniLoraCatalog(PERSONAL_LORA_CATALOG, true)!.loras];
+    const krea = { id: "krea2_turbo_fp8_scaled", name: "Krea 2 Turbo" };
+    const on = { contentFilterOn: true };
+    expect(checkSogniLoras(krea, [{ id: "krea2-detail-enhancer", strength: 3 }, { id: "krea2-warm-light", strength: -2 }], known, on)).toBeNull();
+    expect(
+      checkSogniLoras(krea, Array.from({ length: 9 }, (_, i) => ({ id: `l${i}`, strength: 1 })), known, on),
+    ).toBe("A picture can use at most 8 LoRAs; this has 9. Remove some.");
+    expect(checkSogniLoras({ id: "z_image_turbo_bf16", name: "Z-Image Turbo" }, [{ id: "krea2-detail-enhancer", strength: 1 }], known, on)).toBe(
+      'The LoRA "Detail Enhancer" does not work with the model Z-Image Turbo. Pick LoRAs from the list for this model.',
+    );
+    expect(checkSogniLoras(krea, [{ id: "krea2-detail-enhancer", strength: 5.5 }], known, on)).toBe(
+      'The strength of "Detail Enhancer" must be between -5 and 5 (it is 5.5).',
+    );
+    expect(checkSogniLoras(krea, [{ id: "krea2-realism-engine", strength: 0.8 }], known, on)).toBe(
+      'The LoRA "Realism Engine v3" only works with the Sensitive content filter off. Turn the filter off for this look, or remove the LoRA.',
+    );
+    expect(checkSogniLoras(krea, [{ id: "krea2-realism-engine", strength: 0.8 }], known, { contentFilterOn: false })).toBeNull();
+    expect(checkSogniLoras(krea, [{ id: "personal-3f0c2b1a-0000-4000-8000-000000000001", strength: 0 }], known, on)).toBe(
+      'Your own LoRA "Our sofa range" takes a strength above 0 and at most 1 (it is 0).',
+    );
+    expect(checkSogniLoras(krea, [{ id: "krea2-candid", strength: 3 }, { id: "krea2-candid", strength: 4 }], known, on)).toBe(
+      'The LoRA "krea2-candid" is in the list twice. Keep it once.',
+    );
+    expect(checkSogniLoras(krea, [{ id: "made-up", strength: 1 }], known, on)).toMatch(/Sogni has no LoRA called "made-up"/);
+  });
+
+  it("checks guidance, things-to-avoid text and size against what the model allows", () => {
+    const models = parseSogniModelCatalog(MODEL_CATALOG)!.models;
+    const chroma = models.find((m) => m.id === "chroma1-hd_fp8_scaled")!;
+    const darkBeast = models.find((m) => m.id === DARK_BEAST_V9)!;
+    expect(checkSogniOverrides(chroma, { guidance: 4, negativePrompt: "blurry", size: "1024x1024" })).toBeNull();
+    expect(checkSogniOverrides(chroma, { guidance: 9, negativePrompt: null, size: null })).toBe("Guidance for Chroma1-HD must be between 1 and 8.");
+    expect(checkSogniOverrides(darkBeast, { guidance: 2, negativePrompt: null, size: null })).toBe(
+      "The model Dark Beast Z-Image Turbo v9 does not let you change guidance. Leave it empty.",
+    );
+    expect(checkSogniOverrides(darkBeast, { guidance: null, negativePrompt: "blurry", size: null })).toMatch(/does not use "things to avoid" text/);
+    expect(checkSogniOverrides(darkBeast, { guidance: null, negativePrompt: null, size: "320x320" })).toMatch(
+      /Dark Beast Z-Image Turbo v9 does not take the picture size "320x320".*each side 512 to 2048/,
+    );
+  });
+});
+
+describe("Sogni provider: LoRAs, model settings and the content filter", () => {
+  it("sends LoRAs, strengths, guidance and things-to-avoid as generate_image arguments Sogni's schema allows", async () => {
+    const fake = fakeSogni();
+    await provider(fake).generate({
+      prompt: "a sofa",
+      model: "krea2_turbo_fp8_scaled",
+      loras: [
+        { id: "krea2-detail-enhancer", strength: 3 },
+        { id: "krea2-warm-light", strength: -2 },
+      ],
+      guidance: 2.5,
+      negativePrompt: "blurry, text",
+    });
+    const body = starts(fake)[0]!.body as any;
+    const args = body.input.steps[0].arguments;
+    expect(body.input.steps[0].toolName).toBe("generate_image");
+    expect(args).toMatchObject({
+      model: "krea-2-turbo",
+      loras: ["krea2-detail-enhancer", "krea2-warm-light"],
+      loraStrengths: [3, -2],
+      guidance: 2.5,
+      negativePrompt: "blurry, text",
+    });
+    expect(Object.keys(args).filter((k) => !GENERATE_IMAGE_ARGUMENTS.includes(k))).toEqual([]);
+    expect(Object.keys(body).filter((k) => !WORKFLOW_START_FIELDS.includes(k))).toEqual([]);
+    // The filter is said out loud, and is on unless asked otherwise.
+    expect(body.safe_content_filter).toBe(true);
+  });
+
+  it("sends LoRAs on edit_image (no guidance there), with the catalog's edit model", async () => {
+    const fake = fakeSogni();
+    await provider(fake).generate({
+      prompt: "the same person in a garden",
+      model: "krea2_identity_edit_v1_2",
+      modelTakesReferences: true,
+      referenceImages: [`data:image/png;base64,${PNG.toString("base64")}`],
+      loras: [{ id: "krea2-candid", strength: 4 }],
+      guidance: 3,
+      negativePrompt: "text",
+    });
+    const step = (starts(fake)[0]!.body as any).input.steps[0];
+    expect(step.toolName).toBe("edit_image");
+    expect(step.arguments).toEqual({
+      prompt: "the same person in a garden",
+      model: "krea-identity-edit",
+      sourceImageIndex: -1,
+      numberOfVariations: 1,
+      loras: ["krea2-candid"],
+      loraStrengths: [4],
+    });
+    expect(Object.keys(step.arguments).filter((k) => !EDIT_IMAGE_ARGUMENTS.includes(k))).toEqual([]);
+  });
+
+  it("turns the filter off for the whole workflow only when told to, and sends a catalog id with no tool key as it is", async () => {
+    const off = fakeSogni();
+    await provider(off).generate({ prompt: "x", model: DARK_BEAST_V9, safeContentFilter: false });
+    const body = starts(off)[0]!.body as any;
+    expect(body.safe_content_filter).toBe(false);
+    expect(body.input.steps[0].arguments.model).toBe("dark-beast-z-turbo");
+    expect(JSON.stringify(body.input)).not.toContain("safe");
+
+    const raw = fakeSogni();
+    await provider(raw).generate({ prompt: "x", model: "coreml-sogniXLturbo_alpha1_ad" });
+    expect((starts(raw)[0]!.body as any).input.steps[0].arguments.model).toBe("coreml-sogniXLturbo_alpha1_ad");
+    expect(sogniWorkflowModel("qwen_image_edit_2511_fp8_lightning", "edit_image")).toBe("qwen-lightning");
+  });
+});
+
+describe("media-studio looks with Sogni models and LoRAs", () => {
+  let harness: TestHarness;
+  let fake: ReturnType<typeof fakeSogni>;
+  const owner = { actor: { type: "user" as const, userId: "owner-1", canManageCompany: true }, companyId: COMPANY };
+  const member = { actor: { type: "user" as const, userId: "member-1", canManageCompany: false }, companyId: COMPANY };
+
+  async function setup(options: FakeSogniOptions = {}, config: Record<string, unknown> = SOGNI_CONFIG) {
+    harness = createTestHarness({ manifest, config });
+    harness.seed({ companyFiles: [companyFile(REF_A)] });
+    await plugin.definition.setup(harness.ctx);
+    fake = fakeSogni(options);
+    harness.ctx.http.fetch = vi.fn((url: string, init?: RequestInit) => fake.apiFetch(url, init)) as typeof harness.ctx.http.fetch;
+    vi.stubGlobal("fetch", fake.transferFetch);
+  }
+
+  async function run(params: Record<string, unknown>) {
+    const pending = harness.executeTool<any>(TOOL_GENERATE, params, runCtx);
+    await vi.runAllTimersAsync();
+    return pending;
+  }
+
+  function save(fields: Record<string, unknown>, context = owner) {
+    return harness.performAction<any>("looks.save", { style: "", seed: null, referenceFileIds: [], provider: "sogni", ...fields }, context);
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("lists Sogni's models for the picker, with LoRA availability, and the LoRAs for one model", async () => {
+    await setup();
+    const models = await harness.performAction<any>("sogni.models", {}, member);
+    expect(models.live).toBe(true);
+    expect(models.maxLoras).toBe(8);
+    expect(models.models.find((m: any) => m.id === DARK_BEAST_V9)).toMatchObject({
+      name: "Dark Beast Z-Image Turbo v9",
+      workersOnline: 85,
+      contentFilter: "off-required",
+      hasLoras: false,
+    });
+    expect(models.models.find((m: any) => m.id === "krea2_turbo_fp8_scaled").hasLoras).toBe(true);
+
+    const loras = await harness.performAction<any>("sogni.loras", { modelId: "krea2_turbo_fp8_scaled" }, owner);
+    expect(loras.loras.map((l: any) => l.id)).toEqual(["krea2-detail-enhancer", "krea2-warm-light", "krea2-candid", "krea2-realism-engine"]);
+    // No Unlimited plan: only Sogni's public LoRAs, and a note saying why.
+    expect(loras.personal).toBe("not-allowed");
+    expect(loras.note).toBe("Your own LoRAs are not shown: they need an active Sogni Unlimited plan.");
+    const personalCall = fake.api.find((c) => c.url.endsWith("/v1/loras/personal/catalog"))!;
+    expect(personalCall.headers.authorization).toBe("Bearer resolved:sogni-key-ref");
+    // The public lists are read without the key.
+    expect(fake.api.filter((c) => !c.url.endsWith("/personal/catalog")).every((c) => !c.headers.authorization)).toBe(true);
+
+    const none = await harness.performAction<any>("sogni.loras", { modelId: DARK_BEAST_V9 }, member);
+    expect(none.loras).toEqual([]);
+    expect(none.personal).toBe("owners-only");
+  });
+
+  it("adds the account's own LoRAs for an owner when the plan allows them", async () => {
+    await setup({ personal: { status: 200, body: PERSONAL_LORA_CATALOG } });
+    const loras = await harness.performAction<any>("sogni.loras", { modelId: "krea-2-turbo" }, owner);
+    expect(loras.personal).toBe("included");
+    expect(loras.loras.at(-1)).toMatchObject({ id: "personal-3f0c2b1a-0000-4000-8000-000000000001", personal: true });
+  });
+
+  it("saves a Dark Beast Z-Image Turbo v9 look with the filter off, and its pictures are made with the filter off", async () => {
+    await setup();
+    const saved = await save({ name: "After dark", style: "moody", model: DARK_BEAST_V9, safeContentFilter: false });
+    expect(saved.looks[0]).toMatchObject({
+      model: DARK_BEAST_V9,
+      modelName: "Dark Beast Z-Image Turbo v9",
+      loras: [],
+      safeContentFilter: false,
+      contentFilterOffBy: "owner-1",
+    });
+
+    const result = await run({ prompt: "a sofa at night", look: "After dark" });
+    expect(result.error).toBeUndefined();
+    const body = starts(fake)[0]!.body as any;
+    expect(body.safe_content_filter).toBe(false);
+    expect(body.input.steps[0].arguments).toMatchObject({ model: "dark-beast-z-turbo", prompt: "a sofa at night\n\nStyle: moody" });
+
+    const listed = await harness.executeTool<any>("list-looks", {}, runCtx);
+    expect(listed.content).toContain("model Dark Beast Z-Image Turbo v9 (dark_beast_z_image_turbo_v9_bf16)");
+    expect(listed.content).toContain("content filter off (pictures can be explicit)");
+    expect(listed.data.looks[0]).toMatchObject({ modelName: "Dark Beast Z-Image Turbo v9", contentFilter: "off" });
+  });
+
+  it("saves a Krea 2 Turbo look with LoRAs and sends them, in order, with their strengths", async () => {
+    await setup();
+    await save({
+      name: "Catalogue",
+      model: "krea2_turbo_fp8_scaled",
+      loras: [
+        { id: "krea2-detail-enhancer", strength: 3 },
+        { id: "krea2-warm-light", strength: "-2" },
+      ],
+      size: "1280x720",
+    });
+    const result = await run({ prompt: "a green sofa", look: "Catalogue" });
+    expect(result.error).toBeUndefined();
+    const body = starts(fake)[0]!.body as any;
+    expect(body.safe_content_filter).toBe(true);
+    expect(body.input.steps[0].arguments).toMatchObject({
+      model: "krea-2-turbo",
+      loras: ["krea2-detail-enhancer", "krea2-warm-light"],
+      loraStrengths: [3, -2],
+      width: 1280,
+      height: 720,
+    });
+
+    const listed = await harness.executeTool<any>("list-looks", {}, runCtx);
+    expect(listed.content).toContain("LoRAs: Detail Enhancer at 3, Warm Light at -2");
+    expect(listed.data.looks[0].loras).toEqual([
+      { name: "Detail Enhancer", id: "krea2-detail-enhancer", strength: 3 },
+      { name: "Warm Light", id: "krea2-warm-light", strength: -2 },
+    ]);
+  });
+
+  it("refuses to save an unknown model, a LoRA for another model, more than 8 LoRAs, a strength out of range, or a filter-off LoRA with the filter on", async () => {
+    await setup();
+    await expect(save({ name: "A", model: "made-up-model" })).rejects.toThrow('Sogni has no picture model called "made-up-model". Pick one from the list.');
+    await expect(save({ name: "A", model: "z_image_turbo_bf16", loras: [{ id: "krea2-detail-enhancer", strength: 1 }] })).rejects.toThrow(
+      'The LoRA "Detail Enhancer" does not work with the model Z-Image Turbo. Pick LoRAs from the list for this model.',
+    );
+    await expect(
+      save({ name: "A", model: "krea2_turbo_fp8_scaled", loras: Array.from({ length: 9 }, (_, i) => ({ id: `krea2-x${i}`, strength: 1 })) }),
+    ).rejects.toThrow("A look can use at most 8 LoRAs; this has 9. Remove some.");
+    await expect(save({ name: "A", model: "krea2_turbo_fp8_scaled", loras: [{ id: "krea2-warm-light", strength: 11 }] })).rejects.toThrow(
+      'The strength of "Warm Light" must be between -10 and 10 (it is 11).',
+    );
+    await expect(save({ name: "A", model: "krea2_turbo_fp8_scaled", loras: [{ id: "krea2-realism-engine", strength: 0.8 }] })).rejects.toThrow(
+      /only works with the Sensitive content filter off/,
+    );
+    await expect(save({ name: "A", model: DARK_BEAST_V9, guidance: 3 })).rejects.toThrow(/does not let you change guidance/);
+    await expect(save({ name: "A", provider: "fal", loras: [{ id: "krea2-candid", strength: 3 }] })).rejects.toThrow(/are Sogni settings/);
+    await expect(save({ name: "A", provider: "fal", safeContentFilter: false })).rejects.toThrow(/are Sogni settings/);
+    // Only an owner/admin can save at all (and so turn the filter off).
+    await expect(save({ name: "A", model: DARK_BEAST_V9, safeContentFilter: false }, member)).rejects.toThrow(
+      "Only the company's owner or an admin can change looks.",
+    );
+    const agent = { actor: { type: "agent" as const, agentId: AGENT, canManageCompany: false }, companyId: COMPANY };
+    await expect(save({ name: "A", model: DARK_BEAST_V9, safeContentFilter: false }, agent as any)).rejects.toThrow(/Only the company's owner/);
+    expect(await harness.ctx.state.get(looksKey)).toBeNull();
+  });
+
+  it("never lets an agent turn the content filter off, and ignores a look marked off without the owner flag", async () => {
+    await setup();
+    await harness.ctx.state.set(looksKey, [
+      { id: "l1", name: "Forged", style: "", model: DARK_BEAST_V9, provider: "sogni", seed: null, referenceFileIds: [], safeContentFilter: false, updatedAt: "x" },
+    ]);
+    await run({ prompt: "a sofa", safeContentFilter: false, safe_content_filter: false, contentFilter: "off" } as any);
+    await run({ prompt: "a sofa", look: "Forged" });
+    expect(starts(fake).map((call) => (call.body as any).safe_content_filter)).toEqual([true, true]);
+  });
+
+  it("refuses an agent's model that is not in Sogni's catalog, before using up the day's limit", async () => {
+    await setup();
+    const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");
+    const result = await run({ prompt: "a sofa", provider: "sogni", model: "not-a-sogni-model" });
+    expect(result.error).toBe('Sogni has no picture model called "not-a-sogni-model". Leave out the model, or use a saved look.');
+    expect(reserve).not.toHaveBeenCalled();
+    expect(starts(fake)).toHaveLength(0);
+
+    // Any catalog model works per call, by id or tool key.
+    const ok = await run({ prompt: "a sofa", model: DARK_BEAST_V9 });
+    expect(ok.error).toBeUndefined();
+    expect((starts(fake)[0]!.body as any).input.steps[0].arguments.model).toBe("dark-beast-z-turbo");
+    expect((starts(fake)[0]!.body as any).safe_content_filter).toBe(true);
+
+    // A catalog model with no tool key picks Sogni even when settings say Fal.
+    await setup({}, { ...FAL_CONFIG, sogniKeySecretRef: "sogni-key-ref" });
+    const sdxl = await run({ prompt: "a sofa", model: "coreml-sogniXLturbo_alpha1_ad" });
+    expect(sdxl.data.provider).toBe("sogni");
+    expect((starts(fake)[0]!.body as any).input.steps[0].arguments.model).toBe("coreml-sogniXLturbo_alpha1_ad");
+  });
+
+  it("when Sogni's catalog cannot be reached, still uses a look's saved model and LoRAs, but refuses other models", async () => {
+    await setup({ catalog: "down" });
+    await harness.ctx.state.set(looksKey, [
+      {
+        id: "l1",
+        name: "Catalogue",
+        style: "",
+        model: "krea2_turbo_fp8_scaled",
+        provider: "sogni",
+        seed: null,
+        referenceFileIds: [],
+        loras: [{ id: "krea2-detail-enhancer", name: "Detail Enhancer", strength: 3 }],
+        updatedAt: "x",
+      },
+    ]);
+    const viaLook = await run({ prompt: "a sofa", look: "Catalogue" });
+    expect(viaLook.error).toBeUndefined();
+    expect((starts(fake)[0]!.body as any).input.steps[0].arguments).toMatchObject({ model: "krea-2-turbo", loras: ["krea2-detail-enhancer"] });
+
+    const other = await run({ prompt: "a sofa", model: DARK_BEAST_V9 });
+    expect(other.error).toBe(
+      `Sogni's list of models could not be reached just now, so the model "${DARK_BEAST_V9}" could not be checked. Try again in a minute, or use a saved look.`,
+    );
+    await expect(save({ name: "New", model: DARK_BEAST_V9 })).rejects.toThrow(
+      "Sogni's list of models could not be reached just now, so the model could not be checked. Try again in a minute.",
+    );
+    const offline = await harness.performAction<any>("sogni.models", {}, member);
+    expect(offline.live).toBe(false);
+    expect(offline.note).toMatch(/only a few well-known models are shown/);
+  });
+
+  it("checks a look's LoRAs again before each picture: one that no longer fits its model is refused before spending", async () => {
+    await setup();
+    await harness.ctx.state.set(looksKey, [
+      {
+        id: "l1",
+        name: "Stale",
+        style: "",
+        model: "krea2_turbo_fp8_scaled",
+        provider: "sogni",
+        seed: null,
+        referenceFileIds: [],
+        loras: [{ id: "krea2-warm-light", name: "Warm Light", strength: 40 }],
+        updatedAt: "x",
+      },
+    ]);
+    const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");
+    const result = await run({ prompt: "a sofa", look: "Stale" });
+    expect(result.error).toBe('The look "Stale" cannot be used as saved: The strength of "Warm Light" must be between -10 and 10 (it is 40).');
+    expect(reserve).not.toHaveBeenCalled();
+    expect(starts(fake)).toHaveLength(0);
+  });
+
+  it("leaves a look's LoRAs out, and says so, when the agent picks another model or the picture needs the editing model", async () => {
+    await setup();
+    await save({ name: "Catalogue", model: "krea2_turbo_fp8_scaled", loras: [{ id: "krea2-candid", strength: 4 }] });
+
+    const otherModel = await run({ prompt: "a sofa", look: "Catalogue", model: "z-turbo" });
+    expect(otherModel.content).toContain(`The look's LoRAs and model settings were left out, because this picture uses a different model than the look "Catalogue".`);
+    expect((starts(fake)[0]!.body as any).input.steps[0].arguments.loras).toBeUndefined();
+
+    // Naming the look's own model is still the look.
+    const sameModel = await run({ prompt: "a sofa", look: "Catalogue", model: "krea-2-turbo" });
+    expect(sameModel.content).not.toContain("left out");
+    expect((starts(fake)[1]!.body as any).input.steps[0].arguments.loras).toEqual(["krea2-candid"]);
+
+    const withRefs = await run({ prompt: "the same sofa", look: "Catalogue", referenceFileIds: [REF_A] });
+    expect(withRefs.error).toBeUndefined();
+    expect(withRefs.content).toContain("pictures made from reference pictures use Sogni's picture-editing model");
+    const step = (starts(fake)[2]!.body as any).input.steps[0];
+    expect(step).toMatchObject({ toolName: "edit_image", arguments: { model: "qwen-lightning" } });
+    expect(step.arguments.loras).toBeUndefined();
+  });
+
+  it("an edit-model look applies its LoRAs to edit_image, and refuses to run without reference pictures", async () => {
+    await setup();
+    await save({
+      name: "Same person",
+      model: "krea2_identity_edit_v1_2",
+      referenceFileIds: [REF_A],
+      loras: [{ id: "krea2-candid", strength: 4 }],
+    });
+    const result = await run({ prompt: "in a garden", look: "Same person" });
+    expect(result.error).toBeUndefined();
+    const step = (starts(fake)[0]!.body as any).input.steps[0];
+    expect(step).toMatchObject({ toolName: "edit_image", arguments: { model: "krea-identity-edit", loras: ["krea2-candid"], loraStrengths: [4] } });
+
+    await save({ name: "Editor only", model: "qwen_image_edit_2511_fp8_lightning" });
+    expect((await run({ prompt: "x", look: "Editor only" })).error).toBe(
+      "Qwen Image Edit 2511 Lightning changes existing pictures, so it needs reference pictures. Add reference pictures (to the look or to this picture), or pick another model.",
+    );
+  });
+
+  it("keeps an older look working: no LoRAs, filter on, model as saved", async () => {
+    await setup();
+    await harness.ctx.state.set(looksKey, [
+      { id: "l1", name: "Old", style: "", model: "krea-2-turbo", provider: "sogni", seed: 5, referenceFileIds: [], updatedAt: "x" },
+    ]);
+    const looks = await harness.performAction<any>("looks.list", {}, member);
+    expect(looks.looks[0]).toMatchObject({ loras: [], safeContentFilter: true, contentFilterOffBy: null, guidance: null });
+    const result = await run({ prompt: "a sofa", look: "Old" });
+    expect(result.error).toBeUndefined();
+    expect((starts(fake)[0]!.body as any).input.steps[0].arguments).toMatchObject({ model: "krea-2-turbo", seed: 5 });
   });
 });
