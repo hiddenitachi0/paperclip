@@ -54,9 +54,16 @@ export async function loadLaneAApiTools(
   deps: ApiToolServiceDeps = {},
 ): Promise<LaneAApiToolset> {
   const svc = apiToolService(db, deps);
-  const toolIds = await svc.agentToolIds(companyId, agentId);
-  if (toolIds.length === 0) return EMPTY;
-  const tools = await svc.listGranted(companyId, toolIds);
+  // Same posture as the MCP loader in lane-a.ts: a problem reading the
+  // tools must not fail the chat turn; the quick agent degrades to plain chat.
+  let tools: Awaited<ReturnType<typeof svc.listGranted>>;
+  try {
+    const toolIds = await svc.agentToolIds(companyId, agentId);
+    if (toolIds.length === 0) return EMPTY;
+    tools = await svc.listGranted(companyId, toolIds);
+  } catch {
+    return EMPTY;
+  }
   if (tools.length === 0) return EMPTY;
 
   const anthropicTools: Anthropic.Tool[] = [];
