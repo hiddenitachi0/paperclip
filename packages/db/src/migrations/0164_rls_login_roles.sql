@@ -152,6 +152,10 @@ DECLARE
     'company_agent_roles',
     'company_logos',
     'company_mcp_oauth_connections',
+    -- DUR-4004. Created (and granted on) in 0177_company_api_tools.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_api_tool_calls',
+    'company_api_tools',
     'company_mcp_tools',
     'company_memberships',
     'company_secret_bindings',
@@ -313,6 +317,10 @@ DECLARE
     'company_agent_roles',
     'company_logos',
     'company_mcp_oauth_connections',
+    -- DUR-4004. Created (and granted on) in 0177_company_api_tools.sql; listed
+    -- here so the login-role lists match the schema, as for the tables above.
+    'company_api_tool_calls',
+    'company_api_tools',
     'company_mcp_tools',
     'company_memberships',
     'company_secret_bindings',
