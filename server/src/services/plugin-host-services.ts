@@ -1129,8 +1129,12 @@ export function buildHostServices(
     },
 
     secrets: {
-      async resolve(params) {
-        return secretsHandler.resolve(params);
+      // `context` carries the invocation scope the worker manager verified
+      // for the host->worker call this request is nested in. It must reach
+      // the handler: without it the handler has no company to check the
+      // secret against and fails closed for every call.
+      async resolve(params, context) {
+        return secretsHandler.resolve(params, context);
       },
     },
 
