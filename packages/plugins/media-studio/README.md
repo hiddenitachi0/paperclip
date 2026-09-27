@@ -14,6 +14,8 @@ the roadmap-3 approval gate for the paperclip-fork.
   storage, so no Paperclip address leaves the box), and `look` (a saved look: style words,
   picture service, model, fixed seed, reference pictures).
 - **Agent tool** `paperclip.media-studio:list-looks` — read-only list of the company's looks.
+- **Sogni picture tools** — upscale, remove background, restore, change angle, apply a style, select objects, and
+  improve a prompt, one agent tool each (see "Sogni tools for existing pictures" below).
 - **Company settings → Media Studio looks** — owners/admins add, edit and delete looks; looks
   are stored per company in plugin state (scope `company`).
 - **Issue "Media Studio" tab** — a human generates, submits for approval, and then
@@ -86,6 +88,64 @@ downloaded from Sogni's storage (only `https://<bucket>.s3-accelerate.amazonaws.
 exactly like a Fal picture. Reference pictures are uploaded to Sogni's own storage and used with Sogni's
 picture-editing model (`qwen-lightning`, up to 3 pictures); Sogni takes no seed for those, and says so. Sizes use Fal's
 names (`landscape_4_3` by default) or `1280x720`-style sizes.
+
+### Sogni tools for existing pictures
+
+Besides **Generate image**, Media Studio has one agent tool per Sogni tool below. Each is its own tool, so on an
+agent's **Tools** tab you can tick exactly the ones that agent may use (a quick agent gets none until ticked).
+
+| Tool (Tools tab) | Sogni tool | What it does | Main settings the agent can pass |
+|---|---|---|---|
+| Upscale picture (Sogni) | `upscale_image` | Makes a picture 2-4 times bigger, or to a set longest side (up to 15360 pixels), without changing it | `scale`, `targetLongestEdge` |
+| Remove background (Sogni) | `remove_background` | Cuts out the subject on a transparent background (PNG), or gives the mask | `applyMask` |
+| Restore photo (Sogni) | `restore_photo` | Repairs or changes a photo from a written instruction (scratches, colourising, removing an object) | `prompt`, `quality`, `scale`, `aspectRatio` |
+| Change camera angle (Sogni) | `change_angle` | A new view of the subject from another angle | `description`, `loraStrength`, `aspectRatio` |
+| Apply style (Sogni) | `apply_style` | Redoes the picture in another style, keeping the subject | `prompt`, `scale`, `aspectRatio` |
+| Select objects (Sogni) | `segment_image` | A mask (or cut-out) of the objects named by text, points or boxes | `text`, `points`, `boxes`, `maxInstances`, `threshold`, `applyMask` |
+| Improve picture prompt (Sogni) | `enhance_prompt` | Rewrites a rough idea into a detailed prompt for one Sogni model; text only | `prompt`, `target_output`, `destination_model`, ... |
+
+- **The picture to work on** is `fileId`: a picture in the same company's Files (or attached to one of its tasks).
+  Another company's file is refused, exactly like a missing one. The picture is uploaded to Sogni's own storage (the
+  same presigned upload as reference pictures); no Paperclip address is ever sent to Sogni. Sogni takes PNG, JPEG, WebP
+  and GIF.
+- **The result** is saved like a Generate image picture: to the company's Files without a task, or attached to the task
+  given as `issueId` (same rules as Generate image). It is shown in a quick agent's chat and on Telegram. The original
+  is not changed.
+- **Settings** are Media Studio's: the Sogni key (every tool refuses, with a sentence saying where to set it, when no
+  key is picked), **Sogni payment**, and **Sogni model** (Improve picture prompt writes for that model unless the agent
+  names another).
+- **Daily picture limit**: every tool that makes a picture uses one of the agent's pictures for the day, reserved after
+  its input is checked and before Sogni is called. Improve picture prompt does not count.
+- **Content filter**: always on for these tools. They take no look, and an agent cannot pass anything to turn it off.
+- **Arguments** keep Sogni's own names and descriptions. Everything an agent sends is checked against the tool's
+  schema first (an unknown name, a wrong type or a value out of range is refused with a sentence, before the daily
+  limit is touched), and the final call is checked against Sogni's published schema before it is sent. Left out on
+  purpose: Sogni's picture addresses and "which earlier result" numbers (the picture is always `fileId`), several
+  variations (one picture per call), and Select objects' several-candidates option.
+- **On the wire**: the picture tools are a one-step Sogni creative workflow (`POST /v1/creative-agent/workflows`,
+  polled every 2 seconds, cancelled after 120 seconds, the picture downloaded from Sogni's storage) with the uploaded
+  picture as `media_references` and `sourceImageIndex: -1` where the tool has it. Improve picture prompt is Sogni's
+  synchronous `POST /v1/creative-agent/tools/execute`.
+
+### Updating Sogni's schemas
+
+The tools' parameters are built from Sogni's published schemas, vendored unchanged in
+`vendor/sogni/sogni-protocol@<version>/` (the npm package `@sogni-ai/sogni-protocol`, ISC licence; see `VENDORED.md`
+there for the version, the date and the file list). `vendor/sogni/current.json` names the folder in use and the files
+to copy. The build copies them into `dist/vendor/`, so the built add-on carries its own copy. To move to a newer
+version (not run in CI):
+
+```bash
+node packages/plugins/media-studio/scripts/sync-sogni-schemas.mjs 1.0.0-alpha.47
+pnpm --filter @paperclipai/server exec vitest run src/__tests__/media-studio-sogni-tools.test.ts
+pnpm --filter @paperclipai/plugin-media-studio build
+```
+
+The script downloads the package with `npm pack` (no Sogni key), copies only the listed files, writes `LICENSE` and
+`VENDORED.md`, points `current.json` at the new folder and removes the old one (`--keep-old` keeps it). Read the JSON
+diff before committing: a renamed or removed argument changes what agents can send. The tests fail if a schema starts
+using JSON Schema features the plugin's checker does not understand. To add a Sogni tool, add its schema file to
+`files` in `current.json`, re-run the script, and add an entry to `SOGNI_TOOLS` in `src/sogni-tools.ts`.
 
 The approval it files is a normal `request_board_approval`, so it also shows up in the
 **Now view → Needs you** lane.

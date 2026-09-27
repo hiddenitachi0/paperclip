@@ -1,0 +1,76 @@
+{
+  "title": "enhance_prompt tool schema",
+  "schemaVersion": "2026-05-14.1",
+  "description": "Synchronous prompt-authoring utility for expanding or adapting a source prompt into an exact active image, video, or image-edit model's native prompt format.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt", "target_output", "destination_model"],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "description": "The source prompt, rough idea, or prompt revision request to enhance."
+    },
+    "target_output": {
+      "type": "string",
+      "enum": ["image_prompt", "video_prompt", "edit_prompt", "model_prompt"],
+      "description": "The model-specific prompt artifact to produce. Use model_prompt only when destination_model unambiguously identifies the modality."
+    },
+    "destination_model": {
+      "type": "string",
+      "description": "Required exact active destination model selector, such as seedance2, ltx25, ltx23, wan22, minimax-h3-turbo, qwen, gpt-image-2, krea-2-turbo, chroma-v46-flash, or sdxl. Unknown and sunset models fail closed."
+    },
+    "destination_tool": {
+      "type": "string",
+      "description": "Optional downstream generation tool, such as generate_image, edit_image, generate_video, animate_photo, sound_to_video, or video_to_video."
+    },
+    "prompting_type": {
+      "type": "string",
+      "enum": ["flux", "sdxl", "sd15", "pony", "fast", "sd3", "editing", "video"],
+      "description": "Deprecated compatibility metadata. It never selects or overrides the prompt grammar; destination_model is authoritative."
+    },
+    "model_title": {
+      "type": "string",
+      "description": "Deprecated compatibility label. It never selects or overrides the prompt grammar; destination_model is authoritative."
+    },
+    "style_prompt": {
+      "type": "string",
+      "description": "Optional current style, brand, or prompt context to complement without repeating."
+    },
+    "prompt_mode": {
+      "type": "string",
+      "enum": ["auto", "preserve", "expand", "compress", "validate", "payload"],
+      "description": "Optional model prompt adaptation mode."
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 300,
+      "description": "Requested runtime when authoring a video prompt."
+    },
+    "aspect_ratio": {
+      "type": "string",
+      "description": "Optional target aspect ratio, such as 16:9, 9:16, 1:1, 4:5, or 21:9."
+    },
+    "assets": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Optional available assets the authored prompt may reference. The selected exact model contract applies its per-modality and total limits.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["media_type"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "media_type": { "type": "string", "enum": ["image", "video", "audio"] },
+          "role": { "type": "string", "enum": ["first_frame", "last_frame", "reference", "identity", "style", "motion", "audio", "source_video"] },
+          "url": { "type": "string" }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "description": "Optional production, brand, model, or user constraints to preserve."
+    }
+  }
+}

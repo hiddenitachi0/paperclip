@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.sogni.ai/creative-agent/2026-04-27.1/tools/change_angle.schema.json",
+  "title": "change_angle arguments",
+  "schemaVersion": "2026-04-27.1",
+  "description": "Generate the photo from a different camera angle or perspective. Uses AI to create a new view of the subject as if photographed from a different position. Use when the user wants to see the subject from another angle, generate a different view, create a portrait from a specific direction, or get a closeup/wide shot. Examples: \"show me from the left side\", \"generate a 3/4 portrait view\", \"closeup from slightly above\". IMPORTANT: When previous results exist, this tool automatically uses the LATEST result image unless you specify a different sourceImageIndex or the user explicitly says \"original\".",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "description": {
+      "type": "string",
+      "description": "EXACT camera angle string. You MUST construct this by concatenating exactly one value from each category below, separated by single spaces. No commas, no extra words.\n\nFormat: \"[azimuth] [elevation] [distance]\"\n\nAzimuth (pick one): \"front view\", \"front-right quarter view\", \"right side view\", \"back-right quarter view\", \"back view\", \"back-left quarter view\", \"left side view\", \"front-left quarter view\"\nElevation (pick one): \"low-angle shot\", \"eye-level shot\", \"elevated shot\", \"high-angle shot\"\nDistance (pick one): \"close-up\", \"medium shot\", \"wide shot\"\n\nExamples:\n- \"front-right quarter view eye-level shot medium shot\"\n- \"left side view eye-level shot close-up\"\n- \"front view low-angle shot wide shot\"\n- \"right side view elevated shot medium shot\"\n\nMap user requests: \"from the left\" → \"left side view\", \"looking up at\" → \"low-angle shot\", \"closeup\" → \"close-up\", \"3/4 view\" → \"front-right quarter view\" or \"front-left quarter view\", \"portrait\" → \"front-right quarter view eye-level shot medium shot\".\nDefault elevation to \"eye-level shot\" and distance to \"medium shot\" when not specified."
+    },
+    "sourceImageIndex": {
+      "type": "number",
+      "description": "Which result image to use as source (0-based index). Omit to use the latest result automatically (or the original if no results exist). Only set explicitly when the user specifies a particular image number or explicitly says \"original\" (use -1 for original)."
+    },
+    "loraStrength": {
+      "type": "number",
+      "description": "LoRA strength for angle generation (0.1-1.0). Default: 0.9. Lower values preserve more of the original appearance, higher values produce stronger angle changes. Only set when the user wants to control the transformation intensity."
+    },
+    "aspectRatio": {
+      "type": "string",
+      "description": "Do NOT set unless the user explicitly requests an aspect ratio, format, orientation, or exact pixel dimensions. When a reference/source image is used and the user did not ask to change its shape, omit this field so the handler preserves the selected source image's own ratio.\n\nFormats: \"16:9\", \"9:16\", \"4:5\", \"1:1\", \"4:3\", \"3:2\", \"21:9\", or exact pixels like \"1920x1080\".\n\nCRITICAL: When the user specifies exact pixel dimensions (e.g., \"1280x720\", \"1080x1920\", \"1920x1080\", \"3840x2160\") or an orientation-qualified named resolution (e.g., \"720p landscape\", \"720p portrait\"), use the exact pixel format, NOT a ratio like \"16:9\" or \"9:16\". Exact user-requested dimensions override the selected default media quality, including Pro/HQ defaults. A bare named video resolution like \"720p resolution\" is only a resolution tier/short-side request; do not turn it into landscape pixels and do not set aspectRatio unless the user also states landscape, portrait, vertical, horizontal, or exact pixels. If requested pixels are in bounds but not on the model's pixel step, still pass the user's exact pixel request; the handler snaps to the nearest supported size internally. Only use ratio format when the user says a generic format name without pixel dimensions.\n\nMappings (use ONLY when user does NOT specify pixel dimensions): landscape/widescreen/YouTube/cinematic → \"16:9\". portrait → \"9:16\". TikTok/Reels/IG Reels → \"1080x1920\". ultrawide/cinema scope → \"21:9\". Instagram post → \"4:5\". square → \"1:1\". standard/TV → \"4:3\". 720p landscape → \"1280x720\". 720p portrait → \"720x1280\". 1080p landscape → \"1920x1080\". 1080p portrait/HD portrait → \"1080x1920\". 4K landscape → \"3840x2160\". 4K portrait → \"2160x3840\". Never set for generic requests like \"make a video\"."
+    }
+  },
+  "required": [
+    "description"
+  ]
+}

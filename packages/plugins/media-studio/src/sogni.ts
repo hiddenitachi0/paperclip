@@ -275,6 +275,24 @@ export function assertSogniStorageUrl(raw: string): URL {
   return url;
 }
 
+/** How long a synchronous Sogni tool (tools/execute) may take, 429 waits included. */
+export const SOGNI_EXECUTE_TIMEOUT_MS = 60_000;
+
+/** A picture one of Sogni's picture tools made. */
+export interface SogniToolPicture {
+  contentType: string;
+  contentBase64: string;
+  workflowId: string;
+  /** How many pictures Sogni sent back (only the first is kept). */
+  artifactCount: number;
+}
+
+/** Picture types Sogni's storage takes for an uploaded picture. */
+export function isSogniUploadType(contentType: string): boolean {
+  const type = contentType.split(";")[0]!.trim().toLowerCase();
+  return REFERENCE_CONTENT_TYPES.has(type === "image/jpg" ? "image/jpeg" : type);
+}
+
 export interface SogniProviderOptions {
   apiKey: string;
   /** JSON calls to api.sogni.ai (the worker passes the host's gated fetch). */
@@ -331,14 +349,20 @@ function sniffImageType(bytes: Uint8Array): string | null {
 
 const DATA_URI = /^data:([^;,]+);base64,(.*)$/s;
 
-/** The picture: steps[0].artifacts[0].url per the docs, or the workflow-level artifacts list. */
-function findArtifact(workflow: Json): Json | null {
+/**
+ * The pictures: steps[0].artifacts[].url per the docs, else the
+ * workflow-level artifacts list (the same pictures, when both are given).
+ */
+function pictureArtifacts(workflow: Json): Json[] {
   const firstStep = Array.isArray(workflow.steps) ? asRecord(workflow.steps[0]) : null;
-  const artifacts = [
-    ...(Array.isArray(firstStep?.artifacts) ? firstStep.artifacts : []),
-    ...(Array.isArray(workflow.artifacts) ? workflow.artifacts : []),
-  ].map(asRecord);
-  return artifacts.find((item) => typeof item?.url === "string" && item.url) ?? null;
+  const withUrl = (list: unknown) =>
+    (Array.isArray(list) ? list : []).map(asRecord).filter((item): item is Json => typeof item?.url === "string" && item.url !== "");
+  const fromStep = withUrl(firstStep?.artifacts);
+  return fromStep.length > 0 ? fromStep : withUrl(workflow.artifacts);
+}
+
+function findArtifact(workflow: Json): Json | null {
+  return pictureArtifacts(workflow)[0] ?? null;
 }
 
 export class SogniProvider implements GenerationProvider {
@@ -372,13 +396,17 @@ export class SogniProvider implements GenerationProvider {
   }
 
   /** The plain sentence for an answer Sogni refused. */
-  private refusal(res: Response, body: Json | null): Error {
+  private refusal(res: Response, body: Json | null, what = "picture request"): Error {
     const detail = errorMessage(body);
     if (res.status === 401 || res.status === 403) {
       return new Error("Sogni did not accept the API key. Check the Sogni key picked in Media Studio settings.");
     }
     if (res.status === 402) {
-      return new Error("The Sogni account does not have enough credit for this picture. Top it up at dashboard.sogni.ai, or pick a cheaper model.");
+      return new Error(
+        what === "picture request"
+          ? "The Sogni account does not have enough credit for this picture. Top it up at dashboard.sogni.ai, or pick a cheaper model."
+          : "The Sogni account does not have enough credit for this. Top it up at dashboard.sogni.ai.",
+      );
     }
     if (res.status === 409) {
       return new Error("Sogni is busy with other pictures on this account, try again in a minute.");
@@ -387,7 +415,7 @@ export class SogniProvider implements GenerationProvider {
       return new Error("Sogni is getting too many requests right now, try again in a minute.");
     }
     if (res.status >= 500) return new Error("Sogni is having trouble right now, try again in a minute.");
-    return new Error(`Sogni refused the picture request${detail ? `: ${detail}` : ` (error ${res.status})`}.`);
+    return new Error(`Sogni refused the ${what}${detail ? `: ${detail}` : ` (error ${res.status})`}.`);
   }
 
   private remaining(deadline: number): number {
@@ -464,35 +492,13 @@ export class SogniProvider implements GenerationProvider {
       };
     }
 
-    const body: Json = {
-      input: { title: "Paperclip picture", steps: [step] },
-      token_type: this.options.tokenType ?? "auto",
-      app_source: "paperclip-media-studio",
-      // Always said out loud: on, unless an owner/admin saved a look with it off.
-      safe_content_filter: input.safeContentFilter !== false,
-      ...(mediaReferences.length > 0 ? { media_references: mediaReferences } : {}),
-    };
-    // The same key on every retry of this start, so a retry never starts a second (paid) picture.
-    const idempotencyKey = this.newId();
-    const started = await this.api(
-      "/v1/creative-agent/workflows",
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }),
-        body: JSON.stringify(body),
-      },
+    const { workflowId, firstStep, artifact, picture } = await this.runWorkflow(
+      "Paperclip picture",
+      step,
+      mediaReferences,
+      input.safeContentFilter !== false,
       deadline,
     );
-    if (!started.res.ok) throw this.refusal(started.res, started.body);
-    const workflowId = asRecord(asRecord(started.body?.data)?.workflow)?.workflowId;
-    if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started, so the picture cannot be collected.");
-
-    const workflow = await this.waitForWorkflow(workflowId, deadline);
-    const firstStep = Array.isArray(workflow.steps) ? asRecord(workflow.steps[0]) : null;
-    const artifact = findArtifact(workflow);
-    if (!artifact) throw new Error("Sogni finished but sent no picture back. Try again.");
-
-    const picture = await this.download(String(artifact.url), artifact);
     const reportedSeed =
       readSeed(artifact.seed) ??
       readSeed(asRecord(artifact.metadata)?.seed) ??
@@ -514,6 +520,109 @@ export class SogniProvider implements GenerationProvider {
         ...(input.safeContentFilter === false ? { contentFilter: "off" } : {}),
       },
     };
+  }
+
+  /**
+   * One of Sogni's picture tools (upscale_image, remove_background, ...) as a
+   * one-step workflow on the given pictures (data: URIs, uploaded to Sogni's
+   * storage first; the step's sourceImageIndex -1 is the first of them).
+   * The arguments must already be checked against Sogni's schema.
+   */
+  async runPictureTool(request: {
+    toolName: string;
+    arguments: Json;
+    pictures: string[];
+    /** Only an owner/admin-saved look may turn it off; the tools never do. */
+    safeContentFilter?: boolean;
+  }): Promise<SogniToolPicture> {
+    const deadline = this.now() + this.timeoutMs;
+    const mediaReferences: Array<{ kind: "image"; url: string }> = [];
+    for (const [index, picture] of request.pictures.entries()) {
+      mediaReferences.push({ kind: "image", url: await this.uploadReference(picture, index, deadline) });
+    }
+    const step: Json = { id: "picture", toolName: request.toolName, arguments: request.arguments };
+    const { workflowId, picture, artifactCount } = await this.runWorkflow(
+      `Paperclip ${request.toolName}`,
+      step,
+      mediaReferences,
+      request.safeContentFilter !== false,
+      deadline,
+    );
+    return { contentType: picture.contentType, contentBase64: picture.bytes.toString("base64"), workflowId, artifactCount };
+  }
+
+  /**
+   * One of Sogni's synchronous tools (enhance_prompt) on
+   * POST /v1/creative-agent/tools/execute. Returns the tool's text.
+   */
+  async executeTool(tool: string, args: Json, safeContentFilter = true): Promise<{ text: string; result: Json }> {
+    const deadline = this.now() + SOGNI_EXECUTE_TIMEOUT_MS;
+    const answer = await this.api(
+      "/v1/creative-agent/tools/execute",
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          tool,
+          arguments: args,
+          token_type: this.options.tokenType ?? "auto",
+          app_source: "paperclip-media-studio",
+          safe_content_filter: safeContentFilter,
+        }),
+      },
+      deadline,
+    );
+    if (!answer.res.ok) throw this.refusal(answer.res, answer.body, "request");
+    const data = asRecord(answer.body?.data);
+    const result = asRecord(data?.result) ?? {};
+    if (result.ok === false || result.success === false) {
+      const message = typeof result.message === "string" ? result.message.trim().slice(0, 300).replace(/[.!\s]+$/, "") : "";
+      const why = message ? `: ${message}` : "";
+      throw new Error(`Sogni could not do that${why}.`);
+    }
+    const text = [result.prompt, result.message, data?.message].find((v): v is string => typeof v === "string" && v.trim() !== "");
+    if (!text) throw new Error("Sogni answered but sent no text back. Try again.");
+    return { text: text.trim(), result };
+  }
+
+  /** Start a one-step workflow, wait for it, and download its first picture. */
+  private async runWorkflow(
+    title: string,
+    step: Json,
+    mediaReferences: Array<{ kind: "image"; url: string }>,
+    safeContentFilter: boolean,
+    deadline: number,
+  ): Promise<{ workflowId: string; firstStep: Json | null; artifact: Json; picture: { bytes: Buffer; contentType: string }; artifactCount: number }> {
+    const body: Json = {
+      input: { title, steps: [step] },
+      token_type: this.options.tokenType ?? "auto",
+      app_source: "paperclip-media-studio",
+      // Always said out loud: on, unless an owner/admin saved a look with it off.
+      safe_content_filter: safeContentFilter,
+      ...(mediaReferences.length > 0 ? { media_references: mediaReferences } : {}),
+    };
+    // The same key on every retry of this start, so a retry never starts a second (paid) picture.
+    const idempotencyKey = this.newId();
+    const started = await this.api(
+      "/v1/creative-agent/workflows",
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }),
+        body: JSON.stringify(body),
+      },
+      deadline,
+    );
+    if (!started.res.ok) throw this.refusal(started.res, started.body);
+    const workflowId = asRecord(asRecord(started.body?.data)?.workflow)?.workflowId;
+    if (typeof workflowId !== "string" || !workflowId) throw new Error("Sogni did not say which job it started, so the picture cannot be collected.");
+
+    const workflow = await this.waitForWorkflow(workflowId, deadline);
+    const firstStep = Array.isArray(workflow.steps) ? asRecord(workflow.steps[0]) : null;
+    const artifacts = pictureArtifacts(workflow);
+    const artifact = artifacts[0];
+    if (!artifact) throw new Error("Sogni finished but sent no picture back. Try again.");
+    const picture = await this.download(String(artifact.url), artifact);
+    return { workflowId, firstStep, artifact, picture, artifactCount: artifacts.length };
   }
 
   private async waitForWorkflow(workflowId: string, deadline: number): Promise<Json> {

@@ -11,10 +11,13 @@ import {
   type ProviderConfig,
 } from "./providers.js";
 import {
+  SOGNI_DEFAULT_MODEL,
   SOGNI_MAX_LORAS,
   SOGNI_TOKEN_TYPES,
+  SogniProvider,
   assertSogniModelId,
   guardedTransferFetch,
+  isSogniUploadType,
   sogniCanonicalModelId,
   sogniMaxReferences,
   sogniReferenceModel,
@@ -48,6 +51,7 @@ import {
   TOOL_GENERATE,
   TOOL_LIST_LOOKS,
 } from "./manifest.js";
+import { SOGNI_TOOLS, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
 /**
  * Resolve the operator-configured provider and run one generation. Shared by
@@ -1026,6 +1030,17 @@ const plugin = definePlugin({
       return { modelId, loras, maxLoras: publicCatalog?.maxPerRequest ?? SOGNI_MAX_LORAS, personal, live: publicCatalog !== null, note };
     });
 
+    // Sogni's picture tools and its prompt tool, one agent tool each (ticked
+    // per agent on the Tools tab). Parameters come from Sogni's vendored
+    // schemas, the same ones the manifest lists.
+    for (const def of SOGNI_TOOLS) {
+      ctx.tools.register(
+        def.name,
+        { displayName: def.displayName, description: sogniToolDescription(def), parametersSchema: sogniToolParameters(def) },
+        (params, runCtx) => runSogniTool(ctx, def, params, runCtx),
+      );
+    }
+
     ctx.logger.info(`media-studio plugin ready (looks page: ${LOOKS_PAGE_ROUTE})`);
   },
 
@@ -1033,6 +1048,164 @@ const plugin = definePlugin({
     return { status: "ok", message: "Media Studio ready" };
   },
 });
+
+// ─── Sogni's tools (upscale, remove background, restore, ...) ────────────────
+
+function sogniTokenType(cfg: Record<string, unknown>): SogniTokenType {
+  return (SOGNI_TOKEN_TYPES as readonly string[]).includes(String(cfg.sogniTokenType)) ? (cfg.sogniTokenType as SogniTokenType) : "auto";
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Run one of Media Studio's Sogni tools for an agent. In order, and nothing
+ * spent before the last step: the arguments are checked (the tool's schema,
+ * built from Sogni's, then Sogni's own schema), the Sogni key must be set,
+ * the picture must be a picture in the calling run's company, the agent's
+ * daily picture limit is reserved (picture tools only), and only then is
+ * Sogni called. The Sensitive Content Filter is always on: nothing an agent
+ * sends can turn it off (an unknown argument is refused), and these tools take
+ * no look.
+ */
+async function runSogniTool(
+  ctx: PluginContext,
+  def: SogniToolDef,
+  params: unknown,
+  runCtx: { companyId: string; runId: string; agentId: string },
+): Promise<ToolResult> {
+  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const defaultModel = textOrNull(cfg.sogniModel) ?? SOGNI_DEFAULT_MODEL;
+  const prepared = prepareSogniCall(def, params, { defaultModel });
+  if ("error" in prepared) return { error: prepared.error };
+
+  const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef.trim() : "";
+  if (!ref) {
+    return {
+      error: `${def.displayName} needs a Sogni API key. An admin picks it in Media Studio's settings under "Sogni API key" (the key itself is saved in the company's Secrets).`,
+    };
+  }
+  let apiKey: string;
+  try {
+    apiKey = await ctx.secrets.resolve(ref);
+  } catch (err) {
+    return { error: `The Sogni API key picked in Media Studio's settings could not be read: ${errorText(err)}` };
+  }
+  const sogni = new SogniProvider({
+    apiKey,
+    apiFetch: (url, init) => ctx.http.fetch(url, init),
+    transferFetch: guardedTransferFetch,
+    defaultModel,
+    tokenType: sogniTokenType(cfg),
+  });
+
+  if (def.kind === "text") {
+    try {
+      const { text } = await sogni.executeTool(def.sogniTool, prepared.arguments, true);
+      const model = String(prepared.arguments.destination_model ?? defaultModel);
+      return {
+        content: `Sogni's improved prompt for ${model}:
+
+${text}`,
+        data: { prompt: text, destinationModel: model, targetOutput: prepared.arguments.target_output ?? null, provider: "sogni", tool: def.sogniTool },
+      };
+    } catch (err) {
+      return { error: errorText(err) };
+    }
+  }
+
+  // The picture: a file (or task attachment) in THIS run's company. Another
+  // company's file reads exactly like a missing one.
+  const fileId = prepared.fileId!;
+  const file = await ctx.files.get(fileId, runCtx.companyId);
+  if (!file) {
+    return { error: `The picture ${fileId} is not in this company's Files, so it cannot be used. Pick a picture from this company's Files.` };
+  }
+  const name = file.originalFilename ?? fileId;
+  if (!file.contentType.toLowerCase().startsWith("image/")) return { error: `The file "${name}" is not a picture.` };
+  if (!isSogniUploadType(file.contentType)) {
+    return { error: `Sogni takes PNG, JPEG, WebP or GIF pictures, and "${name}" is ${file.contentType}.` };
+  }
+  let picture: string;
+  try {
+    const content = await ctx.files.readContent(fileId, runCtx.companyId);
+    picture = `data:${content.contentType.toLowerCase()};base64,${content.contentBase64}`;
+  } catch (err) {
+    return { error: errorText(err) };
+  }
+
+  // DUR-177: every picture-making tool counts toward the agent's daily
+  // picture limit, reserved before Sogni is called (see generate-image).
+  const reservation = await ctx.personas.reserveDailyGeneration(runCtx.companyId, { runId: runCtx.runId });
+  if (!reservation.allowed) {
+    return { error: `Daily image limit (${reservation.cap ?? 0}) reached for this agent today.` };
+  }
+
+  try {
+    const made = await sogni.runPictureTool({
+      toolName: def.sogniTool,
+      arguments: prepared.arguments,
+      pictures: [picture],
+      safeContentFilter: true,
+    });
+    const contentType = assertImageContentType(made.contentType);
+    const extension = contentType.split("/")[1]?.replace(/\+.*$/, "") ?? "png";
+    const stem = slug((file.originalFilename ?? "").replace(/\.[a-z0-9]+$/i, "")) || "picture";
+    const filename = `${def.filenamePrefix}-${stem}.${extension}`;
+    const extra = made.artifactCount > 1 ? ` Sogni sent ${made.artifactCount} pictures; the first one was kept.` : "";
+    const prompt = typeof prepared.arguments.prompt === "string" ? prepared.arguments.prompt : typeof prepared.arguments.description === "string" ? prepared.arguments.description : def.displayName;
+    const record = { seed: null, prompt, look: null, provider: "sogni", model: def.sogniTool, referenceFileIds: [fileId] };
+
+    if (prepared.issueId) {
+      // Same rules as Generate image: the host only lets the run attach to a
+      // task it may attach to.
+      const attachment = await ctx.issues.createAttachment(
+        prepared.issueId,
+        { contentBase64: made.contentBase64, contentType, filename },
+        runCtx.companyId,
+        { authorAgentId: runCtx.agentId, runId: runCtx.runId },
+      );
+      await rememberImage(ctx, runCtx.companyId, attachment.id, record);
+      return {
+        content: `Made the ${def.resultNoun} with Sogni and attached it to the task (${attachment.contentPath}). File id: ${attachment.id}. Submit it for board approval before posting.${extra}`,
+        data: {
+          attachmentId: attachment.id,
+          contentPath: attachment.contentPath,
+          fileId: attachment.id,
+          contentType,
+          issueId: prepared.issueId,
+          seed: null,
+          provider: "sogni",
+          tool: def.sogniTool,
+          sourceFileId: fileId,
+        },
+      };
+    }
+
+    const stored = await ctx.files.createCompanyFile({ contentBase64: made.contentBase64, contentType, filename }, runCtx.companyId, {
+      runId: runCtx.runId,
+    });
+    await rememberImage(ctx, runCtx.companyId, stored.id, record);
+    return {
+      content:
+        `Made the ${def.resultNoun} with Sogni and saved it to the company's Files (not tied to a task); it is shown to the person with your reply. File id: ${stored.id}.` +
+        extra,
+      data: {
+        fileId: stored.id,
+        contentPath: stored.contentPath,
+        contentType: stored.contentType,
+        issueId: null,
+        seed: null,
+        provider: "sogni",
+        tool: def.sogniTool,
+        sourceFileId: fileId,
+      },
+    };
+  } catch (err) {
+    return { error: errorText(err) };
+  }
+}
 
 /** Sogni cannot take a seed for a picture made from reference pictures: say so rather than pretend. */
 function seedNotUsedSentence(result: GenerationResult): string {

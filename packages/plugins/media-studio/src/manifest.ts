@@ -1,4 +1,5 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
+import { sogniToolDeclarations } from "./sogni-tools.js";
 
 export const PLUGIN_ID = "paperclip.media-studio";
 const PLUGIN_VERSION = "0.1.0";
@@ -92,7 +93,7 @@ const manifest: PaperclipPluginManifestV1 = {
   version: PLUGIN_VERSION,
   displayName: "Media Studio",
   description:
-    "Generate images (Fal.ai, Sogni or ComfyUI), keep them consistent with saved looks, seeds and reference pictures, and require a board approval before posting.",
+    "Generate images (Fal.ai, Sogni or ComfyUI), keep them consistent with saved looks, seeds and reference pictures, work on existing pictures with Sogni (upscale, remove background, restore, change angle, apply a style, select objects), and require a board approval before posting.",
   author: "Durkan Agency (paperclip-fork)",
   categories: ["ui", "automation"],
   capabilities: [
@@ -125,6 +126,10 @@ const manifest: PaperclipPluginManifestV1 = {
       description: LIST_LOOKS_DESCRIPTION,
       parametersSchema: { type: "object", properties: {} },
     },
+    // Upscale, remove background, restore, change angle, apply style, select
+    // objects and improve prompt: one tool each, so an operator can tick them
+    // per agent. Their parameters come from Sogni's own vendored schemas.
+    ...sogniToolDeclarations(),
   ],
   ui: {
     slots: [
