@@ -202,9 +202,23 @@ def merge_bots(api_bots, file_bots):
     return api_bots + [b for b in file_bots if (b["companyId"], b["agentId"]) not in known]
 
 
+# The last answer Paperclip gave about its bots. When Paperclip does not answer
+# (restarting for a deploy), the bridge keeps serving these instead of
+# dropping them: dropping and re-adding a bot while its old thread was still
+# waiting on Telegram left two threads for one bot, and every message was
+# answered twice (27 Sep).
+LAST_API_BOTS = None
+
+
 def load_bots():
     """Every bot that should be running right now."""
-    return merge_bots(fetch_bots_from_api(), load_file_bots())
+    global LAST_API_BOTS
+    api_bots = fetch_bots_from_api()
+    if api_bots is None:
+        api_bots = LAST_API_BOTS
+    else:
+        LAST_API_BOTS = api_bots
+    return merge_bots(api_bots, load_file_bots())
 
 
 def allowed_users_for(bot):
@@ -1220,6 +1234,12 @@ def current_bot(token):
         return CURRENT_BOTS.get(token)
 
 
+def _is_registered_thread(token):
+    """True when the running thread is the one refresh_bots registered for this bot."""
+    with LOCK:
+        return BOT_THREADS.get(token) is threading.current_thread()
+
+
 def bot_thread(state, token):
     started = current_bot(token)
     if started:
@@ -1232,23 +1252,43 @@ def bot_thread(state, token):
         if bot is None:
             print("telegram-bridge: a bot is no longer configured and has stopped answering", flush=True)
             return
+        if not _is_registered_thread(token):
+            # A newer thread serves this bot now; two would answer every
+            # message twice.
+            return
         bs = bots_state(state, token)
         updates = tg(token, "getUpdates", http_timeout=40, offset=bs["offset"] + 1, timeout=25) or []
-        for u in updates:
-            with LOCK:
-                bs2 = state["bots"].setdefault(token, {"offset": 0, "chats": []})
-                bs2["offset"] = max(bs2["offset"], u.get("update_id", 0))
-                save_state(state)
-            try:
-                if "callback_query" in u:
-                    cq = u["callback_query"]
-                    cq["_token"] = token
-                    cq["_allowed"] = allowed_users_for(bot)
-                    handle_callback(cq)
-                elif "message" in u:
-                    handle_message(state, bot, u["message"])
-            except Exception as e:
-                print(f"update error ({bot['name']}): {e}", flush=True)
+        if updates and not _is_registered_thread(token):
+            return
+        handle_updates(state, token, bot, updates)
+
+
+def handle_updates(state, token, bot, updates):
+    """Handle one batch of Telegram updates for a bot, each at most once.
+
+    The offset is advanced under the lock before an update is handled, and an
+    update at or below the saved offset is skipped, so even two threads that
+    fetched the same batch cannot both answer it.
+    """
+    for u in updates:
+        update_id = u.get("update_id", 0)
+        with LOCK:
+            bs2 = state["bots"].setdefault(token, {"offset": 0, "chats": []})
+            if update_id <= bs2["offset"]:
+                # Already handled (by this or another thread): never twice.
+                continue
+            bs2["offset"] = update_id
+            save_state(state)
+        try:
+            if "callback_query" in u:
+                cq = u["callback_query"]
+                cq["_token"] = token
+                cq["_allowed"] = allowed_users_for(bot)
+                handle_callback(cq)
+            elif "message" in u:
+                handle_message(state, bot, u["message"])
+        except Exception as e:
+            print(f"update error ({bot['name']}): {e}", flush=True)
 
 
 def refresh_bots(state):
@@ -1268,11 +1308,13 @@ def refresh_bots(state):
         if token not in tokens:
             BOT_THREADS.pop(token, None)
     for b in bots:
-        thread = BOT_THREADS.get(b["token"])
-        if thread is None or not thread.is_alive():
+        with LOCK:
+            thread = BOT_THREADS.get(b["token"])
+            if thread is not None and thread.is_alive():
+                continue
             thread = threading.Thread(target=bot_thread, args=(state, b["token"]), daemon=True)
             BOT_THREADS[b["token"]] = thread
-            thread.start()
+        thread.start()
     return bots
 
 

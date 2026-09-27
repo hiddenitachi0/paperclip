@@ -67,6 +67,9 @@ class ConfigTestCase(unittest.TestCase):
         self.previous_config_file = bridge.CONFIG_FILE
         bridge.CONFIG_FILE = self.tmp.name
         bridge.ALLOWED_USER_IDS = {OPERATOR}
+        # The bridge remembers Paperclip's last answer; each test starts fresh.
+        if hasattr(bridge, "LAST_API_BOTS"):
+            bridge.LAST_API_BOTS = None
         with bridge.LOCK:
             bridge.CURRENT_BOTS.clear()
         bridge.BOT_THREADS.clear()
