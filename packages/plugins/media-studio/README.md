@@ -4,7 +4,18 @@ Generate an image, preview it, and **require a board approval before it can be p
 the roadmap-3 approval gate for the paperclip-fork.
 
 - **Agent tool** `paperclip.media-studio:generate-image` — an employee can generate a preview
-  as part of its work.
+  as part of its work. With `issueId` the picture is attached to that task (same rules as
+  before); without it, it is saved as a company file with no task (Files page, "No task"
+  group), authored by the calling agent. A quick agent's chat (web and Telegram) shows the
+  picture. The agent's daily picture limit applies either way.
+- **Consistency** — `seed` (reused for close variations; the seed actually used is always
+  reported and stored with the file), `referenceFileIds` (up to 4 pictures from the same
+  company's Files, sent to Fal's FLUX Kontext model as data URIs so no Paperclip address
+  leaves the box), and `look` (a saved look: style words, model, fixed seed, reference
+  pictures).
+- **Agent tool** `paperclip.media-studio:list-looks` — read-only list of the company's looks.
+- **Company settings → Media Studio looks** — owners/admins add, edit and delete looks; looks
+  are stored per company in plugin state (scope `company`).
 - **Issue "Media Studio" tab** — a human generates, submits for approval, and then
   approves / requests changes / regenerates / posts. Only an **approved** image can be posted.
 

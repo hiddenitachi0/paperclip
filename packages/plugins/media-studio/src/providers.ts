@@ -14,7 +14,37 @@ export interface GenerationInput {
   prompt: string;
   imageSize?: string;
   model?: string;
+  /** Fixed seed: the same seed + prompt + model gives (nearly) the same picture. */
+  seed?: number;
+  /**
+   * Reference pictures as base64 data: URIs (never a Paperclip URL: those are
+   * private to this box). When given, Fal uses a model that keeps the same
+   * person/product/style as these pictures.
+   */
+  referenceImages?: string[];
 }
+
+/**
+ * The Fal model used when reference pictures are given: FLUX.1 Kontext [pro]
+ * "multi", which takes 1+ pictures as `image_urls` (data URIs accepted) and
+ * keeps their identity/look while following the prompt. The plain text-to-
+ * image models (flux/schnell, flux/dev) ignore reference pictures.
+ */
+export const FAL_REFERENCE_MODEL = "fal-ai/flux-pro/kontext/multi";
+
+/** A Fal model id: path segments of letters, digits, dots, dashes, underscores. Never a URL. */
+const FAL_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/i;
+
+export function assertFalModelId(model: string): string {
+  const trimmed = model.trim();
+  if (!FAL_MODEL_ID_PATTERN.test(trimmed) || trimmed.includes("..") || trimmed.length > 200) {
+    throw new Error(`"${model}" is not a Fal model name (it looks like fal-ai/flux/schnell).`);
+  }
+  return trimmed;
+}
+
+/** The largest seed Fal and ComfyUI accept (unsigned 32-bit). */
+export const MAX_SEED = 4_294_967_295;
 
 export interface GenerationResult {
   provider: string;
@@ -24,6 +54,8 @@ export interface GenerationResult {
   imageUrl?: string;
   /** Inline bytes as a data: URL (mock/comfyui) — stored in work-product metadata. */
   imageDataUrl?: string;
+  /** The seed the provider actually used, when it reports one. */
+  seed?: number | null;
   meta?: Record<string, unknown>;
 }
 
@@ -42,22 +74,40 @@ export class FalProvider implements GenerationProvider {
   ) {}
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
-    const model = input.model ?? this.defaultModel;
+    const references = input.referenceImages ?? [];
+    const model = assertFalModelId(input.model ?? (references.length > 0 ? FAL_REFERENCE_MODEL : this.defaultModel));
+    const body: Record<string, unknown> =
+      references.length > 0
+        ? {
+            // FLUX Kontext: the pictures to keep, plus what to do with them.
+            prompt: input.prompt,
+            image_urls: references,
+            num_images: 1,
+            output_format: "jpeg",
+            safety_tolerance: "2",
+          }
+        : {
+            prompt: input.prompt,
+            image_size: input.imageSize ?? "landscape_4_3",
+            num_images: 1,
+            enable_safety_checker: true,
+          };
+    if (typeof input.seed === "number") body.seed = input.seed;
     const res = await this.fetchImpl(`${this.baseUrl}/${model}`, {
       method: "POST",
       headers: { Authorization: `Key ${this.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: input.prompt,
-        image_size: input.imageSize ?? "landscape_4_3",
-        num_images: 1,
-        enable_safety_checker: true,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`fal.ai ${model} failed (${res.status}): ${await res.text()}`);
     const data = (await res.json()) as { images?: Array<{ url: string; content_type?: string }>; seed?: number };
     const image = data.images?.[0];
     if (!image?.url) throw new Error("fal.ai returned no image");
-    return { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", imageUrl: image.url, meta: { seed: data.seed } };
+    const seed = typeof data.seed === "number" ? data.seed : (input.seed ?? null);
+    const base = { provider: this.name, model, contentType: image.content_type ?? "image/jpeg", seed, meta: { seed } };
+    // Fal answers with an https URL on its own CDN (or, rarely, inline bytes).
+    if (/^data:/i.test(image.url)) return { ...base, imageDataUrl: image.url };
+    if (!/^https:\/\//i.test(image.url)) throw new Error("fal.ai returned an image address that is not https");
+    return { ...base, imageUrl: image.url };
   }
 }
 
@@ -72,9 +122,19 @@ export class ComfyUIProvider implements GenerationProvider {
   ) {}
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
+    if ((input.referenceImages ?? []).length > 0) {
+      throw new Error("Reference pictures need the Fal.ai provider. Switch Media Studio to Fal.ai in its settings.");
+    }
     const base = this.baseUrl.replace(/\/$/, "");
+    const seed = typeof input.seed === "number" ? input.seed : Math.floor(Math.random() * MAX_SEED);
+    // A workflow that wants a seed says so with "%SEED%" (the quoted
+    // placeholder becomes the number); one without it keeps its own.
+    const templateText = JSON.stringify(this.workflowTemplate);
+    const usesSeed = templateText.includes('"%SEED%"');
     const workflow = JSON.parse(
-      JSON.stringify(this.workflowTemplate).replaceAll("%PROMPT%", input.prompt.replace(/"/g, '\\"')),
+      templateText
+        .replaceAll("%PROMPT%", input.prompt.replace(/"/g, '\\"'))
+        .replaceAll('"%SEED%"', String(seed)),
     );
     const submit = await this.fetchImpl(`${base}/prompt`, {
       method: "POST",
@@ -106,6 +166,7 @@ export class ComfyUIProvider implements GenerationProvider {
         provider: this.name,
         contentType,
         imageDataUrl: `data:${contentType};base64,${bytes.toString("base64")}`,
+        seed: usesSeed ? seed : null,
         meta: { promptId, filename: image.filename },
       };
     }
@@ -122,11 +183,14 @@ export class MockProvider implements GenerationProvider {
       `<rect width="100%" height="100%" fill="#0b7285"/>` +
       `<text x="50%" y="46%" fill="#e3fafc" font-family="sans-serif" font-size="16" text-anchor="middle">mock preview</text>` +
       `<text x="50%" y="56%" fill="#fff" font-family="sans-serif" font-size="20" text-anchor="middle">${label}</text></svg>`;
+    const seed = typeof input.seed === "number" ? input.seed : Math.floor(Math.random() * MAX_SEED);
     return {
       provider: this.name,
+      model: input.model,
       contentType: "image/svg+xml",
       imageDataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
-      meta: { mock: true },
+      seed,
+      meta: { mock: true, seed, referenceCount: (input.referenceImages ?? []).length },
     };
   }
 }

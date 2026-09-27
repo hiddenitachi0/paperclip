@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { PluginDetailTabProps } from "@paperclipai/plugin-sdk/ui";
+import type { PluginCompanySettingsPageProps, PluginDetailTabProps } from "@paperclipai/plugin-sdk/ui";
 import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
 
 // The plugin UI is served as a standalone ES module, so it must not import from
@@ -8,6 +8,9 @@ import { usePluginAction } from "@paperclipai/plugin-sdk/ui";
 const PLUGIN_ID = "paperclip.media-studio";
 const ACTION_GENERATE = "generate";
 const PROVIDER = "media-studio";
+const ACTION_LOOKS_LIST = "looks.list";
+const ACTION_LOOKS_SAVE = "looks.save";
+const ACTION_LOOKS_DELETE = "looks.delete";
 
 type GenerationResult = {
   provider: string;
@@ -274,6 +277,269 @@ export function MediaStudioIssueTab({ context }: PluginDetailTabProps) {
     </div>
   );
 }
+
+// ─── Company settings → Media Studio looks ───────────────────────────────────
+
+type Look = {
+  id: string;
+  name: string;
+  style: string;
+  model: string | null;
+  seed: number | null;
+  referenceFileIds: string[];
+  updatedAt: string;
+};
+
+type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number };
+
+type CompanyImage = { fileId: string; title: string; src: string };
+
+const ATTACHMENT_PATH = /^\/api\/attachments\/([0-9a-f-]{36})\/content$/i;
+
+function fileContentPath(fileId: string) {
+  return `/api/attachments/${fileId}/content`;
+}
+
+type LookDraft = { id: string | null; name: string; style: string; model: string; seed: string; referenceFileIds: string[] };
+
+const EMPTY_DRAFT: LookDraft = { id: null, name: "", style: "", model: "", seed: "", referenceFileIds: [] };
+
+export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps) {
+  const companyId = context.companyId;
+  const listLooks = usePluginAction(ACTION_LOOKS_LIST);
+  const saveLook = usePluginAction(ACTION_LOOKS_SAVE);
+  const deleteLook = usePluginAction(ACTION_LOOKS_DELETE);
+
+  const [looks, setLooks] = useState<Look[]>([]);
+  const [canManage, setCanManage] = useState(false);
+  const [maxRefs, setMaxRefs] = useState(4);
+  const [draft, setDraft] = useState<LookDraft | null>(null);
+  const [images, setImages] = useState<CompanyImage[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = (await listLooks({})) as LooksResponse;
+      setLooks(res.looks ?? []);
+      setCanManage(res.canManage === true);
+      if (typeof res.maxReferenceFiles === "number") setMaxRefs(res.maxReferenceFiles);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [listLooks]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const loadImages = useCallback(async () => {
+    if (!companyId || images) return;
+    try {
+      const res = await hostFetchJson<{ artifacts?: Array<{ title: string; contentPath: string | null; mediaKind: string }> }>(
+        `/api/companies/${companyId}/artifacts?kind=image&limit=100`,
+      );
+      const found: CompanyImage[] = [];
+      for (const artifact of res.artifacts ?? []) {
+        const match = artifact.contentPath ? ATTACHMENT_PATH.exec(artifact.contentPath) : null;
+        if (!match || found.some((img) => img.fileId === match[1])) continue;
+        found.push({ fileId: match[1], title: artifact.title, src: artifact.contentPath! });
+      }
+      setImages(found);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setImages([]);
+    }
+  }, [companyId, images]);
+
+  const startEdit = (look: Look | null) => {
+    setError(null);
+    setDraft(
+      look
+        ? {
+            id: look.id,
+            name: look.name,
+            style: look.style,
+            model: look.model ?? "",
+            seed: look.seed === null ? "" : String(look.seed),
+            referenceFileIds: [...look.referenceFileIds],
+          }
+        : { ...EMPTY_DRAFT },
+    );
+    void loadImages();
+  };
+
+  const toggleRef = (fileId: string) => {
+    setDraft((d) => {
+      if (!d) return d;
+      if (d.referenceFileIds.includes(fileId)) {
+        return { ...d, referenceFileIds: d.referenceFileIds.filter((id) => id !== fileId) };
+      }
+      if (d.referenceFileIds.length >= maxRefs) return d;
+      return { ...d, referenceFileIds: [...d.referenceFileIds, fileId] };
+    });
+  };
+
+  const onSave = async () => {
+    if (!draft) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = (await saveLook({
+        id: draft.id,
+        name: draft.name,
+        style: draft.style,
+        model: draft.model,
+        seed: draft.seed.trim() === "" ? null : draft.seed.trim(),
+        referenceFileIds: draft.referenceFileIds,
+      })) as LooksResponse;
+      setLooks(res.looks ?? []);
+      setDraft(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDelete = async (look: Look) => {
+    if (typeof window !== "undefined" && !window.confirm(`Delete the look "${look.name}"? Pictures already made with it are kept.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = (await deleteLook({ id: look.id })) as LooksResponse;
+      setLooks(res.looks ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, fontSize: 13, maxWidth: 820 }}>
+      <div>
+        <div style={{ fontWeight: 600, fontSize: 16 }}>Media Studio looks</div>
+        <div style={{ opacity: 0.7, marginTop: 4 }}>
+          A look keeps pictures consistent: its style words are added to every picture made with it, and it can fix the
+          seed and use up to {maxRefs} reference pictures from your Files to keep the same person, product or style.
+          Agents can use looks by name (for example "make a banner in our catalogue look"), but only the company's owner
+          or an admin can change them.
+        </div>
+      </div>
+
+      {error ? <div style={errorBox}>{error}</div> : null}
+
+      {looks.length === 0 ? (
+        <div style={{ opacity: 0.7 }}>No looks are saved yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {looks.map((look) => (
+            <div key={look.id} style={card}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                <span style={{ fontWeight: 600 }}>{look.name}</span>
+                {canManage ? (
+                  <span style={{ display: "flex", gap: 8 }}>
+                    <button type="button" style={ghostBtn} disabled={busy} onClick={() => startEdit(look)}>Edit</button>
+                    <button type="button" style={ghostBtn} disabled={busy} onClick={() => void onDelete(look)}>Delete</button>
+                  </span>
+                ) : null}
+              </div>
+              {look.style ? <div style={{ whiteSpace: "pre-wrap" }}>{look.style}</div> : <div style={{ opacity: 0.6 }}>No style words.</div>}
+              <div style={{ opacity: 0.7, fontSize: 12 }}>
+                {look.seed !== null ? `Fixed seed ${look.seed}` : "New seed each time"}
+                {look.model ? ` · Model ${look.model}` : ""}
+              </div>
+              {look.referenceFileIds.length > 0 ? (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {look.referenceFileIds.map((id) => (
+                    <img key={id} src={fileContentPath(id)} alt="Reference picture" style={thumb} />
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {canManage && !draft ? (
+        <div>
+          <button type="button" style={primaryBtn} onClick={() => startEdit(null)}>Add a look</button>
+        </div>
+      ) : null}
+      {!canManage ? (
+        <div style={{ opacity: 0.7, fontSize: 12 }}>Only the company's owner or an admin can add or change looks.</div>
+      ) : null}
+
+      {draft ? (
+        <div style={{ ...card, gap: 10 }}>
+          <div style={{ fontWeight: 600 }}>{draft.id ? "Edit look" : "New look"}</div>
+          <label style={field}>
+            <span>Name</span>
+            <input value={draft.name} maxLength={60} onChange={(e) => setDraft({ ...draft, name: e.target.value })} style={input} placeholder="Catalogue" />
+          </label>
+          <label style={field}>
+            <span>Style words added to every picture</span>
+            <textarea
+              value={draft.style}
+              maxLength={1000}
+              rows={3}
+              onChange={(e) => setDraft({ ...draft, style: e.target.value })}
+              style={{ ...input, resize: "vertical" }}
+              placeholder="Soft daylight, Scandinavian living room, light oak and linen, photographed at eye level"
+            />
+          </label>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <label style={{ ...field, flex: "1 1 160px" }}>
+              <span>Fixed seed (optional)</span>
+              <input value={draft.seed} inputMode="numeric" onChange={(e) => setDraft({ ...draft, seed: e.target.value.replace(/[^0-9]/g, "") })} style={input} placeholder="Leave empty for a new one each time" />
+            </label>
+            <label style={{ ...field, flex: "2 1 240px" }}>
+              <span>Model (optional)</span>
+              <input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} style={input} placeholder="Leave empty to use the normal one" />
+            </label>
+          </div>
+          <div style={field}>
+            <span>Reference pictures ({draft.referenceFileIds.length} of {maxRefs} picked)</span>
+            {images === null ? (
+              <div style={{ opacity: 0.7 }}>Loading your pictures…</div>
+            ) : images.length === 0 ? (
+              <div style={{ opacity: 0.7 }}>There are no pictures in Files yet.</div>
+            ) : (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", maxHeight: 260, overflowY: "auto" }}>
+                {images.map((img) => {
+                  const picked = draft.referenceFileIds.includes(img.fileId);
+                  return (
+                    <button
+                      key={img.fileId}
+                      type="button"
+                      title={img.title}
+                      aria-pressed={picked}
+                      onClick={() => toggleRef(img.fileId)}
+                      style={{ padding: 0, border: picked ? "3px solid #1971c2" : "3px solid transparent", borderRadius: 8, background: "none", cursor: "pointer" }}
+                    >
+                      <img src={img.src} alt={img.title} style={thumb} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" style={primaryBtn} disabled={busy} onClick={() => void onSave()}>{busy ? "Saving…" : "Save look"}</button>
+            <button type="button" style={ghostBtn} disabled={busy} onClick={() => setDraft(null)}>Cancel</button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const errorBox: React.CSSProperties = { background: "#fff0f6", color: "#a61e4d", padding: "8px 10px", borderRadius: 8 };
+const card: React.CSSProperties = { border: "1px solid rgba(128,128,128,0.35)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 6 };
+const field: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4 };
+const input: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1px solid rgba(128,128,128,0.5)", fontFamily: "inherit", fontSize: 13, background: "transparent", color: "inherit" };
+const thumb: React.CSSProperties = { width: 72, height: 72, objectFit: "cover", borderRadius: 6, display: "block" };
 
 const baseBtn: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid transparent", cursor: "pointer", fontSize: 12, fontWeight: 600 };
 const primaryBtn: React.CSSProperties = { ...baseBtn, background: "#1971c2", color: "#fff" };
