@@ -201,6 +201,8 @@ class AllowlistFromTheApiTests(ConfigTestCase):
         self.cli_env = mock.patch.object(bridge, "cli_env", return_value={"ok": True, "lane": "a",
                                                                           "result": {"response": "ok"}}).start()
         mock.patch.object(bridge, "save_state").start()
+        mock.patch.object(bridge, "paperclip_ready", return_value=True).start()
+        mock.patch.object(bridge, "container_started_at", return_value="2026-09-27T12:00:00Z").start()
 
     def bot_with(self, allowed):
         self.cli.return_value = {"bots": [api_bot(allowed=allowed)]}

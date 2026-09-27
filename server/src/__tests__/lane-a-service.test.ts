@@ -38,6 +38,7 @@ import {
   type LaneATargetAgent,
 } from "../services/lane-a.ts";
 import { LANE_A_DEFAULT_MAX_OUTPUT_TOKENS, LANE_A_DEFAULT_MODEL } from "@paperclipai/shared";
+import { PLUGIN_TOOL_CALL_TIMEOUT_MS } from "../services/plugin-tool-registry.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -541,7 +542,7 @@ describeEmbeddedPostgres("lane A service", () => {
       toolName: PLUGIN_TOOL,
       parameters: { prompt: "a cat" },
       runContext: expect.objectContaining({ agentId: target.id, companyId, projectId: "", runId: expect.any(String) }),
-    });
+    }, PLUGIN_TOOL_CALL_TIMEOUT_MS);
     // The host sees the quick agent, the person who asked, and their own words.
     expect(resolvedDuringCall).toEqual({
       agentId: target.id,

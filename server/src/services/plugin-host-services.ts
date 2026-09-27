@@ -1121,7 +1121,16 @@ export function buildHostServices(
 
         try {
           const init = params.init as RequestInit | undefined;
-          return await executePinnedHttpRequest(target, init, controller.signal);
+          const response = await executePinnedHttpRequest(target, init, controller.signal);
+          // `bodyBase64` carries the exact bytes so a plugin can download a
+          // picture or any other binary file; `body` stays for text callers.
+          return {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+            body: response.body,
+            bodyBase64: response.bodyBytes.toString("base64"),
+          };
         } finally {
           clearTimeout(timeout);
         }
@@ -1129,8 +1138,12 @@ export function buildHostServices(
     },
 
     secrets: {
-      async resolve(params) {
-        return secretsHandler.resolve(params);
+      // `context` carries the invocation scope the worker manager verified
+      // for the host->worker call this request is nested in. It must reach
+      // the handler: without it the handler has no company to check the
+      // secret against and fails closed for every call.
+      async resolve(params, context) {
+        return secretsHandler.resolve(params, context);
       },
     },
 

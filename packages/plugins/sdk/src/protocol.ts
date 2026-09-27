@@ -1115,7 +1115,15 @@ export interface WorkerToHostMethods {
   // HTTP
   "http.fetch": [
     params: { url: string; init?: Record<string, unknown> },
-    result: { status: number; statusText: string; headers: Record<string, string>; body: string },
+    result: {
+      status: number;
+      statusText: string;
+      headers: Record<string, string>;
+      /** The body as UTF-8 text. */
+      body: string;
+      /** The exact body bytes, base64-encoded. Hosts that predate it omit it. */
+      bodyBase64?: string;
+    },
   ];
 
   // Secrets

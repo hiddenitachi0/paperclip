@@ -39,8 +39,10 @@ class BridgeTestCase(unittest.TestCase):
             mock.patch.object(bridge, "cli", return_value={"ok": True}),
             mock.patch.object(bridge, "cli_env", return_value={"identifier": "DUR-1"}),
             mock.patch.object(bridge, "save_state"),
+            mock.patch.object(bridge, "paperclip_ready", return_value=True),
+            mock.patch.object(bridge, "container_started_at", return_value="2026-09-27T12:00:00Z"),
         ]
-        self.tg, self.cli, self.cli_env, _ = [p.start() for p in self.patches]
+        self.tg, self.cli, self.cli_env, _, _, _ = [p.start() for p in self.patches]
 
     def tearDown(self):
         for p in self.patches:

@@ -36,6 +36,10 @@ import { logger } from "../middleware/logger.js";
  *
  * Example: `"acme.linear:search-issues"`
  */
+
+/** How long a plugin tool call may run before the host gives up on it. */
+export const PLUGIN_TOOL_CALL_TIMEOUT_MS = 150_000;
+
 export const TOOL_NAMESPACE_SEPARATOR = ":";
 
 // ---------------------------------------------------------------------------
@@ -434,7 +438,9 @@ export function createPluginToolRegistry(
         runContext,
       };
 
-      const result = await workerManager.call(dbId, "executeTool", rpcParams);
+      // Tools such as picture generation can take well over the default 30 s
+      // RPC timeout (a picture service's own deadline is up to 120 s).
+      const result = await workerManager.call(dbId, "executeTool", rpcParams, PLUGIN_TOOL_CALL_TIMEOUT_MS);
 
       log.debug(
         {
