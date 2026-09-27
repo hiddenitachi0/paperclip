@@ -274,6 +274,22 @@ describe("toolsLine, dataLine, instructionsLine never block", () => {
     expect(toolsLine({ enabledCount: undefined, failed: true, toolsTabPath: "/agents/x/tools" }).state).toBe("todo");
   });
 
+  it("tools: counts ticked add-on tools too, in words", () => {
+    const path = "/agents/x/tools";
+    expect(toolsLine({ enabledCount: 2, addOnCount: 1, failed: false, toolsTabPath: path }).text).toBe(
+      "2 tools and 1 add-on tool ticked.",
+    );
+    expect(toolsLine({ enabledCount: 1, addOnCount: 2, failed: false, toolsTabPath: path }).text).toBe(
+      "1 tool and 2 add-on tools ticked.",
+    );
+    expect(toolsLine({ enabledCount: 0, addOnCount: 1, failed: false, toolsTabPath: path })).toMatchObject({
+      state: "ok",
+      text: "1 add-on tool ticked.",
+    });
+    expect(toolsLine({ enabledCount: 0, addOnCount: 0, failed: false, toolsTabPath: path }).state).toBe("todo");
+    expect(toolsLine({ enabledCount: undefined, addOnCount: 1, failed: false, toolsTabPath: path }).state).toBe("checking");
+  });
+
   it("data: says the feature is off, that only the owner can see it, or whether sales is connected", () => {
     expect(dataLine({ kind: "feature_off" }).text).toContain("switched off");
     expect(dataLine({ kind: "forbidden" }).text).toContain("Only the company owner");

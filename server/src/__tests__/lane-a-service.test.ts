@@ -15,7 +15,12 @@ import {
   createDb,
   laneAConversations,
   laneAMessages,
+  pluginCompanySettings,
+  plugins,
 } from "@paperclipai/db";
+import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
+import { createPluginToolDispatcher } from "../services/plugin-tool-dispatcher.ts";
+import type { PluginWorkerManager } from "../services/plugin-worker-manager.ts";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -64,6 +69,8 @@ describeEmbeddedPostgres("lane A service", () => {
     await db.delete(companyMcpTools);
     await db.delete(agents);
     await db.delete(companyMemberships);
+    await db.delete(pluginCompanySettings);
+    await db.delete(plugins);
     await db.delete(companies);
     if (previousApiKey === undefined) {
       delete process.env.ANTHROPIC_API_KEY;
@@ -413,6 +420,316 @@ describeEmbeddedPostgres("lane A service", () => {
       },
     });
   }
+
+  // ─── Add-on (plugin) tools ──────────────────────────────────────────────
+
+  const PLUGIN_KEY = "acme.pictures";
+  const PLUGIN_TOOL = "make-picture";
+  /** The registry name (what plugin_tool_grants stores) and the name the model sees. */
+  const PLUGIN_TOOL_NAMESPACED = `${PLUGIN_KEY}:${PLUGIN_TOOL}`;
+  const PLUGIN_TOOL_MODEL_NAME = "acme_pictures__make-picture";
+
+  /**
+   * A ready plugin with one tool, registered the way plugin-loader does it
+   * (pluginKey + manifest + DB id) on a dispatcher whose worker is a stub:
+   * no process, just a recorded `executeTool` RPC. The plugin row is real so
+   * the offer step can read its status and the company's on/off flag.
+   */
+  async function seedPluginTool(result: { content?: string; data?: unknown; error?: string } = { content: "Made a picture of a cat." }) {
+    const manifest = {
+      id: PLUGIN_KEY,
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Acme Pictures",
+      description: "Makes pictures",
+      author: "Acme",
+      categories: ["automation"],
+      capabilities: ["agent.tools.register"],
+      entrypoints: { worker: "dist/worker.js" },
+      tools: [
+        {
+          name: PLUGIN_TOOL,
+          displayName: "Make picture",
+          description: "Make a picture from a short description.",
+          parametersSchema: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+        },
+      ],
+    } as unknown as PaperclipPluginManifestV1;
+    const [plugin] = await db
+      .insert(plugins)
+      .values({ pluginKey: PLUGIN_KEY, packageName: "@acme/pictures", version: "1.0.0", manifestJson: manifest, status: "ready" })
+      .returning();
+    const pluginDbId = plugin!.id;
+    const call = vi.fn(async (_id: string, _method: string, _params: unknown) => result);
+    const workerManager = {
+      isRunning: vi.fn((id: string) => id === pluginDbId),
+      call,
+      startWorker: vi.fn(),
+      stopWorker: vi.fn(),
+      getWorker: vi.fn(),
+      stopAll: vi.fn(),
+      diagnostics: vi.fn(() => []),
+    } as unknown as PluginWorkerManager;
+    const dispatcher = createPluginToolDispatcher({ workerManager });
+    dispatcher.registerPluginTools(PLUGIN_KEY, manifest, pluginDbId);
+    return { dispatcher, call, pluginDbId };
+  }
+
+  it("offers a ticked add-on tool, runs it through the plugin path as the quick agent, and counts the call", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher, call, pluginDbId } = await seedPluginTool();
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "call_1", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "a cat" } }],
+        usage: { input_tokens: 50, output_tokens: 20 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Done: a picture of a cat is ready." }],
+        usage: { input_tokens: 60, output_tokens: 15 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const { findLaneAPluginRun, activeLaneAPluginRunCount } = await import("../services/lane-a-plugin-runs.ts");
+    // While the worker is answering, the host must be able to resolve the
+    // run to the quick agent (that is what the daily image limit and the
+    // attachment step do).
+    let resolvedDuringCall: { agentId: string; companyId: string; requesterMessage: string; requestedByUserId: string | null } | null = null;
+    call.mockImplementation(async (_id, _method, params) => {
+      const runId = (params as { runContext: { runId: string } }).runContext.runId;
+      const run = findLaneAPluginRun(runId);
+      resolvedDuringCall = run
+        ? { agentId: run.agentId, companyId: run.companyId, requesterMessage: run.requesterMessage, requestedByUserId: run.requestedByUserId }
+        : null;
+      return { content: "Made a picture of a cat." };
+    });
+
+    const result = await freshLaneAService(db, { pluginToolDispatcher: dispatcher }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "make me a picture of a cat",
+    });
+
+    expect(result.response).toBe("Done: a picture of a cat is ready.");
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    // Offered next to the built-ins, under a name the model API accepts.
+    expect(mockCreate.mock.calls[0][0].tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: PLUGIN_TOOL_MODEL_NAME,
+          description: "Make picture (from the Acme Pictures add-on): Make a picture from a short description.",
+        }),
+        expect.objectContaining({ name: "route_to_agent" }),
+      ]),
+    );
+    expect(mockCreate.mock.calls[0][0].system).toContain("add-on tools ticked for you");
+    // Executed through the dispatcher -> registry -> worker RPC, as this quick agent.
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledWith(pluginDbId, "executeTool", {
+      toolName: PLUGIN_TOOL,
+      parameters: { prompt: "a cat" },
+      runContext: expect.objectContaining({ agentId: target.id, companyId, projectId: "", runId: expect.any(String) }),
+    });
+    // The host sees the quick agent, the person who asked, and their own words.
+    expect(resolvedDuringCall).toEqual({
+      agentId: target.id,
+      companyId,
+      requesterMessage: "make me a picture of a cat",
+      requestedByUserId: "user-1",
+    });
+    expect(activeLaneAPluginRunCount()).toBe(0);
+    // The plugin's sentence is what the model got back.
+    const toolResultTurn = mockCreate.mock.calls[1][0].messages.at(-1);
+    expect(toolResultTurn.content[0]).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "call_1",
+      content: "Made a picture of a cat.",
+    });
+    expect(result.actions).toEqual([
+      { tool: PLUGIN_TOOL_MODEL_NAME, summary: "Used the Make picture (Acme Pictures) add-on tool.", ok: true },
+    ]);
+    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.details).toMatchObject({ tool: PLUGIN_TOOL_MODEL_NAME, ok: true, input: { prompt: "a cat" } });
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("gives a quick agent no add-on tools unless they are ticked: nothing ticked means none, unlike a full agent", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    // plugin_tool_grants stays [] — a full agent would be unrestricted here.
+    const { dispatcher, call } = await seedPluginTool();
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "call_x", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "a cat" } }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "I cannot make pictures." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+
+    const result = await freshLaneAService(db, { pluginToolDispatcher: dispatcher }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "make me a picture of a cat",
+    });
+
+    const offered = (mockCreate.mock.calls[0][0].tools as Array<{ name: string }>).map((tool) => tool.name);
+    expect(offered).not.toContain(PLUGIN_TOOL_MODEL_NAME);
+    expect(mockCreate.mock.calls[0][0].system).not.toContain("add-on tools");
+    // Asked for anyway: refused on the allow-list, never reaches the worker.
+    expect(call).not.toHaveBeenCalled();
+    expect(result.response).toBe("I cannot make pictures.");
+    expect(result.actions).toEqual([
+      { tool: PLUGIN_TOOL_MODEL_NAME, summary: `Refused a tool that is not on the allow-list ("${PLUGIN_TOOL_MODEL_NAME}").`, ok: false },
+    ]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("counts add-on tool calls against LANE_A_MAX_TOOL_CALLS like every other call", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher, call } = await seedPluginTool();
+
+    const mockCreate = vi.fn().mockResolvedValue({
+      content: [{ type: "tool_use", id: `call_${randomUUID()}`, name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "more" } }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "tool_use",
+    });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+
+    await freshLaneAService(db, { pluginToolDispatcher: dispatcher }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "keep making pictures forever",
+    });
+
+    expect(call).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS);
+    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 1);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("leaves a ticked add-on tool out when the company switched its plugin off, or the plugin is not ready", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher, call, pluginDbId } = await seedPluginTool();
+    await db.insert(pluginCompanySettings).values({ companyId, pluginId: pluginDbId, enabled: false });
+
+    const mockCreate = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "Hello." }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "end_turn",
+    });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const svc = freshLaneAService(db, { pluginToolDispatcher: dispatcher });
+
+    await svc.sendMessage({ companyId, targetAgent: target, requester: { userId: "user-1", agentId: null }, message: "hi" });
+    const offeredWhileOff = (mockCreate.mock.calls[0][0].tools as Array<{ name: string }>).map((tool) => tool.name);
+    expect(offeredWhileOff).not.toContain(PLUGIN_TOOL_MODEL_NAME);
+
+    // Switched back on for the company, but the plugin itself is not ready.
+    await db.delete(pluginCompanySettings);
+    await db.update(plugins).set({ status: "error" }).where(eq(plugins.id, pluginDbId));
+    await svc.sendMessage({ companyId, targetAgent: target, requester: { userId: "user-1", agentId: null }, message: "hi again" });
+    const offeredWhileBroken = (mockCreate.mock.calls[1][0].tools as Array<{ name: string }>).map((tool) => tool.name);
+    expect(offeredWhileBroken).not.toContain(PLUGIN_TOOL_MODEL_NAME);
+
+    // Ready and on: offered.
+    await db.update(plugins).set({ status: "ready" }).where(eq(plugins.id, pluginDbId));
+    await svc.sendMessage({ companyId, targetAgent: target, requester: { userId: "user-1", agentId: null }, message: "and now" });
+    const offeredWhenReady = (mockCreate.mock.calls[2][0].tools as Array<{ name: string }>).map((tool) => tool.name);
+    expect(offeredWhenReady).toContain(PLUGIN_TOOL_MODEL_NAME);
+    expect(call).not.toHaveBeenCalled();
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("tells the model in words when an add-on tool fails or answers with data, never pasting file data", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher, call } = await seedPluginTool();
+    call
+      .mockResolvedValueOnce({ error: "Daily image limit (2) reached for this agent today." })
+      .mockResolvedValueOnce({ data: { provider: "mock", imageDataUrl: `data:image/png;base64,${"A".repeat(5000)}`, attachmentId: "att-1" } });
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [
+          { type: "tool_use", id: "call_1", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "one" } },
+          { type: "tool_use", id: "call_2", name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "two" } },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "One failed, one worked." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+
+    const result = await freshLaneAService(db, { pluginToolDispatcher: dispatcher }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "two pictures please",
+    });
+
+    const toolResultTurn = mockCreate.mock.calls[1][0].messages.at(-1);
+    expect(toolResultTurn.content[0]).toMatchObject({
+      tool_use_id: "call_1",
+      is_error: true,
+      content: "That did not work: Daily image limit (2) reached for this agent today.",
+    });
+    expect(toolResultTurn.content[1]).toMatchObject({ tool_use_id: "call_2" });
+    expect(toolResultTurn.content[1].content).toBe("provider: mock\nimageDataUrl: [file data omitted]\nattachmentId: att-1");
+    expect(result.actions).toEqual([
+      { tool: PLUGIN_TOOL_MODEL_NAME, summary: "The Make picture (Acme Pictures) add-on tool did not work.", ok: false },
+      { tool: PLUGIN_TOOL_MODEL_NAME, summary: "Used the Make picture (Acme Pictures) add-on tool.", ok: true },
+    ]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
 
   it("calls a granted Tools-library MCP tool through a capped tool-use loop", async () => {
     process.env.ANTHROPIC_API_KEY = "test-key";

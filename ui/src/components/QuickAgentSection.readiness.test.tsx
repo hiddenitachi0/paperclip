@@ -21,6 +21,7 @@ const mockAgentsApi = vi.hoisted(() => ({ update: vi.fn() }));
 const mockBudgetsApi = vi.hoisted(() => ({ overview: vi.fn(), upsertPolicy: vi.fn() }));
 const mockSecretsApi = vi.hoisted(() => ({ list: vi.fn() }));
 const mockMcpApi = vi.hoisted(() => ({ listForAgent: vi.fn() }));
+const mockPluginsApi = vi.hoisted(() => ({ agentToolGrants: vi.fn() }));
 const mockDataApi = vi.hoisted(() => ({ listDatasetSources: vi.fn() }));
 const mockServerKeyApi = vi.hoisted(() => ({ get: vi.fn() }));
 const mockInstanceSettingsApi = vi.hoisted(() => ({ getExperimental: vi.fn() }));
@@ -38,6 +39,7 @@ vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
 vi.mock("../api/budgets", () => ({ budgetsApi: mockBudgetsApi }));
 vi.mock("../api/secrets", () => ({ secretsApi: mockSecretsApi }));
 vi.mock("../api/mcpToolLibrary", () => ({ mcpToolLibraryApi: mockMcpApi }));
+vi.mock("../api/plugins", () => ({ pluginsApi: mockPluginsApi }));
 vi.mock("../api/dataConnections", () => ({ dataConnectionsApi: mockDataApi }));
 vi.mock("../api/instanceServerAnthropicKey", () => ({ instanceServerAnthropicKeyApi: mockServerKeyApi }));
 vi.mock("../api/instanceSettings", () => ({ instanceSettingsApi: mockInstanceSettingsApi }));
@@ -132,6 +134,7 @@ describe("QuickAgentSection readiness", () => {
       { id: "t2", enabled: false },
       { id: "t3", enabled: true },
     ]);
+    mockPluginsApi.agentToolGrants.mockResolvedValue({ grantedToolNames: [], unrestricted: true, availableTools: [] });
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableBusinessData: false });
     mockServerKeyApi.get.mockRejectedValue(new ApiError("Instance admin access required", 403, null));
     mockDataApi.listDatasetSources.mockResolvedValue([]);
@@ -174,6 +177,45 @@ describe("QuickAgentSection readiness", () => {
     expect(line("instructions")?.dataset.state).toBe("ok");
     expect(toggle()?.disabled).toBe(false);
     expect(container.querySelector('[data-testid="quick-agent-switch-reason"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("counts ticked add-on tools on the Tools line, and only those still installed and on", async () => {
+    const generateImage = {
+      name: "paperclip.media-studio:generate-image",
+      toolName: "generate-image",
+      displayName: "Generate image",
+      description: "Make a picture.",
+      parametersSchema: {},
+      pluginId: "p1",
+      pluginKey: "paperclip.media-studio",
+      pluginDisplayName: "Media Studio",
+    };
+    mockPluginsApi.agentToolGrants.mockResolvedValue({
+      // The second tick points at an add-on that is no longer available.
+      grantedToolNames: [generateImage.name, "acme.gone:tool"],
+      unrestricted: false,
+      availableTools: [generateImage],
+    });
+    const root = await render(agent());
+
+    expect(line("tools")?.dataset.state).toBe("ok");
+    expect(line("tools")?.textContent).toContain("2 tools and 1 add-on tool ticked");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("still shows the Tools-library count when the add-on list cannot be loaded", async () => {
+    mockPluginsApi.agentToolGrants.mockRejectedValue(new ApiError("boom", 500, null));
+    const root = await render(agent());
+
+    expect(line("tools")?.dataset.state).toBe("ok");
+    expect(line("tools")?.textContent).toContain("2 tools ticked");
 
     await act(async () => {
       root.unmount();
