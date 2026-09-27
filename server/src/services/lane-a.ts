@@ -929,7 +929,7 @@ function assertConversationOwnedBy(
  * DUR-3989: what a quick agent is being asked to do, so a refusal can say it
  * in the operator's words ("answer" in chat, "rewriting text" for transform).
  */
-type LaneAWorkKind = "chat" | "transform";
+export type LaneAWorkKind = "chat" | "transform";
 
 /**
  * The plain sentence an operator (or the person on the other end of a
@@ -995,6 +995,66 @@ export interface LaneACredential {
   /** Null only when a test client is injected for Claude. */
   apiKey: string | null;
   source: LaneACredentialSource | null;
+}
+
+/**
+ * How a failed model call is answered. A bad key is a 503 with its own code, an
+ * upstream rate limit a 429, and a request the model service refused as
+ * malformed (wrong model name, wrong address, bad parameters: 4xx) a 422 with
+ * code LANE_A_SETUP_REFUSED and the service's own words, so callers can tell a
+ * setup mistake from an outage. Everything else stays a 502.
+ */
+export function laneAProviderErrorToHttp(err: unknown, kind: LaneAWorkKind): unknown {
+  if (!(err instanceof LaneAProviderError)) return err;
+  const label = laneAProviderLabel(err.provider);
+  if (err.kind === "auth") {
+    return new HttpError(
+      503,
+      err.provider === "anthropic"
+        ? "Lane A model credentials are invalid"
+        : `${label} refused this quick agent's key. Check the key under Connections.`,
+      { code: "LANE_A_KEY_REFUSED", provider: err.provider },
+    );
+  }
+  if (err.kind === "rate_limit") {
+    return kind === "chat"
+      ? new HttpError(429, "Lane A is rate limited upstream — retry shortly", { provider: err.provider })
+      : tooManyRequests("The model is rate limited upstream — retry this item shortly.", {
+          reason: "upstream_rate_limit",
+          provider: err.provider,
+        });
+  }
+  if (err.kind === "upstream" && err.status !== null && err.status >= 400 && err.status < 500) {
+    return new HttpError(
+      422,
+      `${label} refused this quick agent's request: ${providerErrorDetail(err.message)} ` +
+        `Check the model name and the address in this agent's quick answer settings.`,
+      { code: "LANE_A_SETUP_REFUSED", provider: err.provider, providerStatus: err.status },
+    );
+  }
+  return new HttpError(502, `Lane A model call failed: ${err.message}`, { provider: err.provider });
+}
+
+/** The model service's own error sentence out of "X answered 400: {json}", else the whole message. */
+function providerErrorDetail(message: string): string {
+  const brace = message.indexOf("{");
+  if (brace >= 0) {
+    try {
+      const parsed = JSON.parse(message.slice(brace)) as { error?: { message?: unknown } | string; message?: unknown };
+      const inner =
+        typeof parsed.error === "object" && parsed.error !== null && typeof parsed.error.message === "string"
+          ? parsed.error.message
+          : typeof parsed.error === "string"
+            ? parsed.error
+            : typeof parsed.message === "string"
+              ? parsed.message
+              : null;
+      if (inner) return inner.endsWith(".") ? inner : `${inner}.`;
+    } catch {
+      // Not JSON (or cut off): fall through to the whole message.
+    }
+  }
+  return message.endsWith(".") ? message : `${message}.`;
 }
 
 export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
@@ -1424,26 +1484,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
    * is already scrubbed of the key by lane-a-providers.ts.
    */
   function providerErrorToHttp(err: unknown, kind: LaneAWorkKind): unknown {
-    if (!(err instanceof LaneAProviderError)) return err;
-    const label = laneAProviderLabel(err.provider);
-    if (err.kind === "auth") {
-      return new HttpError(
-        503,
-        err.provider === "anthropic"
-          ? "Lane A model credentials are invalid"
-          : `${label} refused this quick agent's key. Check the key under Connections.`,
-        { code: "LANE_A_KEY_REFUSED", provider: err.provider },
-      );
-    }
-    if (err.kind === "rate_limit") {
-      return kind === "chat"
-        ? new HttpError(429, "Lane A is rate limited upstream — retry shortly", { provider: err.provider })
-        : tooManyRequests("The model is rate limited upstream — retry this item shortly.", {
-            reason: "upstream_rate_limit",
-            provider: err.provider,
-          });
-    }
-    return new HttpError(502, `Lane A model call failed: ${err.message}`, { provider: err.provider });
+    return laneAProviderErrorToHttp(err, kind);
   }
 
   // Runs a capped agentic tool-use loop: up to LANE_A_MAX_TOOL_CALLS calls to

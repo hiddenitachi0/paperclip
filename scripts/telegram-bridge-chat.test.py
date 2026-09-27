@@ -196,6 +196,31 @@ class QuickAnswerTests(BridgeChatTestCase):
         self.assertIn("handed this over as a task", reply)
         self.assertIn("DUR-5", reply)
 
+    def test_a_quick_answer_setup_mistake_is_explained_and_not_turned_into_a_task(self):
+        # 27 Sep: model "DeepSeek-V3" (missing "deepseek-ai/") was refused by
+        # Hugging Face, and the message quietly became a full Claude task.
+        self.cli_env.return_value = refused(
+            422, "LANE_A_SETUP_REFUSED",
+            "Local model refused this quick agent's request: The requested model 'DeepSeek-V3' does not exist. "
+            "Check the model name and the address in this agent's quick answer settings.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "time for some more testing"))
+
+        self.assertEqual(self.cli_env.call_count, 1)
+        self.assertEqual(self.tasks(), {})
+        reply = self.texts(OPERATOR)[-1]
+        self.assertIn("set up wrong", reply)
+        self.assertIn("no task was made", reply)
+        self.assertIn("'DeepSeek-V3' does not exist", reply)
+
+    def test_a_refused_key_is_explained_and_not_turned_into_a_task(self):
+        self.cli_env.return_value = refused(503, "LANE_A_KEY_REFUSED", "Local model refused this quick agent's key.")
+
+        bridge.handle_message(self.state, BOT, message(OPERATOR, "hello"))
+
+        self.assertEqual(self.cli_env.call_count, 1)
+        self.assertIn("set up wrong", self.texts(OPERATOR)[-1])
+
     def test_any_other_refusal_is_reported_and_not_retried(self):
         self.cli_env.return_value = refused(404, None, "Agent not found")
 
