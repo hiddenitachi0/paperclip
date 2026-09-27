@@ -1,5 +1,5 @@
 // Self-contained image-generation providers behind one interface.
-// The provider is chosen by operator config; `fetchImpl` is injected so the
+// The provider is chosen by operator config (or per call / per look); `fetchImpl` is injected so the
 // worker can route outbound calls through the gated `ctx.http.fetch`.
 //
 // Contracts:
@@ -7,13 +7,42 @@
 //                 body {prompt, image_size, num_images}  ->  {images:[{url,content_type}]}
 //   ComfyUI:      POST {COMFYUI_URL}/prompt {prompt:<workflow>, client_id} -> {prompt_id}
 //                 poll GET /history/{prompt_id} ; GET /view?filename=&subfolder=&type=
+//   Sogni:        see sogni.ts (durable workflow: start, poll, download)
+
+import {
+  SogniProvider,
+  isKnownSogniModel,
+  type SogniTokenType,
+} from "./sogni.js";
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** The two paid picture services a call or a look can pick between. */
+export const PICTURE_SERVICES = ["fal", "sogni"] as const;
+export type PictureService = (typeof PICTURE_SERVICES)[number];
+
+export function isPictureService(value: unknown): value is PictureService {
+  return value === "fal" || value === "sogni";
+}
+
+/**
+ * Which service a model name belongs to: a known Sogni model, or a Fal model
+ * path (Fal names always have a slash, like fal-ai/flux/schnell). Anything
+ * else is left to the chosen service.
+ */
+export function serviceForModel(model: string | null | undefined): PictureService | null {
+  if (!model?.trim()) return null;
+  if (isKnownSogniModel(model)) return "sogni";
+  if (model.includes("/")) return "fal";
+  return null;
+}
 
 export interface GenerationInput {
   prompt: string;
   imageSize?: string;
   model?: string;
+  /** Which service makes this picture (a per-call choice or a look's); settings decide when absent. */
+  provider?: string;
   /** Fixed seed: the same seed + prompt + model gives (nearly) the same picture. */
   seed?: number;
   /**
@@ -123,7 +152,7 @@ export class ComfyUIProvider implements GenerationProvider {
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
     if ((input.referenceImages ?? []).length > 0) {
-      throw new Error("Reference pictures need the Fal.ai provider. Switch Media Studio to Fal.ai in its settings.");
+      throw new Error("Reference pictures need Fal.ai or Sogni. Switch Media Studio to one of them in its settings.");
     }
     const base = this.baseUrl.replace(/\/$/, "");
     const seed = typeof input.seed === "number" ? input.seed : Math.floor(Math.random() * MAX_SEED);
@@ -201,6 +230,11 @@ export interface ProviderConfig {
   falModel?: string;
   comfyUrl?: string;
   comfyWorkflow?: Record<string, unknown>;
+  sogniKey?: string;
+  sogniModel?: string;
+  sogniTokenType?: SogniTokenType;
+  /** Byte transfers to and from Sogni's storage (see sogni.ts for why this is not the host fetch). */
+  sogniTransferFetch?: FetchImpl;
 }
 
 export function selectProvider(config: ProviderConfig, fetchImpl: FetchImpl): GenerationProvider {
@@ -213,6 +247,17 @@ export function selectProvider(config: ProviderConfig, fetchImpl: FetchImpl): Ge
   if (which === "fal") {
     if (!config.falKey) throw new Error("fal provider needs a FAL_KEY (set falKeySecretRef in plugin config)");
     return new FalProvider(config.falKey, fetchImpl, config.falModel);
+  }
+  if (which === "sogni") {
+    if (!config.sogniKey) throw new Error("Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).");
+    if (!config.sogniTransferFetch) throw new Error("Sogni needs a way to fetch finished pictures.");
+    return new SogniProvider({
+      apiKey: config.sogniKey,
+      apiFetch: fetchImpl,
+      transferFetch: config.sogniTransferFetch,
+      defaultModel: config.sogniModel,
+      tokenType: config.sogniTokenType,
+    });
   }
   throw new Error(`unknown provider: ${which}`);
 }
