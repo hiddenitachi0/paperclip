@@ -99,6 +99,34 @@ export const LANE_A_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
  */
 export const LANE_A_MAX_TOOL_CALLS = 3;
 /**
+ * Add-on tools (such as Media Studio's Generate image) have their own, larger
+ * per-message budget, so "make me a series of five pictures" fits in one
+ * message. It is separate from LANE_A_MAX_TOOL_CALLS: add-on calls do not use
+ * up the budget for other tools, and other tools do not use up this one.
+ */
+export const LANE_A_MAX_ADDON_TOOL_CALLS = 6;
+/**
+ * Hard bound on model round-trips per message: every allowed call in its own
+ * round, one round in which calls past a limit are refused, and one last round
+ * in which the model tells the person about it.
+ */
+export const LANE_A_MAX_MODEL_ROUNDS = LANE_A_MAX_TOOL_CALLS + LANE_A_MAX_ADDON_TOOL_CALLS + 2;
+/** Longest error text kept in the activity log for a failed tool call. */
+export const LANE_A_TOOL_ERROR_LOG_CHARS = 500;
+
+/** What the model is told when a call goes past a per-message limit. */
+export function laneAToolCapMessage(kind: "addon" | "other"): string {
+  const what =
+    kind === "addon"
+      ? `the ${LANE_A_MAX_ADDON_TOOL_CALLS} add-on tool calls (such as pictures)`
+      : `the ${LANE_A_MAX_TOOL_CALLS} tool calls`;
+  return (
+    `Not done: you have used ${what} one message allows. This is Paperclip's per-message limit, ` +
+    `not a daily limit, a cost limit or an error, and it resets with the person's next message. ` +
+    `Tell the person what you finished, and that they can say "continue" to get the rest.`
+  );
+}
+/**
  * Conversation memory (quick agents, round 2): how much of the earlier
  * transcript is replayed to the model on each message. Both bounds apply —
  * at most this many stored turns (user + assistant rows), and at most this
@@ -327,7 +355,11 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   }
   if (capabilities.length > 0) {
     capabilities.push(
-      `At most ${LANE_A_MAX_TOOL_CALLS} tool calls per message. Never claim you did something a tool did not confirm. ` +
+      `At most ${LANE_A_MAX_TOOL_CALLS} tool calls per message` +
+        (input.hasPluginTools
+          ? `, plus up to ${LANE_A_MAX_ADDON_TOOL_CALLS} add-on tool calls such as pictures. For a bigger series, make what fits and tell the person to say "continue" for the rest`
+          : ``) +
+        `. Never claim you did something a tool did not confirm. ` +
         `When you hand work to a colleague, tell the person who got it and the task reference.`,
     );
     parts.push(capabilities.join(" "));
@@ -1217,7 +1249,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     }
   }
 
-  async function recordToolCall(ctx: LaneAToolContext, toolName: string, input: unknown, result: { ok: boolean; summary: string }) {
+  async function recordToolCall(
+    ctx: LaneAToolContext,
+    toolName: string,
+    input: unknown,
+    result: { ok: boolean; summary: string; error?: string | null },
+  ) {
     try {
       await logActivity(db, {
         companyId: ctx.companyId,
@@ -1232,6 +1269,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           input: summarizeToolInput(input),
           ok: result.ok,
           summary: result.summary,
+          // What the tool or service actually said when it failed, so "who
+          // blocked this?" can be answered from the log.
+          ...(!result.ok && result.error ? { error: result.error.slice(0, LANE_A_TOOL_ERROR_LOG_CHARS) } : {}),
           conversationId: ctx.conversationId,
         },
       });
@@ -1406,12 +1446,13 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return new HttpError(502, `Lane A model call failed: ${err.message}`, { provider: err.provider });
   }
 
-  // Runs a capped agentic tool-use loop: up to LANE_A_MAX_TOOL_CALLS real
-  // tool executions across up to LANE_A_MAX_TOOL_CALLS + 1 model round-trips
-  // (the extra round-trip lets the model produce a final text answer after
-  // its last tool result, or after the cap forces remaining requests to be
-  // rejected with a synthetic tool_result error). This bounds wall-clock and
-  // API calls regardless of how many tool calls the model tries to make.
+  // Runs a capped agentic tool-use loop: up to LANE_A_MAX_TOOL_CALLS calls to
+  // built-in / Tools-library tools plus up to LANE_A_MAX_ADDON_TOOL_CALLS calls
+  // to add-on tools per message. A call past its limit is refused with a plain
+  // tool_result the model can pass on. After a round in which every call was
+  // refused, the model gets exactly one more round to answer in words; if it
+  // asks for tools again, the loop stops. LANE_A_MAX_MODEL_ROUNDS bounds the
+  // round-trips regardless of what the model does.
   async function callModel(params: {
     systemPrompt: string;
     history: LaneAChatMessage[];
@@ -1448,10 +1489,12 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     let inputTokens = 0;
     let outputTokens = 0;
     let toolCallsUsed = 0;
+    let addonToolCallsUsed = 0;
+    let finalRound = false;
     let response: Awaited<ReturnType<LaneAProviderClient["complete"]>> | undefined;
 
     try {
-      for (let round = 0; round < LANE_A_MAX_TOOL_CALLS + 1; round++) {
+      for (let round = 0; round < LANE_A_MAX_MODEL_ROUNDS; round++) {
         response = await client.complete({
           model: params.model ?? LANE_A_MODEL,
           maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
@@ -1464,11 +1507,17 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
         const toolUseBlocks = response.toolCalls;
         if (response.stop !== "tool_use" || toolUseBlocks.length === 0) break;
+        // It was told it hit a limit and still asks for tools: stop here.
+        if (finalRound) break;
 
         messages.push({ role: "assistant", content: response.text, toolCalls: toolUseBlocks });
         const toolResults: LaneAToolResult[] = [];
+        let refusedForCap = 0;
+        let executedThisRound = 0;
         for (const block of toolUseBlocks) {
-          if (toolCallsUsed >= LANE_A_MAX_TOOL_CALLS) {
+          const isAddon = toolset.pluginTools.has(block.name);
+          if (isAddon ? addonToolCallsUsed >= LANE_A_MAX_ADDON_TOOL_CALLS : toolCallsUsed >= LANE_A_MAX_TOOL_CALLS) {
+            refusedForCap++;
             if (block.name === READ_BUSINESS_DATA_TOOL) {
               // Asked for data and got none: the reply is still checked, so it
               // cannot carry a number no lookup in this turn returned.
@@ -1477,7 +1526,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             toolResults.push({
               toolCallId: block.id,
               name: block.name,
-              content: "Lane A tool-call cap reached for this message.",
+              content: laneAToolCapMessage(isAddon ? "addon" : "other"),
               isError: true,
             });
             continue;
@@ -1497,7 +1546,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             });
             continue;
           }
-          toolCallsUsed++;
+          if (isAddon) addonToolCallsUsed++;
+          else toolCallsUsed++;
+          executedThisRound++;
           const input = block.input;
 
           if (isLaneABuiltinTool(block.name)) {
@@ -1527,7 +1578,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
               });
             }
             actions.push({ tool: block.name, summary: result.summary, ok: result.ok });
-            await recordToolCall(ctx, block.name, input, result);
+            await recordToolCall(ctx, block.name, input, { ...result, error: result.ok ? null : result.content });
             toolResults.push({
               toolCallId: block.id,
               name: block.name,
@@ -1541,7 +1592,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           if (pluginTool) {
             // An add-on tool, through the same execute path a full agent's
             // HTTP call takes, as this quick agent. It already counted
-            // against the cap above, like every other call.
+            // against the add-on limit above.
             const execution = pluginToolExecution();
             const label = `${pluginTool.displayName} (${pluginTool.pluginDisplayName})`;
             let outcome: { ok: boolean; content: string };
@@ -1591,7 +1642,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 ? `Made a picture with the ${label} add-on tool${image.issueId ? " and attached it to the task" : " and saved it to Files"}.`
                 : `Used the ${label} add-on tool.`;
             actions.push({ tool: block.name, summary, ok: outcome.ok, ...(image ? { image } : {}) });
-            await recordToolCall(ctx, block.name, input, { ok: outcome.ok, summary });
+            await recordToolCall(ctx, block.name, input, { ok: outcome.ok, summary, error: outcome.ok ? null : outcome.content });
             toolResults.push({
               toolCallId: block.id,
               name: block.name,
@@ -1629,7 +1680,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             const ok = !result.isError;
             const summary = ok ? `Used the ${block.name} tool.` : `The ${block.name} tool reported a problem.`;
             actions.push({ tool: block.name, summary, ok });
-            await recordToolCall(ctx, block.name, input, { ok, summary });
+            await recordToolCall(ctx, block.name, input, { ok, summary, error: ok ? null : text || null });
             toolResults.push({
               toolCallId: block.id,
               name: block.name,
@@ -1639,7 +1690,11 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           } catch (err) {
             const summary = `The ${block.name} tool failed.`;
             actions.push({ tool: block.name, summary, ok: false });
-            await recordToolCall(ctx, block.name, input, { ok: false, summary });
+            await recordToolCall(ctx, block.name, input, {
+              ok: false,
+              summary,
+              error: err instanceof Error ? err.message : String(err),
+            });
             toolResults.push({
               toolCallId: block.id,
               name: block.name,
@@ -1649,6 +1704,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           }
         }
         messages.push({ role: "tool", results: toolResults });
+        if (refusedForCap > 0 && executedThisRound === 0) finalRound = true;
       }
     } catch (err) {
       throw providerErrorToHttp(err, "chat");

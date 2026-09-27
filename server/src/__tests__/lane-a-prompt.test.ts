@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LANE_A_MAX_TOOL_CALLS,
+  LANE_A_MAX_ADDON_TOOL_CALLS,
   LANE_A_MEMORY_MAX_TURNS,
   buildSystemPrompt,
   estimateLaneATokens,
@@ -26,6 +27,14 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Route anything about invoices to Finn.");
     expect(prompt).toContain(`At most ${LANE_A_MAX_TOOL_CALLS} tool calls per message`);
     expect(prompt).toContain("route_to_agent");
+  });
+
+  it("tells a quick agent with add-on tools its separate limit for pictures and how to continue", () => {
+    const withAddons = buildSystemPrompt({ agentName: "Maja", hasMcpTools: false, hasBuiltinTools: true, hasPluginTools: true });
+    expect(withAddons).toContain(`plus up to ${LANE_A_MAX_ADDON_TOOL_CALLS} add-on tool calls such as pictures`);
+    expect(withAddons).toContain(`say "continue"`);
+    const withoutAddons = buildSystemPrompt({ agentName: "Ada", hasMcpTools: false, hasBuiltinTools: true });
+    expect(withoutAddons).not.toContain("add-on tool calls such as pictures");
   });
 
   it("lists available colleagues so the model can pick a hand-over target", () => {
