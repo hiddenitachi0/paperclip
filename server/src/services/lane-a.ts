@@ -47,6 +47,8 @@ import { budgetService } from "./budgets.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import { loadLaneAApiTools, type LaneAApiToolClient } from "./lane-a-api-tools.js";
+import type { ApiToolServiceDeps } from "./api-tools.js";
 import { getPluginToolDispatcher, type PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import { pluginToolExecutionService, type PluginToolExecutionService } from "./plugin-tool-execution.js";
 import { openLaneAPluginRun } from "./lane-a-plugin-runs.js";
@@ -183,7 +185,10 @@ export interface LaneASystemPromptInput {
   instructions?: string | null;
   /** Untrusted caller context for this one message. */
   context?: string;
-  /** Whether Tools-library (MCP) tools are attached this turn. */
+  /**
+   * Whether Tools-library tools are attached this turn: MCP servers and, since
+   * DUR-4004, "API with a key" tools (both live in the same toolIndex).
+   */
   hasMcpTools: boolean;
   /** Whether add-on (plugin) tools ticked for this agent are attached this turn. Absent leaves the prompt as it was. */
   hasPluginTools?: boolean;
@@ -604,7 +609,8 @@ function sanitizeToolNamePart(raw: string): string {
 }
 
 interface LaneALoadedTool {
-  client: McpClient;
+  // An MCP client, or (DUR-4004) the one-method stand-in an API tool uses.
+  client: McpClient | LaneAApiToolClient;
   toolName: string;
 }
 
@@ -750,7 +756,32 @@ async function connectMcpServer(entry: ResolvedMcpServer): Promise<McpClient> {
 // list qualified by server name. A server that fails to connect or list
 // tools is skipped rather than failing the whole Lane A turn — Lane A must
 // still degrade to plain chat if one granted tool is misconfigured or down.
+//
+// DUR-4004: the agent's "API with a key" tools ride along (lane-a-api-tools.ts):
+// same toolset shape, same loop, the key attached server-side at call time.
 async function loadLaneATools(
+  db: Db,
+  companyId: string,
+  agentId: string,
+  mcpToolIds: string[],
+  apiToolDeps: ApiToolServiceDeps = {},
+): Promise<LaneAToolset> {
+  const [mcp, api] = await Promise.all([
+    loadLaneAMcpTools(db, companyId, agentId, mcpToolIds),
+    loadLaneAApiTools(db, companyId, agentId, apiToolDeps),
+  ]);
+  if (api.anthropicTools.length === 0) return mcp;
+  return {
+    anthropicTools: [...mcp.anthropicTools, ...api.anthropicTools.filter((tool) => !mcp.toolIndex.has(tool.name))],
+    // One index for both kinds: the add-on loader's clash set is built from
+    // these keys, so an add-on tool can never shadow an API tool either.
+    toolIndex: new Map([...api.toolIndex, ...mcp.toolIndex]),
+    pluginTools: mcp.pluginTools,
+    clients: mcp.clients,
+  };
+}
+
+async function loadLaneAMcpTools(
   db: Db,
   companyId: string,
   agentId: string,
@@ -882,6 +913,8 @@ export interface LaneAServiceOptions {
   toolDeps?: Partial<LaneAToolDeps>;
   /** DUR-3972 test seam: the business-data service's outbound fetch and clock. */
   businessData?: BusinessDataServiceDeps;
+  /** DUR-4004 test seam: the "API with a key" tools' outbound guard (DNS answer, test dial) and clock. */
+  apiTools?: ApiToolServiceDeps;
   /**
    * Test seam: the Claude client. When set, a Claude-provider call needs no
    * key at all (none is read or required). Production leaves it unset.
@@ -1638,7 +1671,9 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
     const pluginToolGrants = (agentRow?.pluginToolGrants as string[] | null) ?? [];
     const [mcpToolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
-      loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? []),
+      // DUR-4004: "API with a key" tools are folded into this toolset's
+      // toolIndex, so the add-on clash set below covers them too.
+      loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? [], options.apiTools),
       loadReplayHistory(conversation.id),
       listColleagues(params.companyId, params.targetAgent.id),
     ]);

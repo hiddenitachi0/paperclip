@@ -1,0 +1,23 @@
+-- Which Telegram bot gets a company's approvals and questions.
+--
+-- The host-side bridge (scripts/telegram-bridge.py) sends each approval or
+-- question to the bot of the agent that asked for it, or to the nearest boss
+-- with a bot. When nobody asked (a card the board filed itself) or nobody on
+-- the way up has a bot, it used to pick "the bot closest to the top of the
+-- org chart" -- and when two bots were equally close, simply the first one in
+-- its list. On 27 Sep a newly connected assistant with no boss tied with the
+-- CEO, came first in the list, and started receiving the company's deploy
+-- cards, Approve button included.
+--
+-- After this migration the operator chooses, explicitly:
+--   * receives_company_notices (boolean, NOT NULL, false) marks the one bot
+--     that gets this company's approvals and questions when no agent's own
+--     bot (or its boss's) should.
+--   * a partial unique index allows at most one such bot per company.
+--
+-- Additive only: one defaulted column and one index. No row is written, so
+-- every existing bot stays false and the bridge falls back to its own rule
+-- (the CEO's bot, else the oldest bot) until the operator picks one. Every
+-- statement is guarded so a re-run is a no-op.
+ALTER TABLE "telegram_bots" ADD COLUMN IF NOT EXISTS "receives_company_notices" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "telegram_bots_company_notices_uq" ON "telegram_bots" ("company_id") WHERE "receives_company_notices";

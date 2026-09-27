@@ -226,6 +226,26 @@ export function assertCompanyOwnerOrInstanceAdmin(req: Request, companyId: strin
   assertCompanyAccess(req, companyId);
 }
 
+/**
+ * DUR-3997: changing a company's connections is for its owner and admins (the
+ * same rule the Connections page draws its buttons by, see
+ * ui/src/hooks/useCompanyRole.ts). Allowed: the local single-user board, an
+ * instance admin, and a board user whose ACTIVE membership in this company is
+ * owner or admin. Refused: agents, service and delegate tokens, operators and
+ * viewers -- with a plain sentence saying who can do it.
+ */
+export function assertCompanyOwnerAdminOrInstanceAdmin(req: Request, companyId: string, what = "this") {
+  assertBoard(req);
+  if (req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
+    const membership = (req.actor.memberships ?? []).find((item) => item.companyId === companyId);
+    const role = membership?.status === "active" ? membership.membershipRole : null;
+    if (role !== "owner" && role !== "admin") {
+      throw forbidden(`Only the company's owner or an admin can change ${what}.`);
+    }
+  }
+  assertCompanyAccess(req, companyId);
+}
+
 // Shared by the agent config routes (PATCH /agents/:id) and the agent
 // avatar routes (POST/DELETE .../agents/:agentId/avatar in assets.ts) so
 // "who may update this agent's record" is decided in exactly one place.

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { boolean, index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -24,6 +25,12 @@ import { companySecrets } from "./company_secrets.js";
  * `allowed_telegram_user_ids` is the per-bot allowlist the bridge enforces —
  * stored as text, because a Telegram user id is a 64-bit integer and JSON
  * numbers are not.
+ *
+ * `receives_company_notices` (migration 0178) marks the one bot that gets the
+ * company's approvals and questions when no agent's own bot (or its boss's)
+ * should — a card the board filed itself, for example. At most one per
+ * company (partial unique index). With none marked, the bridge uses the CEO's
+ * bot, else the oldest bot.
  */
 export const telegramBots = pgTable(
   "telegram_bots",
@@ -37,6 +44,7 @@ export const telegramBots = pgTable(
     uiBase: text("ui_base"),
     allowedTelegramUserIds: jsonb("allowed_telegram_user_ids").notNull().$type<string[]>().default([]),
     enabled: boolean("enabled").notNull().default(true),
+    receivesCompanyNotices: boolean("receives_company_notices").notNull().default(false),
     lastCheckAt: timestamp("last_check_at", { withTimezone: true }),
     lastCheckOk: boolean("last_check_ok"),
     lastCheckUsername: text("last_check_username"),
@@ -51,5 +59,9 @@ export const telegramBots = pgTable(
     // same person and both create tasks for the same agent.
     companyAgentUq: uniqueIndex("telegram_bots_company_agent_uq").on(table.companyId, table.agentId),
     tokenSecretUq: uniqueIndex("telegram_bots_token_secret_uq").on(table.tokenSecretId),
+    // At most one bot per company gets the company's approvals and questions.
+    companyNoticesUq: uniqueIndex("telegram_bots_company_notices_uq")
+      .on(table.companyId)
+      .where(sql`${table.receivesCompanyNotices}`),
   }),
 );

@@ -182,6 +182,7 @@ import {
   type ClaudeCredentialSource,
 } from "./claude-credential-source.js";
 import { resolveAgentMcpToolLibraryServers } from "./mcp-tool-library.js";
+import { buildApiToolsAnnouncement } from "./api-tools-agent-prompt.js";
 import {
   evaluateExecutionAllowlist,
   isExecutionForcedToKubernetes,
@@ -12190,6 +12191,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
       if (grantedToolServers.length > 0) {
         mergedConfig.mcpServers = [...existingMcpServers, ...grantedToolServers];
+      }
+    }
+    // DUR-4004: an "API with a key" tool has no MCP surface, so the agent is
+    // told about its ticked-on API tools in a prompt section instead (the
+    // adapter renders context.paperclipApiToolsMarkdown) and calls an action
+    // over HTTP with its run token; the key never leaves the server.
+    {
+      const apiToolsMarkdown = await buildApiToolsAnnouncement(db, agent.companyId, agent.id).catch(() => "");
+      if (apiToolsMarkdown) {
+        context.paperclipApiToolsMarkdown = apiToolsMarkdown;
+      } else {
+        delete context.paperclipApiToolsMarkdown;
       }
     }
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);

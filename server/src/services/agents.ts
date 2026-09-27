@@ -235,7 +235,9 @@ function assertNoRoleAssignmentFields(data: Record<string, unknown>) {
 // via db.update(agents) and always resyncs the matching secret bindings in
 // the same call. Blocking it here closes every other writer of the generic
 // create/update functions, exactly like ROLE_ASSIGNMENT_FIELDS above.
-const TOOL_LIBRARY_ASSIGNMENT_FIELDS = ["mcpToolIds"] as const;
+// DUR-4004: apiToolIds ("API with a key" tools) has the same posture and is
+// written only by syncApiToolSelection below.
+const TOOL_LIBRARY_ASSIGNMENT_FIELDS = ["mcpToolIds", "apiToolIds"] as const;
 
 function assertNoToolLibraryAssignmentFields(data: Record<string, unknown>) {
   const present = TOOL_LIBRARY_ASSIGNMENT_FIELDS.filter((field) =>
@@ -875,6 +877,23 @@ export function agentService(db: Db, options: AgentServiceOptions = {}) {
       const updated = await db
         .update(agents)
         .set({ pluginToolGrants: desiredToolNames, updatedAt: new Date() })
+        .where(eq(agents.id, agentId))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!updated) throw notFound("Agent not found");
+      const normalized = await getById(updated.id);
+      if (!normalized) throw notFound("Agent not found");
+      return normalized;
+    },
+
+    // DUR-4004: the only writer of agents.apiToolIds — board-only at the
+    // route layer (see routes/api-tools.ts). No secret-binding resync here:
+    // an API tool's key is bound to the TOOL row (target api_tool), not to
+    // the agent, and is only ever resolved server-side at call time.
+    syncApiToolSelection: async (agentId: string, desiredToolIds: string[]) => {
+      const updated = await db
+        .update(agents)
+        .set({ apiToolIds: desiredToolIds, updatedAt: new Date() })
         .where(eq(agents.id, agentId))
         .returning()
         .then((rows) => rows[0] ?? null);

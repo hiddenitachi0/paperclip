@@ -478,6 +478,29 @@ can fail, so the log line never sees it. Remove the alias (`acceptLegacyBodyFiel
 `server/src/routes/telegram-bots.ts` and `server/src/routes/access.ts`) in the release after the
 one that ships this.
 
+**Update (27 Sep, which bot gets the company's cards):** a card goes to the bot of the agent that
+asked for it, or the nearest boss with a bot. When nobody asked (a card the board filed itself, such
+as a deploy request) or nobody on the way up has a bot, the bridge used to pick the bot "closest to
+the top of the org chart" and, on a tie, the first one in its list. A newly connected assistant with
+no boss tied with the CEO, came first (bots from the app are listed before the file's), and received
+the company's deploy cards with a working Approve button. Now the operator chooses: **Company settings
+→ Connections → Telegram bots** has a switch per bot, "Sends this company's approvals and questions"
+(only one per company; turning one on turns the others off; owner or admin only). New column
+`telegram_bots.receives_company_notices` (migration 0178, at most one true per company). With none
+chosen, the bridge uses the CEO's bot (by agent role, app or file), else the oldest bot (file bots
+before app bots, app bots by when they were connected) — never list order. Questions, waiting tasks
+and stuck agents use the same rule. `telegram bridge-config` now also sends `receivesCompanyNotices`,
+`createdAt` and `agentRole` for each bot. The screen also warns when a bot has nobody of its own
+allowed to use it (the instance-wide list then applies).
+
+**The bridge is not restarted by a deploy.** `deploy-prod.sh` / the deploy runner rebuild and restart
+the Paperclip container and update the checkout on disk, but the bridge is a separate systemd service
+(`paperclip-telegram-bridge.service`, `python3 /root/paperclip/scripts/telegram-bridge.py`) that keeps
+running the old code until someone restarts it. After any deploy that changes
+`scripts/telegram-bridge.py`, run on the box as root: `systemctl restart paperclip-telegram-bridge`,
+then check `journalctl -u paperclip-telegram-bridge -n 50 --no-pager` for the line
+`company <id>: approvals and questions with no bot of their own go to <bot name> (<why>)`.
+
 _Roadmap item still open:_ Productize-a-project (item 7) — was blocked indefinitely on an
 external dependency (a productizable deliverable from another company's project) and was
 cancelled 2026-07-07 rather than left waiting; revisit if that dependency ever ships.

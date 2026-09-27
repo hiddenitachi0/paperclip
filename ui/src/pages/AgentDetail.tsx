@@ -9,6 +9,7 @@ import {
 } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
 import { mcpToolLibraryApi, type AgentMcpToolListItem } from "../api/mcpToolLibrary";
+import { AgentApiToolsSection } from "../components/AgentApiToolsSection";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -3235,6 +3236,9 @@ export function AgentToolsTab({
 
       {/* Tools that installed add-ons (plugins) bring; ticks write agents.plugin_tool_grants. */}
       <AgentAddOnToolsSection agentId={agent.id} quickAgent={agent.laneAEnabled === true} />
+
+      {/* DUR-4004: "API with a key" tools, ticked on the same way. */}
+      <AgentApiToolsSection agentId={agent.id} companyId={companyId} />
     </div>
   );
 }
