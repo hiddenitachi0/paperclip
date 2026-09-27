@@ -723,6 +723,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // key). Never resolved by any agent -- only by the server-side
   // data-connections service, which makes every outbound call itself.
   "data_connection",
+  // DUR-4004: the key of an "API with a key" tool (company_api_tools row,
+  // config_path 'auth'). Never resolved by any agent -- only by the
+  // server-side api-tools service, which makes every outbound call itself.
+  // Deliberately NOT a dedicated target: one provider key may be shared by
+  // several tools (and by an MCP server) if the operator wants that.
+  "api_tool",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
