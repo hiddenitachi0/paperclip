@@ -280,6 +280,55 @@ if (_logFlushInterval.unref) _logFlushInterval.unref();
  * @param eventBus - The system-wide event bus for publishing plugin events.
  * @returns An object implementing the HostServices interface for the plugin SDK.
  */
+/** Largest file a plugin may read back through `ctx.files.readContent` (a reference picture, say). */
+const PLUGIN_FILE_READ_MAX_BYTES = 10 * 1024 * 1024;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+type CompanyFileRow = {
+  id: string;
+  companyId: string;
+  issueId: string | null;
+  contentType: string;
+  byteSize: number;
+  originalFilename: string | null;
+  createdByAgentId: string | null;
+  createdAt: Date;
+};
+
+function toPluginCompanyFile(file: CompanyFileRow) {
+  const contentPath = `/api/attachments/${file.id}/content`;
+  return {
+    id: file.id,
+    companyId: file.companyId,
+    issueId: file.issueId,
+    contentType: file.contentType,
+    byteSize: file.byteSize,
+    originalFilename: file.originalFilename,
+    createdByAgentId: file.createdByAgentId,
+    contentPath,
+    openPath: contentPath,
+    downloadPath: `${contentPath}?download=1`,
+    createdAt: file.createdAt,
+  };
+}
+
+async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream as AsyncIterable<Buffer | string>) {
+    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    total += buf.length;
+    if (total > PLUGIN_FILE_READ_MAX_BYTES) {
+      throw new Error("That file is too large to use here.");
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** Maximum time (ms) to keep a session event subscription alive before forcing cleanup. */
 const SESSION_EVENT_SUBSCRIPTION_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes
 
@@ -503,6 +552,24 @@ export function buildHostServices(
    */
   const heartbeatRunIdOrNull = (runId: string | null | undefined): string | null =>
     runId && !findLaneAPluginRun(runId) ? runId : null;
+
+  /**
+   * The agent a tool call's run belongs to, in this company, or null. A
+   * heartbeat run resolves to its agent; a quick agent (Lane A) has no
+   * heartbeat run, and its plugin tool call runs under a short-lived id the
+   * host itself issued (lane-a-plugin-runs.ts), which resolves to the quick
+   * agent the same way. Never taken from a plugin-supplied agent id.
+   */
+  const callingAgentIdForRun = async (companyId: string, runId: string): Promise<string | null> => {
+    const run = await db
+      .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, companyId: heartbeatRuns.companyId })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (run) return run.companyId === companyId ? run.agentId : null;
+    const laneARun = findLaneAPluginRun(runId);
+    return laneARun && laneARun.companyId === companyId ? laneARun.agentId : null;
+  };
 
   const logPluginActivity = async (input: {
     companyId: string;
@@ -2488,24 +2555,9 @@ export function buildHostServices(
         if (!params.runId) {
           throw new Error("runId is required");
         }
-        const run = await db
-          .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, companyId: heartbeatRuns.companyId })
-          .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.id, params.runId))
-          .then((rows) => rows[0] ?? null);
-        // A quick agent (Lane A) has no heartbeat run; its plugin tool call
-        // runs under a short-lived id the host itself issued
-        // (lane-a-plugin-runs.ts), which resolves to the quick agent the
-        // same way a heartbeat run resolves to its agent. The limit is still
-        // the agent's own, per agent, in agent_daily_counters.
-        const callingAgentId = run
-          ? run.companyId === companyId
-            ? run.agentId
-            : null
-          : (() => {
-              const laneARun = findLaneAPluginRun(params.runId);
-              return laneARun && laneARun.companyId === companyId ? laneARun.agentId : null;
-            })();
+        // The limit is still the agent's own, per agent, in
+        // agent_daily_counters, whichever kind of run it came from.
+        const callingAgentId = await callingAgentIdForRun(companyId, params.runId);
         if (!callingAgentId) {
           throw new Error("Run not found in this company");
         }
@@ -2515,6 +2567,108 @@ export function buildHostServices(
         // method keeps its name and result shape so plugins built against
         // the SDK (media-studio) need no change.
         return agentDailyLimits.reserve(callingAgentId, "image_generation");
+      },
+    },
+
+    files: {
+      async createCompanyFile(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+
+        // runId is required and host-enforced, like issues.createAttachment
+        // and personas.reserveDailyGeneration: the author is the agent the
+        // run belongs to in THIS company, never a plugin-supplied id, and a
+        // run from another company (or an unknown one) is refused.
+        if (!params.runId) {
+          throw new Error("runId is required");
+        }
+        const authorAgentId = await callingAgentIdForRun(companyId, params.runId);
+        if (!authorAgentId) {
+          throw new Error("Run not found in this company");
+        }
+
+        const contentType = normalizeContentType(params.contentType);
+        if (!isAllowedContentType(contentType)) {
+          throw new Error(`File type "${contentType}" is not allowed`);
+        }
+        let buffer: Buffer;
+        try {
+          buffer = Buffer.from(params.contentBase64, "base64");
+        } catch {
+          throw new Error("contentBase64 is not valid base64");
+        }
+        if (buffer.length <= 0) {
+          throw new Error("The file is empty");
+        }
+        const company = await companies.getById(companyId);
+        const maxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
+        if (buffer.length > maxBytes) {
+          throw new Error(`The file is larger than this company allows (${maxBytes} bytes)`);
+        }
+
+        const stored = await getStorage().putFile({
+          companyId,
+          namespace: "files",
+          originalFilename: params.filename ?? null,
+          contentType,
+          body: buffer,
+        });
+        const file = await issues.createCompanyFile({
+          companyId,
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: stored.originalFilename,
+          createdByAgentId: authorAgentId,
+        });
+
+        await logPluginActivity({
+          companyId,
+          action: "company.file.created",
+          entityType: "attachment",
+          entityId: file.id,
+          actor: { actorAgentId: authorAgentId, actorRunId: params.runId },
+          details: {
+            attachmentId: file.id,
+            contentType: file.contentType,
+            byteSize: file.byteSize,
+            originalFilename: file.originalFilename,
+          },
+        });
+
+        return toPluginCompanyFile(file);
+      },
+
+      async get(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const file = isUuid(params.fileId) ? await issues.getAttachmentById(params.fileId) : null;
+        // A file in another company reads exactly like a missing one.
+        if (!file || file.companyId !== companyId) return null;
+        return toPluginCompanyFile(file);
+      },
+
+      async readContent(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const file = isUuid(params.fileId) ? await issues.getAttachmentById(params.fileId) : null;
+        if (!file || file.companyId !== companyId) {
+          throw new Error("That file is not in this company's Files.");
+        }
+        // Pictures only, for now: the one use is a reference picture for
+        // Media Studio, and a plugin has no business reading a company's
+        // documents through this door.
+        if (!file.contentType.toLowerCase().startsWith("image/")) {
+          throw new Error("Only pictures can be read here, and that file is not a picture.");
+        }
+        if (file.byteSize > PLUGIN_FILE_READ_MAX_BYTES) {
+          throw new Error(`That file is too large to use here (over ${Math.floor(PLUGIN_FILE_READ_MAX_BYTES / (1024 * 1024))} MB).`);
+        }
+        const object = await getStorage().getObject(companyId, file.objectKey);
+        const body = await streamToBuffer(object.stream);
+        return { ...toPluginCompanyFile(file), contentBase64: body.toString("base64") } as any;
       },
     },
 

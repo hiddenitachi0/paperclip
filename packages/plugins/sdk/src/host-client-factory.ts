@@ -297,6 +297,15 @@ export interface HostServices {
     searchAudit(params: WorkerToHostMethods["authorization.audit.search"][0]): Promise<WorkerToHostMethods["authorization.audit.search"][1]>;
   };
 
+  /** Provides company files not tied to a task. */
+  files: {
+    createCompanyFile(
+      params: WorkerToHostMethods["files.createCompanyFile"][0],
+    ): Promise<WorkerToHostMethods["files.createCompanyFile"][1]>;
+    get(params: WorkerToHostMethods["files.get"][0]): Promise<WorkerToHostMethods["files.get"][1]>;
+    readContent(params: WorkerToHostMethods["files.readContent"][0]): Promise<WorkerToHostMethods["files.readContent"][1]>;
+  };
+
   /** Provides persona-scoped enforcement helpers (DUR-177 daily generation cap). */
   personas: {
     reserveDailyGeneration(
@@ -497,6 +506,11 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "authorization.policies.previewAssignment": "authorization.policies.read",
   "authorization.policies.explainAssignment": "authorization.policies.read",
   "authorization.audit.search": "authorization.audit.read",
+
+  // Company files
+  "files.createCompanyFile": "company.files.create",
+  "files.get": "company.files.read",
+  "files.readContent": "company.files.read",
 
   // Personas
   "personas.reserveDailyGeneration": "personas.generation_cap.enforce",
@@ -970,6 +984,16 @@ export function createHostClientHandlers(
     }),
     "authorization.audit.search": gated("authorization.audit.search", async (params) => {
       return services.authorization.searchAudit(params);
+    }),
+
+    "files.createCompanyFile": gated("files.createCompanyFile", async (params) => {
+      return services.files.createCompanyFile(params);
+    }),
+    "files.get": gated("files.get", async (params) => {
+      return services.files.get(params);
+    }),
+    "files.readContent": gated("files.readContent", async (params) => {
+      return services.files.readContent(params);
     }),
 
     "personas.reserveDailyGeneration": gated("personas.reserveDailyGeneration", async (params) => {

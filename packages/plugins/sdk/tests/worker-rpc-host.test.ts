@@ -143,6 +143,7 @@ describe("worker performAction context", () => {
           agentId: null,
           runId: null,
           companyId: null,
+          canManageCompany: false,
         },
         companyId: null,
       });

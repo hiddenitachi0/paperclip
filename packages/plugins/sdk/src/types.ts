@@ -48,7 +48,12 @@ import type {
   PrincipalPermissionGrant,
   PrincipalType,
 } from "@paperclipai/shared";
-import type { PluginPerformActionContext, PluginPersonaGenerationCapReservation } from "./protocol.js";
+import type {
+  PluginCompanyFile,
+  PluginCompanyFileContent,
+  PluginPerformActionContext,
+  PluginPersonaGenerationCapReservation,
+} from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports from @paperclipai/shared (plugin authors import from one place)
@@ -1815,6 +1820,43 @@ export interface PluginPersonasClient {
   ): Promise<PluginPersonaGenerationCapReservation>;
 }
 
+/**
+ * `ctx.files` — company files that are not tied to a task (they show in the
+ * Files page's "No task" group), and read access to a company's files by id.
+ *
+ * The company is always the one the host verified for this invocation: a
+ * call naming any other company is refused before it reaches the host
+ * service.
+ */
+export interface PluginFilesClient {
+  /**
+   * Save bytes as a company file with no task. Requires
+   * `company.files.create`.
+   *
+   * Only callable from a tool handler: pass the invoking
+   * `ToolRunContext.runId` as `options.runId`. The host resolves the author
+   * agent from that run (never from a plugin-supplied id), refuses a run that
+   * is not in `companyId`, and records the agent and the run with the file.
+   */
+  createCompanyFile(
+    input: { contentBase64: string; contentType: string; filename?: string | null },
+    companyId: string,
+    options: { runId: string },
+  ): Promise<PluginCompanyFile>;
+  /**
+   * One company file by id, or null when there is no such file in
+   * `companyId` (a file in another company reads as null). Requires
+   * `company.files.read`.
+   */
+  get(fileId: string, companyId: string): Promise<PluginCompanyFile | null>;
+  /**
+   * One company picture with its bytes (base64). Pictures (image/*) only,
+   * up to 10 MB. Throws a plain sentence when the file is not in
+   * `companyId` or is not a picture. Requires `company.files.read`.
+   */
+  readContent(fileId: string, companyId: string): Promise<PluginCompanyFileContent>;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming (worker → UI push channel)
 // ---------------------------------------------------------------------------
@@ -1963,6 +2005,9 @@ export interface PluginContext {
 
   /** Persona-scoped enforcement helpers. Requires `personas.generation_cap.enforce`. */
   personas: PluginPersonasClient;
+
+  /** Company files not tied to a task. Requires `company.files.create` / `company.files.read`. */
+  files: PluginFilesClient;
 
   /** Register getData handlers for the plugin's UI components. */
   data: PluginDataClient;

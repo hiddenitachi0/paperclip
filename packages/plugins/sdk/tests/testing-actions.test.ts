@@ -56,6 +56,7 @@ describe("createTestHarness action context", () => {
     expect(result.companyId).toBe("host-company");
     expect(result.actor).toEqual({
       type: "user",
+      canManageCompany: false,
       userId: "board-user-1",
       agentId: null,
       runId: "run-1",

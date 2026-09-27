@@ -843,6 +843,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: null,
         runId: null,
         companyId: null,
+        canManageCompany: false,
       },
       renderEnvironment: null,
     });
@@ -880,6 +881,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: null,
         runId: runA,
         companyId: companyA,
+        canManageCompany: false,
       },
       renderEnvironment: null,
     });
@@ -906,6 +908,36 @@ describe.sequential("plugin tool and bridge authz", () => {
         companyId: companyA,
       }),
     }));
+  });
+
+  it("tells the plugin whether the board user may manage the company (owner/admin, instance admin), never from params", async () => {
+    readyPlugin();
+    const cases: Array<{ actor: Record<string, unknown>; expected: boolean }> = [
+      { actor: { memberships: [{ companyId: companyA, status: "active", membershipRole: "owner" }] }, expected: true },
+      { actor: { memberships: [{ companyId: companyA, status: "active", membershipRole: "admin" }] }, expected: true },
+      { actor: { memberships: [{ companyId: companyA, status: "active", membershipRole: "operator" }] }, expected: false },
+      // Owner of ANOTHER company, operator here: not a manager here.
+      {
+        actor: {
+          companyIds: [companyA, companyB],
+          memberships: [
+            { companyId: companyA, status: "active", membershipRole: "operator" },
+            { companyId: companyB, status: "active", membershipRole: "owner" },
+          ],
+        },
+        expected: false,
+      },
+      { actor: { isInstanceAdmin: true }, expected: true },
+    ];
+    for (const { actor, expected } of cases) {
+      const call = vi.fn().mockResolvedValue({ ok: true });
+      const { app } = await createApp(boardActor(actor), {}, { bridgeDeps: { workerManager: { call } } });
+      const res = await request(app)
+        .post(`/api/plugins/${pluginId}/actions/looks.save`)
+        .send({ companyId: companyA, params: { canManageCompany: true } });
+      expect(res.status).toBe(200);
+      expect(call.mock.calls[0]?.[2]?.actorContext?.canManageCompany).toBe(expected);
+    }
   });
 
   it("allows agent-scoped plugin actions with authenticated actor context", async () => {
@@ -940,6 +972,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: agentA,
         runId: runA,
         companyId: companyA,
+        canManageCompany: false,
       },
       renderEnvironment: null,
     });
@@ -969,6 +1002,7 @@ describe.sequential("plugin tool and bridge authz", () => {
         agentId: agentA,
         runId: runA,
         companyId: companyA,
+        canManageCompany: false,
       },
       renderEnvironment: null,
     });
