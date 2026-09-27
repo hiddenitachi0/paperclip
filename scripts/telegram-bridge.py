@@ -268,6 +268,51 @@ def cli_env(env, *parts):
         return None
 
 
+# Paperclip restarts on every deploy (about a minute). A message that arrives
+# then used to fail at once with "I didn't hear back from Paperclip". Now the
+# bridge checks Paperclip is up BEFORE sending, waits for it if it is
+# restarting, and after a failure says plainly when a restart was the cause.
+# It never re-sends on its own after sending, because Paperclip may already
+# have acted on the message.
+HEALTH_URL = os.environ.get("PAPERCLIP_HEALTH_URL", "http://127.0.0.1:3100/api/health")
+RESTART_WAIT_SECONDS = int(os.environ.get("PAPERCLIP_RESTART_WAIT_SECONDS", "150"))
+RESTART_POLL_SECONDS = 5
+
+
+def container_started_at():
+    """When the Paperclip container last started, or None if it is not running."""
+    try:
+        out = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{.State.Running}} {{.State.StartedAt}}", CONTAINER],
+            stderr=subprocess.DEVNULL, timeout=10).decode().split()
+    except Exception:
+        return None
+    if len(out) != 2 or out[0] != "true":
+        return None
+    return out[1]
+
+
+def paperclip_ready():
+    """True when the container runs and Paperclip answers its health check."""
+    if container_started_at() is None:
+        return False
+    try:
+        with urllib.request.urlopen(HEALTH_URL, timeout=5) as r:
+            return r.status == 200 and json.load(r).get("status") == "ok"
+    except Exception:
+        return False
+
+
+def wait_for_paperclip(sleep=time.sleep, now=time.monotonic):
+    """Wait up to RESTART_WAIT_SECONDS for Paperclip to come back. True if it did."""
+    deadline = now() + RESTART_WAIT_SECONDS
+    while now() < deadline:
+        sleep(RESTART_POLL_SECONDS)
+        if paperclip_ready():
+            return True
+    return False
+
+
 def fetch_org(company_id):
     """Return (reports_to, names, roles) maps from a company's live org."""
     data = cli("agent", "list", "-C", company_id) or []
@@ -919,6 +964,17 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
     tg(token, "sendChatAction", chat_id=chat_id, action="typing")
     conversation_id = None if force_task else get_conversation(state, token, chat_id)
     notes = []
+    if not paperclip_ready():
+        send_plain(token, chat_id, (
+            f"Paperclip is restarting. I'll pass this on to {agent_name} as soon as it's back, "
+            "usually within a minute."))
+        if not wait_for_paperclip():
+            send_plain(token, chat_id, (
+                f"Paperclip is still not back, so {agent_name} did not get your message. "
+                "Please send it again in a few minutes."))
+            return
+        tg(token, "sendChatAction", chat_id=chat_id, action="typing")
+    started_before = container_started_at()
     res = chat_send(bot, text, conversation_id, "b" if force_task else None)
     if _refused(res) and conversation_id and res.get("code") in CONVERSATION_ENDED_CODES:
         set_conversation(state, token, chat_id, None)
@@ -928,6 +984,13 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
         notes.append("Quick answers aren't available right now, so I've handed this over as a task.")
         res = chat_send(bot, text, lane="b")
 
+    if res is None and started_before is not None and container_started_at() != started_before:
+        # Paperclip restarted while it was answering: the answer is lost, and
+        # it may have started on the request, so ask rather than re-send.
+        send_plain(token, chat_id, (
+            f"Paperclip restarted while {agent_name} was working on that, so the answer was lost. "
+            "Please send it again. If it asked for a task or a picture, check Paperclip first so it isn't done twice."))
+        return
     if res is None:
         # The command may have timed out after the server acted, so do not
         # claim that nothing happened.
