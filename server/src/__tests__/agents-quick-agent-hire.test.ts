@@ -379,6 +379,8 @@ describe.sequential("every quick-agent field is handled on the employment path",
     // DUR-3997: provider and, for OpenRouter / local, the model address.
     laneAProvider: "openai",
     laneABaseUrl: "http://localhost:11434/v1",
+    // "Creativity" (sampling temperature).
+    laneATemperature: 0.9,
   };
 
   beforeEach(() => {
@@ -462,7 +464,40 @@ describe.sequential("every quick-agent field is handled on the employment path",
       expect(res.status).toBe(403);
       expect(mockAgentService.create).not.toHaveBeenCalled();
     });
+
+    it(`reads "${field}" back off the card in the legacy approve branch`, () => {
+      const legacyRebuild = readFileSync(new URL("../services/approvals.ts", import.meta.url), "utf8");
+      expect(legacyRebuild).toContain(`payload.${field}`);
+    });
+
+    it(`refuses an agent that PATCHes "${field}" on its own record`, async () => {
+      mockAgentService.update.mockReset();
+      const res = await request(await createApp("agent"))
+        .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+        .send({ [field]: SAMPLE_VALUES[field] });
+
+      expect(res.status).toBe(403);
+      expect(String(res.body.error)).toContain("cannot modify quick-agent settings");
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    });
   }
+
+  it("the board saves a creativity setting through PATCH; out of range is refused before anything is saved", async () => {
+    mockAgentService.update.mockReset();
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeAgent({ id: ACTOR_AGENT_ID, ...patch }),
+    );
+    const app = await createApp("board");
+
+    const saved = await request(app).patch(`/api/agents/${ACTOR_AGENT_ID}`).send({ laneATemperature: 0.9 });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({ laneATemperature: 0.9 });
+
+    mockAgentService.update.mockClear();
+    const tooHigh = await request(app).patch(`/api/agents/${ACTOR_AGENT_ID}`).send({ laneATemperature: 2 });
+    expect(tooHigh.status).toBe(400);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
 });
 
 // DUR-4000: the job side of a persona — which person does this job

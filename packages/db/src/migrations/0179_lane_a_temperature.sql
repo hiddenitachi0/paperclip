@@ -1,0 +1,15 @@
+-- Quick-agent "creativity": the sampling temperature a quick agent's model
+-- calls are made with.
+--
+-- Quick agents never sent a temperature, so the model host's own default
+-- applied. For some hosted models (Mistral Small on OpenRouter) that default
+-- makes a playful chat persona flat and dry, and the operator had no dial.
+--
+-- After this migration:
+--   * lane_a_temperature (real, nullable) holds 0-1.5, validated by the API.
+--     Null = send no temperature, i.e. exactly what happened before.
+--
+-- Additive only: one nullable column, no default, no row written. Every
+-- existing quick agent stays null and keeps the host's default until the
+-- operator picks a setting. Guarded so a re-run is a no-op.
+ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "lane_a_temperature" real;

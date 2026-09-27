@@ -3,8 +3,13 @@ import {
   LANE_A_MODELS,
   LANE_A_MODEL_CATALOGUE,
   LANE_A_PROVIDERS,
+  LANE_A_MAX_TEMPERATURE,
+  LANE_A_MIN_TEMPERATURE,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_TEMPERATURE_PRESETS,
   isLaneAModelForProvider,
+  laneAModelAcceptsTemperature,
+  laneATemperatureForCall,
   laneAModelCostCents,
   laneAModelIssueForProvider,
   laneAProviderModelCostCents,
@@ -12,7 +17,7 @@ import {
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
 } from "./lane-a-models.js";
-import { QUICK_AGENT_FIELDS, createAgentSchema, laneAProviderModelIssue } from "./validators/agent.js";
+import { QUICK_AGENT_FIELDS, createAgentSchema, laneAProviderModelIssue, updateAgentSchema } from "./validators/agent.js";
 
 // DUR-3997: the per-provider catalogue. The Claude entries and prices must be
 // what they were before this change (every existing quick agent has a null
@@ -162,5 +167,68 @@ describe("quick-agent validators (DUR-3997)", () => {
       createAgentSchema.safeParse({ ...base, adapterConfig: { laneA: { apiKey: { type: "plain", value: "x" } } } })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("quick-agent creativity (sampling temperature)", () => {
+  const base = { name: "Front desk", adapterType: "claude_local" as const };
+
+  it("is a board-only quick-agent field", () => {
+    expect(QUICK_AGENT_FIELDS).toContain("laneATemperature");
+  });
+
+  it("accepts 0-1.5 and null (model default) on create and on PATCH", () => {
+    for (const value of [0, 0.2, 0.6, 0.9, 1.2, 1.5, null]) {
+      expect(createAgentSchema.safeParse({ ...base, laneATemperature: value }).success, String(value)).toBe(true);
+      expect(updateAgentSchema.safeParse({ laneATemperature: value }).success, String(value)).toBe(true);
+    }
+    // Left out entirely: nothing is changed.
+    expect(updateAgentSchema.parse({})).not.toHaveProperty("laneATemperature");
+  });
+
+  it("refuses anything outside 0-1.5, and anything that is not a number", () => {
+    for (const value of [-0.1, 1.51, 2, Number.POSITIVE_INFINITY, Number.NaN, "0.9", true]) {
+      expect(createAgentSchema.safeParse({ ...base, laneATemperature: value }).success, String(value)).toBe(false);
+      expect(updateAgentSchema.safeParse({ laneATemperature: value }).success, String(value)).toBe(false);
+    }
+    const tooHigh = updateAgentSchema.safeParse({ laneATemperature: 2 });
+    expect(tooHigh.success).toBe(false);
+    expect(JSON.stringify(tooHigh.error?.issues)).toContain("Creativity must be between 0 and 1.5.");
+  });
+
+  it("offers four plain-language steps, all inside the stored range", () => {
+    expect(LANE_A_TEMPERATURE_PRESETS.map((p) => p.label)).toEqual(["Precise", "Balanced", "Lively", "Very lively"]);
+    for (const preset of LANE_A_TEMPERATURE_PRESETS) {
+      expect(preset.value).toBeGreaterThanOrEqual(LANE_A_MIN_TEMPERATURE);
+      expect(preset.value).toBeLessThanOrEqual(LANE_A_MAX_TEMPERATURE);
+    }
+  });
+
+  it("knows which models take a temperature: Claude Haiku yes, Sonnet 5 / Opus 5 no, OpenAI reasoning models no", () => {
+    expect(laneAModelAcceptsTemperature("anthropic", "claude-haiku-4-5")).toBe(true);
+    // Null provider/model = Claude on the default model (Sonnet 5).
+    expect(laneAModelAcceptsTemperature(null, null)).toBe(false);
+    expect(laneAModelAcceptsTemperature("anthropic", "claude-sonnet-5")).toBe(false);
+    expect(laneAModelAcceptsTemperature("anthropic", "claude-opus-5")).toBe(false);
+    expect(laneAModelAcceptsTemperature("openai", "gpt-4.1-mini")).toBe(true);
+    expect(laneAModelAcceptsTemperature("openai", "o4-mini")).toBe(false);
+    expect(laneAModelAcceptsTemperature("google", "gemini-2.5-flash")).toBe(true);
+    expect(laneAModelAcceptsTemperature("openrouter", "mistralai/mistral-small-3.2-24b-instruct")).toBe(true);
+    expect(laneAModelAcceptsTemperature("local", "llama3.1")).toBe(true);
+  });
+
+  it("resolves the value a call is made with: clamped for Claude, dropped where refused or invalid", () => {
+    expect(laneATemperatureForCall("openrouter", "mistralai/mistral-small-3.2-24b-instruct", 1.2)).toBe(1.2);
+    expect(laneATemperatureForCall("openrouter", "x/y", null)).toBeNull();
+    expect(laneATemperatureForCall("openrouter", "x/y", undefined)).toBeNull();
+    expect(laneATemperatureForCall("openrouter", "x/y", 0)).toBe(0);
+    expect(laneATemperatureForCall("anthropic", "claude-haiku-4-5", 1.2)).toBe(1);
+    expect(laneATemperatureForCall("anthropic", "claude-haiku-4-5", 0.6)).toBe(0.6);
+    expect(laneATemperatureForCall("anthropic", "claude-sonnet-5", 0.6)).toBeNull();
+    expect(laneATemperatureForCall("openai", "o4-mini", 0.6)).toBeNull();
+    // A value that somehow got past validation is never forwarded.
+    expect(laneATemperatureForCall("local", "llama3.1", 3)).toBeNull();
+    expect(laneATemperatureForCall("local", "llama3.1", -1)).toBeNull();
+    expect(laneATemperatureForCall("local", "llama3.1", Number.NaN)).toBeNull();
   });
 });

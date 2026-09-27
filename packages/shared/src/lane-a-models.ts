@@ -275,6 +275,70 @@ export const LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP = 1;
 export const LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP = 100_000;
 
 /**
+ * "Creativity" (sampling temperature) per quick agent. Null = send nothing and
+ * let the model host use its own default, which is what every quick agent did
+ * before this setting existed. Some hosts' defaults (e.g. Mistral Small on
+ * OpenRouter) make a playful chat persona flat and dry; this is the dial.
+ *
+ * 0-1.5 is the range the operator may store. OpenAI-compatible hosts accept up
+ * to 2, but past ~1.5 most models drift into nonsense, so the store stops
+ * there. Claude only accepts 0-1, so a Claude call is clamped to 1 instead of
+ * refused.
+ */
+export const LANE_A_MIN_TEMPERATURE = 0;
+export const LANE_A_MAX_TEMPERATURE = 1.5;
+export const LANE_A_ANTHROPIC_MAX_TEMPERATURE = 1;
+
+/** The named steps the quick-agent card offers. Plain words for the operator. */
+export const LANE_A_TEMPERATURE_PRESETS = [
+  { value: 0.2, label: "Precise" },
+  { value: 0.6, label: "Balanced" },
+  { value: 0.9, label: "Lively" },
+  { value: 1.2, label: "Very lively" },
+] as const;
+
+/**
+ * Claude models that still take a temperature. Claude Sonnet 5 and Opus 5
+ * (and every newer Claude) removed sampling parameters: sending one is a 400,
+ * which would turn "make it livelier" into "the chat stopped working". So
+ * Claude is an allow-list, not a deny-list: a Claude model added later is
+ * assumed to refuse until someone checks.
+ */
+const LANE_A_ANTHROPIC_TEMPERATURE_MODELS: ReadonlySet<string> = new Set(["claude-haiku-4-5"]);
+
+/**
+ * Whether this provider/model is known to accept a temperature. False means
+ * the model decides for itself and the setting is not sent. OpenAI's
+ * reasoning models (o-series, gpt-5) refuse anything but their default.
+ * OpenRouter, Google and local servers accept it (OpenRouter drops a
+ * parameter a model does not support); the call path still retries once
+ * without it if a host refuses.
+ */
+export function laneAModelAcceptsTemperature(provider: unknown, model: unknown): boolean {
+  const key = normalizeLaneAProvider(provider);
+  const resolved = resolveLaneAModelForProvider(key, model);
+  if (key === "anthropic") return resolved !== null && LANE_A_ANTHROPIC_TEMPERATURE_MODELS.has(resolved);
+  if (key === "openai") return resolved === null || !/^(o\d|gpt-5)/i.test(resolved);
+  return true;
+}
+
+/**
+ * The temperature one call is actually made with, or null to send none.
+ * Anything that is not a finite number in range is treated as "not set"
+ * rather than forwarded (a bad value must never break a chat), and so is a
+ * model known not to accept one. A Claude call is clamped to Claude's 0-1.
+ */
+export function laneATemperatureForCall(provider: unknown, model: unknown, temperature: unknown): number | null {
+  if (typeof temperature !== "number" || !Number.isFinite(temperature)) return null;
+  if (temperature < LANE_A_MIN_TEMPERATURE || temperature > LANE_A_MAX_TEMPERATURE) return null;
+  if (!laneAModelAcceptsTemperature(provider, model)) return null;
+  if (normalizeLaneAProvider(provider) === "anthropic") {
+    return Math.min(temperature, LANE_A_ANTHROPIC_MAX_TEMPERATURE);
+  }
+  return temperature;
+}
+
+/**
  * What a day of transform calls could cost this quick agent if every call ran
  * at the limit, in whole US cents.
  *

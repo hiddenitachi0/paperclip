@@ -10,7 +10,10 @@ import {
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
   LANE_A_PROVIDER_CATALOGUE,
+  LANE_A_ANTHROPIC_MAX_TEMPERATURE,
+  LANE_A_TEMPERATURE_PRESETS,
   LANE_A_TRANSFORM_MAX_TOTAL_CHARS,
+  laneAModelAcceptsTemperature,
   laneAModelsForProvider,
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
@@ -85,6 +88,7 @@ export function QuickAgentSection({
     laneATransformDailyCallCap?: number | null;
     laneAProvider?: string | null;
     laneABaseUrl?: string | null;
+    laneATemperature?: number | null;
   };
   companyId?: string;
 }) {
@@ -480,6 +484,14 @@ export function QuickAgentSection({
             </label>
           )}
 
+          <CreativitySetting
+            value={agent.laneATemperature ?? null}
+            provider={provider}
+            model={agent.laneAModel ?? null}
+            disabled={settingMutation.isPending}
+            onSave={(next) => settingMutation.mutateAsync({ laneATemperature: next })}
+          />
+
           <NumberSetting
             label="Longest answer (tokens)"
             hint={`Empty = ${LANE_A_DEFAULT_MAX_OUTPUT_TOKENS}. Stops an answer from becoming unexpectedly long and expensive.`}
@@ -639,6 +651,86 @@ function TextSetting({
         </Button>
       </div>
       <span className="block text-xs text-muted-foreground">{hint}</span>
+    </label>
+  );
+}
+
+/**
+ * "Creativity": the sampling temperature every model call of this quick agent
+ * is made with. Saves as soon as it is changed (there is no Save button to
+ * forget) and says so next to the control. Empty = the model's own default,
+ * i.e. nothing is sent.
+ */
+function CreativitySetting({
+  value,
+  provider,
+  model,
+  disabled,
+  onSave,
+}: {
+  value: number | null;
+  provider: LaneAProvider;
+  model: string | null;
+  disabled?: boolean;
+  onSave: (next: number | null) => Promise<unknown>;
+}) {
+  const [status, setStatus] = useState<"saving" | "saved" | null>(null);
+  const isPreset = value === null || LANE_A_TEMPERATURE_PRESETS.some((preset) => preset.value === value);
+  const acceptsTemperature = laneAModelAcceptsTemperature(provider, model);
+
+  const change = async (raw: string) => {
+    const next = raw === "" ? null : Number(raw);
+    setStatus("saving");
+    try {
+      await onSave(next);
+      setStatus("saved");
+    } catch {
+      // The card already shows why it could not be saved.
+      setStatus(null);
+    }
+  };
+
+  return (
+    <label className="block space-y-1">
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+        Creativity
+        {status === "saving" && <span data-testid="creativity-status">Saving…</span>}
+        {status === "saved" && (
+          <span className="text-emerald-600 dark:text-emerald-400" data-testid="creativity-status">
+            Saved
+          </span>
+        )}
+      </span>
+      <select
+        className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+        value={value === null ? "" : String(value)}
+        disabled={disabled}
+        data-testid="creativity-select"
+        onChange={(event) => void change(event.target.value)}
+      >
+        <option value="">Model default</option>
+        {LANE_A_TEMPERATURE_PRESETS.map((preset) => (
+          <option key={preset.value} value={String(preset.value)}>
+            {preset.label} ({preset.value})
+          </option>
+        ))}
+        {!isPreset && <option value={String(value)}>Custom ({value})</option>}
+      </select>
+      <span className="block text-xs text-muted-foreground">
+        Higher makes replies more playful and varied; lower makes them more predictable. Work agents usually stay
+        precise.
+      </span>
+      {!acceptsTemperature && value !== null && (
+        <span className="block text-xs text-muted-foreground" data-testid="creativity-not-used">
+          The model picked above decides this for itself, so this setting is not used with it. Claude Haiku, OpenAI
+          GPT-4.1, Google, OpenRouter and local models follow it.
+        </span>
+      )}
+      {acceptsTemperature && provider === "anthropic" && value !== null && value > LANE_A_ANTHROPIC_MAX_TEMPERATURE && (
+        <span className="block text-xs text-muted-foreground" data-testid="creativity-capped">
+          Claude goes no higher than {LANE_A_ANTHROPIC_MAX_TEMPERATURE}, so this works like {LANE_A_ANTHROPIC_MAX_TEMPERATURE} here.
+        </span>
+      )}
     </label>
   );
 }

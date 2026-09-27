@@ -4,6 +4,7 @@ import {
   uuid,
   text,
   integer,
+  real,
   boolean,
   timestamp,
   jsonb,
@@ -103,6 +104,10 @@ export const agents = pgTable(
     // in packages/shared), resolved binding-gated and audited at call time.
     laneAProvider: text("lane_a_provider"),
     laneABaseUrl: text("lane_a_base_url"),
+    // Migration 0179: quick-agent "creativity" (sampling temperature, 0-1.5).
+    // Null = send no temperature, i.e. the model host's own default, which is
+    // what every quick agent did before this column existed.
+    laneATemperature: real("lane_a_temperature"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // DUR-109: last time a human (direct bundle/file edit) or an approved

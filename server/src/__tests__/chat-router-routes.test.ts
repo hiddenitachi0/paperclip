@@ -376,7 +376,7 @@ describe("POST /chat/classify", () => {
   // on which endpoint the UI happened to call.
   it("passes the per-agent model and output ceiling into Lane A", async () => {
     mockAgentService.getById.mockResolvedValue(
-      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400 } as never),
+      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400, laneATemperature: 0.9 } as never),
     );
     mockLaneAService.sendMessage.mockResolvedValue({
       conversationId: "conv-1",
@@ -393,6 +393,7 @@ describe("POST /chat/classify", () => {
     expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
       laneAModel: "claude-haiku-4-5",
       laneAMaxOutputTokens: 400,
+      laneATemperature: 0.9,
     });
   });
 });

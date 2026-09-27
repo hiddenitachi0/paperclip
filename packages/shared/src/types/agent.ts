@@ -154,6 +154,8 @@ export interface Agent {
   laneAProvider?: string | null;
   /** DUR-3997: OpenAI-compatible endpoint for OpenRouter / local. Null = the provider's default. */
   laneABaseUrl?: string | null;
+  /** Quick-agent "creativity" (sampling temperature, 0-1.5). Null = the model host's default. Board-only. */
+  laneATemperature?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }

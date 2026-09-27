@@ -63,6 +63,13 @@ export interface LaneACompletionRequest {
   messages: LaneAChatMessage[];
   tools?: LaneATool[];
   maxTokens: number;
+  /**
+   * Sampling temperature ("creativity"). Absent/null = send none, so the
+   * model host's default applies. The caller has already dropped it for a
+   * model known to refuse one and clamped it for Claude
+   * (laneATemperatureForCall in @paperclipai/shared).
+   */
+  temperature?: number | null;
 }
 
 export type LaneAStop = "end_turn" | "tool_use" | "max_tokens" | "other";
@@ -252,6 +259,11 @@ function createAnthropicLaneAClient(client: LaneAModelClient, apiKey: string | n
         const response = await client.messages.create({
           model: request.model,
           max_tokens: request.maxTokens,
+          // Claude takes 0-1; clamped again here so a caller that skipped
+          // laneATemperatureForCall still cannot send a value Claude refuses.
+          ...(typeof request.temperature === "number" && Number.isFinite(request.temperature)
+            ? { temperature: Math.min(1, Math.max(0, request.temperature)) }
+            : {}),
           system: request.system,
           messages: toAnthropicMessages(request.messages),
           ...(request.tools && request.tools.length > 0 ? { tools: request.tools.map(toAnthropicTool) } : {}),
@@ -365,6 +377,11 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
   // Google's shim, Ollama, LM Studio, llama.cpp, vLLM) speaks `max_tokens`.
   if (provider === "openai") body.max_completion_tokens = request.maxTokens;
   else body.max_tokens = request.maxTokens;
+  // Only when the operator chose a creativity setting: with no key at all
+  // the host's own default applies, exactly as before the setting existed.
+  if (typeof request.temperature === "number" && Number.isFinite(request.temperature)) {
+    body.temperature = request.temperature;
+  }
   return body;
 }
 
