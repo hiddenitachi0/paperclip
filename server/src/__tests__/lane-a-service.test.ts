@@ -33,6 +33,7 @@ import { createMcpTool } from "../services/mcp-tool-library.ts";
 import {
   LANE_A_MAX_DAILY_TURNS_PER_EMPLOYEE,
   LANE_A_MAX_TOOL_CALLS,
+  LANE_A_MAX_ADDON_TOOL_CALLS,
   LANE_A_MAX_TURNS_PER_CONVERSATION,
   laneAService,
   type LaneATargetAgent,
@@ -706,7 +707,7 @@ describeEmbeddedPostgres("lane A service", () => {
     vi.resetModules();
   });
 
-  it("counts add-on tool calls against LANE_A_MAX_TOOL_CALLS like every other call", async () => {
+  it("caps add-on tool calls at LANE_A_MAX_ADDON_TOOL_CALLS, then gives the model one round to answer", async () => {
     process.env.ANTHROPIC_API_KEY = "test-key";
     const companyId = await seedCompany();
     const target = await seedAgent(companyId, true, "Artist");
@@ -729,8 +730,93 @@ describeEmbeddedPostgres("lane A service", () => {
       message: "keep making pictures forever",
     });
 
-    expect(call).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS);
-    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 1);
+    // One call per round up to the limit, one round refused, one last round.
+    expect(call).toHaveBeenCalledTimes(LANE_A_MAX_ADDON_TOOL_CALLS);
+    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_ADDON_TOOL_CALLS + 2);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("makes a series of five pictures in one message, and explains the limit plainly past six", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher, call } = await seedPluginTool();
+
+    const picture = (n: number) => ({ type: "tool_use", id: `call_${randomUUID()}`, name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: `scene ${n}` } });
+    const mockCreate = vi
+      .fn()
+      // Seven pictures asked for in one go: six are made, the seventh is refused.
+      .mockResolvedValueOnce({
+        content: [1, 2, 3, 4, 5, 6, 7].map(picture),
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "Six are done. Say continue for the seventh." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+
+    const result = await freshLaneAService(db, { pluginToolDispatcher: dispatcher }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "make me a series of seven pictures",
+    });
+
+    expect(call).toHaveBeenCalledTimes(6);
+    expect(result.response).toBe("Six are done. Say continue for the seventh.");
+    const secondRequest = mockCreate.mock.calls[1]![0] as { messages: Array<{ role: string; content: unknown }> };
+    const refusal = JSON.stringify(secondRequest.messages.at(-1));
+    expect(refusal).toContain("per-message limit");
+    expect(refusal).toContain("not a daily limit");
+    expect(refusal).toContain("continue");
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("keeps what the service said when an add-on tool fails, in the activity log", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const target = await seedAgent(companyId, true, "Artist");
+    await agentService(db).syncPluginToolGrants(target.id, [PLUGIN_TOOL_NAMESPACED]);
+    const { dispatcher } = await seedPluginTool({ error: "fal.ai failed (422): content policy violation" });
+
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: `call_${randomUUID()}`, name: PLUGIN_TOOL_MODEL_NAME, input: { prompt: "x" } }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "The picture service refused that one." }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+
+    await freshLaneAService(db, { pluginToolDispatcher: dispatcher }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "user-1", agentId: null },
+      message: "make a picture",
+    });
+
+    const logged = await db.select().from(activityLog).where(eq(activityLog.action, "lane_a.tool_called"));
+    expect(logged).toHaveLength(1);
+    const details = logged[0]!.details as { ok: boolean; error?: string };
+    expect(details.ok).toBe(false);
+    expect(details.error).toContain("content policy violation");
 
     vi.doUnmock("@anthropic-ai/sdk");
     vi.resetModules();
@@ -958,7 +1044,9 @@ describeEmbeddedPostgres("lane A service", () => {
     });
 
     expect(mockCallTool).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS);
-    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 1);
+    // One round refused past the limit, then one last round; it asked for
+    // tools again, so the loop stopped there.
+    expect(mockCreate).toHaveBeenCalledTimes(LANE_A_MAX_TOOL_CALLS + 2);
 
     unmockMcpSdk();
     vi.doUnmock("@anthropic-ai/sdk");
