@@ -59,6 +59,7 @@ import {
   createTelegramBotSchema,
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
+  updateTelegramBotCompanyNoticesSchema,
   // Secret
   createSecretSchema,
   updateSecretSchema,
@@ -764,6 +765,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/telegram-bots/{botId}/token",
   "POST /api/companies/{companyId}/telegram-bots/{botId}/test",
   "PUT /api/companies/{companyId}/telegram-bots/{botId}/allowed-users",
+  "PUT /api/companies/{companyId}/telegram-bots/{botId}/company-notices",
   "DELETE /api/companies/{companyId}/telegram-bots/{botId}",
   // DUR-3972: business-data connections. Operator work only -- one of them
   // stores a shop key, and all of them decide what company data agents may
@@ -3245,6 +3247,7 @@ for (const route of [
   ["post", "/api/companies/{companyId}/telegram-bots/{botId}/token", "Replace a connected bot's token with a new one from BotFather", rotateTelegramBotTokenSchema],
   ["post", "/api/companies/{companyId}/telegram-bots/{botId}/test", "Ask Telegram whether this bot is reachable, and report its username", undefined],
   ["put", "/api/companies/{companyId}/telegram-bots/{botId}/allowed-users", "Set which Telegram users may use this bot", updateTelegramBotAllowedUsersSchema],
+  ["put", "/api/companies/{companyId}/telegram-bots/{botId}/company-notices", "Choose whether this bot gets the company's approvals and questions (turning one on turns the others off)", updateTelegramBotCompanyNoticesSchema],
   ["delete", "/api/companies/{companyId}/telegram-bots/{botId}", "Disconnect a Telegram bot and delete its saved token", undefined],
   ["get", "/api/instance/telegram-bridge-config", "Every enabled Telegram bot on this instance, without tokens, for the host-side bridge", undefined],
   ["get", "/api/companies/{companyId}/telegram-bots/{botId}/bridge-token", "Resolve one bot's token for the host-side bridge (instance admin only)", undefined],

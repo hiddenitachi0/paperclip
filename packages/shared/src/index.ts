@@ -1269,9 +1269,11 @@ export {
   createTelegramBotSchema,
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
+  updateTelegramBotCompanyNoticesSchema,
   type CreateTelegramBotInput,
   type RotateTelegramBotTokenInput,
   type UpdateTelegramBotAllowedUsersInput,
+  type UpdateTelegramBotCompanyNoticesInput,
 } from "./validators/telegram-bot.js";
 export type {
   DataConnectionCheckResult,

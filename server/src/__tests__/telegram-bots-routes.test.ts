@@ -100,10 +100,10 @@ d("telegram bot routes", () => {
     return companyId;
   }
 
-  async function seedAgent(companyId: string, name = `A-${randomUUID().slice(0, 6)}`) {
+  async function seedAgent(companyId: string, name = `A-${randomUUID().slice(0, 6)}`, role = "engineer") {
     return agentService(db).create(companyId, {
       name,
-      role: "engineer",
+      role,
       status: "idle",
       adapterType: "process",
       adapterConfig: { command: "echo" },
@@ -122,7 +122,7 @@ d("telegram bot routes", () => {
   });
 
   /** An ordinary board member of one company. */
-  const memberActor = (companyIds: string[]) => ({
+  const memberActor = (companyIds: string[], membershipRole = "admin") => ({
     type: "board",
     source: "session",
     userId: "member",
@@ -131,7 +131,7 @@ d("telegram bot routes", () => {
     memberships: companyIds.map((companyId) => ({
       companyId,
       status: "active",
-      membershipRole: "admin",
+      membershipRole,
     })),
   });
 
@@ -178,6 +178,8 @@ d("telegram bot routes", () => {
     expect(created.body.name).toBe("Daglig leder");
     expect(created.body.agentName).toBe("Daglig leder");
     expect(created.body.tokenHint).toBe("8100000001:••••ng01");
+    // A new bot never takes the company's approvals and questions by itself.
+    expect(created.body.receivesCompanyNotices).toBe(false);
     expect(JSON.stringify(created.body)).not.toContain(TOKEN);
     expect(JSON.stringify(created.body)).not.toContain("AAHtesting");
 
@@ -346,6 +348,138 @@ d("telegram bot routes", () => {
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);
     expect(await db.select().from(telegramBots)).toHaveLength(0);
     expect(await db.select().from(companySecrets)).toHaveLength(0);
+  });
+
+  // ── The bot that gets the company's approvals and questions ──────────────
+
+  function markNotices(app: express.Express, companyId: string, botId: string, receivesCompanyNotices: boolean) {
+    return request(app)
+      .put(`/api/companies/${companyId}/telegram-bots/${botId}/company-notices`)
+      .send({ receivesCompanyNotices });
+  }
+
+  async function marked(companyId: string) {
+    const rows = await db.select().from(telegramBots).where(eq(telegramBots.companyId, companyId));
+    return rows.filter((row) => row.receivesCompanyNotices).map((row) => row.id);
+  }
+
+  it("turning one bot on turns the others in the company off, and leaves other companies alone", async () => {
+    const companyA = await seedCompany();
+    const companyB = await seedCompany();
+    const ceo = await seedAgent(companyA, "CEO", "ceo");
+    const assistant = await seedAgent(companyA, "Assistant", "general");
+    const other = await seedAgent(companyB, "Other CEO", "ceo");
+    const app = createApp(adminActor());
+    const ceoBot = (await connectBot(app, companyA, ceo.id, TOKEN, "CEO")).body;
+    const assistantBot = (await connectBot(app, companyA, assistant.id, NEW_TOKEN, "Maja")).body;
+    const otherBot = (await connectBot(app, companyB, other.id, "8100000003:AAHthirdtokenthirdtokenthirdtok3", "Other")).body;
+    expect(await markNotices(app, companyB, otherBot.id, true).then((res) => res.status)).toBe(200);
+
+    const first = await markNotices(app, companyA, ceoBot.id, true);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(first.body.receivesCompanyNotices).toBe(true);
+    expect(await marked(companyA)).toEqual([ceoBot.id]);
+
+    const second = await markNotices(app, companyA, assistantBot.id, true);
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(second.body.receivesCompanyNotices).toBe(true);
+    expect(await marked(companyA)).toEqual([assistantBot.id]);
+    expect(await marked(companyB)).toEqual([otherBot.id]);
+
+    const listed = await request(app).get(`/api/companies/${companyA}/telegram-bots`);
+    expect(
+      Object.fromEntries(listed.body.map((bot: { name: string; receivesCompanyNotices: boolean }) => [bot.name, bot.receivesCompanyNotices])),
+    ).toEqual({ CEO: false, Maja: true });
+
+    const off = await markNotices(app, companyA, assistantBot.id, false);
+    expect(off.status).toBe(200);
+    expect(off.body.receivesCompanyNotices).toBe(false);
+    expect(await marked(companyA)).toEqual([]);
+    expect(await marked(companyB)).toEqual([otherBot.id]);
+
+    const activity = await db.select().from(activityLog).where(eq(activityLog.companyId, companyA));
+    expect(activity.filter((row) => row.action === "telegram_bot.company_notices_changed")).toHaveLength(3);
+  });
+
+  it("two bots turned on at the same moment end with exactly one on", async () => {
+    const companyId = await seedCompany();
+    const a = await seedAgent(companyId, "CEO", "ceo");
+    const b = await seedAgent(companyId, "Assistant", "general");
+    const app = createApp(adminActor());
+    const botA = (await connectBot(app, companyId, a.id, TOKEN, "CEO")).body;
+    const botB = (await connectBot(app, companyId, b.id, NEW_TOKEN, "Maja")).body;
+
+    const results = await Promise.all([
+      markNotices(app, companyId, botA.id, true),
+      markNotices(app, companyId, botB.id, true),
+    ]);
+
+    expect(results.map((res) => res.status)).toEqual([200, 200]);
+    expect(await marked(companyId)).toHaveLength(1);
+  });
+
+  it("only the company's owner or an admin may choose the bot; operators, viewers and agents are refused", async () => {
+    const companyId = await seedCompany();
+    const agent = await seedAgent(companyId, "CEO", "ceo");
+    const created = (await connectBot(createApp(adminActor()), companyId, agent.id)).body;
+
+    for (const role of ["operator", "viewer"]) {
+      const refused = await markNotices(createApp(memberActor([companyId], role)), companyId, created.id, true);
+      expect(refused.status, role).toBe(403);
+      expect(refused.body.error, role).toContain("owner or an admin");
+    }
+    const asAgent = await markNotices(createApp(agentActor(companyId, agent.id)), companyId, created.id, true);
+    expect(asAgent.status).toBe(403);
+    expect(await marked(companyId)).toEqual([]);
+
+    for (const role of ["admin", "owner"]) {
+      const allowed = await markNotices(createApp(memberActor([companyId], role)), companyId, created.id, true);
+      expect(allowed.status, `${role}: ${JSON.stringify(allowed.body)}`).toBe(200);
+    }
+    expect(await marked(companyId)).toEqual([created.id]);
+  });
+
+  it("cannot mark another company's bot, and refuses anything but true or false", async () => {
+    const companyA = await seedCompany();
+    const companyB = await seedCompany();
+    const agentB = await seedAgent(companyB);
+    const app = createApp(adminActor());
+    const botB = (await connectBot(app, companyB, agentB.id)).body;
+
+    const crossCompany = await markNotices(app, companyA, botB.id, true);
+    expect(crossCompany.status).toBe(404);
+    expect(await marked(companyB)).toEqual([]);
+
+    const notABoolean = await request(app)
+      .put(`/api/companies/${companyB}/telegram-bots/${botB.id}/company-notices`)
+      .send({ receivesCompanyNotices: "yes" });
+    expect(notABoolean.status).toBe(400);
+  });
+
+  it("tells the bridge which bot is chosen, when each was connected, and each bot's agent role", async () => {
+    const companyId = await seedCompany();
+    const ceo = await seedAgent(companyId, "CEO", "ceo");
+    const assistant = await seedAgent(companyId, "Assistant", "general");
+    const app = createApp(adminActor());
+    const ceoBot = (await connectBot(app, companyId, ceo.id, TOKEN, "CEO")).body;
+    const assistantBot = (await connectBot(app, companyId, assistant.id, NEW_TOKEN, "Maja")).body;
+    await markNotices(app, companyId, assistantBot.id, true);
+
+    const roster = await request(app).get("/api/instance/telegram-bridge-config");
+
+    expect(roster.status, JSON.stringify(roster.body)).toBe(200);
+    const byId = new Map(roster.body.bots.map((bot: { id: string }) => [bot.id, bot]));
+    expect(byId.get(ceoBot.id)).toMatchObject({
+      receivesCompanyNotices: false,
+      createdAt: ceoBot.createdAt,
+      agentRole: "ceo",
+    });
+    expect(byId.get(assistantBot.id)).toMatchObject({
+      receivesCompanyNotices: true,
+      createdAt: assistantBot.createdAt,
+      agentRole: "general",
+    });
+    expect(JSON.stringify(roster.body)).not.toContain("AAH");
   });
 
   // ── Who may reach any of this ─────────────────────────────────────────────
