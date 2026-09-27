@@ -365,6 +365,68 @@ describeEmbeddedPostgres("lane A provider key resolution (DUR-3997)", () => {
     expect(child.stdout).toBe("absent");
   });
 
+  it("keeps chatting without tools when the model's host refuses tools, and remembers that", async () => {
+    // 27 Sep: Sao10K/L3-8B-Stheno-v3.2 via Hugging Face (Novita) answered 400
+    // "model features function calling not support" to every message.
+    const companyId = await seedCompany();
+    const target = await seedQuickAgent(companyId, {
+      provider: "local",
+      model: "Sao10K/L3-8B-Stheno-v3.2",
+      baseUrl: "https://router.huggingface.co/v1",
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        return new Response(
+          JSON.stringify({ code: 400, reason: "INVALID_REQUEST_BODY", message: "model features function calling not support", metadata: {} }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      return completionResponse("Hei! Bare prat i dag.");
+    }) as unknown as typeof fetch;
+    const lane = await import("../services/lane-a.ts");
+    lane.resetLaneAModelsRefusingTools();
+
+    const first = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "hei",
+    });
+
+    expect(first.response).toBe("Hei! Bare prat i dag.");
+    expect(bodies).toHaveLength(2);
+    expect(Array.isArray(bodies[0]!.tools)).toBe(true);
+    expect(bodies[1]!.tools).toBeUndefined();
+    expect(JSON.stringify(bodies[1]!.messages)).toContain("Your current model cannot use tools");
+
+    const second = await lane.laneAService(db, { providerFetch }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "og nå?",
+    });
+    expect(second.response).toBe("Hei! Bare prat i dag.");
+    // Remembered: the next message goes straight to the no-tools request.
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]!.tools).toBeUndefined();
+    lane.resetLaneAModelsRefusingTools();
+  });
+
+  it("does not mistake other refusals for a tools problem", async () => {
+    const { isLaneAToolsUnsupportedError } = await import("../services/lane-a.ts");
+    const { LaneAProviderError } = await import("../services/lane-a-providers.ts");
+    const toolsRefused = (message: string, status = 400) =>
+      isLaneAToolsUnsupportedError(new LaneAProviderError({ kind: "upstream", provider: "local", status, message }));
+    expect(toolsRefused('Local model answered 400: {"message":"model features function calling not support"}')).toBe(true);
+    expect(toolsRefused("Local model answered 400: This model does not support tools.")).toBe(true);
+    expect(toolsRefused("Local model answered 404: No endpoints found that support tool use.", 404)).toBe(true);
+    expect(toolsRefused("Local model answered 400: The requested model 'DeepSeek-V3' does not exist.")).toBe(false);
+    expect(toolsRefused("Local model answered 503: overloaded, function calling not supported right now", 503)).toBe(false);
+  });
+
   it("runs a transform on OpenRouter with a free-form model, costed at 0 because no price is known", async () => {
     const companyId = await seedCompany();
     const boundValue = `sk-or-v1-${randomUUID()}`;
