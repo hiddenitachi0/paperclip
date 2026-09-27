@@ -453,3 +453,24 @@ export function createPluginToolDispatcher(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Process-wide handle
+// ---------------------------------------------------------------------------
+
+let _sharedDispatcher: PluginToolDispatcher | null = null;
+
+/**
+ * Wire the dispatcher the server built at startup so services that are
+ * constructed before it exists (the quick-agent chat, routes/lane-a.ts) can
+ * reach it at call time. Same posture as `setPluginEventBus` in
+ * activity-log.ts.
+ */
+export function setPluginToolDispatcher(dispatcher: PluginToolDispatcher | null): void {
+  _sharedDispatcher = dispatcher;
+}
+
+/** The dispatcher wired at startup, or null when plugin tools are not enabled. */
+export function getPluginToolDispatcher(): PluginToolDispatcher | null {
+  return _sharedDispatcher;
+}

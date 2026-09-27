@@ -64,6 +64,7 @@ import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
+import { pluginToolExecutionService } from "../services/plugin-tool-execution.js";
 import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
@@ -541,6 +542,10 @@ export function pluginRoutes(
   });
   const issuesSvc = issueService(db);
   const agentsSvc = agentService(db);
+  // The one plugin-tool execute path, shared with the quick-agent chat
+  // (services/lane-a.ts): tool lookup, per-company enable flag, grant check,
+  // then the worker. This route only adds the HTTP-side run-context checks.
+  const toolExecution = toolDeps ? pluginToolExecutionService(db, toolDeps.toolDispatcher) : null;
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -783,15 +788,18 @@ export function pluginRoutes(
     error: string | null;
     // DUR-189: piggybacked off the same agent-row select this function
     // already does for the companyId check, so adding grant enforcement
-    // doesn't cost an extra DB round trip. Absent/empty means unrestricted.
+    // doesn't cost an extra DB round trip. Absent/empty means unrestricted
+    // for a full agent; the shared execute service reads lane_a_enabled off
+    // the same row to decide (services/plugin-tool-execution.ts).
     pluginToolGrants: string[];
+    laneAEnabled: boolean;
   }
 
   async function validateToolRunContextScope(
     runContext: ToolRunContext,
     actor: Request["actor"],
   ): Promise<ToolRunContextScopeResult> {
-    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [] };
+    const noGrants: ToolRunContextScopeResult = { error: null, pluginToolGrants: [], laneAEnabled: false };
 
     // DUR-174: an agent-authenticated caller must be the same agent named in
     // runContext.agentId, so two agents (e.g. two personas) in one company
@@ -804,7 +812,11 @@ export function pluginRoutes(
     }
 
     const [agent] = await db
-      .select({ companyId: agents.companyId, pluginToolGrants: agents.pluginToolGrants })
+      .select({
+        companyId: agents.companyId,
+        pluginToolGrants: agents.pluginToolGrants,
+        laneAEnabled: agents.laneAEnabled,
+      })
       .from(agents)
       .where(eq(agents.id, runContext.agentId))
       .limit(1);
@@ -812,6 +824,7 @@ export function pluginRoutes(
       return { ...noGrants, error: '"runContext.agentId" does not belong to "runContext.companyId"' };
     }
     const pluginToolGrants = (agent.pluginToolGrants as string[] | null) ?? [];
+    const laneAEnabled = agent.laneAEnabled === true;
 
     const [run] = await db
       .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
@@ -819,10 +832,10 @@ export function pluginRoutes(
       .where(eq(heartbeatRuns.id, runContext.runId))
       .limit(1);
     if (!run || run.companyId !== runContext.companyId) {
-      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants };
+      return { error: '"runContext.runId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
     }
     if (run.agentId !== runContext.agentId) {
-      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants };
+      return { error: '"runContext.runId" does not belong to "runContext.agentId"', pluginToolGrants, laneAEnabled };
     }
 
     const [project] = await db
@@ -831,35 +844,26 @@ export function pluginRoutes(
       .where(eq(projects.id, runContext.projectId))
       .limit(1);
     if (!project || project.companyId !== runContext.companyId) {
-      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants };
+      return { error: '"runContext.projectId" does not belong to "runContext.companyId"', pluginToolGrants, laneAEnabled };
     }
 
-    return { error: null, pluginToolGrants };
+    return { error: null, pluginToolGrants, laneAEnabled };
   }
 
-  // DUR-189: an empty/absent grants list means unrestricted — this matches
-  // every agent's behavior before agents.pluginToolGrants existed (there was
-  // no per-agent scoping at all), so treating "no grants set" as "no
-  // restriction" is not a regression. A non-empty list narrows the agent to
-  // exactly those namespaced tool names. Board/human callers get an empty
-  // grants list from validateToolRunContextScope (agent-only lookup skipped
-  // isn't relevant here — board callers aren't restricted by this check at
-  // the route layer, see the actor.type guard at the call site).
-  function checkPluginToolGrant(pluginToolGrants: string[], namespacedToolName: string): string | null {
-    if (pluginToolGrants.length > 0 && !pluginToolGrants.includes(namespacedToolName)) {
-      return `Agent is not granted the "${namespacedToolName}" plugin tool`;
-    }
-    return null;
-  }
+  // DUR-189: for a full agent an empty/absent grants list means unrestricted
+  // (`empty_means_all` in services/plugin-tool-execution.ts) — this matches
+  // every agent's behavior before agents.pluginToolGrants existed. A quick
+  // agent (lane_a_enabled) reads the same column as `ticked_only`; the
+  // service decides from the row, so this route and lane-a.ts cannot differ.
 
   /**
    * DUR-195: a company can disable a plugin for itself via
    * `plugin_company_settings.enabled` while the plugin stays `ready`
-   * instance-wide. Absence of a settings row means the plugin has never been
-   * toggled for that company and defaults to enabled (matches the column's
-   * `DEFAULT true` and `upsertCompanySettings`' own default).
+   * instance-wide. Absence of a settings row means enabled. Lives in the
+   * shared execution service; this is the route's handle on it.
    */
   async function isPluginEnabledForCompany(pluginDbId: string, companyId: string): Promise<boolean> {
+    if (toolExecution) return toolExecution.isPluginEnabledForCompany(pluginDbId, companyId);
     const settings = await registry.getCompanySettings(pluginDbId, companyId);
     return settings ? settings.enabled : true;
   }
@@ -1061,7 +1065,7 @@ export function pluginRoutes(
   router.post("/plugins/tools/execute", async (req, res) => {
     assertBoardOrAgent(req);
 
-    if (!toolDeps) {
+    if (!toolDeps || !toolExecution) {
       res.status(501).json({ error: "Plugin tool dispatch is not enabled" });
       return;
     }
@@ -1099,58 +1103,34 @@ export function pluginRoutes(
       return;
     }
 
-    // Verify the tool exists
-    const registeredTool = toolDeps.toolDispatcher.getTool(tool);
-    if (!registeredTool) {
-      res.status(404).json({ error: `Tool "${tool}" not found` });
+    // Tool lookup (404), per-company enable flag (403), grant check (403) and
+    // the worker call (502 when the worker is down, 500 otherwise) — the same
+    // steps in the same order as before, now in the shared service so a quick
+    // agent's call cannot drift from this route.
+    const outcome = await toolExecution.execute({
+      tool,
+      parameters,
+      runContext,
+      agent: { laneAEnabled: scope.laneAEnabled, pluginToolGrants: scope.pluginToolGrants },
+    });
+    if (!outcome.ok) {
+      res.status(outcome.status).json({ error: outcome.error });
       return;
     }
-
-    // DUR-195: the target company may have disabled this tool's plugin
-    // (`plugin_company_settings.enabled = false`) even though the plugin is
-    // `ready` instance-wide. Enforce that gate here, not just at listing.
-    const pluginEnabled = await isPluginEnabledForCompany(registeredTool.pluginDbId, runContext.companyId);
-    if (!pluginEnabled) {
-      res.status(403).json({
-        error: `Plugin "${registeredTool.pluginId}" is disabled for this company`,
-      });
-      return;
-    }
-
-    const grantError = checkPluginToolGrant(scope.pluginToolGrants, tool);
-    if (grantError) {
-      res.status(403).json({ error: grantError });
-      return;
-    }
-
-    try {
-      const result = await toolDeps.toolDispatcher.executeTool(
-        tool,
-        parameters ?? {},
-        runContext,
-      );
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-
-      // Distinguish between "worker not running" (502) and other errors (500)
-      if (message.includes("not running") || message.includes("worker")) {
-        res.status(502).json({ error: message });
-      } else {
-        res.status(500).json({ error: message });
-      }
-    }
+    res.json(outcome.result);
   });
 
   /**
    * GET /api/agents/:agentId/plugin-tool-grants
    *
    * DUR-189: read this agent's plugin-tool allow-list (namespaced tool
-   * names) plus the full catalog of currently registered plugin tools, each
-   * flagged with whether this agent is granted it today. An empty
-   * `grantedToolNames` means unrestricted (every registered tool), matching
-   * the enforcement semantics in POST /plugins/tools/execute. Board-only —
-   * same posture as GET /agents/:agentId/mcp-tools.
+   * names) plus the catalog of plugin tools the agent's company can tick for
+   * it: every registered tool whose plugin is `ready` and switched on for
+   * that company, each with its plugin's name for the screen. An empty
+   * `grantedToolNames` means unrestricted for a FULL agent (`unrestricted`),
+   * matching POST /plugins/tools/execute; a quick agent only ever gets the
+   * ticked ones (services/lane-a.ts). Board-only — same posture as
+   * GET /agents/:agentId/mcp-tools.
    */
   router.get("/agents/:agentId/plugin-tool-grants", async (req, res) => {
     assertBoard(req);
@@ -1165,11 +1145,11 @@ export function pluginRoutes(
     }
     await assertCompanyAccess(req, agent.companyId);
     const grantedToolNames = (agent.pluginToolGrants as string[] | null) ?? [];
-    const allTools = toolDeps ? toolDeps.toolDispatcher.listToolsForAgent() : [];
+    const availableTools = toolExecution ? await toolExecution.listToolsForCompany(agent.companyId) : [];
     res.json({
       grantedToolNames,
       unrestricted: grantedToolNames.length === 0,
-      availableTools: allTools,
+      availableTools,
     });
   });
 

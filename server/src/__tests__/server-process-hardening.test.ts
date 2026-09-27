@@ -72,6 +72,19 @@ describe("the Docker image starts the server hardened", () => {
   const dockerfile = fs.readFileSync(path.join(REPO_ROOT, "Dockerfile"), "utf8");
   const production = dockerfile.slice(dockerfile.indexOf("FROM base AS production"));
 
+  it("builds the bundled add-ons into the image, since /app is read-only at run time", () => {
+    // The Plugin Manager cannot build a bundled add-on on a hardened
+    // installation (DUR-3994 Stage 2), so the build stage must produce it.
+    const build = dockerfile.slice(dockerfile.indexOf("FROM base AS build"), dockerfile.indexOf("FROM base AS production"));
+    const step = build.split("\n").find((line) => line.includes("@paperclipai/plugin-media-studio"));
+    expect(step, "the build stage builds the Media Studio add-on").toBeDefined();
+    expect(build).toContain("@paperclipai/plugin-mission-control");
+    expect(build).toContain("./packages/plugins/sandbox-providers/*");
+    expect(build).toContain("packages/plugins/media-studio/dist");
+    // The build runs before the image is copied into the production stage.
+    expect(dockerfile.indexOf("@paperclipai/plugin-media-studio")).toBeLessThan(dockerfile.indexOf("COPY --from=build /app /app"));
+  });
+
   it("installs a root-owned, execute-only copy of Node for the server", () => {
     expect(production).toMatch(
       /RUN install -o root -g root -m 0711 \/usr\/local\/bin\/node \/usr\/local\/lib\/paperclip\/node\n/,

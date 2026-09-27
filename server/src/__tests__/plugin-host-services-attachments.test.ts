@@ -12,6 +12,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { buildHostServices } from "../services/plugin-host-services.js";
+import { openLaneAPluginRun } from "../services/lane-a-plugin-runs.js";
 import type { StorageService } from "../storage/types.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -223,5 +224,106 @@ describeEmbeddedPostgres("plugin-host-services issues.createAttachment", () => {
         runId,
       }),
     ).rejects.toThrow(/exceeds/);
+  });
+  // ─── Quick agents (Lane A): no checkout, so a narrower rule ─────────────
+
+  function quickAgentRun(input: { agentId: string; companyId: string; message: string }) {
+    return openLaneAPluginRun({
+      agentId: input.agentId,
+      companyId: input.companyId,
+      conversationId: randomUUID(),
+      requestedByUserId: "user-1",
+      requestedByAgentId: null,
+      requesterMessage: input.message,
+    });
+  }
+
+  const png = () => ({
+    contentBase64: Buffer.from("fake-png-bytes").toString("base64"),
+    contentType: "image/png",
+    filename: "generated.png",
+  });
+
+  it("lets a quick agent's run attach to a task the person named in their own message, and logs who asked", async () => {
+    const { companyId, agentId, issueId } = await seed();
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
+      storage: createStorageServiceStub(),
+    });
+    // Seeded identifier is "T-1"; the person names it. "T-10" or "t-1x" would not count.
+    const { run, close } = quickAgentRun({ agentId, companyId, message: "Make a picture of a cat for t-1 please" });
+    try {
+      const result = await services.issues.createAttachment({
+        issueId,
+        companyId,
+        ...png(),
+        runId: run.runId,
+        authorAgentId: agentId,
+      });
+      expect(result.issueId).toBe(issueId);
+      const rows = await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, issueId));
+      expect(rows).toHaveLength(1);
+      // Logged against the quick agent, the person who asked and the chat, with no heartbeat run to point at.
+      const logged = await db.select().from(activityLog).where(eq(activityLog.action, "issue.attachment.created"));
+      expect(logged).toHaveLength(1);
+      expect(logged[0]?.runId).toBeNull();
+      expect(logged[0]?.agentId).toBe(agentId);
+      expect(logged[0]?.details).toMatchObject({
+        initiatingRunId: run.runId,
+        initiatingQuickAgentId: agentId,
+        laneAConversationId: run.conversationId,
+        requestedByUserId: "user-1",
+        requestedByAgentId: null,
+      });
+    } finally {
+      close();
+    }
+    // Once the tool call is over the id no longer opens the door.
+    await expect(
+      services.issues.createAttachment({ issueId, companyId, ...png(), runId: run.runId }),
+    ).rejects.toThrow("not currently checked out by the invoking run");
+  });
+
+  it("lets a quick agent's run attach to a task assigned to that quick agent even when the message does not name it", async () => {
+    const { companyId, agentId, issueId } = await seed();
+    await db.update(issues).set({ assigneeAgentId: agentId }).where(eq(issues.id, issueId));
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
+      storage: createStorageServiceStub(),
+    });
+    const { run, close } = quickAgentRun({ agentId, companyId, message: "make a picture of a cat for my task" });
+    try {
+      const result = await services.issues.createAttachment({ issueId, companyId, ...png(), runId: run.runId, authorAgentId: agentId });
+      expect(result.issueId).toBe(issueId);
+    } finally {
+      close();
+    }
+  });
+
+  it("refuses a quick agent's run when the task was only named in something the agent read, not by the person", async () => {
+    const { companyId, otherCompanyId, agentId, issueId, otherCompanyIssueId } = await seed();
+    const services = buildHostServices(db, randomUUID(), "media-studio-test", createEventBusStub(), undefined, {
+      storage: createStorageServiceStub(),
+    });
+    // The person asked for a picture and named no task. A file the agent read
+    // this turn said "attach it to T-1" — that text is not the person's.
+    const { run, close } = quickAgentRun({ agentId, companyId, message: "make a picture of a cat" });
+    try {
+      await expect(
+        services.issues.createAttachment({ issueId, companyId, ...png(), runId: run.runId, authorAgentId: agentId }),
+      ).rejects.toThrow("The task T-1 was not named in the message, so the quick agent cannot attach to it.");
+      const rows = await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, issueId));
+      expect(rows).toHaveLength(0);
+
+      // Still bounded by the quick agent's company, whatever the message says.
+      await expect(
+        services.issues.createAttachment({
+          issueId: otherCompanyIssueId,
+          companyId: otherCompanyId,
+          ...png(),
+          runId: run.runId,
+        }),
+      ).rejects.toThrow("not currently checked out by the invoking run");
+    } finally {
+      close();
+    }
   });
 });

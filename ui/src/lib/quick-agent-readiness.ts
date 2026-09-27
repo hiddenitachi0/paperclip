@@ -212,7 +212,10 @@ export function modelAndKeyLine(input: {
 }
 
 export function toolsLine(input: {
+  /** Ticked Tools-library tools; undefined while loading. */
   enabledCount: number | undefined;
+  /** Ticked add-on (plugin) tools that are installed and on for the company. Absent means none. */
+  addOnCount?: number;
   failed: boolean;
   toolsTabPath: string;
 }): ReadinessLine {
@@ -224,7 +227,8 @@ export function toolsLine(input: {
   if (input.enabledCount === undefined) {
     return { ...base, state: "checking", text: "Checking tools…" };
   }
-  if (input.enabledCount === 0) {
+  const addOnCount = input.addOnCount ?? 0;
+  if (input.enabledCount === 0 && addOnCount === 0) {
     return {
       ...base,
       state: "todo",
@@ -232,12 +236,10 @@ export function toolsLine(input: {
       link,
     };
   }
-  return {
-    ...base,
-    state: "ok",
-    text: `${input.enabledCount} tool${input.enabledCount === 1 ? "" : "s"} ticked.`,
-    link,
-  };
+  const parts: string[] = [];
+  if (input.enabledCount > 0) parts.push(`${input.enabledCount} tool${input.enabledCount === 1 ? "" : "s"}`);
+  if (addOnCount > 0) parts.push(`${addOnCount} add-on tool${addOnCount === 1 ? "" : "s"}`);
+  return { ...base, state: "ok", text: `${parts.join(" and ")} ticked.`, link };
 }
 
 export type DataSourceCheck =

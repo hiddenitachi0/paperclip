@@ -52,6 +52,7 @@ import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { SorteringsreglerCard } from "../components/SorteringsreglerCard";
 import { QuickAgentSection } from "../components/QuickAgentSection";
 import { QuickAgentChatPanel } from "../components/QuickAgentChatPanel";
+import { AgentAddOnToolsSection } from "../components/AgentAddOnToolsSection";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
@@ -3233,6 +3234,9 @@ export function AgentToolsTab({
           {syncTools.error instanceof Error ? syncTools.error.message : "Failed to update tools"}
         </p>
       )}
+
+      {/* Tools that installed add-ons (plugins) bring; ticks write agents.plugin_tool_grants. */}
+      <AgentAddOnToolsSection agentId={agent.id} quickAgent={agent.laneAEnabled === true} />
 
       {/* DUR-4004: "API with a key" tools, ticked on the same way. */}
       <AgentApiToolsSection agentId={agent.id} companyId={companyId} />

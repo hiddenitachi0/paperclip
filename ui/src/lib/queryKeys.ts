@@ -342,6 +342,7 @@ export const queryKeys = {
   },
   plugins: {
     all: ["plugins"] as const,
+    agentToolGrants: (agentId: string) => ["plugins", "agent-tool-grants", agentId] as const,
     examples: ["plugins", "examples"] as const,
     detail: (pluginId: string) => ["plugins", pluginId] as const,
     health: (pluginId: string) => ["plugins", pluginId, "health"] as const,

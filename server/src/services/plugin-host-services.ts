@@ -40,6 +40,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { agentDailyLimitService } from "./agent-daily-limits.js";
+import { findLaneAPluginRun, laneAPluginRunNamesIssue } from "./lane-a-plugin-runs.js";
 import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -492,6 +493,17 @@ export function buildHostServices(
     normalizePluginOriginKind(originKind);
   };
 
+  /**
+   * A quick agent's plugin tool run (lane-a-plugin-runs.ts) is not a
+   * heartbeat_runs row, so it can never be written into a column that points
+   * at that table (activity_log.run_id, issues.checkout_run_id, ...). Every
+   * such write goes through here: a heartbeat run id passes, a quick-agent
+   * run id becomes null. The run itself still resolves through
+   * findLaneAPluginRun wherever "which agent is calling" matters.
+   */
+  const heartbeatRunIdOrNull = (runId: string | null | undefined): string | null =>
+    runId && !findLaneAPluginRun(runId) ? runId : null;
+
   const logPluginActivity = async (input: {
     companyId: string;
     action: string;
@@ -500,16 +512,27 @@ export function buildHostServices(
     details?: Record<string, unknown> | null;
     actor?: { actorAgentId?: string | null; actorUserId?: string | null; actorRunId?: string | null };
   }) => {
+    // A quick agent's run goes into the details (initiatingRunId, the quick
+    // agent, the chat it came from and who asked) instead of the FK column.
+    const actorRunId = input.actor?.actorRunId ?? null;
+    const laneARun = actorRunId ? findLaneAPluginRun(actorRunId) : null;
+    const details: Record<string, unknown> = pluginActivityDetails(input.details, input.actor);
+    if (laneARun) {
+      details.initiatingQuickAgentId = laneARun.agentId;
+      details.laneAConversationId = laneARun.conversationId;
+      details.requestedByUserId = laneARun.requestedByUserId;
+      details.requestedByAgentId = laneARun.requestedByAgentId;
+    }
     await logActivity(db, {
       companyId: input.companyId,
       actorType: "plugin",
       actorId: pluginId,
       agentId: input.actor?.actorAgentId ?? null,
-      runId: input.actor?.actorRunId ?? null,
+      runId: heartbeatRunIdOrNull(actorRunId),
       action: input.action,
       entityType: input.entityType,
       entityId: input.entityId,
-      details: pluginActivityDetails(input.details, input.actor),
+      details,
     });
   };
 
@@ -1476,10 +1499,12 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        // A quick agent's run can never own or adopt a checkout lock (the
+        // lock column points at heartbeat_runs), so it is read as "no run".
         const ownership = await issues.assertCheckoutOwner(
           params.issueId,
           params.actorAgentId,
-          params.actorRunId,
+          heartbeatRunIdOrNull(params.actorRunId),
         );
         if (ownership.adoptedFromRunId) {
           await logPluginActivity({
@@ -1871,7 +1896,26 @@ export function buildHostServices(
           .where(and(eq(issuesTable.id, issue.id), eq(issuesTable.companyId, companyId)))
           .then((rows) => rows[0] ?? null);
         if (!checkoutRow || checkoutRow.checkoutRunId !== params.runId) {
-          throw new Error("Issue is not currently checked out by the invoking run");
+          // A quick agent (Lane A) has no checkout: it answers in chat. Its
+          // run is resolved by the host (lane-a-plugin-runs.ts, one id per
+          // tool call), never from a plugin-claimed id, and it may attach
+          // only to a task in its own company that is assigned to it, or
+          // that the PERSON named in this turn's message. The task id in the
+          // tool input comes from the model, and a file or a sales lookup
+          // the agent read this turn lands in the same context — so a task
+          // reference planted there is not enough.
+          const laneARun = findLaneAPluginRun(params.runId);
+          if (!laneARun || laneARun.companyId !== companyId) {
+            throw new Error("Issue is not currently checked out by the invoking run");
+          }
+          const assignedToQuickAgent = issue.assigneeAgentId === laneARun.agentId;
+          if (!assignedToQuickAgent && !laneAPluginRunNamesIssue(laneARun, issue)) {
+            const ref = issue.identifier ?? issue.id;
+            throw new Error(
+              `The task ${ref} was not named in the message, so the quick agent cannot attach to it. ` +
+                `Name the task in your message (for example ${issue.identifier ?? "DUR-12"}), or assign the task to the quick agent.`,
+            );
+          }
         }
 
         const contentType = normalizeContentType(params.contentType);
@@ -2449,7 +2493,20 @@ export function buildHostServices(
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, params.runId))
           .then((rows) => rows[0] ?? null);
-        if (!run || run.companyId !== companyId) {
+        // A quick agent (Lane A) has no heartbeat run; its plugin tool call
+        // runs under a short-lived id the host itself issued
+        // (lane-a-plugin-runs.ts), which resolves to the quick agent the
+        // same way a heartbeat run resolves to its agent. The limit is still
+        // the agent's own, per agent, in agent_daily_counters.
+        const callingAgentId = run
+          ? run.companyId === companyId
+            ? run.agentId
+            : null
+          : (() => {
+              const laneARun = findLaneAPluginRun(params.runId);
+              return laneARun && laneARun.companyId === companyId ? laneARun.agentId : null;
+            })();
+        if (!callingAgentId) {
           throw new Error("Run not found in this company");
         }
 
@@ -2457,7 +2514,7 @@ export function buildHostServices(
         // .dailyImageGenerations), counted in agent_daily_counters. The
         // method keeps its name and result shape so plugins built against
         // the SDK (media-studio) need no change.
-        return agentDailyLimits.reserve(run.agentId, "image_generation");
+        return agentDailyLimits.reserve(callingAgentId, "image_generation");
       },
     },
 

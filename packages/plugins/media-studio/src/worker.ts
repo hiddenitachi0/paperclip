@@ -90,11 +90,15 @@ const plugin = definePlugin({
         parametersSchema: {
           type: "object",
           properties: {
-            prompt: { type: "string" },
-            imageSize: { type: "string" },
-            model: { type: "string" },
+            prompt: { type: "string", description: "What to generate." },
+            issueId: {
+              type: "string",
+              description: "The task to attach the image to; use one the person named.",
+            },
+            imageSize: { type: "string", description: "Provider size hint, e.g. landscape_4_3." },
+            model: { type: "string", description: "Optional provider model override." },
           },
-          required: ["prompt"],
+          required: ["prompt", "issueId"],
         },
       },
       async (params, runCtx): Promise<ToolResult> => {
