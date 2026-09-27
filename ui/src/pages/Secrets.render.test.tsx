@@ -267,6 +267,49 @@ describe("Secrets page layout", () => {
     vi.clearAllMocks();
   });
 
+  it("opens New secret without looping when the provider vault list failed to load", async () => {
+    // 27 Sep: after a network error the vault list had no data, the page used
+    // a fresh [] on every render, and the dialog's default-vault effect set
+    // state on every render -> React error #185 (maximum update depth).
+    mockSecretsApi.providerConfigs.mockRejectedValue(new Error("NetworkError when attempting to fetch resource."));
+    const consoleErrors: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "));
+    });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Secrets />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const newSecret = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "New secret",
+    );
+    expect(newSecret).toBeDefined();
+    await act(async () => {
+      newSecret!.click();
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(document.body.textContent).toContain("Create secret");
+    expect(consoleErrors.join("\n")).not.toMatch(/Maximum update depth|#185/);
+
+    errorSpy.mockRestore();
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("uses the shared search/filter/tab affordances and keeps vault sections quiet", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({
