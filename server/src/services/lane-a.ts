@@ -1594,6 +1594,16 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         return await request(true);
       } catch (err) {
         if (!isLaneAToolsUnsupportedError(err)) throw err;
+        // Say why, once per refusal: without this the only trace of a model
+        // host dropping the tools is an agent that suddenly "can't" use them.
+        logger.warn(
+          {
+            provider: err instanceof LaneAProviderError ? err.provider : null,
+            model: modelId,
+            reason: err instanceof Error ? err.message.slice(0, 500) : String(err),
+          },
+          "lane A: the model's host refused tools; answering without tools for the next hour",
+        );
         rememberLaneAModelRefusesTools(modelId);
         toolsOff = true;
         return request(false);
