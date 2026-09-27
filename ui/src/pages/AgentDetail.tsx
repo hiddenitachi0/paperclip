@@ -86,7 +86,6 @@ import {
   HelpCircle,
   FolderOpen,
   AlertTriangle,
-  Plug,
   Package,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
@@ -3161,7 +3160,6 @@ export function AgentToolsTab({
   companyId?: string;
 }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const [pendingToolId, setPendingToolId] = useState<string | null>(null);
 
   const { data: tools, isLoading, error } = useQuery({
@@ -3203,12 +3201,13 @@ export function AgentToolsTab({
       ) : error ? (
         <p className="text-sm text-destructive">Could not load tools.</p>
       ) : !tools || tools.length === 0 ? (
-        <EmptyState
-          icon={Plug}
-          message="No tools in the library yet. Add one in Tools, then come back here to give it to this agent."
-          action="Go to Tools"
-          onAction={() => navigate("/tools")}
-        />
+        <p className="text-sm text-muted-foreground" data-testid="library-tools-empty">
+          No tools in the library yet.{" "}
+          <Link to="/tools" className="underline underline-offset-2">
+            Add one in Tools
+          </Link>
+          , then come back here to give it to this agent. Tools from add-ons such as Media Studio are listed below.
+        </p>
       ) : (
         <ul className="divide-y divide-border border border-border rounded-lg">
           {tools.map((tool) => (
