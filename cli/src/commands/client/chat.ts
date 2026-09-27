@@ -17,6 +17,10 @@ import {
  *                 straight back, real work becomes a task.
  *   chat answers  the agent's latest answer for tasks started from a chat
  *                 (GET /api/companies/:companyId/issue-answers).
+ *   chat image    the bytes of a picture a quick agent's reply carried
+ *                 (GET /api/attachments/:id/content), base64 in JSON, so the
+ *                 bridge can upload it to Telegram without handing Telegram
+ *                 a private Paperclip address.
  *
  * Both take the company as an explicit --company-id. The bridge passes the
  * company from its bot config, never from message text.
@@ -68,6 +72,28 @@ export function registerChatCommands(program: Command): void {
 
   addCommonClientOptions(
     chat
+      .command("image")
+      .description(
+        "The bytes of a picture a quick agent's reply carried, as base64 in JSON (pictures only). With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<fileId>", "The picture's file id (from the reply's actions)")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (fileId: string, opts: BaseClientOptions) => {
+        try {
+          const outcome = await runChatImage(fileId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
       .command("answers")
       .description("Status and the agent's latest answer for tasks in one company (at most 50 ids)")
       .argument("<issueIds...>", "Task IDs")
@@ -88,6 +114,44 @@ export function registerChatCommands(program: Command): void {
       }),
     { includeCompany: false },
   );
+}
+
+/** Telegram's own upload limit for a document; a picture over this is not fetched. */
+export const CHAT_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+const FILE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type ChatImageOutcome =
+  | { ok: true; fileId: string; contentType: string; byteSize: number; contentBase64: string }
+  | { ok: false; status: number; error: string };
+
+/**
+ * One picture's bytes. Only pictures (image/*), only up to
+ * CHAT_IMAGE_MAX_BYTES, and only what this CLI's own sign-in may read (the
+ * server checks company access on every request).
+ */
+export async function runChatImage(fileId: string, opts: BaseClientOptions): Promise<ChatImageOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  if (!FILE_ID_PATTERN.test(fileId)) return { ok: false, status: 400, error: "That is not a file id." };
+  try {
+    const result = await ctx.api.getBytes(apiPath`/api/attachments/${fileId}/content`, { ignoreNotFound: true });
+    if (!result) return { ok: false, status: 404, error: "That picture was not found." };
+    const contentType = (result.contentType ?? "").split(";")[0]!.trim().toLowerCase();
+    if (!contentType.startsWith("image/")) return { ok: false, status: 415, error: "That file is not a picture." };
+    if (result.bytes.length > CHAT_IMAGE_MAX_BYTES) {
+      return { ok: false, status: 413, error: "That picture is too large to send." };
+    }
+    return {
+      ok: true,
+      fileId,
+      contentType,
+      byteSize: result.bytes.length,
+      contentBase64: result.bytes.toString("base64"),
+    };
+  } catch (err) {
+    if (err instanceof ApiRequestError) return { ok: false, status: err.status, error: err.message };
+    throw err;
+  }
 }
 
 export async function runChatSend(agentId: string, opts: ChatSendOptions): Promise<ChatSendOutcome> {

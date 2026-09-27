@@ -6,11 +6,23 @@ import { api } from "./client";
  * colleague, look up the weather, read a task summary).
  */
 
+/** A picture a tool made this turn; the server checked it is a picture in this company. */
+export interface LaneAActionImage {
+  fileId: string;
+  /** Same-origin address of the picture. */
+  contentPath: string;
+  contentType: string;
+  seed: number | null;
+  /** The task it is attached to, or null for a company file with no task. */
+  issueId: string | null;
+}
+
 export interface LaneAAction {
   tool: string;
   /** Plain-language one-liner, e.g. "Handed to Bob as task DUR-12." */
   summary: string;
   ok: boolean;
+  image?: LaneAActionImage;
 }
 
 export interface LaneASendMessageResult {

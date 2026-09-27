@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { laneAApi, type LaneAAction } from "../api/laneA";
+import { laneAApi, type LaneAAction, type LaneAActionImage } from "../api/laneA";
+import { Link } from "@/lib/router";
 import { ApiError } from "../api/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -66,6 +67,39 @@ function describeSendError(err: unknown): { text: string; resetConversation: boo
     return { text: err.message, resetConversation: false };
   }
   return { text: err instanceof Error ? err.message : "Something went wrong sending that message.", resetConversation: false };
+}
+
+/** Where a picture shows on the Files page: the "No task" group, or its task's group. */
+export function filesHrefForImage(image: LaneAActionImage): string {
+  return `/files?groupIssueId=${encodeURIComponent(image.issueId ?? "no-task")}`;
+}
+
+/** Pictures a tool made while answering: a thumbnail (opens full size) and a link to it in Files. */
+export function ChatActionImages({ actions }: { actions: LaneAAction[] }) {
+  const images = actions.map((action) => action.image).filter((image): image is LaneAActionImage => Boolean(image));
+  if (images.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-2">
+      {images.map((image) => (
+        <figure key={image.fileId} className="space-y-1">
+          <a href={image.contentPath} target="_blank" rel="noreferrer" title="Open the full-size picture">
+            <img
+              src={image.contentPath}
+              alt="Picture made for this reply"
+              loading="lazy"
+              className="max-h-64 max-w-full rounded-md border object-contain"
+            />
+          </a>
+          <figcaption className="text-xs text-muted-foreground">
+            <Link to={filesHrefForImage(image)} className="underline underline-offset-2">
+              {image.issueId ? "See it in Files (with its task)" : "See it in Files"}
+            </Link>
+            {image.seed !== null ? <span> · Seed {image.seed}</span> : null}
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
 }
 
 export function QuickAgentChatPanel({
@@ -218,6 +252,7 @@ export function QuickAgentChatPanel({
                   )}
                 >
                   {message.content}
+                  <ChatActionImages actions={message.actions} />
                   {message.actions.length > 0 && (
                     <ul className="mt-2 space-y-1 border-t pt-2 text-xs text-muted-foreground">
                       {message.actions.map((action, index) => (

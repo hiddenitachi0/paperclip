@@ -3,12 +3,31 @@ import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { laneAConversations } from "./lane_a_conversations.js";
 
+/**
+ * A picture an add-on tool made during the turn. The server fills this in
+ * only after checking the file is a picture in the conversation's own
+ * company, so the chat can show it and the Telegram bridge can send it.
+ */
+export interface LaneAToolImage {
+  /** The company file (issue_attachments id) the picture is stored as. */
+  fileId: string;
+  /** Same-origin address of the picture; needs a signed-in session. */
+  contentPath: string;
+  contentType: string;
+  /** The seed the picture was made with, when the tool reported one. */
+  seed: number | null;
+  /** The task it is attached to, or null when it is a company file with no task. */
+  issueId: string | null;
+}
+
 /** One tool call a quick agent made while answering a message, kept for the operator to see. */
 export interface LaneAStoredToolCall {
   tool: string;
   /** Plain-language one-liner of what happened, e.g. "Handed to Bob as task DUR-12". */
   summary: string;
   ok: boolean;
+  /** Set when the tool made a picture (see LaneAToolImage). */
+  image?: LaneAToolImage;
 }
 
 // Quick agents (Lane A, round 2): the transcript of a Lane A conversation, one

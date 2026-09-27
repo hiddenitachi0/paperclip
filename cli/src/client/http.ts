@@ -92,6 +92,32 @@ export class PaperclipApiClient {
     return this.request<T>(path, { method: "DELETE" }, opts);
   }
 
+  /**
+   * GET raw bytes (a stored picture, say) with the same credentials as every
+   * other call. Answers null on 404 when `ignoreNotFound` is set.
+   */
+  async getBytes(
+    path: string,
+    opts?: RequestOptions,
+  ): Promise<{ bytes: Buffer; contentType: string | null } | null> {
+    const url = buildUrl(this.apiBase, path);
+    const headers: Record<string, string> = {};
+    if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+    if (this.runId) headers["x-paperclip-run-id"] = this.runId;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET", headers });
+    } catch (error) {
+      throw new ApiConnectionError({ apiBase: this.apiBase, path, method: "GET", cause: error });
+    }
+    if (opts?.ignoreNotFound && response.status === 404) return null;
+    if (!response.ok) throw await toApiError(response);
+    return {
+      bytes: Buffer.from(await response.arrayBuffer()),
+      contentType: response.headers.get("content-type"),
+    };
+  }
+
   setApiKey(apiKey: string | undefined) {
     this.apiKey = apiKey?.trim() || undefined;
   }

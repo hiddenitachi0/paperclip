@@ -151,4 +151,34 @@ describe("chat commands", () => {
     expect(url.searchParams.get("ids")).toBe(`${ISSUE_A},${ISSUE_B}`);
     expect(JSON.parse(printed.join("\n"))).toEqual({ issues: [] });
   });
+  it("fetches a picture's bytes as base64 for the bridge", async () => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { "Content-Type": "image/jpeg" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "image", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/attachments/${ISSUE_A}/content`);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ authorization: "Bearer board-token" });
+    expect(JSON.parse(printed.join("\n"))).toEqual({
+      ok: true,
+      fileId: ISSUE_A,
+      contentType: "image/jpeg",
+      byteSize: bytes.length,
+      contentBase64: bytes.toString("base64"),
+    });
+  });
+
+  it("refuses a file that is not a picture", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("<html></html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["chat", "image", ISSUE_A, "-C", COMPANY_ID, "--json"]);
+
+    expect(JSON.parse(printed.join("\n"))).toMatchObject({ ok: false, status: 415 });
+  });
 });

@@ -9,12 +9,15 @@ import { and, asc, count, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzl
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  assets,
   budgetPolicies,
   companies,
   costEvents,
+  issueAttachments,
   laneAConversations,
   laneAMessages,
   type LaneAStoredToolCall,
+  type LaneAToolImage,
 } from "@paperclipai/db";
 import {
   LANE_A_API_KEY_CONFIG_PATH,
@@ -633,6 +636,26 @@ interface LaneAToolset {
 
 const EMPTY_TOOLSET: LaneAToolset = { anthropicTools: [], toolIndex: new Map(), pluginTools: new Map(), clients: [] };
 
+const LANE_A_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * An earlier turn's pictures, as a line the model sees when the conversation
+ * is replayed (the person does not see it). Without it, "same as the last
+ * one but with a blue sofa, same seed" would find no seed to reuse: only
+ * the reply text is replayed, not the tool results.
+ */
+export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolCall[] | null | undefined): string {
+  const images = (Array.isArray(toolCalls) ? toolCalls : [])
+    .map((call) => call?.image)
+    .filter((image): image is LaneAToolImage => Boolean(image && typeof image.fileId === "string"));
+  if (images.length === 0) return content;
+  const lines = images.map(
+    (image) =>
+      `[Picture made in this turn: file id ${image.fileId}${image.seed !== null && image.seed !== undefined ? `, seed ${image.seed}` : ""}]`,
+  );
+  return `${content}\n\n${lines.join("\n")}`;
+}
+
 /** Upper bound on the text an add-on tool hands back to the model (same as the built-ins'). */
 const PLUGIN_TOOL_RESULT_MAX_CHARS = 4_000;
 /** A string field longer than this is described, not repeated (an image as a data: URL would be megabytes). */
@@ -1143,11 +1166,55 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       (row) => Array.isArray(row.toolCalls) && row.toolCalls.some((call) => call?.tool === READ_BUSINESS_DATA_TOOL),
     );
     return {
-      history: selectReplayTurns(chronological.map((row) => ({ role: row.role, content: row.content }))).map(
-        (turn) => ({ role: turn.role, content: turn.content }),
-      ),
+      history: selectReplayTurns(
+        chronological.map((row) => ({ role: row.role, content: withImageReplayNote(row.content, row.toolCalls) })),
+      ).map((turn) => ({ role: turn.role, content: turn.content })),
       businessDataInHistory,
     };
+  }
+
+  /**
+   * The picture an add-on tool says it made, if the claim holds: a file id
+   * that is a stored picture in THIS conversation's company. Anything else
+   * (no file, another company's file, not a picture) shows no picture, so an
+   * add-on cannot point the chat or Telegram at a file the person may not
+   * see. The address is built here, never taken from the add-on.
+   */
+  async function verifiedPluginToolImage(result: PluginToolResult, companyId: string): Promise<LaneAToolImage | null> {
+    const data = result?.data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const record = data as Record<string, unknown>;
+    const fileId =
+      typeof record.fileId === "string" ? record.fileId : typeof record.attachmentId === "string" ? record.attachmentId : null;
+    if (!fileId || !LANE_A_UUID_PATTERN.test(fileId)) return null;
+    try {
+      const [row] = await db
+        .select({
+          id: issueAttachments.id,
+          companyId: issueAttachments.companyId,
+          issueId: issueAttachments.issueId,
+          contentType: assets.contentType,
+        })
+        .from(issueAttachments)
+        .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
+        .where(and(eq(issueAttachments.id, fileId), eq(issueAttachments.companyId, companyId)));
+      if (!row || row.companyId !== companyId) return null;
+      const contentType = row.contentType.toLowerCase();
+      if (!contentType.startsWith("image/")) return null;
+      const seed =
+        typeof record.seed === "number" && Number.isInteger(record.seed) && record.seed >= 0 ? record.seed : null;
+      return {
+        fileId: row.id,
+        contentPath: `/api/attachments/${row.id}/content`,
+        contentType,
+        seed,
+        issueId: row.issueId,
+      };
+    } catch (err) {
+      // Showing the picture is a nicety; the reply still goes out without it.
+      logger.warn({ err, companyId }, "lane A: could not check an add-on tool's picture");
+      return null;
+    }
   }
 
   async function recordToolCall(ctx: LaneAToolContext, toolName: string, input: unknown, result: { ok: boolean; summary: string }) {
@@ -1478,6 +1545,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
             const execution = pluginToolExecution();
             const label = `${pluginTool.displayName} (${pluginTool.pluginDisplayName})`;
             let outcome: { ok: boolean; content: string };
+            let image: LaneAToolImage | null = null;
             if (!execution) {
               outcome = { ok: false, content: "Add-on tools are not available right now." };
             } else {
@@ -1508,16 +1576,21 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                 outcome = executed.ok
                   ? describePluginToolResultForModel(executed.result.result)
                   : { ok: false, content: `That did not work: ${executed.error}` };
+                if (executed.ok && outcome.ok) {
+                  image = await verifiedPluginToolImage(executed.result.result, ctx.companyId);
+                }
               } catch (err) {
                 outcome = { ok: false, content: `That did not work: ${err instanceof Error ? err.message : String(err)}` };
               } finally {
                 pluginRun.close();
               }
             }
-            const summary = outcome.ok
-              ? `Used the ${label} add-on tool.`
-              : `The ${label} add-on tool did not work.`;
-            actions.push({ tool: block.name, summary, ok: outcome.ok });
+            const summary = !outcome.ok
+              ? `The ${label} add-on tool did not work.`
+              : image
+                ? `Made a picture with the ${label} add-on tool${image.issueId ? " and attached it to the task" : " and saved it to Files"}.`
+                : `Used the ${label} add-on tool.`;
+            actions.push({ tool: block.name, summary, ok: outcome.ok, ...(image ? { image } : {}) });
             await recordToolCall(ctx, block.name, input, { ok: outcome.ok, summary });
             toolResults.push({
               toolCallId: block.id,
