@@ -272,7 +272,10 @@ export interface PinnedHttpResponse {
   status: number;
   statusText: string;
   headers: Record<string, string>;
+  /** The body decoded as UTF-8 text. Damages binary content such as pictures. */
   body: string;
+  /** The body exactly as received. Use this for anything that is not text. */
+  bodyBytes: Buffer;
 }
 
 /**
@@ -328,6 +331,7 @@ export async function executePinnedHttpRequest(
     response.on("error", reject);
   });
 
+  const bodyBytes = Buffer.concat(chunks);
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(response.headers)) {
     if (Array.isArray(value)) {
@@ -341,7 +345,8 @@ export async function executePinnedHttpRequest(
     status: response.statusCode ?? 500,
     statusText: response.statusMessage ?? "",
     headers,
-    body: Buffer.concat(chunks).toString("utf8"),
+    body: bodyBytes.toString("utf8"),
+    bodyBytes,
   };
 }
 
@@ -551,7 +556,7 @@ export function createSafeOutboundFetch(
     }
 
     const bodyAllowed = response.status !== 204 && response.status !== 205 && response.status >= 200;
-    return new Response(bodyAllowed ? response.body : null, {
+    return new Response(bodyAllowed ? new Uint8Array(response.bodyBytes) : null, {
       status: response.status < 200 || response.status > 599 ? 502 : response.status,
       statusText: response.statusText,
       headers: response.headers,
