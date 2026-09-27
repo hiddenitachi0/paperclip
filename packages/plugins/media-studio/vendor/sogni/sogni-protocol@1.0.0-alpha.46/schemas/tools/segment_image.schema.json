@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.sogni.ai/creative-agent/2026-07-18.1/tools/segment_image.schema.json",
+  "title": "segment_image arguments",
+  "schemaVersion": "2026-07-18.1",
+  "description": "Select objects in an original image with SAM 3. Returns a PNG mask or transparent cutout without repainting the source. Coordinates refer to the original image, normalized 0–1. Supply an object description, a positive point, or a box. Text can combine with boxes; points can combine with at most one box, never with text.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sourceImageIndex": {
+      "type": "integer",
+      "description": "Original source: negative indices select uploads (-1 is the first), non-negative indices select generated images. Omit to use the latest image."
+    },
+    "source_image_url": {
+      "type": "string",
+      "description": "REST alternative: retrievable original image URL."
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "description": "Object or concept to select, such as the red suitcase."
+    },
+    "points": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "label": {
+            "type": "string",
+            "enum": [
+              "positive",
+              "negative"
+            ]
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "label"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "boxes": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "properties": {
+          "x0": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y0": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "x1": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y1": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "label": {
+            "type": "string",
+            "enum": [
+              "positive",
+              "negative"
+            ],
+            "description": "Optional inclusion/exclusion label; defaults to positive. Negative boxes require a text prompt."
+          }
+        },
+        "required": [
+          "x0",
+          "y0",
+          "x1",
+          "y1"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "maxInstances": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16,
+      "description": "Keep only the strongest N selections. Omit to keep every selection above threshold."
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Minimum object confidence. Default 0.5."
+    },
+    "multimask": {
+      "type": "boolean",
+      "description": "Return multiple candidate masks for point selection. Default true for points."
+    },
+    "applyMask": {
+      "type": "boolean",
+      "description": "Return the original foreground with transparency instead of the binary mask. Default false."
+    }
+  },
+  "required": []
+}

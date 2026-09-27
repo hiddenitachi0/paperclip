@@ -1,0 +1,16 @@
+{
+  "package": "@sogni-ai/sogni-protocol",
+  "version": "1.0.0-alpha.46",
+  "dir": "sogni-protocol@1.0.0-alpha.46",
+  "files": [
+    "schemas/tools/upscale_image.schema.json",
+    "schemas/tools/remove_background.schema.json",
+    "schemas/tools/restore_photo.schema.json",
+    "schemas/tools/change_angle.schema.json",
+    "schemas/tools/apply_style.schema.json",
+    "schemas/tools/segment_image.schema.json",
+    "schemas/tools/enhance_prompt.schema.json",
+    "enums/tool-names.json",
+    "version.json"
+  ]
+}

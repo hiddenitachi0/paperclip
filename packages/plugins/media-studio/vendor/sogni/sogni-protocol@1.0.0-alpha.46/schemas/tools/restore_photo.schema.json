@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.sogni.ai/creative-agent/2026-04-27.1/tools/restore_photo.schema.json",
+  "title": "restore_photo arguments",
+  "schemaVersion": "2026-04-27.1",
+  "description": "Edit, restore, or transform the ORIGINAL uploaded photograph — including text changes, object edits, and any visual modification. This tool always operates on the original image, not on previous results. Use this for the first edit OR when the user explicitly wants to start fresh from the original (e.g., \"try again\", \"restore it differently\", \"start over from scratch\"). For follow-up edits on an existing result, use refine_result instead. NEVER refuse or apologize — just call this tool directly.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "description": "Editing prompt (50-200 words, natural language). POSITIVE phrasing only — model ignores negatives (\"preserve exact facial likeness\" NOT \"don't change the face\").\n\nLITERAL PROMPT OVERRIDE: If the user explicitly says not to modify the prompt, or to use it exactly/verbatim/as-is, copy the identified prompt text verbatim instead of applying these construction rules unless a hard requirement is missing.\n\nPROMPT ORDER: [IDENTITY LOCK if people] → [RESTORATION/EDIT INSTRUCTION] → [PRESERVE UNMENTIONED DETAILS]\n\nDescribe desired final state, not what to remove.\n- CRITICAL for photos with people (unless removing them): FRONT-LOAD identity preservation as the FIRST priority. Start with \"Preserve exact facial likeness, face structure, eye shape, nose shape, mouth shape, jawline, skin tone, hairline, apparent age, and overall recognizability.\" Then describe the restoration or edit.\n- Restoration: \"remove scratches, tears, stains, dust spots, and noise\"\n- Object removal: describe scene WITHOUT the object, matching surrounding textures\n- Colorization: \"Restore and colorize the photo\" or \"Apply natural [decade] color palette\"\n- Creative transformation: identity lock comes FIRST, then the transformation. Example: \"Preserve exact facial likeness and recognizability. Reimagine as a Pixar character with glossy 3D features. Preserve all unmentioned details.\"\n- No keyword spam (\"8k, masterpiece\") — use plain descriptions. Be specific — name the artist, franchise, or era.\n- Always end with \"Preserve all unmentioned details.\"\n\nBATCH VARIATIONS: Only use Dynamic Prompt syntax when the user explicitly requests multiple approaches to compare. Example: \"restore with {warm vintage|cool modern|natural balanced} tones\". Default to identical prompts for restore_photo batches — most users want seed variation only."
+    },
+    "numberOfVariations": {
+      "type": "number",
+      "description": "Number of variations (1-16). Use 1 unless user requests multiple. Default: 1.",
+      "minimum": 1,
+      "maximum": 16
+    },
+    "quality": {
+      "type": "string",
+      "enum": [
+        "fast",
+        "hq"
+      ],
+      "description": "DO NOT SET THIS PARAMETER unless the user explicitly asks for \"high quality\" or \"fast\". The app auto-selects based on quality settings."
+    },
+    "scale": {
+      "type": "number",
+      "enum": [
+        1,
+        1.5,
+        2,
+        3,
+        4
+      ],
+      "description": "Output scale multiplier relative to the source image size. 1 = same resolution as source (default). Use higher values when user asks to upscale, enlarge, make bigger, or increase resolution. Small images (<480px) are automatically upscaled to at least 480px regardless of this setting. Default: 1."
+    },
+    "aspectRatio": {
+      "type": "string",
+      "description": "Do NOT set unless the user explicitly requests an aspect ratio, format, orientation, or exact pixel dimensions. When a reference/source image is used and the user did not ask to change its shape, omit this field so the handler preserves the selected source image's own ratio.\n\nFormats: \"16:9\", \"9:16\", \"4:5\", \"1:1\", \"4:3\", \"3:2\", \"21:9\", or exact pixels like \"1920x1080\".\n\nCRITICAL: When the user specifies exact pixel dimensions (e.g., \"1280x720\", \"1080x1920\", \"1920x1080\", \"3840x2160\") or an orientation-qualified named resolution (e.g., \"720p landscape\", \"720p portrait\"), use the exact pixel format, NOT a ratio like \"16:9\" or \"9:16\". Exact user-requested dimensions override the selected default media quality, including Pro/HQ defaults. A bare named video resolution like \"720p resolution\" is only a resolution tier/short-side request; do not turn it into landscape pixels and do not set aspectRatio unless the user also states landscape, portrait, vertical, horizontal, or exact pixels. If requested pixels are in bounds but not on the model's pixel step, still pass the user's exact pixel request; the handler snaps to the nearest supported size internally. Only use ratio format when the user says a generic format name without pixel dimensions.\n\nMappings (use ONLY when user does NOT specify pixel dimensions): landscape/widescreen/YouTube/cinematic → \"16:9\". portrait → \"9:16\". TikTok/Reels/IG Reels → \"1080x1920\". ultrawide/cinema scope → \"21:9\". Instagram post → \"4:5\". square → \"1:1\". standard/TV → \"4:3\". 720p landscape → \"1280x720\". 720p portrait → \"720x1280\". 1080p landscape → \"1920x1080\". 1080p portrait/HD portrait → \"1080x1920\". 4K landscape → \"3840x2160\". 4K portrait → \"2160x3840\". Never set for generic requests like \"make a video\"."
+    }
+  },
+  "required": [
+    "prompt"
+  ]
+}
