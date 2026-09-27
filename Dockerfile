@@ -54,6 +54,17 @@ COPY --from=deps /app /app
 COPY . .
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
+# Bundled add-ons are built INTO the image. DUR-3994 Stage 2 made /app read-only
+# for the node user, so the Plugin Manager can no longer build a bundled add-on
+# at install time (it now says so plainly). Without this step, installing Media
+# Studio or any other first-party add-on fails on a hardened installation.
+RUN pnpm --filter @paperclipai/plugin-media-studio \
+    --filter @paperclipai/plugin-mission-control \
+    --filter @paperclipai/plugin-llm-wiki \
+    --filter @paperclipai/plugin-workspace-diff \
+    --filter @paperclipai/plugin-fake-sandbox \
+    --filter "./packages/plugins/sandbox-providers/*" build
+RUN test -d packages/plugins/media-studio/dist || (echo "ERROR: bundled add-on build output missing" && exit 1)
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 # DUR-3994 Stage 1: the list of the server's key names (names only, never a
