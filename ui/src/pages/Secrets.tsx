@@ -321,6 +321,10 @@ export function getProviderConfigBlockReason(
   return null;
 }
 
+const NO_SECRETS: CompanySecret[] = [];
+const NO_PROVIDERS: SecretProviderDescriptor[] = [];
+const NO_PROVIDER_CONFIGS: CompanySecretProviderConfig[] = [];
+
 export function getDefaultProviderConfigId(
   configs: CompanySecretProviderConfig[],
   provider: SecretProvider,
@@ -480,9 +484,11 @@ export function Secrets() {
     retry: false,
   });
 
-  const secrets = secretsQuery.data ?? [];
-  const providers = providersQuery.data ?? [];
-  const providerConfigs = providerConfigsQuery.data ?? [];
+  // Stable empty fallbacks: a fresh [] on every render made the effects below
+  // re-run forever while a list had no data (React error #185, 27 Sep).
+  const secrets = secretsQuery.data ?? NO_SECRETS;
+  const providers = providersQuery.data ?? NO_PROVIDERS;
+  const providerConfigs = providerConfigsQuery.data ?? NO_PROVIDER_CONFIGS;
   const selectedSecret = useMemo(
     () => secrets.find((secret) => secret.id === selectedSecretId) ?? null,
     [secrets, selectedSecretId],
@@ -864,10 +870,11 @@ export function Secrets() {
     if (!createOpen) return;
     const current = providerConfigs.find((config) => config.id === createForm.providerConfigId);
     if (current?.provider === createForm.provider) return;
-    setCreateForm((form) => ({
-      ...form,
-      providerConfigId: getDefaultProviderConfigId(providerConfigs, form.provider),
-    }));
+    setCreateForm((form) => {
+      const providerConfigId = getDefaultProviderConfigId(providerConfigs, form.provider);
+      // Same value: keep the same object so React does not render again.
+      return form.providerConfigId === providerConfigId ? form : { ...form, providerConfigId };
+    });
   }, [createForm.provider, createForm.providerConfigId, createOpen, providerConfigs]);
 
   useEffect(() => {
