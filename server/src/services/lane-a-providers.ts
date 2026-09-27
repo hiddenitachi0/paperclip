@@ -353,6 +353,12 @@ export function buildOpenAiCompatibleBody(provider: LaneAProvider, request: Lane
   };
   if (request.tools && request.tools.length > 0) {
     body.tools = request.tools.map(toOpenAiTool);
+    // OpenRouter may otherwise route to a host that silently ignores `tools`
+    // ("ignore unknown parameters"), and the model then answers without ever
+    // calling one (27 Sep: Mistral Small said a saved look did not exist
+    // without looking). Require a host that supports every parameter; if none
+    // does, OpenRouter says so and the quick agent retries without tools.
+    if (provider === "openrouter") body.provider = { require_parameters: true };
   }
   // OpenAI's reasoning models refuse `max_tokens` and want
   // `max_completion_tokens`; every other OpenAI-compatible server (OpenRouter,

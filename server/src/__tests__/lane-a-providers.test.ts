@@ -272,6 +272,35 @@ describe("OpenAI-compatible provider client", () => {
     expect(() => createLaneAProviderClient({ provider: "openai", apiKey: null })).toThrow(/No key/);
   });
 
+  it("buildOpenAiCompatibleBody makes OpenRouter use a host that really supports the tools", () => {
+    const tool = { name: "list_looks", description: "List looks", inputSchema: { type: "object", properties: {} } };
+    const withTools = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "which looks do we have?" }],
+      maxTokens: 10,
+      tools: [tool] as never,
+    });
+    expect(withTools.provider).toEqual({ require_parameters: true });
+
+    const noTools = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 10,
+    });
+    expect(Object.hasOwn(noTools, "provider")).toBe(false);
+
+    const otherHost = buildOpenAiCompatibleBody("local", {
+      model: "llama3.1",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      maxTokens: 10,
+      tools: [tool] as never,
+    });
+    expect(Object.hasOwn(otherHost, "provider")).toBe(false);
+  });
+
   it("buildOpenAiCompatibleBody leaves tools out entirely when there are none", () => {
     const body = buildOpenAiCompatibleBody("local", {
       model: "llama3.1",
