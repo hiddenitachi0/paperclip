@@ -91,6 +91,12 @@ describe("apiToolActionSchema", () => {
     expect(apiToolActionSchema.safeParse({ ...base, path: "run" }).success).toBe(false);
     expect(apiToolActionSchema.safeParse({ ...base, path: "/run?x=1" }).success).toBe(false);
     expect(apiToolActionSchema.safeParse({ ...base, method: "HEAD" }).success).toBe(false);
+    // A "." or ".." part would climb out of the base address.
+    const dotted = apiToolActionSchema.safeParse({ ...base, path: "/v1/../admin" });
+    expect(dotted.success).toBe(false);
+    if (!dotted.success) expect(dotted.error.issues[0]!.message).toBe('The path cannot contain a "." or ".." part.');
+    expect(apiToolActionSchema.safeParse({ ...base, path: "/./run" }).success).toBe(false);
+    expect(apiToolActionSchema.safeParse({ ...base, path: "/v1.2/run..all" }).success).toBe(true);
   });
 });
 

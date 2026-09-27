@@ -146,7 +146,11 @@ export const apiToolActionSchema = z
       .min(1)
       .max(512)
       .refine((value) => value.startsWith("/"), "The path must start with /.")
-      .refine((value) => !/[?#\s]/.test(value), "The path cannot contain ?, # or spaces."),
+      .refine((value) => !/[?#\s]/.test(value), "The path cannot contain ?, # or spaces.")
+      .refine(
+        (value) => !value.split("/").some((segment) => segment === "." || segment === ".."),
+        'The path cannot contain a "." or ".." part.',
+      ),
     description: z.string().trim().max(280).default(""),
     inputs: z.array(apiToolActionInputSchema).max(API_TOOL_MAX_INPUTS_PER_ACTION).default([]),
   })

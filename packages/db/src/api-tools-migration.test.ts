@@ -114,6 +114,8 @@ d(`migration ${MIGRATION_TAG}`, () => {
     expect(s.constraints.company_api_tool_calls_tool_id_company_api_tools_id_fk).toBe("FOREIGN KEY (tool_id) REFERENCES company_api_tools(id) ON DELETE SET NULL");
     expect(s.constraints.company_api_tool_calls_channel_check).toContain("'quick_chat'::text");
     expect(s.constraints.company_api_tool_calls_status_check).toContain("'rate_limited'::text");
+    // Written before the request goes out, replaced by the outcome after.
+    expect(s.constraints.company_api_tool_calls_status_check).toContain("'started'::text");
     expect(s.indexes).toContain("company_api_tool_calls_company_created_idx");
     expect(s.indexes).toContain("company_api_tool_calls_tool_created_idx");
   });

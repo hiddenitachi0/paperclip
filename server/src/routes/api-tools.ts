@@ -13,7 +13,7 @@ import { forbidden, notFound, unprocessable } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyScope } from "../middleware/company-scope.js";
 import { agentService } from "../services/index.js";
-import { apiToolService, type ApiToolServiceDeps } from "../services/api-tools.js";
+import { apiToolService, toApiToolAgentView, type ApiToolServiceDeps } from "../services/api-tools.js";
 import { importOpenApiActions } from "../services/api-tools-openapi.js";
 import { assertAuthenticated, assertBoard, assertCompanyAccess } from "./authz.js";
 
@@ -206,7 +206,10 @@ export function apiToolRoutes(rawDb: Db, deps: ApiToolServiceDeps = {}) {
     const agent = await loadAgent(req.params.agentId as string);
     const selected = Array.isArray(agent.apiToolIds) ? (agent.apiToolIds as string[]) : [];
     if (req.actor.type === "agent") {
-      res.json(await svc.listGranted(agent.companyId, selected));
+      // The agent view only (no auth, no secret id, no import address, no
+      // last-test text); mapped here too so a change to the service cannot
+      // widen what an agent sees.
+      res.json((await svc.listGranted(agent.companyId, selected)).map(toApiToolAgentView));
       return;
     }
     res.json(await svc.listForAgent(agent.companyId, selected));

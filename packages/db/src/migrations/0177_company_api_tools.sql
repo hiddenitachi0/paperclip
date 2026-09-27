@@ -13,8 +13,10 @@
 --     versions and is bound to the row through company_secret_bindings
 --     (target_type 'api_tool', config_path 'auth').
 --   * company_api_tool_calls is the audit trail and the counter the daily cap
---     is enforced from: one row per call (or refusal), never the request
---     input, never the response, never an error text.
+--     is enforced from: one row per call, written as 'started' before the
+--     request goes out and updated to its outcome after (at most one
+--     'rate_limited' row per tool per hour), never the request input, never
+--     the response, never an error text.
 --   * agents.api_tool_ids lists which of these tools an agent is checked-on
 --     for, exactly like agents.mcp_tool_ids. Empty means none.
 --
@@ -80,7 +82,7 @@ DO $$ BEGIN
     ALTER TABLE "company_api_tool_calls" ADD CONSTRAINT "company_api_tool_calls_channel_check" CHECK ("channel" IN ('quick_chat', 'agent_run', 'board', 'settings_test'));
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'company_api_tool_calls_status_check') THEN
-    ALTER TABLE "company_api_tool_calls" ADD CONSTRAINT "company_api_tool_calls_status_check" CHECK ("status" IN ('ok', 'upstream_error', 'network_error', 'refused', 'rate_limited'));
+    ALTER TABLE "company_api_tool_calls" ADD CONSTRAINT "company_api_tool_calls_status_check" CHECK ("status" IN ('started', 'ok', 'upstream_error', 'network_error', 'refused', 'rate_limited'));
   END IF;
 END $$;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "company_api_tool_calls_company_created_idx" ON "company_api_tool_calls" USING btree ("company_id","created_at");--> statement-breakpoint

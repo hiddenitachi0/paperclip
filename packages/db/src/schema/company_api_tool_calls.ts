@@ -11,6 +11,10 @@ import { companyApiTools } from "./company_api_tools.js";
  * it went") and the counter the tool's daily_cap is enforced from, so the
  * limit survives a restart instead of living in memory.
  *
+ * A call is written as `started` before the request goes out (no row, no
+ * call) and updated to its outcome after; a refusal at the daily cap writes
+ * at most one `rate_limited` row per tool per hour.
+ *
  * Deliberately narrow: no request input, no response body, no error text.
  * Those can carry anything the upstream sent back, so they stay out of the
  * database; the activity log (quick agents) and the run log (full agents)
@@ -46,7 +50,7 @@ export const companyApiToolCalls = pgTable(
     ),
     statusCheck: check(
       "company_api_tool_calls_status_check",
-      sql`${table.status} IN ('ok', 'upstream_error', 'network_error', 'refused', 'rate_limited')`,
+      sql`${table.status} IN ('started', 'ok', 'upstream_error', 'network_error', 'refused', 'rate_limited')`,
     ),
   }),
 );

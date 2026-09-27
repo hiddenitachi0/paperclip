@@ -11,7 +11,7 @@ import {
   type ApiToolUpdate,
 } from "@paperclipai/shared/validators/api-tool";
 import { HttpError, notFound, tooManyRequests, unprocessable } from "../errors.js";
-import { redactKnownLeakedSecretPatterns, redactKnownSecretValues } from "../redaction.js";
+import { REDACTED_EVENT_VALUE, redactKnownLeakedSecretPatterns } from "../redaction.js";
 import { secretService } from "./secrets.js";
 import {
   createSafeOutboundFetch,
@@ -47,6 +47,8 @@ export const API_TOOL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 /** Body text handed back to a caller is cut here, with a note. */
 export const API_TOOL_BODY_TEXT_LIMIT = 50 * 1024;
 export const API_TOOL_MAX_URLS = 50;
+/** At the cap, at most one `rate_limited` audit row is written per tool in this window. */
+export const RATE_LIMITED_AUDIT_INTERVAL_MS = 60 * 60 * 1000;
 
 const KEY_RE = /^[a-z0-9-]{1,64}$/;
 
@@ -78,6 +80,33 @@ export interface ApiToolSummary {
   lastTestMessage: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * What an agent may see of a tool (the quick-agent tool list, the full
+ * agent's prompt section, GET /agents/:id/api-tools as the agent itself):
+ * enough to call an action, nothing about how the key is attached, which
+ * secret holds it, where the actions were imported from, or what the last
+ * Test said.
+ */
+export interface ApiToolAgentView {
+  id: string;
+  name: string;
+  key: string;
+  description: string;
+  actions: ApiToolAction[];
+  status: string;
+}
+
+export function toApiToolAgentView(tool: Pick<ApiToolSummary, keyof ApiToolAgentView>): ApiToolAgentView {
+  return {
+    id: tool.id,
+    name: tool.name,
+    key: tool.key,
+    description: tool.description,
+    actions: tool.actions,
+    status: tool.status,
+  };
 }
 
 export interface ApiToolRunResult {
@@ -139,11 +168,61 @@ export function createApiToolOutboundPolicy(baseUrl: string): OutboundHostPolicy
 // `key=`, `api_key=`, `token=` and friends inside a URL or a query string:
 // the guard's own pattern list covers vendor-shaped keys (sk-..., ghp_...),
 // this covers a key that is only recognisable by the parameter it rides in.
-const QUERY_KEY_RE = /([?&](?:api[_-]?key|apikey|key|token|access[_-]?token|secret|password)=)[^&\s"'<>]+/gi;
+// A tool whose key travels as `?appid=...` adds its own parameter name for
+// that call (see scrubApiToolText's `queryParamNames`).
+const DEFAULT_QUERY_KEY_NAMES = ["api[_-]?key", "apikey", "key", "token", "access[_-]?token", "secret", "password"];
 
-/** Removes the key (when known), key-shaped text, and `key=...` query values from any text that leaves this file. */
-export function scrubApiToolText(text: string, knownSecrets: Iterable<string>): string {
-  return redactKnownSecretValues(redactKnownLeakedSecretPatterns(text), knownSecrets).replace(QUERY_KEY_RE, "$1[REDACTED]");
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function queryKeyPattern(extraNames: Iterable<string>): RegExp {
+  const names = [...DEFAULT_QUERY_KEY_NAMES, ...[...extraNames].filter((name) => name.length > 0).map(escapeRegExp)];
+  return new RegExp(`([?&](?:${names.join("|")})=)[^&\\s"'<>]+`, "gi");
+}
+
+/**
+ * Every form the key can take on its way out and back: as sent in a header,
+ * percent-encoded the way encodeURIComponent and URLSearchParams write it
+ * (with `+` or `%20` for a space), and escaped the way a JSON body or a
+ * PHP-style `\/` writes it. scrubApiToolText matches them ignoring case, so
+ * lower-case hex (or a fully lower-cased echo) is caught too. An upstream
+ * that echoes the request URL in an error therefore cannot hand the key back
+ * in any of them.
+ */
+export function apiToolKeyForms(key: string): string[] {
+  if (!key) return [];
+  const component = encodeURIComponent(key);
+  const form = new URLSearchParams({ k: key }).toString().slice(2);
+  const forms = [
+    key,
+    component,
+    component.replace(/%20/g, "+"),
+    form,
+    form.replace(/\+/g, "%20"),
+    JSON.stringify(key).slice(1, -1),
+    key.replace(/\//g, "\\/"),
+  ];
+  // Longest first, so a longer form is removed whole before a shorter one
+  // could leave a fragment of it behind.
+  return [...new Set(forms)].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Removes the key (every form of it, see apiToolKeyForms), key-shaped text,
+ * and `<name>=...` query values from any text that leaves this file. The
+ * known values go first: a pattern that matched only the start of the key
+ * would otherwise leave the rest of it behind.
+ */
+export function scrubApiToolText(text: string, knownSecrets: Iterable<string>, queryParamNames: Iterable<string> = []): string {
+  let output = text;
+  for (const form of [...knownSecrets].flatMap(apiToolKeyForms)) {
+    // Same floor as redactKnownSecretValues: a very short value would
+    // redact ordinary words.
+    if (form.length < 6) continue;
+    output = output.replace(new RegExp(escapeRegExp(form), "gi"), REDACTED_EVENT_VALUE);
+  }
+  return redactKnownLeakedSecretPatterns(output).replace(queryKeyPattern(queryParamNames), "$1[REDACTED]");
 }
 
 const URL_RE = /https?:\/\/[^\s"'<>\\)\]]+/g;
@@ -156,6 +235,10 @@ export function findUrls(text: string): string[] {
     if (seen.size >= API_TOOL_MAX_URLS) break;
   }
   return [...seen];
+}
+
+function placeholderText(value: unknown): string {
+  return value === undefined || value === null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
 function describeInputs(action: ApiToolAction): string {
@@ -217,6 +300,16 @@ export function validateActionInput(action: ApiToolAction, raw: Record<string, u
         break;
     }
   }
+  // An input that fills a {placeholder} in the path becomes one path
+  // segment. "." and ".." would be read as "this folder" and "the folder
+  // above", so they could move the call somewhere the action does not name.
+  for (const placeholder of action.path.matchAll(/\{([^{}]+)\}/g)) {
+    const name = placeholder[1]!;
+    const text = placeholderText(cleaned[name]);
+    if (text === "." || text === "..") {
+      throw unprocessable(`The input "${name}" is part of the address and cannot be "." or "..".`, { code: "bad_input" });
+    }
+  }
   return cleaned;
 }
 
@@ -247,11 +340,26 @@ export function buildApiToolRequest(
 ): BuiltApiToolRequest {
   const remaining = { ...input };
   const path = action.path.replace(/\{([^{}]+)\}/g, (_match, name: string) => {
-    const value = remaining[name];
+    const text = placeholderText(remaining[name]);
     delete remaining[name];
-    return encodeURIComponent(value === undefined || value === null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value));
+    // Same rule as validateActionInput, repeated here so the builder is safe
+    // on its own.
+    if (text === "." || text === "..") {
+      throw unprocessable(`The input "${name}" is part of the address and cannot be "." or "..".`, { code: "bad_input" });
+    }
+    return encodeURIComponent(text);
   });
+  const base = new URL(baseUrl);
   const url = new URL(`${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`);
+  // Backstop for the placeholder rule in validateActionInput: whatever the
+  // path and inputs were, the request must stay on the tool's own host and
+  // under its base path (a `..` segment would otherwise climb out of it).
+  const basePath = base.pathname.replace(/\/+$/, "");
+  if (url.host !== base.host || (url.pathname !== basePath && !url.pathname.startsWith(`${basePath}/`))) {
+    throw unprocessable(`That call would leave the tool's base address (${base.host}${basePath || "/"}), so it was not made.`, {
+      code: "path_outside_base",
+    });
+  }
   const headers: Record<string, string> = { accept: "application/json, text/*;q=0.8, */*;q=0.5", "user-agent": "Paperclip-api-tool/1.0" };
   let body: string | undefined;
   const sendsBody = action.method === "POST" || action.method === "PUT" || action.method === "PATCH";
@@ -450,15 +558,18 @@ export function apiToolService(db: Db, deps: ApiToolServiceDeps = {}) {
     return (await list(companyId)).map((tool) => ({ ...tool, enabled: selected.has(tool.id) }));
   }
 
-  /** The active tools among `toolIds`, for offering to an agent. Unknown or disabled ids are skipped. */
-  async function listGranted(companyId: string, toolIds: string[]): Promise<ApiToolSummary[]> {
+  /**
+   * The active tools among `toolIds`, for offering to an agent, as the
+   * agent view (see ApiToolAgentView). Unknown or disabled ids are skipped.
+   */
+  async function listGranted(companyId: string, toolIds: string[]): Promise<ApiToolAgentView[]> {
     if (toolIds.length === 0) return [];
     const rows = await db
       .select()
       .from(companyApiTools)
       .where(and(eq(companyApiTools.companyId, companyId), inArray(companyApiTools.id, toolIds), eq(companyApiTools.status, "active")))
       .orderBy(companyApiTools.name);
-    return rows.map(toSummary);
+    return rows.map((row) => toApiToolAgentView(toSummary(row)));
   }
 
   async function agentToolIds(companyId: string, agentId: string): Promise<string[]> {
@@ -500,6 +611,12 @@ export function apiToolService(db: Db, deps: ApiToolServiceDeps = {}) {
     });
   }
 
+  // Rows that stand for a call that went out (or was about to): these are
+  // what the daily cap counts. `started` is written before the request is
+  // sent and replaced by the outcome after, so a crash in between still
+  // counts against the cap.
+  const COUNTED_STATUSES = ["started", "ok", "upstream_error", "network_error"] as const;
+
   async function countCallsToday(toolId: string): Promise<number> {
     const [row] = await db
       .select({ n: count() })
@@ -508,39 +625,106 @@ export function apiToolService(db: Db, deps: ApiToolServiceDeps = {}) {
         and(
           eq(companyApiToolCalls.toolId, toolId),
           gte(companyApiToolCalls.createdAt, utcDayStart(now())),
-          inArray(companyApiToolCalls.status, ["ok", "upstream_error", "network_error"]),
+          inArray(companyApiToolCalls.status, [...COUNTED_STATUSES]),
         ),
       );
     return Number(row?.n ?? 0);
   }
 
-  async function recordCall(row: ApiToolRow, actionName: string, caller: ApiToolCaller, outcome: {
-    status: typeof companyApiToolCalls.$inferInsert.status;
+  function auditValues(row: ApiToolRow, actionName: string, caller: ApiToolCaller) {
+    return {
+      companyId: row.companyId,
+      toolId: row.id,
+      action: actionName,
+      channel: caller.channel,
+      agentId: caller.agentId,
+      userId: caller.userId,
+      runId: caller.runId,
+      createdAt: new Date(now()),
+    };
+  }
+
+  /**
+   * The cap refusal. A caller that keeps trying at the cap must not grow the
+   * audit table by one row per attempt, so at most one `rate_limited` row is
+   * written per tool per hour. A refusal needs no row to be safe, so a
+   * failure to write it is ignored.
+   */
+  async function refuseAtCap(row: ApiToolRow, actionName: string, caller: ApiToolCaller, used: number): Promise<never> {
+    try {
+      const [recent] = await db
+        .select({ id: companyApiToolCalls.id })
+        .from(companyApiToolCalls)
+        .where(
+          and(
+            eq(companyApiToolCalls.toolId, row.id),
+            eq(companyApiToolCalls.status, "rate_limited"),
+            gte(companyApiToolCalls.createdAt, new Date(now() - RATE_LIMITED_AUDIT_INTERVAL_MS)),
+          ),
+        )
+        .limit(1);
+      if (!recent) {
+        await db.insert(companyApiToolCalls).values({ ...auditValues(row, actionName, caller), status: "rate_limited" });
+      }
+    } catch {
+      // Refusing is the safe outcome either way.
+    }
+    throw tooManyRequests(
+      `The tool "${row.name}" has used its ${row.dailyCap} calls for today. It can run again after midnight UTC, or raise the daily limit on the Tools page.`,
+      { code: "daily_cap", limit: row.dailyCap, used: Math.min(used, row.dailyCap) },
+    );
+  }
+
+  /**
+   * Writes the `started` row that counts this call, before anything goes
+   * out. Fails closed: no row, no call.
+   */
+  async function startCall(row: ApiToolRow, actionName: string, caller: ApiToolCaller): Promise<string> {
+    let id: string | undefined;
+    try {
+      const [inserted] = await db
+        .insert(companyApiToolCalls)
+        .values({ ...auditValues(row, actionName, caller), status: "started" })
+        .returning({ id: companyApiToolCalls.id });
+      id = inserted?.id;
+    } catch {
+      id = undefined;
+    }
+    if (!id) {
+      throw new HttpError(503, `The call to "${row.name}" was not made because Paperclip could not record it. Try again in a moment.`, {
+        code: "audit_unavailable",
+      });
+    }
+    // Two calls can pass the first count at the same moment; the recount,
+    // which includes this call's own row, keeps the cap exact. The row is
+    // withdrawn, not left behind, so a refused race does not count.
+    const used = await countCallsToday(row.id);
+    if (used > row.dailyCap) {
+      await db.delete(companyApiToolCalls).where(eq(companyApiToolCalls.id, id)).catch(() => undefined);
+      return refuseAtCap(row, actionName, caller, used);
+    }
+    return id;
+  }
+
+  /** Replaces the `started` row with the outcome. If that fails the row stays `started` and keeps counting. */
+  async function finishCall(auditId: string, outcome: {
+    status: "ok" | "upstream_error" | "network_error";
     httpStatus: number | null;
     durationMs: number | null;
   }) {
     await db
-      .insert(companyApiToolCalls)
-      .values({
-        companyId: row.companyId,
-        toolId: row.id,
-        action: actionName,
-        channel: caller.channel,
-        agentId: caller.agentId,
-        userId: caller.userId,
-        runId: caller.runId,
-        status: outcome.status,
-        httpStatus: outcome.httpStatus,
-        durationMs: outcome.durationMs,
-      })
+      .update(companyApiToolCalls)
+      .set({ status: outcome.status, httpStatus: outcome.httpStatus, durationMs: outcome.durationMs })
+      .where(eq(companyApiToolCalls.id, auditId))
       .catch(() => undefined);
   }
 
   /**
    * Makes one call. Refusals before the request goes out (validation, the
-   * daily cap, a missing key) throw an HttpError with a plain sentence; a
-   * request that went out always comes back as a result, with `error` set
-   * when there was no answer. Every text in the result is scrubbed.
+   * daily cap, a missing key, an audit row that cannot be written) throw an
+   * HttpError with a plain sentence; a request that went out always comes
+   * back as a result, with `error` set when there was no answer. Every text
+   * in the result is scrubbed.
    */
   async function performCall(
     row: ApiToolRow,
@@ -554,17 +738,12 @@ export function apiToolService(db: Db, deps: ApiToolServiceDeps = {}) {
     }
     const input = validateActionInput(action, rawInput);
     const used = await countCallsToday(row.id);
-    if (used >= row.dailyCap) {
-      await recordCall(row, action.name, caller, { status: "rate_limited", httpStatus: null, durationMs: null });
-      throw tooManyRequests(
-        `The tool "${row.name}" has used its ${row.dailyCap} calls for today. It can run again after midnight UTC, or raise the daily limit on the Tools page.`,
-        { code: "daily_cap", limit: row.dailyCap, used },
-      );
-    }
+    if (used >= row.dailyCap) return refuseAtCap(row, action.name, caller, used);
     const key = await resolveKey(row, auth, caller);
-    const knownSecrets = [key];
-    const scrub = (text: string) => scrubApiToolText(text, knownSecrets);
+    const queryParamNames = auth.kind === "query" && auth.name ? [auth.name] : [];
+    const scrub = (text: string) => scrubApiToolText(text, [key], queryParamNames);
     const request = buildApiToolRequest(row.baseUrl, auth, action, input, key);
+    const auditId = await startCall(row, action.name, caller);
     const fetchImpl = createSafeOutboundFetch(createApiToolOutboundPolicy(row.baseUrl), { lookup: deps.lookup, testOnlyDial: deps.testOnlyDial });
     const started = now();
     let response: Response;
@@ -576,19 +755,24 @@ export function apiToolService(db: Db, deps: ApiToolServiceDeps = {}) {
         error instanceof SafeOutboundFetchError
           ? error.message
           : `Could not reach ${hostOf(row.baseUrl)}.`;
-      await recordCall(row, action.name, caller, { status: "network_error", httpStatus: null, durationMs });
+      await finishCall(auditId, { status: "network_error", httpStatus: null, durationMs });
       return { ok: false, status: 0, contentType: null, body: "", truncated: false, urls: [], error: scrub(message), durationMs };
     }
     const durationMs = now() - started;
     const contentType = response.headers.get("content-type");
-    const rawText = await response.text();
+    let rawText: string;
+    try {
+      rawText = await response.text();
+    } catch {
+      rawText = "";
+    }
     const scrubbed = scrub(prettyBody(rawText, contentType));
     const truncated = scrubbed.length > API_TOOL_BODY_TEXT_LIMIT;
     const body = truncated
       ? `${scrubbed.slice(0, API_TOOL_BODY_TEXT_LIMIT)}\n\n[The answer was cut at 50 KB; ${scrubbed.length - API_TOOL_BODY_TEXT_LIMIT} more characters were not shown.]`
       : scrubbed;
     const ok = response.status >= 200 && response.status < 300;
-    await recordCall(row, action.name, caller, { status: ok ? "ok" : "upstream_error", httpStatus: response.status, durationMs });
+    await finishCall(auditId, { status: ok ? "ok" : "upstream_error", httpStatus: response.status, durationMs });
     return { ok, status: response.status, contentType, body, truncated, urls: findUrls(scrubbed), error: null, durationMs };
   }
 

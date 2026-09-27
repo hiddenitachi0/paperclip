@@ -26,6 +26,7 @@ import { HttpError } from "../errors.js";
 import {
   API_TOOL_BODY_TEXT_LIMIT,
   API_TOOL_MAX_RESPONSE_BYTES,
+  apiToolKeyForms,
   apiToolService,
   buildApiToolRequest,
   findUrls,
@@ -144,6 +145,17 @@ d("DUR-4004 api-tools service", () => {
         }
         if (url.pathname === "/leak-error") {
           json(500, { error: `bad key ${req.headers.authorization ?? ""} at https://api.example.com/?api_key=${KEY}` });
+          return;
+        }
+        if (url.pathname.endsWith("/echo-url")) {
+          // An upstream that repeats the request back in its error: the raw
+          // request line (percent-encoded key), the decoded value, and the
+          // same URL with lower-case hex escapes.
+          json(400, {
+            error: `Bad request: GET ${req.url}`,
+            received: url.searchParams.get("appid"),
+            lower: (req.url ?? "").replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase()),
+          });
           return;
         }
         if (url.pathname === "/unauth") {
@@ -442,10 +454,147 @@ d("DUR-4004 api-tools service", () => {
     const calls = await db.select().from(companyApiToolCalls);
     expect(calls.map((c) => c.status).sort()).toEqual(["ok", "ok", "rate_limited"]);
 
+    // More refused attempts within the hour add no rows (N1).
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(svc().runAction(companyId, tool.id, "echo", { id: 5 }, boardCaller)).rejects.toMatchObject({ status: 429 });
+    }
+    expect((await db.select().from(companyApiToolCalls)).filter((c) => c.status === "rate_limited")).toHaveLength(1);
+    // An hour later one more is written, still only one.
+    clock = Date.parse("2026-09-27T11:00:01.000Z");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(svc().runAction(companyId, tool.id, "echo", { id: 6 }, boardCaller)).rejects.toMatchObject({ status: 429 });
+    }
+    expect((await db.select().from(companyApiToolCalls)).filter((c) => c.status === "rate_limited")).toHaveLength(2);
+    expect(hits).toHaveLength(2);
+
     clock = Date.parse("2026-09-28T00:00:01.000Z");
     const next = await svc().runAction(companyId, tool.id, "echo", { id: 4 }, boardCaller);
     expect(next.ok).toBe(true);
     clock = Date.parse("2026-09-27T10:00:00.000Z");
+  });
+
+  it("fails closed: when the audit row cannot be written, no request goes out and the caller gets a plain sentence", async () => {
+    const companyId = await seedCompany();
+    const { tool } = await seedTool(companyId);
+    await db.execute(sql.raw(`ALTER TABLE company_api_tool_calls ADD CONSTRAINT dur4004_test_block_started CHECK (status <> 'started')`));
+    try {
+      const refused = await svc().runAction(companyId, tool.id, "echo", { id: 1 }, boardCaller).then(() => null, (err: unknown) => err);
+      expect(refused).toBeInstanceOf(HttpError);
+      expect((refused as HttpError).status).toBe(503);
+      expect((refused as HttpError).message).toBe('The call to "Fal.ai" was not made because Paperclip could not record it. Try again in a moment.');
+      expect(hits).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE company_api_tool_calls DROP CONSTRAINT dur4004_test_block_started`));
+    }
+    // With the audit table writable again the same call goes through and is counted once, as its outcome.
+    await svc().runAction(companyId, tool.id, "echo", { id: 1 }, boardCaller);
+    expect(hits).toHaveLength(1);
+    expect((await db.select().from(companyApiToolCalls)).map((c) => c.status)).toEqual(["ok"]);
+  });
+
+  it("keeps the cap exact when two calls race past the first count", async () => {
+    const companyId = await seedCompany();
+    const { tool } = await seedTool(companyId, { dailyCap: 1 });
+    const results = await Promise.allSettled([
+      svc().runAction(companyId, tool.id, "echo", { id: 1 }, boardCaller),
+      svc().runAction(companyId, tool.id, "echo", { id: 2 }, boardCaller),
+      svc().runAction(companyId, tool.id, "echo", { id: 3 }, boardCaller),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled").length).toBeLessThanOrEqual(1);
+    expect(hits.length).toBeLessThanOrEqual(1);
+    const counted = (await db.select().from(companyApiToolCalls)).filter((c) => c.status !== "rate_limited");
+    expect(counted.length).toBeLessThanOrEqual(1);
+  });
+
+  it("never hands back a query-sent key in any encoding, even when the upstream echoes the request URL (S1)", async () => {
+    const companyId = await seedCompany();
+    // A key with the characters URL encoding changes: + / = and a space.
+    const queryKey = "Qk+" + "ab/cd=ef gh+ij/kl==mn0123456789";
+    const secret = await secretService(db).create(companyId, { name: `appid-${randomUUID().slice(0, 8)}`, provider: "local_encrypted", value: queryKey, kind: "other" });
+    const tool = await svc().create(
+      companyId,
+      {
+        name: "Weather",
+        description: "",
+        baseUrl: "https://api.openweathermap.org/data/2.5",
+        auth: { kind: "query", name: "appid", secretId: secret.id },
+        actions: [{ name: "echo_url", method: "GET", path: "/echo-url", description: "", inputs: [{ name: "q", type: "string", required: false }] }],
+        dailyCap: 300,
+        status: "active",
+      },
+      { userId: "filip" },
+    );
+    const result = await svc().runAction(companyId, tool.id, "echo_url", { q: "Oslo" }, boardCaller);
+    expect(result.status).toBe(400);
+    // The key did go out, in the query string, encoded.
+    expect(hits[0]!.url).toBe(`/data/2.5/echo-url?q=Oslo&appid=${new URLSearchParams({ k: queryKey }).toString().slice(2)}`);
+    const everything = JSON.stringify(result);
+    for (const form of apiToolKeyForms(queryKey)) {
+      expect(everything.includes(form), `key form ${form.slice(0, 8)}… leaked`).toBe(false);
+    }
+    expect(everything).not.toContain(encodeURIComponent(queryKey));
+    expect(everything).not.toContain(encodeURIComponent(queryKey).replace(/%20/g, "+"));
+    expect(everything).not.toContain("ab/cd=ef");
+    // The tool's own parameter name is redacted too, not only the usual ones.
+    expect(result.body).toContain("appid=[REDACTED]");
+    expect(result.body).toContain("q=Oslo");
+    for (const url of result.urls) expect(url).not.toMatch(/appid=(?!\[REDACTED\])/);
+    expect(await dumpDatabase()).not.toContain("ab/cd=ef");
+  });
+
+  it("scrubs every encoded form of a known key and the tool's own query name (pure)", () => {
+    const key = "Zz+" + "12/34=56 78+9abcdef";
+    const text = [
+      `raw ${key}`,
+      `component ${encodeURIComponent(key)}`,
+      `plus ${encodeURIComponent(key).replace(/%20/g, "+")}`,
+      `form ${new URLSearchParams({ k: key }).toString().slice(2)}`,
+      `lower ${encodeURIComponent(key).toLowerCase()}`,
+      `json ${JSON.stringify({ k: key })}`,
+      `php ${key.replace(/\//g, "\\/")}`,
+      "url https://x.example/?appid=whatever&page=2",
+    ].join("\n");
+    const scrubbed = scrubApiToolText(text, [key], ["appid"]);
+    expect(scrubbed).not.toContain("12/34");
+    expect(scrubbed).not.toContain("12%2F34");
+    expect(scrubbed).not.toContain("12%2f34");
+    expect(scrubbed).not.toContain("12\\/34");
+    expect(scrubbed).toContain("?appid=[REDACTED]&page=2");
+    // Without the tool's own name, an unknown parameter is left alone.
+    expect(scrubApiToolText("https://x.example/?appid=whatever", [])).toContain("appid=whatever");
+  });
+
+  it('refuses "." and ".." as a path input with a plain sentence, before any request goes out (S2)', async () => {
+    const companyId = await seedCompany();
+    const { tool } = await seedTool(companyId, {
+      baseUrl: "https://api.example.com/v1",
+      actions: [{ name: "get_file", method: "GET", path: "/files/{name}", description: "", inputs: [{ name: "name", type: "string", required: true }] }],
+    });
+    for (const value of ["..", "."]) {
+      await expect(svc().runAction(companyId, tool.id, "get_file", { name: value }, boardCaller)).rejects.toThrow(
+        'The input "name" is part of the address and cannot be "." or "..".',
+      );
+    }
+    expect(hits).toHaveLength(0);
+    expect(await db.select().from(companyApiToolCalls)).toHaveLength(0);
+    // A normal value, and one that merely contains dots or a slash, stays inside the base path.
+    await svc().runAction(companyId, tool.id, "get_file", { name: "../x/.." }, boardCaller);
+    expect(hits[0]!.url).toBe("/v1/files/..%2Fx%2F..");
+  });
+
+  it("the request builder refuses anything that would leave the base path (backstop)", () => {
+    const auth: ApiToolAuth = { kind: "bearer", secretId: randomUUID() };
+    const action = { method: "GET" as const, path: "/files/{name}", inputs: [{ name: "name", type: "string" as const, required: true }] };
+    // The builder repeats the placeholder rule, so it is safe even if called without validation.
+    expect(() => buildApiToolRequest("https://api.example.com/v1", auth, { ...action, path: "/{name}" }, { name: ".." }, KEY)).toThrow(
+      'The input "name" is part of the address and cannot be "." or "..".',
+    );
+    // A path that climbs out of the base on its own is refused by the base-path check.
+    expect(() => buildApiToolRequest("https://api.example.com/v1", auth, { ...action, path: "/../admin", inputs: [] }, {}, KEY)).toThrow(
+      "That call would leave the tool's base address (api.example.com/v1), so it was not made.",
+    );
+    expect(buildApiToolRequest("https://api.example.com/v1", auth, action, { name: "a.b" }, KEY).url).toBe("https://api.example.com/v1/files/a.b");
+    expect(buildApiToolRequest("https://api.example.com", auth, { ...action, path: "/" , inputs: [] }, {}, KEY).url).toBe("https://api.example.com/");
   });
 
   // ── Test button ──────────────────────────────────────────────────────────
@@ -512,6 +661,8 @@ d("DUR-4004 api-tools service", () => {
     expect(await svc().agentToolIds(companyId, agentId)).toHaveLength(3);
     const granted = await svc().listGranted(companyId, await svc().agentToolIds(companyId, agentId));
     expect(granted.map((tool) => tool.id)).toEqual([active.tool.id]);
+    // S3: what an agent is handed carries nothing about the key or the tool's set-up.
+    expect(Object.keys(granted[0]!).sort()).toEqual(["actions", "description", "id", "key", "name", "status"]);
     expect(granted[0]!.id).toMatch(SECRET_UUID_RE);
     const forAgent = await svc().listForAgent(companyId, [active.tool.id]);
     expect(forAgent.map((tool) => [tool.name, tool.enabled])).toEqual([["Active", true], ["Off", false]]);

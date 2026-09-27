@@ -61,7 +61,12 @@ const mockSvc = vi.hoisted(() => ({
   test: vi.fn(),
   toSummary: vi.fn(),
 }));
-vi.mock("../services/api-tools.js", () => ({ apiToolService: () => mockSvc }));
+// The real toApiToolAgentView is kept: the route maps the agent's own list
+// through it, and that mapping is under test below.
+vi.mock("../services/api-tools.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/api-tools.js")>()),
+  apiToolService: () => mockSvc,
+}));
 
 const mockImport = vi.hoisted(() => vi.fn());
 vi.mock("../services/api-tools-openapi.js", () => ({ importOpenApiActions: mockImport }));
@@ -285,6 +290,9 @@ describe("DUR-4004 api-tools routes", () => {
       expect(mine.status).toBe(200);
       expect(mockSvc.listGranted).toHaveBeenCalledWith(companyId, [toolId]);
       expect(mine.body[0]).not.toHaveProperty("enabled");
+      // S3: even if the service handed back a full row, the agent gets the agent view only.
+      expect(Object.keys(mine.body[0]).sort()).toEqual(["actions", "description", "id", "key", "name", "status"]);
+      expect(JSON.stringify(mine.body)).not.toContain(secretId);
 
       const other = await buildApp(agent(companyId, "66666666-6666-4666-8666-666666666666"));
       expect((await request(other).get(`/api/agents/${agentId}/api-tools`)).status).toBe(403);

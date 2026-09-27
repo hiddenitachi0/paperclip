@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import type { ApiToolAction } from "@paperclipai/shared/validators/api-tool";
-import { apiToolService, type ApiToolSummary } from "./api-tools.js";
+import { apiToolService, type ApiToolAgentView } from "./api-tools.js";
 
 /**
  * DUR-4004: how a FULL agent learns about its "API with a key" tools.
@@ -22,7 +22,7 @@ function describeInput(input: ApiToolAction["inputs"][number]): string {
   return `${input.name} (${bits.join(", ")})${input.description ? `: ${input.description}` : ""}`;
 }
 
-export function renderApiToolsAnnouncement(companyId: string, tools: ApiToolSummary[]): string {
+export function renderApiToolsAnnouncement(companyId: string, tools: ApiToolAgentView[]): string {
   const withActions = tools.filter((tool) => tool.actions.length > 0);
   if (withActions.length === 0) return "";
   const lines: string[] = [
