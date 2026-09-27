@@ -448,7 +448,13 @@ d("DUR-3980 agent secret self-binding", () => {
     // update + create carry the gate directly; rollbackConfigRevision funnels
     // through update; syncMcpToolSelection is board-only (route layer) and
     // resyncs bindings from already-granted tools; activatePendingApproval
-    // changes only status. Nothing else writes config.
+    // changes only status. Nothing else writes config. DUR-4004's
+    // syncApiToolSelection is NOT a config save path: it writes only
+    // agents.api_tool_ids, resyncs no binding (an API tool's key is bound to
+    // the tool row, never to the agent), and its one caller is
+    // POST /agents/:id/api-tools/sync, whose scope runs assertBoard (via
+    // assertCompanyOwnerOrAdmin) before anything else, so an agent actor
+    // cannot reach it (dur4004-api-tools-routes.test.ts pins the 403).
     const CONFIG_SAVE_PATHS = ["create", "rollbackConfigRevision", "syncMcpToolSelection", "update"];
     const GATED = ["create", "rollbackConfigRevision", "update"]; // accept an agent actor
 
@@ -456,7 +462,7 @@ d("DUR-3980 agent secret self-binding", () => {
       "activatePendingApproval", "clearError", "create", "createApiKey", "getById",
       "getChainOfCommand", "getConfigRevision", "getKeyById", "list", "listConfigRevisions",
       "listKeys", "orgForCompany", "pause", "remove", "resolveByReference", "resume",
-      "revokeKey", "rollbackConfigRevision", "runningForAgent", "syncMcpToolSelection",
+      "revokeKey", "rollbackConfigRevision", "runningForAgent", "syncApiToolSelection", "syncMcpToolSelection",
       "syncPluginToolGrants", "terminate", "update", "updatePermissions",
     ].sort();
 

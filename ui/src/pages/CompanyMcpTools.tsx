@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LogIn, MoreVertical, Pencil, Plug, Plus, Trash2, X } from "lucide-react";
+import { KeyRound, LogIn, MoreVertical, Pencil, Plug, Plus, Terminal, Trash2, X } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -11,6 +11,8 @@ import {
   type McpToolLibraryEntry,
 } from "../api/mcpToolLibrary";
 import { ApiError } from "../api/client";
+import { apiToolsApi, type ApiTool } from "../api/apiTools";
+import { ApiToolFormDialog } from "../components/ApiToolFormDialog";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,6 +112,13 @@ export function CompanyMcpTools() {
   const [formOpen, setFormOpen] = useState(false);
   const [editingToolId, setEditingToolId] = useState<string | null>(null);
   const [deletingTool, setDeletingTool] = useState<McpToolLibraryEntry | null>(null);
+  // DUR-4004: "Add tool" first asks which kind; the MCP form opens with that
+  // kind preset, the "API with a key" kind has its own form.
+  const [chooserOpen, setChooserOpen] = useState(false);
+  const [newMcpKind, setNewMcpKind] = useState<"command" | "url">("url");
+  const [apiFormOpen, setApiFormOpen] = useState(false);
+  const [editingApiToolId, setEditingApiToolId] = useState<string | null>(null);
+  const [deletingApiTool, setDeletingApiTool] = useState<ApiTool | null>(null);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Tools" }]);
@@ -122,11 +131,34 @@ export function CompanyMcpTools() {
   });
   const tools = toolsQuery.data ?? [];
 
+  const apiToolsQuery = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.apiTools.list(selectedCompanyId) : ["api-tools", "__none__"],
+    queryFn: () => apiToolsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+  const apiTools = apiToolsQuery.data ?? [];
+
   const invalidateTools = () => {
     if (selectedCompanyId) {
       queryClient.invalidateQueries({ queryKey: queryKeys.mcpTools.list(selectedCompanyId) });
     }
   };
+
+  const invalidateApiTools = () => {
+    if (selectedCompanyId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.apiTools.list(selectedCompanyId) });
+    }
+  };
+
+  const deleteApiTool = useMutation({
+    mutationFn: (id: string) => apiToolsApi.remove(selectedCompanyId!, id),
+    onSuccess: () => {
+      invalidateApiTools();
+      setDeletingApiTool(null);
+      pushToast({ title: "Tool removed", tone: "success" });
+    },
+    onError: (error) => pushToast({ title: "Could not remove tool", body: errorMessage(error, ""), tone: "error" }),
+  });
 
   const createTool = useMutation({
     mutationFn: (draft: ToolDraft) =>
@@ -170,15 +202,33 @@ export function CompanyMcpTools() {
   });
 
   const editingTool = tools.find((tool) => tool.id === editingToolId) ?? null;
+  const editingApiTool = apiTools.find((tool) => tool.id === editingApiToolId) ?? null;
 
   function openCreate() {
+    setChooserOpen(true);
+  }
+
+  function startMcpTool(kind: "command" | "url") {
+    setChooserOpen(false);
+    setNewMcpKind(kind);
     setEditingToolId(null);
     setFormOpen(true);
+  }
+
+  function startApiTool() {
+    setChooserOpen(false);
+    setEditingApiToolId(null);
+    setApiFormOpen(true);
   }
 
   function openEdit(tool: McpToolLibraryEntry) {
     setEditingToolId(tool.id);
     setFormOpen(true);
+  }
+
+  function openEditApiTool(tool: ApiTool) {
+    setEditingApiToolId(tool.id);
+    setApiFormOpen(true);
   }
 
   function handleSubmit(draft: ToolDraft) {
@@ -195,8 +245,9 @@ export function CompanyMcpTools() {
         <div>
           <h1 className="text-lg font-semibold">Tools</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Add a tool once — give it a name, say what it does, and connect it. Then check it on for any agent from
-            that agent's page. Keys always go through Secrets, never typed here in the open.
+            Add a tool once — give it a name, say what it does, and connect it. An MCP server, or any service that
+            gives you an API key. Then check it on for any agent from that agent's page. Keys always go through
+            Secrets, never typed here in the open.
           </p>
         </div>
         <Button onClick={openCreate}>
@@ -205,19 +256,63 @@ export function CompanyMcpTools() {
         </Button>
       </div>
 
-      {toolsQuery.isLoading ? (
+      {toolsQuery.isLoading || apiToolsQuery.isLoading ? (
         <PageSkeleton variant="list" />
-      ) : toolsQuery.error ? (
-        <div className="py-6 text-sm text-destructive">{errorMessage(toolsQuery.error, "Could not load tools.")}</div>
-      ) : tools.length === 0 ? (
+      ) : toolsQuery.error || apiToolsQuery.error ? (
+        <div className="py-6 text-sm text-destructive">{errorMessage(toolsQuery.error ?? apiToolsQuery.error, "Could not load tools.")}</div>
+      ) : tools.length === 0 && apiTools.length === 0 ? (
         <EmptyState
           icon={Plug}
-          message="No tools yet. Add one — an image generator, a calendar, anything with an MCP server — and hand it to an agent."
+          message="No tools yet. Add one — an image generator, an accounting service, anything with an MCP server or an API key — and hand it to an agent."
           action="Add tool"
           onAction={openCreate}
         />
       ) : (
         <ul className="divide-y divide-border border border-border rounded-lg">
+          {apiTools.map((tool) => (
+            <li key={tool.id} className="flex items-start justify-between gap-4 px-4 py-3" data-testid="api-tool-row">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 font-medium">
+                  {tool.name}
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">API with a key</span>
+                  {tool.status === "disabled" ? (
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">switched off</span>
+                  ) : null}
+                </div>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  {tool.description || tool.baseUrl}
+                  {" · "}
+                  {tool.actions.length === 0 ? "no actions yet" : `${tool.actions.length} action${tool.actions.length === 1 ? "" : "s"}`}
+                  {" · "}
+                  {tool.dailyCap} calls a day
+                </p>
+                {tool.lastTestAt && tool.lastTestMessage ? (
+                  <p className={`mt-0.5 text-xs ${tool.lastTestOk ? "text-muted-foreground" : "text-destructive"}`}>
+                    Last test {tool.lastTestOk ? "passed" : "failed"}: {tool.lastTestMessage}
+                  </p>
+                ) : (
+                  <p className="mt-0.5 text-xs text-muted-foreground">Not tested yet.</p>
+                )}
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon-sm">
+                    <MoreVertical className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => openEditApiTool(tool)}>
+                    <Pencil className="mr-2 h-4 w-4" />
+                    Edit
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setDeletingApiTool(tool)} variant="destructive">
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </li>
+          ))}
           {tools.map((tool) => (
             <li key={tool.id} className="flex items-start justify-between gap-4 px-4 py-3">
               <div className="min-w-0">
@@ -252,12 +347,91 @@ export function CompanyMcpTools() {
           setFormOpen(open);
           if (!open) setEditingToolId(null);
         }}
-        initialDraft={editingTool ? draftFromTool(editingTool) : emptyDraft()}
-        title={editingTool ? "Edit tool" : "Add tool"}
+        initialDraft={editingTool ? draftFromTool(editingTool) : { ...emptyDraft(), kind: newMcpKind }}
+        title={editingTool ? "Edit tool" : newMcpKind === "command" ? "Add MCP server (command)" : "Add MCP server (URL)"}
         toolId={editingTool?.id ?? null}
         onSubmit={handleSubmit}
         isPending={createTool.isPending || updateTool.isPending}
       />
+
+      {/* DUR-4004: which kind of tool? */}
+      <Dialog open={chooserOpen} onOpenChange={setChooserOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add tool</DialogTitle>
+            <DialogDescription>What kind of tool is it?</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2" data-testid="tool-kind-chooser">
+            <button
+              type="button"
+              className="flex w-full items-start gap-3 rounded-md border border-border px-3 py-2 text-left hover:bg-accent/40"
+              onClick={() => startMcpTool("url")}
+            >
+              <Plug className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                <span className="block font-medium">MCP server (URL)</span>
+                <span className="block text-sm text-muted-foreground">A server you connect to over the web, with a key or a sign-in.</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-start gap-3 rounded-md border border-border px-3 py-2 text-left hover:bg-accent/40"
+              onClick={() => startMcpTool("command")}
+            >
+              <Terminal className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                <span className="block font-medium">MCP server (command)</span>
+                <span className="block text-sm text-muted-foreground">A program Paperclip starts on this machine.</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-start gap-3 rounded-md border border-border px-3 py-2 text-left hover:bg-accent/40"
+              onClick={startApiTool}
+            >
+              <KeyRound className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                <span className="block font-medium">API with a key</span>
+                <span className="block text-sm text-muted-foreground">
+                  A service that gave you an API key and a web address (Fal.ai, Fiken, …). You list the actions an agent
+                  may call.
+                </span>
+              </span>
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <ApiToolFormDialog
+        open={apiFormOpen}
+        onOpenChange={(open) => {
+          setApiFormOpen(open);
+          if (!open) setEditingApiToolId(null);
+        }}
+        tool={editingApiTool}
+        onSaved={invalidateApiTools}
+      />
+
+      <AlertDialog open={deletingApiTool !== null} onOpenChange={(open) => !open && setDeletingApiTool(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete "{deletingApiTool?.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Agents that had this checked on lose access to its actions. This only removes the tool itself — the saved
+              secret with the key stays in Secrets.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => deletingApiTool && deleteApiTool.mutate(deletingApiTool.id)}
+              disabled={deleteApiTool.isPending}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={deletingTool !== null} onOpenChange={(open) => !open && setDeletingTool(null)}>
         <AlertDialogContent>

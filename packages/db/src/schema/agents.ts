@@ -155,6 +155,12 @@ export const agents = pgTable(
     // generic create/update patch (assertNoPluginToolAssignmentFields in
     // services/agents.ts), only the dedicated assignment route may write it.
     pluginToolGrants: jsonb("plugin_tool_grants").$type<string[]>().notNull().default([]),
+    // DUR-4004: ids of company_api_tools rows ("API with a key") this agent is
+    // checked-on for. Same posture as mcpToolIds: live selection re-read on
+    // every dispatch, never settable through the generic create/update patch
+    // (assertNoToolLibraryAssignmentFields), only the dedicated assignment
+    // route writes it. Empty means none.
+    apiToolIds: jsonb("api_tool_ids").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
