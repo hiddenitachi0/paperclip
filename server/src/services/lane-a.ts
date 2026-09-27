@@ -1059,12 +1059,15 @@ export function isLaneAToolsUnsupportedError(err: unknown): boolean {
  * The provider refused the request because of the creativity setting, e.g.
  * OpenAI reasoning models: 400 "Unsupported value: 'temperature' does not
  * support 0.2 with this model", or a Claude model that removed sampling
- * parameters. The call is then repeated without it.
+ * parameters. Also OpenRouter's "No endpoints found that can handle the
+ * requested parameters": with tools offered it requires a host that supports
+ * every parameter sent, and the temperature is one of them. The call is then
+ * repeated without it (only ever when one was sent).
  */
 export function isLaneATemperatureUnsupportedError(err: unknown): boolean {
   if (!(err instanceof LaneAProviderError)) return false;
   if (err.kind !== "upstream" || err.status === null || err.status < 400 || err.status >= 500) return false;
-  return /temperature/i.test(err.message);
+  return /temperature|can handle the requested parameters/i.test(err.message);
 }
 
 export function laneAProviderErrorToHttp(err: unknown, kind: LaneAWorkKind): unknown {

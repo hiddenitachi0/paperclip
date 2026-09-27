@@ -202,6 +202,25 @@ d("quick-agent creativity (sampling temperature)", () => {
     expect(Object.hasOwn(fetcher.bodies[0]!, "temperature")).toBe(false);
   });
 
+  it("chat sends the temperature alongside the tools (only the retry drops it)", async () => {
+    const companyId = await seedCompany();
+    const target = await seedQuickAgent(companyId, {
+      provider: "local",
+      model: localMistral.model,
+      baseUrl: localMistral.baseUrl,
+      temperature: 0.9,
+    });
+    const fetcher = recordingFetch();
+    await laneAService(db, { providerFetch: fetcher.impl }).sendMessage({
+      companyId,
+      targetAgent: target,
+      requester: { userId: "filip", agentId: null },
+      message: "hei",
+    });
+    expect(fetcher.bodies[0]!.temperature).toBe(0.9);
+    expect(Array.isArray(fetcher.bodies[0]!.tools)).toBe(true);
+  });
+
   it("transform sends it too", async () => {
     const companyId = await seedCompany();
     const target = await seedQuickAgent(companyId, { ...localMistral, temperature: 1.2 });
@@ -296,6 +315,9 @@ describe("isLaneATemperatureUnsupportedError", () => {
   it("recognises a refusal that names the temperature, and nothing else", () => {
     expect(refused("OpenAI answered 400: Unsupported value: 'temperature' does not support 0.2 with this model.")).toBe(true);
     expect(refused("temperature: This model does not support sampling parameters.")).toBe(true);
+    expect(
+      refused("OpenRouter answered 404: No endpoints found that can handle the requested parameters.", 404),
+    ).toBe(true);
     expect(refused("OpenAI answered 400: The requested model 'gpt-9' does not exist.")).toBe(false);
     expect(refused("OpenAI answered 503: overloaded (temperature of the GPUs too high)", 503)).toBe(false);
     expect(isLaneATemperatureUnsupportedError(new Error("temperature"))).toBe(false);

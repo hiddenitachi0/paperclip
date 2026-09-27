@@ -337,6 +337,19 @@ describe("OpenAI-compatible provider client", () => {
     });
     expect(fetcher.calls[0]!.body.temperature).toBe(1.2);
   });
+
+  it("on OpenRouter with tools, sends both the temperature and require_parameters", () => {
+    const body = buildOpenAiCompatibleBody("openrouter", {
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "u" }],
+      tools: [WEATHER_TOOL],
+      maxTokens: 10,
+      temperature: 0.9,
+    });
+    expect(body.temperature).toBe(0.9);
+    expect(body.provider).toEqual({ require_parameters: true });
+  });
 });
 
 describe("Anthropic provider client", () => {
