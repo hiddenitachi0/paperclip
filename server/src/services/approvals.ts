@@ -434,6 +434,8 @@ export function approvalService(db: Db) {
               typeof payload.laneATransformDailyCallCap === "number" ? payload.laneATransformDailyCallCap : null,
             laneAProvider: typeof payload.laneAProvider === "string" ? payload.laneAProvider : null,
             laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
+            laneATemperature:
+              typeof payload.laneATemperature === "number" ? payload.laneATemperature : null,
             // DUR-4000: which person does this job and the job's limits box,
             // read back off the card for the same reason; the service still
             // refuses a persona from another company. A malformed limits

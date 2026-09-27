@@ -168,6 +168,8 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
           // agent row by the service, so it cannot be forgotten here.
           laneAProvider: targetAgent.laneAProvider ?? null,
           laneABaseUrl: targetAgent.laneABaseUrl ?? null,
+          // "Creativity" (sampling temperature); null = the model host's default.
+          laneATemperature: targetAgent.laneATemperature ?? null,
         },
         requester,
         actor: req.actor,

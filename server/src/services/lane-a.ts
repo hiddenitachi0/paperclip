@@ -31,6 +31,7 @@ import {
   laneAProviderModelCostCents,
   normalizeLaneAProvider,
   resolveLaneAModelForProvider,
+  laneATemperatureForCall,
   type LaneAProvider,
 } from "@paperclipai/shared";
 import { HttpError, conflict, forbidden, notFound, tooManyRequests } from "../errors.js";
@@ -538,6 +539,12 @@ export interface LaneATargetAgent {
    */
   laneAProvider?: string | null;
   laneABaseUrl?: string | null;
+  /**
+   * "Creativity" (sampling temperature, 0-1.5). Null/absent = send none, the
+   * model host's default. Optional so existing callers and tests are
+   * unaffected; when absent the service reads the stored value off the row.
+   */
+  laneATemperature?: number | null;
 }
 
 /**
@@ -590,7 +597,10 @@ export function resolveLaneASettings(agent: LaneATargetAgent) {
     typeof agent.laneATransformDailyCallCap === "number" && agent.laneATransformDailyCallCap > 0
       ? agent.laneATransformDailyCallCap
       : LANE_A_DEFAULT_TRANSFORM_DAILY_CALL_CAP;
-  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap };
+  // Null when unset, out of range, or the model is known to refuse one;
+  // clamped to 0-1 for Claude.
+  const temperature = laneATemperatureForCall(provider, model, agent.laneATemperature);
+  return { provider, model, baseUrl, maxOutputTokens, dailyCallCap, temperature };
 }
 
 /**
@@ -1045,6 +1055,18 @@ export function isLaneAToolsUnsupportedError(err: unknown): boolean {
   );
 }
 
+/**
+ * The provider refused the request because of the creativity setting, e.g.
+ * OpenAI reasoning models: 400 "Unsupported value: 'temperature' does not
+ * support 0.2 with this model", or a Claude model that removed sampling
+ * parameters. The call is then repeated without it.
+ */
+export function isLaneATemperatureUnsupportedError(err: unknown): boolean {
+  if (!(err instanceof LaneAProviderError)) return false;
+  if (err.kind !== "upstream" || err.status === null || err.status < 400 || err.status >= 500) return false;
+  return /temperature/i.test(err.message);
+}
+
 export function laneAProviderErrorToHttp(err: unknown, kind: LaneAWorkKind): unknown {
   if (!(err instanceof LaneAProviderError)) return err;
   const label = laneAProviderLabel(err.provider);
@@ -1395,6 +1417,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneAProvider: agents.laneAProvider,
         laneABaseUrl: agents.laneABaseUrl,
         laneAModel: agents.laneAModel,
+        laneATemperature: agents.laneATemperature,
         // DUR-4000: which person does this job, so the prompt can say so,
         // and the job's limits box (its standing rules ride in the prompt).
         personaId: agents.personaId,
@@ -1546,6 +1569,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     /** DUR-3977: per-agent model/output ceiling, defaults already applied by the caller. */
     model?: string;
     maxOutputTokens?: number;
+    /** Sampling temperature, already resolved for this provider/model. Null = send none. */
+    temperature?: number | null;
     /** DUR-3972: offer read_business_data this turn (the company has an active sales source). */
     offerBusinessData?: boolean;
     /** DUR-3997: offer read_company_file this turn (the company has an active file-server connection). */
@@ -1580,15 +1605,28 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     // are offered. For those the quick agent still chats, without tools, and
     // says so plainly when asked for something only a tool can do.
     let toolsOff = tools.length === 0 || laneAModelRefusesTools(modelId);
+    // A host that refuses the creativity setting still gets an answer: the
+    // call is repeated once without it, and the rest of the turn goes without.
+    let temperatureOff = typeof params.temperature !== "number";
     const completeRound = async () => {
-      const request = (withTools: boolean) =>
+      const send = (withTools: boolean) =>
         client.complete({
           model: modelId,
           maxTokens: params.maxOutputTokens ?? LANE_A_MAX_OUTPUT_TOKENS,
           system: withTools || tools.length === 0 ? systemPrompt : `${systemPrompt}\n\n${LANE_A_NO_TOOLS_NOTE}`,
           messages,
           ...(withTools ? { tools } : {}),
+          ...(temperatureOff ? {} : { temperature: params.temperature }),
         });
+      const request = async (withTools: boolean) => {
+        try {
+          return await send(withTools);
+        } catch (err) {
+          if (temperatureOff || !isLaneATemperatureUnsupportedError(err)) throw err;
+          temperatureOff = true;
+          return send(withTools);
+        }
+      };
       if (toolsOff) return request(false);
       try {
         return await request(true);
@@ -1883,6 +1921,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+      laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
     });
     const chatModel = assertLaneASettingsRunnable(chatSettings);
     const credential = await resolveLaneACredential({
@@ -1988,6 +2027,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         client,
         model: chatModel,
         maxOutputTokens: chatSettings.maxOutputTokens,
+        temperature: chatSettings.temperature,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
       });
@@ -2289,6 +2329,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       laneAProvider: params.targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
       laneABaseUrl: params.targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
       laneAModel: params.targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+      laneATemperature: params.targetAgent.laneATemperature ?? agentRow?.laneATemperature ?? null,
     });
     const model = assertLaneASettingsRunnable(settings);
 
@@ -2344,6 +2385,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
           maxOutputTokens: settings.maxOutputTokens,
           maxOutputChars: params.maxOutputChars,
         }),
+        temperature: settings.temperature,
       });
     } finally {
       release();
@@ -2391,14 +2433,27 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     message: string;
     model: string;
     maxOutputTokens: number;
+    /** Sampling temperature, already resolved for this provider/model. Null = send none. */
+    temperature?: number | null;
   }) {
     try {
-      const response = await params.client.complete({
-        model: params.model,
-        maxTokens: params.maxOutputTokens,
-        system: params.systemPrompt,
-        messages: [{ role: "user", content: params.message }],
-      });
+      const send = (withTemperature: boolean) =>
+        params.client.complete({
+          model: params.model,
+          maxTokens: params.maxOutputTokens,
+          system: params.systemPrompt,
+          messages: [{ role: "user", content: params.message }],
+          ...(withTemperature ? { temperature: params.temperature } : {}),
+        });
+      const withTemperature = typeof params.temperature === "number";
+      let response: Awaited<ReturnType<typeof send>>;
+      try {
+        response = await send(withTemperature);
+      } catch (err) {
+        // Same as chat: a host that refuses the setting still answers.
+        if (!withTemperature || !isLaneATemperatureUnsupportedError(err)) throw err;
+        response = await send(false);
+      }
       return {
         text: response.text.trim(),
         inputTokens: response.usage.inputTokens,
@@ -2450,6 +2505,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneATransformDailyCallCap: agents.laneATransformDailyCallCap,
         laneAProvider: agents.laneAProvider,
         laneABaseUrl: agents.laneABaseUrl,
+        laneATemperature: agents.laneATemperature,
       })
       .from(agents)
       .where(
@@ -2499,6 +2555,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         laneATransformDailyCallCap: row.laneATransformDailyCallCap,
         laneAProvider: row.laneAProvider,
         laneABaseUrl: row.laneABaseUrl,
+        laneATemperature: row.laneATemperature,
       });
       const callsToday = callsByAgentId.get(row.id) ?? 0;
       const exceededBudget = await findExceededTransformBudget(companyId, row.id);

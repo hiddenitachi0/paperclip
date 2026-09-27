@@ -253,7 +253,7 @@ describe("lane A routes", () => {
   // different prices.
   it("passes the per-agent model and output ceiling into the chat path", async () => {
     mockAgentService.getById.mockResolvedValue(
-      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400 } as never),
+      makeAgent({ laneAModel: "claude-haiku-4-5", laneAMaxOutputTokens: 400, laneATemperature: 0.9 } as never),
     );
     mockLaneAService.sendMessage.mockResolvedValue({ text: "hei" });
     const app = await createApp({
@@ -271,6 +271,7 @@ describe("lane A routes", () => {
     expect(mockLaneAService.sendMessage.mock.calls[0][0].targetAgent).toMatchObject({
       laneAModel: "claude-haiku-4-5",
       laneAMaxOutputTokens: 400,
+      laneATemperature: 0.9,
     });
   });
 });

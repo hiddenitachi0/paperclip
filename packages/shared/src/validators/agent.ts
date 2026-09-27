@@ -11,8 +11,10 @@ import {
   LANE_A_BASE_URL_MAX_LENGTH,
   LANE_A_FREE_FORM_MODEL_MAX_LENGTH,
   LANE_A_MAX_MAX_OUTPUT_TOKENS,
+  LANE_A_MAX_TEMPERATURE,
   LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_MIN_MAX_OUTPUT_TOKENS,
+  LANE_A_MIN_TEMPERATURE,
   LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP,
   LANE_A_PROVIDERS,
   laneAModelIssueForProvider,
@@ -51,6 +53,10 @@ export const QUICK_AGENT_FIELDS = [
   // key, exactly as before.
   "laneAProvider",
   "laneABaseUrl",
+  // How playful and varied the quick agent's replies are (sampling
+  // temperature). Null = the model host's own default. Board-only like the
+  // rest: it changes how the agent talks to people.
+  "laneATemperature",
 ] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
@@ -462,6 +468,16 @@ const createAgentObjectSchema = z.object({
     .int()
     .min(LANE_A_MIN_TRANSFORM_DAILY_CALL_CAP)
     .max(LANE_A_MAX_TRANSFORM_DAILY_CALL_CAP)
+    .nullable()
+    .optional(),
+  // "Creativity": sampling temperature sent on every quick-agent model call.
+  // Null = send none (the model host's default). Claude calls are clamped to
+  // 1 at call time; see laneATemperatureForCall (and not sent at all to a model that refuses one).
+  laneATemperature: z
+    .number()
+    .finite()
+    .min(LANE_A_MIN_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
+    .max(LANE_A_MAX_TEMPERATURE, `Creativity must be between ${LANE_A_MIN_TEMPERATURE} and ${LANE_A_MAX_TEMPERATURE}.`)
     .nullable()
     .optional(),
   // DUR-4000 (PERSONA_JOB_FIELDS): which person does this job, and the

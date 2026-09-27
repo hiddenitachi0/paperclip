@@ -2878,6 +2878,8 @@ export function agentRoutes(
           // binding inside adapterConfig (already on the card above).
           laneAProvider: agent.laneAProvider ?? null,
           laneABaseUrl: agent.laneABaseUrl ?? null,
+          // "Creativity" chosen at hire time, same reason.
+          laneATemperature: agent.laneATemperature ?? null,
           // DUR-4000: which person does this job and the job's limits box,
           // for the same reason — the card is what the board reads, and the
           // legacy branch in approvals.ts rebuilds the agent from it. The

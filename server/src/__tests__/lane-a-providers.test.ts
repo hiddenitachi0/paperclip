@@ -311,6 +311,32 @@ describe("OpenAI-compatible provider client", () => {
     expect(Object.hasOwn(body, "tools")).toBe(false);
     expect(body.max_tokens).toBe(10);
   });
+
+  it("buildOpenAiCompatibleBody sends temperature only when a creativity setting is chosen", () => {
+    const base = { model: "m", system: "s", messages: [{ role: "user" as const, content: "u" }], maxTokens: 10 };
+    for (const provider of ["openai", "google", "openrouter", "local"] as const) {
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, base), "temperature")).toBe(false);
+      expect(Object.hasOwn(buildOpenAiCompatibleBody(provider, { ...base, temperature: null }), "temperature")).toBe(false);
+      expect(buildOpenAiCompatibleBody(provider, { ...base, temperature: 0.9 }).temperature).toBe(0.9);
+      // 0 is a real choice ("as predictable as possible"), not "unset".
+      expect(buildOpenAiCompatibleBody(provider, { ...base, temperature: 0 }).temperature).toBe(0);
+    }
+  });
+
+  it("puts the temperature on the wire for OpenRouter", async () => {
+    const fetcher = fakeFetch(() =>
+      jsonResponse({ choices: [{ message: { role: "assistant", content: "Hei!" }, finish_reason: "stop" }] }),
+    );
+    const client = createLaneAProviderClient({ provider: "openrouter", apiKey: KEY, fetch: fetcher.impl });
+    await client.complete({
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 64,
+      temperature: 1.2,
+    });
+    expect(fetcher.calls[0]!.body.temperature).toBe(1.2);
+  });
 });
 
 describe("Anthropic provider client", () => {
@@ -346,6 +372,22 @@ describe("Anthropic provider client", () => {
       stop: "end_turn",
       stopReason: "end_turn",
     });
+  });
+
+  it("sends a temperature to Claude only when set, clamped to Claude's 0-1 range", async () => {
+    const answer = { content: [{ type: "text", text: "Hei!" }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "end_turn" };
+    const { client, create } = fakeAnthropic([answer, answer, answer]);
+    const provider = createLaneAProviderClient({ provider: "anthropic", apiKey: null, anthropicClient: client });
+    const base = { model: "claude-haiku-4-5", system: "s", messages: [{ role: "user" as const, content: "hi" }], maxTokens: 64 };
+
+    await provider.complete(base);
+    await provider.complete({ ...base, temperature: 0.6 });
+    await provider.complete({ ...base, temperature: 1.4 });
+
+    const sent = create.mock.calls.map((call) => (call as unknown[])[0] as Record<string, unknown>);
+    expect(Object.hasOwn(sent[0]!, "temperature")).toBe(false);
+    expect(sent[1]!.temperature).toBe(0.6);
+    expect(sent[2]!.temperature).toBe(1);
   });
 
   it("translates tool_use blocks into tool calls and tool results back into tool_result blocks", () => {

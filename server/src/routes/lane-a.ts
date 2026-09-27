@@ -95,6 +95,8 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         // The key binding itself is read off the agent row by the service.
         laneAProvider: targetAgent.laneAProvider ?? null,
         laneABaseUrl: targetAgent.laneABaseUrl ?? null,
+        // "Creativity" (sampling temperature); null = the model host's default.
+        laneATemperature: targetAgent.laneATemperature ?? null,
       },
       requester: requesterFor(req),
       actor: req.actor,
@@ -159,6 +161,8 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
         // DUR-3997: same two fields the chat route passes.
         laneAProvider: targetAgent.laneAProvider ?? null,
         laneABaseUrl: targetAgent.laneABaseUrl ?? null,
+        // "Creativity" (sampling temperature); null = the model host's default.
+        laneATemperature: targetAgent.laneATemperature ?? null,
       },
       input,
       variables,
