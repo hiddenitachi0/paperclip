@@ -1,6 +1,6 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companySecretBindings, telegramBots } from "@paperclipai/db";
+import { agents, companySecretBindings, telegramBots, withCompanyScope } from "@paperclipai/db";
 import type { TelegramBotCheckResult, TelegramBotSummary } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { secretService } from "./secrets.js";
@@ -47,6 +47,7 @@ function toSummary(row: TelegramBotRow, agentName: string | null): TelegramBotSu
     uiBase: row.uiBase,
     allowedTelegramUserIds: row.allowedTelegramUserIds ?? [],
     enabled: row.enabled,
+    receivesCompanyNotices: row.receivesCompanyNotices,
     lastCheckAt: row.lastCheckAt ? row.lastCheckAt.toISOString() : null,
     lastCheckOk: row.lastCheckOk,
     lastCheckUsername: row.lastCheckUsername,
@@ -288,6 +289,52 @@ export function telegramBotService(db: Db, deps: { fetchImpl?: typeof fetch } = 
     return toSummary(updated ?? row, names.get(row.agentId) ?? null);
   }
 
+  /**
+   * Mark (or unmark) the bot that gets this company's approvals and questions
+   * when no agent's own bot, or its boss's, should (a card the board filed
+   * itself, for example). Marking one unmarks every other bot in the company,
+   * in one transaction, so there is never a moment with two.
+   *
+   * The company's bot rows are locked first: two people marking two different
+   * bots at the same moment end with the second one marked, instead of one of
+   * them failing on the one-per-company index.
+   */
+  async function setReceivesCompanyNotices(
+    companyId: string,
+    botId: string,
+    receivesCompanyNotices: boolean,
+  ): Promise<TelegramBotSummary> {
+    const row = await getRow(companyId, botId);
+    const updated = await withCompanyScope(db, companyId, async (tx) => {
+      await tx
+        .select({ id: telegramBots.id })
+        .from(telegramBots)
+        .where(eq(telegramBots.companyId, companyId))
+        .for("update");
+      const now = new Date();
+      if (receivesCompanyNotices) {
+        await tx
+          .update(telegramBots)
+          .set({ receivesCompanyNotices: false, updatedAt: now })
+          .where(
+            and(
+              eq(telegramBots.companyId, companyId),
+              eq(telegramBots.receivesCompanyNotices, true),
+              ne(telegramBots.id, row.id),
+            ),
+          );
+      }
+      const [result] = await tx
+        .update(telegramBots)
+        .set({ receivesCompanyNotices, updatedAt: now })
+        .where(and(eq(telegramBots.id, row.id), eq(telegramBots.companyId, companyId)))
+        .returning();
+      return result;
+    });
+    const names = await agentNames(companyId);
+    return toSummary(updated ?? row, names.get(row.agentId) ?? null);
+  }
+
   async function remove(companyId: string, botId: string): Promise<{ removedSecretId: string }> {
     const row = await getRow(companyId, botId);
     // Order matters: the bot row goes first so nothing can resolve the token
@@ -372,6 +419,7 @@ export function telegramBotService(db: Db, deps: { fetchImpl?: typeof fetch } = 
     create,
     rotateToken,
     setAllowedUsers,
+    setReceivesCompanyNotices,
     remove,
     resolveBotToken,
     check,

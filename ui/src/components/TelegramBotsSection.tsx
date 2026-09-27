@@ -9,6 +9,7 @@ import { useToastActions } from "../context/ToastContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
 
 /**
  * DUR-3978 slice 2: where Filip connects a Telegram bot himself.
@@ -23,6 +24,12 @@ import { Input } from "@/components/ui/input";
  *
  * DUR-3997: lives on the Connections page. `readOnly` hides every write action
  * for operators and viewers; the server routes keep their own checks.
+ *
+ * "Sends this company's approvals and questions": the one bot that gets the
+ * cards no agent's own bot (or its boss's) should get — ones the board filed
+ * itself, and ones from agents with no bot above them. Only one can be on;
+ * turning one on turns the others off. With none on, the bridge uses the
+ * CEO's bot, else the oldest bot.
  */
 
 function statusText(bot: TelegramBotSummary): string {
@@ -109,6 +116,22 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
     onError: fail("Could not change who may use the bot"),
   });
 
+  const noticesMutation = useMutation({
+    mutationFn: (input: { botId: string; receivesCompanyNotices: boolean }) =>
+      telegramBotsApi.setCompanyNotices(companyId, input.botId, input.receivesCompanyNotices),
+    onSuccess: (updated) => {
+      setError(null);
+      invalidate();
+      pushToast({
+        title: updated.receivesCompanyNotices
+          ? `${updated.name} now sends this company's approvals and questions`
+          : `${updated.name} no longer sends this company's approvals and questions`,
+        tone: "success",
+      });
+    },
+    onError: fail("Could not change which bot sends the approvals and questions"),
+  });
+
   const removeMutation = useMutation({
     mutationFn: (botId: string) => telegramBotsApi.remove(companyId, botId),
     onSuccess: () => {
@@ -124,6 +147,7 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
   const agents = agentsQuery.data ?? [];
   const takenAgentIds = new Set(bots.map((bot) => bot.agentId));
   const availableAgents = agents.filter((agent) => !takenAgentIds.has(agent.id));
+  const noNoticeBot = bots.length > 0 && !bots.some((bot) => bot.receivesCompanyNotices);
 
   return (
     <Card>
@@ -274,6 +298,19 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
                   </p>
                 )}
 
+                <div className="flex items-center gap-2">
+                  <ToggleSwitch
+                    checked={bot.receivesCompanyNotices}
+                    onCheckedChange={(next) =>
+                      noticesMutation.mutate({ botId: bot.id, receivesCompanyNotices: next })
+                    }
+                    disabled={readOnly || noticesMutation.isPending}
+                    aria-label={`Sends this company's approvals and questions: ${bot.name}`}
+                    data-testid={`telegram-bot-notices-${bot.id}`}
+                  />
+                  <span className="text-xs">Sends this company's approvals and questions</span>
+                </div>
+
                 {rotatingId === bot.id && !readOnly && (
                   <div className="flex items-end gap-2">
                     <div className="flex-1 space-y-1.5">
@@ -302,9 +339,11 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
                 <div className="space-y-1.5">
                   <p className="text-xs font-medium">Who may use this bot</p>
                   {bot.allowedTelegramUserIds.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">
-                      Nobody added yet — so the usual list of who may use the bots applies. Add your own
-                      Telegram ID to decide it here.
+                    <p
+                      className="text-xs text-amber-600 dark:text-amber-400"
+                      data-testid={`telegram-bot-no-own-users-${bot.id}`}
+                    >
+                      Anyone on the instance-wide list can use this bot. Add who may use it.
                     </p>
                   ) : (
                     <ul className="flex flex-wrap gap-2">
@@ -366,6 +405,13 @@ export function TelegramBotsSection({ companyId, readOnly = false }: { companyId
               </li>
             ))}
           </ul>
+        )}
+
+        {noNoticeBot && (
+          <p className="text-xs text-muted-foreground" data-testid="telegram-bots-no-notice-bot">
+            No bot is chosen to send this company's approvals and questions, so they go to the CEO's bot, or to
+            the oldest bot if the CEO has none.
+          </p>
         )}
 
         {error && <p className="text-sm text-destructive">{error}</p>}

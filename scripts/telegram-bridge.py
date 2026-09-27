@@ -11,7 +11,9 @@ approvals/tasks still live in Paperclip and the web UI.
 - Outbound: a pending approval is routed to the requesting agent's bot (or the
   nearest boss's bot up `reportsTo`, within the same company), with Approve/Reject
   buttons. Credential requests link to the dashboard form instead (a button can't
-  carry a secret value).
+  carry a secret value). When nobody asked (a card the board filed itself) or
+  nobody on the way up has a bot, it goes to the company's notice bot — see
+  company_notice_bot for how that one is chosen.
 - Inbound (per bot): Approve/Reject taps resolve the approval. A text message
   goes through the same chat router the web chat uses (DUR-3978): a quick
   question is answered in the same chat when that bot's agent has quick answers
@@ -124,6 +126,10 @@ def fetch_bots_from_api():
             "companyId": b.get("companyId") or DEFAULT_COMPANY_ID,
             "uiBase": b.get("uiBase") or UI_HOST,
             "allowedUserIds": _normalized_user_ids(b.get("allowedUserIds")),
+            # How company_notice_bot picks the company's notice bot.
+            "receivesCompanyNotices": b.get("receivesCompanyNotices") is True,
+            "createdAt": b.get("createdAt") if isinstance(b.get("createdAt"), str) else None,
+            "agentRole": b.get("agentRole") if isinstance(b.get("agentRole"), str) else None,
             "source": "paperclip",
         })
     return bots
@@ -149,7 +155,7 @@ def load_file_bots():
         print(f"telegram-bridge: could not read the bot file ({type(e).__name__})", flush=True)
         return []
     bots = []
-    for b in raw if isinstance(raw, list) else []:
+    for index, b in enumerate(raw if isinstance(raw, list) else []):
         token = str(b.get("token") or "").strip()
         if not token or not b.get("agentId"):
             continue
@@ -162,6 +168,10 @@ def load_file_bots():
             # The file has never carried a per-bot allowlist; those bots keep
             # using the instance-wide list, exactly as before.
             "allowedUserIds": set(),
+            # A file bot cannot be marked as the company's notice bot, and it
+            # counts as older than any bot connected in the app; among file
+            # bots, the one listed first is the oldest.
+            "fileIndex": index,
             "source": "file",
         })
     return bots
@@ -247,13 +257,14 @@ def cli_env(env, *parts):
 
 
 def fetch_org(company_id):
-    """Return (reports_to, names) maps from a company's live org."""
+    """Return (reports_to, names, roles) maps from a company's live org."""
     data = cli("agent", "list", "-C", company_id) or []
-    reports_to, names = {}, {}
+    reports_to, names, roles = {}, {}, {}
     for a in data:
         reports_to[a["id"]] = a.get("reportsTo")
         names[a["id"]] = a.get("name")
-    return reports_to, names
+        roles[a["id"]] = a.get("role")
+    return reports_to, names, roles
 
 
 def resolve_bot(agent_id, bots_by_agent, reports_to, default_bot):
@@ -264,17 +275,71 @@ def resolve_bot(agent_id, bots_by_agent, reports_to, default_bot):
         if cur in bots_by_agent:
             return bots_by_agent[cur], cur != agent_id
         cur = reports_to.get(cur)
-    return default_bot, True  # fallback: everyone reaches the company's top bot
+    return default_bot, True  # fallback: the company's notice bot
 
 
-def _org_depth(agent_id, reports_to):
-    """Distance from agent to the org root (used to pick a company's top bot)."""
-    d, cur, seen = 0, agent_id, set()
-    while cur and cur not in seen and reports_to.get(cur):
-        seen.add(cur)
-        cur = reports_to.get(cur)
-        d += 1
-    return d
+def _bot_age_key(bot):
+    """Oldest first: every file bot before any app bot (the file is where bots
+    lived before the app had them), file bots in the order the file lists them,
+    app bots by when they were connected (one without a date after those with
+    one). The agent id settles any remaining tie, so the answer never depends
+    on the order the bots happen to arrive in."""
+    if bot.get("source") == "file":
+        return (0, 0, "", bot.get("fileIndex", 0), str(bot.get("agentId")))
+    created = bot.get("createdAt") or ""
+    return (1, 0 if created else 1, created, 0, str(bot.get("agentId")))
+
+
+def _bot_agent_role(bot, roles):
+    role = bot.get("agentRole") or (roles or {}).get(bot.get("agentId"))
+    return str(role).strip().lower() if role else None
+
+
+def company_notice_bot(cbots, roles=None):
+    """The bot that gets a company's approvals, questions and waiting/stalled
+    notices when no agent's own bot (or its boss's) should: a card the board
+    filed itself, or an agent with no bot anywhere above it.
+
+    1. the bot the operator marked in the app ("Sends this company's approvals
+       and questions");
+    2. else the bot whose agent is the CEO (app or file);
+    3. else the oldest bot (see _bot_age_key).
+
+    Never "the first bot in the list": on 27 Sep a newly connected assistant
+    with no boss tied with the CEO for "closest to the top of the org", came
+    first in the list, and started receiving the company's deploy cards.
+    """
+    return choose_company_notice_bot(cbots, roles)[0]
+
+
+def choose_company_notice_bot(cbots, roles=None):
+    """company_notice_bot, plus a few plain words on why it was chosen."""
+    if not cbots:
+        return None, None
+    marked = [b for b in cbots if b.get("source") == "paperclip" and b.get("receivesCompanyNotices") is True]
+    if marked:
+        return min(marked, key=_bot_age_key), "chosen in Paperclip"
+    ceo = [b for b in cbots if _bot_agent_role(b, roles) == "ceo"]
+    if ceo:
+        return min(ceo, key=_bot_age_key), "the CEO's bot"
+    return min(cbots, key=_bot_age_key), "the oldest bot; none is chosen in Paperclip and no CEO has a bot"
+
+
+# The last notice bot logged per company, so the log says it once at start and
+# again only when it changes — the line to look for after a restart.
+LAST_NOTICE_BOT = {}
+
+
+def log_company_notice_bot(company_id, cbots, roles):
+    bot, why = choose_company_notice_bot(cbots, roles)
+    if bot is None:
+        return
+    key = (bot.get("agentId"), why)
+    if LAST_NOTICE_BOT.get(company_id) == key:
+        return
+    LAST_NOTICE_BOT[company_id] = key
+    print(f"telegram-bridge: company {str(company_id)[:8]}: approvals and questions with no bot of their own "
+          f"go to {bot.get('name')} ({why})", flush=True)
 
 
 def approval_title(a):
@@ -337,10 +402,11 @@ def notify_approvals(state, bots):
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("approvals", [])
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        # The company's "top bot" (closest to the org root) is the escalation sink.
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        # Where a card goes when no agent's own bot (or its boss's) should.
+        default_bot = company_notice_bot(cbots, roles)
+        log_company_notice_bot(company_id, cbots, roles)
         for a in items:
             if a.get("status") not in ("pending", "revision_requested"):
                 continue
@@ -417,9 +483,9 @@ def notify_waiting(state, bots):
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("issues", [])
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        default_bot = company_notice_bot(cbots, roles)
         for it in items:
             iid = it.get("id")
             status = it.get("status")
@@ -472,9 +538,9 @@ def notify_stalled_agents(state, bots):
         data = cli("agent", "list", "-C", company_id)
         if data is None:
             continue
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        default_bot = company_notice_bot(cbots, roles)
         for a in data:
             if a.get("status") != "error" or not a.get("errorAlertedAt"):
                 continue
@@ -537,9 +603,9 @@ def notify_interactions(state, bots):
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("interactions", [])
-        reports_to, names = fetch_org(company_id)
+        reports_to, names, roles = fetch_org(company_id)
         bots_by_agent = {b["agentId"]: b for b in cbots}
-        default_bot = min(cbots, key=lambda b: _org_depth(b["agentId"], reports_to))
+        default_bot = company_notice_bot(cbots, roles)
         for it in items:
             iid = it.get("id")
             issue_id = it.get("issueId")

@@ -32,6 +32,11 @@ type BridgeRosterBot = {
   companyId: string;
   uiBase: string | null;
   allowedUserIds: string[];
+  // How the bridge picks the bot that gets the company's approvals and
+  // questions when no agent's own bot should. Passed through unchanged.
+  receivesCompanyNotices?: boolean;
+  createdAt?: string;
+  agentRole?: string | null;
 };
 
 export function registerTelegramCommands(program: Command): void {

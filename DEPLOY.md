@@ -47,6 +47,11 @@ $COMPOSE restart server     # restart app
 # Deploy the latest custom (the gated deploy path — pull + rebuild + swap + health-check):
 ./scripts/deploy-prod.sh            # logs to deploy.log; no-op if custom hasn't moved
 
+# The Telegram bridge is a separate service a deploy does NOT restart (see FORK.md,
+# "Telegram bridge"). After a deploy that changed scripts/telegram-bridge.py:
+systemctl restart paperclip-telegram-bridge
+journalctl -u paperclip-telegram-bridge -n 50 --no-pager   # look for "approvals and questions ... go to"
+
 # (manual equivalent) take an upstream/fork update:
 git pull && $COMPOSE up -d --build
 ```

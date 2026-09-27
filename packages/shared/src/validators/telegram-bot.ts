@@ -64,6 +64,15 @@ export const updateTelegramBotAllowedUsersSchema = z.object({
     .max(MAX_TELEGRAM_BOT_ALLOWED_USERS),
 });
 
+/**
+ * Mark (true) or unmark (false) the bot that gets this company's approvals and
+ * questions. Marking one unmarks every other bot in the company.
+ */
+export const updateTelegramBotCompanyNoticesSchema = z.object({
+  receivesCompanyNotices: z.boolean(),
+});
+
 export type CreateTelegramBotInput = z.infer<typeof createTelegramBotSchema>;
 export type RotateTelegramBotTokenInput = z.infer<typeof rotateTelegramBotTokenSchema>;
 export type UpdateTelegramBotAllowedUsersInput = z.infer<typeof updateTelegramBotAllowedUsersSchema>;
+export type UpdateTelegramBotCompanyNoticesInput = z.infer<typeof updateTelegramBotCompanyNoticesSchema>;
