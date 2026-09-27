@@ -16,6 +16,22 @@
 //           and pass that https URL as media_references[{kind:"image", url}]
 //           (inline data: URIs are rejected by the workflow API). [media-upload-urls, workflows]
 //
+// Models: the workflow's `model` argument is a tool key ("z-turbo") or a raw
+// catalog model id ("dark_beast_z_image_turbo_v9_bf16"). The published tool
+// schema lists the keys; Sogni's own client resolves keys to catalog ids and
+// passes any other id through unchanged (sogni-client Chat/modelRouting.js,
+// resolveHostedToolModelSelector; the argument validator skips the enum on
+// `model`). So a known model is sent by its key and any other catalog model
+// by its id. The live list of models is GET /v1/model-catalog (sogni-catalog.ts).
+//
+// LoRAs: step arguments `loras` (ids, in order, 1-8) and `loraStrengths`
+// (same length, positional) on generate_image and edit_image. Sensitive
+// Content Filter: the workflow-level body field `safe_content_filter`
+// (default true; one setting for the whole workflow, not per step).
+// [creative-agent-workflows "LoRA Steps" and "Sensitive Content Filter";
+// @sogni-ai/sogni-intelligence-client 4.6.2 schemas/tools/generate_image
+// and edit_image, additionalProperties false.]
+//
 // Text-only pictures use generate_image (it takes a seed). Pictures made from
 // reference pictures use edit_image with sourceImageIndex -1 (the first
 // uploaded picture; the others ride along as context pictures). edit_image has
@@ -65,6 +81,77 @@ export const SOGNI_EDIT_MODELS: Record<string, number> = {
   "gpt-image-2.5-flare": 16,
 };
 
+/**
+ * generate_image tool keys and the catalog model each one runs, from Sogni's
+ * own client (@sogni-ai/sogni-client 5.58.0, Chat/modelRouting.js
+ * IMAGE_MODEL_SELECTORS, limited to the keys the published tool schema lists).
+ */
+export const SOGNI_GENERATE_TOOL_KEYS: Record<string, string> = {
+  "z-turbo": "z_image_turbo_bf16",
+  "z-image": "z_image_bf16",
+  "krea-2-turbo": "krea2_turbo_fp8_scaled",
+  "dark-beast-krea2": "dark_beast_krea2_fp8",
+  "dark-beast-z-turbo": "dark_beast_z_image_turbo_v9_bf16",
+  "chroma-v46-flash": "chroma-v.46-flash_fp8",
+  "chroma1-hd": "chroma1-hd_fp8_scaled",
+  "chroma-detail": "chroma-v48-detail-svd_fp8",
+  "qwen-2512": "qwen_image_2512_fp8",
+  "qwen-2512-lightning": "qwen_image_2512_fp8_lightning",
+  "gpt-image-2": "gpt-image-2",
+  "gpt-image-2.5-sunburst": "gpt-image-2.5-sunburst",
+  "gpt-image-2.5-flare": "gpt-image-2.5-flare",
+  "one-obsession-v22": "one_obsession_v22_fp16",
+  "pony-v7": "coreml-cyberrealisticPony_v7",
+  "albedo-xl": "coreml-albedobaseXL_v31Large",
+  "animagine-xl": "coreml-animagineXL40_v4Opt",
+  "anima-pencil-xl": "coreml-animaPencilXL_v500",
+  "art-universe-xl": "coreml-artUniverse_sdxlV60",
+  "hyphoria-real": "coreml-hyphoriaRealIllu_v05",
+  "analog-madness-xl": "coreml-analogMadnessSDXL_xl2",
+  "cyberrealistic-xl": "coreml-cyberrealisticXL_v60",
+  "real-dream-xl": "coreml-realDream_sdxlPony11",
+  "faetastic-xl": "coreml-sdxlFaetastic_v24",
+  "zavychroma-xl": "coreml-zavychromaxl_v80",
+  "pony-faetality": "coreml-ponyFaetality_v11",
+  "dreamshaper-xl": "coreml-DreamShaper-XL1-Alpha2",
+};
+
+/** edit_image tool keys and their catalog models (same source, EDIT_IMAGE_MODEL_SELECTORS). */
+export const SOGNI_EDIT_TOOL_KEYS: Record<string, string> = {
+  "qwen-lightning": "qwen_image_edit_2511_fp8_lightning",
+  qwen: "qwen_image_edit_2511_fp8",
+  "krea-identity-edit": "krea2_identity_edit_v1_2",
+  "dark-beast-krea2-identity-edit": "dark_beast_krea2_identity_edit_v1_2",
+  "gpt-image-2": "gpt-image-2",
+  "gpt-image-2.5-sunburst": "gpt-image-2.5-sunburst",
+  "gpt-image-2.5-flare": "gpt-image-2.5-flare",
+};
+
+export type SogniTool = "generate_image" | "edit_image";
+
+/** A tool key ("z-turbo") becomes its catalog model id; anything else is returned trimmed. */
+export function sogniCanonicalModelId(model: string): string {
+  const trimmed = model.trim();
+  const key = trimmed.toLowerCase();
+  return SOGNI_GENERATE_TOOL_KEYS[key] ?? SOGNI_EDIT_TOOL_KEYS[key] ?? trimmed;
+}
+
+/** What goes in a step's `model` argument: the tool's key when it has one, else the catalog id. */
+export function sogniWorkflowModel(model: string, tool: SogniTool): string {
+  const canonical = sogniCanonicalModelId(model);
+  const keys = tool === "edit_image" ? SOGNI_EDIT_TOOL_KEYS : SOGNI_GENERATE_TOOL_KEYS;
+  const key = Object.keys(keys).find((k) => keys[k] === canonical);
+  return key ?? canonical;
+}
+
+/** At most this many LoRAs on one picture (Sogni's limit, also advertised as constraints.maxPerRequest). */
+export const SOGNI_MAX_LORAS = 8;
+
+export interface SogniLoraPick {
+  id: string;
+  strength: number;
+}
+
 export const SOGNI_TOKEN_TYPES = ["auto", "sogni", "spark"] as const;
 export type SogniTokenType = (typeof SOGNI_TOKEN_TYPES)[number];
 
@@ -81,9 +168,17 @@ const MAX_SEED = 4_294_967_295;
 const MAX_PICTURE_BYTES = 50 * 1024 * 1024;
 const REFERENCE_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"]);
 
+const KNOWN_CANONICAL_IDS = new Set([...Object.values(SOGNI_GENERATE_TOOL_KEYS), ...Object.values(SOGNI_EDIT_TOOL_KEYS)]);
+
+/** A Sogni tool key, or the catalog id of one (the live catalog knows many more; see sogni-catalog.ts). */
 export function isKnownSogniModel(model: string): boolean {
   const id = model.trim().toLowerCase();
-  return (SOGNI_IMAGE_MODELS as readonly string[]).includes(id) || id in SOGNI_EDIT_MODELS;
+  return (
+    (SOGNI_IMAGE_MODELS as readonly string[]).includes(id) ||
+    id in SOGNI_EDIT_MODELS ||
+    id in SOGNI_GENERATE_TOOL_KEYS ||
+    KNOWN_CANONICAL_IDS.has(model.trim())
+  );
 }
 
 export function assertSogniModelId(model: string): string {
@@ -94,14 +189,21 @@ export function assertSogniModelId(model: string): string {
   return trimmed;
 }
 
-/** The edit model used for reference pictures: the asked-for one if it can take references, else the default. */
-export function sogniReferenceModel(model?: string): string {
-  const id = model?.trim().toLowerCase();
-  return id && id in SOGNI_EDIT_MODELS ? id : SOGNI_REFERENCE_MODEL;
+/**
+ * The edit model used for reference pictures: the asked-for one if it can
+ * take references (a known edit model, or one the catalog says edits
+ * pictures: `takesReferences`), else the default edit model.
+ */
+export function sogniReferenceModel(model?: string, takesReferences = false): string {
+  if (!model?.trim()) return SOGNI_REFERENCE_MODEL;
+  const edit = sogniWorkflowModel(model, "edit_image");
+  if (edit in SOGNI_EDIT_MODELS) return edit;
+  return takesReferences ? sogniCanonicalModelId(model) : SOGNI_REFERENCE_MODEL;
 }
 
-export function sogniMaxReferences(model?: string): number {
-  return SOGNI_EDIT_MODELS[sogniReferenceModel(model)] ?? 3;
+/** How many reference pictures the chosen edit model takes (3 for an edit model Sogni's docs give no number for). */
+export function sogniMaxReferences(model?: string, takesReferences = false): number {
+  return SOGNI_EDIT_MODELS[sogniReferenceModel(model, takesReferences)] ?? 3;
 }
 
 /**
@@ -119,7 +221,17 @@ const SIZE_PRESETS: Record<string, { width: number; height: number }> = {
 /** Fal's default size, so an unsized picture has the same shape with either provider. */
 export const SOGNI_DEFAULT_SIZE = "landscape_4_3";
 
-export function sogniSize(imageSize?: string): { width: number; height: number } {
+/** The sides a model takes (from the catalog's width/height ranges); 256-2048 when unknown. */
+export interface SogniSizeBounds {
+  minWidth: number;
+  maxWidth: number;
+  minHeight: number;
+  maxHeight: number;
+}
+
+export const SOGNI_DEFAULT_SIZE_BOUNDS: SogniSizeBounds = { minWidth: 256, maxWidth: 2048, minHeight: 256, maxHeight: 2048 };
+
+export function sogniSize(imageSize?: string, bounds: SogniSizeBounds = SOGNI_DEFAULT_SIZE_BOUNDS): { width: number; height: number } {
   const wanted = (imageSize ?? SOGNI_DEFAULT_SIZE).trim().toLowerCase();
   const preset = SIZE_PRESETS[wanted];
   if (preset) return preset;
@@ -127,10 +239,16 @@ export function sogniSize(imageSize?: string): { width: number; height: number }
   if (exact) {
     const width = Number(exact[1]);
     const height = Number(exact[2]);
-    if (width >= 256 && width <= 2048 && height >= 256 && height <= 2048) return { width, height };
+    if (width >= bounds.minWidth && width <= bounds.maxWidth && height >= bounds.minHeight && height <= bounds.maxHeight) {
+      return { width, height };
+    }
   }
+  const sides =
+    bounds.minWidth === bounds.minHeight && bounds.maxWidth === bounds.maxHeight
+      ? `each side ${bounds.minWidth} to ${bounds.maxWidth}`
+      : `width ${bounds.minWidth} to ${bounds.maxWidth}, height ${bounds.minHeight} to ${bounds.maxHeight}`;
   throw new Error(
-    `Sogni does not know the picture size "${imageSize}". Use one of ${Object.keys(SIZE_PRESETS).join(", ")}, or a size like 1280x720 (each side 256 to 2048).`,
+    `Sogni does not know the picture size "${imageSize}". Use one of ${Object.keys(SIZE_PRESETS).join(", ")}, or a size like 1280x720 (${sides}).`,
   );
 }
 
@@ -291,15 +409,18 @@ export class SogniProvider implements GenerationProvider {
   async generate(input: GenerationInput): Promise<GenerationResult> {
     const deadline = this.now() + this.timeoutMs;
     const references = input.referenceImages ?? [];
-    const size = sogniSize(input.imageSize);
+    const size = sogniSize(input.imageSize, input.sizeBounds);
 
     let step: Json;
     let model: string;
     let sentSeed: number | null = null;
     const mediaReferences: Array<{ kind: "image"; url: string }> = [];
+    const loras = (input.loras ?? []).slice(0, SOGNI_MAX_LORAS);
+    const loraArguments =
+      loras.length > 0 ? { loras: loras.map((lora) => lora.id), loraStrengths: loras.map((lora) => lora.strength) } : {};
     if (references.length > 0) {
-      model = sogniReferenceModel(input.model);
-      const max = sogniMaxReferences(model);
+      model = sogniReferenceModel(input.model, input.modelTakesReferences === true);
+      const max = sogniMaxReferences(model, input.modelTakesReferences === true);
       if (references.length > max) {
         throw new Error(`Sogni's ${model} model takes at most ${max} reference pictures; this asked for ${references.length}.`);
       }
@@ -316,16 +437,30 @@ export class SogniProvider implements GenerationProvider {
           numberOfVariations: 1,
           // Without a size, Sogni keeps the first reference picture's shape.
           ...(input.imageSize ? size : {}),
+          // edit_image takes loras/loraStrengths but no guidance or negativePrompt.
+          ...loraArguments,
         },
       };
     } else {
-      model = assertSogniModelId(input.model ?? this.options.defaultModel ?? SOGNI_DEFAULT_MODEL);
+      model = sogniWorkflowModel(
+        assertSogniModelId(input.model ?? this.options.defaultModel ?? SOGNI_DEFAULT_MODEL),
+        "generate_image",
+      );
       // Always send a seed, so the seed of every picture is known and can be reused.
       sentSeed = typeof input.seed === "number" ? input.seed : Math.floor(Math.random() * MAX_SEED);
       step = {
         id: "picture",
         toolName: "generate_image",
-        arguments: { prompt: input.prompt, model, seed: sentSeed, numberOfVariations: 1, ...size },
+        arguments: {
+          prompt: input.prompt,
+          model,
+          seed: sentSeed,
+          numberOfVariations: 1,
+          ...size,
+          ...(typeof input.guidance === "number" ? { guidance: input.guidance } : {}),
+          ...(input.negativePrompt?.trim() ? { negativePrompt: input.negativePrompt.trim() } : {}),
+          ...loraArguments,
+        },
       };
     }
 
@@ -333,6 +468,8 @@ export class SogniProvider implements GenerationProvider {
       input: { title: "Paperclip picture", steps: [step] },
       token_type: this.options.tokenType ?? "auto",
       app_source: "paperclip-media-studio",
+      // Always said out loud: on, unless an owner/admin saved a look with it off.
+      safe_content_filter: input.safeContentFilter !== false,
       ...(mediaReferences.length > 0 ? { media_references: mediaReferences } : {}),
     };
     // The same key on every retry of this start, so a retry never starts a second (paid) picture.
@@ -369,7 +506,13 @@ export class SogniProvider implements GenerationProvider {
       contentType: picture.contentType,
       imageDataUrl: `data:${picture.contentType};base64,${picture.bytes.toString("base64")}`,
       seed,
-      meta: { seed, workflowId, ...(seedNotUsed ? { seedNotUsed: true } : {}) },
+      meta: {
+        seed,
+        workflowId,
+        ...(seedNotUsed ? { seedNotUsed: true } : {}),
+        ...(loras.length > 0 ? { loras: loras.map((lora) => lora.id) } : {}),
+        ...(input.safeContentFilter === false ? { contentFilter: "off" } : {}),
+      },
     };
   }
 

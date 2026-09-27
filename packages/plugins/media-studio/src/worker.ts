@@ -11,19 +11,35 @@ import {
   type ProviderConfig,
 } from "./providers.js";
 import {
+  SOGNI_MAX_LORAS,
   SOGNI_TOKEN_TYPES,
   assertSogniModelId,
   guardedTransferFetch,
+  sogniCanonicalModelId,
   sogniMaxReferences,
   sogniReferenceModel,
   sogniSize,
+  type SogniLoraPick,
   type SogniTokenType,
 } from "./sogni.js";
+import {
+  SOGNI_NEGATIVE_PROMPT_MAX,
+  SogniCatalog,
+  checkSogniLoras,
+  checkSogniOverrides,
+  lorasForModel,
+  showNumber,
+  sizeBoundsFor,
+  type SogniLoraInfo,
+  type SogniModelInfo,
+} from "./sogni-catalog.js";
 import {
   ACTION_GENERATE,
   ACTION_LOOKS_DELETE,
   ACTION_LOOKS_LIST,
   ACTION_LOOKS_SAVE,
+  ACTION_SOGNI_LORAS,
+  ACTION_SOGNI_MODELS,
   GENERATE_IMAGE_DESCRIPTION,
   GENERATE_IMAGE_PARAMETERS,
   LIST_LOOKS_DESCRIPTION,
@@ -102,9 +118,10 @@ function chooseService(
   requested: PictureService | null,
   callModel: string | undefined,
   look: Look | null,
+  serviceOf: (model: string | null | undefined) => PictureService | null = serviceForModel,
 ): { service: string; useLookModel: boolean } | { error: string } {
-  const callModelService = serviceForModel(callModel);
-  const lookService = look ? (look.provider ?? serviceForModel(look.model)) : null;
+  const callModelService = serviceOf(callModel);
+  const lookService = look ? (look.provider ?? serviceOf(look.model)) : null;
   if (requested) {
     if (callModel && callModelService && callModelService !== requested) {
       return {
@@ -167,19 +184,41 @@ async function toAttachmentBytes(
 //
 // A look is a named recipe a company reuses so its pictures stay consistent:
 // style words added to every prompt, an optional model, an optional fixed
-// seed, and up to four reference pictures from the company's Files. Stored
-// per company in plugin state (scope "company", scope id = the company the
-// host verified for this call), so one company never sees another's looks.
+// seed, and up to four reference pictures from the company's Files. A Sogni
+// look can also carry LoRAs (with strengths), model settings (guidance,
+// "things to avoid" text, picture size) and the Sensitive Content Filter
+// switch. Stored per company in plugin state (scope "company", scope id = the
+// company the host verified for this call), so one company never sees
+// another's looks. Only an owner/admin can save one, and everything in it is
+// checked against Sogni's catalog again before each picture.
+
+export interface LookLora {
+  id: string;
+  /** Sogni's name for it when the look was saved, so the list reads well even when Sogni cannot be reached. */
+  name: string;
+  strength: number;
+}
 
 export interface Look {
   id: string;
   name: string;
   style: string;
   model: string | null;
+  /** Sogni's name for the model when the look was saved ("Dark Beast Z-Image Turbo v9"). */
+  modelName: string | null;
   /** The service this look's pictures are made with (null: the one in settings, or the one its model implies). */
   provider: PictureService | null;
   seed: number | null;
   referenceFileIds: string[];
+  /** Sogni only. */
+  loras: LookLora[];
+  guidance: number | null;
+  negativePrompt: string | null;
+  size: string | null;
+  /** Sogni's Sensitive Content Filter; on unless an owner/admin turned it off (see contentFilterOffBy). */
+  safeContentFilter: boolean;
+  /** The owner/admin (user id) who saved the look with the filter off. The filter is only off with this set. */
+  contentFilterOffBy: string | null;
   updatedAt: string;
 }
 
@@ -198,12 +237,49 @@ function isLook(value: unknown): value is Look {
   return typeof v.id === "string" && typeof v.name === "string" && typeof v.style === "string" && Array.isArray(v.referenceFileIds);
 }
 
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Fill in what older looks do not have: no LoRAs or settings, and the content filter on. */
+function normalizeLook(look: Look): Look {
+  const raw = look as unknown as Record<string, unknown>;
+  const loras = Array.isArray(raw.loras)
+    ? raw.loras.flatMap((item): LookLora[] => {
+        const l = item as Record<string, unknown> | null;
+        if (!l || typeof l.id !== "string" || !l.id || finiteOrNull(l.strength) === null) return [];
+        return [{ id: l.id, name: typeof l.name === "string" && l.name ? l.name : l.id, strength: l.strength as number }];
+      })
+    : [];
+  const offBy = textOrNull(raw.contentFilterOffBy);
+  return {
+    ...look,
+    provider: isPictureService(look.provider) ? look.provider : null,
+    model: textOrNull(raw.model),
+    modelName: textOrNull(raw.modelName),
+    seed: finiteOrNull(raw.seed),
+    loras,
+    guidance: finiteOrNull(raw.guidance),
+    negativePrompt: textOrNull(raw.negativePrompt),
+    size: textOrNull(raw.size),
+    // Off only when saved off by a named owner/admin; anything else is on.
+    safeContentFilter: !(raw.safeContentFilter === false && offBy !== null),
+    contentFilterOffBy: raw.safeContentFilter === false ? offBy : null,
+  };
+}
+
+/** The Sensitive Content Filter is off for this look (saved off by an owner/admin). */
+export function lookFilterOff(look: Look): boolean {
+  return look.safeContentFilter === false && typeof look.contentFilterOffBy === "string" && look.contentFilterOffBy.length > 0;
+}
+
 export async function loadLooks(ctx: PluginContext, companyId: string): Promise<Look[]> {
   const raw = await ctx.state.get(looksScope(companyId));
-  // Looks saved before the service choice existed have no provider: they follow settings/their model.
-  return Array.isArray(raw)
-    ? raw.filter(isLook).map((look) => ({ ...look, provider: isPictureService(look.provider) ? look.provider : null }))
-    : [];
+  return Array.isArray(raw) ? raw.filter(isLook).map(normalizeLook) : [];
 }
 
 function findLook(looks: Look[], name: string): Look | undefined {
@@ -225,7 +301,14 @@ function describeLook(look: Look): string {
     extras.push(`${look.referenceFileIds.length} reference picture${look.referenceFileIds.length === 1 ? "" : "s"}`);
   }
   if (look.provider) extras.push(`made with ${SERVICE_NAME[look.provider]}`);
-  if (look.model) extras.push(`model ${look.model}`);
+  if (look.model) extras.push(`model ${look.modelName ? `${look.modelName} (${look.model})` : look.model}`);
+  if (look.loras.length > 0) {
+    extras.push(`LoRAs: ${look.loras.map((lora) => `${lora.name} at ${showNumber(lora.strength)}`).join(", ")}`);
+  }
+  if (look.guidance !== null) extras.push(`guidance ${showNumber(look.guidance)}`);
+  if (look.size) extras.push(`size ${look.size}`);
+  if (look.negativePrompt) extras.push("has things to avoid");
+  if (lookFilterOff(look)) extras.push("content filter off (pictures can be explicit)");
   const style = look.style.trim() ? `: ${look.style.trim()}` : "";
   return `- ${look.name}${style}${extras.length > 0 ? ` (${extras.join("; ")})` : ""}`;
 }
@@ -265,6 +348,28 @@ function readReferenceIds(value: unknown): string[] | "invalid" {
   return ids;
 }
 
+/** LoRA picks from the looks page: [{id, strength}]. Strength may come as text from a form field. */
+function readLoraPicks(value: unknown): SogniLoraPick[] | "invalid" {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return "invalid";
+  const picks: SogniLoraPick[] = [];
+  for (const item of value) {
+    const row = item as Record<string, unknown> | null;
+    const id = typeof row?.id === "string" ? row.id.trim() : "";
+    const raw = row?.strength;
+    const strength = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+    if (!id || id.length > 200 || typeof strength !== "number" || !Number.isFinite(strength)) return "invalid";
+    picks.push({ id, strength });
+  }
+  return picks;
+}
+
+function readOptionalNumber(value: unknown): number | null | "invalid" {
+  if (value === undefined || value === null || value === "") return null;
+  const n = typeof value === "string" ? Number(value.trim()) : value;
+  return typeof n === "number" && Number.isFinite(n) ? n : "invalid";
+}
+
 function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 }
@@ -274,10 +379,187 @@ function imageRecordScope(companyId: string, fileId: string) {
   return { scopeKind: "company" as const, scopeId: companyId, stateKey: `image:${fileId}` };
 }
 
+// ─── Sogni's catalog, per worker ─────────────────────────────────────────────
+
+const sogniCatalogs = new WeakMap<PluginContext, SogniCatalog>();
+
+/** One catalog (and one 10-minute memory) per plugin worker; reads go through the host's gated fetch. */
+export function sogniCatalogFor(ctx: PluginContext): SogniCatalog {
+  let catalog = sogniCatalogs.get(ctx);
+  if (!catalog) {
+    catalog = new SogniCatalog((url, init) => ctx.http.fetch(url, init));
+    sogniCatalogs.set(ctx, catalog);
+  }
+  return catalog;
+}
+
+async function resolveSogniKey(ctx: PluginContext, cfg: Record<string, unknown>): Promise<string | null> {
+  const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef : "";
+  return ref ? ctx.secrets.resolve(ref) : null;
+}
+
+const CATALOG_UNREACHABLE = "Sogni's list of models could not be reached just now";
+
+/**
+ * A Sogni model must be in Sogni's catalog. When the catalog cannot be read,
+ * only a model an owner/admin already chose (saved in the look being used,
+ * or set in Media Studio settings) is let through.
+ */
+async function resolveSogniModel(
+  catalog: SogniCatalog,
+  model: string,
+  trusted: Array<string | null | undefined>,
+): Promise<{ id: string; info: SogniModelInfo | null } | { error: string }> {
+  let checked: string;
+  try {
+    checked = assertSogniModelId(model);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+  const id = sogniCanonicalModelId(checked);
+  const found = await catalog.model(id);
+  if (found.live) {
+    if (found.model) return { id: found.model.id, info: found.model };
+    return { error: `Sogni has no picture model called "${model}". Leave out the model, or use a saved look.` };
+  }
+  const trustedIds = trusted.filter((t): t is string => typeof t === "string" && t.trim() !== "").map(sogniCanonicalModelId);
+  if (trustedIds.includes(id)) return { id, info: null };
+  return { error: `${CATALOG_UNREACHABLE}, so the model "${model}" could not be checked. Try again in a minute, or use a saved look.` };
+}
+
+/** Public LoRAs, plus the account's own when asked for. `known` is null when they could not be read. */
+async function knownLoras(
+  ctx: PluginContext,
+  cfg: Record<string, unknown>,
+  catalog: SogniCatalog,
+  withPersonal: boolean,
+): Promise<{ known: SogniLoraInfo[] | null; maxPerRequest: number; error?: string }> {
+  const publicCatalog = await catalog.publicLoras();
+  if (!publicCatalog) return { known: null, maxPerRequest: SOGNI_MAX_LORAS };
+  const known = [...publicCatalog.loras];
+  if (withPersonal) {
+    const key = await resolveSogniKey(ctx, cfg);
+    if (!key) return { known: null, maxPerRequest: publicCatalog.maxPerRequest, error: "Your own LoRAs need the Sogni API key picked in Media Studio settings." };
+    const own = await catalog.personalLoras(key);
+    if (own.status === "not-allowed") {
+      return {
+        known: null,
+        maxPerRequest: publicCatalog.maxPerRequest,
+        error: "Your own LoRAs need an active Sogni Unlimited plan on the Sogni account.",
+      };
+    }
+    if (own.status === "unavailable") return { known: null, maxPerRequest: publicCatalog.maxPerRequest };
+    known.push(...own.loras);
+  }
+  return { known, maxPerRequest: publicCatalog.maxPerRequest };
+}
+
 export interface PreparedGeneration {
   input: GenerationInput;
   look: Look | null;
   referenceFileIds: string[];
+  /** Plain sentences for the agent: what of the look could not be used, and why. */
+  notes: string[];
+}
+
+/**
+ * Sogni's part of preparing a picture: the model must be in Sogni's catalog,
+ * and a look's LoRAs and settings must still fit it. Runs before the daily
+ * limit is reserved, so nothing is spent on a picture that would be refused.
+ */
+async function prepareSogni(
+  ctx: PluginContext,
+  cfg: Record<string, unknown>,
+  input: GenerationInput,
+  look: Look | null,
+  lookModelUsed: boolean,
+  referenceCount: number,
+  notes: string[],
+): Promise<{ error: string } | null> {
+  const catalog = sogniCatalogFor(ctx);
+  let info: SogniModelInfo | null = null;
+  if (input.model) {
+    const resolved = await resolveSogniModel(catalog, input.model, [look?.model, textOrNull(cfg.sogniModel)]);
+    if ("error" in resolved) {
+      return lookModelUsed && look && !resolved.error.startsWith(CATALOG_UNREACHABLE)
+        ? { error: `The look "${look.name}" uses the model ${look.modelName ?? look.model}, which Sogni no longer offers. An owner or admin can pick another model for the look.` }
+        : resolved;
+    }
+    input.model = resolved.id;
+    info = resolved.info;
+  }
+  if (info && !info.generates && referenceCount === 0) {
+    return {
+      error: `${info.name} changes existing pictures, so it needs reference pictures. Add reference pictures (to the look or to this picture), or pick another model.`,
+    };
+  }
+  input.modelTakesReferences = info?.takesReferences ?? false;
+  const editing = referenceCount > 0;
+  // With reference pictures the picture comes from an edit model: this one if it edits, else Sogni's default editor.
+  const usesOwnModel =
+    !editing ||
+    (input.model !== undefined &&
+      sogniCanonicalModelId(sogniReferenceModel(input.model, input.modelTakesReferences)) === sogniCanonicalModelId(input.model));
+
+  if (look?.size && !input.imageSize) input.imageSize = look.size;
+  const bounds = sizeBoundsFor(usesOwnModel ? info : null);
+  if (input.imageSize) {
+    try {
+      sogniSize(input.imageSize, bounds);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  input.sizeBounds = bounds;
+
+  if (look && (look.loras.length > 0 || look.guidance !== null || look.negativePrompt !== null)) {
+    if (!lookModelUsed) {
+      notes.push(`The look's LoRAs and model settings were left out, because this picture uses a different model than the look "${look.name}".`);
+    } else if (!usesOwnModel) {
+      notes.push(
+        "The look's LoRAs and model settings were left out: pictures made from reference pictures use Sogni's picture-editing model, which cannot use them. An owner or admin can pick a picture-editing model for the look.",
+      );
+    } else {
+      if (look.loras.length > 0) {
+        if (look.loras.length > SOGNI_MAX_LORAS) {
+          return { error: `The look "${look.name}" has more than ${SOGNI_MAX_LORAS} LoRAs. An owner or admin needs to remove some.` };
+        }
+        const picks = look.loras.map(({ id, strength }) => ({ id, strength }));
+        const loras = await knownLoras(ctx, cfg, catalog, picks.some((p) => p.id.startsWith("personal-")));
+        if (loras.error) return { error: `The look "${look.name}" cannot be used: ${loras.error}` };
+        // Sogni's LoRA list unreadable: the owner/admin-saved picks are used as saved (Sogni limits strengths itself).
+        if (loras.known && info) {
+          const problem = checkSogniLoras(info, picks, loras.known, {
+            maxPerRequest: loras.maxPerRequest,
+            contentFilterOn: !lookFilterOff(look),
+          });
+          if (problem) return { error: `The look "${look.name}" cannot be used as saved: ${problem}` };
+        }
+        input.loras = picks;
+      }
+      if (info) {
+        const problem = checkSogniOverrides(info, { guidance: look.guidance, negativePrompt: look.negativePrompt, size: null });
+        if (problem) return { error: `The look "${look.name}" cannot be used as saved: ${problem}` };
+      }
+      if (!editing) {
+        if (look.guidance !== null) input.guidance = look.guidance;
+        if (look.negativePrompt) input.negativePrompt = look.negativePrompt;
+      } else if (look.guidance !== null || look.negativePrompt) {
+        notes.push('Guidance and "things to avoid" text are not used for pictures made from reference pictures.');
+      }
+    }
+  }
+
+  // Only a look an owner/admin saved with the filter off turns it off. Nothing an agent sends can.
+  input.safeContentFilter = look ? !lookFilterOff(look) : true;
+
+  const max = sogniMaxReferences(input.model, input.modelTakesReferences);
+  if (referenceCount > max) {
+    return {
+      error: `Sogni's ${sogniReferenceModel(input.model, input.modelTakesReferences)} model takes at most ${max} reference pictures (this asked for ${referenceCount}).`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -318,26 +600,32 @@ export async function prepareGeneration(
 
   const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
   const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
-  const chosen = chooseService(settingsProvider, isPictureService(rawProvider) ? rawProvider : null, input.model, look);
+  const catalog = sogniCatalogFor(ctx);
+  const callModel = input.model;
+  // A model name that is neither a known Sogni key nor a Fal path may still be one of Sogni's many models.
+  if (callModel && !serviceForModel(callModel) && isPictureService(settingsProvider)) await catalog.models();
+  const chosen = chooseService(
+    settingsProvider,
+    isPictureService(rawProvider) ? rawProvider : null,
+    callModel,
+    look,
+    (model) => serviceForModel(model) ?? (model && catalog.knows(model) ? "sogni" : null),
+  );
   if ("error" in chosen) return chosen;
   input.provider = chosen.service;
 
   if (look?.style.trim()) input.prompt = `${input.prompt}\n\nStyle: ${look.style.trim()}`;
-  if (!input.model && look?.model && chosen.useLookModel) input.model = look.model;
+  // The look's model is used when the call names no model, or names the look's own model.
+  const lookModelUsed = callModel
+    ? Boolean(look?.model) && sogniCanonicalModelId(callModel) === sogniCanonicalModelId(look!.model!)
+    : Boolean(look?.model) && chosen.useLookModel;
+  if (lookModelUsed && !callModel) input.model = look!.model!;
 
+  const notes: string[] = [];
   // Sogni's own limits, checked here so a mistake does not use up one of the day's pictures.
   if (chosen.service === "sogni") {
-    try {
-      if (input.imageSize) sogniSize(input.imageSize);
-      if (input.model) assertSogniModelId(input.model);
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err) };
-    }
-    if (referenceFileIds.length > sogniMaxReferences(input.model)) {
-      return {
-        error: `Sogni's ${sogniReferenceModel(input.model)} model takes at most ${sogniMaxReferences(input.model)} reference pictures (this asked for ${referenceFileIds.length}).`,
-      };
-    }
+    const problem = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes);
+    if (problem) return problem;
   }
   // An explicit seed wins over the look's fixed seed: "same look, but try
   // the seed from that other picture" is a normal thing to ask.
@@ -348,7 +636,7 @@ export async function prepareGeneration(
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
-  return { input, look, referenceFileIds };
+  return { input, look, referenceFileIds, notes };
 }
 
 function assertCanManageLooks(context: { companyId: string | null; actor: { type: string; canManageCompany?: boolean } }): string {
@@ -359,10 +647,25 @@ function assertCanManageLooks(context: { companyId: string | null; actor: { type
   return context.companyId;
 }
 
+const SOGNI_ONLY_SETTINGS =
+  'LoRAs, guidance, "things to avoid" text, picture size and the content filter switch are Sogni settings. Pick Sogni as the picture service to use them.';
+
+function sameLoras(a: SogniLoraPick[], b: LookLora[]): boolean {
+  return a.length === b.length && a.every((pick, i) => pick.id === b[i]!.id && pick.strength === b[i]!.strength);
+}
+
+/**
+ * Check a look before saving it. For Sogni, the model must be in Sogni's
+ * catalog, each LoRA must work with that model at a strength inside its
+ * range, and each setting must be one the model allows. When Sogni cannot be
+ * reached, only what the look already had is kept.
+ */
 async function validateLookInput(
   ctx: PluginContext,
   companyId: string,
   params: Record<string, unknown>,
+  actorUserId: string | null,
+  existing: Look | null,
 ): Promise<Omit<Look, "id" | "updatedAt">> {
   const name = typeof params.name === "string" ? params.name.trim() : "";
   if (!name) throw new Error("Give the look a name.");
@@ -373,18 +676,6 @@ async function validateLookInput(
   if (rawProvider && !isPictureService(rawProvider)) throw new Error("Pick Fal.ai, Sogni, or the normal picture service for the look.");
   const provider: PictureService | null = isPictureService(rawProvider) ? rawProvider : null;
   const rawModel = typeof params.model === "string" ? params.model.trim() : "";
-  let model: string | null = null;
-  if (rawModel) {
-    const modelService = serviceForModel(rawModel);
-    if (provider && modelService && modelService !== provider) {
-      throw new Error(`"${rawModel}" is a ${SERVICE_NAME[modelService]} model. Pick ${SERVICE_NAME[modelService]} as the service, or another model.`);
-    }
-    try {
-      model = (provider ?? modelService) === "sogni" ? assertSogniModelId(rawModel) : assertFalModelId(rawModel);
-    } catch {
-      throw new Error(`"${rawModel}" is not a model name. Leave it empty to use the normal model.`);
-    }
-  }
   const seed = parseSeed(params.seed);
   if (seed === "invalid") throw new Error(`The seed must be a whole number from 0 to ${MAX_SEED}, or empty.`);
   const refs = readReferenceIds(params.referenceFileIds);
@@ -397,7 +688,115 @@ async function validateLookInput(
       throw new Error(`"${file.originalFilename ?? "That file"}" is not a picture, so it cannot be a reference.`);
     }
   }
-  return { name, style, model, provider, seed: seed ?? null, referenceFileIds: refs };
+
+  const picks = readLoraPicks(params.loras);
+  if (picks === "invalid") throw new Error("The LoRAs could not be read. Pick them again.");
+  const guidance = readOptionalNumber(params.guidance);
+  if (guidance === "invalid") throw new Error("Guidance must be a number, or empty.");
+  const negativePrompt = textOrNull(params.negativePrompt);
+  const size = textOrNull(params.size);
+  const safeContentFilter = params.safeContentFilter !== false;
+
+  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const catalog = sogniCatalogFor(ctx);
+  const modelService = rawModel ? (serviceForModel(rawModel) ?? (catalog.knows(rawModel) ? "sogni" : null)) : null;
+  if (provider && modelService && modelService !== provider) {
+    throw new Error(`"${rawModel}" is a ${SERVICE_NAME[modelService]} model. Pick ${SERVICE_NAME[modelService]} as the service, or another model.`);
+  }
+  const settingsService = isPictureService(String(cfg.provider ?? "").toLowerCase()) ? (String(cfg.provider).toLowerCase() as PictureService) : null;
+  const service = provider ?? modelService ?? settingsService;
+  const base = { name, style, provider, seed: seed ?? null, referenceFileIds: refs };
+
+  if (service !== "sogni") {
+    if (picks.length > 0 || guidance !== null || negativePrompt !== null || size !== null || !safeContentFilter) {
+      throw new Error(SOGNI_ONLY_SETTINGS);
+    }
+    let model: string | null = null;
+    if (rawModel) {
+      try {
+        model = assertFalModelId(rawModel);
+      } catch {
+        throw new Error(`"${rawModel}" is not a model name. Leave it empty to use the normal model.`);
+      }
+    }
+    return { ...base, model, modelName: null, loras: [], guidance: null, negativePrompt: null, size: null, safeContentFilter: true, contentFilterOffBy: null };
+  }
+
+  // ── Sogni ──
+  if (picks.length > SOGNI_MAX_LORAS) throw new Error(`A look can use at most ${SOGNI_MAX_LORAS} LoRAs; this has ${picks.length}. Remove some.`);
+  if (!rawModel && (picks.length > 0 || guidance !== null || negativePrompt !== null)) {
+    throw new Error("Pick a Sogni model first: LoRAs, guidance and \"things to avoid\" text belong to one model.");
+  }
+  if (negativePrompt && negativePrompt.length > SOGNI_NEGATIVE_PROMPT_MAX) {
+    throw new Error(`Keep the "things to avoid" text under ${SOGNI_NEGATIVE_PROMPT_MAX} characters.`);
+  }
+  let model: string | null = null;
+  let info: SogniModelInfo | null = null;
+  if (rawModel) {
+    let checked: string;
+    try {
+      checked = assertSogniModelId(rawModel);
+    } catch {
+      throw new Error(`"${rawModel}" is not a model name. Leave it empty to use the normal model.`);
+    }
+    const found = await catalog.model(checked);
+    if (found.live && !found.model) throw new Error(`Sogni has no picture model called "${rawModel}". Pick one from the list.`);
+    if (found.model) {
+      info = found.model;
+      model = found.model.id;
+    } else if (existing?.model && sogniCanonicalModelId(existing.model) === sogniCanonicalModelId(checked)) {
+      model = existing.model; // Sogni unreachable: keep the model this look already had.
+    } else {
+      throw new Error(`${CATALOG_UNREACHABLE}, so the model could not be checked. Try again in a minute.`);
+    }
+  }
+  const unchanged =
+    existing !== null &&
+    existing.model === model &&
+    existing.guidance === guidance &&
+    existing.negativePrompt === negativePrompt &&
+    existing.size === size;
+  if (info) {
+    const problem = checkSogniOverrides(info, { guidance, negativePrompt, size });
+    if (problem) throw new Error(problem);
+  } else if ((guidance !== null || negativePrompt !== null) && !unchanged) {
+    throw new Error(`${CATALOG_UNREACHABLE}, so the model settings could not be checked. Try again in a minute.`);
+  } else if (size !== null) {
+    sogniSize(size);
+  }
+
+  let loras: LookLora[] = [];
+  if (picks.length > 0) {
+    const listed = info ? await knownLoras(ctx, cfg, catalog, picks.some((p) => p.id.startsWith("personal-"))) : null;
+    if (listed?.error) throw new Error(listed.error);
+    if (info && listed?.known) {
+      const problem = checkSogniLoras(info, picks, listed.known, { maxPerRequest: listed.maxPerRequest, contentFilterOn: safeContentFilter });
+      if (problem) throw new Error(problem);
+      loras = picks.map((pick) => ({ ...pick, name: listed.known!.find((l) => l.id === pick.id)?.name ?? pick.id }));
+    } else if (existing && existing.model === model && sameLoras(picks, existing.loras)) {
+      loras = existing.loras; // Sogni unreachable: keep the LoRAs this look already had.
+    } else {
+      throw new Error("Sogni's list of LoRAs could not be reached just now, so the LoRAs could not be checked. Try again in a minute.");
+    }
+  }
+
+  // Turning the filter off is recorded with who did it; only an owner/admin gets this far.
+  const contentFilterOffBy = safeContentFilter
+    ? null
+    : existing && lookFilterOff(existing)
+      ? existing.contentFilterOffBy
+      : actorUserId ?? "owner-or-admin";
+  return {
+    ...base,
+    model,
+    modelName: info?.name ?? (model && existing?.model === model ? existing.modelName : null),
+    loras,
+    guidance,
+    negativePrompt,
+    size,
+    safeContentFilter,
+    contentFilterOffBy,
+  };
 }
 
 const plugin = definePlugin({
@@ -416,7 +815,8 @@ const plugin = definePlugin({
 
         const prepared = await prepareGeneration(ctx, runCtx.companyId, rawParams);
         if ("error" in prepared) return { error: prepared.error };
-        const { input, look, referenceFileIds } = prepared;
+        const { input, look, referenceFileIds, notes } = prepared;
+        const notesSentence = notes.length > 0 ? ` ${notes.join(" ")}` : "";
 
         // DUR-177 / DUR-4000: enforce the calling agent's own daily image
         // limit (agents.limits.dailyImageGenerations) in code, at the moment
@@ -449,7 +849,7 @@ const plugin = definePlugin({
             );
             await rememberImage(ctx, runCtx.companyId, attachment.id, { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds });
             return {
-              content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.${seedSentence(seed)}${seedNotUsedSentence(result)}`,
+              content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.${seedSentence(seed)}${seedNotUsedSentence(result)}${notesSentence}`,
               data: {
                 ...result,
                 attachmentId: attachment.id,
@@ -477,7 +877,8 @@ const plugin = definePlugin({
               `Made the picture and saved it to the company's Files (not tied to a task); it is shown to the person with your reply. File id: ${file.id}.` +
               lookSentence +
               seedSentence(seed) +
-              seedNotUsedSentence(result),
+              seedNotUsedSentence(result) +
+              notesSentence,
             data: {
               fileId: file.id,
               contentPath: file.contentPath,
@@ -516,6 +917,11 @@ const plugin = definePlugin({
               style: look.style,
               provider: look.provider,
               model: look.model,
+              modelName: look.modelName,
+              loras: look.loras.map((lora) => ({ name: lora.name, id: lora.id, strength: lora.strength })),
+              guidance: look.guidance,
+              size: look.size,
+              contentFilter: lookFilterOff(look) ? "off" : "on",
               seed: look.seed,
               references: look.referenceFileIds.length,
             })),
@@ -545,9 +951,10 @@ const plugin = definePlugin({
 
     ctx.actions.register(ACTION_LOOKS_SAVE, async (params, context) => {
       const companyId = assertCanManageLooks(context);
-      const fields = await validateLookInput(ctx, companyId, params);
       const looks = await loadLooks(ctx, companyId);
       const id = typeof params.id === "string" && params.id ? params.id : null;
+      const existing = id ? (looks.find((look) => look.id === id) ?? null) : null;
+      const fields = await validateLookInput(ctx, companyId, params, context.actor.userId ?? null, existing);
       const clash = looks.find((look) => look.id !== id && look.name.trim().toLowerCase() === fields.name.toLowerCase());
       if (clash) throw new Error(`There is already a look called "${clash.name}". Pick another name.`);
       const updatedAt = new Date().toISOString();
@@ -570,6 +977,53 @@ const plugin = definePlugin({
       const next = looks.filter((look) => look.id !== id);
       await ctx.state.set(looksScope(companyId), next);
       return { looks: next };
+    });
+
+    // Sogni's picture models, for the looks page's model picker. Public
+    // information (no key); anyone in the company may read it.
+    ctx.actions.register(ACTION_SOGNI_MODELS, async (_params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const catalog = sogniCatalogFor(ctx);
+      const list = await catalog.models();
+      const loras = await catalog.publicLoras();
+      const withLoras = loras ? new Set(loras.models) : null;
+      return {
+        models: list.models.map((model) => ({ ...model, hasLoras: withLoras ? withLoras.has(model.id) : null })),
+        live: list.live,
+        updatedAt: list.updatedAt,
+        maxLoras: loras?.maxPerRequest ?? SOGNI_MAX_LORAS,
+        note: list.live ? null : "Sogni's model list could not be reached just now, so only a few well-known models are shown. Try again in a minute.",
+      };
+    });
+
+    // The LoRAs that work with one Sogni model: Sogni's public ones, plus the
+    // account's own for an owner/admin when the Sogni key is set and the
+    // account's plan allows them.
+    ctx.actions.register(ACTION_SOGNI_LORAS, async (params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const rawModel = typeof params.modelId === "string" ? params.modelId.trim() : "";
+      if (!rawModel) throw new Error("Pick a Sogni model first.");
+      const modelId = sogniCanonicalModelId(assertSogniModelId(rawModel));
+      const catalog = sogniCatalogFor(ctx);
+      const publicCatalog = await catalog.publicLoras();
+      const loras = lorasForModel(publicCatalog, modelId);
+      let personal: "included" | "not-allowed" | "no-key" | "unavailable" | "owners-only" = "owners-only";
+      let note: string | null = publicCatalog ? null : "Sogni's list of LoRAs could not be reached just now. Try again in a minute.";
+      if (context.actor.type === "user" && context.actor.canManageCompany === true) {
+        const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+        const key = await resolveSogniKey(ctx, cfg);
+        if (!key) {
+          personal = "no-key";
+        } else {
+          const own = await catalog.personalLoras(key);
+          personal = own.status;
+          loras.push(...own.loras.filter((lora) => lora.modelIds.includes(modelId)));
+          if (own.status === "not-allowed") {
+            note = note ?? "Your own LoRAs are not shown: they need an active Sogni Unlimited plan.";
+          }
+        }
+      }
+      return { modelId, loras, maxLoras: publicCatalog?.maxPerRequest ?? SOGNI_MAX_LORAS, personal, live: publicCatalog !== null, note };
     });
 
     ctx.logger.info(`media-studio plugin ready (looks page: ${LOOKS_PAGE_ROUTE})`);

@@ -1,0 +1,265 @@
+{
+ "status": "success",
+ "data": {
+  "lastUpdated": "1789154602696",
+  "loras": [
+   {
+    "loraId": "krea2-detail-enhancer",
+    "slug": "krea2-detail-enhancer",
+    "name": "Detail Enhancer",
+    "description": "Enhances the image with fine detail and clarity with minimal change to the image. Sharpens all textures and surfaces. A negative value does the opposite.",
+    "relatedLoraIds": [],
+    "ui": {
+     "min": -5,
+     "max": 5,
+     "default": 1,
+     "step": 0.1,
+     "recommendedMin": -2,
+     "recommendedMax": 5,
+     "rangeLabels": {
+      "min": "Less Detailed",
+      "max": "More Detailed"
+     },
+     "category": "detail-composition",
+     "nsfw": false,
+     "sexual": false,
+     "creator": "alcaitiff",
+     "sourceUrl": "https://civitai.com/models/2729908?modelVersionId=3068874",
+     "license": "Civitai terms",
+     "licenseUrl": "https://civitai.com/models/2729908?modelVersionId=3068874"
+    },
+    "compatibleModels": [
+     {
+      "modelId": "krea2_turbo_fp8_scaled",
+      "name": "Krea 2 Turbo"
+     },
+     {
+      "modelId": "krea2_identity_edit_v1_2",
+      "name": "Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "dark_beast_krea2_fp8",
+      "name": "Dark Beast Krea 2 v3"
+     },
+     {
+      "modelId": "dark_beast_krea2_identity_edit_v1_2",
+      "name": "Dark Beast Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "krea2_identity_edit_sogni_v0_3_alpha",
+      "name": "Sogni Krea 2 Identity Edit v0.3 Alpha"
+     }
+    ],
+    "modelIds": [
+     "krea2_turbo_fp8_scaled",
+     "krea2_identity_edit_v1_2",
+     "dark_beast_krea2_fp8",
+     "dark_beast_krea2_identity_edit_v1_2",
+     "krea2_identity_edit_sogni_v0_3_alpha"
+    ]
+   },
+   {
+    "loraId": "krea2-warm-light",
+    "slug": "krea2-warm-light",
+    "name": "Warm Light",
+    "description": "Takes an image from cold and dark to warm golden light. The negative values can go a little further than the positive ones - roughly -6 to 3 - but the sweet spot changes for each image.",
+    "relatedLoraIds": [],
+    "ui": {
+     "min": -10,
+     "max": 10,
+     "default": 1,
+     "step": 0.1,
+     "recommendedMin": -3,
+     "recommendedMax": 3,
+     "rangeLabels": {
+      "min": "Cooler & Darker",
+      "max": "Warmer & Golden"
+     },
+     "category": "lighting",
+     "nsfw": false,
+     "sexual": false,
+     "creator": "alcaitiff",
+     "sourceUrl": "https://civitai.com/models/2764310?modelVersionId=3111233",
+     "license": "Civitai terms",
+     "licenseUrl": "https://civitai.com/models/2764310?modelVersionId=3111233"
+    },
+    "compatibleModels": [
+     {
+      "modelId": "krea2_turbo_fp8_scaled",
+      "name": "Krea 2 Turbo"
+     },
+     {
+      "modelId": "krea2_identity_edit_v1_2",
+      "name": "Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "dark_beast_krea2_fp8",
+      "name": "Dark Beast Krea 2 v3"
+     },
+     {
+      "modelId": "dark_beast_krea2_identity_edit_v1_2",
+      "name": "Dark Beast Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "krea2_identity_edit_sogni_v0_3_alpha",
+      "name": "Sogni Krea 2 Identity Edit v0.3 Alpha"
+     }
+    ],
+    "modelIds": [
+     "krea2_turbo_fp8_scaled",
+     "krea2_identity_edit_v1_2",
+     "dark_beast_krea2_fp8",
+     "dark_beast_krea2_identity_edit_v1_2",
+     "krea2_identity_edit_sogni_v0_3_alpha"
+    ]
+   },
+   {
+    "loraId": "krea2-candid",
+    "slug": "krea2-candid",
+    "name": "Editorial <-> Candid",
+    "description": "Reduces the staged look of photos, and even the \"AI look\", by breaking eye contact and making the composition and posing less perfect. Recommended range 3.0 to 9.0.",
+    "relatedLoraIds": [],
+    "ui": {
+     "min": -10,
+     "max": 10,
+     "default": 3,
+     "step": 0.1,
+     "recommendedMin": 3,
+     "recommendedMax": 9,
+     "rangeLabels": {
+      "min": "More Editorial",
+      "max": "More Candid"
+     },
+     "category": "art-direction",
+     "nsfw": false,
+     "sexual": false,
+     "creator": "Loraholic",
+     "sourceUrl": "https://civitai.com/models/2774295?modelVersionId=3123867",
+     "license": "Civitai terms",
+     "licenseUrl": "https://civitai.com/models/2774295?modelVersionId=3123867"
+    },
+    "compatibleModels": [
+     {
+      "modelId": "krea2_turbo_fp8_scaled",
+      "name": "Krea 2 Turbo"
+     },
+     {
+      "modelId": "krea2_identity_edit_v1_2",
+      "name": "Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "dark_beast_krea2_fp8",
+      "name": "Dark Beast Krea 2 v3"
+     },
+     {
+      "modelId": "dark_beast_krea2_identity_edit_v1_2",
+      "name": "Dark Beast Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "krea2_identity_edit_sogni_v0_3_alpha",
+      "name": "Sogni Krea 2 Identity Edit v0.3 Alpha"
+     }
+    ],
+    "modelIds": [
+     "krea2_turbo_fp8_scaled",
+     "krea2_identity_edit_v1_2",
+     "dark_beast_krea2_fp8",
+     "dark_beast_krea2_identity_edit_v1_2",
+     "krea2_identity_edit_sogni_v0_3_alpha"
+    ]
+   },
+   {
+    "loraId": "krea2-realism-engine",
+    "slug": "krea2-realism-engine",
+    "name": "Realism Engine v3",
+    "description": "One of the most popular uncensored LoRAs for Krea 2. Rather than a slider, it is a full concept and realism finetune: it carries deep trained knowledge of mature themes and subject matter that did not ship with the base model, and pushes output toward photographic realism. The author's default is 0.8; above roughly 1.0 skin starts to look plastic.\n\nThis LoRA often works best with Krea2FilterBypass LoRA also added to your generation.",
+    "relatedLoraIds": [
+     "krea2-filter-bypass-2",
+     "krea2-filter-bypass-3"
+    ],
+    "ui": {
+     "min": 0,
+     "max": 2,
+     "default": 0.8,
+     "step": 0.1,
+     "recommendedMin": 0.5,
+     "recommendedMax": 1,
+     "category": "popular-community-fine-tunes",
+     "nsfw": true,
+     "sexual": true,
+     "creator": "razzz",
+     "sourceUrl": "https://civitai.red/models/2688234?modelVersionId=3109006",
+     "license": "Civitai terms",
+     "licenseUrl": "https://civitai.red/models/2688234?modelVersionId=3109006"
+    },
+    "compatibleModels": [
+     {
+      "modelId": "krea2_turbo_fp8_scaled",
+      "name": "Krea 2 Turbo"
+     },
+     {
+      "modelId": "krea2_identity_edit_v1_2",
+      "name": "Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "dark_beast_krea2_fp8",
+      "name": "Dark Beast Krea 2 v3"
+     },
+     {
+      "modelId": "dark_beast_krea2_identity_edit_v1_2",
+      "name": "Dark Beast Krea 2 Identity Edit v1.2"
+     },
+     {
+      "modelId": "krea2_identity_edit_sogni_v0_3_alpha",
+      "name": "Sogni Krea 2 Identity Edit v0.3 Alpha"
+     }
+    ],
+    "modelIds": [
+     "krea2_turbo_fp8_scaled",
+     "krea2_identity_edit_v1_2",
+     "dark_beast_krea2_fp8",
+     "dark_beast_krea2_identity_edit_v1_2",
+     "krea2_identity_edit_sogni_v0_3_alpha"
+    ]
+   }
+  ],
+  "models": [
+   "dark_beast_krea2_fp8",
+   "dark_beast_krea2_identity_edit_v1_2",
+   "krea2_identity_edit_sogni_v0_3_alpha",
+   "krea2_identity_edit_v1_2",
+   "krea2_turbo_fp8_scaled",
+   "minimax-h3-fastvideo-int8_a2v_turbo",
+   "minimax-h3-fastvideo-int8_a2v_turbo_2stage",
+   "minimax-h3-fastvideo-int8_flf2v_turbo",
+   "minimax-h3-fastvideo-int8_flf2v_turbo_2stage",
+   "minimax-h3-fastvideo-int8_flfa2v_turbo",
+   "minimax-h3-fastvideo-int8_flfa2v_turbo_2stage",
+   "minimax-h3-fastvideo-int8_i2v_turbo",
+   "minimax-h3-fastvideo-int8_i2v_turbo_2stage",
+   "minimax-h3-fastvideo-int8_ia2v_turbo",
+   "minimax-h3-fastvideo-int8_ia2v_turbo_2stage",
+   "minimax-h3-fastvideo-int8_t2v_turbo",
+   "minimax-h3-fastvideo-int8_t2v_turbo_2stage",
+   "minimax-h3-fl2va-fp8_flf2v",
+   "minimax-h3-fl2va-fp8_flf2v_balanced",
+   "minimax-h3-fl2va-fp8_flf2v_turbo",
+   "minimax-h3-fl2va-fp8_i2v",
+   "minimax-h3-fl2va-fp8_i2v_balanced",
+   "minimax-h3-fl2va-fp8_i2v_turbo",
+   "minimax-h3-fl2va-fp8_t2v",
+   "minimax-h3-fl2va-fp8_t2v_balanced",
+   "minimax-h3-fl2va-fp8_t2v_turbo",
+   "minimax-h3-ref2va-fp8_r2v",
+   "minimax-h3-ref2va-fp8_r2v_2stage",
+   "minimax-h3-ref2va-fp8_r2v_balanced",
+   "minimax-h3-ref2va-fp8_r2v_balanced_2stage",
+   "minimax-h3-ref2va-fp8_r2v_turbo"
+  ],
+  "constraints": {
+   "maxPerRequest": 8,
+   "minStrength": -100,
+   "maxStrength": 100
+  }
+ }
+}
