@@ -563,8 +563,16 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             init: Object.keys(serializedInit).length > 0 ? serializedInit : undefined,
           });
 
-          // Reconstruct a Response-like object from the serialized result
-          return new Response(result.body, {
+          // Reconstruct a Response-like object from the serialized result.
+          // Prefer the exact bytes: rebuilding from the UTF-8 text corrupts
+          // pictures and other binary downloads.
+          const nullBodyStatus = [101, 103, 204, 205, 304].includes(result.status);
+          const responseBody = nullBodyStatus
+            ? null
+            : typeof result.bodyBase64 === "string"
+              ? new Uint8Array(Buffer.from(result.bodyBase64, "base64"))
+              : result.body;
+          return new Response(responseBody, {
             status: result.status,
             statusText: result.statusText,
             headers: result.headers,

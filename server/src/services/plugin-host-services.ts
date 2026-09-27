@@ -1121,7 +1121,16 @@ export function buildHostServices(
 
         try {
           const init = params.init as RequestInit | undefined;
-          return await executePinnedHttpRequest(target, init, controller.signal);
+          const response = await executePinnedHttpRequest(target, init, controller.signal);
+          // `bodyBase64` carries the exact bytes so a plugin can download a
+          // picture or any other binary file; `body` stays for text callers.
+          return {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+            body: response.body,
+            bodyBase64: response.bodyBytes.toString("base64"),
+          };
         } finally {
           clearTimeout(timeout);
         }

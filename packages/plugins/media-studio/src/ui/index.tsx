@@ -285,10 +285,13 @@ type Look = {
   name: string;
   style: string;
   model: string | null;
+  provider?: "fal" | "sogni" | null;
   seed: number | null;
   referenceFileIds: string[];
   updatedAt: string;
 };
+
+const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni" };
 
 type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number };
 
@@ -300,9 +303,9 @@ function fileContentPath(fileId: string) {
   return `/api/attachments/${fileId}/content`;
 }
 
-type LookDraft = { id: string | null; name: string; style: string; model: string; seed: string; referenceFileIds: string[] };
+type LookDraft = { id: string | null; name: string; style: string; provider: string; model: string; seed: string; referenceFileIds: string[] };
 
-const EMPTY_DRAFT: LookDraft = { id: null, name: "", style: "", model: "", seed: "", referenceFileIds: [] };
+const EMPTY_DRAFT: LookDraft = { id: null, name: "", style: "", provider: "", model: "", seed: "", referenceFileIds: [] };
 
 export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps) {
   const companyId = context.companyId;
@@ -360,6 +363,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
             id: look.id,
             name: look.name,
             style: look.style,
+            provider: look.provider ?? "",
             model: look.model ?? "",
             seed: look.seed === null ? "" : String(look.seed),
             referenceFileIds: [...look.referenceFileIds],
@@ -389,6 +393,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
         id: draft.id,
         name: draft.name,
         style: draft.style,
+        provider: draft.provider || null,
         model: draft.model,
         seed: draft.seed.trim() === "" ? null : draft.seed.trim(),
         referenceFileIds: draft.referenceFileIds,
@@ -448,6 +453,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
               {look.style ? <div style={{ whiteSpace: "pre-wrap" }}>{look.style}</div> : <div style={{ opacity: 0.6 }}>No style words.</div>}
               <div style={{ opacity: 0.7, fontSize: 12 }}>
                 {look.seed !== null ? `Fixed seed ${look.seed}` : "New seed each time"}
+                {look.provider ? ` · Made with ${SERVICE_LABEL[look.provider] ?? look.provider}` : ""}
                 {look.model ? ` · Model ${look.model}` : ""}
               </div>
               {look.referenceFileIds.length > 0 ? (
@@ -494,9 +500,22 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
               <span>Fixed seed (optional)</span>
               <input value={draft.seed} inputMode="numeric" onChange={(e) => setDraft({ ...draft, seed: e.target.value.replace(/[^0-9]/g, "") })} style={input} placeholder="Leave empty for a new one each time" />
             </label>
+            <label style={{ ...field, flex: "1 1 160px" }}>
+              <span>Picture service</span>
+              <select value={draft.provider} onChange={(e) => setDraft({ ...draft, provider: e.target.value })} style={input}>
+                <option value="">The normal one (from settings)</option>
+                <option value="fal">Fal.ai</option>
+                <option value="sogni">Sogni</option>
+              </select>
+            </label>
             <label style={{ ...field, flex: "2 1 240px" }}>
               <span>Model (optional)</span>
-              <input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} style={input} placeholder="Leave empty to use the normal one" />
+              <input
+                value={draft.model}
+                onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+                style={input}
+                placeholder={draft.provider === "sogni" ? "For example z-turbo" : draft.provider === "fal" ? "For example fal-ai/flux/dev" : "Leave empty to use the normal one"}
+              />
             </label>
           </div>
           <div style={field}>

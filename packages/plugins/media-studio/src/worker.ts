@@ -2,11 +2,23 @@ import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@p
 import {
   MAX_SEED,
   assertFalModelId,
+  isPictureService,
   selectProvider,
+  serviceForModel,
   type GenerationInput,
   type GenerationResult,
+  type PictureService,
   type ProviderConfig,
 } from "./providers.js";
+import {
+  SOGNI_TOKEN_TYPES,
+  assertSogniModelId,
+  guardedTransferFetch,
+  sogniMaxReferences,
+  sogniReferenceModel,
+  sogniSize,
+  type SogniTokenType,
+} from "./sogni.js";
 import {
   ACTION_GENERATE,
   ACTION_LOOKS_DELETE,
@@ -27,18 +39,29 @@ import {
  */
 async function runGeneration(ctx: PluginContext, input: GenerationInput): Promise<GenerationResult> {
   const cfg = (await ctx.config.get()) as Record<string, unknown>;
-  const provider = String(cfg.provider ?? "mock");
+  // A per-call choice or a look's service (already checked in prepareGeneration) wins over settings.
+  const provider = input.provider ?? String(cfg.provider ?? "mock");
 
   const providerConfig: ProviderConfig = {
     provider,
-    falModel: typeof cfg.falModel === "string" ? cfg.falModel : undefined,
+    falModel: typeof cfg.falModel === "string" && cfg.falModel.trim() ? cfg.falModel.trim() : undefined,
     comfyUrl: typeof cfg.comfyUrl === "string" && cfg.comfyUrl ? cfg.comfyUrl : undefined,
+    sogniModel: typeof cfg.sogniModel === "string" && cfg.sogniModel.trim() ? cfg.sogniModel.trim() : undefined,
+    sogniTokenType: (SOGNI_TOKEN_TYPES as readonly string[]).includes(String(cfg.sogniTokenType))
+      ? (cfg.sogniTokenType as SogniTokenType)
+      : "auto",
+    sogniTransferFetch: guardedTransferFetch,
   };
 
   if (provider === "fal") {
     const ref = typeof cfg.falKeySecretRef === "string" ? cfg.falKeySecretRef : "";
     if (!ref) throw new Error("Set the Fal.ai API key secret reference in Media Studio settings.");
     providerConfig.falKey = await ctx.secrets.resolve(ref);
+  }
+  if (provider === "sogni") {
+    const ref = typeof cfg.sogniKeySecretRef === "string" ? cfg.sogniKeySecretRef : "";
+    if (!ref) throw new Error("Pick the Sogni API key in Media Studio settings (it comes from the company's Secrets).");
+    providerConfig.sogniKey = await ctx.secrets.resolve(ref);
   }
 
   const impl = selectProvider(providerConfig, (url, init) => ctx.http.fetch(url, init));
@@ -63,6 +86,38 @@ function toInput(params: Record<string, unknown>): GenerationInput {
     model: typeof params.model === "string" && params.model.trim() ? params.model.trim() : undefined,
     seed: typeof seed === "number" ? seed : undefined,
   };
+}
+
+const SERVICE_NAME: Record<PictureService, string> = { fal: "Fal.ai", sogni: "Sogni" };
+
+/**
+ * Which service makes this picture. In order: the per-call provider; a model
+ * the call names (a Sogni model name or a Fal model path picks its service);
+ * the look's service (set on the look, or implied by the look's model); the
+ * settings. Only a per-call provider moves away from mock/ComfyUI: those are
+ * chosen on purpose (testing, own server) and must not start spending.
+ */
+function chooseService(
+  settingsProvider: string,
+  requested: PictureService | null,
+  callModel: string | undefined,
+  look: Look | null,
+): { service: string; useLookModel: boolean } | { error: string } {
+  const callModelService = serviceForModel(callModel);
+  const lookService = look ? (look.provider ?? serviceForModel(look.model)) : null;
+  if (requested) {
+    if (callModel && callModelService && callModelService !== requested) {
+      return {
+        error: `The model ${callModel} is a ${SERVICE_NAME[callModelService]} model, not a ${SERVICE_NAME[requested]} one. Leave out the model, or use ${SERVICE_NAME[callModelService]}.`,
+      };
+    }
+    return { service: requested, useLookModel: !lookService || lookService === requested };
+  }
+  if (isPictureService(settingsProvider)) {
+    if (callModelService) return { service: callModelService, useLookModel: false };
+    if (!callModel && lookService) return { service: lookService, useLookModel: true };
+  }
+  return { service: settingsProvider, useLookModel: !lookService || lookService === settingsProvider };
 }
 
 const DATA_URL_PATTERN = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/s;
@@ -121,6 +176,8 @@ export interface Look {
   name: string;
   style: string;
   model: string | null;
+  /** The service this look's pictures are made with (null: the one in settings, or the one its model implies). */
+  provider: PictureService | null;
   seed: number | null;
   referenceFileIds: string[];
   updatedAt: string;
@@ -143,7 +200,10 @@ function isLook(value: unknown): value is Look {
 
 export async function loadLooks(ctx: PluginContext, companyId: string): Promise<Look[]> {
   const raw = await ctx.state.get(looksScope(companyId));
-  return Array.isArray(raw) ? raw.filter(isLook) : [];
+  // Looks saved before the service choice existed have no provider: they follow settings/their model.
+  return Array.isArray(raw)
+    ? raw.filter(isLook).map((look) => ({ ...look, provider: isPictureService(look.provider) ? look.provider : null }))
+    : [];
 }
 
 function findLook(looks: Look[], name: string): Look | undefined {
@@ -164,6 +224,7 @@ function describeLook(look: Look): string {
   if (look.referenceFileIds.length > 0) {
     extras.push(`${look.referenceFileIds.length} reference picture${look.referenceFileIds.length === 1 ? "" : "s"}`);
   }
+  if (look.provider) extras.push(`made with ${SERVICE_NAME[look.provider]}`);
   if (look.model) extras.push(`model ${look.model}`);
   const style = look.style.trim() ? `: ${look.style.trim()}` : "";
   return `- ${look.name}${style}${extras.length > 0 ? ` (${extras.join("; ")})` : ""}`;
@@ -236,6 +297,10 @@ export async function prepareGeneration(
   }
   const requestedRefs = readReferenceIds(params.referenceFileIds);
   if (requestedRefs === "invalid") return { error: "referenceFileIds must be a list of file ids." };
+  const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
+  if (rawProvider && !isPictureService(rawProvider)) {
+    return { error: `"${String(params.provider)}" is not a picture service. Use fal (Fal.ai) or sogni (Sogni), or leave it out.` };
+  }
 
   let look: Look | null = null;
   const lookName = typeof params.look === "string" ? params.look.trim() : "";
@@ -251,8 +316,29 @@ export async function prepareGeneration(
     return { error: `At most ${MAX_REFERENCE_FILES} reference pictures can be used at once (this asked for ${referenceFileIds.length}).` };
   }
 
+  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
+  const chosen = chooseService(settingsProvider, isPictureService(rawProvider) ? rawProvider : null, input.model, look);
+  if ("error" in chosen) return chosen;
+  input.provider = chosen.service;
+
   if (look?.style.trim()) input.prompt = `${input.prompt}\n\nStyle: ${look.style.trim()}`;
-  if (!input.model && look?.model) input.model = look.model;
+  if (!input.model && look?.model && chosen.useLookModel) input.model = look.model;
+
+  // Sogni's own limits, checked here so a mistake does not use up one of the day's pictures.
+  if (chosen.service === "sogni") {
+    try {
+      if (input.imageSize) sogniSize(input.imageSize);
+      if (input.model) assertSogniModelId(input.model);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+    if (referenceFileIds.length > sogniMaxReferences(input.model)) {
+      return {
+        error: `Sogni's ${sogniReferenceModel(input.model)} model takes at most ${sogniMaxReferences(input.model)} reference pictures (this asked for ${referenceFileIds.length}).`,
+      };
+    }
+  }
   // An explicit seed wins over the look's fixed seed: "same look, but try
   // the seed from that other picture" is a normal thing to ask.
   if (input.seed === undefined && look?.seed !== null && look?.seed !== undefined) input.seed = look.seed;
@@ -283,11 +369,18 @@ async function validateLookInput(
   if (name.length > LOOK_NAME_MAX) throw new Error(`Keep the name under ${LOOK_NAME_MAX} characters.`);
   const style = typeof params.style === "string" ? params.style.trim() : "";
   if (style.length > LOOK_STYLE_MAX) throw new Error(`Keep the style text under ${LOOK_STYLE_MAX} characters.`);
+  const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
+  if (rawProvider && !isPictureService(rawProvider)) throw new Error("Pick Fal.ai, Sogni, or the normal picture service for the look.");
+  const provider: PictureService | null = isPictureService(rawProvider) ? rawProvider : null;
   const rawModel = typeof params.model === "string" ? params.model.trim() : "";
   let model: string | null = null;
   if (rawModel) {
+    const modelService = serviceForModel(rawModel);
+    if (provider && modelService && modelService !== provider) {
+      throw new Error(`"${rawModel}" is a ${SERVICE_NAME[modelService]} model. Pick ${SERVICE_NAME[modelService]} as the service, or another model.`);
+    }
     try {
-      model = assertFalModelId(rawModel);
+      model = (provider ?? modelService) === "sogni" ? assertSogniModelId(rawModel) : assertFalModelId(rawModel);
     } catch {
       throw new Error(`"${rawModel}" is not a model name. Leave it empty to use the normal model.`);
     }
@@ -304,7 +397,7 @@ async function validateLookInput(
       throw new Error(`"${file.originalFilename ?? "That file"}" is not a picture, so it cannot be a reference.`);
     }
   }
-  return { name, style, model, seed: seed ?? null, referenceFileIds: refs };
+  return { name, style, model, provider, seed: seed ?? null, referenceFileIds: refs };
 }
 
 const plugin = definePlugin({
@@ -354,9 +447,9 @@ const plugin = definePlugin({
               runCtx.companyId,
               { authorAgentId: runCtx.agentId, runId: runCtx.runId },
             );
-            await rememberImage(ctx, runCtx.companyId, attachment.id, { seed, prompt: input.prompt, look, model: result.model, referenceFileIds });
+            await rememberImage(ctx, runCtx.companyId, attachment.id, { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds });
             return {
-              content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.${seedSentence(seed)}`,
+              content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.${seedSentence(seed)}${seedNotUsedSentence(result)}`,
               data: {
                 ...result,
                 attachmentId: attachment.id,
@@ -377,13 +470,14 @@ const plugin = definePlugin({
             runCtx.companyId,
             { runId: runCtx.runId },
           );
-          await rememberImage(ctx, runCtx.companyId, file.id, { seed, prompt: input.prompt, look, model: result.model, referenceFileIds });
+          await rememberImage(ctx, runCtx.companyId, file.id, { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds });
           const lookSentence = look ? ` Used the saved look "${look.name}".` : "";
           return {
             content:
               `Made the picture and saved it to the company's Files (not tied to a task); it is shown to the person with your reply. File id: ${file.id}.` +
               lookSentence +
-              seedSentence(seed),
+              seedSentence(seed) +
+              seedNotUsedSentence(result),
             data: {
               fileId: file.id,
               contentPath: file.contentPath,
@@ -416,7 +510,16 @@ const plugin = definePlugin({
         if (looks.length === 0) return { content: lookNamesSentence(looks), data: { looks: [] } };
         return {
           content: `Saved looks:\n${looks.map(describeLook).join("\n")}`,
-          data: { looks: looks.map((look) => ({ name: look.name, style: look.style, seed: look.seed, references: look.referenceFileIds.length })) },
+          data: {
+            looks: looks.map((look) => ({
+              name: look.name,
+              style: look.style,
+              provider: look.provider,
+              model: look.model,
+              seed: look.seed,
+              references: look.referenceFileIds.length,
+            })),
+          },
         };
       },
     );
@@ -477,6 +580,13 @@ const plugin = definePlugin({
   },
 });
 
+/** Sogni cannot take a seed for a picture made from reference pictures: say so rather than pretend. */
+function seedNotUsedSentence(result: GenerationResult): string {
+  return result.meta?.seedNotUsed === true
+    ? " Sogni does not use a seed when it works from reference pictures, so the seed was not applied."
+    : "";
+}
+
 function seedSentence(seed: number | null): string {
   return seed === null ? "" : ` Seed: ${seed}. To make a close variation of this picture later, pass seed ${seed} again.`;
 }
@@ -490,13 +600,14 @@ async function rememberImage(
   ctx: PluginContext,
   companyId: string,
   fileId: string,
-  record: { seed: number | null; prompt: string; look: Look | null; model?: string; referenceFileIds: string[] },
+  record: { seed: number | null; prompt: string; look: Look | null; provider: string; model?: string; referenceFileIds: string[] },
 ): Promise<void> {
   try {
     await ctx.state.set(imageRecordScope(companyId, fileId), {
       seed: record.seed,
       prompt: record.prompt,
       look: record.look?.name ?? null,
+      provider: record.provider,
       model: record.model ?? null,
       referenceFileIds: record.referenceFileIds,
       createdAt: new Date().toISOString(),

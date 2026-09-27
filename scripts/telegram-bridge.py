@@ -59,6 +59,7 @@ UI_HOST = os.environ.get("PAPERCLIP_UI_HOST", "https://paperclip-prod.tailc4d456
 CONFIG_FILE = os.environ.get("TELEGRAM_AGENTS_FILE", "/root/paperclip/.telegram-agents.json")
 STATE_FILE = os.environ.get("TELEGRAM_STATE_FILE", "/root/paperclip/.telegram-state.json")
 CLI = "cd /app && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts"
+CHAT_SEND_TIMEOUT_SECONDS = 200
 ARGS = f"--api-base {API_BASE} --data-dir {DATA_DIR} --json"
 
 # DUR-3978: two-way chat.
@@ -256,13 +257,13 @@ def cli(*parts):
         return None
 
 
-def cli_env(env, *parts):
+def cli_env(env, *parts, timeout=90):
     args = ["docker", "exec"]
     for k, v in env.items():
         args += ["-e", f"{k}={v}"]
     args += [CONTAINER, "sh", "-lc", f"{CLI} {' '.join(parts)} {ARGS}"]
     try:
-        return json.loads(subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=90).decode())
+        return json.loads(subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=timeout).decode())
     except Exception as e:
         print(f"cli_env error ({parts[0] if parts else '?'}): {e}", flush=True)
         return None
@@ -951,7 +952,9 @@ def chat_send(bot, text, conversation_id=None, lane=None):
         parts += ["--conversation-id", conversation_id]
     if lane in ("a", "b"):
         parts += ["--lane", lane]
-    return cli_env({"TT": text}, *parts)
+    # A quick answer can include making a picture, which may take up to about
+    # two minutes, so wait longer than for other commands.
+    return cli_env({"TT": text}, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
 
 
 def _refused(res):
