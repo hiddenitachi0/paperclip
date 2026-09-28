@@ -1,6 +1,7 @@
 import { pgTable, uuid, text, integer, boolean, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { personas } from "./personas.js";
+import { routines } from "./routines.js";
 
 // DUR-134: one row per platform account a persona publishes to. The 23
 // August operator decision makes this a per-persona-per-channel safety
@@ -47,6 +48,15 @@ export const personaAccounts = pgTable(
     // Per-persona-account kill switch. Checked at the top of every publish
     // attempt; effective on the very next attempt, no propagation delay.
     publishingPaused: boolean("publishing_paused").notNull().default(false),
+    // DUR-4016: the operator-set cadence this account writes on, wired
+    // through the existing routines/routine_triggers primitive (item 4 of
+    // this ticket's own DoD) rather than a bare cron column here. The
+    // routine fires an issue that briefs the persona's agent to write and
+    // queue a post; attemptPublish (see persona-publisher-sweep.ts) is what
+    // actually moves an already-queued post out the door, on its own tick,
+    // independent of this. ON DELETE SET NULL: deleting the routine (e.g.
+    // via the generic routines UI) must not fail the account row.
+    scheduleRoutineId: uuid("schedule_routine_id").references(() => routines.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -6,13 +6,18 @@
 // createPersonaAccountSchema before this service is ever called.
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companySecretBindings, personaAccounts, personas } from "@paperclipai/db";
+import { agents, companySecretBindings, personaAccounts, personas } from "@paperclipai/db";
 import type {
   CreatePersonaAccountInput,
+  SetPersonaAccountScheduleInput,
   UpdatePersonaAccountInput,
 } from "@paperclipai/shared/validators/persona-account";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { secretService } from "./secrets.js";
+import { personaService } from "./personas.js";
+import { routineService } from "./routines.js";
+
+type ScheduleActor = { agentId?: string | null; userId?: string | null };
 
 // DUR-134: the persona_accounts secret binding always lives at this single
 // configPath -- one credential per account, never a map of several. Kept as
@@ -171,6 +176,134 @@ export function personaAccountsService(db: Db) {
     await db.delete(personaAccounts).where(eq(personaAccounts.id, accountId));
   }
 
+  // DUR-4016 (DUR-134 item 4, review follow-up): the schedule the persona
+  // WRITES on -- distinct from personaPublisherSweep, which drains posts
+  // that already exist. Wired through the existing routines/routine_triggers
+  // primitive rather than a bare cron column: the routine fires a real issue
+  // that briefs the assigned agent to write and queue a post for this
+  // account (routine.description becomes the issue body, per
+  // dispatchRoutineRun), which is exactly the operator-set-schedule model
+  // the rest of the product already uses.
+  async function setSchedule(
+    accountId: string,
+    input: SetPersonaAccountScheduleInput,
+    actor: ScheduleActor,
+  ): Promise<PersonaAccountRow> {
+    const account = await getAccountById(accountId);
+    if (!account) throw notFound("Persona account not found");
+
+    const personas_ = personaService(db);
+    const persona = await personas_.getPersonaById(account.personaId);
+    if (!persona) throw notFound("Persona not found");
+    const actingAgentIds = await personas_.listActingAgentIdsForPersona(account.personaId);
+    if (!actingAgentIds.includes(input.assigneeAgentId)) {
+      throw forbidden("assigneeAgentId must be one of this persona's own agents");
+    }
+    const [assigneeAgent] = await db
+      .select({ id: agents.id, companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.id, input.assigneeAgentId));
+    if (!assigneeAgent || assigneeAgent.companyId !== account.companyId) {
+      throw notFound("Agent not found");
+    }
+
+    const routines_ = routineService(db);
+    const title = `Scheduled post — ${persona.displayName ?? "persona"} on ${account.platform}`;
+    const description =
+      `This is ${persona.displayName ?? "the persona"}'s scheduled writing slot for her ` +
+      `${account.platform} account "${account.accountLabel}". Write a caption (and pick or ` +
+      `generate an image if this account uses one), then queue it with ` +
+      `POST /persona-accounts/${account.id}/posts. The daily cap, warm-up and autonomy gates ` +
+      `are enforced automatically once it is queued -- do not call attempt-publish yourself.`;
+
+    if (account.scheduleRoutineId) {
+      const existingRoutine = await routines_.get(account.scheduleRoutineId);
+      if (existingRoutine) {
+        await routines_.update(
+          existingRoutine.id,
+          { title, description, assigneeAgentId: input.assigneeAgentId },
+          actor,
+        );
+        const detail = await routines_.getDetail(existingRoutine.id);
+        const scheduleTrigger = detail?.triggers.find((trigger) => trigger.kind === "schedule");
+        if (scheduleTrigger) {
+          await routines_.updateTrigger(
+            scheduleTrigger.id,
+            {
+              cronExpression: input.cronExpression,
+              timezone: input.timezone ?? "UTC",
+              enabled: input.enabled ?? true,
+            },
+            actor,
+          );
+        } else {
+          await routines_.createTrigger(
+            existingRoutine.id,
+            {
+              kind: "schedule",
+              cronExpression: input.cronExpression,
+              timezone: input.timezone ?? "UTC",
+              enabled: input.enabled ?? true,
+            },
+            actor,
+          );
+        }
+        return account;
+      }
+    }
+
+    const createdRoutine = await routines_.create(
+      account.companyId,
+      {
+        title,
+        description,
+        assigneeAgentId: input.assigneeAgentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+        variables: [],
+      },
+      actor,
+    );
+    await routines_.createTrigger(
+      createdRoutine.id,
+      {
+        kind: "schedule",
+        cronExpression: input.cronExpression,
+        timezone: input.timezone ?? "UTC",
+        enabled: input.enabled ?? true,
+      },
+      actor,
+    );
+
+    const [updated] = await db
+      .update(personaAccounts)
+      .set({ scheduleRoutineId: createdRoutine.id, updatedAt: new Date() })
+      .where(eq(personaAccounts.id, accountId))
+      .returning();
+    return updated!;
+  }
+
+  async function clearSchedule(accountId: string, actor: ScheduleActor): Promise<PersonaAccountRow> {
+    const account = await getAccountById(accountId);
+    if (!account) throw notFound("Persona account not found");
+    if (account.scheduleRoutineId) {
+      const routines_ = routineService(db);
+      const detail = await routines_.getDetail(account.scheduleRoutineId);
+      const scheduleTrigger = detail?.triggers.find((trigger) => trigger.kind === "schedule");
+      if (scheduleTrigger) {
+        await routines_.updateTrigger(scheduleTrigger.id, { enabled: false }, actor);
+      }
+    }
+    const [updated] = await db
+      .update(personaAccounts)
+      .set({ scheduleRoutineId: null, updatedAt: new Date() })
+      .where(eq(personaAccounts.id, accountId))
+      .returning();
+    return updated!;
+  }
+
   return {
     createAccount,
     getAccountById,
@@ -180,5 +313,7 @@ export function personaAccountsService(db: Db) {
     markConnected,
     deleteAccount,
     resolvePublishToken,
+    setSchedule,
+    clearSchedule,
   };
 }
