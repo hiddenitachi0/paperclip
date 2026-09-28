@@ -1,7 +1,14 @@
 import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companySecretBindings, telegramBots, withCompanyScope } from "@paperclipai/db";
-import type { TelegramBotCheckResult, TelegramBotSummary } from "@paperclipai/shared";
+import {
+  TELEGRAM_VOICE_REPLY_MODES,
+  TELEGRAM_VOICE_REPLY_MODE_DEFAULT,
+  type TelegramBotCheckResult,
+  type TelegramBotSummary,
+  type TelegramVoiceReplyMode,
+  type UpdateTelegramBotVoiceInput,
+} from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { secretService } from "./secrets.js";
 
@@ -36,6 +43,12 @@ export function telegramBotTokenHint(token: string): string {
 
 type TelegramBotRow = typeof telegramBots.$inferSelect;
 
+export function normalizeVoiceReplyMode(value: unknown): TelegramVoiceReplyMode {
+  return (TELEGRAM_VOICE_REPLY_MODES as readonly unknown[]).includes(value)
+    ? (value as TelegramVoiceReplyMode)
+    : TELEGRAM_VOICE_REPLY_MODE_DEFAULT;
+}
+
 function toSummary(row: TelegramBotRow, agentName: string | null): TelegramBotSummary {
   return {
     id: row.id,
@@ -48,6 +61,8 @@ function toSummary(row: TelegramBotRow, agentName: string | null): TelegramBotSu
     allowedTelegramUserIds: row.allowedTelegramUserIds ?? [],
     enabled: row.enabled,
     receivesCompanyNotices: row.receivesCompanyNotices,
+    voiceReplyMode: normalizeVoiceReplyMode(row.voiceReplyMode),
+    voice: row.voice ?? null,
     lastCheckAt: row.lastCheckAt ? row.lastCheckAt.toISOString() : null,
     lastCheckOk: row.lastCheckOk,
     lastCheckUsername: row.lastCheckUsername,
@@ -289,6 +304,25 @@ export function telegramBotService(db: Db, deps: { fetchImpl?: typeof fetch } = 
     return toSummary(updated ?? row, names.get(row.agentId) ?? null);
   }
 
+  /** Voice messages: when this bot reads its answer aloud, and with which voice. */
+  async function setVoice(
+    companyId: string,
+    botId: string,
+    input: UpdateTelegramBotVoiceInput,
+  ): Promise<TelegramBotSummary> {
+    const row = await getRow(companyId, botId);
+    const patch: Partial<Pick<TelegramBotRow, "voiceReplyMode" | "voice">> = {};
+    if (input.voiceReplyMode !== undefined) patch.voiceReplyMode = input.voiceReplyMode;
+    if (input.voice !== undefined) patch.voice = input.voice;
+    const [updated] = await db
+      .update(telegramBots)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(and(eq(telegramBots.id, row.id), eq(telegramBots.companyId, companyId)))
+      .returning();
+    const names = await agentNames(companyId);
+    return toSummary(updated ?? row, names.get(row.agentId) ?? null);
+  }
+
   /**
    * Mark (or unmark) the bot that gets this company's approvals and questions
    * when no agent's own bot, or its boss's, should (a card the board filed
@@ -420,6 +454,7 @@ export function telegramBotService(db: Db, deps: { fetchImpl?: typeof fetch } = 
     rotateToken,
     setAllowedUsers,
     setReceivesCompanyNotices,
+    setVoice,
     remove,
     resolveBotToken,
     check,

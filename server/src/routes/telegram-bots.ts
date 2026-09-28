@@ -7,6 +7,7 @@ import {
   rotateTelegramBotTokenSchema,
   updateTelegramBotAllowedUsersSchema,
   updateTelegramBotCompanyNoticesSchema,
+  updateTelegramBotVoiceSchema,
 } from "@paperclipai/shared";
 import type { TelegramBridgeBot } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
@@ -20,7 +21,7 @@ import {
 } from "./authz.js";
 import { logActivity } from "../services/index.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { telegramBotService } from "../services/telegram-bots.js";
+import { normalizeVoiceReplyMode, telegramBotService } from "../services/telegram-bots.js";
 
 /**
  * DUR-3978 slice 2: connecting a Telegram bot from company settings.
@@ -212,6 +213,30 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
     },
   );
 
+  /**
+   * Voice messages: "Reply with voice" (never / when I sent a voice message /
+   * always) and the voice the answers are read with.
+   */
+  router.put(
+    "/companies/:companyId/telegram-bots/:botId/voice",
+    boardScope(),
+    validate(updateTelegramBotVoiceSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const updated = await svc.setVoice(companyId, req.params.botId as string, req.body);
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "telegram_bot.voice_changed",
+        entityType: "telegram_bot",
+        entityId: updated.id,
+        details: { name: updated.name, voiceReplyMode: updated.voiceReplyMode, voice: updated.voice },
+      });
+      res.json(updated);
+    },
+  );
+
   router.delete("/companies/:companyId/telegram-bots/:botId", boardScope(), async (req, res) => {
     const companyId = req.params.companyId as string;
     const botId = req.params.botId as string;
@@ -270,6 +295,9 @@ export function telegramBotRoutes(rawDb: Db, deps: { fetchImpl?: typeof fetch } 
           receivesCompanyNotices: row.receivesCompanyNotices,
           createdAt: row.createdAt.toISOString(),
           agentRole: roles.get(row.agentId) ?? null,
+          // Voice messages: when the bridge reads an answer aloud, and how.
+          voiceReplyMode: normalizeVoiceReplyMode(row.voiceReplyMode),
+          voice: row.voice ?? null,
         });
       }
     }

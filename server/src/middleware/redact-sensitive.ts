@@ -71,6 +71,9 @@ const SENSITIVE_KEYS = new Set<string>([
   // A field called `value` is very rarely something an operator needs to
   // read back from an error log.
   "value",
+  // Voice messages: a recording travels as `audioBase64`. A person's voice
+  // does not belong in a log line (and 27 MB of base64 would swamp it).
+  "audiobase64",
 ]);
 
 const MAX_DEPTH = 6;
