@@ -35,6 +35,7 @@ import {
   PERSONA_JOB_FIELDS,
   parseAgentLimits,
   laneAProviderModelIssue,
+  readLaneAWebSearchSwitch,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -1613,6 +1614,19 @@ export function agentRoutes(
     throw forbidden(`Agent-authenticated callers cannot modify quick-agent settings (${QUICK_AGENT_FIELDS.join(", ")})`);
   }
 
+  // "Can search the web" (adapterConfig.laneA.webSearch) is board-only too:
+  // it spends the company's Brave credit and lets the quick agent read the
+  // open web. adapterConfig is otherwise agent-writable, so every write path
+  // (create, hire, PATCH, config rollback) compares the switch it would store
+  // with the one already stored and refuses an agent that would turn it on.
+  function assertNoAgentWebSearchSwitchOn(req: Request, requestedAdapterConfig: unknown, existingAdapterConfig: unknown) {
+    if (req.actor.type !== "agent") return;
+    if (!readLaneAWebSearchSwitch(requestedAdapterConfig) || readLaneAWebSearchSwitch(existingAdapterConfig)) return;
+    throw forbidden(
+      'Agent-authenticated callers cannot switch on "Can search the web" (adapterConfig.laneA.webSearch). Only board-authenticated callers can.',
+    );
+  }
+
   // DUR-4000: which person does this job (personaId) and the job's own limits
   // box are board-only on every write path, same shape as the quick-agent
   // guard above. An agent that could pick its own persona could speak as
@@ -2642,6 +2656,7 @@ export function agentRoutes(
     }
     const targetSnapshot = asRecord(targetRevision.afterConfig) ?? {};
     assertAgentSelfUpdateRollbackAllowed(req, existing, targetSnapshot);
+    assertNoAgentWebSearchSwitchOn(req, targetSnapshot.adapterConfig, existing.adapterConfig);
 
     const actor = getActorInfo(req);
     const updated = await svc.rollbackConfigRevision(id, revisionId, {
@@ -2759,6 +2774,7 @@ export function agentRoutes(
     // otherwise an agent-authenticated hire could hand itself the direct
     // model-call lane that a human is supposed to switch on.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
+    assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
     const hiredAgentId = randomUUID();
@@ -3019,6 +3035,7 @@ export function agentRoutes(
     // the quick-agent choice is board-only on every write path and should not
     // depend on that one earlier check staying where it is.
     assertNoAgentLaneAFlagMutation(req, req.body as Record<string, unknown>);
+    assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
     const agentId = randomUUID();
@@ -3597,6 +3614,7 @@ export function agentRoutes(
         secretCreator: patchSecretCreator,
       });
       patchData.adapterConfig = syncInstructionsBundleConfigFromFilePath(existing, normalizedEffectiveAdapterConfig);
+      assertNoAgentWebSearchSwitchOn(req, patchData.adapterConfig, existing.adapterConfig);
     }
     if (requestedRuntimeConfig) {
       const baseAdapterConfig = asRecord(patchData.adapterConfig) ?? asRecord(existing.adapterConfig) ?? {};
