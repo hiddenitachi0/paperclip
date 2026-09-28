@@ -40,6 +40,8 @@ import {
   ACTION_GENERATE,
   ACTION_LOOKS_DELETE,
   ACTION_LOOKS_LIST,
+  ACTION_LOOK_DEFAULTS_LIST,
+  ACTION_LOOK_DEFAULTS_SET,
   ACTION_LOOKS_SAVE,
   ACTION_SOGNI_LORAS,
   ACTION_SOGNI_MODELS,
@@ -291,6 +293,111 @@ function findLook(looks: Look[], name: string): Look | undefined {
   return looks.find((look) => look.name.trim().toLowerCase() === wanted);
 }
 
+// ─── Default look per agent ──────────────────────────────────────────────────
+//
+// An owner/admin can give an agent a default look: used for every picture
+// that agent makes without naming a look. Stored per company next to the
+// looks (plugin state, scope "company", the host-verified company id) as
+// { agentId: lookId }. The agent is always the run's own agent as the host
+// resolved it (runCtx.agentId), never anything from the tool input. A
+// default look is the same saved look, applied the same way: it cannot do
+// anything the look itself cannot (the content filter included).
+
+const LOOK_DEFAULTS_STATE_KEY = "lookDefaults";
+
+function lookDefaultsScope(companyId: string) {
+  return { scopeKind: "company" as const, scopeId: companyId, stateKey: LOOK_DEFAULTS_STATE_KEY };
+}
+
+/** The company's agentId -> lookId map. Anything malformed is left out. */
+export async function loadLookDefaults(ctx: PluginContext, companyId: string): Promise<Record<string, string>> {
+  const raw = await ctx.state.get(lookDefaultsScope(companyId));
+  const defaults: Record<string, string> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return defaults;
+  for (const [agentId, lookId] of Object.entries(raw as Record<string, unknown>)) {
+    if (agentId && typeof lookId === "string" && lookId) defaults[agentId] = lookId;
+  }
+  return defaults;
+}
+
+/** Only defaults that still point at a saved look. */
+function liveDefaults(defaults: Record<string, string>, looks: Look[]): Record<string, string> {
+  const ids = new Set(looks.map((look) => look.id));
+  return Object.fromEntries(Object.entries(defaults).filter(([, lookId]) => ids.has(lookId)));
+}
+
+/** Why a picture used the look it did; said back to the agent so it can tell the person. */
+export type LookReason = "look-input" | "named-in-request" | "agent-default";
+
+const WORD_CHAR = "[\\p{L}\\p{N}_]";
+/** What may sit between "look" and a look's name: spaces, a colon, quotes, a hyphen ("look: Maja Night", 'look "B"', "B-look"). */
+const LOOK_GAP = "[\\s:\"'\u201c\u201d\u2018\u2019\u00ab\u00bb-]+";
+/** A name this short is only taken from the text with the word "look" right next to it. */
+const SHORT_LOOK_NAME = 2;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A look's name as a pattern: its words in order, any spacing between them. */
+function lookNamePattern(name: string): string {
+  return name.trim().split(/\s+/).map(escapeRegExp).join("\\s+");
+}
+
+function wholeWords(pattern: string): string {
+  return `(?<!${WORD_CHAR})${pattern}(?!${WORD_CHAR})`;
+}
+
+function nextToLookWord(name: string): RegExp {
+  const core = lookNamePattern(name);
+  return new RegExp(`${wholeWords(`look${LOOK_GAP}${core}`)}|${wholeWords(`${core}${LOOK_GAP}look`)}`, "iu");
+}
+
+/**
+ * The saved look the request's text names, when the agent left `look` empty
+ * but wrote "in look Maja Night" or "Maja Night look" into the prompt. Whole
+ * words only and case-insensitive; a name of one or two characters only
+ * counts with the word "look" right next to it. A name mentioned next to
+ * "look" beats one that is only mentioned; a longer name beats one inside it
+ * ("Maja Night" over "Maja"). When two different looks are still left, the
+ * request is ambiguous and nothing is guessed.
+ */
+export function lookMentionedIn(prompt: string, looks: Look[]): { look: Look } | { ambiguous: Look[] } | null {
+  const found: Array<{ look: Look; nextToLook: boolean }> = [];
+  for (const look of looks) {
+    const name = look.name.trim();
+    if (!name) continue;
+    const nextToLook = nextToLookWord(name).test(prompt);
+    const short = name.length <= SHORT_LOOK_NAME;
+    if (nextToLook || (!short && new RegExp(wholeWords(lookNamePattern(name)), "iu").test(prompt))) {
+      found.push({ look, nextToLook });
+    }
+  }
+  if (found.length === 0) return null;
+  const strongest = found.some((f) => f.nextToLook) ? found.filter((f) => f.nextToLook) : found;
+  // Drop a look whose name is only part of another mentioned look's name.
+  const left = strongest.filter(
+    (f) =>
+      !strongest.some(
+        (other) =>
+          other.look.id !== f.look.id &&
+          other.look.name.trim().length > f.look.name.trim().length &&
+          new RegExp(wholeWords(lookNamePattern(f.look.name)), "iu").test(other.look.name),
+      ),
+  );
+  return left.length === 1 ? { look: left[0]!.look } : { ambiguous: left.map((f) => f.look) };
+}
+
+/** The sentence the tool result carries about the look (or none). */
+function lookUsedSentence(look: Look | null, reason: LookReason | null): string {
+  if (!look) return "";
+  if (reason === "agent-default") {
+    return ` Used the saved look "${look.name}" (your default look, because no look was named).`;
+  }
+  if (reason === "named-in-request") return ` Used the saved look "${look.name}" (named in the request).`;
+  return ` Used the saved look "${look.name}".`;
+}
+
 function lookNamesSentence(looks: Look[]): string {
   if (looks.length === 0) {
     return "No looks are saved yet. A company owner or admin can add them under Company settings, Media Studio looks.";
@@ -298,8 +405,9 @@ function lookNamesSentence(looks: Look[]): string {
   return `Saved looks: ${looks.map((look) => look.name).join(", ")}.`;
 }
 
-function describeLook(look: Look): string {
+function describeLook(look: Look, isYourDefault = false): string {
   const extras: string[] = [];
+  if (isYourDefault) extras.push("your default look: used when you name no look");
   if (look.seed !== null) extras.push(`fixed seed ${look.seed}`);
   if (look.referenceFileIds.length > 0) {
     extras.push(`${look.referenceFileIds.length} reference picture${look.referenceFileIds.length === 1 ? "" : "s"}`);
@@ -461,6 +569,8 @@ async function knownLoras(
 export interface PreparedGeneration {
   input: GenerationInput;
   look: Look | null;
+  /** Why this look: named as look, named in the request's text, or the agent's default. Null without a look. */
+  lookReason: LookReason | null;
   referenceFileIds: string[];
   /** Plain sentences for the agent: what of the look could not be used, and why. */
   notes: string[];
@@ -575,6 +685,8 @@ export async function prepareGeneration(
   ctx: PluginContext,
   companyId: string,
   params: Record<string, unknown>,
+  /** The calling agent, as the host resolved it for this run (never from the tool input). */
+  options: { agentId?: string | null } = {},
 ): Promise<PreparedGeneration | { error: string }> {
   const input = toInput(params);
   if (!input.prompt) return { error: "prompt is required" };
@@ -588,12 +700,34 @@ export async function prepareGeneration(
     return { error: `"${String(params.provider)}" is not a picture service. Use fal (Fal.ai) or sogni (Sogni), or leave it out.` };
   }
 
+  // Which look, in order: the one named as look; else one the request's
+  // text names ("in look Maja Night"); else the agent's default look.
   let look: Look | null = null;
+  let lookReason: LookReason | null = null;
   const lookName = typeof params.look === "string" ? params.look.trim() : "";
   if (lookName) {
     const looks = await loadLooks(ctx, companyId);
     look = findLook(looks, lookName) ?? null;
     if (!look) return { error: `There is no saved look called "${lookName}". ${lookNamesSentence(looks)}` };
+    lookReason = "look-input";
+  } else {
+    const looks = await loadLooks(ctx, companyId);
+    if (looks.length > 0) {
+      const mentioned = lookMentionedIn(input.prompt, looks);
+      if (mentioned && "ambiguous" in mentioned) {
+        return {
+          error: `The request names more than one saved look (${mentioned.ambiguous.map((l) => `"${l.name}"`).join(", ")}). Pass the one to use as look.`,
+        };
+      }
+      if (mentioned) {
+        look = mentioned.look;
+        lookReason = "named-in-request";
+      } else if (options.agentId) {
+        const lookId = (await loadLookDefaults(ctx, companyId))[options.agentId];
+        look = (lookId ? looks.find((l) => l.id === lookId) : undefined) ?? null;
+        if (look) lookReason = "agent-default";
+      }
+    }
   }
 
   const referenceFileIds = [...(look?.referenceFileIds ?? [])];
@@ -640,7 +774,7 @@ export async function prepareGeneration(
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
-  return { input, look, referenceFileIds, notes };
+  return { input, look, lookReason, referenceFileIds, notes };
 }
 
 function assertCanManageLooks(context: { companyId: string | null; actor: { type: string; canManageCompany?: boolean } }): string {
@@ -817,10 +951,12 @@ const plugin = definePlugin({
         const rawParams = (params ?? {}) as Record<string, unknown>;
         const issueId = typeof rawParams.issueId === "string" ? rawParams.issueId.trim() : "";
 
-        const prepared = await prepareGeneration(ctx, runCtx.companyId, rawParams);
+        // The agent is the run's own, as the host resolved it; the input cannot name another.
+        const prepared = await prepareGeneration(ctx, runCtx.companyId, rawParams, { agentId: runCtx.agentId });
         if ("error" in prepared) return { error: prepared.error };
-        const { input, look, referenceFileIds, notes } = prepared;
+        const { input, look, lookReason, referenceFileIds, notes } = prepared;
         const notesSentence = notes.length > 0 ? ` ${notes.join(" ")}` : "";
+        const lookSentence = lookUsedSentence(look, lookReason);
 
         // DUR-177 / DUR-4000: enforce the calling agent's own daily image
         // limit (agents.limits.dailyImageGenerations) in code, at the moment
@@ -853,7 +989,7 @@ const plugin = definePlugin({
             );
             await rememberImage(ctx, runCtx.companyId, attachment.id, { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds });
             return {
-              content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.${seedSentence(seed)}${seedNotUsedSentence(result)}${notesSentence}`,
+              content: `Generated a ${result.provider} preview and attached it to the issue (${attachment.contentPath}). Submit it for board approval before posting.${lookSentence}${seedSentence(seed)}${seedNotUsedSentence(result)}${notesSentence}`,
               data: {
                 ...result,
                 attachmentId: attachment.id,
@@ -861,6 +997,8 @@ const plugin = definePlugin({
                 fileId: attachment.id,
                 issueId,
                 seed,
+                look: look?.name ?? null,
+                lookReason,
               },
             };
           }
@@ -875,7 +1013,6 @@ const plugin = definePlugin({
             { runId: runCtx.runId },
           );
           await rememberImage(ctx, runCtx.companyId, file.id, { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds });
-          const lookSentence = look ? ` Used the saved look "${look.name}".` : "";
           return {
             content:
               `Made the picture and saved it to the company's Files (not tied to a task); it is shown to the person with your reply. File id: ${file.id}.` +
@@ -890,6 +1027,7 @@ const plugin = definePlugin({
               seed,
               issueId: null,
               look: look?.name ?? null,
+              lookReason,
               provider: result.provider,
               model: result.model ?? null,
               referenceFileIds,
@@ -912,12 +1050,20 @@ const plugin = definePlugin({
       },
       async (_params, runCtx): Promise<ToolResult> => {
         const looks = await loadLooks(ctx, runCtx.companyId);
-        if (looks.length === 0) return { content: lookNamesSentence(looks), data: { looks: [] } };
+        if (looks.length === 0) return { content: lookNamesSentence(looks), data: { looks: [], defaultLook: null } };
+        // The calling agent's own default, as the host resolved the agent for this run.
+        const defaultId = (await loadLookDefaults(ctx, runCtx.companyId))[runCtx.agentId] ?? null;
+        const defaultLook = looks.find((look) => look.id === defaultId) ?? null;
+        const defaultSentence = defaultLook
+          ? `\nYour default look is "${defaultLook.name}": it is used for every picture where no look is named. A look named in the request wins over it.`
+          : "";
         return {
-          content: `Saved looks:\n${looks.map(describeLook).join("\n")}`,
+          content: `Saved looks:\n${looks.map((look) => describeLook(look, look.id === defaultLook?.id)).join("\n")}${defaultSentence}`,
           data: {
+            defaultLook: defaultLook?.name ?? null,
             looks: looks.map((look) => ({
               name: look.name,
+              yourDefault: look.id === defaultLook?.id,
               style: look.style,
               provider: look.provider,
               model: look.model,
@@ -980,7 +1126,50 @@ const plugin = definePlugin({
       const looks = await loadLooks(ctx, companyId);
       const next = looks.filter((look) => look.id !== id);
       await ctx.state.set(looksScope(companyId), next);
-      return { looks: next };
+      // No agent keeps a default that points at a deleted look.
+      const defaults = await loadLookDefaults(ctx, companyId);
+      const kept = liveDefaults(defaults, next);
+      if (Object.keys(kept).length !== Object.keys(defaults).length) await ctx.state.set(lookDefaultsScope(companyId), kept);
+      return { looks: next, defaults: kept };
+    });
+
+    // Default look per agent (same page). Anyone in the company may see it;
+    // only an owner/admin may change it. The agents are the company's own,
+    // read through the host (capability agents.read), terminated ones left out.
+    ctx.actions.register(ACTION_LOOK_DEFAULTS_LIST, async (_params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      const companyId = context.companyId;
+      const [agents, looks, defaults] = await Promise.all([
+        ctx.agents.list({ companyId }),
+        loadLooks(ctx, companyId),
+        loadLookDefaults(ctx, companyId),
+      ]);
+      return {
+        agents: agents
+          .filter((agent) => agent.companyId === companyId && agent.status !== "terminated")
+          .map((agent) => ({ id: agent.id, name: agent.name, title: agent.title ?? null }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+        defaults: liveDefaults(defaults, looks),
+        canManage: context.actor.type === "user" && context.actor.canManageCompany === true,
+      };
+    });
+
+    ctx.actions.register(ACTION_LOOK_DEFAULTS_SET, async (params, context) => {
+      const companyId = assertCanManageLooks(context);
+      const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "";
+      if (!agentId) throw new Error("Pick an agent.");
+      const agent = await ctx.agents.get(agentId, companyId);
+      if (!agent || agent.companyId !== companyId || agent.status === "terminated") {
+        throw new Error("That agent is not in this company. Reload the page.");
+      }
+      const lookId = typeof params.lookId === "string" ? params.lookId.trim() : "";
+      const looks = await loadLooks(ctx, companyId);
+      if (lookId && !looks.some((look) => look.id === lookId)) throw new Error("That look no longer exists. Reload the page.");
+      const defaults = liveDefaults(await loadLookDefaults(ctx, companyId), looks);
+      if (lookId) defaults[agentId] = lookId;
+      else delete defaults[agentId];
+      await ctx.state.set(lookDefaultsScope(companyId), defaults);
+      return { defaults };
     });
 
     // Sogni's picture models, for the looks page's model picker. Public

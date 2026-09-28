@@ -10,6 +10,10 @@ export const ACTION_GENERATE = "generate";
 export const ACTION_LOOKS_LIST = "looks.list";
 export const ACTION_LOOKS_SAVE = "looks.save";
 export const ACTION_LOOKS_DELETE = "looks.delete";
+/** The company's agents and each one's default look, for the looks page. */
+export const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
+/** Set (or clear) one agent's default look. Owner/admin only. */
+export const ACTION_LOOK_DEFAULTS_SET = "looks.defaults.set";
 /** Sogni's live list of picture models, for the looks page's model picker. */
 export const ACTION_SOGNI_MODELS = "sogni.models";
 /** The LoRAs that work with one Sogni model, for the looks page. */
@@ -29,6 +33,7 @@ export const MAX_REFERENCE_FILES = 4;
 export const GENERATE_IMAGE_DESCRIPTION =
   "Make a picture from a text description. Without a task it is saved to the company's Files (not tied to any task) and shown in the chat; with issueId it is attached to that task instead. " +
   "When the person names a saved look (\"in our catalogue look\"), pass it as look. " +
+  "When no look is named, your default look is used (if an owner or admin gave you one); a look named in the request wins over it. The result says which look was used and why. " +
   "To make a close variation of an earlier picture (\"same as the last one but with a blue sofa\"), pass the seed that earlier picture reported. " +
   "To keep the same person, product or style as existing pictures, pass their file ids as referenceFileIds (up to 4). " +
   "Pictures are made by the picture service chosen in Media Studio settings; pass provider (\"fal\" or \"sogni\") only when the person asks for a specific one. " +
@@ -46,7 +51,7 @@ export const GENERATE_IMAGE_PARAMETERS = {
     look: {
       type: "string",
       description:
-        "Optional. The name of a saved look to use (its style, model, LoRAs, seed and reference pictures). Use list-looks to see the names.",
+        "Optional. The name of a saved look to use (its style, model, LoRAs, seed and reference pictures). Use list-looks to see the names. Leave it out to use your default look, if you have one.",
     },
     seed: {
       type: "integer",
@@ -80,7 +85,7 @@ export const GENERATE_IMAGE_PARAMETERS = {
 } as const;
 
 export const LIST_LOOKS_DESCRIPTION =
-  "List the company's saved picture looks (name, style, picture service, model name, LoRAs, and whether each has a fixed seed, reference pictures or the content filter off). Use it when the person asks which looks exist, or before using a look you are unsure of.";
+  "List the company's saved picture looks (name, style, picture service, model name, LoRAs, and whether each has a fixed seed, reference pictures or the content filter off), and which one is your default look (used when no look is named). Use it when the person asks which looks exist, or before using a look you are unsure of.";
 
 /**
  * Media Studio — generate an image, preview it, gate it behind a board
@@ -104,6 +109,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "issue.attachments.create",
     "company.files.create",
     "company.files.read",
+    // The looks page lists the company's agents to pick each one's default look.
+    "agents.read",
     "plugin.state.read",
     "plugin.state.write",
     "instance.settings.register",
