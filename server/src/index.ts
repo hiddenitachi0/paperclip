@@ -72,6 +72,7 @@ import {
 } from "./services/index.js";
 import { schedulerLiveness } from "./services/scheduler-liveness.js";
 import { watcherService } from "./services/watchers.js";
+import { morningReportService } from "./services/morning-report.js";
 import { describeTickPhases } from "./services/scheduler-tick-phases.js";
 import {
   SCHEDULER_TICK_CHAIN,
@@ -1020,6 +1021,7 @@ export async function startServer(): Promise<StartedServer> {
     const mergePrAutomation = config.mergePrAutomationEnabled ? mergePrAutomationService(schedulerDb as any) : null;
     const agentErrorAlerts = agentErrorAlertsService(schedulerDb as any);
     const marketWatchers = watcherService(schedulerDb as any);
+    const morningReports = morningReportService(schedulerDb as any);
     const untrackedWriteAlerts = untrackedWriteAlertsService(schedulerDb as any);
     const quietModeAlerts = quietModeAlertsService(schedulerDb as any);
     const personaPublisherSweep = config.personaPublishingSweepEnabled
@@ -1369,6 +1371,30 @@ export async function startServer(): Promise<StartedServer> {
           })
           .catch((err) => {
             logger.error({ err }, "watchers tick failed");
+          }),
+      );
+
+      // Morning report: agents whose daily briefing time (in their own
+      // timezone) is now (see services/morning-report.ts). Composing is
+      // detached onto the pool the same way a watcher alert is, so a slow
+      // source fetch or model call never holds this chain's connection.
+      void schedulerTickSingleFlight.run(SCHEDULER_TICK_CHAIN.morningReport, () =>
+        runInCompanyScopeBypass(
+          bypassDb,
+          {
+            reason: "heartbeat scheduler tick: morningReport",
+            actorType: "scheduler",
+            route: "heartbeat-scheduler:morningReport",
+          },
+          () => morningReports.tick(new Date()),
+        )
+          .then((result) => {
+            if (result.fired > 0 || result.expired > 0) {
+              logger.info({ ...result }, "morning-report tick fired reports");
+            }
+          })
+          .catch((err) => {
+            logger.error({ err }, "morning-report tick failed");
           }),
       );
 
