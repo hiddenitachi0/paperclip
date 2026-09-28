@@ -1419,6 +1419,18 @@ export function secretService(db: Db, rawDb: Db = db) {
       }
     }
 
+    // The company's web-search key (Connections → Web search): one per company.
+    for (const targetId of collectTargetIds(bindings, "web_search")) {
+      if (targetId !== companyId) continue;
+      setTarget({
+        type: "web_search",
+        id: targetId,
+        label: "Web search for quick agents (Connections)",
+        href: "/company/settings/connections",
+        status: null,
+      });
+    }
+
     return targetMap;
   }
 

@@ -18,6 +18,9 @@ import {
   laneATransformWorstCaseDailyCents,
   normalizeLaneAProvider,
   formatAgentDisplayName,
+  readLaneAWebSearchSwitch,
+  WEB_SEARCH_FREE_CREDIT_TEXT,
+  WEB_SEARCH_PRICE_TEXT,
   type CompanySecret,
   type LaneAProvider,
 } from "@paperclipai/shared";
@@ -31,6 +34,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { mcpToolLibraryApi } from "../api/mcpToolLibrary";
 import { pluginsApi } from "../api/plugins";
 import { secretsApi } from "../api/secrets";
+import { webSearchApi } from "../api/webSearch";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { agentRouteRef } from "../lib/utils";
@@ -185,14 +189,32 @@ export function QuickAgentSection({
         ? "no key (fine for most local servers)"
         : "no key yet — pick one below";
 
+  // adapterConfig is merged one level deep on the server, so laneA is always
+  // sent whole: saving the key keeps the web switch, and the other way round.
+  const currentLaneA = useMemo(() => {
+    const laneA = agent.adapterConfig?.laneA;
+    return typeof laneA === "object" && laneA !== null ? (laneA as Record<string, unknown>) : {};
+  }, [agent.adapterConfig]);
   const saveKeyBinding = (next: SecretBindingValue | null) =>
     settingMutation.mutate({
       adapterConfig: {
         laneA: {
+          ...currentLaneA,
           apiKey: next ? { type: "secret_ref", secretId: next.secretId, version: next.version ?? "latest" } : null,
         },
       },
     });
+
+  // "Can search the web": off unless switched on here.
+  const webSearchOn = readLaneAWebSearchSwitch(agent.adapterConfig);
+  const webSearchQuery = useQuery({
+    queryKey: queryKeys.companies.webSearch(effectiveCompanyId),
+    queryFn: () => webSearchApi.get(effectiveCompanyId),
+    enabled: Boolean(effectiveCompanyId),
+    retry: false,
+  });
+  const saveWebSearch = (next: boolean) =>
+    settingMutation.mutate({ adapterConfig: { laneA: { ...currentLaneA, webSearch: next } } });
 
   // ─── DUR-3997 slice 4: readiness ────────────────────────────────────────
   // Paperclip's own key is only readable by an instance admin (the route is
@@ -312,7 +334,7 @@ export function QuickAgentSection({
             <CardDescription>
               A quick agent answers you directly in chat instead of running as a full agent in its own workspace.
               It remembers the conversation, keeps notes you ask it to remember (you can read and edit them here
-              once it is on), and can hand work to a colleague, look up the weather and read a task summary. Good for a secretary or a weather helper. Only you can switch this on.
+              once it is on), and can hand work to a colleague, look up the weather, tell the time anywhere and read a task summary. Switch on "Can search the web" below to let it look up live facts. Good for a secretary or a weather helper. Only you can switch this on.
             </CardDescription>
           </div>
           <ToggleSwitch
@@ -431,6 +453,43 @@ export function QuickAgentSection({
               disabled={settingMutation.isPending}
               onSave={(next) => settingMutation.mutate({ laneABaseUrl: next })}
             />
+          )}
+        </div>
+
+        {/* Web search: off by default, per quick agent. */}
+        <div className="space-y-2 border-t pt-4" data-testid="quick-agent-web-search">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">Can search the web</p>
+              <p className="text-xs text-muted-foreground">
+                Lets this quick agent search the web with the company's Brave Search key and read the pages it finds
+                or that you link, so it can answer things like today's football scores or a price. It tells you which
+                site an answer came from. Every quick agent can always tell the time anywhere. Brave charges{" "}
+                {WEB_SEARCH_PRICE_TEXT} and gives {WEB_SEARCH_FREE_CREDIT_TEXT}; Paperclip stops at{" "}
+                {webSearchQuery.data?.dailyCap ?? 100} searches a day for the whole company.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={webSearchOn}
+              onCheckedChange={(next) => saveWebSearch(next)}
+              disabled={settingMutation.isPending}
+              aria-label="Can search the web"
+            />
+          </div>
+          {webSearchOn && webSearchQuery.data && webSearchQuery.data.keyStatus !== "ok" && (
+            <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="quick-agent-web-search-no-key">
+              The company has no usable Brave Search key yet, so this quick agent can only read pages you link, not
+              search.{" "}
+              <Link to="/company/settings/connections" className="underline">
+                Pick a key under Connections → Web search
+              </Link>
+              .
+            </p>
+          )}
+          {webSearchQuery.data && (
+            <p className="text-xs text-muted-foreground">
+              Searches today (whole company): {webSearchQuery.data.usedToday} of {webSearchQuery.data.dailyCap}.
+            </p>
           )}
         </div>
 

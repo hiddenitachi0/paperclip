@@ -83,6 +83,16 @@ export {
   type LaneAProviderDescriptor,
 } from "./lane-a-models.js";
 export {
+  WEB_SEARCH_BINDING_TARGET_TYPE,
+  WEB_SEARCH_KEY_CONFIG_PATH,
+  WEB_SEARCH_DEFAULT_DAILY_CAP,
+  WEB_SEARCH_COUNTER_KIND,
+  WEB_SEARCH_PRICE_TEXT,
+  WEB_SEARCH_FREE_CREDIT_TEXT,
+  readLaneAWebSearchSwitch,
+  type CompanyWebSearchSettings,
+} from "./web-search.js";
+export {
   DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS,
   hireMonthlySpendingLimitCentsFromPayload,
 } from "./hire-spending-limit.js";

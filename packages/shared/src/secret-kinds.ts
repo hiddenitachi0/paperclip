@@ -29,6 +29,7 @@ export type SecretKindProvider =
   | "fiken"
   | "telegram"
   | "slack"
+  | "brave"
   | "other";
 
 /** How the Secrets screens group kinds. */
@@ -74,6 +75,7 @@ export const SECRET_KIND_IDS = [
   "fiken_api_token",
   "telegram_bot_token",
   "slack_bot_token",
+  "brave_search_api_key",
   "other",
 ] as const;
 
@@ -202,6 +204,19 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
     category: "messaging",
     valuePattern: /^xox[abp]-[A-Za-z0-9-]{10,}$/,
     envKey: "SLACK_BOT_TOKEN",
+    testable: false,
+  },
+  {
+    id: "brave_search_api_key",
+    label: "Brave Search API key",
+    description:
+      "Key from api-dashboard.search.brave.com. Lets quick agents that may search the web look things up " +
+      "(picked under Connections → Web search).",
+    provider: "brave",
+    category: "data_source",
+    // No envKey: the key is only ever read from the company secret picked on
+    // Connections -> Web search, and migration 0171's backfill (already applied)
+    // lists every kind that has one.
     testable: false,
   },
   {
