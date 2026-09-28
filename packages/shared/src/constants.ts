@@ -729,6 +729,12 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // Deliberately NOT a dedicated target: one provider key may be shared by
   // several tools (and by an MCP server) if the operator wants that.
   "api_tool",
+  // The company's web-search key for quick agents (a Brave Search API key),
+  // target_id = the company id, config_path WEB_SEARCH_KEY_CONFIG_PATH. The
+  // binding row IS the operator's pick (Connections → Web search). Never
+  // resolved by any agent -- only by the server-side web_search tool, which
+  // makes the call itself. Not dedicated, like api_tool.
+  "web_search",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 

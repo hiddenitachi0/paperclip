@@ -498,6 +498,60 @@ describe.sequential("every quick-agent field is handled on the employment path",
     expect(tooHigh.status).toBe(400);
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
+
+  // "Can search the web" lives in adapterConfig.laneA.webSearch, which an agent
+  // may otherwise write; the switch itself is board-only on every path.
+  it("the board switches on \"Can search the web\"; an agent cannot switch it on for itself or at hire", async () => {
+    mockAgentService.update.mockReset();
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeAgent({ id: ACTOR_AGENT_ID, ...patch }),
+    );
+    const board = await request(await createApp("board"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { webSearch: true } } });
+    expect(board.status, JSON.stringify(board.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({ adapterConfig: { laneA: { webSearch: true } } });
+
+    mockAgentService.update.mockClear();
+    const agentApp = await createApp("agent");
+    const self = await request(agentApp)
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { webSearch: true } } });
+    expect(self.status).toBe(403);
+    expect(String(self.body.error)).toContain('cannot switch on "Can search the web"');
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+
+    const notABoolean = await request(await createApp("board"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { laneA: { webSearch: "yes" } } });
+    expect(notABoolean.status).toBe(400);
+    expect(JSON.stringify(notABoolean.body)).toContain("must be on or off");
+
+    mockAgentService.create.mockClear();
+    const hire = await postHire(await createApp("agent", createDb(true)), {
+      ...baseHireBody(),
+      adapterConfig: { laneA: { webSearch: true } },
+    });
+    expect(hire.status).toBe(403);
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+
+  it("an agent that already has web search on may save its other settings", async () => {
+    mockAgentService.getById.mockResolvedValue(
+      makeAgent({ id: ACTOR_AGENT_ID, adapterConfig: { laneA: { webSearch: true } } }),
+    );
+    mockAgentService.update.mockReset();
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeAgent({ id: ACTOR_AGENT_ID, ...patch }),
+    );
+    const res = await request(await createApp("agent"))
+      .patch(`/api/agents/${ACTOR_AGENT_ID}`)
+      .send({ adapterConfig: { model: "claude-sonnet-4-5" } });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0]?.[1]).toMatchObject({
+      adapterConfig: { model: "claude-sonnet-4-5", laneA: { webSearch: true } },
+    });
+  });
 });
 
 // DUR-4000: the job side of a persona — which person does this job

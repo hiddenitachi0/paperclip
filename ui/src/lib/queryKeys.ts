@@ -8,6 +8,7 @@ export const queryKeys = {
     telegramBots: (id: string) => ["companies", id, "telegram-bots"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
+    webSearch: (id: string) => ["companies", id, "web-search"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {
