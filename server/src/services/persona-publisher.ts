@@ -249,14 +249,21 @@ export function personaPublisherService(db: Db) {
     // publish (autonomous, past warm-up) never passes through that branch,
     // so without this the adapter would silently receive `null` and skip
     // Fanvue's AUP-mandated AI disclosure even when aiDisclosureEnabled.
-    // A previously-approved post keeps whatever disclosureText it was
-    // stamped with at approval-filing time (COALESCE), since the account's
-    // aiDisclosureEnabled setting may have changed since then.
+    // DUR-4016: always write the freshly-computed `disclosureText` (from
+    // THIS call's account row, loaded at the top of attemptPublish), never a
+    // COALESCE with whatever was stamped on the post at approval-filing
+    // time. A previous approach kept the approval-time snapshot whenever it
+    // was non-null, which could either publish stale disclosure copy or (if
+    // the account had disclosure off at gate time and an operator flips it
+    // on before the approved post is claimed) skip the now-required
+    // disclosure entirely -- a real Fanvue-AUP compliance gap, not
+    // cosmetic. The account's CURRENT setting at the moment of publishing is
+    // always what should ship.
     const [claimed] = await db
       .update(personaPosts)
       .set({
         status: "publishing",
-        disclosureText: sql`COALESCE(${personaPosts.disclosureText}, ${disclosureText})`,
+        disclosureText,
         publishAttemptedAt: new Date(),
         updatedAt: new Date(),
       })
