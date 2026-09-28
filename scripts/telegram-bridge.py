@@ -23,7 +23,10 @@ approvals/tasks still live in Paperclip and the web UI.
   Paperclip (`chat image`), so Telegram never gets a Paperclip address.
   Anything else becomes a task for that bot's agent in
   that bot's company, and the agent's answer is posted back into the chat the
-  task came from once it is done or waiting.
+  task came from once it is done or waiting. A task a quick answer started (a
+  hand-over to a colleague, or a research task the agent took on itself) is
+  followed the same way, and a task with a result page (its "result"
+  document) is linked straight to that page.
 
 Config (DUR-3978 slice 2): the bots come from Paperclip itself — the operator
 connects them in company settings, and this service reads them through the
@@ -91,6 +94,10 @@ TASK_ANSWERS_PER_CALL = 50  # the server's limit per call
 QUICK_ANSWER_MAX_IMAGES = 4
 TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 TG_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
+# A research task delivers its result page as the issue document with this key
+# (RESEARCH_RESULT_DOCUMENT_KEY in packages/shared/src/research-tasks.ts; a test
+# pins that they match). The chat links straight to it.
+RESULT_DOCUMENT_KEY = "result"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 LOCK = threading.Lock()
@@ -809,16 +816,21 @@ def set_conversation(state, token, chat_id, conversation_id):
         save_state(state)
 
 
-def remember_task(state, token, chat_id, task_ref, text):
-    """Record that a task came from this chat, so its answer goes back there."""
+def remember_task(state, token, chat_id, task_ref, text, colleague=False):
+    """Record that a task came from this chat, so its answer goes back there.
+    `colleague` marks a task the bot's agent handed to someone else, so the
+    answer does not say the bot's agent finished it."""
     with LOCK:
         tasks = _bot_entry(state, token).setdefault("tasks", {})
-        tasks[task_ref["issueId"]] = {
+        entry = {
             "chat": chat_id,
             "identifier": task_ref.get("identifier") or "",
             "title": first_line(text)[:200],
             "at": time.time(),
         }
+        if colleague:
+            entry["colleague"] = True
+        tasks[task_ref["issueId"]] = entry
         save_state(state)
 
 
@@ -920,6 +932,31 @@ def reply_images(result):
             "hasTask": bool(image.get("issueId")),
         })
     return images[:QUICK_ANSWER_MAX_IMAGES]
+
+
+def handed_over_tasks(result):
+    """The tasks a quick answer started (a hand-over to a colleague, or a research
+    task the agent took on itself), from its actions: only well-formed task ids,
+    each once. Their answers are posted back into this chat like /task ones."""
+    tasks = []
+    for action in (result or {}).get("actions") or []:
+        task = action.get("task") if isinstance(action, dict) and action.get("ok") is not False else None
+        if not isinstance(task, dict):
+            continue
+        issue_id = task.get("issueId")
+        if not isinstance(issue_id, str) or not UUID_RE.match(issue_id):
+            continue
+        if any(t["issueId"] == issue_id for t in tasks):
+            continue
+        identifier = task.get("identifier")
+        title = task.get("title")
+        tasks.append({
+            "issueId": issue_id,
+            "identifier": identifier if isinstance(identifier, str) else "",
+            "title": title if isinstance(title, str) else "",
+            "colleague": action.get("tool") == "route_to_agent",
+        })
+    return tasks
 
 
 def image_caption(image):
@@ -1038,6 +1075,10 @@ def ask_agent(state, bot, chat_id, text, force_task=False):
         if isinstance(conversation, str) and UUID_RE.match(conversation):
             set_conversation(state, token, chat_id, conversation)
         images = reply_images(result)
+        # Durable first: a task the answer started is recorded before the reply
+        # goes out, so its result comes back to this chat even after a restart.
+        for started in handed_over_tasks(result):
+            remember_task(state, token, chat_id, started, started["title"] or text, colleague=started["colleague"])
         answer = str(result.get("response") or "").strip() or (
             "" if images else f"{agent_name} had nothing to add.")
         if notes or answer:
@@ -1067,21 +1108,25 @@ def format_task_answer(bot, item, entry, answer):
     title = (item.get("title") or entry.get("title") or "").strip()[:200]
     status = item.get("status")
     link = f"{bot['uiBase']}/issues/{item.get('identifier') or item.get('id')}"
+    has_result_page = isinstance(item.get("resultDocument"), dict)
+    if has_result_page:
+        link += f"#document-{RESULT_DOCUMENT_KEY}"
     if status == "done":
-        head = f"✅ {bot['name']} finished {ident}"
+        head = f"✅ {ident} is finished" if entry.get("colleague") else f"✅ {bot['name']} finished {ident}"
     elif status == "cancelled":
         head = f"✖️ {ident} was cancelled"
     else:
         head = f"⏸ {ident} is waiting and may need you"
     if title:
         head += f" — {title}"
-    footer = f"\n\nOpen the task: {link}"
+    footer = f"\n\nOpen the result page: {link}" if has_result_page else f"\n\nOpen the task: {link}"
     if not answer:
         return f"{head}\nNo written answer.{footer}"
     body = str(answer.get("body") or "").strip()
     room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
     if tg_len(body) > room:
-        footer = f"\n\nThis answer is too long for Telegram. Read all of it here: {link}"
+        footer = (f"\n\nThis answer is too long for Telegram. Read all of it here: {link}" if not has_result_page
+                  else f"\n\nThis answer is too long for Telegram. Read all of it and the result page here: {link}")
         room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
         body = tg_truncate(body, room)
     return f"{head}\n\n{body}{footer}"

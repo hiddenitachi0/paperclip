@@ -93,6 +93,15 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export {
+  RESEARCH_RESULT_DOCUMENT_KEY,
+  RESEARCH_SKILL_SLUG,
+  RESEARCH_SKILL_KEY,
+  RESEARCH_TASK_KINDS,
+  researchResultPagePath,
+  type ResearchTaskKind,
+  type ChatHandedOverTask,
+} from "./research-tasks.js";
+export {
   DEFAULT_HIRE_MONTHLY_SPENDING_LIMIT_CENTS,
   hireMonthlySpendingLimitCentsFromPayload,
 } from "./hire-spending-limit.js";

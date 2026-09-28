@@ -22,9 +22,14 @@ const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
 }));
 
+const mockDocumentService = vi.hoisted(() => ({
+  getIssueDocumentByKey: vi.fn(),
+}));
+
 vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueService,
   accessService: () => mockAccessService,
+  documentService: () => mockDocumentService,
 }));
 
 // The real middleware reserves a Postgres connection. Here it keeps its one
@@ -95,6 +100,35 @@ describe("GET /companies/:companyId/issue-answers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockAccessService.decide.mockResolvedValue({ allowed: true });
+    mockDocumentService.getIssueDocumentByKey.mockResolvedValue(null);
+  });
+
+  it("says when the task has a result page, with its title only and never its text", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment({ body: "Plan is ready: 4 days in Rome." })]);
+    mockDocumentService.getIssueDocumentByKey.mockResolvedValue({
+      key: "result",
+      title: "Rome, 4 days",
+      body: "# Day 1\nThe whole private plan",
+    });
+    const app = await createApp(boardActor());
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.status).toBe(200);
+    expect(mockDocumentService.getIssueDocumentByKey).toHaveBeenCalledWith(ownIssueId, "result");
+    expect(res.body.issues[0].resultDocument).toEqual({ key: "result", title: "Rome, 4 days" });
+    expect(JSON.stringify(res.body)).not.toContain("The whole private plan");
+  });
+
+  it("has no result page when the task has no result document", async () => {
+    mockIssueService.getById.mockResolvedValue(issue(ownIssueId));
+    mockIssueService.listComments.mockResolvedValue([comment()]);
+    const app = await createApp(boardActor());
+
+    const res = await request(app).get(`/api/companies/${companyId}/issue-answers`).query({ ids: ownIssueId });
+
+    expect(res.body.issues[0].resultDocument).toBeNull();
   });
 
   it("returns the status and the agent's latest answer", async () => {

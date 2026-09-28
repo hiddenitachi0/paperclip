@@ -28,6 +28,12 @@ export interface LaneAStoredToolCall {
   ok: boolean;
   /** Set when the tool made a picture (see LaneAToolImage). */
   image?: LaneAToolImage;
+  /**
+   * Set when the tool created a task (a hand-over to a colleague, or a
+   * research task for the quick agent itself), so the chat can follow it and
+   * show its answer when it is done.
+   */
+  task?: { issueId: string; identifier: string | null; title: string };
 }
 
 // Quick agents (Lane A, round 2): the transcript of a Lane A conversation, one

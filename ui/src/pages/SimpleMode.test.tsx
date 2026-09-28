@@ -13,6 +13,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   create: vi.fn(),
   get: vi.fn(),
   listComments: vi.fn(),
+  listDocuments: vi.fn(),
 }));
 const mockChatApi = vi.hoisted(() => ({ classify: vi.fn(), sendMessage: vi.fn() }));
 const mockSetSelectedCompanyId = vi.hoisted(() => vi.fn());
@@ -53,6 +54,7 @@ describe("SimpleMode", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockAgentsApi.list.mockResolvedValue([ceoAgent, engineerAgent]);
+    mockIssuesApi.listDocuments.mockResolvedValue([]);
     mockChatApi.classify.mockResolvedValue({
       lane: "b",
       targetAgentId: "agent-eng",
@@ -268,5 +270,64 @@ describe("SimpleMode", () => {
     expect(container.textContent).not.toMatch(/PR #12/);
     expect(container.textContent).not.toMatch(/9c3101d9be7ac0/);
     expect(container.textContent).toMatch(/ask something else/i);
+  });
+
+  it("follows a research task a quick answer started, then shows its answer and the result page", async () => {
+    mockChatApi.sendMessage.mockResolvedValue({
+      lane: "a",
+      result: {
+        conversationId: "conv-1",
+        response: "I'm on it — I'll send the plan here when it's ready.",
+        turnCount: 1,
+        stopReason: "end_turn",
+        actions: [
+          {
+            tool: "start_research_task",
+            summary: "Started research task PAP-31: Trip plan.",
+            ok: true,
+            task: { issueId: "issue-31", identifier: "PAP-31", title: "Trip plan" },
+          },
+        ],
+      },
+      taskRef: null,
+    });
+    mockIssuesApi.get.mockResolvedValueOnce({ id: "issue-31", identifier: "PAP-31", status: "in_progress" });
+    render();
+    await flush();
+
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    act(() => {
+      setTextareaValue(textarea, "Plan 4 days in Rome for us");
+    });
+    await advance(600);
+    await flush();
+    const form = container.querySelector("form") as HTMLFormElement;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockIssuesApi.get).toHaveBeenCalledWith("issue-31");
+    expect(container.textContent).toMatch(/working on this/i);
+    expect(container.textContent).toContain("I'm on it — I'll send the plan here when it's ready.");
+
+    mockIssuesApi.get.mockResolvedValue({ id: "issue-31", identifier: "PAP-31", status: "done" });
+    mockIssuesApi.listComments.mockResolvedValue([
+      { authorType: "agent", body: "Your Rome plan is ready: about 14 500 NOK.", createdAt: "2026-09-28T10:00:00Z", deletedAt: null },
+    ]);
+    mockIssuesApi.listDocuments.mockResolvedValue([{ key: "result", title: "Rome, 4 days" }]);
+    await advance(3100);
+    await flush();
+    await flush();
+
+    expect(container.textContent).toContain("Your Rome plan is ready: about 14 500 NOK.");
+    expect(container.textContent).not.toContain("I'm on it");
+    const open = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Open the result page");
+    expect(open).toBeDefined();
+    act(() => {
+      open!.click();
+    });
+    expect(mockNavigate).toHaveBeenCalledWith("/PAP/issues/PAP-31#document-result");
   });
 });

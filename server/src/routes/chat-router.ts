@@ -16,6 +16,8 @@ import {
   secretaryClassifierService,
 } from "../services/index.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { buildResearchTaskDescription, inferResearchKind } from "../services/research-tasks.js";
+import { findResearchSkillLink } from "../services/research-skill-link.js";
 import type { LaneAServiceOptions } from "../services/lane-a.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
@@ -206,10 +208,25 @@ export function chatRouterRoutes(db: Db, options: { laneA?: LaneAServiceOptions 
     });
     if (!decision.allowed) throw forbidden(decision.explanation);
 
+    // A research or planning request that goes straight to a task (long, or
+    // "/task" from Telegram) to a quick agent gets the same "how to do it and
+    // how to deliver it" notes a quick agent's own hand-over writes, worded
+    // as "if this is a research request" since the kind is only guessed.
+    const researchKind = targetAgent.laneAEnabled ? inferResearchKind(message) : null;
+    const description = researchKind
+      ? buildResearchTaskDescription({
+          kind: researchKind,
+          brief: message,
+          handedOverBy: null,
+          skillLink: await findResearchSkillLink(db, companyId),
+          guessed: true,
+        })
+      : message;
+
     const issue = await issues.create(companyId, {
       id: randomUUID(),
       title: buildLaneBTitle(message),
-      description: message,
+      description,
       assigneeAgentId: targetAgentId,
       status: "todo",
       priority: "medium",
