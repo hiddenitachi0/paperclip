@@ -381,6 +381,20 @@ describe.sequential("every quick-agent field is handled on the employment path",
     laneABaseUrl: "http://localhost:11434/v1",
     // "Creativity" (sampling temperature).
     laneATemperature: 0.9,
+    // DUR-4017: the daily briefing settings.
+    morningReportSettings: {
+      enabled: true,
+      time: "07:00",
+      timezone: "Europe/Oslo",
+      placeOverride: null,
+      placeOverrideUntil: null,
+      sources: ["bbc"],
+      topics: ["tech"],
+      hobbyTopics: [],
+      sportFollows: [],
+      priceSymbols: ["BTC"],
+      maxHeadlines: 5,
+    },
   };
 
   beforeEach(() => {

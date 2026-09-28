@@ -24,6 +24,7 @@ import { BROWSER_ACCESS_LEVELS } from "../browser-access.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
 import { validateAdapterModelEffort } from "../model-effort.js";
+import { morningReportSettingsSchema } from "../morning-report.js";
 
 /** Upper bound for agents.laneAInstructions (roughly 2k tokens); it is prepended to every quick-agent call. */
 export const LANE_A_INSTRUCTIONS_MAX_LENGTH = 8000;
@@ -58,6 +59,10 @@ export const QUICK_AGENT_FIELDS = [
   // temperature). Null = the model host's own default. Board-only like the
   // rest: it changes how the agent talks to people.
   "laneATemperature",
+  // DUR-4017: the daily briefing settings (on/off, delivery time, sources to
+  // pull). Board-only like the rest of this list — an agent cannot switch its
+  // own daily report on or change what it is told to fetch and say.
+  "morningReportSettings",
 ] as const;
 export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 
@@ -535,6 +540,10 @@ const createAgentObjectSchema = z.object({
   // here. The persona must belong to the same company; the service checks.
   personaId: z.string().uuid().nullable().optional(),
   limits: agentLimitsSchema.optional(),
+  // DUR-4017 (QUICK_AGENT_FIELDS): the daily briefing settings. Board-only on
+  // create, hire and PATCH — enforced in server/src/routes/agents.ts the same
+  // way the rest of this list is. Null/absent = never configured.
+  morningReportSettings: morningReportSettingsSchema.nullable().optional(),
   // DUR-4013 (BROWSER_ACCESS_FIELDS): board-only on create, hire and PATCH —
   // enforced in server/src/routes/agents.ts (assertNoAgentBrowserAccessFieldMutation).
   browserAccess: browserAccessSchema.optional(),

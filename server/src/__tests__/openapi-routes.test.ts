@@ -95,6 +95,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "goal-adoption.ts",
   // MCP OAuth "Connect & sign in" routes (DUR-3909) are a new backend feature not yet in the public OpenAPI document.
   "mcp-oauth.ts",
+  // Morning report routes (DUR-4017) are a new backend feature not yet in the public OpenAPI document.
+  "morning-report.ts",
 ]);
 
 function createApp() {

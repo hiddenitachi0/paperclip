@@ -243,6 +243,11 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Morning report (migration 0183): the outbox row per day a report
+    -- was generated. Created (and granted on) in 0183_morning_report.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'morning_report_outbox',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',
@@ -406,6 +411,11 @@ DECLARE
     'labels',
     'lane_a_conversations',
     'lane_a_messages',
+    -- Morning report (migration 0183): the outbox row per day a report
+    -- was generated. Created (and granted on) in 0183_morning_report.sql;
+    -- listed here so the login-role lists match the schema, as for the
+    -- tables above.
+    'morning_report_outbox',
     'persona_account_publish_counters',
     'persona_accounts',
     'persona_generation_counters',
