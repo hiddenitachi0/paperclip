@@ -1,0 +1,19 @@
+-- DUR-4013 step 3: agents.browser_access, the board-only switch that says
+-- whether (and how far) an agent may drive the browser worker.
+--
+--   * browser_access (text, not null, default 'off') -- 'off' |
+--     'browse_and_forms' | 'book_and_buy'. Every existing agent gets 'off',
+--     i.e. exactly what happened before this column existed: no browser tool
+--     offered at all (the heartbeat MCP-library injection only adds it when
+--     this is not 'off' -- not built yet, tracked separately).
+--
+-- Additive only: one not-null column with a default, so the ALTER backfills
+-- every existing row to 'off' in the same statement. No production behavior
+-- change -- nothing reads this column yet outside this migration and the
+-- board-only write guard. Guarded so a re-run is a no-op.
+--
+-- Rollback: DROP COLUMN "browser_access" from "agents". Safe -- no other
+-- table references it (no FK) and no data is generated from it, so a
+-- rollback loses only the switch's current position, not anything an agent
+-- did with it.
+ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "browser_access" text NOT NULL DEFAULT 'off';

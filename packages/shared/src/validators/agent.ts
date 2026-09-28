@@ -73,6 +73,30 @@ export type QuickAgentField = (typeof QUICK_AGENT_FIELDS)[number];
 export const PERSONA_JOB_FIELDS = ["personaId", "limits"] as const;
 export type PersonaJobField = (typeof PERSONA_JOB_FIELDS)[number];
 
+/**
+ * DUR-4013 step 3: how far, if at all, this agent may drive the browser
+ * worker. Board-only on every write path (create, hire, PATCH) — an agent
+ * that could switch this on for itself would have no gate at all, since the
+ * server trusts the switch, not the model, to decide whether the browser
+ * tool is even offered (see heartbeat.ts's MCP-library injection point). The
+ * guard in server/src/routes/agents.ts reads this list the same way it reads
+ * PERSONA_JOB_FIELDS/QUICK_AGENT_FIELDS.
+ */
+export const BROWSER_ACCESS_FIELDS = ["browserAccess"] as const;
+export type BrowserAccessField = (typeof BROWSER_ACCESS_FIELDS)[number];
+
+/**
+ * "off" — no browser tool offered at all (default). "browse_and_forms" —
+ * navigate/read/click/type/fill forms, no final booking/purchase step (the
+ * only level step 3 wires up). "book_and_buy" — adds the gated
+ * request_booking/request_purchase/confirm_final_step tools; accepted here
+ * so the column and its validator do not need another migration when step
+ * 4/6 lands, but nothing serves those tools yet.
+ */
+export const AGENT_BROWSER_ACCESS_LEVELS = ["off", "browse_and_forms", "book_and_buy"] as const;
+export type AgentBrowserAccessLevel = (typeof AGENT_BROWSER_ACCESS_LEVELS)[number];
+export const browserAccessSchema = z.enum(AGENT_BROWSER_ACCESS_LEVELS);
+
 /** Upper bound for agents.limits.notes, the free-text standing rules an agent reads. */
 export const AGENT_LIMITS_NOTES_MAX_LENGTH = 4000;
 
@@ -511,6 +535,9 @@ const createAgentObjectSchema = z.object({
   // here. The persona must belong to the same company; the service checks.
   personaId: z.string().uuid().nullable().optional(),
   limits: agentLimitsSchema.optional(),
+  // DUR-4013 (BROWSER_ACCESS_FIELDS): board-only on create, hire and PATCH —
+  // enforced in server/src/routes/agents.ts (assertNoAgentBrowserAccessFieldMutation).
+  browserAccess: browserAccessSchema.optional(),
 });
 
 export const createAgentSchema = createAgentObjectSchema.superRefine(refineAgentModelEffort);

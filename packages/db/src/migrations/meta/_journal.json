@@ -1282,6 +1282,13 @@
       "when": 1787160520000,
       "tag": "0183_persona_account_schedule_routine",
       "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
+      "when": 1787160530000,
+      "tag": "0184_agent_browser_access",
+      "breakpoints": true
     }
   ]
 }
