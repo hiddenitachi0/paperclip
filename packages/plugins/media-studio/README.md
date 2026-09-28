@@ -13,7 +13,18 @@ the roadmap-3 approval gate for the paperclip-fork.
   company's Files, sent to Fal's FLUX Kontext model as data URIs, or uploaded to Sogni's
   storage, so no Paperclip address leaves the box), and `look` (a saved look: style words,
   picture service, model, fixed seed, reference pictures).
-- **Agent tool** `paperclip.media-studio:list-looks` — read-only list of the company's looks.
+- **Agent tool** `paperclip.media-studio:list-looks` — read-only list of the company's looks; it marks the
+  calling agent's default look.
+- **Default look per agent** — on the looks page an owner/admin can give an agent a default look ("When this agent
+  makes a picture without naming a look, it uses this one"). Which look a picture uses, in order: the one passed as
+  `look`; else a saved look the request's text names ("in look Maja Night", "Maja Night look"; whole words,
+  case-insensitive; a one- or two-letter name only right next to the word "look"; two different looks named is
+  refused with a sentence, before the daily limit is touched); else the agent's default. The tool result says which
+  look was used and why. The agent is the run's own (as the host resolved it), never one named in the input. Stored
+  per company next to the looks (plugin state, scope `company`, key `lookDefaults`, `{ agentId: lookId }`); deleting
+  a look clears the defaults that point at it, renaming keeps them. A default look is the same saved look, so the
+  content filter rule does not change: it is only off for a look an owner/admin saved with it off. The page lists the
+  company's agents through the host (`agents.read`).
 - **Sogni picture tools** — upscale, remove background, restore, change angle, apply a style, select objects, and
   improve a prompt, one agent tool each (see "Sogni tools for existing pictures" below).
 - **Company settings → Media Studio looks** — owners/admins add, edit and delete looks; looks
