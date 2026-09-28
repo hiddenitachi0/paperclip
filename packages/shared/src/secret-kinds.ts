@@ -214,7 +214,9 @@ export const SECRET_KINDS: readonly SecretKindDescriptor[] = [
       "(picked under Connections → Web search).",
     provider: "brave",
     category: "data_source",
-    envKey: "BRAVE_API_KEY",
+    // No envKey: the key is only ever read from the company secret picked on
+    // Connections -> Web search, and migration 0171's backfill (already applied)
+    // lists every kind that has one.
     testable: false,
   },
   {

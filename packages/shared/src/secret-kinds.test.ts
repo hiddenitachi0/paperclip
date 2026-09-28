@@ -88,7 +88,8 @@ describe("secret kinds taxonomy", () => {
     expect(brave?.provider).toBe("brave");
     expect(brave?.category).toBe("data_source");
     expect(isTestableSecretKind("brave_search_api_key")).toBe(false);
-    expect(secretKindForEnvKey("BRAVE_API_KEY")).toBe("brave_search_api_key");
+    // Not an environment variable anywhere, so no env-key mapping.
+    expect(secretKindForEnvKey("BRAVE_API_KEY")).toBe(null);
     // No shape rule: a pasted Brave key is never warned about.
     expect(secretValueLooksWrongForKind("brave_search_api_key", "anything")).toBe(false);
   });
