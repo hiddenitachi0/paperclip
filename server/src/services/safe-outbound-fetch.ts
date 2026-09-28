@@ -370,6 +370,13 @@ export interface OutboundHostPolicy {
   /** Per request, including DNS. */
   timeoutMs: number;
   maxResponseBytes: number;
+  /**
+   * How many redirects to follow, and only to the SAME host over https (each
+   * hop is checked again from the top: host rule, DNS, address rule). A
+   * redirect to any other host is refused. Absent or 0: every 3xx is refused,
+   * which is what the business-data sources rely on.
+   */
+  maxSameHostRedirects?: number;
 }
 
 const DATA_SOURCE_REQUEST_TIMEOUT_MS = 10_000;
@@ -390,6 +397,36 @@ export const FIKEN_OUTBOUND_POLICY: OutboundHostPolicy = {
   hostPattern: new RegExp(`^${FIKEN_API_HOST.replace(/\./g, "\\.")}$`),
   timeoutMs: DATA_SOURCE_REQUEST_TIMEOUT_MS,
   maxResponseBytes: DATA_SOURCE_MAX_RESPONSE_BYTES,
+};
+
+/**
+ * Quick agents' web_search: Brave's one API host, nothing else. The key goes
+ * in a header, so it never appears in a URL, a log line or an error.
+ */
+export const BRAVE_SEARCH_OUTBOUND_POLICY: OutboundHostPolicy = {
+  sourceKind: "Brave Search",
+  protocols: ["https:"],
+  hostPattern: /^api\.search\.brave\.com$/,
+  timeoutMs: 8_000,
+  maxResponseBytes: 1024 * 1024,
+};
+
+/**
+ * Quick agents' read_web_page: any ordinary public web host. The name must be
+ * a dotted DNS name with an alphabetic top-level label -- so never an IP
+ * literal, never "localhost" -- and not one of the private-network suffixes
+ * below. Every resolved address must still be public (checked per request,
+ * like every policy here), so a public-looking name that points inside is
+ * refused too. Redirects are followed only on the same host.
+ */
+export const PUBLIC_WEB_PAGE_OUTBOUND_POLICY: OutboundHostPolicy = {
+  sourceKind: "web pages",
+  protocols: ["https:"],
+  hostPattern:
+    /^(?=.{4,253}$)(?!.*\.(?:local|localhost|internal|intranet|lan|home|corp|arpa|test|invalid|example)$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/,
+  timeoutMs: 10_000,
+  maxResponseBytes: 3 * 1024 * 1024,
+  maxSameHostRedirects: 3,
 };
 
 function escapeRegExp(value: string): string {
@@ -478,7 +515,7 @@ export function createSafeOutboundFetch(
   policy: OutboundHostPolicy,
   deps: SafeOutboundFetchDeps = {},
 ): OutboundFetch {
-  const guarded = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const guarded = async (input: RequestInfo | URL, init?: RequestInit, redirectsFollowed = 0): Promise<Response> => {
     if (typeof input !== "string" && !(input instanceof URL)) {
       // A Request object carries its own headers/body/redirect mode; refuse it
       // rather than half-honour it.
@@ -549,6 +586,24 @@ export function createSafeOutboundFetch(
     }
 
     if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.location;
+      const maxRedirects = policy.maxSameHostRedirects ?? 0;
+      if (location && redirectsFollowed < maxRedirects) {
+        let next: URL | null = null;
+        try {
+          next = new URL(location, parsed);
+        } catch {
+          next = null;
+        }
+        // Same host, https, no credentials: follow it through every check
+        // again. Anything else is the classic bounce to somewhere not allowed.
+        if (next && next.protocol === "https:" && next.hostname.toLowerCase() === host) {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "GET" || method === "HEAD") {
+            return guarded(next.toString(), { ...init, method }, redirectsFollowed + 1);
+          }
+        }
+      }
       throw new SafeOutboundFetchError(
         "redirect_refused",
         `${host} tried to redirect the request to another address. That is not allowed.`,
@@ -562,5 +617,5 @@ export function createSafeOutboundFetch(
       headers: response.headers,
     });
   };
-  return guarded as OutboundFetch;
+  return ((input: RequestInfo | URL, init?: RequestInit) => guarded(input, init)) as OutboundFetch;
 }
