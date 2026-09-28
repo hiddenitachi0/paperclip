@@ -81,6 +81,8 @@ const explicitOpenApiCoverageExclusions = new Set([
   "web-search.ts",
   // Quick-agent memory notebook routes sit next to the agent's quick-agent settings and are not yet in the public OpenAPI document.
   "agent-memories.ts",
+  // Watcher routes (market-price checks and the Telegram outbox) are board-only and not yet in the public OpenAPI document.
+  "watchers.ts",
   // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
   "personas.ts",
   // Persona publishing routes (DUR-134) are board/instance-admin-only and not yet in the public OpenAPI document.

@@ -191,6 +191,10 @@ vi.mock("../storage/index.js", () => ({
   createStorageServiceFromConfig: vi.fn(() => ({ id: "storage-service" })),
 }));
 
+vi.mock("../services/watchers.js", () => ({
+  watcherService: vi.fn(() => ({ tick: vi.fn(async () => ({ checked: 0, fired: 0 })) })),
+}));
+
 vi.mock("../services/feedback-share-client.js", () => ({
   createFeedbackTraceShareClientFromConfig: vi.fn(() => ({ id: "feedback-share-client" })),
 }));
