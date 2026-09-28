@@ -39,3 +39,14 @@ export type {
   EgressProxyOptions,
   HostCheckResult,
 } from "./egress-proxy.js";
+export { BrowserToolHandler } from "./tools.js";
+export type {
+  ElementRef,
+  AccessibilitySnapshot,
+  ElementDescriptor,
+  BrowserDriver,
+  ToolRefusal,
+  ToolResult,
+  ToolRefused,
+  ToolOutcome,
+} from "./tools.js";
