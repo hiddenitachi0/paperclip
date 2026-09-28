@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserToolHandler, type AccessibilitySnapshot, type BrowserDriver, type ElementDescriptor } from "./tools.js";
+import { BrowserToolHandler, type AccessibilitySnapshot, type BrowserDriver, type ElementDescriptor } from "./browser-tools.js";
 
 const EMPTY_SNAPSHOT: AccessibilitySnapshot = { tree: "", url: "https://example.com", title: "" };
 

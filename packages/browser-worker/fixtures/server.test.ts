@@ -1,8 +1,8 @@
 import { type AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createFixtureServer } from "./server.js";
-import { matchFinalActionWording } from "../src/final-action-matcher.js";
-import { looksLikePaymentField } from "../src/payment-detection.js";
+import { matchFinalActionWording } from "@paperclipai/adapter-utils/final-action-matcher";
+import { looksLikePaymentField } from "@paperclipai/adapter-utils/payment-detection";
 
 let baseUrl: string;
 let close: () => Promise<void>;

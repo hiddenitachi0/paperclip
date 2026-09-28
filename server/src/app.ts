@@ -23,6 +23,7 @@ import { mcpToolLibraryRoutes } from "./routes/mcp-tool-library.js";
 import { apiToolRoutes } from "./routes/api-tools.js";
 import { webSearchRoutes } from "./routes/web-search.js";
 import { agentMemoryRoutes } from "./routes/agent-memories.js";
+import { browserRoutes } from "./routes/browser.js";
 import { watcherRoutes } from "./routes/watchers.js";
 import { morningReportRoutes } from "./routes/morning-report.js";
 import { mcpOAuthRoutes } from "./routes/mcp-oauth.js";
@@ -294,6 +295,7 @@ export async function createApp(
   api.use(apiToolRoutes(db));
   api.use(webSearchRoutes(db));
   api.use(agentMemoryRoutes(db));
+  api.use(browserRoutes(db));
   api.use(watcherRoutes(db));
   api.use(morningReportRoutes(db));
   api.use(mcpOAuthRoutes(db));

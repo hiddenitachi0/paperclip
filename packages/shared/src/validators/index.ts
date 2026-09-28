@@ -315,6 +315,18 @@ export {
 } from "./persona-account.js";
 
 export {
+  openBrowserSessionSchema,
+  browserNavigateSchema,
+  browserClickSchema,
+  browserTypeSchema,
+  browserSelectSchema,
+  browserCheckSchema,
+  browserPressKeySchema,
+  browserWaitSchema,
+  browserHandOverSchema,
+} from "./browser.js";
+
+export {
   mcpToolLibraryConnectionSchema,
   mcpToolLibraryEntryBodySchema,
   mcpToolLibraryEntryUpdateSchema,
