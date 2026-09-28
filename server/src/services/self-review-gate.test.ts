@@ -17,6 +17,7 @@ import {
   issues,
   projectWorkspaces,
   projects,
+  workspaceOperations,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -339,6 +340,7 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
   afterEach(async () => {
     await db.delete(issueComments);
     await db.delete(agentWakeupRequests);
+    await db.delete(workspaceOperations);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
@@ -1532,6 +1534,157 @@ describeEmbeddedPostgres("self-review-gate DB-backed behavior", () => {
       expect(result).not.toBeNull();
       expect(result?.message).not.toMatch(/operator/i);
       expect(calls).toHaveLength(1);
+    });
+  });
+
+  describe("DUR-4031: shared_workspace issue with no own execution_workspaces row", () => {
+    // Reproduces the reported bug: a `shared_workspace`-mode workspace whose
+    // execution_workspaces.sourceIssueId points at the PARENT issue that originally
+    // realized it (e.g. a sprint parent), while a DIFFERENT child issue's own runs
+    // actually did their work in that same shared checkout. The primary
+    // sourceIssueId = issue.id lookup permanently misses for the child, and only the
+    // workspace_operations fallback (keyed on the issue whose run actually operated
+    // there, written server-side and not agent-writable) can find it.
+    async function seedSharedWorkspaceChildIssue(input: { changedFilePath: string; content?: string }) {
+      const parentFixture = await seedCodeIssueFixture();
+      const { companyId, projectId, agentId } = parentFixture;
+      const parentIssueId = parentFixture.issueId;
+
+      const childIssueId = randomUUID();
+      const childRunId = randomUUID();
+      await db.insert(issues).values({
+        id: childIssueId,
+        companyId,
+        projectId,
+        parentId: parentIssueId,
+        title: "Child sharing the parent's workspace",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        issueNumber: 2,
+        identifier: "T-2",
+      });
+      await db.insert(heartbeatRuns).values({
+        id: childRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "running",
+      });
+
+      const repoRoot = await createTempRepoWithChange(input.changedFilePath, input.content);
+      const executionWorkspaceId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: executionWorkspaceId,
+        companyId,
+        projectId,
+        mode: "shared_workspace",
+        strategyType: "project_primary",
+        name: "shared sprint workspace",
+        status: "active",
+        providerType: "local_fs",
+        cwd: repoRoot,
+        baseRef: "base",
+        // The workspace row's sourceIssueId still names the PARENT (whoever's run first
+        // realized it) -- never rewritten when the child's run later reuses it.
+        sourceIssueId: parentIssueId,
+      });
+      // Written server-side by the child's own run dispatch (workspaceOperationsSvc), never
+      // via any issue PATCH route -- this is the trustworthy signal the fallback relies on.
+      await db.insert(workspaceOperations).values({
+        companyId,
+        executionWorkspaceId,
+        heartbeatRunId: childRunId,
+        issueId: childIssueId,
+        phase: "workspace_provision",
+        status: "succeeded",
+      });
+
+      return { companyId, agentId, projectId, parentIssueId, childIssueId, childRunId, executionWorkspaceId, repoRoot };
+    }
+
+    it("resolves the shared workspace for the child issue via workspace_operations, not sourceIssueId", async () => {
+      const { companyId, childIssueId } = await seedSharedWorkspaceChildIssue({
+        changedFilePath: "server/src/services/authorization.ts",
+      });
+
+      const changedFiles = await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId: childIssueId });
+      expect(changedFiles).toEqual(["server/src/services/authorization.ts"]);
+
+      const diffContent = await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId: childIssueId });
+      expect(diffContent).toContain("authorization.ts");
+    });
+
+    it("still detects a risky surface for the child's own diff instead of falling into the unresolvable-workspace lenient path", async () => {
+      const { companyId, projectId, agentId, childIssueId, childRunId } = await seedSharedWorkspaceChildIssue({
+        changedFilePath: "server/src/services/authorization.ts",
+      });
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: childIssueId, identifier: "T-2", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: childRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      // A real diff was read and found risky -- proves the gate did NOT degrade to
+      // workspaceFullyUnresolvable's lenient "any completed pass counts" branch, which
+      // never runs risky-surface detection at all.
+      expect(result?.message).toContain("authorization or permissions");
+      expect(calls).toHaveLength(1);
+
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, childIssueId));
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("risky surface");
+    });
+
+    it("a completed self-review pass on the child's exact diff lets a later attempt through, closing the retry loop", async () => {
+      const { companyId, projectId, agentId, childIssueId, childRunId } = await seedSharedWorkspaceChildIssue({
+        changedFilePath: "ui/src/components/WidgetCard.tsx",
+      });
+
+      const fingerprint = computeReviewedDiffFingerprint(
+        await getChangedFilePathsForIssueWorkspace(db, { companyId, issueId: childIssueId }),
+        await getChangedDiffContentForIssueWorkspace(db, { companyId, issueId: childIssueId }),
+      );
+      expect(fingerprint).not.toBeNull();
+
+      const priorSourceRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: priorSourceRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: "completed",
+      });
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: SELF_REVIEW_PASS_REASON,
+        payload: { reviewedDiffFingerprint: fingerprint },
+        status: "completed",
+        idempotencyKey: buildSelfReviewPassIdempotencyKey({ issueId: childIssueId, sourceRunId: priorSourceRunId }),
+        requestedByActorType: "system",
+        requestedByActorId: "issue_self_review_gate",
+      });
+
+      const { wakeup, calls } = makeRecordingWakeup(db, companyId);
+      const result = await evaluateSelfReviewDoneGate({
+        db,
+        wakeup,
+        issue: { id: childIssueId, identifier: "T-2", companyId, projectId, executionPolicy: null },
+        actor: { actorType: "agent", agentId, runId: childRunId },
+        requestedStatus: "done",
+        currentStatus: "in_progress",
+      });
+
+      expect(result).toBeNull();
+      expect(calls).toHaveLength(0);
     });
   });
 
