@@ -299,6 +299,11 @@ DECLARE
     'user',
     'user_sidebar_preferences',
     'verification',
+    -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
+    -- the login-role lists match the schema, as for the tables above.
+    'watcher_alerts',
+    'watcher_price_points',
+    'watchers',
     'workspace_operations',
     'workspace_runtime_services'
   ];
@@ -440,6 +445,11 @@ DECLARE
     -- it belongs in this list too.
     'telegram_bots',
     'untracked_write_incidents',
+    -- Watchers. Created (and granted on) in 0181_watchers.sql; listed here so
+    -- the login-role lists match the schema, as for the tables above.
+    'watcher_alerts',
+    'watcher_price_points',
+    'watchers',
     'workspace_operations',
     'workspace_runtime_services'
   ];

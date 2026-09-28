@@ -736,6 +736,17 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // Deliberately NOT a dedicated target: the same OpenAI key may also be a
   // quick agent's key.
   "speech",
+  // Watchers: the key of a market-price source (a Finnhub key for a US-stock
+  // watcher; watchers row, config_path 'source_key'). Never resolved by any
+  // agent -- only by the server-side watcher service, which makes every price
+  // request itself. Not dedicated: one Finnhub key serves every stock watcher.
+  "watcher",
+  // The company's web-search key for quick agents (a Brave Search API key),
+  // target_id = the company id, config_path WEB_SEARCH_KEY_CONFIG_PATH. The
+  // binding row IS the operator's pick (Connections → Web search). Never
+  // resolved by any agent -- only by the server-side web_search tool, which
+  // makes the call itself. Not dedicated, like api_tool.
+  "web_search",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 

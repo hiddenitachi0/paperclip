@@ -77,10 +77,14 @@ const explicitOpenApiCoverageExclusions = new Set([
   "mcp-tool-library.ts",
   // "API with a key" tool routes (DUR-4004) sit next to the MCP tool library and are not yet in the public OpenAPI document.
   "api-tools.ts",
+  // Web search for quick agents (Connections → Web search) sits next to the API tools and is not yet in the public OpenAPI document.
+  "web-search.ts",
   // Quick-agent memory notebook routes sit next to the agent's quick-agent settings and are not yet in the public OpenAPI document.
   "agent-memories.ts",
   // Voice message routes (speech-to-text, text-to-speech, the speech settings) are board-only and not yet in the public OpenAPI document.
   "speech.ts",
+  // Watcher routes (market-price checks and the Telegram outbox) are board-only and not yet in the public OpenAPI document.
+  "watchers.ts",
   // Persona routes (DUR-133) are board-only and not yet in the public OpenAPI document.
   "personas.ts",
   // Persona publishing routes (DUR-134) are board/instance-admin-only and not yet in the public OpenAPI document.

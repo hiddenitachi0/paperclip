@@ -130,3 +130,4 @@ export { companySpeechSettings, speechUsageEvents } from "./speech.js";
 export { dataConnections, dataDatasetSources, type DataConnectionObserved } from "./data_connections.js";
 export { dataReadEvents } from "./data_read_events.js";
 export { trustedCodeFingerprints } from "./trusted_code_fingerprints.js";
+export { watchers, watcherPricePoints, watcherAlerts } from "./watchers.js";

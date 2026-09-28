@@ -9,6 +9,7 @@ export const queryKeys = {
     speechSettings: (id: string) => ["companies", id, "speech-settings"] as const,
     dataConnections: (id: string) => ["companies", id, "data-connections"] as const,
     datasetSources: (id: string) => ["companies", id, "dataset-sources"] as const,
+    webSearch: (id: string) => ["companies", id, "web-search"] as const,
     dataReads: (id: string) => ["companies", id, "data-reads"] as const,
   },
   companySkills: {
@@ -287,6 +288,10 @@ export const queryKeys = {
   // Quick-agent memory notebook (the persona's when the agent has one).
   agentMemories: {
     list: (agentId: string) => ["agent-memories", agentId] as const,
+  },
+  // Market-price watchers.
+  watchers: {
+    list: (companyId: string) => ["watchers", companyId] as const,
   },
   // DUR-4004: "API with a key" tools.
   apiTools: {

@@ -125,6 +125,13 @@ export function parseAgentLimits(value: unknown): AgentLimitsInput {
 export const laneAAdapterConfigSchema = z
   .object({
     apiKey: envBindingSecretRefSchema.nullable().optional(),
+    /**
+     * "Can search the web": offers the quick agent web_search (with the
+     * company's Brave key, Connections → Web search) and read_web_page. Off
+     * when absent. Board-only: an agent-authenticated caller cannot change it
+     * (server/src/routes/agents.ts), so an agent cannot give itself the web.
+     */
+    webSearch: z.boolean().optional(),
   })
   .strict();
 
@@ -244,10 +251,14 @@ const adapterConfigSchema = z.record(z.string(), z.unknown()).superRefine((value
   if (laneAValue !== undefined && laneAValue !== null) {
     const parsed = laneAAdapterConfigSchema.safeParse(laneAValue);
     if (!parsed.success) {
+      const webSearchValue =
+        typeof laneAValue === "object" && laneAValue !== null ? (laneAValue as { webSearch?: unknown }).webSearch : undefined;
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.",
+          webSearchValue !== undefined && typeof webSearchValue !== "boolean"
+            ? "The quick agent's \"Can search the web\" switch must be on or off (true or false)."
+            : "The quick agent's key must be a saved secret picked from the company's secrets — a key cannot be typed in here.",
         path: ["laneA"],
       });
     }
