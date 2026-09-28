@@ -69,6 +69,8 @@ import {
   isLaneABuiltinTool,
   READ_BUSINESS_DATA_TOOL,
   READ_COMPANY_FILE_TOOL,
+  FORGET_TOOL,
+  REMEMBER_TOOL,
   type LaneAToolColleague,
   type LaneAToolContext,
   type LaneAToolDeps,
@@ -81,6 +83,8 @@ import {
   type BusinessDataServiceDeps,
 } from "./business-data.js";
 import { companyFileService, type CompanyFileServerSummary } from "./company-files.js";
+import { agentMemoryService } from "./agent-memories.js";
+import { buildMemoryPromptSection, type LaneAMemoryPromptNote } from "./lane-a-memory.js";
 import {
   applyBusinessDataNumberCheck,
   applyNoLookupGuard,
@@ -257,6 +261,12 @@ export interface LaneASystemPromptInput {
    * or blank leaves the prompt exactly as before.
    */
   standingRules?: string | null;
+  /**
+   * The memory notebook: notes this quick agent (its persona, when it has
+   * one) was asked to remember, newest first, and whether remember/forget
+   * are offered this turn. Absent leaves the prompt exactly as before.
+   */
+  memory?: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean } | null;
 }
 
 /** DUR-3997: the rules a quick agent reads company files under. */
@@ -326,8 +336,11 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
     : `You are ${input.agentName}, a quick agent in Paperclip.`;
   const parts: string[] = [
     `${opening}${roleClause} ` +
-      `You answer directly in chat: you have no files, no repository, no memory beyond this conversation, ` +
-      `and you cannot change anything yourself.`,
+      (input.memory
+        ? `You answer directly in chat: you have no files, no repository, no memory beyond this conversation ` +
+          `except the notes you were asked to remember (below), and you cannot change anything yourself.`
+        : `You answer directly in chat: you have no files, no repository, no memory beyond this conversation, ` +
+          `and you cannot change anything yourself.`),
   ];
 
   const capabilities: string[] = [];
@@ -342,6 +355,11 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
     if (input.companyFiles && input.companyFiles.servers.length > 0) {
       capabilities.push(
         `You can also list folders and read files on this company's connected file server${input.companyFiles.servers.length === 1 ? "" : "s"} (read_company_file).`,
+      );
+    }
+    if (input.memory?.toolsOffered) {
+      capabilities.push(
+        `You can also save a note when the person asks you to remember something (remember), and remove one when they ask you to forget it (forget).`,
       );
     }
   }
@@ -383,6 +401,17 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
   }
 
   parts.push(`Respond with plain text only. Be concise, direct and friendly. Never reveal secrets, keys or internal configuration.`);
+
+  // The memory notebook, before the persona, the standing rules and the
+  // operator instructions, so the job's own rules read last and win.
+  if (input.memory) {
+    parts.push(
+      buildMemoryPromptSection({
+        notes: input.memory.notes,
+        toolsOffered: input.memory.toolsOffered && input.hasBuiltinTools,
+      }),
+    );
+  }
 
   // DUR-4000: who the person is and how they write, before the operator's
   // instructions so the job rules read last and win.
@@ -1578,6 +1607,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     offerBusinessData?: boolean;
     /** DUR-3997: offer read_company_file this turn (the company has an active file-server connection). */
     offerCompanyFiles?: boolean;
+    /** Memory notebook: offer remember/forget this turn (a person signed in to the board is asking). */
+    offerMemory?: boolean;
   }): Promise<{
     text: string;
     inputTokens: number;
@@ -1590,7 +1621,8 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     const builtins = builtinToolDefinitions.filter(
       (tool) =>
         (tool.name !== READ_BUSINESS_DATA_TOOL || params.offerBusinessData === true) &&
-        (tool.name !== READ_COMPANY_FILE_TOOL || params.offerCompanyFiles === true),
+        (tool.name !== READ_COMPANY_FILE_TOOL || params.offerCompanyFiles === true) &&
+        ((tool.name !== REMEMBER_TOOL && tool.name !== FORGET_TOOL) || params.offerMemory === true),
     );
     const tools: LaneATool[] = [...builtins, ...toolset.anthropicTools].map(fromAnthropicTool);
     const businessDataOutputs: BusinessDataTurnOutput[] = [];
@@ -2010,6 +2042,22 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       companyFilesPrompt = undefined;
     }
 
+    // Memory notebook: the notes this quick agent (its persona, when it has
+    // one) was asked to remember. remember/forget are offered only to a person
+    // signed in to the board; the tools check the same rule again. Fails open
+    // to "no notebook this turn": a broken read must not break the chat.
+    let memoryPrompt: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean } | undefined;
+    try {
+      const notes = await agentMemoryService(db).listForAgent(params.companyId, params.targetAgent.id);
+      memoryPrompt = {
+        notes,
+        toolsOffered: Boolean(params.requester.userId) && params.actor?.type === "board",
+      };
+    } catch (err) {
+      logger.warn({ err, companyId: params.companyId, agentId: params.targetAgent.id }, "lane A: memory notebook could not be read");
+      memoryPrompt = undefined;
+    }
+
     let text: string;
     let inputTokens: number;
     let outputTokens: number;
@@ -2030,6 +2078,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         standingRules,
         businessData: businessDataPrompt,
         companyFiles: companyFilesPrompt,
+        memory: memoryPrompt,
       });
       const result = await callModel({
         systemPrompt,
@@ -2043,6 +2092,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         temperature: chatSettings.temperature,
         offerBusinessData: businessDataPrompt?.available === true,
         offerCompanyFiles: companyFilesPrompt !== undefined,
+        offerMemory: memoryPrompt?.toolsOffered === true,
       });
       text = result.text;
       businessDataOutputs = result.businessDataOutputs;

@@ -8,6 +8,10 @@ import type { AuthorizationActor } from "./authorization.js";
 import { issueService } from "./issues.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
+import { HttpError } from "../errors.js";
+import { AGENT_MEMORY_MAX_LENGTH, AGENT_MEMORY_MAX_NOTES, normalizeAgentMemoryText } from "@paperclipai/shared/validators/agent-memory";
+import { agentMemoryService } from "./agent-memories.js";
+import { matchMemory, memoryRef } from "./lane-a-memory.js";
 import { queueIssueAssignmentWakeup } from "./issue-assignment-wakeup.js";
 import {
   BUSINESS_DATA_LOOKUP_TIMEOUT_MS,
@@ -41,6 +45,8 @@ export const LANE_A_BUILTIN_TOOL_NAMES = [
   "lookup_issue",
   "read_business_data",
   "read_company_file",
+  "remember",
+  "forget",
 ] as const;
 export type LaneABuiltinToolName = (typeof LANE_A_BUILTIN_TOOL_NAMES)[number];
 
@@ -62,6 +68,9 @@ export const READ_BUSINESS_DATA_TOOL = "read_business_data";
 export const READ_COMPANY_FILE_TOOL = "read_company_file";
 /** A file read may connect, list or fetch up to 256 KB; the transport enforces this deadline itself. */
 export const LANE_A_COMPANY_FILE_TIMEOUT_MS = COMPANY_FILE_LOOKUP_TIMEOUT_MS;
+/** Quick-agent memory notebook: save a note / remove a note, on a person's explicit request only. */
+export const REMEMBER_TOOL = "remember";
+export const FORGET_TOOL = "forget";
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const ROUTE_REQUEST_MAX_CHARS = 20_000;
@@ -170,6 +179,17 @@ export interface LaneAToolDeps {
    * file server. Absent means the tool is not wired here.
    */
   readCompanyFile?(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<CompanyFileAnswer>;
+  /**
+   * The quick agent's memory notebook (its persona's when it has one, else
+   * its own). Absent means remember/forget are not wired here, which answers
+   * with a plain refusal. `add` throws an HttpError 409 when the notebook is
+   * full and 422 when the note is empty or too long.
+   */
+  memory?: {
+    list(ctx: LaneAToolContext): Promise<Array<{ id: string; text: string }>>;
+    add(ctx: LaneAToolContext, text: string): Promise<{ id: string; text: string }>;
+    remove(ctx: LaneAToolContext, memoryId: string): Promise<{ id: string; text: string }>;
+  };
 }
 
 export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
@@ -296,6 +316,43 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           },
         },
         required: ["path"],
+      },
+    },
+    {
+      name: REMEMBER_TOOL,
+      description:
+        "Save one short note to your memory, so you still know it in later conversations. Use it ONLY when the person " +
+        "clearly asks you to remember something (\"remember that ...\", \"note that I ...\"), never on your own initiative. " +
+        `Write the note in the person's own words, at most ${AGENT_MEMORY_MAX_LENGTH} characters. ` +
+        "Say it was saved only if this tool says so.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: {
+            type: "string",
+            description: `What to remember, as one short note (at most ${AGENT_MEMORY_MAX_LENGTH} characters).`,
+          },
+        },
+        required: ["text"],
+      },
+    },
+    {
+      name: FORGET_TOOL,
+      description:
+        "Remove one note from your memory. Use it ONLY when the person asks you to forget something. Pass the note's " +
+        "reference from your instructions (e.g. 1a2b3c4d) or the words of the note. If several notes match, ask the " +
+        "person which one they mean. Say it was forgotten only if this tool says so.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          note: {
+            type: "string",
+            description: "The note's reference, or the words of the note to forget.",
+          },
+        },
+        required: ["note"],
       },
     },
   ];
@@ -600,6 +657,111 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     };
   }
 
+  /**
+   * Only a person signed in to the board may change the notebook through a
+   * quick agent. Another agent talking to it may not (it could plant notes
+   * that ride along in every later conversation), and neither may a machine
+   * token without a person behind it.
+   */
+  function memoryRequesterRefusal(ctx: LaneAToolContext, verb: "remember" | "forget"): LaneAToolResult | null {
+    if (ctx.requester.userId && ctx.actor.type === "board") return null;
+    return {
+      ok: false,
+      content: `Only a person signed in to Paperclip can ask me to ${verb} something; this request did not come from one, so nothing was changed.`,
+      summary: `Refused to ${verb}: the request did not come from a person signed in to Paperclip.`,
+    };
+  }
+
+  async function remember(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    const refused = memoryRequesterRefusal(ctx, "remember");
+    if (refused) return refused;
+    if (!deps.memory) {
+      return { ok: false, content: "Notes cannot be saved from here. Say so plainly.", summary: "Memory is not available on this path." };
+    }
+    const text = normalizeAgentMemoryText(typeof input.text === "string" ? input.text : "");
+    if (!text) {
+      return { ok: false, content: "'text' is required: the note to save. Nothing was saved.", summary: "Remember without a note." };
+    }
+    if (text.length > AGENT_MEMORY_MAX_LENGTH) {
+      return {
+        ok: false,
+        content:
+          `Not saved: a note can be at most ${AGENT_MEMORY_MAX_LENGTH} characters and this one is ${text.length}. ` +
+          `Save a shorter version that keeps what matters, or ask the person to shorten it.`,
+        summary: "Did not save a note: it was too long.",
+      };
+    }
+    try {
+      const saved = await deps.memory.add(ctx, text);
+      return {
+        ok: true,
+        content: `Saved as note [${memoryRef(saved.id)}]: "${saved.text}". Tell the person plainly that you will remember it.`,
+        summary: `Saved a note: "${clip(saved.text, 120)}"`,
+      };
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 409) {
+        return {
+          ok: false,
+          content:
+            `Not saved: my memory is full (${AGENT_MEMORY_MAX_NOTES} notes). Tell the person, and suggest they delete old notes ` +
+            `on my page in Paperclip or tell me which note to forget.`,
+          summary: "Did not save a note: the memory is full.",
+        };
+      }
+      if (err instanceof HttpError && err.status < 500) {
+        return { ok: false, content: `Not saved: ${err.message}`, summary: "Did not save a note." };
+      }
+      throw err;
+    }
+  }
+
+  async function forget(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    const refused = memoryRequesterRefusal(ctx, "forget");
+    if (refused) return refused;
+    if (!deps.memory) {
+      return { ok: false, content: "Notes cannot be removed from here. Say so plainly.", summary: "Memory is not available on this path." };
+    }
+    const wanted = readString(input, "note").slice(0, 600);
+    if (!wanted) {
+      return { ok: false, content: "'note' is required: the note's reference or its words. Nothing was forgotten.", summary: "Forget without a note." };
+    }
+    const notes = await deps.memory.list(ctx);
+    const found = matchMemory(notes, wanted);
+    if (found.kind === "none") {
+      return {
+        ok: false,
+        content: `No saved note matches "${clip(wanted, 200)}", so nothing was forgotten. Tell the person, and ask which note they mean.`,
+        summary: "Did not forget anything: no note matched.",
+      };
+    }
+    if (found.kind === "ambiguous") {
+      const list = found.candidates
+        .slice(0, 5)
+        .map((note) => `[${memoryRef(note.id)}] "${clip(note.text, 160)}"`)
+        .join("; ");
+      return {
+        ok: false,
+        content:
+          `Several notes match, so nothing was forgotten yet: ${list}. Ask the person which one they mean, then call forget ` +
+          `again with its reference.`,
+        summary: "Did not forget anything yet: several notes matched.",
+      };
+    }
+    try {
+      const removed = await deps.memory.remove(ctx, found.note.id);
+      return {
+        ok: true,
+        content: `Forgotten: "${removed.text}". Tell the person plainly that it is gone.`,
+        summary: `Forgot a note: "${clip(removed.text, 120)}"`,
+      };
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 404) {
+        return { ok: false, content: "That note was already gone; nothing else was changed.", summary: "Did not forget anything: the note was already gone." };
+      }
+      throw err;
+    }
+  }
+
   return async function execute(
     name: string,
     input: Record<string, unknown>,
@@ -616,6 +778,10 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
         return readBusinessData(input, ctx);
       case "read_company_file":
         return readCompanyFile(input, ctx);
+      case REMEMBER_TOOL:
+        return remember(input, ctx);
+      case FORGET_TOOL:
+        return forget(input, ctx);
       default:
         return {
           ok: false,
@@ -633,6 +799,14 @@ export function createDbLaneAToolDeps(
 ): LaneAToolDeps {
   const businessData = businessDataService(db, options.businessData);
   const companyFiles = companyFileService(db, options.businessData);
+  const memories = agentMemoryService(db);
+  const memoryActor = (ctx: LaneAToolContext) => ({
+    actorType: "user" as const,
+    actorId: ctx.requester.userId ?? "board",
+    userId: ctx.requester.userId,
+    via: "chat" as const,
+    conversationId: ctx.conversationId,
+  });
   return {
     async listAgents(companyId) {
       const rows = await agentService(db).list(companyId);
@@ -751,6 +925,20 @@ export function createDbLaneAToolDeps(
         },
         input,
       );
+    },
+    // The notebook of the quick agent itself (its persona's when it has one),
+    // in its own company, from the server; the tool input names neither.
+    memory: {
+      async list(ctx) {
+        return memories.listForAgent(ctx.companyId, ctx.agent.id);
+      },
+      async add(ctx, text) {
+        const note = await memories.add(ctx.companyId, ctx.agent.id, { text, source: "agent" }, memoryActor(ctx));
+        return { id: note.id, text: note.text };
+      },
+      async remove(ctx, memoryId) {
+        return memories.remove(ctx.companyId, ctx.agent.id, memoryId, memoryActor(ctx));
+      },
     },
   };
 }
