@@ -261,6 +261,16 @@ export interface ToolRunContext {
   companyId: string;
   /** UUID of the project the run belongs to. */
   projectId: string;
+  /**
+   * The requester's own message for this turn, verbatim — set by the host
+   * only for a quick agent's (Lane A) chat turn, from the message the person
+   * (or agent) sent. Absent for every other call: the host drops this field
+   * from any run context a caller sends over HTTP, so neither an agent nor
+   * its tool input can supply or change it. Use it to react to what the
+   * person actually asked (for example keywords), not to what the model
+   * wrote into the tool input.
+   */
+  requesterMessage?: string;
 }
 
 /**

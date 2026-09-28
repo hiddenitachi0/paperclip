@@ -1841,6 +1841,10 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
                     // A quick agent works in no project; the field is
                     // required by the SDK type, so it is sent empty.
                     projectId: "",
+                    // The person's own words this turn, from the host (never
+                    // from the tool input): a plugin may react to what the
+                    // person asked, e.g. Media Studio's keyword looks.
+                    requesterMessage: message,
                   },
                   agent: { laneAEnabled: ctx.laneAEnabled ?? true, pluginToolGrants: ctx.pluginToolGrants ?? [] },
                 });
