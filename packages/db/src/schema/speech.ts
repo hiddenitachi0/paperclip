@@ -4,7 +4,7 @@ import { companies } from "./companies.js";
 import { telegramBots } from "./telegram_bots.js";
 
 /**
- * Voice messages (migration 0181).
+ * Voice messages (migration 0182).
  *
  * `company_speech_settings`: one row per company at most, holding the daily
  * allowances the operator chose. No row means the defaults

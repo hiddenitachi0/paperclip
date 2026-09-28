@@ -32,7 +32,7 @@ import { companySecrets } from "./company_secrets.js";
  * company (partial unique index). With none marked, the bridge uses the CEO's
  * bot, else the oldest bot.
  *
- * `voice_reply_mode` and `voice` (migration 0181) say when the bot reads its
+ * `voice_reply_mode` and `voice` (migration 0182) say when the bot reads its
  * answer aloud ('never', 'when_voice' = when the person sent a voice message,
  * 'always') and with which text-to-speech voice (null = the default voice).
  */

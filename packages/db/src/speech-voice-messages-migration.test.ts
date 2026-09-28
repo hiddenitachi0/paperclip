@@ -7,7 +7,7 @@ import { createDb } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 /**
- * Migration 0181_speech_voice_messages applies on the embedded-Postgres path
+ * Migration 0182_speech_voice_messages applies on the embedded-Postgres path
  * (every migration, in journal order): two defaulted columns on telegram_bots,
  * the per-company speech allowances, and the speech usage log, granted and
  * policed like every other tenant table, with no row written, and safe to run
@@ -17,10 +17,10 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
 if (!support.supported) {
-  console.warn(`Skipping migration 0181 test: ${support.reason ?? "unsupported environment"}`);
+  console.warn(`Skipping migration 0182 test: ${support.reason ?? "unsupported environment"}`);
 }
 
-const MIGRATION_TAG = "0181_speech_voice_messages";
+const MIGRATION_TAG = "0182_speech_voice_messages";
 const MIGRATION_PATH = fileURLToPath(new URL(`./migrations/${MIGRATION_TAG}.sql`, import.meta.url));
 
 type Row = Record<string, unknown>;
@@ -38,7 +38,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
   const companyId = randomUUID();
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0181-speech-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-db-0182-speech-");
     db = createDb(tempDb.connectionString);
     await db.execute(sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Voice', 'VOI')`);
   }, 60_000);
@@ -146,7 +146,7 @@ d(`migration ${MIGRATION_TAG}`, () => {
     expect(policies[0]?.n).toBe(2);
   });
 
-  it("is registered in the journal after 0180 with a strictly greater timestamp", () => {
+  it("is registered in the journal after the previous migration with a strictly greater timestamp", () => {
     const journal = JSON.parse(readFileSync(fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url)), "utf8")) as {
       entries: Array<{ idx: number; when: number; tag: string }>;
     };
