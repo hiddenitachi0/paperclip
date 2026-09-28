@@ -201,6 +201,109 @@ describe("Media Studio looks page with Sogni models and LoRAs", () => {
   });
 });
 
+describe("Media Studio looks page: default look per agent", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const MAJA = "33333333-3333-4333-8333-333333333333";
+  const OLE = "34343434-3434-4343-8343-343434343434";
+  const savedLooks = [
+    { id: "look-night", name: "Maja Night", style: "", model: null, seed: null, referenceFileIds: [], updatedAt: "x" },
+    { id: "look-cat", name: "Catalogue", style: "", model: null, seed: null, referenceFileIds: [], updatedAt: "x" },
+  ];
+
+  function stubActions(canManage: boolean) {
+    for (const key of Object.keys(actions)) delete actions[key];
+    actions["looks.list"] = vi.fn(async () => ({ looks: savedLooks, canManage, maxReferenceFiles: 4 }));
+    actions["looks.delete"] = vi.fn(async () => ({ looks: [savedLooks[1]], defaults: {} }));
+    actions["looks.defaults.list"] = vi.fn(async () => ({
+      agents: [
+        { id: MAJA, name: "Maja", title: "Social media" },
+        { id: OLE, name: "Ole", title: null },
+      ],
+      defaults: { [MAJA]: "look-night" },
+      canManage,
+    }));
+    actions["looks.defaults.set"] = vi.fn(async ({ agentId, lookId }: { agentId: string; lookId: string | null }) => ({
+      defaults: lookId ? { [MAJA]: "look-night", [agentId]: lookId } : {},
+    }));
+    installBridge();
+  }
+
+  async function render() {
+    root = createRoot(container);
+    root.render(<MediaStudioLooksPage context={{ companyId: COMPANY } as never} />);
+    await flush();
+  }
+
+  const selectFor = (name: string) => container.querySelector<HTMLSelectElement>(`select[aria-label="Default look for ${name}"]`)!;
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ artifacts: [] }), { status: 200 })));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    root?.unmount();
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  it("lists the agents with a select of saved looks or None, and saves a change at once", async () => {
+    stubActions(true);
+    await render();
+    const section = container.querySelector('[aria-label="Default look per agent"]')!;
+    expect(section.textContent).toContain("When this agent makes a picture without naming a look, it uses this one.");
+    expect(selectFor("Maja").value).toBe("look-night");
+    expect(selectFor("Ole").value).toBe("");
+    expect([...selectFor("Ole").options].map((o) => o.textContent)).toEqual(["None", "Maja Night", "Catalogue"]);
+    expect(selectFor("Ole").disabled).toBe(false);
+
+    setValue(selectFor("Ole"), "look-cat");
+    await flush();
+    expect(actions["looks.defaults.set"]).toHaveBeenCalledWith({ agentId: OLE, lookId: "look-cat" });
+    expect(selectFor("Ole").value).toBe("look-cat");
+
+    setValue(selectFor("Maja"), "");
+    await flush();
+    expect(actions["looks.defaults.set"]).toHaveBeenLastCalledWith({ agentId: MAJA, lookId: null });
+    expect(selectFor("Maja").value).toBe("");
+  });
+
+  it("clears a deleted look as a default on the page", async () => {
+    stubActions(true);
+    vi.stubGlobal("confirm", () => true);
+    await render();
+    expect(selectFor("Maja").value).toBe("look-night");
+    buttonNamed(container, "Delete").click();
+    await flush();
+    expect(actions["looks.delete"]).toHaveBeenCalledWith({ id: "look-night" });
+    expect(selectFor("Maja").value).toBe("");
+  });
+
+  it("shows the defaults to a member but does not let them change them", async () => {
+    stubActions(false);
+    await render();
+    expect(selectFor("Maja").value).toBe("look-night");
+    expect(selectFor("Maja").disabled).toBe(true);
+    expect(container.textContent).toContain("Only the company's owner or an admin can change an agent's default look.");
+  });
+
+  it("shows why the agents could not be loaded instead of saying there are none", async () => {
+    stubActions(true);
+    actions["looks.defaults.list"] = vi.fn(async () => {
+      throw new Error("The agents could not be read.");
+    });
+    await render();
+    const section = container.querySelector('[aria-label="Default look per agent"]')!;
+    expect(section.textContent).toContain("The agents could not be read.");
+    expect(section.textContent).not.toContain("This company has no agents yet.");
+    expect(section.textContent).not.toContain("Loading the agents");
+    // The looks themselves still show.
+    expect(container.textContent).toContain("Catalogue");
+  });
+});
+
 describe("looks page helpers", () => {
   it("searches by name, id or tag, and hides other builds unless asked", () => {
     expect(filterSogniModels(MODELS, "uncensored spicy", false).map((m) => m.id)).toEqual([

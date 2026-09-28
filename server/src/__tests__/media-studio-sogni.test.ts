@@ -1030,6 +1030,35 @@ describe("media-studio looks with Sogni models and LoRAs", () => {
     expect(starts(fake).map((call) => (call.body as any).safe_content_filter)).toEqual([true, true]);
   });
 
+  it("a default look turns the filter off exactly as the same saved look does, and nothing more", async () => {
+    await setup();
+    await save({ name: "After dark", style: "moody", model: DARK_BEAST_V9, safeContentFilter: false });
+    await save({ name: "Daylight", model: DARK_BEAST_V9 });
+    const looks = (await harness.ctx.state.get(looksKey)) as Array<{ id: string; name: string }>;
+    const afterDark = looks.find((l) => l.name === "After dark")!;
+    const defaultsKey = { ...looksKey, stateKey: "lookDefaults" };
+    const OTHER_AGENT = "34343434-3434-4343-8343-343434343434";
+
+    // The saved-off look as this agent's default: the filter is off, as with look: "After dark".
+    await harness.ctx.state.set(defaultsKey, { [AGENT]: afterDark.id });
+    expect((await run({ prompt: "a sofa at night" })).data).toMatchObject({ look: "After dark", lookReason: "agent-default" });
+    // A look named in the request wins, and its own filter setting (on) is what counts.
+    expect((await run({ prompt: "a sofa in look daylight" })).data).toMatchObject({ look: "Daylight", lookReason: "named-in-request" });
+    // Another agent's run does not get this agent's default; nothing it sends turns the filter off.
+    const other = harness.executeTool<any>(TOOL_GENERATE, { prompt: "a sofa", safeContentFilter: false } as any, { ...runCtx, agentId: OTHER_AGENT });
+    await vi.runAllTimersAsync();
+    expect((await other).data.look).toBeNull();
+    // A default pointing at a look marked off without the owner flag keeps the filter on.
+    await harness.ctx.state.set(looksKey, [
+      ...looks,
+      { id: "forged", name: "Forged", style: "", model: DARK_BEAST_V9, provider: "sogni", seed: null, referenceFileIds: [], safeContentFilter: false, updatedAt: "x" },
+    ]);
+    await harness.ctx.state.set(defaultsKey, { [AGENT]: "forged" });
+    expect((await run({ prompt: "a sofa" })).data).toMatchObject({ look: "Forged", lookReason: "agent-default" });
+
+    expect(starts(fake).map((call) => (call.body as any).safe_content_filter)).toEqual([false, true, true, true]);
+  });
+
   it("refuses an agent's model that is not in Sogni's catalog, before using up the day's limit", async () => {
     await setup();
     const reserve = vi.spyOn(harness.ctx.personas, "reserveDailyGeneration");

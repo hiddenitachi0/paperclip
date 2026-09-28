@@ -11,6 +11,8 @@ const PROVIDER = "media-studio";
 const ACTION_LOOKS_LIST = "looks.list";
 const ACTION_LOOKS_SAVE = "looks.save";
 const ACTION_LOOKS_DELETE = "looks.delete";
+const ACTION_LOOK_DEFAULTS_LIST = "looks.defaults.list";
+const ACTION_LOOK_DEFAULTS_SET = "looks.defaults.set";
 const ACTION_SOGNI_MODELS = "sogni.models";
 const ACTION_SOGNI_LORAS = "sogni.loras";
 
@@ -303,7 +305,10 @@ type Look = {
 
 const SERVICE_LABEL: Record<string, string> = { fal: "Fal.ai", sogni: "Sogni" };
 
-type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number };
+type LooksResponse = { looks: Look[]; canManage?: boolean; maxReferenceFiles?: number; defaults?: Record<string, string> };
+
+export type LookAgent = { id: string; name: string; title: string | null };
+type LookDefaultsResponse = { agents?: LookAgent[]; defaults?: Record<string, string>; canManage?: boolean };
 
 type CompanyImage = { fileId: string; title: string; src: string };
 
@@ -744,6 +749,67 @@ export function SogniLoraSection(props: {
   );
 }
 
+/**
+ * "Default look per agent": one row per agent with a select of the saved
+ * looks or None. Saving is immediate; only an owner/admin can change it.
+ */
+export function LookDefaultsSection(props: {
+  looks: Look[];
+  agents: LookAgent[] | null;
+  defaults: Record<string, string>;
+  canManage: boolean;
+  savingAgentId: string | null;
+  error: string | null;
+  onPick: (agentId: string, lookId: string) => void;
+}) {
+  const { looks, agents, defaults, canManage, savingAgentId, error, onPick } = props;
+  return (
+    <section aria-label="Default look per agent" style={{ ...card, gap: 8 }}>
+      <div style={{ fontWeight: 600 }}>Default look per agent</div>
+      <div style={{ opacity: 0.7, fontSize: 12 }}>
+        When this agent makes a picture without naming a look, it uses this one. A look named in the request still wins.
+      </div>
+      {error ? <div style={errorBox}>{error}</div> : null}
+      {agents === null ? (
+        error ? null : <div style={{ opacity: 0.7 }}>Loading the agents…</div>
+      ) : agents.length === 0 ? (
+        <div style={{ opacity: 0.7 }}>This company has no agents yet.</div>
+      ) : looks.length === 0 ? (
+        <div style={{ opacity: 0.7 }}>Save a look first; then you can make it an agent's default.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {agents.map((agent) => (
+            <label key={agent.id} style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ flex: "1 1 180px" }}>
+                {agent.name}
+                {agent.title ? <span style={{ opacity: 0.6 }}> · {agent.title}</span> : null}
+              </span>
+              <select
+                aria-label={`Default look for ${agent.name}`}
+                value={defaults[agent.id] ?? ""}
+                disabled={!canManage || savingAgentId !== null}
+                onChange={(e) => onPick(agent.id, e.target.value)}
+                style={{ ...input, flex: "1 1 200px" }}
+              >
+                <option value="">None</option>
+                {looks.map((look) => (
+                  <option key={look.id} value={look.id}>
+                    {look.name}
+                  </option>
+                ))}
+              </select>
+              {savingAgentId === agent.id ? <span style={{ fontSize: 12, opacity: 0.7 }}>Saving…</span> : null}
+            </label>
+          ))}
+        </div>
+      )}
+      {!canManage ? (
+        <div style={{ opacity: 0.7, fontSize: 12 }}>Only the company's owner or an admin can change an agent's default look.</div>
+      ) : null}
+    </section>
+  );
+}
+
 export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps) {
   const companyId = context.companyId;
   const listLooks = usePluginAction(ACTION_LOOKS_LIST);
@@ -751,8 +817,14 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const deleteLook = usePluginAction(ACTION_LOOKS_DELETE);
   const listSogniModels = usePluginAction(ACTION_SOGNI_MODELS);
   const listSogniLoras = usePluginAction(ACTION_SOGNI_LORAS);
+  const listLookDefaults = usePluginAction(ACTION_LOOK_DEFAULTS_LIST);
+  const setLookDefault = usePluginAction(ACTION_LOOK_DEFAULTS_SET);
 
   const [looks, setLooks] = useState<Look[]>([]);
+  const [agents, setAgents] = useState<LookAgent[] | null>(null);
+  const [defaults, setDefaults] = useState<Record<string, string>>({});
+  const [savingDefaultFor, setSavingDefaultFor] = useState<string | null>(null);
+  const [defaultsError, setDefaultsError] = useState<string | null>(null);
   const [canManage, setCanManage] = useState(false);
   const [maxRefs, setMaxRefs] = useState(4);
   const [draft, setDraft] = useState<LookDraft | null>(null);
@@ -776,6 +848,39 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The agents and their default looks: their own call, so a problem here does not hide the looks.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = (await listLookDefaults({})) as LookDefaultsResponse;
+        if (cancelled) return;
+        setAgents(res.agents ?? []);
+        setDefaults(res.defaults ?? {});
+      } catch (e) {
+        if (cancelled) return;
+        // Leave the list empty (not "no agents"): the error says what went wrong.
+        setDefaultsError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [listLookDefaults]);
+
+  const onPickDefault = async (agentId: string, lookId: string) => {
+    setSavingDefaultFor(agentId);
+    setDefaultsError(null);
+    try {
+      const res = (await setLookDefault({ agentId, lookId: lookId || null })) as LookDefaultsResponse;
+      setDefaults(res.defaults ?? {});
+    } catch (e) {
+      setDefaultsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingDefaultFor(null);
+    }
+  };
 
   const wantsSogni = draft?.provider === "sogni";
   const draftModel = draft?.model ?? "";
@@ -888,6 +993,8 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     try {
       const res = (await deleteLook({ id: look.id })) as LooksResponse;
       setLooks(res.looks ?? []);
+      // Deleting a look also clears it as any agent's default.
+      if (res.defaults) setDefaults(res.defaults);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -959,6 +1066,18 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
       ) : null}
       {!canManage ? (
         <div style={{ opacity: 0.7, fontSize: 12 }}>Only the company's owner or an admin can add or change looks.</div>
+      ) : null}
+
+      {!draft ? (
+        <LookDefaultsSection
+          looks={looks}
+          agents={agents}
+          defaults={defaults}
+          canManage={canManage}
+          savingAgentId={savingDefaultFor}
+          error={defaultsError}
+          onPick={(agentId, lookId) => void onPickDefault(agentId, lookId)}
+        />
       ) : null}
 
       {draft ? (
