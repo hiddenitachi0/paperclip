@@ -134,6 +134,10 @@ DECLARE
     'agent_daily_counters',
     'agent_instructions_revisions',
     'agent_memberships',
+    -- Quick-agent memory notebook. Created (and granted on) in
+    -- 0180_agent_memories.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'agent_memories',
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',
@@ -303,6 +307,10 @@ DECLARE
     'agent_daily_counters',
     'agent_instructions_revisions',
     'agent_memberships',
+    -- Quick-agent memory notebook. Created (and granted on) in
+    -- 0180_agent_memories.sql; listed here so the login-role lists match the
+    -- schema, as for the tables above.
+    'agent_memories',
     'agent_runtime_state',
     'agent_task_sessions',
     'agent_wakeup_requests',

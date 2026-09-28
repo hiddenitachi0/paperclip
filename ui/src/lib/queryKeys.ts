@@ -283,6 +283,10 @@ export const queryKeys = {
     list: (companyId: string) => ["mcp-tools", companyId] as const,
     forAgent: (agentId: string) => ["mcp-tools", "agent", agentId] as const,
   },
+  // Quick-agent memory notebook (the persona's when the agent has one).
+  agentMemories: {
+    list: (agentId: string) => ["agent-memories", agentId] as const,
+  },
   // DUR-4004: "API with a key" tools.
   apiTools: {
     list: (companyId: string) => ["api-tools", companyId] as const,

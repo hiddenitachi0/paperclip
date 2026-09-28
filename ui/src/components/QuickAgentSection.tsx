@@ -311,8 +311,8 @@ export function QuickAgentSection({
             <p className="text-xs text-muted-foreground">{displayName}</p>
             <CardDescription>
               A quick agent answers you directly in chat instead of running as a full agent in its own workspace.
-              It remembers the conversation and can do three things: hand work to a colleague, look up the weather,
-              and read a task summary. Good for a secretary or a weather helper. Only you can switch this on.
+              It remembers the conversation, keeps notes you ask it to remember (you can read and edit them here
+              once it is on), and can hand work to a colleague, look up the weather and read a task summary. Good for a secretary or a weather helper. Only you can switch this on.
             </CardDescription>
           </div>
           <ToggleSwitch
