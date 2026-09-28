@@ -715,6 +715,28 @@ const LANE_A_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
  * one but with a blue sofa, same seed" would find no seed to reuse: only
  * the reply text is replayed, not the tool results.
  */
+/** Said instead when a reply claims a picture that no tool made this turn. */
+export const LANE_A_NO_PICTURE_MADE_NOTE = "(No picture was actually made in this reply. Ask again to get one.)";
+
+const PICTURE_NOTE_PATTERN = /\[\s*Picture made in this turn:[^\]]*\]/gi;
+
+/**
+ * The "[Picture made in this turn: file id …, seed …]" note is something
+ * Paperclip adds to EARLIER turns when it replays a conversation; a model
+ * never has a reason to write one itself. Small models copy it, sometimes
+ * with a made-up file id (27 Sep: Maja claimed a picture, no tool ran). Such
+ * notes are removed, and when no picture was actually made this turn, the
+ * person is told so plainly.
+ */
+export function guardLaneAPictureClaims(text: string, actions: LaneAAction[]): string {
+  if (!PICTURE_NOTE_PATTERN.test(text)) return text;
+  PICTURE_NOTE_PATTERN.lastIndex = 0;
+  const cleaned = text.replace(PICTURE_NOTE_PATTERN, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const madePicture = actions.some((action) => (action as { image?: unknown }).image);
+  if (madePicture) return cleaned;
+  return cleaned ? `${cleaned}\n\n${LANE_A_NO_PICTURE_MADE_NOTE}` : LANE_A_NO_PICTURE_MADE_NOTE;
+}
+
 export function withImageReplayNote(content: string, toolCalls: LaneAStoredToolCall[] | null | undefined): string {
   const images = (Array.isArray(toolCalls) ? toolCalls : [])
     .map((call) => call?.image)
@@ -2100,6 +2122,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       outputTokens = result.outputTokens;
       stopReason = result.stopReason;
       actions = result.actions;
+      text = guardLaneAPictureClaims(text, actions);
     } finally {
       await closeLaneATools(toolset);
     }
