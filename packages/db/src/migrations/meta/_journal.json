@@ -1287,7 +1287,14 @@
       "idx": 184,
       "version": "7",
       "when": 1787160530000,
-      "tag": "0184_morning_report",
+      "tag": "0184_agent_browser_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1787160540000,
+      "tag": "0185_morning_report",
       "breakpoints": true
     }
   ]

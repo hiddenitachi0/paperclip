@@ -889,6 +889,72 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("blocks agent-authenticated hires that set browserAccess (DUR-4013)", async () => {
+    mockAccessService.hasPermission.mockResolvedValue(true);
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agent-hires`)
+      .send({
+        name: "Injected",
+        role: "engineer",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        browserAccess: "book_and_buy",
+      }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("cannot set browser access");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("blocks agent-authenticated self-updates that set browserAccess, even on their own record (DUR-4013)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ browserAccess: "browse_and_forms" }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("cannot set browser access");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows a board-authenticated update that sets browserAccess (DUR-4013)", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ browserAccess: "browse_and_forms" }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({ browserAccess: "browse_and_forms" }),
+      expect.anything(),
+    );
+  });
+
   it("forces agent-authenticated hires to pending_approval even when the company disables required approval (DUR-81)", async () => {
     mockAccessService.hasPermission.mockResolvedValue(true);
     mockApprovalService.create.mockResolvedValue({

@@ -93,6 +93,12 @@ export {
   type CompanyWebSearchSettings,
 } from "./web-search.js";
 export {
+  BROWSER_ACCESS_LEVELS,
+  readLaneABrowserAccess,
+  browserAccessLevelRank,
+  type BrowserAccessLevel,
+} from "./browser-access.js";
+export {
   RESEARCH_RESULT_DOCUMENT_KEY,
   RESEARCH_SKILL_SLUG,
   RESEARCH_SKILL_KEY,
@@ -1539,6 +1545,11 @@ export {
   type PersonaJobField,
   type AgentLimitsInput,
   PERSONA_FIELD_MAX_LENGTHS,
+  BROWSER_ACCESS_FIELDS,
+  AGENT_BROWSER_ACCESS_LEVELS,
+  browserAccessSchema,
+  type BrowserAccessField,
+  type AgentBrowserAccessLevel,
 } from "./validators/index.js";
 export { formatAgentDisplayName } from "./agent-display-name.js";
 
