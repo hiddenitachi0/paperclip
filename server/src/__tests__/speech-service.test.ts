@@ -72,3 +72,27 @@ describe("the daily allowance", () => {
     expect(startOfUtcDay(new Date("2026-09-28T23:30:00+02:00")).toISOString()).toBe("2026-09-28T00:00:00.000Z");
   });
 });
+
+describe("the larger body limit for recordings", () => {
+  it("applies to the transcribe route only, the way app.ts mounts it", async () => {
+    const express = (await import("express")).default;
+    const request = (await import("supertest")).default;
+    const { DEFAULT_JSON_BODY_LIMIT } = await import("../http/body-limits.js");
+    const { SPEECH_TRANSCRIBE_API_PATH, SPEECH_TRANSCRIBE_JSON_BODY_LIMIT } = await import("../routes/speech.js");
+    const app = express();
+    app.use(SPEECH_TRANSCRIBE_API_PATH, express.json({ limit: SPEECH_TRANSCRIBE_JSON_BODY_LIMIT }));
+    app.use(express.json({ limit: DEFAULT_JSON_BODY_LIMIT }));
+    app.post("/api/companies/:companyId/speech/transcribe", (req, res) => {
+      res.json({ length: String(req.body.audioBase64).length });
+    });
+    app.post("/api/companies/:companyId/speech/speak", (req, res) => {
+      res.json({ length: String(req.body.text).length });
+    });
+    const big = "A".repeat(12 * 1024 * 1024);
+    const ok = await request(app).post("/api/companies/c1/speech/transcribe").send({ audioBase64: big });
+    expect(ok.status).toBe(200);
+    expect(ok.body.length).toBe(big.length);
+    const refused = await request(app).post("/api/companies/c1/speech/speak").send({ text: big });
+    expect(refused.status).toBe(413);
+  }, 60_000);
+});
