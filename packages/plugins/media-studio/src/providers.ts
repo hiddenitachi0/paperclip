@@ -64,6 +64,8 @@ export interface GenerationInput {
   negativePrompt?: string;
   /** The model can make a picture from reference pictures (the catalog says it edits pictures). */
   modelTakesReferences?: boolean;
+  /** How many reference pictures the chosen edit model takes, from Sogni's catalog (the worker checks it first). */
+  maxReferences?: number;
   /** Sogni's Sensitive Content Filter. Only an owner/admin-saved look can set false; anything else is on. */
   safeContentFilter?: boolean;
   /** The picture sizes the chosen model takes (from Sogni's catalog). */

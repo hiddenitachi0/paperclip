@@ -1,5 +1,6 @@
 import { definePlugin, runWorker, type PluginContext, type ToolResult } from "@paperclipai/plugin-sdk";
 import {
+  FAL_REFERENCE_MODEL,
   MAX_SEED,
   assertFalModelId,
   isPictureService,
@@ -13,6 +14,7 @@ import {
 import {
   SOGNI_DEFAULT_MODEL,
   SOGNI_MAX_LORAS,
+  SOGNI_MAX_REFERENCES,
   SOGNI_TOKEN_TYPES,
   SogniProvider,
   assertSogniModelId,
@@ -43,6 +45,7 @@ import {
   ACTION_LOOK_DEFAULTS_LIST,
   ACTION_LOOK_DEFAULTS_SET,
   ACTION_LOOK_RULES_LIST,
+  ACTION_LOOK_PROMPT_PREVIEW,
   ACTION_LOOK_RULES_PREVIEW,
   ACTION_LOOK_RULES_SAVE,
   ACTION_LOOKS_SAVE,
@@ -84,6 +87,19 @@ import {
   type LookRuleOwnerKey,
   type LookRuleSet,
 } from "./look-rules.js";
+import {
+  REFERENCE_ROLE_LABELS,
+  SHEET_FIELDS,
+  SHEET_FIELD_MAX,
+  assemblePrompt,
+  filledSheetLabels,
+  isReferenceRole,
+  normalizeRoles,
+  normalizeSheet,
+  sheetIsEmpty,
+  type CharacterSheet,
+  type ReferenceRole,
+} from "./look-prompt.js";
 import { SOGNI_TOOLS, prepareSogniCall, sogniToolDescription, sogniToolParameters, type SogniToolDef } from "./sogni-tools.js";
 
 /**
@@ -247,6 +263,10 @@ export interface Look {
   provider: PictureService | null;
   seed: number | null;
   referenceFileIds: string[];
+  /** What each reference picture is for (face, body, outfit, ...), one per picture, in the same order. Older looks: all "other". */
+  referenceRoles: ReferenceRole[];
+  /** Character sheet: short text per field (hair, face, outfit, ...). Older looks: empty. */
+  sheet: CharacterSheet;
   /** Sogni only. */
   loras: LookLora[];
   guidance: number | null;
@@ -282,7 +302,7 @@ function textOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-/** Fill in what older looks do not have: no LoRAs or settings, and the content filter on. */
+/** Fill in what older looks do not have: no LoRAs or settings, the content filter on, every picture "other", an empty sheet. */
 function normalizeLook(look: Look): Look {
   const raw = look as unknown as Record<string, unknown>;
   const loras = Array.isArray(raw.loras)
@@ -299,6 +319,8 @@ function normalizeLook(look: Look): Look {
     model: textOrNull(raw.model),
     modelName: textOrNull(raw.modelName),
     seed: finiteOrNull(raw.seed),
+    referenceRoles: normalizeRoles(raw.referenceRoles, look.referenceFileIds.length),
+    sheet: normalizeSheet(raw.sheet),
     loras,
     guidance: finiteOrNull(raw.guidance),
     negativePrompt: textOrNull(raw.negativePrompt),
@@ -522,8 +544,12 @@ function describeLook(look: Look, isYourDefault = false): string {
   if (isYourDefault) extras.push("your default look: used when you name no look");
   if (look.seed !== null) extras.push(`fixed seed ${look.seed}`);
   if (look.referenceFileIds.length > 0) {
-    extras.push(`${look.referenceFileIds.length} reference picture${look.referenceFileIds.length === 1 ? "" : "s"}`);
+    const roles = look.referenceRoles.some((role) => role !== "other")
+      ? ` (${look.referenceRoles.map((role) => REFERENCE_ROLE_LABELS[role].toLowerCase()).join(", ")})`
+      : "";
+    extras.push(`${look.referenceFileIds.length} reference picture${look.referenceFileIds.length === 1 ? "" : "s"}${roles}`);
   }
+  if (!sheetIsEmpty(look.sheet)) extras.push(`character sheet: ${filledSheetLabels(look.sheet).join(", ").toLowerCase()}`);
   if (look.provider) extras.push(`made with ${SERVICE_NAME[look.provider]}`);
   if (look.model) extras.push(`model ${look.modelName ? `${look.modelName} (${look.model})` : look.model}`);
   if (look.loras.length > 0) {
@@ -592,6 +618,39 @@ function readOptionalNumber(value: unknown): number | null | "invalid" {
   if (value === undefined || value === null || value === "") return null;
   const n = typeof value === "string" ? Number(value.trim()) : value;
   return typeof n === "number" && Number.isFinite(n) ? n : "invalid";
+}
+
+/** One role per reference picture (from the looks page). A missing role is "other"; an unknown one is refused. */
+function readReferenceRoles(value: unknown, count: number): ReferenceRole[] {
+  if (value === undefined || value === null) return normalizeRoles([], count);
+  if (!Array.isArray(value) || value.length > count || value.some((role) => role !== null && role !== "" && !isReferenceRole(role))) {
+    throw new Error("Pick what each reference picture is for (face, body, outfit, style, background or other).");
+  }
+  return normalizeRoles(value, count);
+}
+
+/** The character sheet from the looks page: known fields only, each short. */
+function readSheet(value: unknown): CharacterSheet {
+  if (value !== undefined && value !== null && (typeof value !== "object" || Array.isArray(value))) {
+    throw new Error("The character sheet could not be read. Fill it in again.");
+  }
+  const sheet = normalizeSheet(value);
+  for (const field of SHEET_FIELDS) {
+    if ((sheet[field.key]?.length ?? 0) > SHEET_FIELD_MAX) {
+      throw new Error(`Keep "${field.label}" under ${SHEET_FIELD_MAX} characters.`);
+    }
+  }
+  return sheet;
+}
+
+/**
+ * How many reference pictures a Sogni look with this model can keep: the
+ * model's own limit when it edits pictures (from the catalog, else Sogni's
+ * docs), else the limit of Sogni's default picture editor (3).
+ */
+export function lookReferenceLimit(model: string | null, info: SogniModelInfo | null): number {
+  const takes = info?.takesReferences === true;
+  return sogniMaxReferences(model ?? undefined, takes, info?.maxReferences ?? null);
 }
 
 function slug(text: string): string {
@@ -703,7 +762,7 @@ async function prepareSogni(
   lookModelUsed: boolean,
   referenceCount: number,
   notes: string[],
-): Promise<{ error: string } | null> {
+): Promise<{ error: string } | { info: SogniModelInfo | null; editing: boolean; usesOwnModel: boolean }> {
   const catalog = sogniCatalogFor(ctx);
   let info: SogniModelInfo | null = null;
   if (input.model) {
@@ -781,13 +840,15 @@ async function prepareSogni(
   // Only a look an owner/admin saved with the filter off turns it off. Nothing an agent sends can.
   input.safeContentFilter = look ? !lookFilterOff(look) : true;
 
-  const max = sogniMaxReferences(input.model, input.modelTakesReferences);
+  // The chosen model's own limit from Sogni's catalog when it is the editor used, else the docs' number.
+  const max = sogniMaxReferences(input.model, input.modelTakesReferences, usesOwnModel ? (info?.maxReferences ?? null) : null);
   if (referenceCount > max) {
     return {
       error: `Sogni's ${sogniReferenceModel(input.model, input.modelTakesReferences)} model takes at most ${max} reference pictures (this asked for ${referenceCount}).`,
     };
   }
-  return null;
+  if (editing) input.maxReferences = max;
+  return { info, editing, usesOwnModel };
 }
 
 /**
@@ -859,9 +920,13 @@ export async function prepareGeneration(
   }
 
   const referenceFileIds = [...(look?.referenceFileIds ?? [])];
-  for (const id of requestedRefs) if (!referenceFileIds.includes(id)) referenceFileIds.push(id);
-  if (referenceFileIds.length > MAX_REFERENCE_FILES) {
-    return { error: `At most ${MAX_REFERENCE_FILES} reference pictures can be used at once (this asked for ${referenceFileIds.length}).` };
+  // The look's pictures keep their roles; pictures the agent adds are "other".
+  const referenceRoles: ReferenceRole[] = [...(look?.referenceRoles ?? [])];
+  for (const id of requestedRefs) {
+    if (!referenceFileIds.includes(id)) {
+      referenceFileIds.push(id);
+      referenceRoles.push("other");
+    }
   }
 
   const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
@@ -879,8 +944,11 @@ export async function prepareGeneration(
   );
   if ("error" in chosen) return chosen;
   input.provider = chosen.service;
-
-  if (look?.style.trim()) input.prompt = `${input.prompt}\n\nStyle: ${look.style.trim()}`;
+  // Sogni's picture-editing models take up to 16 (each model's own limit is checked below); Fal's Kontext 4.
+  const referenceCap = chosen.service === "sogni" ? SOGNI_MAX_REFERENCES : MAX_REFERENCE_FILES;
+  if (referenceFileIds.length > referenceCap) {
+    return { error: `At most ${referenceCap} reference pictures can be used at once (this asked for ${referenceFileIds.length}).` };
+  }
   // The look's model is used when the call names no model, or names the look's own model.
   const lookModelUsed = callModel
     ? Boolean(look?.model) && sogniCanonicalModelId(callModel) === sogniCanonicalModelId(look!.model!)
@@ -889,9 +957,32 @@ export async function prepareGeneration(
 
   const notes: string[] = [];
   // Sogni's own limits, checked here so a mistake does not use up one of the day's pictures.
+  let negativeAllowed = false;
   if (chosen.service === "sogni") {
-    const problem = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes);
-    if (problem) return problem;
+    const prepared = await prepareSogni(ctx, cfg, input, look, lookModelUsed, referenceFileIds.length, notes);
+    if ("error" in prepared) return prepared;
+    // "Always avoid" goes into the model's own "things to avoid" text when this picture can use it.
+    negativeAllowed = !prepared.editing && prepared.usesOwnModel && prepared.info?.negativePrompt != null;
+  }
+
+  // The final prompt: the request, what each picture is for, the look's sheet and style words.
+  const assembled = assemblePrompt({
+    request: input.prompt,
+    style: look?.style,
+    sheet: look?.sheet,
+    roles: referenceFileIds.length > 0 ? referenceRoles : [],
+    service: chosen.service,
+    avoidAsNegative: negativeAllowed,
+  });
+  input.prompt = assembled.prompt;
+  if (assembled.avoid) {
+    const merged = input.negativePrompt ? `${input.negativePrompt}, ${assembled.avoid}` : assembled.avoid;
+    if (merged.length <= SOGNI_NEGATIVE_PROMPT_MAX) input.negativePrompt = merged;
+    else input.prompt = `${input.prompt}\n\nKeep out of the picture: ${assembled.avoid.replace(/[\s.]+$/, "")}.`;
+  }
+  if (look && assembled.leftOut.length > 0) {
+    const labels = SHEET_FIELDS.filter((f) => assembled.leftOut.includes(f.key)).map((f) => f.label.toLowerCase());
+    notes.push(`The look's ${labels.join(", ")} ${labels.length === 1 ? "was" : "were"} left out, because the request describes ${labels.length === 1 ? "it" : "them"}.`);
   }
   // An explicit seed wins over the look's fixed seed: "same look, but try
   // the seed from that other picture" is a normal thing to ask.
@@ -946,7 +1037,9 @@ async function validateLookInput(
   if (seed === "invalid") throw new Error(`The seed must be a whole number from 0 to ${MAX_SEED}, or empty.`);
   const refs = readReferenceIds(params.referenceFileIds);
   if (refs === "invalid") throw new Error("The reference pictures could not be read. Pick them again.");
-  if (refs.length > MAX_REFERENCE_FILES) throw new Error(`Pick at most ${MAX_REFERENCE_FILES} reference pictures.`);
+  if (refs.length > SOGNI_MAX_REFERENCES) throw new Error(`Pick at most ${SOGNI_MAX_REFERENCES} reference pictures.`);
+  const referenceRoles = readReferenceRoles(params.referenceRoles, refs.length);
+  const sheet = readSheet(params.sheet);
   for (const id of refs) {
     const file = await ctx.files.get(id, companyId);
     if (!file) throw new Error("One of the reference pictures is not in this company's Files. Pick it again.");
@@ -971,9 +1064,12 @@ async function validateLookInput(
   }
   const settingsService = isPictureService(String(cfg.provider ?? "").toLowerCase()) ? (String(cfg.provider).toLowerCase() as PictureService) : null;
   const service = provider ?? modelService ?? settingsService;
-  const base = { name, style, provider, seed: seed ?? null, referenceFileIds: refs };
+  const base = { name, style, provider, seed: seed ?? null, referenceFileIds: refs, referenceRoles, sheet };
 
   if (service !== "sogni") {
+    if (refs.length > MAX_REFERENCE_FILES) {
+      throw new Error(`Pick at most ${MAX_REFERENCE_FILES} reference pictures (more need a Sogni picture-editing model that takes more).`);
+    }
     if (picks.length > 0 || guidance !== null || negativePrompt !== null || size !== null || !safeContentFilter) {
       throw new Error(SOGNI_ONLY_SETTINGS);
     }
@@ -1014,6 +1110,15 @@ async function validateLookInput(
       model = existing.model; // Sogni unreachable: keep the model this look already had.
     } else {
       throw new Error(`${CATALOG_UNREACHABLE}, so the model could not be checked. Try again in a minute.`);
+    }
+  }
+  if (refs.length > 0) {
+    const max = lookReferenceLimit(model, info);
+    if (refs.length > max) {
+      const editor = sogniReferenceModel(model ?? undefined, info?.takesReferences === true);
+      throw new Error(
+        `Sogni's ${info && sogniCanonicalModelId(editor) === info.id ? info.name : editor} model takes at most ${max} reference pictures; this look has ${refs.length}. Remove some, or pick a model that takes more.`,
+      );
     }
   }
   const unchanged =
@@ -1309,6 +1414,8 @@ const plugin = definePlugin({
               contentFilter: lookFilterOff(look) ? "off" : "on",
               seed: look.seed,
               references: look.referenceFileIds.length,
+              referenceRoles: look.referenceRoles,
+              sheet: look.sheet,
             })),
           },
         };
@@ -1369,6 +1476,14 @@ const plugin = definePlugin({
       const cleaned = withoutLook(await loadLookRules(ctx, companyId), id);
       if (cleaned.changed) await ctx.state.set(lookRulesScope(companyId), cleaned.sets);
       return { looks: next, defaults: kept, lookRules: cleaned.sets };
+    });
+
+    // "Preview prompt" on the looks page: the exact text a look (as it is in
+    // the form, saved or not) would send for a sample request. Nothing is
+    // made or spent; anyone in the company may try it.
+    ctx.actions.register(ACTION_LOOK_PROMPT_PREVIEW, async (params, context) => {
+      if (!context.companyId) throw new Error("Open this page from inside a company.");
+      return previewLookPrompt(ctx, params);
     });
 
     // Default look per agent (same page). Anyone in the company may see it;
@@ -1483,7 +1598,12 @@ const plugin = definePlugin({
       const loras = await catalog.publicLoras();
       const withLoras = loras ? new Set(loras.models) : null;
       return {
-        models: list.models.map((model) => ({ ...model, hasLoras: withLoras ? withLoras.has(model.id) : null })),
+        models: list.models.map((model) => ({
+          ...model,
+          hasLoras: withLoras ? withLoras.has(model.id) : null,
+          // How many reference pictures a look with this model can keep (the same rule as saving).
+          referenceLimit: lookReferenceLimit(model.id, model),
+        })),
         live: list.live,
         updatedAt: list.updatedAt,
         maxLoras: loras?.maxPerRequest ?? SOGNI_MAX_LORAS,
@@ -1698,6 +1818,83 @@ ${text}`,
   }
 }
 
+// ─── Preview prompt ─────────────────────────────────────────────────────────
+
+/** Used when the preview is asked for without a sample request. */
+export const PREVIEW_SAMPLE_REQUEST = "reading a book by the window";
+
+export interface PromptPreview {
+  request: string;
+  prompt: string;
+  /** Sogni's "things to avoid" text, when the model takes it (the look's own plus the sheet's "Always avoid"). */
+  negativePrompt: string | null;
+  service: string;
+  /** The model the picture would be made with (for pictures from reference pictures: the editing model). */
+  model: string | null;
+  references: Array<{ position: number; role: ReferenceRole; label: string }>;
+  /** Sheet fields left out because the sample request describes them itself. */
+  leftOut: string[];
+}
+
+/**
+ * The prompt a look would send, from the looks page's form (the same
+ * assembly as a real picture; see look-prompt.ts). The service and model are
+ * worked out as for a real picture; Sogni's catalog (public) is read to know
+ * whether the model takes "things to avoid" text.
+ */
+export async function previewLookPrompt(ctx: PluginContext, params: Record<string, unknown>): Promise<PromptPreview> {
+  const request = typeof params.request === "string" && params.request.trim() ? params.request.trim().slice(0, 2000) : PREVIEW_SAMPLE_REQUEST;
+  const style = typeof params.style === "string" ? params.style.trim().slice(0, LOOK_STYLE_MAX) : "";
+  const refs = readReferenceIds(params.referenceFileIds);
+  if (refs === "invalid") throw new Error("The reference pictures could not be read. Pick them again.");
+  const roles = readReferenceRoles(params.referenceRoles, refs.length);
+  const sheet = readSheet(params.sheet);
+  const cfg = ((await ctx.config.get()) ?? {}) as Record<string, unknown>;
+  const settingsProvider = String(cfg.provider ?? "mock").toLowerCase();
+  const rawProvider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
+  const rawModel = typeof params.model === "string" ? params.model.trim() : "";
+  const catalog = sogniCatalogFor(ctx);
+  const modelService = rawModel ? (serviceForModel(rawModel) ?? (catalog.knows(rawModel) ? "sogni" : null)) : null;
+  const service = isPictureService(rawProvider)
+    ? rawProvider
+    : isPictureService(settingsProvider)
+      ? (modelService ?? settingsProvider)
+      : settingsProvider;
+
+  let model: string | null = null;
+  let negativeAllowed = false;
+  if (service === "sogni") {
+    const wanted = rawModel || textOrNull(cfg.sogniModel) || SOGNI_DEFAULT_MODEL;
+    let info: SogniModelInfo | null = null;
+    try {
+      info = (await catalog.model(assertSogniModelId(wanted))).model;
+    } catch {
+      info = null;
+    }
+    if (refs.length > 0) {
+      model = sogniReferenceModel(rawModel || undefined, info?.takesReferences === true);
+    } else {
+      model = info?.id ?? wanted;
+      negativeAllowed = info?.negativePrompt != null;
+    }
+  } else if (service === "fal") {
+    // As Fal is called: the look's model, else Kontext for reference pictures, else the settings' model.
+    model = rawModel || (refs.length > 0 ? FAL_REFERENCE_MODEL : (textOrNull(cfg.falModel) ?? "fal-ai/flux/schnell"));
+  }
+  const assembled = assemblePrompt({ request, style, sheet, roles: refs.length > 0 ? roles : [], service, avoidAsNegative: negativeAllowed });
+  const ownNegative = service === "sogni" && refs.length === 0 ? textOrNull(params.negativePrompt) : null;
+  const negatives = [ownNegative, assembled.avoid].filter((text): text is string => Boolean(text));
+  return {
+    request,
+    prompt: assembled.prompt,
+    negativePrompt: negatives.length > 0 ? negatives.join(", ") : null,
+    service,
+    model,
+    references: roles.map((role, i) => ({ position: i + 1, role, label: REFERENCE_ROLE_LABELS[role] })),
+    leftOut: SHEET_FIELDS.filter((f) => assembled.leftOut.includes(f.key)).map((f) => f.label),
+  };
+}
+
 // ─── Quick pictures ─────────────────────────────────────────────────────────
 
 /**
@@ -1738,7 +1935,8 @@ export async function runQuickPicture(
   const service = isPictureService(settingsProvider) && lookService ? lookService : settingsProvider;
   const size = quickPictureSize(shape, service);
   const input: GenerationInput = {
-    prompt: look?.style.trim() ? `${prompt}\n\nStyle: ${look.style.trim()}` : prompt,
+    // A named look's words only: its style words and character sheet (no pictures, so no roles).
+    prompt: look ? assemblePrompt({ request: prompt, style: look.style, sheet: look.sheet, roles: [], service }).prompt : prompt,
     provider: service,
     model: quickModelFor(service),
     imageSize: size.imageSize,
@@ -1777,7 +1975,7 @@ export async function runQuickPicture(
   const filename = `quick-picture${seed !== null ? `-seed-${seed}` : ""}.${extension}`;
   const record = { seed, prompt: input.prompt, look, provider: result.provider, model: result.model, referenceFileIds: [], quick: true, durationMs };
   ctx.logger.info(`media-studio: quick picture via ${result.provider} (${result.model ?? "default model"}, ${size.imageSize}) in ${durationMs} ms`);
-  const lookSentence = look ? ` Used the saved look "${look.name}" (its style words only).` : "";
+  const lookSentence = look ? ` Used the saved look "${look.name}" (its style words and character sheet only).` : "";
   const about = `${SERVICE_NAME[result.provider as PictureService] ?? result.provider}, ${size.width}x${size.height}, ${showDuration(durationMs)}`;
   const data = {
     quick: true,

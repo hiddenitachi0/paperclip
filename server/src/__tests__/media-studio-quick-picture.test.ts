@@ -231,7 +231,7 @@ describe("media-studio quick picture", () => {
     expect(args.loras).toBeUndefined();
     expect(args.seed).not.toBe(777);
     expect(result.data.look).toBe("After dark");
-    expect(result.content).toContain('Used the saved look "After dark" (its style words only).');
+    expect(result.content).toContain('Used the saved look "After dark" (its style words and character sheet only).');
   });
 
   it("a named Fal look adds its style but keeps schnell and no reference pictures", async () => {

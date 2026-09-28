@@ -19,6 +19,8 @@ export const ACTION_LOOK_DEFAULTS_SET = "looks.defaults.set";
 export const ACTION_LOOK_RULES_LIST = "lookRules.list";
 /** Save one person's (or job's) whole rule list. Owner/admin only. */
 export const ACTION_LOOK_RULES_SAVE = "lookRules.save";
+/** The exact prompt a look would send for a sample request (the looks page's "Preview prompt"). */
+export const ACTION_LOOK_PROMPT_PREVIEW = "looks.previewPrompt";
 /** "Right now this would pick: ..." with a test message. */
 export const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 /** Sogni's live list of picture models, for the looks page's model picker. */
@@ -97,7 +99,7 @@ export const QUICK_PICTURE_DESCRIPTION =
   "Make a quick, small picture (about 512 pixels, few details, made in a few seconds) to go along with your message: a mood picture that sets the scene, not a finished picture. " +
   "Use it when a picture would simply make your reply nicer (\"good morning\" with a sunrise, a cosy autumn feeling). " +
   "When the person asks for a real picture (a product shot, a picture of a person or a specific look, anything they will use), use generate-image instead. " +
-  "It uses the fastest model of the picture service, with no reference pictures and no LoRAs. A saved look is only used when you name it as look (its style words and content filter; not its model, LoRAs or reference pictures). " +
+  "It uses the fastest model of the picture service, with no reference pictures and no LoRAs. A saved look is only used when you name it as look (its style words, character sheet and content filter; not its model, LoRAs or reference pictures). " +
   "It is saved to the company's Files and shown with your reply; with issueId it is attached to that task instead. It counts toward the daily picture limit, and it gives up after 30 seconds.";
 
 export const QUICK_PICTURE_PARAMETERS = {

@@ -54,6 +54,13 @@ export interface SogniModelInfo {
   generates: boolean;
   /** Can make a picture from reference pictures (edit_image). */
   takesReferences: boolean;
+  /**
+   * How many reference pictures it takes, from the catalog: parameters.maxContextImages
+   * (GPT Image 2.5: 16), else the most context pictures Sogni benchmarks it with
+   * (parameters.benchmark.secContext1..N: Qwen Image Edit 3, Krea 2 Identity Edit 2).
+   * Null when the catalog does not say.
+   */
+  maxReferences: number | null;
   /** Workers connected right now (all networks); null when not known (built-in list). */
   workersOnline: number | null;
   /** "off-required": only works with the Sensitive Content Filter off. "mature": made for mature pictures. */
@@ -144,6 +151,18 @@ function contentFilterNeed(id: string, tags: string[]): SogniModelInfo["contentF
   return tags.includes("spicy") ? "mature" : null;
 }
 
+/** See SogniModelInfo.maxReferences. */
+export function catalogMaxReferences(parameters: Json): number | null {
+  const declared = num(parameters.maxContextImages);
+  if (declared !== null && declared >= 1) return Math.floor(declared);
+  const benchmark = asRecord(parameters.benchmark);
+  const benchmarked = Object.keys(benchmark ?? {})
+    .map((key) => /^secContext(\d+)$/.exec(key))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => Number(m[1]));
+  return benchmarked.length > 0 ? Math.max(...benchmarked) : null;
+}
+
 function parseModel(value: unknown): SogniModelInfo | null {
   const m = asRecord(value);
   const id = str(m?.id);
@@ -167,6 +186,7 @@ function parseModel(value: unknown): SogniModelInfo | null {
     tier: str(m.tierId),
     generates: !editOnly,
     takesReferences: editOnly || EDIT_MODEL_IDS.has(id),
+    maxReferences: catalogMaxReferences(p),
     workersOnline,
     contentFilter: contentFilterNeed(id, tags),
     width: range(p.width),
@@ -296,6 +316,7 @@ export const SOGNI_OFFLINE_MODELS: SogniModelInfo[] = Object.entries(OFFLINE_NAM
     tier: null,
     generates: !editOnly,
     takesReferences: EDIT_MODEL_IDS.has(id),
+    maxReferences: null,
     workersOnline: null,
     contentFilter: contentFilterNeed(id, []),
     width: null,
