@@ -110,6 +110,26 @@ export const agents = pgTable(
     laneATemperature: real("lane_a_temperature"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    // DUR-4017: the operator's daily briefing settings for this agent
+    // (enabled, delivery time, timezone, place override, sources/topics,
+    // price symbols, headline cap). Shape is morningReportSettingsSchema in
+    // packages/shared. Null means the feature has never been configured — the
+    // UI treats that the same as `enabled: false`. Board-settable only, same
+    // guard as the rest of QUICK_AGENT_FIELDS: an agent cannot switch its own
+    // daily report on or change what it is told to fetch.
+    morningReportSettings: jsonb("morning_report_settings").$type<Record<string, unknown>>(),
+    // The scheduler tick's single-flight lease on this agent's morning report
+    // (mirrors watchers.check_lease_until in packages/db/src/schema/watchers.ts):
+    // set while a report is being composed so two overlapping ticks never fire
+    // the same day's report twice. Cleared once the report is written, or left
+    // to expire if composing crashes.
+    morningReportLeaseUntil: timestamp("morning_report_lease_until", { withTimezone: true }),
+    // The agent-local calendar date (YYYY-MM-DD, in morningReportSettings.timezone)
+    // a report was last generated for. The tick compares this to "today" in the
+    // agent's own timezone before firing, so a DST transition, or a tick that
+    // runs more than once inside the target minute, never sends two reports the
+    // same local day.
+    morningReportLastSentDate: text("morning_report_last_sent_date"),
     // DUR-109: last time a human (direct bundle/file edit) or an approved
     // boss-proposed instructions_change actually reviewed/applied this
     // agent's instructions. Defaults to now() on the migration backfill and

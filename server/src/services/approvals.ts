@@ -436,6 +436,14 @@ export function approvalService(db: Db) {
             laneABaseUrl: typeof payload.laneABaseUrl === "string" ? payload.laneABaseUrl : null,
             laneATemperature:
               typeof payload.laneATemperature === "number" ? payload.laneATemperature : null,
+            // DUR-4017: the daily briefing settings the card carries, read
+            // back for the same reason. Anything not an object reads as
+            // "never configured" (null), matching a hire made before this
+            // field existed.
+            morningReportSettings:
+              typeof payload.morningReportSettings === "object" && payload.morningReportSettings !== null
+                ? (payload.morningReportSettings as Record<string, unknown>)
+                : null,
             // DUR-4000: which person does this job and the job's limits box,
             // read back off the card for the same reason; the service still
             // refuses a persona from another company. A malformed limits
