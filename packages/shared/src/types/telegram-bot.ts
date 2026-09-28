@@ -27,6 +27,10 @@ export type TelegramBotSummary = {
    * a card the board filed itself, for example.
    */
   receivesCompanyNotices: boolean;
+  /** When the bot reads its answer aloud: never, when the person sent a voice message, or always. */
+  voiceReplyMode: "never" | "when_voice" | "always";
+  /** The voice it reads with; null means the default voice. */
+  voice: string | null;
   lastCheckAt: string | null;
   lastCheckOk: boolean | null;
   lastCheckUsername: string | null;
@@ -63,6 +67,9 @@ export type TelegramBridgeBot = {
   receivesCompanyNotices: boolean;
   createdAt: string;
   agentRole: string | null;
+  /** Voice messages: when the bot reads its answer aloud, and with which voice (null = default). */
+  voiceReplyMode: "never" | "when_voice" | "always";
+  voice: string | null;
   token: string;
 };
 

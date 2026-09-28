@@ -695,3 +695,4 @@ export type {
   TelegramBridgeBot,
   TelegramBridgeConfig,
 } from "./telegram-bot.js";
+export type { SpeechSettings, SpeechSpeakResult, SpeechTranscribeResult } from "./speech.js";

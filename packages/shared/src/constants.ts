@@ -729,6 +729,13 @@ export const SECRET_BINDING_TARGET_TYPES = [
   // Deliberately NOT a dedicated target: one provider key may be shared by
   // several tools (and by an MCP server) if the operator wants that.
   "api_tool",
+  // Voice messages: the OpenAI key a company's speech-to-text and
+  // text-to-speech calls are made with (target_id = the company id,
+  // config_path 'openai_api_key'). Never resolved by any agent -- only by the
+  // server-side speech service, which makes every outbound call itself.
+  // Deliberately NOT a dedicated target: the same OpenAI key may also be a
+  // quick agent's key.
+  "speech",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 

@@ -176,6 +176,10 @@ DECLARE
     'company_skill_stars',
     'company_skill_versions',
     'company_skills',
+    -- Voice messages. Created (and granted on) in
+    -- 0181_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
     'cross_company_access_log',
@@ -279,6 +283,10 @@ DECLARE
     'routines',
     'secret_access_events',
     'session',
+    -- Voice messages. Created (and granted on) in
+    -- 0181_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'speech_usage_events',
     -- DUR-3978 slice 2. The real DDL, grant and policy for this table live in
     -- 0166_telegram_bots.sql; the name is listed here for the same reason
     -- company_service_tokens is, above.
@@ -339,6 +347,10 @@ DECLARE
     'company_skill_stars',
     'company_skill_versions',
     'company_skills',
+    -- Voice messages. Created (and granted on) in
+    -- 0181_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'company_speech_settings',
     'company_user_sidebar_preferences',
     'cost_events',
     'customer_inbox_conversations',
@@ -420,6 +432,10 @@ DECLARE
     'routine_triggers',
     'routines',
     'secret_access_events',
+    -- Voice messages. Created (and granted on) in
+    -- 0181_speech_voice_messages.sql; listed here so the login-role lists
+    -- match the schema, as for the tables above.
+    'speech_usage_events',
     -- DUR-3978 slice 2, created in 0166_telegram_bots.sql; company-scoped, so
     -- it belongs in this list too.
     'telegram_bots',
