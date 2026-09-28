@@ -43,7 +43,11 @@ export const laneAMessages = pgTable(
       .notNull()
       .references(() => laneAConversations.id, { onDelete: "cascade" }),
     agentId: uuid("agent_id").notNull().references(() => agents.id),
-    role: text("role").$type<"user" | "assistant">().notNull(),
+    // "recap" (no migration: the column is plain text): the one row a
+    // continued conversation opens with, holding the earlier messages picked
+    // for it. It rides in the system prompt, never replayed as a turn
+    // (server/src/services/lane-a-continue.ts).
+    role: text("role").$type<"user" | "assistant" | "recap">().notNull(),
     content: text("content").notNull(),
     toolCalls: jsonb("tool_calls").$type<LaneAStoredToolCall[]>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

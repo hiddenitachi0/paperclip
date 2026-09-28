@@ -6,7 +6,9 @@ import { badRequest, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { agentService, laneAService } from "../services/index.js";
 import type { LaneAServiceOptions } from "../services/lane-a.js";
-import { assertCompanyAccess, assertServiceOrBoard, getActorInfo } from "./authz.js";
+import { LANE_A_CONTINUE_SPEC_MAX_LENGTH } from "../services/lane-a-continue.js";
+import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
+import { assertBoard, assertCompanyAccess, assertServiceOrBoard, getActorInfo } from "./authz.js";
 
 /**
  * Lane A routes (DUR-217): `POST /api/lane-a/:agentId/messages`, a direct
@@ -23,6 +25,13 @@ import { assertCompanyAccess, assertServiceOrBoard, getActorInfo } from "./authz
  * (round 2) also remember earlier turns of the same conversation.
  */
 const conversationQuerySchema = z.object({ companyId: z.string().uuid() });
+/** Continue an earlier conversation: the company and, optionally, what to continue ("last 45 minutes", "our meeting today"). */
+const continueConversationSchema = z
+  .object({
+    companyId: z.string().uuid(),
+    spec: z.string().trim().max(LANE_A_CONTINUE_SPEC_MAX_LENGTH).optional(),
+  })
+  .strict();
 
 /**
  * Which company a transform call acts for. For a service token this is the
@@ -194,6 +203,73 @@ export function laneARoutes(db: Db, options: { laneA?: LaneAServiceOptions } = {
     assertCompanyAccess(req, companyId);
 
     const result = await laneA.listTransformAgents(companyId);
+    res.json(result);
+  });
+
+  /**
+   * Continue an earlier conversation (Telegram `/cont`, the chat panel's
+   * "Continue earlier conversation…"): starts a new conversation that carries
+   * the relevant part of this person's recent chat with this quick agent.
+   * Board users only; the service reads only the caller's own conversations
+   * with this agent in this company (services/lane-a-continue.ts).
+   */
+  router.post("/lane-a/:agentId/continue", validate(continueConversationSchema), async (req, res) => {
+    assertBoard(req);
+    const targetAgentId = req.params.agentId as string;
+    const { companyId, spec } = req.body as { companyId: string; spec?: string };
+    assertCompanyAccess(req, companyId);
+
+    const targetAgent = await agents.getById(targetAgentId);
+    if (!targetAgent || targetAgent.companyId !== companyId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+
+    const result = await laneA.continueConversation({
+      companyId,
+      targetAgent: {
+        id: targetAgent.id,
+        companyId: targetAgent.companyId,
+        name: targetAgent.name,
+        role: targetAgent.role,
+        laneAEnabled: targetAgent.laneAEnabled,
+        laneAModel: targetAgent.laneAModel ?? null,
+        laneAMaxOutputTokens: targetAgent.laneAMaxOutputTokens ?? null,
+        laneAProvider: targetAgent.laneAProvider ?? null,
+        laneABaseUrl: targetAgent.laneABaseUrl ?? null,
+      },
+      requester: requesterFor(req),
+      actor: req.actor,
+      spec: spec ?? null,
+    });
+    // Same scrub the chat router gives a reply: the recap can quote earlier answers.
+    res.json({ ...result, recap: redactKnownLeakedSecretPatterns(redactSensitiveText(result.recap)) });
+  });
+
+  /** Telegram `/looks`: the saved looks, from the quick agent's ticked "List saved looks" tool. Board users only. */
+  router.get("/lane-a/:agentId/looks", async (req, res) => {
+    assertBoard(req);
+    const targetAgentId = req.params.agentId as string;
+    const parsedQuery = conversationQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      res.status(400).json({ error: "companyId is required" });
+      return;
+    }
+    const { companyId } = parsedQuery.data;
+    assertCompanyAccess(req, companyId);
+
+    const targetAgent = await agents.getById(targetAgentId);
+    if (!targetAgent || targetAgent.companyId !== companyId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+
+    const result = await laneA.listLooks({
+      companyId,
+      targetAgent: { id: targetAgent.id, name: targetAgent.name, laneAEnabled: targetAgent.laneAEnabled },
+      requester: requesterFor(req),
+      actor: req.actor,
+    });
     res.json(result);
   });
 

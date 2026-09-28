@@ -5,7 +5,7 @@ import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { and, asc, count, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -34,7 +34,7 @@ import {
   laneATemperatureForCall,
   type LaneAProvider,
 } from "@paperclipai/shared";
-import { HttpError, conflict, forbidden, notFound, tooManyRequests } from "../errors.js";
+import { HttpError, conflict, forbidden, notFound, tooManyRequests, unprocessable } from "../errors.js";
 import {
   LaneAProviderError,
   createLaneAProviderClient,
@@ -85,6 +85,23 @@ import {
 import { companyFileService, type CompanyFileServerSummary } from "./company-files.js";
 import { agentMemoryService } from "./agent-memories.js";
 import { buildMemoryPromptSection, type LaneAMemoryPromptNote } from "./lane-a-memory.js";
+import {
+  LANE_A_CONTINUE_LOOKBACK_MS,
+  LANE_A_CONTINUE_MAX_MESSAGES,
+  LANE_A_CONTINUE_NO_MATCH,
+  LANE_A_CONTINUE_NOTHING_FOUND,
+  LANE_A_CONTINUE_SELECTION_MAX_OUTPUT_TOKENS,
+  LANE_A_RECAP_ROLE,
+  LANE_A_RECAP_SUMMARY_TOOL,
+  boundCandidates,
+  buildContinueSeed,
+  buildEarlierConversationSection,
+  buildShortRecap,
+  buildTopicSelectionRequest,
+  parseContinueSpec,
+  parseTopicSelection,
+  type LaneAContinueMessage,
+} from "./lane-a-continue.js";
 import {
   applyBusinessDataNumberCheck,
   applyNoLookupGuard,
@@ -267,6 +284,12 @@ export interface LaneASystemPromptInput {
    * are offered this turn. Absent leaves the prompt exactly as before.
    */
   memory?: { notes: LaneAMemoryPromptNote[]; toolsOffered: boolean } | null;
+  /**
+   * A continued conversation's recap (lane-a-continue.ts): the earlier
+   * messages picked for it, rendered as "Earlier conversation, recapped for
+   * continuity". Absent leaves the prompt exactly as before.
+   */
+  earlierConversation?: string | null;
 }
 
 /** DUR-3997: the rules a quick agent reads company files under. */
@@ -411,6 +434,13 @@ export function buildSystemPrompt(input: LaneASystemPromptInput): string {
         toolsOffered: input.memory.toolsOffered && input.hasBuiltinTools,
       }),
     );
+  }
+
+  // A continued conversation: the earlier messages picked for it, framed as
+  // background. Before the persona and the rules, so the job rules read last.
+  const earlierConversation = input.earlierConversation?.trim();
+  if (earlierConversation) {
+    parts.push(buildEarlierConversationSection(earlierConversation));
   }
 
   // DUR-4000: who the person is and how they write, before the operator's
@@ -1359,26 +1389,40 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
 
   async function loadReplayHistory(
     conversationId: string,
-  ): Promise<{ history: LaneAChatMessage[]; businessDataInHistory: boolean }> {
+  ): Promise<{ history: LaneAChatMessage[]; businessDataInHistory: boolean; earlierConversation: string | null }> {
     // Newest rows first, bounded by the turn cap; selectReplayTurns applies
-    // the token budget and restores chronological order.
-    const rows = await db
-      .select({ role: laneAMessages.role, content: laneAMessages.content, toolCalls: laneAMessages.toolCalls })
-      .from(laneAMessages)
-      .where(eq(laneAMessages.conversationId, conversationId))
-      .orderBy(desc(laneAMessages.createdAt))
-      .limit(LANE_A_MEMORY_MAX_TURNS);
+    // the token budget and restores chronological order. A continued
+    // conversation's recap row is read on its own: it goes in the system
+    // prompt, never in the turns.
+    const [rows, recapRows] = await Promise.all([
+      db
+        .select({ role: laneAMessages.role, content: laneAMessages.content, toolCalls: laneAMessages.toolCalls })
+        .from(laneAMessages)
+        .where(and(eq(laneAMessages.conversationId, conversationId), ne(laneAMessages.role, LANE_A_RECAP_ROLE)))
+        .orderBy(desc(laneAMessages.createdAt))
+        .limit(LANE_A_MEMORY_MAX_TURNS),
+      db
+        .select({ content: laneAMessages.content, toolCalls: laneAMessages.toolCalls })
+        .from(laneAMessages)
+        .where(and(eq(laneAMessages.conversationId, conversationId), eq(laneAMessages.role, LANE_A_RECAP_ROLE)))
+        .limit(1),
+    ]);
     const chronological = rows.slice().reverse();
     // DUR-3972: an earlier turn that read business data leaves its figures in
-    // the replayed history, where the model can repeat or add them up.
-    const businessDataInHistory = rows.some(
+    // the replayed history, where the model can repeat or add them up. A
+    // recap of messages that did carries the same marker.
+    const businessDataInHistory = [...rows, ...recapRows].some(
       (row) => Array.isArray(row.toolCalls) && row.toolCalls.some((call) => call?.tool === READ_BUSINESS_DATA_TOOL),
     );
     return {
       history: selectReplayTurns(
-        chronological.map((row) => ({ role: row.role, content: withImageReplayNote(row.content, row.toolCalls) })),
+        chronological.map((row) => ({
+          role: row.role as LaneAReplayTurn["role"],
+          content: withImageReplayNote(row.content, row.toolCalls),
+        })),
       ).map((turn) => ({ role: turn.role, content: turn.content })),
       businessDataInHistory,
+      earlierConversation: recapRows[0]?.content ?? null,
     };
   }
 
@@ -2010,7 +2054,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     });
 
     const pluginToolGrants = (agentRow?.pluginToolGrants as string[] | null) ?? [];
-    const [mcpToolset, { history, businessDataInHistory }, colleagues] = await Promise.all([
+    const [mcpToolset, { history, businessDataInHistory, earlierConversation }, colleagues] = await Promise.all([
       // DUR-4004: "API with a key" tools are folded into this toolset's
       // toolIndex, so the add-on clash set below covers them too.
       loadLaneATools(db, params.companyId, params.targetAgent.id, params.targetAgent.mcpToolIds ?? [], options.apiTools),
@@ -2105,6 +2149,7 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
         businessData: businessDataPrompt,
         companyFiles: companyFilesPrompt,
         memory: memoryPrompt,
+        earlierConversation,
       });
       const result = await callModel({
         systemPrompt,
@@ -2256,18 +2301,26 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
       .where(eq(laneAMessages.conversationId, conversation.id))
       .orderBy(asc(laneAMessages.createdAt));
     const expired = Date.now() - conversation.lastMessageAt.getTime() > LANE_A_IDLE_TIMEOUT_MS;
+    // A continued conversation's recap row is not a turn: the transcript
+    // shows its one-line summary instead.
+    const recapRow = rows.find((row) => row.role === LANE_A_RECAP_ROLE);
     return {
       conversationId: conversation.id,
       turnCount: conversation.turnCount,
       expired,
       turnCapReached: conversation.turnCount >= LANE_A_MAX_TURNS_PER_CONVERSATION,
-      messages: rows.map((row) => ({
-        id: row.id,
-        role: row.role,
-        content: row.content,
-        actions: row.toolCalls ?? [],
-        createdAt: row.createdAt,
-      })),
+      continuedFrom: recapRow
+        ? (recapRow.toolCalls ?? []).find((call) => call?.tool === LANE_A_RECAP_SUMMARY_TOOL)?.summary ?? ""
+        : null,
+      messages: rows
+        .filter((row) => row.role !== LANE_A_RECAP_ROLE)
+        .map((row) => ({
+          id: row.id,
+          role: row.role as "user" | "assistant",
+          content: row.content,
+          actions: row.toolCalls ?? [],
+          createdAt: row.createdAt,
+        })),
     };
   }
 
@@ -2682,8 +2735,293 @@ export function laneAService(db: Db, options: LaneAServiceOptions = {}) {
     return { agents: results };
   }
 
-  return { sendMessage, getConversation, transform, listTransformAgents };
+  // ─── Continue an earlier conversation (Telegram /cont, the chat panel) ─────
+
+  /**
+   * Starts a NEW conversation that carries the relevant part of this person's
+   * recent chat with this quick agent (lane-a-continue.ts has the rules for
+   * reading the spec and picking messages).
+   *
+   * Scope, in order: the agent must be a quick agent; the requester must be a
+   * person signed in to the board (never an agent or a token); only
+   * conversations that person opened with THIS agent in THIS company are
+   * read, and only the last 7 days of them. Cost: a time phrase or "the last
+   * conversation" makes no model call; a topic makes exactly one, on the
+   * agent's own quick model, billed like a chat turn. Nothing found or
+   * nothing matched is a plain 422 and starts nothing.
+   */
+  async function continueConversation(params: {
+    companyId: string;
+    targetAgent: LaneATargetAgent;
+    requester: LaneARequester;
+    actor?: AuthorizationActor;
+    spec?: string | null;
+    /** Test seam: the clock. */
+    now?: Date;
+  }) {
+    const { companyId, targetAgent, requester } = params;
+    if (!targetAgent.laneAEnabled) {
+      throw forbidden("Lane A is not enabled for this agent");
+    }
+    const userId = requester.userId;
+    if (!userId || requester.agentId || params.actor?.type !== "board") {
+      throw forbidden("Only a person signed in to Paperclip can continue an earlier conversation.");
+    }
+    await assertAgentMayWork({ companyId, targetAgent, kind: "chat" });
+
+    const now = params.now ?? new Date();
+    const plan = parseContinueSpec(params.spec, now);
+    const lookbackStart = new Date(now.getTime() - LANE_A_CONTINUE_LOOKBACK_MS);
+    const sourceLabel = plan.mode === "last" ? plan.label : plan.window.label;
+
+    // Only this person's own conversations with this agent, in this company.
+    const mine = and(
+      eq(laneAConversations.companyId, companyId),
+      eq(laneAConversations.agentId, targetAgent.id),
+      eq(laneAConversations.requestedByUserId, userId),
+      isNull(laneAConversations.requestedByAgentId),
+      eq(laneAMessages.companyId, companyId),
+      inArray(laneAMessages.role, ["user", "assistant"]),
+      gte(laneAMessages.createdAt, lookbackStart),
+    );
+    const selectMine = (extra: SQL | undefined, limit: number) =>
+      db
+        .select({
+          id: laneAMessages.id,
+          conversationId: laneAMessages.conversationId,
+          role: laneAMessages.role,
+          content: laneAMessages.content,
+          toolCalls: laneAMessages.toolCalls,
+          createdAt: laneAMessages.createdAt,
+        })
+        .from(laneAMessages)
+        .innerJoin(laneAConversations, eq(laneAMessages.conversationId, laneAConversations.id))
+        .where(extra ? and(mine, extra) : mine)
+        .orderBy(desc(laneAMessages.createdAt))
+        .limit(limit);
+
+    let rows: Awaited<ReturnType<typeof selectMine>> = [];
+    let carriedRecap: string | null = null;
+    if (plan.mode === "last") {
+      const [latest] = await selectMine(undefined, 1);
+      if (latest) {
+        rows = await selectMine(eq(laneAMessages.conversationId, latest.conversationId), LANE_A_CONTINUE_MAX_MESSAGES);
+        const [recapRow] = await db
+          .select({ content: laneAMessages.content })
+          .from(laneAMessages)
+          .where(and(eq(laneAMessages.conversationId, latest.conversationId), eq(laneAMessages.role, LANE_A_RECAP_ROLE)))
+          .limit(1);
+        carriedRecap = recapRow?.content ?? null;
+      }
+    } else {
+      rows = await selectMine(
+        and(gte(laneAMessages.createdAt, plan.window.from), lte(laneAMessages.createdAt, plan.window.to)),
+        LANE_A_CONTINUE_MAX_MESSAGES,
+      );
+    }
+    if (rows.length === 0) {
+      throw unprocessable(
+        plan.mode === "last"
+          ? `There is no earlier conversation with ${targetAgent.name} from the last 7 days to continue.`
+          : `I found no messages with ${targetAgent.name} from ${sourceLabel}, so there is nothing to continue.`,
+        { code: LANE_A_CONTINUE_NOTHING_FOUND },
+      );
+    }
+
+    const toMessage = (row: (typeof rows)[number]): LaneAContinueMessage => ({
+      id: row.id,
+      conversationId: row.conversationId,
+      role: row.role === "user" ? "user" : "assistant",
+      content: withImageReplayNote(row.content, row.toolCalls),
+      createdAt: row.createdAt,
+    });
+    const considered = rows.slice().reverse().map(toMessage);
+    let picked: LaneAContinueMessage[] = considered;
+    let modelRecap: string | null = null;
+
+    if (plan.mode === "topic") {
+      // The one model call: the agent's own quick model, key and provider,
+      // exactly as a chat turn would use them.
+      const agentRow = await loadLaneAAgentRow(companyId, targetAgent.id);
+      const settings = resolveLaneASettings({
+        ...targetAgent,
+        laneAProvider: targetAgent.laneAProvider ?? agentRow?.laneAProvider ?? null,
+        laneABaseUrl: targetAgent.laneABaseUrl ?? agentRow?.laneABaseUrl ?? null,
+        laneAModel: targetAgent.laneAModel ?? agentRow?.laneAModel ?? null,
+      });
+      const model = assertLaneASettingsRunnable(settings);
+      const credential = await resolveLaneACredential({
+        companyId,
+        agentId: targetAgent.id,
+        provider: settings.provider,
+        adapterConfig: agentRow?.adapterConfig,
+        actor: params.actor,
+        keyOptional: settings.provider === "anthropic" && Boolean(options.createModelClient),
+      });
+      const client = buildProviderClient({ provider: settings.provider, baseUrl: settings.baseUrl, credential });
+      const candidates = boundCandidates(considered);
+      const request = buildTopicSelectionRequest({
+        spec: plan.topic,
+        agentName: targetAgent.name,
+        windowLabel: plan.window.label,
+        messages: candidates,
+      });
+      let completion: Awaited<ReturnType<LaneAProviderClient["complete"]>>;
+      try {
+        completion = await client.complete({
+          model,
+          maxTokens: Math.min(LANE_A_CONTINUE_SELECTION_MAX_OUTPUT_TOKENS, settings.maxOutputTokens),
+          system: request.system,
+          messages: [{ role: "user", content: request.user }],
+        });
+      } catch (err) {
+        throw providerErrorToHttp(err, "chat");
+      }
+      await costService(db).createEvent(companyId, {
+        agentId: targetAgent.id,
+        provider: settings.provider,
+        biller: settings.provider,
+        billingType: "metered_api",
+        model,
+        inputTokens: completion.usage.inputTokens,
+        outputTokens: completion.usage.outputTokens,
+        costCents: computeCostCents(settings.provider, model, completion.usage.inputTokens, completion.usage.outputTokens),
+        occurredAt: new Date(),
+      });
+      const selection = parseTopicSelection(completion.text, candidates.length);
+      if (!selection || selection.indexes.length === 0) {
+        throw unprocessable(
+          `Nothing in your messages with ${targetAgent.name} from ${sourceLabel} matched "${plan.topic}". ` +
+            `Try a time instead, like "last 45 minutes" or "this morning".`,
+          { code: LANE_A_CONTINUE_NO_MATCH },
+        );
+      }
+      picked = selection.indexes.map((index) => candidates[index]!);
+      modelRecap = selection.recap || null;
+    }
+
+    const seed = buildContinueSeed({
+      agentName: targetAgent.name,
+      sourceLabel: plan.mode === "topic" ? `messages about "${plan.topic}" from ${sourceLabel}` : sourceLabel,
+      recap: modelRecap,
+      messages: picked,
+      carriedRecap,
+    });
+    const shortRecap = buildShortRecap({ recap: modelRecap, messages: picked, sourceLabel });
+    const pickedIds = new Set(picked.map((message) => message.id));
+    const pickedBusinessData = rows.some(
+      (row) =>
+        pickedIds.has(row.id) &&
+        Array.isArray(row.toolCalls) &&
+        row.toolCalls.some((call) => call?.tool === READ_BUSINESS_DATA_TOOL),
+    );
+
+    const [conversation] = await db
+      .insert(laneAConversations)
+      .values({ companyId, agentId: targetAgent.id, requestedByUserId: userId, requestedByAgentId: null })
+      .returning();
+    const recapToolCalls: LaneAStoredToolCall[] = [{ tool: LANE_A_RECAP_SUMMARY_TOOL, summary: shortRecap, ok: true }];
+    // Figures in the recap keep the sales-figure guard on, as replayed turns do.
+    if (pickedBusinessData) {
+      recapToolCalls.push({ tool: READ_BUSINESS_DATA_TOOL, summary: "Earlier sales figures are part of the recap.", ok: true });
+    }
+    await db.insert(laneAMessages).values({
+      companyId,
+      conversationId: conversation!.id,
+      agentId: targetAgent.id,
+      role: LANE_A_RECAP_ROLE,
+      content: seed,
+      toolCalls: recapToolCalls,
+    });
+
+    const fromConversations = new Set(picked.map((message) => message.conversationId)).size;
+    try {
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: userId,
+        agentId: targetAgent.id,
+        action: "lane_a.conversation_continued",
+        entityType: "agent",
+        entityId: targetAgent.id,
+        details: {
+          conversationId: conversation!.id,
+          mode: plan.mode,
+          matchedMessages: picked.length,
+          consideredMessages: considered.length,
+          fromConversations,
+        },
+      });
+    } catch {
+      // The activity row must never break the continue; the conversation exists.
+    }
+
+    return {
+      conversationId: conversation!.id,
+      mode: plan.mode,
+      recap: shortRecap,
+      matchedMessages: picked.length,
+      consideredMessages: considered.length,
+      fromConversations,
+      window: plan.mode === "last" ? null : { from: plan.window.from, to: plan.window.to, label: plan.window.label },
+    };
+  }
+
+  /**
+   * Telegram /looks: the saved looks, straight from the add-on tool that
+   * lists them when it is ticked for this quick agent. No model call. The
+   * tool runs through the same execute path (company switch, grant check) a
+   * chat turn's call takes, as this quick agent.
+   */
+  async function listLooks(params: {
+    companyId: string;
+    targetAgent: Pick<LaneATargetAgent, "id" | "name" | "laneAEnabled">;
+    requester: LaneARequester;
+    actor?: AuthorizationActor;
+  }): Promise<{ available: boolean; text: string }> {
+    const { companyId, targetAgent } = params;
+    if (!params.requester.userId || params.requester.agentId || params.actor?.type !== "board") {
+      throw forbidden("Only a person signed in to Paperclip can list looks here.");
+    }
+    const agentRow = await loadLaneAAgentRow(companyId, targetAgent.id);
+    const grants = (agentRow?.pluginToolGrants as string[] | null) ?? [];
+    const tool = grants.find((name) => name.endsWith(`:${LANE_A_LIST_LOOKS_TOOL}`));
+    const execution = pluginToolExecution();
+    if (!targetAgent.laneAEnabled || !tool || !execution) {
+      return {
+        available: false,
+        text: `${targetAgent.name} cannot list saved looks: the "List saved looks" add-on tool is not ticked for it.`,
+      };
+    }
+    const pluginRun = openLaneAPluginRun({
+      agentId: targetAgent.id,
+      companyId,
+      conversationId: "",
+      requestedByUserId: params.requester.userId,
+      requestedByAgentId: null,
+      requesterMessage: "",
+    });
+    try {
+      const executed = await execution.execute({
+        tool,
+        parameters: {},
+        runContext: { agentId: targetAgent.id, runId: pluginRun.run.runId, companyId, projectId: "" },
+        agent: { laneAEnabled: agentRow?.laneAEnabled ?? true, pluginToolGrants: grants },
+      });
+      if (!executed.ok) return { available: true, text: `Could not list looks: ${executed.error}` };
+      return { available: true, text: describePluginToolResultForModel(executed.result.result).content };
+    } catch (err) {
+      return { available: true, text: `Could not list looks: ${err instanceof Error ? err.message : String(err)}` };
+    } finally {
+      pluginRun.close();
+    }
+  }
+
+  return { sendMessage, getConversation, transform, listTransformAgents, continueConversation, listLooks };
 }
+
+/** The bare name of Media Studio's "List saved looks" tool (its grant is `<plugin>:list-looks`). */
+export const LANE_A_LIST_LOOKS_TOOL = "list-looks";
 
 /**
  * The one-line "what is this specialist for" a picker can show. The operator's
