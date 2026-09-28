@@ -33,6 +33,7 @@ import {
   DEFAULT_INSTRUCTIONS_STALENESS_THRESHOLD_DAYS,
   QUICK_AGENT_FIELDS,
   PERSONA_JOB_FIELDS,
+  BROWSER_ACCESS_FIELDS,
   parseAgentLimits,
   laneAProviderModelIssue,
   readLaneAWebSearchSwitch,
@@ -1643,6 +1644,21 @@ export function agentRoutes(
     );
   }
 
+  // DUR-4013 step 3: whether (and how far) an agent may drive the browser
+  // worker is board-only on every write path, same shape as the persona/job
+  // guard above — the server trusts this switch, not the model, so an agent
+  // that could flip it for itself would have no gate at all.
+  function patchTouchesBrowserAccessFields(patchData: Record<string, unknown>) {
+    return BROWSER_ACCESS_FIELDS.some((key) => hasOwn(patchData, key));
+  }
+
+  function assertNoAgentBrowserAccessFieldMutation(req: Request, patchData: Record<string, unknown>) {
+    if (req.actor.type !== "agent" || !patchTouchesBrowserAccessFields(patchData)) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot set browser access on an agent (${BROWSER_ACCESS_FIELDS.join(", ")}). Only board-authenticated callers can.`,
+    );
+  }
+
   function assertNoAgentInstructionsConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown> | null | undefined,
@@ -2777,6 +2793,8 @@ export function agentRoutes(
     assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
+    // DUR-4013: same for the browser-access switch.
+    assertNoAgentBrowserAccessFieldMutation(req, req.body as Record<string, unknown>);
     const hiredAgentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -3038,6 +3056,8 @@ export function agentRoutes(
     assertNoAgentWebSearchSwitchOn(req, (req.body as Record<string, unknown>).adapterConfig, null);
     // DUR-4000: same for the persona link and the limits box.
     assertNoAgentPersonaJobFieldMutation(req, req.body as Record<string, unknown>);
+    // DUR-4013: same for the browser-access switch.
+    assertNoAgentBrowserAccessFieldMutation(req, req.body as Record<string, unknown>);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -3501,6 +3521,8 @@ export function agentRoutes(
     // DUR-4000: personaId / limits are board-only; an agent cannot pick its
     // own persona or raise its own limits, even on its own record.
     assertNoAgentPersonaJobFieldMutation(req, patchData);
+    // DUR-4013: same for the browser-access switch, even on its own record.
+    assertNoAgentBrowserAccessFieldMutation(req, patchData);
     if (patchTouchesLaneAFields(patchData)) {
       await assertCanManageLaneAFlag(req, existing);
       // DUR-3997: the model must fit the provider. A patch may carry one

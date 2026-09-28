@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_BROWSER_ACCESS_LEVELS,
+  BROWSER_ACCESS_FIELDS,
   PERSONA_JOB_FIELDS,
   agentLimitsSchema,
   createAgentSchema,
@@ -254,5 +256,37 @@ describe("DUR-4000 personaId and limits (the job side of a persona)", () => {
     expect(parseAgentLimits(null)).toEqual({});
     expect(parseAgentLimits({ dailyImageGenerations: "two" })).toEqual({});
     expect(parseAgentLimits("nonsense")).toEqual({});
+  });
+});
+
+describe("DUR-4013 browserAccess (how far an agent may drive the browser worker)", () => {
+  it("names exactly the one board-only field the route guard reads", () => {
+    expect([...BROWSER_ACCESS_FIELDS]).toEqual(["browserAccess"]);
+  });
+
+  it("accepts each of the three levels on create, and leaves it out when not sent", () => {
+    for (const level of AGENT_BROWSER_ACCESS_LEVELS) {
+      const result = createAgentSchema.safeParse({ ...baseAgent({}), browserAccess: level });
+      expect(result.success, level).toBe(true);
+      if (result.success) expect(result.data.browserAccess).toBe(level);
+    }
+    const without = createAgentSchema.safeParse(baseAgent({}));
+    expect(without.success).toBe(true);
+    if (without.success) expect(without.data.browserAccess).toBeUndefined();
+  });
+
+  it("refuses a level outside the three named ones", () => {
+    expect(updateAgentSchema.safeParse({ browserAccess: "book_and_buy_anything" }).success).toBe(false);
+    expect(updateAgentSchema.safeParse({ browserAccess: "on" }).success).toBe(false);
+    expect(updateAgentSchema.safeParse({ browserAccess: null }).success).toBe(false);
+  });
+
+  it("lets a PATCH set browserAccess on its own, without touching personaId/limits", () => {
+    const result = updateAgentSchema.safeParse({ browserAccess: "browse_and_forms" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.browserAccess).toBe("browse_and_forms");
+      expect(result.data.personaId).toBeUndefined();
+    }
   });
 });

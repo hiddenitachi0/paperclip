@@ -108,6 +108,16 @@ export const agents = pgTable(
     // Null = send no temperature, i.e. the model host's own default, which is
     // what every quick agent did before this column existed.
     laneATemperature: real("lane_a_temperature"),
+    // DUR-4013 step 3 (migration 0183). Whether, and how far, this agent may
+    // drive the browser worker: "off" (default, no browser tool offered at
+    // all) | "browse_and_forms" (navigate/read/click/type/fill forms, no
+    // final booking/purchase step) | "book_and_buy" (adds the gated
+    // request_booking/request_purchase/confirm_final_step tools — not wired
+    // to anything yet; those land in step 4/6). Board-settable only, same
+    // guard shape as personaId/limits (assertNoAgentBrowserAccessFieldMutation
+    // in server/src/routes/agents.ts) — an agent that could switch this on
+    // for itself would have no gate at all.
+    browserAccess: text("browser_access").notNull().default("off"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     // DUR-109: last time a human (direct bundle/file edit) or an approved
