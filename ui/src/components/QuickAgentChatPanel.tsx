@@ -5,6 +5,7 @@ import { Link } from "@/lib/router";
 import { ApiError } from "../api/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "../lib/utils";
 import { ChatMicButton, ChatSpeakButton } from "./ChatSpeechButtons";
@@ -26,6 +27,8 @@ interface ChatMessage {
 }
 
 const MESSAGE_MAX_LENGTH = 8000;
+/** The server's limit for what to continue ("last 45 minutes", "our meeting today"). */
+const CONTINUE_SPEC_MAX_LENGTH = 200;
 
 function storageKey(agentId: string) {
   return `paperclip.quickAgent.conversation.${agentId}`;
@@ -117,12 +120,18 @@ export function QuickAgentChatPanel({
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // "Continuing from: …" after a continue, or when a continued conversation is resumed.
+  const [continuedFrom, setContinuedFrom] = useState<string | null>(null);
+  const [continueOpen, setContinueOpen] = useState(false);
+  const [continueSpec, setContinueSpec] = useState("");
+  const [continuing, setContinuing] = useState(false);
   const [loadingTranscript, setLoadingTranscript] = useState(Boolean(conversationId));
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const resetConversation = useCallback(() => {
     setConversationId(null);
     writeStoredConversationId(agentId, null);
+    setContinuedFrom(null);
   }, [agentId]);
 
   // Resume the stored conversation (if any) on first render.
@@ -146,6 +155,9 @@ export function QuickAgentChatPanel({
         setMessages(
           transcript.messages.map((m) => ({ id: m.id, role: m.role, content: m.content, actions: m.actions })),
         );
+        if (typeof transcript.continuedFrom === "string") {
+          setContinuedFrom(transcript.continuedFrom || "your earlier conversation");
+        }
       })
       .catch(() => {
         if (cancelled) return;
@@ -203,6 +215,26 @@ export function QuickAgentChatPanel({
     }
   };
 
+  const continueEarlier = async () => {
+    if (continuing || sending) return;
+    setContinuing(true);
+    setNotice(null);
+    try {
+      const spec = continueSpec.trim();
+      const result = await laneAApi.continueConversation(agentId, { companyId, ...(spec ? { spec } : {}) });
+      setConversationId(result.conversationId);
+      writeStoredConversationId(agentId, result.conversationId);
+      setMessages([]);
+      setContinuedFrom(result.recap || "your earlier conversation");
+      setContinueOpen(false);
+      setContinueSpec("");
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : "Could not continue the earlier conversation.");
+    } finally {
+      setContinuing(false);
+    }
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -214,23 +246,62 @@ export function QuickAgentChatPanel({
               up the weather, or read a task summary. Everything it does is shown under its reply.
             </CardDescription>
           </div>
-          {messages.length > 0 && (
+          <div className="flex shrink-0 items-center gap-1">
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => {
-                resetConversation();
-                setMessages([]);
-                setNotice(null);
-              }}
-              disabled={sending}
+              onClick={() => setContinueOpen((open) => !open)}
+              disabled={sending || continuing}
             >
-              New conversation
+              Continue earlier conversation…
             </Button>
-          )}
+            {messages.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  resetConversation();
+                  setMessages([]);
+                  setNotice(null);
+                  setContinuedFrom(null);
+                }}
+                disabled={sending}
+              >
+                New conversation
+              </Button>
+            )}
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {continueOpen && (
+          <div className="space-y-2 rounded-md border p-3">
+            <p className="text-sm text-muted-foreground">
+              What should {agentName} pick up? Leave it empty for your last conversation, or say a time ("last 45
+              minutes", "this morning", "yesterday") or a topic ("our meeting today").
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="What to continue"
+                value={continueSpec}
+                onChange={(event) => setContinueSpec(event.target.value.slice(0, CONTINUE_SPEC_MAX_LENGTH))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void continueEarlier();
+                  }
+                }}
+                placeholder="e.g. last 45 minutes"
+                className="text-sm"
+                disabled={continuing}
+              />
+              <Button size="sm" onClick={() => void continueEarlier()} disabled={continuing}>
+                {continuing ? <Loader2 className="h-4 w-4 animate-spin" /> : "Continue"}
+              </Button>
+            </div>
+          </div>
+        )}
+        {continuedFrom && <p className="text-sm text-muted-foreground">Continuing from: {continuedFrom}</p>}
         <div className="max-h-96 overflow-y-auto rounded-md border bg-muted/30 p-3 space-y-3">
           {loadingTranscript ? (
             <p className="text-sm text-muted-foreground flex items-center gap-2">
