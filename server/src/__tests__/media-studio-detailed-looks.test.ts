@@ -267,9 +267,15 @@ describe("media-studio detailed looks in the worker", () => {
     return pending;
   }
   async function act(harness: TestHarness, key: string, params: Record<string, unknown>, context: typeof owner | typeof member = owner) {
-    const pending = harness.performAction<any>(key, params, context);
+    // Settle before running the timers so a refusal is never reported as unhandled.
+    const pending = harness.performAction<any>(key, params, context).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     await vi.runAllTimersAsync();
-    return pending;
+    const settled = await pending;
+    if (!settled.ok) throw settled.error;
+    return settled.value;
   }
 
   it("saves roles and a sheet, and a Fal picture gets the role sentences and the sheet", async () => {
