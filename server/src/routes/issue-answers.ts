@@ -4,7 +4,8 @@ import { createRequestScopedDb } from "@paperclipai/db";
 import { badRequest } from "../errors.js";
 import { companyScopeFromParam } from "../middleware/company-scope.js";
 import { redactKnownLeakedSecretPatterns, redactSensitiveText } from "../redaction.js";
-import { accessService, issueService } from "../services/index.js";
+import { RESEARCH_RESULT_DOCUMENT_KEY } from "@paperclipai/shared";
+import { accessService, documentService, issueService } from "../services/index.js";
 import { assertCompanyAccess } from "./authz.js";
 
 /**
@@ -26,6 +27,10 @@ import { assertCompanyAccess } from "./authz.js";
  *
  * The answer text goes out through the same secret redaction the server uses
  * for run logs, because it is about to leave Paperclip for a chat app.
+ *
+ * `resultDocument` says whether the task has a result page (the issue
+ * document RESEARCH_RESULT_DOCUMENT_KEY a research task delivers), so the chat
+ * can link straight to it. Only its key and title go out, never its body.
  */
 
 export const ISSUE_ANSWERS_MAX_IDS = 50;
@@ -87,6 +92,7 @@ export function issueAnswerRoutes(rawDb: Db) {
   const db = createRequestScopedDb(rawDb);
   const issues = issueService(db, { rawDb });
   const access = accessService(db);
+  const documents = documentService(db);
 
   router.get(
     "/companies/:companyId/issue-answers",
@@ -128,6 +134,7 @@ export function issueAnswerRoutes(rawDb: Db) {
           limit: ISSUE_ANSWER_SCAN_COMMENT_LIMIT,
         });
         const answer = pickLatestAgentAnswer(comments);
+        const resultDoc = await documents.getIssueDocumentByKey(issue.id, RESEARCH_RESULT_DOCUMENT_KEY);
         results.push({
           id: issue.id,
           companyId: issue.companyId,
@@ -141,6 +148,9 @@ export function issueAnswerRoutes(rawDb: Db) {
                 body: redactAnswerText(answer.body),
                 createdAt: answer.createdAt,
               }
+            : null,
+          resultDocument: resultDoc
+            ? { key: RESEARCH_RESULT_DOCUMENT_KEY, title: redactAnswerText(resultDoc.title ?? "") || null }
             : null,
         });
       }

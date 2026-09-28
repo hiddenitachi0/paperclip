@@ -55,6 +55,8 @@ export const queryKeys = {
   },
   issues: {
     list: (companyId: string) => ["issues", companyId] as const,
+    /** A chat's follow-up of a task it started: status, latest answer, result page. */
+    chatAnswer: (companyId: string, issueId: string) => ["issues", companyId, "chat-answer", issueId] as const,
     mentionPool: (companyId: string) => ["issues", companyId, "mention-pool"] as const,
     search: (companyId: string, q: string, projectId?: string, limit?: number) =>
       ["issues", companyId, "search", q, projectId ?? "__all-projects__", limit ?? "__no-limit__"] as const,

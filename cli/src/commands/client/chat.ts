@@ -22,7 +22,16 @@ import {
  *                 bridge can upload it to Telegram without handing Telegram
  *                 a private Paperclip address.
  *
- * Both take the company as an explicit --company-id. The bridge passes the
+ *   chat continue start a new quick-agent conversation that carries the relevant
+ *                 part of this person's recent chat with the agent
+ *                 (POST /api/lane-a/:agentId/continue); Telegram `/cont`.
+ *   chat memory   the agent's memory notebook (GET /api/agents/:agentId/memories);
+ *                 Telegram `/memory`.
+ *   chat looks    Media Studio's saved looks through the agent's ticked "List
+ *                 saved looks" tool (GET /api/lane-a/:agentId/looks); Telegram
+ *                 `/looks`.
+ *
+ * All take the company as an explicit --company-id. The bridge passes the
  * company from its bot config, never from message text.
  *
  * `chat send --json` prints an outcome object in every case the server
@@ -36,6 +45,10 @@ interface ChatSendOptions extends BaseClientOptions {
   message: string;
   conversationId?: string;
   lane?: string;
+}
+
+interface ChatContinueOptions extends BaseClientOptions {
+  spec?: string;
 }
 
 export type ChatSendOutcome =
@@ -59,6 +72,75 @@ export function registerChatCommands(program: Command): void {
       .action(async (agentId: string, opts: ChatSendOptions) => {
         try {
           const outcome = await runChatSend(agentId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("continue")
+      .description(
+        "Start a new quick-answer conversation that carries on from your earlier chat with the agent: nothing for the last conversation, a time (\"last 45 minutes\", \"this morning\") or a topic (\"our meeting today\"). With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<agentId>", "Agent ID")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .option("--spec <text>", "What to continue: a time or a topic; leave out for the last conversation")
+      .action(async (agentId: string, opts: ChatContinueOptions) => {
+        try {
+          const outcome = await runChatContinue(agentId, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("memory")
+      .description(
+        "The agent's memory notebook: the notes it was asked to remember, newest first. With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<agentId>", "Agent ID")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (agentId: string, opts: BaseClientOptions) => {
+        try {
+          const outcome = await runChatGet(apiPath`/api/agents/${agentId}/memories`, opts);
+          if (!outcome.ok && !opts.json) {
+            throw new ApiRequestError(outcome.status, outcome.error);
+          }
+          printOutput(outcome, { json: opts.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    chat
+      .command("looks")
+      .description(
+        "Media Studio's saved looks, through the agent's ticked \"List saved looks\" tool (no model call). With --json a refusal is printed as {ok:false,...} and exits 0.",
+      )
+      .argument("<agentId>", "Agent ID")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .action(async (agentId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const query = new URLSearchParams({ companyId: ctx.companyId! });
+          const outcome = await runChatGet(`${apiPath`/api/lane-a/${agentId}/looks`}?${query.toString()}`, opts);
           if (!outcome.ok && !opts.json) {
             throw new ApiRequestError(outcome.status, outcome.error);
           }
@@ -168,6 +250,40 @@ export async function runChatSend(agentId: string, opts: ChatSendOptions): Promi
 
   try {
     const result = await ctx.api.post<Record<string, unknown>>(apiPath`/api/chat/${agentId}/messages`, body);
+    return { ok: true, ...(result ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      return { ok: false, status: err.status, code: refusalCode(err), error: err.message };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Continue an earlier conversation. The spec is sent as data in the body; the
+ * company always comes from --company-id.
+ */
+export async function runChatContinue(agentId: string, opts: ChatContinueOptions): Promise<ChatSendOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  const body: Record<string, unknown> = { companyId: ctx.companyId };
+  const spec = opts.spec?.trim();
+  if (spec) body.spec = spec;
+  try {
+    const result = await ctx.api.post<Record<string, unknown>>(apiPath`/api/lane-a/${agentId}/continue`, body);
+    return { ok: true, ...(result ?? {}) };
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      return { ok: false, status: err.status, code: refusalCode(err), error: err.message };
+    }
+    throw err;
+  }
+}
+
+/** A GET whose refusal is data for the caller, like `chat send`. */
+async function runChatGet(path: string, opts: BaseClientOptions): Promise<ChatSendOutcome> {
+  const ctx = resolveCommandContext(opts, { requireCompany: true });
+  try {
+    const result = await ctx.api.get<Record<string, unknown>>(path);
     return { ok: true, ...(result ?? {}) };
   } catch (err) {
     if (err instanceof ApiRequestError) {

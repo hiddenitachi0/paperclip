@@ -43,6 +43,9 @@ import {
   type WebSearchResult,
 } from "./lane-a-web-tools.js";
 import { webSearchService, type FetchedWebPage, type WebSearchServiceDeps } from "./web-search.js";
+import type { ChatHandedOverTask, ResearchTaskKind } from "@paperclipai/shared";
+import { buildResearchTaskDescription, isResearchTaskKind } from "./research-tasks.js";
+import { findResearchSkillLink } from "./research-skill-link.js";
 
 /**
  * Quick agents (Lane A, round 2): the small set of things a quick agent is
@@ -59,6 +62,7 @@ import { webSearchService, type FetchedWebPage, type WebSearchServiceDeps } from
 
 export const LANE_A_BUILTIN_TOOL_NAMES = [
   "route_to_agent",
+  "start_research_task",
   "get_weather",
   "get_time",
   "web_search",
@@ -100,6 +104,13 @@ export const GET_TIME_TOOL = "get_time";
  * Brave key (Connections → Web search).
  */
 export const WEB_SEARCH_TOOL = "web_search";
+/**
+ * Research and planning ("plan a trip", "find the best price on X"): the quick
+ * agent hands it to a full run of its own as a task with a written brief,
+ * instead of trying to do it in a few tool calls. Always offered, like
+ * route_to_agent.
+ */
+export const START_RESEARCH_TASK_TOOL = "start_research_task";
 export const READ_WEB_PAGE_TOOL = "read_web_page";
 /** Upper bound on the text a tool hands back to the model. */
 const TOOL_RESULT_MAX_CHARS = 4_000;
@@ -121,6 +132,11 @@ export interface LaneAToolResult {
    * reply against `content`, and the platform appends `footer` itself.
    */
   businessData?: { footer: string | null; lookupId: string | null };
+  /**
+   * Set when the tool created a task (route_to_agent, start_research_task),
+   * so the chat that asked can follow it and show its answer when it is done.
+   */
+  task?: ChatHandedOverTask;
 }
 
 export interface LaneAToolColleague {
@@ -202,8 +218,17 @@ export interface LaneAToolDeps {
     title: string;
     description: string;
     ctx: LaneAToolContext;
+    /** What made the task, for the activity log. Default "route_to_agent". */
+    source?: "route_to_agent" | "start_research_task";
   }): Promise<{ id: string; identifier: string | null; status: string }>;
   lookupIssue(reference: string): Promise<LaneAToolIssueSummary | null>;
+  /**
+   * The research-and-plan skill as a `[research-and-plan](skill://…)`
+   * mention for a research task's description, or null when the company does
+   * not have it. Absent means no mention (the description still says what to
+   * deliver).
+   */
+  researchSkillLink?(companyId: string): Promise<string | null>;
   fetch: typeof fetch;
   /**
    * DUR-3972: one business-data lookup for the caller's own company. Absent
@@ -257,6 +282,35 @@ export function buildLaneABuiltinToolDefinitions(): Anthropic.Tool[] {
           title: { type: "string", description: "Optional short task title (max 80 characters)." },
         },
         required: ["agent", "request"],
+      },
+    },
+    {
+      name: START_RESEARCH_TASK_TOOL,
+      description:
+        "Take on a bigger research or planning job yourself, as a task you work on in the background: planning a trip " +
+        "or an itinerary, finding the best price on a product, comparing options, or any question that needs many " +
+        "searches and pages. Use it instead of trying to answer such a request here with a few searches. Write a full " +
+        "brief so the work can start without asking back. Research and a written result only: nothing is booked or " +
+        "bought. The finished result page is sent back to this chat.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["trip_plan", "price_hunt", "research"],
+            description: "'trip_plan' for trips and itineraries, 'price_hunt' for the best price on a product, 'research' for anything else.",
+          },
+          title: { type: "string", description: "Short task title, e.g. 'Trip plan: 4 days in Rome in May' (max 80 characters)." },
+          brief: {
+            type: "string",
+            description:
+              "The full brief: the goal, and everything the person said that matters: dates, places, budget and currency, " +
+              "who it is for, must-haves, preferences, what to leave out. For a product: the exact product, model or " +
+              "variant, and the country to buy in. List any assumption you made as 'Assumption: …'.",
+          },
+        },
+        required: ["kind", "brief"],
       },
     },
     {
@@ -666,6 +720,78 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
       ok: true,
       content: `Done. ${match.name} now has task ${ref} ("${title}") and has been woken up to start on it.`,
       summary: `Handed to ${match.name} as task ${ref}.`,
+      task: { issueId: issue.id, identifier: issue.identifier, title },
+    };
+  }
+
+  async function startResearchTask(input: Record<string, unknown>, ctx: LaneAToolContext): Promise<LaneAToolResult> {
+    const brief = readString(input, "brief").slice(0, ROUTE_REQUEST_MAX_CHARS);
+    const rawKind = readString(input, "kind");
+    const kind: ResearchTaskKind = isResearchTaskKind(rawKind) ? rawKind : "research";
+    if (!brief) {
+      return {
+        ok: false,
+        content: "'brief' is required: write what should be researched or planned, with everything the person said.",
+        summary: "Could not start the research task: no brief.",
+      };
+    }
+    if (!ctx.requester.userId) {
+      return {
+        ok: false,
+        content: "Only a person can ask me to start a research task; this request came from another agent.",
+        summary: "Refused to start a research task: the request did not come from a person.",
+      };
+    }
+    const agents = await deps.listAgents(ctx.companyId);
+    const self = agents.find((agent) => agent.id === ctx.agent.id);
+    if (!self || !isAgentAvailableForRouting(self)) {
+      return {
+        ok: false,
+        content:
+          "I cannot take on background work right now (my full work sessions are paused or switched off), so no task " +
+          "was made. Tell the person plainly; an owner can switch it back on on my page in Paperclip.",
+        summary: "Could not start the research task: this agent cannot run tasks right now.",
+      };
+    }
+    // The same tasks:assign decision a hand-over to a colleague makes, with
+    // this agent as the assignee.
+    const decision = await deps.canAssignTask({ companyId: ctx.companyId, assigneeAgentId: ctx.agent.id, ctx });
+    if (!decision.allowed) {
+      return {
+        ok: false,
+        content:
+          "The person asking is not allowed to give me tasks, so no task was created. Tell them plainly and suggest " +
+          "they ask someone who manages assignments.",
+        summary: "Refused to start a research task: the person asking may not assign tasks to this agent.",
+      };
+    }
+    const title = buildTaskTitle(readString(input, "title") || brief);
+    let skillLink: string | null = null;
+    if (deps.researchSkillLink) {
+      try {
+        skillLink = await deps.researchSkillLink(ctx.companyId);
+      } catch {
+        skillLink = null;
+      }
+    }
+    const description = buildResearchTaskDescription({ kind, brief, handedOverBy: ctx.agent.name, skillLink });
+    const issue = await deps.createIssueForAgent({
+      companyId: ctx.companyId,
+      assigneeAgentId: ctx.agent.id,
+      title,
+      description,
+      ctx,
+      source: "start_research_task",
+    });
+    const ref = issue.identifier ?? issue.id;
+    return {
+      ok: true,
+      content:
+        `Started task ${ref} ("${title}"); you will work on it in the background and the result page is sent to this ` +
+        `chat when it is ready. Now tell the person, in your own words: you're on it, you'll send the result here when ` +
+        `it's ready, and the task reference ${ref}. Do not start the research here.`,
+      summary: `Started research task ${ref}: ${title}.`,
+      task: { issueId: issue.id, identifier: issue.identifier, title },
     };
   }
 
@@ -989,6 +1115,8 @@ export function createLaneABuiltinToolExecutor(deps: LaneAToolDeps) {
     switch (name) {
       case "route_to_agent":
         return routeToAgent(input, ctx);
+      case START_RESEARCH_TASK_TOOL:
+        return startResearchTask(input, ctx);
       case "get_weather":
         return getWeather(input);
       case "lookup_issue":
@@ -1066,7 +1194,7 @@ export function createDbLaneAToolDeps(
       });
       return { allowed: decision.allowed, explanation: decision.explanation };
     },
-    async createIssueForAgent({ companyId, assigneeAgentId, title, description, ctx }) {
+    async createIssueForAgent({ companyId, assigneeAgentId, title, description, ctx, source = "route_to_agent" }) {
       const issues = issueService(db);
       const issue = await issues.create(companyId, {
         id: randomUUID(),
@@ -1091,7 +1219,7 @@ export function createDbLaneAToolDeps(
         details: {
           title: issue.title,
           identifier: issue.identifier,
-          source: "lane_a_route_to_agent",
+          source: `lane_a_${source}`,
           quickAgentId: ctx.agent.id,
           conversationId: ctx.conversationId,
         },
@@ -1101,7 +1229,7 @@ export function createDbLaneAToolDeps(
         issue,
         reason: "issue_assigned",
         mutation: "create",
-        contextSource: "lane_a.route_to_agent",
+        contextSource: `lane_a.${source}`,
         requestedByActorType: actorType,
         requestedByActorId: actorId,
       });
@@ -1122,6 +1250,7 @@ export function createDbLaneAToolDeps(
         updatedAt: issue.updatedAt,
       };
     },
+    researchSkillLink: (companyId) => findResearchSkillLink(db, companyId),
     fetch: (input, init) => fetch(input, init),
     async readBusinessData(input, ctx) {
       // The company is the quick agent's own, from the server; the tool input

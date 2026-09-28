@@ -1274,7 +1274,14 @@ describeEmbeddedPostgres("lane A service", () => {
       actor: { type: "board", userId: "operator-1", companyIds: [companyId], source: "session", isInstanceAdmin: false },
       message: "Get Bob to fix the login page",
     });
-    expect(allowed.actions).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+    expect(allowed.actions).toEqual([
+      {
+        tool: "route_to_agent",
+        summary: "Handed to Bob as task DUR-12.",
+        ok: true,
+        task: { issueId: "issue-1", identifier: "DUR-12", title: "Fix the login page" },
+      },
+    ]);
     expect(createIssueForAgent).toHaveBeenCalledTimes(1);
     expect(createIssueForAgent).toHaveBeenCalledWith(expect.objectContaining({ companyId, assigneeAgentId: bob.id }));
 
@@ -1332,7 +1339,14 @@ describeEmbeddedPostgres("lane A service", () => {
     });
 
     expect(result.response).toBe("Done — Bob has it as DUR-12.");
-    expect(result.actions).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+    const handedOver = {
+      tool: "route_to_agent",
+      summary: "Handed to Bob as task DUR-12.",
+      ok: true,
+      // The chat follows the task it started (Telegram posts its answer back).
+      task: { issueId: "issue-1", identifier: "DUR-12", title: "Fix the login page" },
+    };
+    expect(result.actions).toEqual([handedOver]);
     expect(createIssueForAgent).toHaveBeenCalledWith(
       expect.objectContaining({ companyId, assigneeAgentId: bob.id, title: "Fix the login page" }),
     );
@@ -1351,7 +1365,144 @@ describeEmbeddedPostgres("lane A service", () => {
 
     const stored = await db.select().from(laneAMessages).where(eq(laneAMessages.conversationId, result.conversationId));
     const assistantRow = stored.find((row) => row.role === "assistant");
-    expect(assistantRow?.toolCalls).toEqual([{ tool: "route_to_agent", summary: "Handed to Bob as task DUR-12.", ok: true }]);
+    expect(assistantRow?.toolCalls).toEqual([handedOver]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("hands a research request to a task for itself with a full brief, and the reply carries the task", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const maja = await seedAgent(companyId, true, "Maja");
+    await seedAgent(companyId, false, "Bob");
+
+    const brief =
+      "Plan 4 days in Rome for 2 adults, 14-17 May, budget about 15 000 NOK in total, likes food and history.\n" +
+      "Assumption: flying from Oslo.";
+    const mockCreate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [
+          {
+            type: "tool_use",
+            id: "call_1",
+            name: "start_research_task",
+            input: { kind: "trip_plan", title: "Trip plan: 4 days in Rome", brief },
+          },
+        ],
+        usage: { input_tokens: 50, output_tokens: 20 },
+        stop_reason: "tool_use",
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: "I'm on it — I'll send the plan here when it's ready (DUR-31)." }],
+        usage: { input_tokens: 60, output_tokens: 15 },
+        stop_reason: "end_turn",
+      });
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-31", identifier: "DUR-31", status: "todo" }));
+    const researchSkillLink = vi.fn(async () => "[research-and-plan](skill://skill-1?s=research-and-plan)");
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent, researchSkillLink } });
+
+    const result = await svc.sendMessage({
+      companyId,
+      targetAgent: maja,
+      requester: { userId: "user-1", agentId: null },
+      actor: { type: "board", userId: "user-1", companyIds: [companyId], source: "local_implicit" },
+      message: "Can you plan a trip to Rome for us in May and give me an itinerary?",
+    });
+
+    // The quick agent is told to hand research over rather than squeeze it into a few tool calls.
+    const system = mockCreate.mock.calls[0][0].system as string;
+    expect(system).toContain("start_research_task");
+    expect(system).toContain("Research and planning");
+    expect(system).toContain("I'm on it");
+    expect(mockCreate.mock.calls[0][0].tools.map((tool: { name: string }) => tool.name)).toContain("start_research_task");
+
+    // The task is the quick agent's own, with the brief and the delivery rules.
+    expect(createIssueForAgent).toHaveBeenCalledTimes(1);
+    const created = (createIssueForAgent.mock.calls[0] as unknown as [Record<string, any>])[0];
+    expect(created).toMatchObject({
+      companyId,
+      assigneeAgentId: maja.id,
+      title: "Trip plan: 4 days in Rome",
+      source: "start_research_task",
+    });
+    expect(created.description.startsWith(brief)).toBe(true);
+    expect(created.description).toContain("[research-and-plan](skill://skill-1?s=research-and-plan)");
+    expect(created.description).toContain("key `result`");
+    expect(created.description).toContain("day-by-day plan with times");
+    expect(created.description).toContain("do not book, buy, sign up or fill in any form");
+    expect(created.description).toContain("Handed over by Maja (quick agent)");
+    expect(researchSkillLink).toHaveBeenCalledWith(companyId);
+
+    // The model is told what to say, and the reply carries the task for the chat to follow.
+    const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0];
+    expect(toolResult).toMatchObject({ type: "tool_result", is_error: false });
+    expect(toolResult.content).toContain("DUR-31");
+    expect(toolResult.content).toContain("you're on it");
+    const started = {
+      tool: "start_research_task",
+      summary: "Started research task DUR-31: Trip plan: 4 days in Rome.",
+      ok: true,
+      task: { issueId: "issue-31", identifier: "DUR-31", title: "Trip plan: 4 days in Rome" },
+    };
+    expect(result.actions).toEqual([started]);
+    expect(result.response).toBe("I'm on it — I'll send the plan here when it's ready (DUR-31).");
+    const stored = await db.select().from(laneAMessages).where(eq(laneAMessages.conversationId, result.conversationId));
+    expect(stored.find((row) => row.role === "assistant")?.toolCalls).toEqual([started]);
+
+    vi.doUnmock("@anthropic-ai/sdk");
+    vi.resetModules();
+  });
+
+  it("start_research_task refuses a person who may not give the quick agent tasks, and another agent", async () => {
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const companyId = await seedCompany();
+    const maja = await seedAgent(companyId, true, "Maja");
+    await db.insert(companyMemberships).values([
+      { companyId, principalType: "user", principalId: "viewer-1", status: "active", membershipRole: "viewer" },
+    ]);
+    const toolTurn = {
+      content: [
+        { type: "tool_use", id: "call_1", name: "start_research_task", input: { kind: "price_hunt", brief: "Best price on a Moccamaster KBG Select in Norway" } },
+      ],
+      usage: { input_tokens: 50, output_tokens: 20 },
+      stop_reason: "tool_use",
+    };
+    const textTurn = { content: [{ type: "text", text: "Sorry." }], usage: { input_tokens: 5, output_tokens: 2 }, stop_reason: "end_turn" };
+    const mockCreate = vi.fn().mockResolvedValueOnce(toolTurn).mockResolvedValueOnce(textTurn)
+      .mockResolvedValueOnce(toolTurn).mockResolvedValueOnce(textTurn);
+    mockAnthropic(mockCreate);
+    vi.resetModules();
+    const { laneAService: freshLaneAService } = await import("../services/lane-a.ts");
+    const createIssueForAgent = vi.fn(async () => ({ id: "issue-1", identifier: "DUR-1", status: "todo" }));
+    const svc = freshLaneAService(db, { toolDeps: { createIssueForAgent, researchSkillLink: async () => null } });
+
+    const viewer = await svc.sendMessage({
+      companyId,
+      targetAgent: maja,
+      requester: { userId: "viewer-1", agentId: null },
+      actor: { type: "board", userId: "viewer-1", companyIds: [companyId], source: "session", isInstanceAdmin: false },
+      message: "Find the best price on a Moccamaster",
+    });
+    expect(viewer.actions).toEqual([
+      expect.objectContaining({ tool: "start_research_task", ok: false }),
+    ]);
+    expect(viewer.actions[0]).not.toHaveProperty("task");
+
+    const bot = await seedAgent(companyId, false, "Bot");
+    const fromAgent = await svc.sendMessage({
+      companyId,
+      targetAgent: maja,
+      requester: { userId: null, agentId: bot.id },
+      actor: { type: "agent", agentId: bot.id, companyId, source: "agent_key" } as any,
+      message: "Find the best price on a Moccamaster",
+    });
+    expect(fromAgent.actions[0]).toMatchObject({ tool: "start_research_task", ok: false });
+    expect(createIssueForAgent).not.toHaveBeenCalled();
 
     vi.doUnmock("@anthropic-ai/sdk");
     vi.resetModules();

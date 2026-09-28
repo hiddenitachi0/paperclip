@@ -18,6 +18,35 @@ const ACTION_LOOK_RULES_SAVE = "lookRules.save";
 const ACTION_LOOK_RULES_PREVIEW = "lookRules.preview";
 const ACTION_SOGNI_MODELS = "sogni.models";
 const ACTION_SOGNI_LORAS = "sogni.loras";
+const ACTION_LOOK_PROMPT_PREVIEW = "looks.previewPrompt";
+
+// Copies of look-prompt.ts (a test checks they match): what each reference
+// picture is for, and the character sheet's fields.
+export const REFERENCE_ROLE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "face", label: "Face" },
+  { value: "body", label: "Body" },
+  { value: "outfit", label: "Outfit" },
+  { value: "style", label: "Style/aesthetic" },
+  { value: "background", label: "Background" },
+  { value: "other", label: "Other" },
+];
+export const SHEET_FIELD_OPTIONS: Array<{ key: string; label: string; placeholder: string }> = [
+  { key: "hair", label: "Hair", placeholder: "long, blonde, loose waves" },
+  { key: "face", label: "Face", placeholder: "small, petite nose, red lips" },
+  { key: "eyes", label: "Eyes", placeholder: "narrow, green" },
+  { key: "body", label: "Body", placeholder: "slim, tall" },
+  { key: "skin", label: "Skin", placeholder: "fair, light freckles" },
+  { key: "outfit", label: "Outfit", placeholder: "cream knit sweater, dark jeans" },
+  { key: "accessories", label: "Accessories", placeholder: "thin gold necklace" },
+  { key: "expression", label: "Expression/pose defaults", placeholder: "soft smile, relaxed" },
+  { key: "setting", label: "Setting/background", placeholder: "bright Scandinavian living room" },
+  { key: "artStyle", label: "Art style", placeholder: "natural photograph" },
+  { key: "lighting", label: "Lighting", placeholder: "soft daylight from a window" },
+  { key: "camera", label: "Camera/framing", placeholder: "eye level, 50 mm, waist up" },
+  { key: "avoid", label: "Always avoid", placeholder: "text, watermarks, extra fingers" },
+];
+const SHEET_FIELD_MAX = 300;
+const DEFAULT_SAMPLE_REQUEST = "reading a book by the window";
 
 type GenerationResult = {
   provider: string;
@@ -298,6 +327,8 @@ type Look = {
   provider?: "fal" | "sogni" | null;
   seed: number | null;
   referenceFileIds: string[];
+  referenceRoles?: string[];
+  sheet?: Record<string, string>;
   loras?: LookLora[];
   guidance?: number | null;
   negativePrompt?: string | null;
@@ -336,6 +367,8 @@ export type SogniModel = {
   creator: string | null;
   sourceUrl: string | null;
   variant: boolean;
+  /** How many reference pictures a look with this model can keep (the worker works it out). */
+  referenceLimit?: number;
 };
 
 export type SogniLora = {
@@ -358,6 +391,20 @@ export type SogniLora = {
 };
 
 type SogniModelsResponse = { models: SogniModel[]; live: boolean; maxLoras?: number; note?: string | null };
+export type PromptPreviewResult = {
+  request: string;
+  prompt: string;
+  negativePrompt: string | null;
+  service: string;
+  model: string | null;
+  references: Array<{ position: number; role: string; label: string }>;
+  leftOut: string[];
+};
+
+function roleLabel(role: string | undefined): string {
+  return REFERENCE_ROLE_OPTIONS.find((o) => o.value === role)?.label ?? "Other";
+}
+
 type SogniLorasResponse = { modelId: string; loras: SogniLora[]; maxLoras?: number; personal?: string; note?: string | null };
 
 const ATTACHMENT_PATH = /^\/api\/attachments\/([0-9a-f-]{36})\/content$/i;
@@ -374,6 +421,10 @@ export type LookDraft = {
   model: string;
   seed: string;
   referenceFileIds: string[];
+  /** One per reference picture, same order (missing: "other"). */
+  referenceRoles?: string[];
+  /** Character sheet fields (missing: empty). */
+  sheet?: Record<string, string>;
   loras: LookLora[];
   guidance: string;
   negativePrompt: string;
@@ -390,6 +441,8 @@ const EMPTY_DRAFT: LookDraft = {
   model: "",
   seed: "",
   referenceFileIds: [],
+  referenceRoles: [],
+  sheet: {},
   loras: [],
   guidance: "",
   negativePrompt: "",
@@ -450,6 +503,32 @@ export function startingStrength(lora: SogniLora): number {
   return lora.personal && value <= 0 ? Math.min(1, lora.max) : value;
 }
 
+/** One role per picked picture, in order ("other" where none is picked). */
+export function draftRoles(draft: Pick<LookDraft, "referenceFileIds" | "referenceRoles">): string[] {
+  return draft.referenceFileIds.map((_, i) => draft.referenceRoles?.[i] || "other");
+}
+
+/** The sheet's filled-in fields, trimmed. */
+export function draftSheet(draft: Pick<LookDraft, "sheet">): Record<string, string> {
+  const sheet: Record<string, string> = {};
+  for (const field of SHEET_FIELD_OPTIONS) {
+    const value = draft.sheet?.[field.key]?.trim();
+    if (value) sheet[field.key] = value;
+  }
+  return sheet;
+}
+
+/** How many reference pictures this look can keep: 4, or the chosen Sogni model's own limit (3 when unknown). */
+export function referenceLimitFor(provider: string, model: SogniModel | null, fallback: number): number {
+  if (provider !== "sogni") return fallback;
+  return model?.referenceLimit ?? 3;
+}
+
+/** A new random seed for "Lock seed". */
+export function randomSeed(): string {
+  return String(Math.floor(Math.random() * 4_294_967_295));
+}
+
 /** Turn the form into what looks.save takes. Only Sogni looks carry LoRAs and model settings. */
 export function draftToSaveParams(draft: LookDraft): Record<string, unknown> {
   const sogni = draft.provider === "sogni";
@@ -462,6 +541,8 @@ export function draftToSaveParams(draft: LookDraft): Record<string, unknown> {
     model: draft.model,
     seed: draft.seed.trim() === "" ? null : draft.seed.trim(),
     referenceFileIds: draft.referenceFileIds,
+    referenceRoles: draftRoles(draft),
+    sheet: draftSheet(draft),
     loras: sogni ? draft.loras.map(({ id, strength }) => ({ id, strength })) : [],
     guidance: sogni && draft.guidance.trim() !== "" ? draft.guidance.trim() : null,
     negativePrompt: sogni && draft.negativePrompt.trim() ? draft.negativePrompt.trim() : null,
@@ -480,6 +561,8 @@ function lookToDraft(look: Look): LookDraft {
     model: look.model ?? "",
     seed: look.seed === null ? "" : String(look.seed),
     referenceFileIds: [...look.referenceFileIds],
+    referenceRoles: look.referenceFileIds.map((_, i) => look.referenceRoles?.[i] ?? "other"),
+    sheet: { ...(look.sheet ?? {}) },
     loras: (look.loras ?? []).map((lora) => ({ ...lora })),
     guidance: typeof look.guidance === "number" ? String(look.guidance) : "",
     negativePrompt: look.negativePrompt ?? "",
@@ -1390,6 +1473,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const listSogniLoras = usePluginAction(ACTION_SOGNI_LORAS);
   const listLookDefaults = usePluginAction(ACTION_LOOK_DEFAULTS_LIST);
   const setLookDefault = usePluginAction(ACTION_LOOK_DEFAULTS_SET);
+  const previewPrompt = usePluginAction(ACTION_LOOK_PROMPT_PREVIEW);
 
   const [looks, setLooks] = useState<Look[]>([]);
   const [agents, setAgents] = useState<LookAgent[] | null>(null);
@@ -1404,6 +1488,11 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
   const [error, setError] = useState<string | null>(null);
   const [sogniModels, setSogniModels] = useState<SogniModelsResponse | null>(null);
   const [sogniLoras, setSogniLoras] = useState<SogniLorasResponse | null>(null);
+  const [sampleRequest, setSampleRequest] = useState(DEFAULT_SAMPLE_REQUEST);
+  const [promptPreview, setPromptPreview] = useState<PromptPreviewResult | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -1518,19 +1607,52 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
 
   const startEdit = (look: Look | null) => {
     setError(null);
+    setPromptPreview(null);
+    setPreviewError(null);
     setDraft(look ? lookToDraft(look) : { ...EMPTY_DRAFT });
+    setSheetOpen(Boolean(look?.sheet && Object.keys(look.sheet).length > 0));
     void loadImages();
   };
 
-  const toggleRef = (fileId: string) => {
+  // Picking or unpicking a picture keeps each picture's role with it.
+  const toggleRef = (fileId: string, limit: number) => {
     setDraft((d) => {
       if (!d) return d;
-      if (d.referenceFileIds.includes(fileId)) {
-        return { ...d, referenceFileIds: d.referenceFileIds.filter((id) => id !== fileId) };
+      const roles = draftRoles(d);
+      const at = d.referenceFileIds.indexOf(fileId);
+      if (at >= 0) {
+        return {
+          ...d,
+          referenceFileIds: d.referenceFileIds.filter((id) => id !== fileId),
+          referenceRoles: roles.filter((_, i) => i !== at),
+        };
       }
-      if (d.referenceFileIds.length >= maxRefs) return d;
-      return { ...d, referenceFileIds: [...d.referenceFileIds, fileId] };
+      if (d.referenceFileIds.length >= limit) return d;
+      return { ...d, referenceFileIds: [...d.referenceFileIds, fileId], referenceRoles: [...roles, "other"] };
     });
+  };
+
+  const setRole = (index: number, role: string) => {
+    setDraft((d) => (d ? { ...d, referenceRoles: draftRoles(d).map((r, i) => (i === index ? role : r)) } : d));
+  };
+
+  const setSheetField = (key: string, value: string) => {
+    setDraft((d) => (d ? { ...d, sheet: { ...(d.sheet ?? {}), [key]: value } } : d));
+  };
+
+  const onPreviewPrompt = async () => {
+    if (!draft) return;
+    setPreviewBusy(true);
+    setPreviewError(null);
+    try {
+      const res = (await previewPrompt({ ...draftToSaveParams(draft), request: sampleRequest })) as PromptPreviewResult;
+      setPromptPreview(res);
+    } catch (e) {
+      setPromptPreview(null);
+      setPreviewError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPreviewBusy(false);
+    }
   };
 
   // A new model starts with no LoRAs or model settings: those belong to one model.
@@ -1578,14 +1700,16 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
     ? (sogniModels?.models.find((m) => m.id === draftModel || (sogniLoras !== null && m.id === sogniLoras.modelId)) ?? null)
     : null;
   const maxLoras = sogniLoras?.maxLoras ?? sogniModels?.maxLoras ?? DEFAULT_MAX_LORAS;
+  const refLimit = draft ? referenceLimitFor(draft.provider, chosenModel, maxRefs) : maxRefs;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, fontSize: 13, maxWidth: 820 }}>
       <div>
         <div style={{ fontWeight: 600, fontSize: 16 }}>Media Studio looks</div>
         <div style={{ opacity: 0.7, marginTop: 4 }}>
-          A look keeps pictures consistent: its style words are added to every picture made with it, and it can fix the
-          seed and use up to {maxRefs} reference pictures from your Files to keep the same person, product or style. With
+          A look keeps pictures consistent: its style words and character sheet (hair, face, outfit and so on) are added
+          to every picture made with it, and it can fix the seed and use reference pictures from your Files, each with a
+          role (face, body, outfit, style, background), to keep the same person, product or style. With
           Sogni, a look can also use one specific model and that model's LoRAs. Agents can use looks by name (for example
           "make a banner in our catalogue look"), but only the company's owner or an admin can change them.
         </div>
@@ -1618,10 +1742,18 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                   : ""}
                 {look.safeContentFilter === false ? " · Content filter off" : ""}
               </div>
+              {look.sheet && Object.keys(look.sheet).length > 0 ? (
+                <div style={{ opacity: 0.7, fontSize: 12 }}>
+                  Character sheet: {SHEET_FIELD_OPTIONS.filter((f) => look.sheet?.[f.key]).map((f) => f.label).join(", ")}
+                </div>
+              ) : null}
               {look.referenceFileIds.length > 0 ? (
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {look.referenceFileIds.map((id) => (
-                    <img key={id} src={fileContentPath(id)} alt="Reference picture" style={thumb} />
+                  {look.referenceFileIds.map((id, i) => (
+                    <figure key={id} style={{ margin: 0, display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
+                      <img src={fileContentPath(id)} alt="Reference picture" style={thumb} />
+                      <figcaption style={{ fontSize: 11, opacity: 0.7 }}>{roleLabel(look.referenceRoles?.[i])}</figcaption>
+                    </figure>
                   ))}
                 </div>
               ) : null}
@@ -1671,10 +1803,30 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
             />
           </label>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <label style={{ ...field, flex: "1 1 160px" }}>
-              <span>Fixed seed (optional)</span>
-              <input value={draft.seed} inputMode="numeric" onChange={(e) => setDraft({ ...draft, seed: e.target.value.replace(/[^0-9]/g, "") })} style={input} placeholder="Leave empty for a new one each time" />
-            </label>
+            <div style={{ ...field, flex: "1 1 200px" }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  aria-label="Lock seed"
+                  checked={draft.seed !== ""}
+                  onChange={(e) => setDraft({ ...draft, seed: e.target.checked ? (draft.seed || randomSeed()) : "" })}
+                />
+                <span>Lock seed</span>
+              </label>
+              {draft.seed !== "" ? (
+                <input
+                  aria-label="Seed"
+                  value={draft.seed}
+                  inputMode="numeric"
+                  onChange={(e) => setDraft({ ...draft, seed: e.target.value.replace(/[^0-9]/g, "") })}
+                  style={input}
+                />
+              ) : null}
+              <span style={{ fontSize: 12, opacity: 0.75 }}>
+                A fixed seed with the same character sheet gives the most consistent results. Off: a new seed each time.
+                (Sogni does not use a seed for pictures made from reference pictures.)
+              </span>
+            </div>
             <label style={{ ...field, flex: "1 1 160px" }}>
               <span>Picture service</span>
               <select
@@ -1810,8 +1962,56 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
             </>
           ) : null}
 
+          <details style={{ ...card, gap: 8 }} open={sheetOpen} onToggle={(e) => setSheetOpen(e.currentTarget.open)}>
+            <summary style={{ fontWeight: 600, cursor: "pointer" }}>Character sheet (optional)</summary>
+            <div style={{ fontSize: 12, opacity: 0.8 }}>
+              Short words for what should stay the same in every picture. When a request says otherwise (for example
+              another outfit or place), the request wins.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8 }}>
+              {SHEET_FIELD_OPTIONS.map((f) => (
+                <label key={f.key} style={field}>
+                  <span>{f.label}</span>
+                  <input
+                    aria-label={f.label}
+                    value={draft.sheet?.[f.key] ?? ""}
+                    maxLength={SHEET_FIELD_MAX}
+                    onChange={(e) => setSheetField(f.key, e.target.value)}
+                    style={input}
+                    placeholder={f.placeholder}
+                  />
+                </label>
+              ))}
+            </div>
+          </details>
+
           <div style={field}>
-            <span>Reference pictures ({draft.referenceFileIds.length} of {maxRefs} picked)</span>
+            <span>Reference pictures ({draft.referenceFileIds.length} of {refLimit} picked)</span>
+            {draft.referenceFileIds.length > 0 ? (
+              <div aria-label="Picked reference pictures" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {draft.referenceFileIds.map((id, i) => (
+                  <div key={id} style={{ display: "flex", flexDirection: "column", gap: 4, width: 120 }}>
+                    <span style={{ fontSize: 11, opacity: 0.7 }}>Picture {i + 1}</span>
+                    <img src={fileContentPath(id)} alt={`Reference picture ${i + 1}`} style={thumb} />
+                    <select
+                      aria-label={`What picture ${i + 1} is for`}
+                      value={draftRoles(draft)[i]}
+                      onChange={(e) => setRole(i, e.target.value)}
+                      style={input}
+                    >
+                      {REFERENCE_ROLE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {draft.referenceFileIds.length > refLimit ? (
+              <div style={{ color: "#b45309", fontSize: 12 }}>
+                This model takes at most {refLimit} reference pictures. Remove some before saving.
+              </div>
+            ) : null}
             {images === null ? (
               <div style={{ opacity: 0.7 }}>Loading your pictures…</div>
             ) : images.length === 0 ? (
@@ -1826,7 +2026,7 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                       type="button"
                       title={img.title}
                       aria-pressed={picked}
-                      onClick={() => toggleRef(img.fileId)}
+                      onClick={() => toggleRef(img.fileId, refLimit)}
                       style={{ padding: 0, border: picked ? "3px solid #1971c2" : "3px solid transparent", borderRadius: 8, background: "none", cursor: "pointer" }}
                     >
                       <img src={img.src} alt={img.title} style={thumb} />
@@ -1835,6 +2035,41 @@ export function MediaStudioLooksPage({ context }: PluginCompanySettingsPageProps
                 })}
               </div>
             )}
+          </div>
+          <div style={{ ...card, gap: 6 }} aria-label="Preview prompt">
+            <label style={field}>
+              <span>Sample request</span>
+              <input aria-label="Sample request" value={sampleRequest} onChange={(e) => setSampleRequest(e.target.value)} style={input} />
+            </label>
+            <div>
+              <button type="button" style={secondaryBtn} disabled={previewBusy} onClick={() => void onPreviewPrompt()}>
+                {previewBusy ? "Working…" : "Preview prompt"}
+              </button>
+            </div>
+            {previewError ? <div style={errorBox}>{previewError}</div> : null}
+            {promptPreview ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>
+                  Sent to {SERVICE_LABEL[promptPreview.service] ?? promptPreview.service}
+                  {promptPreview.model ? ` (${promptPreview.model})` : ""}
+                  {promptPreview.references.length > 0
+                    ? ` with ${promptPreview.references.map((r) => `picture ${r.position} as ${r.label.toLowerCase()}`).join(", ")}`
+                    : ""}
+                  :
+                </div>
+                <pre aria-label="Prompt that would be sent" style={{ whiteSpace: "pre-wrap", margin: 0, padding: 8, borderRadius: 8, background: "rgba(128,128,128,0.12)", fontSize: 12 }}>
+                  {promptPreview.prompt}
+                </pre>
+                {promptPreview.negativePrompt ? (
+                  <div style={{ fontSize: 12 }}>Things to avoid (sent separately): {promptPreview.negativePrompt}</div>
+                ) : null}
+                {promptPreview.leftOut.length > 0 ? (
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    Left out because the request describes it: {promptPreview.leftOut.join(", ")}.
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" style={primaryBtn} disabled={busy} onClick={() => void onSave()}>{busy ? "Saving…" : "Save look"}</button>

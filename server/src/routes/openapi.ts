@@ -3561,6 +3561,8 @@ registerCurrentRoute({
         turnCount: z.number(),
         expired: z.boolean(),
         turnCapReached: z.boolean(),
+        /** A continued conversation's one-line recap of what it carries on from; null otherwise. */
+        continuedFrom: z.string().nullable(),
         messages: z.array(
           z.object({
             id: z.string(),
@@ -3572,6 +3574,48 @@ registerCurrentRoute({
         ),
       }),
     ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/lane-a/{agentId}/continue",
+  tags: ["agents"],
+  summary:
+    "Start a new quick-agent conversation that carries the relevant part of the caller's own recent chat with this agent (board users only)",
+  body: z.object({ companyId: z.string().uuid(), spec: z.string().max(200).optional() }),
+  responses: {
+    200: r.ok(
+      z.object({
+        conversationId: z.string(),
+        mode: z.enum(["last", "time", "topic"]),
+        recap: z.string(),
+        matchedMessages: z.number(),
+        consideredMessages: z.number(),
+        fromConversations: z.number(),
+        window: z.object({ from: z.string(), to: z.string(), label: z.string() }).nullable(),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/lane-a/{agentId}/looks",
+  tags: ["agents"],
+  summary: "List Media Studio's saved looks through the quick agent's ticked \"List saved looks\" tool (board users only, no model call)",
+  query: z.object({ companyId: z.string().uuid() }),
+  responses: {
+    200: r.ok(z.object({ available: z.boolean(), text: z.string() })),
     400: r.badRequest,
     401: r.unauthorized,
     403: r.forbidden,
@@ -3691,6 +3735,10 @@ registry.registerPath({
                 createdAt: z.string(),
               })
               .nullable(),
+            resultDocument: z
+              .object({ key: z.string(), title: z.string().nullable() })
+              .nullable()
+              .describe("The task's result page (issue document 'result'), when it has one"),
           }),
         ),
       }),

@@ -21,12 +21,17 @@ approvals/tasks still live in Paperclip and the web UI.
   goes through the same chat router the web chat uses (DUR-3978): a quick
   question is answered in the same chat when that bot's agent has quick answers
   switched on, and the chat keeps one conversation so follow-ups have context
-  (`/new` starts over). A picture the quick answer made (Media Studio) is
+  (`/new` starts over; `/cont [time or topic]` starts a new one that carries on
+  from the earlier chat, since a conversation ends after 30 quiet minutes;
+  `/memory` and `/looks` list the agent's notes and saved looks). A picture the quick answer made (Media Studio) is
   uploaded into the chat as a photo: the bridge fetches its bytes from
   Paperclip (`chat image`), so Telegram never gets a Paperclip address.
   Anything else becomes a task for that bot's agent in
   that bot's company, and the agent's answer is posted back into the chat the
-  task came from once it is done or waiting.
+  task came from once it is done or waiting. A task a quick answer started (a
+  hand-over to a colleague, or a research task the agent took on itself) is
+  followed the same way, and a task with a result page (its "result"
+  document) is linked straight to that page.
 
 Config (DUR-3978 slice 2): the bots come from Paperclip itself — the operator
 connects them in company settings, and this service reads them through the
@@ -82,6 +87,14 @@ QUICK_UNAVAILABLE_STATUSES = (429, 502, 503, 504)
 # the service refuses, no key): handing the message over as a full task would
 # only hide the mistake and cost a Claude run, so say what is wrong instead.
 QUICK_SETUP_ERROR_CODES = ("LANE_A_SETUP_REFUSED", "LANE_A_KEY_REFUSED", "LANE_A_KEY_MISSING", "LANE_A_KEY_UNRESOLVED")
+# /cont: refusals meaning "nothing to continue from" (server/src/services/
+# lane-a-continue.ts); the server's own sentence is passed on as it is.
+CONTINUE_NOTHING_CODES = ("LANE_A_CONTINUE_NOTHING_FOUND", "LANE_A_CONTINUE_NO_MATCH")
+CONTINUE_SPEC_MAX_CHARS = 200  # the server's limit
+CONTINUE_RECAP_MAX_CHARS = 300
+MEMORY_NOTES_SHOWN = 15
+MEMORY_NOTE_MAX_CHARS = 200
+LOOKS_MAX_CHARS = 3000
 ANSWER_FINISHED_STATUSES = ("done", "cancelled")
 ANSWER_WAITING_STATUSES = ("in_review", "blocked")
 # A task that has not finished after this long stops being watched.
@@ -94,6 +107,10 @@ TASK_ANSWERS_PER_CALL = 50  # the server's limit per call
 QUICK_ANSWER_MAX_IMAGES = 4
 TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 TG_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
+# A research task delivers its result page as the issue document with this key
+# (RESEARCH_RESULT_DOCUMENT_KEY in packages/shared/src/research-tasks.ts; a test
+# pins that they match). The chat links straight to it.
+RESULT_DOCUMENT_KEY = "result"
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 # Voice messages: a voice message (or an audio file) from an allowed person is
@@ -845,16 +862,21 @@ def set_conversation(state, token, chat_id, conversation_id):
         save_state(state)
 
 
-def remember_task(state, token, chat_id, task_ref, text):
-    """Record that a task came from this chat, so its answer goes back there."""
+def remember_task(state, token, chat_id, task_ref, text, colleague=False):
+    """Record that a task came from this chat, so its answer goes back there.
+    `colleague` marks a task the bot's agent handed to someone else, so the
+    answer does not say the bot's agent finished it."""
     with LOCK:
         tasks = _bot_entry(state, token).setdefault("tasks", {})
-        tasks[task_ref["issueId"]] = {
+        entry = {
             "chat": chat_id,
             "identifier": task_ref.get("identifier") or "",
             "title": first_line(text)[:200],
             "at": time.time(),
         }
+        if colleague:
+            entry["colleague"] = True
+        tasks[task_ref["issueId"]] = entry
         save_state(state)
 
 
@@ -956,6 +978,31 @@ def reply_images(result):
             "hasTask": bool(image.get("issueId")),
         })
     return images[:QUICK_ANSWER_MAX_IMAGES]
+
+
+def handed_over_tasks(result):
+    """The tasks a quick answer started (a hand-over to a colleague, or a research
+    task the agent took on itself), from its actions: only well-formed task ids,
+    each once. Their answers are posted back into this chat like /task ones."""
+    tasks = []
+    for action in (result or {}).get("actions") or []:
+        task = action.get("task") if isinstance(action, dict) and action.get("ok") is not False else None
+        if not isinstance(task, dict):
+            continue
+        issue_id = task.get("issueId")
+        if not isinstance(issue_id, str) or not UUID_RE.match(issue_id):
+            continue
+        if any(t["issueId"] == issue_id for t in tasks):
+            continue
+        identifier = task.get("identifier")
+        title = task.get("title")
+        tasks.append({
+            "issueId": issue_id,
+            "identifier": identifier if isinstance(identifier, str) else "",
+            "title": title if isinstance(title, str) else "",
+            "colleague": action.get("tool") == "route_to_agent",
+        })
+    return tasks
 
 
 def image_caption(image):
@@ -1078,6 +1125,10 @@ def ask_agent(state, bot, chat_id, text, force_task=False, came_by_voice=False):
         if isinstance(conversation, str) and UUID_RE.match(conversation):
             set_conversation(state, token, chat_id, conversation)
         images = reply_images(result)
+        # Durable first: a task the answer started is recorded before the reply
+        # goes out, so its result comes back to this chat even after a restart.
+        for started in handed_over_tasks(result):
+            remember_task(state, token, chat_id, started, started["title"] or text, colleague=started["colleague"])
         answer = str(result.get("response") or "").strip() or (
             "" if images else f"{agent_name} had nothing to add.")
         if notes or answer:
@@ -1243,27 +1294,137 @@ def send_voice_answer(bot, chat_id, text):
         send_plain(token, chat_id, "(I couldn't send the spoken answer here.)")
 
 
+def continue_conversation(state, bot, chat_id, spec):
+    """/cont [what]: start a new quick-answer conversation that carries on from
+    the earlier one. The words travel only as data in an environment variable;
+    the agent and the company are the bot's own. The new conversation is
+    stored for this chat, so the next message continues it."""
+    token, agent_name = bot["token"], bot["name"]
+    spec = (spec or "").strip()[:CONTINUE_SPEC_MAX_CHARS]
+    if not paperclip_ready():
+        send_plain(token, chat_id, "Paperclip is restarting. Try /cont again in a minute.")
+        return
+    tg(token, "sendChatAction", chat_id=chat_id, action="typing")
+    parts = ["chat", "continue", bot["agentId"], "-C", bot["companyId"]]
+    env = {}
+    if spec:
+        parts += ["--spec", '"$CS"']
+        env["CS"] = spec
+    res = cli_env(env, *parts, timeout=CHAT_SEND_TIMEOUT_SECONDS)
+    if res is None:
+        send_plain(token, chat_id, (
+            f"I didn't hear back from Paperclip, so I couldn't pick up the earlier conversation with {agent_name}. "
+            "Try /cont again in a minute."))
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:400]
+        if res.get("code") in CONTINUE_NOTHING_CODES and reason:
+            send_plain(token, chat_id, f"🔁 {reason}")
+        elif res.get("status") == 403 and "not enabled" in reason:
+            send_plain(token, chat_id, (
+                f"{agent_name} doesn't have quick answers switched on, so there's no conversation to continue."))
+        else:
+            send_plain(token, chat_id, f"Couldn't continue the earlier conversation with {agent_name}."
+                       + (f" Paperclip said: {reason}" if reason else ""))
+        return
+    conversation = res.get("conversationId") if isinstance(res, dict) else None
+    if not (isinstance(conversation, str) and UUID_RE.match(conversation)):
+        send_plain(token, chat_id, f"Something went wrong picking up the earlier conversation with {agent_name}.")
+        return
+    set_conversation(state, token, chat_id, conversation)
+    recap = tg_truncate(" ".join(str(res.get("recap") or "").split()), CONTINUE_RECAP_MAX_CHARS)
+    send_plain(token, chat_id, (
+        f"🔁 Continuing from: {recap or 'your earlier conversation'}\n\n"
+        f"Just carry on: your next message goes to {agent_name} with that in mind."))
+
+
+def show_memory(bot, chat_id):
+    """/memory: what the agent was asked to remember, newest first, short."""
+    token, agent_name = bot["token"], bot["name"]
+    res = cli("chat", "memory", bot["agentId"], "-C", bot["companyId"])
+    if res is None:
+        send_plain(token, chat_id, "I didn't hear back from Paperclip. Try /memory again in a minute.")
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, f"Couldn't read {agent_name}'s memory." + (f" Paperclip said: {reason}" if reason else ""))
+        return
+    notes = [n for n in (res.get("notes") or []) if isinstance(n, dict) and str(n.get("text") or "").strip()]
+    if not notes:
+        send_plain(token, chat_id, f"🧠 {agent_name} hasn't been asked to remember anything yet. "
+                   "Say \"remember that …\" in a message to add a note.")
+        return
+    lines = [f"🧠 What {agent_name} remembers ({len(notes)}):"]
+    for n in notes[:MEMORY_NOTES_SHOWN]:
+        lines.append("• " + tg_truncate(" ".join(str(n["text"]).split()), MEMORY_NOTE_MAX_CHARS))
+    if len(notes) > MEMORY_NOTES_SHOWN:
+        lines.append(f"…and {len(notes) - MEMORY_NOTES_SHOWN} older ones. See them all on {agent_name}'s page in Paperclip.")
+    send_plain(token, chat_id, "\n".join(lines))
+
+
+def show_looks(bot, chat_id):
+    """/looks: Media Studio's saved looks, through the agent's own ticked tool."""
+    token, agent_name = bot["token"], bot["name"]
+    res = cli("chat", "looks", bot["agentId"], "-C", bot["companyId"])
+    if res is None:
+        send_plain(token, chat_id, "I didn't hear back from Paperclip. Try /looks again in a minute.")
+        return
+    if _refused(res):
+        reason = str(res.get("error") or "").strip()[:300]
+        send_plain(token, chat_id, f"Couldn't list the looks." + (f" Paperclip said: {reason}" if reason else ""))
+        return
+    text = str(res.get("text") or "").strip()
+    if not res.get("available"):
+        send_plain(token, chat_id, text or f"{agent_name} can't list saved looks: the \"List saved looks\" tool isn't ticked for it.")
+        return
+    send_plain(token, chat_id, "🎨 " + tg_truncate(text or "No saved looks yet.", LOOKS_MAX_CHARS))
+
+
+HELP_TEXT = (
+    "*Connected — you're talking to {name}.*\n"
+    "I'll send approvals here; tap ✅/❌ to act.\n\n"
+    "• Any message → {name} answers here. A quick question gets a quick answer "
+    "when quick answers are switched on for {name}; anything bigger becomes a task, "
+    "and its answer comes back here when it's done\n"
+    "• A voice message → {name} hears it and answers the same way; the answer can be read "
+    "aloud too (Company settings → Connections → Telegram)\n"
+    "• `/task <text>` → always make it a task\n"
+    "• `/new` → start a fresh conversation\n"
+    "• `/cont` → carry on from the last conversation (a conversation ends after 30 quiet minutes)\n"
+    "• `/cont last 45 minutes`, `/cont this morning`, `/cont yesterday` → carry on from that time\n"
+    "• `/cont our meeting today` → carry on from just the messages about that\n"
+    "• `/memory` → what {name} was asked to remember\n"
+    "• `/looks` → the saved picture looks\n"
+    "• `/project <name>` → a project\n"
+    "• `/status` → what's happening now\n"
+    "• `/help` → this list")
+
+
 def format_task_answer(bot, item, entry, answer):
     """The message that carries a task's answer back into its chat."""
     ident = item.get("identifier") or entry.get("identifier") or "The task"
     title = (item.get("title") or entry.get("title") or "").strip()[:200]
     status = item.get("status")
     link = f"{bot['uiBase']}/issues/{item.get('identifier') or item.get('id')}"
+    has_result_page = isinstance(item.get("resultDocument"), dict)
+    if has_result_page:
+        link += f"#document-{RESULT_DOCUMENT_KEY}"
     if status == "done":
-        head = f"✅ {bot['name']} finished {ident}"
+        head = f"✅ {ident} is finished" if entry.get("colleague") else f"✅ {bot['name']} finished {ident}"
     elif status == "cancelled":
         head = f"✖️ {ident} was cancelled"
     else:
         head = f"⏸ {ident} is waiting and may need you"
     if title:
         head += f" — {title}"
-    footer = f"\n\nOpen the task: {link}"
+    footer = f"\n\nOpen the result page: {link}" if has_result_page else f"\n\nOpen the task: {link}"
     if not answer:
         return f"{head}\nNo written answer.{footer}"
     body = str(answer.get("body") or "").strip()
     room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
     if tg_len(body) > room:
-        footer = f"\n\nThis answer is too long for Telegram. Read all of it here: {link}"
+        footer = (f"\n\nThis answer is too long for Telegram. Read all of it here: {link}" if not has_result_page
+                  else f"\n\nThis answer is too long for Telegram. Read all of it and the result page here: {link}")
         room = TG_TEXT_LIMIT - tg_len(head) - tg_len(footer) - 2
         body = tg_truncate(body, room)
     return f"{head}\n\n{body}{footer}"
@@ -1515,18 +1676,19 @@ def handle_message(state, bot, m):
     company_id = bot["companyId"]
     low = text.lower()
     if low in ("/start", "/help"):
-        tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown", text=(
-            f"*Connected — you're talking to {agent_name}.*\n"
-            "I'll send approvals here; tap ✅/❌ to act.\n\n"
-            f"• Any message → {agent_name} answers here. A quick question gets a quick answer "
-            f"when quick answers are switched on for {agent_name}; anything bigger becomes a task, "
-            "and its answer comes back here when it's done\n"
-            f"• A voice message → {agent_name} hears it and answers the same way; the answer can be read "
-            "aloud too (Company settings → Connections → Telegram)\n"
-            "• `/task <text>` → always make it a task\n"
-            "• `/new` → start a fresh conversation\n"
-            "• `/project <name>` → a project\n"
-            "• `/status` → what's happening now"))
+        tg(token, "sendMessage", chat_id=chat_id, parse_mode="Markdown",
+           text=HELP_TEXT.format(name=agent_name))
+        return
+    command = low.split(maxsplit=1)[0] if low else ""
+    if command in ("/cont", "/continue"):
+        words = text.split(maxsplit=1)
+        continue_conversation(state, bot, chat_id, words[1] if len(words) > 1 else "")
+        return
+    if low == "/memory":
+        show_memory(bot, chat_id)
+        return
+    if low == "/looks":
+        show_looks(bot, chat_id)
         return
     if low == "/new":
         set_conversation(state, token, chat_id, None)
