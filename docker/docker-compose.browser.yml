@@ -1,0 +1,110 @@
+# DUR-4015 (Maja browser, step 2): infra-only overlay adding the sandboxed
+# browser worker and its forward proxy. Layer on top of the base compose the
+# same way docker-compose.prod.yml is layered:
+#
+#   docker compose --env-file .env \
+#     -f docker/docker-compose.yml -f docker/docker-compose.prod.yml \
+#     -f docker/docker-compose.browser.yml up -d
+#
+# This file is a PR only. It does not go on a deploy card in this sprint --
+# Filip decides separately whether/when to run it on the host. See "Host
+# steps for Filip" in the PR description for what a human still has to do
+# before this can go live (deployPolicy.composeFiles, the control token,
+# host firewall rules, capacity check).
+#
+# Design: see DUR-4015 description ("Maja acts on websites and pays with
+# single-use cards"). Two containers, one image:
+#
+#  - `browser`: the Playwright/Chromium worker. Runs as the image's built-in
+#    non-root `pwuser`, filesystem read-only (tmpfs for /tmp and its home so
+#    Chromium still has somewhere to write), every Linux capability dropped,
+#    no-new-privileges so it can never regain one, on `browser-internal`
+#    ONLY -- that network is `internal: true`, so this container has no
+#    route anywhere except the other containers on it. Its only way out to
+#    the web is through `browser-egress` on the same network.
+#  - `browser-egress`: the same image, started with a different entrypoint
+#    (`egress-proxy`), on BOTH `browser-internal` and the default bridge
+#    network, so it is the sole bridge between the sandboxed worker and the
+#    outside world. It resolves DNS itself and connects only to addresses it
+#    has checked are public (RFC1918/loopback/link-local/metadata/CGNAT/
+#    multicast all refused), ports 80/443 only, no route back into this
+#    compose project's own network.
+#
+# Both containers are placeholders for Backend Engineer's step-1 image
+# (worker package + Dockerfile, still in progress as of this PR -- see
+# DUR-4013). `image:` below names where that image is expected to land;
+# update it to the real tag/digest once step 1 merges. Nothing in this file
+# is referenced by the base compose or any deploy path, so it is inert
+# until a host operator explicitly adds it to deployPolicy.composeFiles.
+services:
+  browser:
+    image: "${PAPERCLIP_BROWSER_IMAGE:?set once DUR-4013's worker image is published}"
+    # No `command:` override: the image's default entrypoint is the browser
+    # worker (control server + Chromium launcher), per Backend Engineer's
+    # step-1 image.
+    init: true
+    read_only: true
+    user: pwuser
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      # Keeps the Playwright/Chromium seccomp profile that ships in the base
+      # image active (needed for Chromium's own sandbox to stay on inside an
+      # already-restricted container). Do not add `seccomp:unconfined` here.
+    tmpfs:
+      - /tmp:mode=1777,size=1g
+      - /home/pwuser:mode=0700,size=1g,uid=1000,gid=1000
+    shm_size: "1gb"
+    mem_limit: "2g"
+    cpus: 1.5
+    pids_limit: 512
+    environment:
+      # Control-plane auth, root-only on the host (see "Host steps for
+      # Filip"). The `PAPERCLIP_SERVER_` prefix keeps this out of every
+      # agent's own environment already (packages/adapter-utils/src/
+      # server-env-secrets.ts), same as the server's own secrets.
+      PAPERCLIP_SERVER_BROWSER_TOKEN: "${PAPERCLIP_SERVER_BROWSER_TOKEN:?set in the root-only secrets file, see Host steps for Filip}"
+      BROWSER_CONTROL_SOCKET: /run/browser-control/control.sock
+    volumes:
+      - browser-control:/run/browser-control
+    networks:
+      - browser-internal
+    depends_on:
+      - browser-egress
+    restart: unless-stopped
+
+  browser-egress:
+    image: "${PAPERCLIP_BROWSER_IMAGE:?set once DUR-4013's worker image is published}"
+    entrypoint: ["egress-proxy"]
+    init: true
+    read_only: true
+    user: pwuser
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+    mem_limit: "256m"
+    cpus: 0.5
+    pids_limit: 128
+    environment:
+      EGRESS_PROXY_PORT: "3128"
+      EGRESS_ALLOWED_PORTS: "80,443"
+      # Registrable hostnames the proxy must always refuse in addition to
+      # its non-public-address check, so a captured worker cannot reach the
+      # tailnet or loop back into this same instance's own public URL.
+      EGRESS_DENY_HOST_SUFFIXES: "ts.net"
+      EGRESS_DENY_HOSTNAMES: "${PAPERCLIP_PUBLIC_URL_HOSTNAME:-}"
+    networks:
+      - browser-internal
+      - default
+    restart: unless-stopped
+
+networks:
+  browser-internal:
+    internal: true
+
+volumes:
+  browser-control:
